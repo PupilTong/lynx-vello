@@ -152,9 +152,10 @@ What that covers, and what it does not:
 - opaque JavaScript weak-ref handles carrying `u32` arena ids, with both GC
   callbacks and explicit `__DropElement` retiring exactly one DOM node and arena
   entry; its descendants remain live as detached subtrees until separately reported;
-- every ReactLynx Snapshot constructor except `__CreateFrame`, plus
-  `__AppendElement`, `__DropElement`, `__FlushElementTree`, and web-core's boot
-  sequence. `__CreateList` creates the element but does not yet retain or
+- every ReactLynx Snapshot constructor except `__CreateFrame`, all four tree
+  mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
+  `__ReplaceElement`), `__DropElement`, `__FlushElementTree`, and web-core's
+  boot sequence. `__CreateList` creates the element but does not yet retain or
   execute its JavaScript callbacks.
 
 **Still open**

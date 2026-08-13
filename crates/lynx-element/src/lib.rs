@@ -30,14 +30,17 @@
 //! | `__CreateRawText(text)` | [`ElementTree::create_raw_text`] |
 //! | `__CreateList(parentComponentUniqueID, ...)` | [`ElementTree::create_list`] |
 //! | `__AppendElement(parent, child)` | [`ElementTree::append_element`] |
+//! | `__InsertElementBefore(parent, child, reference?)` | [`ElementTree::insert_element_before`] |
+//! | `__RemoveElement(parent, child)` | [`ElementTree::remove_element`] |
+//! | `__ReplaceElement(newElement, oldElement)` | [`ElementTree::replace_element`] |
 //! | `__DropElement(element)` | [`ElementTree::drop_element`] |
 //! | `__FlushElementTree()` | [`ElementTree::flush_element_tree`] |
 //!
-//! Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
-//! `__CreateFrame`, querying, and list callback execution — is not implemented yet. Creating a
-//! list records its element identity and tag only; the current runtime binding does not retain its
-//! JavaScript callbacks. Calling into this crate is the whole Element PAPI surface that exists
-//! today; a script that needs more will fail at the missing global, not silently render wrong.
+//! Everything else — attributes, classes, inline styles, `__SetCSSId`, events, `__CreateFrame`,
+//! tree querying, and list callback execution — is not implemented yet. Creating a list records its
+//! element identity and tag only; the current runtime binding does not retain its JavaScript
+//! callbacks. Calling into this crate is the whole Element PAPI surface that exists today; a script
+//! that needs more will fail at the missing global, not silently render wrong.
 //!
 //! # Recorded limits
 //!

@@ -25,8 +25,9 @@ written to track: `crates/lynx-element` owns the Lynx element layer (unique-id
 handles, `<page>` policy, the UA cascade defaults), and `crates/bobcat-core`'s
 feature-gated `quickjs` module runs a `.web.bundle`'s main-thread
 script against it with every ReactLynx Snapshot constructor except
-`__CreateFrame`, plus `__AppendElement`, `__DropElement`, and
-`__FlushElementTree`. `js-runtime.md` still declines to
+`__CreateFrame`, plus all four tree mutation calls (`__AppendElement`,
+`__InsertElementBefore`, `__RemoveElement`, `__ReplaceElement`),
+`__DropElement`, and `__FlushElementTree`. `js-runtime.md` still declines to
 enumerate the Element PAPI; the authoritative list of what exists is
 `lynx-element`'s crate docs.
 

@@ -16,6 +16,7 @@ use crate::{
 #[non_exhaustive]
 pub enum PapiError {
     UnknownElement(ElementId),
+    NotAChild { parent: ElementId, child: ElementId },
     WouldCycle { parent: ElementId, child: ElementId },
     CannotReparentPage,
     CannotRemovePage,
@@ -27,14 +28,17 @@ impl fmt::Display for PapiError {
             Self::UnknownElement(raw) => {
                 write!(formatter, "no element has the unique id {raw}")
             }
+            Self::NotAChild { parent, child } => {
+                write!(formatter, "element #{child} is not a child of #{parent}")
+            }
             Self::WouldCycle { parent, child } => write!(
                 formatter,
-                "appending #{child} under #{parent} would form a cycle"
+                "placing #{child} under #{parent} would form a cycle"
             ),
             Self::CannotReparentPage => {
                 formatter.write_str("the page element cannot be given a parent")
             }
-            Self::CannotRemovePage => formatter.write_str("the page element cannot be dropped"),
+            Self::CannotRemovePage => formatter.write_str("the page element cannot be removed"),
         }
     }
 }
@@ -260,22 +264,98 @@ impl ElementTree {
         parent: ElementId,
         child: ElementId,
     ) -> Result<ElementId, PapiError> {
-        let parent_node = self
-            .node_id(parent)
-            .ok_or(PapiError::UnknownElement(parent))?;
-        let child_node = self
-            .node_id(child)
-            .ok_or(PapiError::UnknownElement(child))?;
-        if child == PAGE_UNIQUE_ID {
-            return Err(PapiError::CannotReparentPage);
-        }
-        if parent == child || self.document.is_ancestor(child_node, parent_node) {
-            return Err(PapiError::WouldCycle { parent, child });
+        self.insert_element_before(parent, child, None)
+    }
+
+    /// Reparents `child` before `reference`, or appends it when the reference is absent.
+    pub fn insert_element_before(
+        &mut self,
+        parent: ElementId,
+        child: ElementId,
+        reference: Option<ElementId>,
+    ) -> Result<ElementId, PapiError> {
+        let parent_node = self.require_node(parent)?;
+        let child_node = self.require_node(child)?;
+        let reference_node = reference.map(|id| self.require_node(id)).transpose()?;
+        self.validate_insertion(parent, parent_node, child, child_node)?;
+        if let (Some(reference), Some(reference_node)) = (reference, reference_node) {
+            if self
+                .document
+                .get(reference_node)
+                .and_then(dom::Node::parent_id)
+                != Some(parent_node)
+            {
+                return Err(PapiError::NotAChild {
+                    parent,
+                    child: reference,
+                });
+            }
+            if reference == child {
+                return Ok(child);
+            }
         }
 
         self.uncommitted = true;
-        self.document.append_child(parent_node, child_node);
+        self.document
+            .insert_before(parent_node, child_node, reference_node);
         Ok(child)
+    }
+
+    /// Detaches `child` from `parent` without retiring either element and returns the child.
+    pub fn remove_element(
+        &mut self,
+        parent: ElementId,
+        child: ElementId,
+    ) -> Result<ElementId, PapiError> {
+        let parent_node = self.require_node(parent)?;
+        let child_node = self.require_node(child)?;
+        if child == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotRemovePage);
+        }
+        if self.document.get(child_node).and_then(dom::Node::parent_id) != Some(parent_node) {
+            return Err(PapiError::NotAChild { parent, child });
+        }
+
+        self.uncommitted = true;
+        self.document.remove_element(child_node);
+        Ok(child)
+    }
+
+    /// Replaces `old_element` in place with `new_element`, leaving the old element detached.
+    ///
+    /// Replacing a detached element or replacing an element with itself is a no-op, matching the
+    /// Element PAPI's `ChildNode.replaceWith` behavior.
+    pub fn replace_element(
+        &mut self,
+        new_element: ElementId,
+        old_element: ElementId,
+    ) -> Result<(), PapiError> {
+        let new_node = self.require_node(new_element)?;
+        let old_node = self.require_node(old_element)?;
+        if new_element == old_element {
+            return Ok(());
+        }
+        if old_element == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotRemovePage);
+        }
+        let Some(parent_node) = self.document.get(old_node).and_then(dom::Node::parent_id) else {
+            return Ok(());
+        };
+        if new_element == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotReparentPage);
+        }
+        let parent = *self
+            .document
+            .get(parent_node)
+            .expect("a live element's parent must be live")
+            .payload();
+        self.validate_insertion(parent, parent_node, new_element, new_node)?;
+
+        self.uncommitted = true;
+        self.document
+            .insert_before(parent_node, new_node, Some(old_node));
+        self.document.remove_element(old_node);
+        Ok(())
     }
 
     /// Drops one element and permanently retires its id.
@@ -316,6 +396,26 @@ impl ElementTree {
     ) -> Result<(), PapiError> {
         if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
             return Err(PapiError::UnknownElement(parent_component_unique_id));
+        }
+        Ok(())
+    }
+
+    fn require_node(&self, id: ElementId) -> Result<NodeId, PapiError> {
+        self.node_id(id).ok_or(PapiError::UnknownElement(id))
+    }
+
+    fn validate_insertion(
+        &self,
+        parent: ElementId,
+        parent_node: NodeId,
+        child: ElementId,
+        child_node: NodeId,
+    ) -> Result<(), PapiError> {
+        if child == PAGE_UNIQUE_ID {
+            return Err(PapiError::CannotReparentPage);
+        }
+        if parent == child || self.document.is_ancestor(child_node, parent_node) {
+            return Err(PapiError::WouldCycle { parent, child });
         }
         Ok(())
     }
@@ -634,6 +734,170 @@ mod tests {
         assert_eq!(
             tree.append_element(view, page).unwrap_err(),
             PapiError::CannotReparentPage
+        );
+    }
+
+    #[test]
+    fn tree_mutations_insert_remove_and_replace_without_retiring_handles() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let first = tree.create_view(0).unwrap();
+        let second = tree.create_view(0).unwrap();
+        let third = tree.create_view(0).unwrap();
+        let replacement = tree.create_view(0).unwrap();
+        let second_child = tree.create_view(0).unwrap();
+        tree.append_element(second, second_child).unwrap();
+
+        assert_eq!(
+            tree.insert_element_before(page, first, None).unwrap(),
+            first
+        );
+        assert_eq!(
+            tree.insert_element_before(page, second, Some(first))
+                .unwrap(),
+            second
+        );
+        tree.append_element(page, third).unwrap();
+        tree.insert_element_before(page, third, Some(second))
+            .unwrap();
+
+        let page_node = tree.node_id(page).unwrap();
+        let first_node = tree.node_id(first).unwrap();
+        let second_node = tree.node_id(second).unwrap();
+        let third_node = tree.node_id(third).unwrap();
+        let replacement_node = tree.node_id(replacement).unwrap();
+        let second_child_node = tree.node_id(second_child).unwrap();
+        assert_eq!(
+            tree.document().get(page_node).unwrap().child_ids(),
+            [third_node, second_node, first_node]
+        );
+
+        assert_eq!(tree.remove_element(page, second).unwrap(), second);
+        assert_eq!(
+            tree.document().get(page_node).unwrap().child_ids(),
+            [third_node, first_node]
+        );
+        assert_eq!(tree.document().get(second_node).unwrap().parent_id(), None);
+        assert!(
+            tree.element(second).is_some(),
+            "remove must not retire the handle"
+        );
+        assert_eq!(
+            tree.document().get(second_child_node).unwrap().parent_id(),
+            Some(second_node),
+            "remove must preserve the detached subtree"
+        );
+        assert!(tree.element(second_child).is_some());
+
+        tree.replace_element(replacement, first).unwrap();
+        assert_eq!(
+            tree.document().get(page_node).unwrap().child_ids(),
+            [third_node, replacement_node]
+        );
+        assert_eq!(tree.document().get(first_node).unwrap().parent_id(), None);
+        assert!(
+            tree.element(first).is_some(),
+            "replace must leave the old handle live but detached"
+        );
+    }
+
+    #[test]
+    fn insert_and_remove_require_the_reference_or_child_to_belong_to_the_parent() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let other_parent = tree.create_view(0).unwrap();
+        let reference = tree.create_view(0).unwrap();
+        let child = tree.create_view(0).unwrap();
+        tree.append_element(page, other_parent).unwrap();
+        tree.append_element(other_parent, reference).unwrap();
+
+        assert_eq!(
+            tree.insert_element_before(page, child, Some(reference))
+                .unwrap_err(),
+            PapiError::NotAChild {
+                parent: page,
+                child: reference,
+            }
+        );
+        assert_eq!(
+            tree.remove_element(page, reference).unwrap_err(),
+            PapiError::NotAChild {
+                parent: page,
+                child: reference,
+            }
+        );
+        assert_eq!(
+            tree.insert_element_before(page, child, Some(99))
+                .unwrap_err(),
+            PapiError::UnknownElement(99)
+        );
+    }
+
+    #[test]
+    fn insert_and_replace_reject_cycles_and_page_reparenting() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let outer = tree.create_view(0).unwrap();
+        let inner = tree.create_view(0).unwrap();
+        tree.append_element(page, outer).unwrap();
+        tree.append_element(outer, inner).unwrap();
+
+        assert_eq!(
+            tree.insert_element_before(inner, outer, None).unwrap_err(),
+            PapiError::WouldCycle {
+                parent: inner,
+                child: outer,
+            }
+        );
+        assert_eq!(
+            tree.replace_element(outer, inner).unwrap_err(),
+            PapiError::WouldCycle {
+                parent: outer,
+                child: outer,
+            }
+        );
+        assert_eq!(
+            tree.insert_element_before(outer, page, None).unwrap_err(),
+            PapiError::CannotReparentPage
+        );
+        assert_eq!(
+            tree.remove_element(outer, page).unwrap_err(),
+            PapiError::CannotRemovePage
+        );
+        assert_eq!(
+            tree.replace_element(inner, page).unwrap_err(),
+            PapiError::CannotRemovePage
+        );
+        assert_eq!(
+            tree.replace_element(page, inner).unwrap_err(),
+            PapiError::CannotReparentPage
+        );
+    }
+
+    #[test]
+    fn self_insert_self_replace_and_detached_replace_are_no_ops() {
+        let mut tree = tree();
+        let page = tree.create_page("page", 0);
+        let child = tree.create_view(0).unwrap();
+        let detached = tree.create_view(0).unwrap();
+        let unused_replacement = tree.create_view(0).unwrap();
+        tree.append_element(page, child).unwrap();
+        tree.flush_element_tree();
+
+        assert_eq!(
+            tree.insert_element_before(page, child, Some(child))
+                .unwrap(),
+            child
+        );
+        tree.replace_element(child, child).unwrap();
+        tree.replace_element(unused_replacement, detached).unwrap();
+        assert!(!tree.has_uncommitted_mutations());
+
+        let page_node = tree.node_id(page).unwrap();
+        let child_node = tree.node_id(child).unwrap();
+        assert_eq!(
+            tree.document().get(page_node).unwrap().child_ids(),
+            [child_node]
         );
     }
 

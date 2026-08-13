@@ -188,12 +188,14 @@ useful signal for currently-compatible versions of those libraries.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Twelve Element PAPI globals are
+  `renderPage` → `__FlushElementTree`. Fifteen Element PAPI globals are
   installed: every ReactLynx Snapshot constructor except `__CreateFrame`
   (`__CreatePage`, `__CreateElement`, `__CreateWrapperElement`, `__CreateText`,
   `__CreateImage`, `__CreateView`, `__CreateScrollView`, `__CreateRawText`,
-  `__CreateList`) plus `__AppendElement`, `__DropElement`, and
-  `__FlushElementTree`; unsupported globals remain precise `ReferenceError`s.
+  `__CreateList`) plus all four tree mutation calls (`__AppendElement`,
+  `__InsertElementBefore`, `__RemoveElement`, `__ReplaceElement`),
+  `__DropElement`, and `__FlushElementTree`; unsupported globals remain precise
+  `ReferenceError`s.
   `__CreateList` consumes only its numeric parent-component argument for now;
   callback storage/execution remains part of the unimplemented list surface.
   Creation calls return opaque QuickJS weak-ref objects
