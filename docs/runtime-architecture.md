@@ -7,12 +7,16 @@ document subsystem, not an implementation injected by an embedder.
 The product dependency graph is:
 
 ```text
-bobcat-cli ──▶ bobcat-core ──▶ lynx-element ──▶ dom ─┬─▶ hughie
-  │                 │                                  ├─▶ vendor/stylo
-  │                 └──▶ quickjs-rust-bridge           └─▶ vello/wgpu
-  │                     [feature = "quickjs"]
-  ├── lynx-template-decoder
-  └── winit (macOS headed product only)
+bobcat-cli  ─┐
+             ├──▶ bobcat-core ──▶ lynx-element ──▶ dom ─┬─▶ hughie
+bobcat-wasm ─┘          │                                  ├─▶ vendor/stylo
+                        └──▶ quickjs-rust-bridge           └─▶ vello/wgpu
+                             [feature = "quickjs";
+                              native product only]
+
+bobcat-cli  ──▶ lynx-template-decoder + winit (macOS headed product only)
+bobcat-wasm ──▶ NAPI-RS + emnapi (`wasm32-wasip1-threads`, one shared-memory
+                                  module for Rust threads and Vello/WebGPU Canvas)
 
 Each layer depends only on the layer directly below and re-exports it whole
 (`bobcat_core::lynx_element`, `lynx_element::dom`); `dom` re-exports the
@@ -49,14 +53,16 @@ JavaScript adapter:
   draw target, and IO primitives — and relays OS facts into the engine
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks); it
   never starts or steers the pipeline. The engine schedules through the
-  `engine::Window` it borrows at attach time — one trait carrying the draw
-  target, the detachable `FrameRequester` its Lynx main thread keeps, and
-  `pre_present`. `Engine` is generic over it, so, as with
+  `engine::Window` capabilities supplied at attach time — one trait carrying
+  the draw target and the detachable `FrameRequester` its Lynx main thread
+  keeps. The same frame handle performs `pre_present` on the presenting side.
+  `Engine` is generic over it, so, as with
   `ScriptEngine::ImportFuture`, the boundary needs no boxed closure and no
-  `dyn` call: `Window::Target<'window>` is a GAT, so the engine's surface
-  borrows the embedder's window rather than demanding a `'static`
-  refcounted handle. `engine::OffscreenEngine` is the windowless
-  composition, over the uninhabited `NoWindow`.
+  `dyn` call: `Window::Target<'window>` is a GAT, so native surfaces may
+  borrow an embedder-owned window. `Engine::attach_target` also admits an
+  owned browser canvas target without a self-referential wrapper.
+  `engine::OffscreenEngine` is the windowless composition, over the
+  uninhabited `NoWindow`.
 - `resource` and `view` provide resource acquisition and generic engine/view
   composition. The crate root does not re-export `ElementTree`, `dom`,
   or a renderer specialization. `bobcat-cli` is one embedder of `engine`,
@@ -180,6 +186,15 @@ batch boundaries; the presenting side never waits on the main thread; the
 embedder loop never blocks. The offscreen composition keeps the wall-free form: one
 thread, `Engine::run_script`, identical semantics — the golden screenshot
 suite drives it end to end.
+
+The browser embedder has one compiled `wasm32-wasip1-threads` module. Its
+NAPI/Emnapi async-work Workers can run blocking Rust CPU work and share the
+module's linear memory, but the browser UI thread exclusively owns the Canvas,
+wgpu Device/Queue/Surface, and Vello renderer. Those WebGPU objects are
+thread-affine and are never sent to a Rust worker. The browser build currently
+disables QuickJS and exposes direct Element-PAPI operations for the demo; a
+dedicated owner thread for a future QuickJS realm and `.web.bundle` execution
+remain unimplemented.
 
 ## Static dispatch and intentional dynamic boundaries
 

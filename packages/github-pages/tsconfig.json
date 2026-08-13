@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["DOM", "DOM.Iterable", "ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    "declaration": false,
+    "isolatedDeclarations": false,
+    "noEmit": true
+  },
+  "include": ["rsbuild.config.ts", "src/**/*.ts"]
+}
