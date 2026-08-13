@@ -2,7 +2,7 @@
 
 #![allow(unsafe_code)]
 
-use std::ffi::{c_char, c_double, c_int, c_void};
+use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
 
 pub(crate) type InterruptCallback = unsafe extern "C" fn(opaque: *mut c_void) -> c_int;
 
@@ -11,6 +11,7 @@ pub(crate) const HOST_ARG_NULL: i32 = 1;
 pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
 pub(crate) const HOST_ARG_NUMBER: i32 = 3;
 pub(crate) const HOST_ARG_STRING: i32 = 4;
+pub(crate) const HOST_ARG_JS_WEAK_REF: i32 = 5;
 
 #[repr(C)]
 pub(crate) struct QjsHostArg {
@@ -37,6 +38,8 @@ pub(crate) type HostDispatch = unsafe extern "C" fn(
 ) -> c_int;
 
 pub(crate) type HostRelease = unsafe extern "C" fn(opaque: *mut c_void, handler: *mut c_void);
+
+pub(crate) type JsWeakRefDrop = unsafe extern "C" fn(opaque: *mut c_void, node_id: c_uint);
 
 #[repr(C)]
 pub(crate) struct QjsRuntime {
@@ -141,6 +144,15 @@ unsafe extern "C" {
         release: Option<HostRelease>,
         opaque: *mut c_void,
     );
+    pub(crate) fn qjs_runtime_set_js_weak_ref_drop(
+        runtime: *mut QjsRuntime,
+        drop: Option<JsWeakRefDrop>,
+        opaque: *mut c_void,
+    );
+    pub(crate) fn qjs_create_weak_ref_with_node_id(
+        context: *mut JSContext,
+        node_id: c_uint,
+    ) -> *mut QjsValue;
     pub(crate) fn qjs_new_host_function(
         context: *mut JSContext,
         name: *const c_char,

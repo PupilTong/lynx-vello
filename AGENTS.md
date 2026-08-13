@@ -191,7 +191,10 @@ useful signal for currently-compatible versions of those libraries.
   `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
   installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
   `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Handles cross the primitives-only boundary as `u32` ids.
+  `ReferenceError`s. Creation calls return opaque QuickJS weak-ref objects
+  carrying the `u32` arena id; collection reports the id through
+  `js_weak_ref_drop`, which retires only that Lynx element and matching DOM node;
+  its descendants remain live but detached until their own VM notifications.
   Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
   `type ElementId = u32` remain defined by `lynx-element`.
   The resource module must not decode images/fonts/templates, upload render
@@ -207,9 +210,13 @@ useful signal for currently-compatible versions of those libraries.
   `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
   table reached via the context opaque). Host callbacks speak `HostValue`, a
-  primitives-only boundary (undefined/null/bool/number/string) — objects,
+  primitives-plus-one-opaque-handle boundary
+  (undefined/null/bool/number/string/`JsWeakRef(u32)`) — ordinary objects,
   arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
-  the way in rather than lossily converted — which also means a callback
+  the way in rather than lossily converted. `Realm::create_weak_ref_with_node_id`
+  creates one identity-stable object per live id, and its finalizer queues the
+  id for the realm's `js_weak_ref_drop` callback outside the collector. This
+  boundary also means a callback
   cannot call back into its own realm, so host functions are strictly
   leaf calls today. A slot is vacated for the duration of its call (a guard
   that restores it on the unwinding path too), so a panicking callback becomes
@@ -305,8 +312,9 @@ useful signal for currently-compatible versions of those libraries.
   owns that id, its stable DOM `NodeId` association, component creation
   fields. The arena permanently reserves slot 0 as web-core's
   "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
-  the selected DOM subtree and takes the corresponding arena entries, leaving
-  permanent `None` tombstones; unique ids are never recycled, although `dom`
+  only the selected DOM node and takes its one arena entry, leaving a permanent
+  `None` tombstone; its live descendants become detached and await their own VM
+  drop notifications. Unique ids are never recycled, although `dom`
   may reuse its private `NodeId` slots;
   every fallible PAPI entry returns `PapiError` instead of panicking, because
   the main-thread script is untrusted input and the DOM core is
@@ -331,11 +339,12 @@ useful signal for currently-compatible versions of those libraries.
   tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
   `flush_element_tree` is the single commit boundary — a plain style +
   layout pass: the page is the permanent document element, pre-created by
-  `ElementTree::new` with the fixed unique id 1 (ids are opaque handles to
-  script, so `__CreatePage` just binds the component fields and returns it),
+  `ElementTree::new` with the fixed unique id 1 (the id is carried by an
+  opaque JavaScript weak-ref object, so `__CreatePage` just binds the component
+  fields and returns that object),
   and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
-  limits (see the crate docs, which are authoritative): handles are ids rather
-  than element objects; `parentComponentUniqueID` is recorded but not honored
+  limits (see the crate docs, which are authoritative): handle objects expose
+  no element properties or methods beyond their identity; `parentComponentUniqueID` is recorded but not honored
   (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
   covers only the three documented Lynx computed defaults. It must not absorb
   DOM/CSS core behavior, and nothing below it may depend on it.

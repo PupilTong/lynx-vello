@@ -124,6 +124,12 @@ touch it: they hold an `Engine` and relay OS facts into it.
    is the same permanent `u32` id stored in the element arena; private DOM
    `NodeId` slots may still be reused.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
+   Creation PAPI calls return an opaque, identity-stable JavaScript weak-ref
+   object carrying the element's `u32` arena id; host calls recover the id
+   only from that unforgeable object. Its finalizer queues `js_weak_ref_drop`,
+   which runs outside the collector and retires only that `LynxElement` and DOM
+   node through `ElementTree::drop_element`. Its children become detached roots
+   whose subtrees remain live until their own handles receive VM drop notifications.
    A batch's first Element PAPI mutation takes the tree out of its hand-off
    slot; every call after that is a plain `&mut` mutation with no
    synchronization — the tree validates, so a bad handle throws at the call

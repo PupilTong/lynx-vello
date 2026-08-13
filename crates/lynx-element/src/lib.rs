@@ -34,16 +34,19 @@
 //!
 //! # Recorded limits
 //!
-//! - **The runtime identity and JavaScript handle are the same unique id.** [`ElementTree`] speaks
-//!   [`ElementId`] internally, matching the native engine's identity (`__GetElementUniqueID`), and
-//!   `bobcat-core`'s optional `QuickJS` runtime carries it directly over its primitives-only
-//!   boundary.
+//! - **Runtime identity is a unique id; JavaScript receives an opaque weak-ref object.**
+//!   [`ElementTree`] speaks [`ElementId`] internally, matching the native engine's identity
+//!   (`__GetElementUniqueID`). `bobcat-core`'s optional `QuickJS` runtime stores that arena id in
+//!   an unforgeable object. Collecting the object calls back into [`ElementTree::drop_element`],
+//!   which retires only that Lynx element and corresponding DOM node. Its descendants stay live but
+//!   detached until the VM reports their own handles dropped; `__DropElement` is the explicit early
+//!   path through the same operation.
 //! - **Unique ids and arena slots are never recycled.** The context owns a
 //!   `Vec<Option<LynxElement>>` whose slot zero is the permanent null sentinel. [`ElementId`] is
-//!   simply `u32`, and every positive id is also its direct arena index. `__DropElement` retires a
-//!   subtree through [`ElementTree::drop_element`], which takes each value and leaves a permanent
-//!   `None` tombstone. `Document<ElementId>` stores that same unique id. `dom` may reuse its
-//!   private `NodeId` slots, but no stale script identity can ever name a later element.
+//!   simply `u32`, and every positive id is also its direct arena index. Each call to
+//!   [`ElementTree::drop_element`] takes exactly one value and leaves a permanent `None` tombstone.
+//!   `Document<ElementId>` stores that same unique id. `dom` may reuse its private `NodeId` slots,
+//!   but no stale script identity can ever name a later element.
 //! - **There is no runtime tree-depth cap in this layer.** `ElementTree` keeps no depth-specific
 //!   state or traversal helpers; hardening recursive walks belongs in `dom` and `hughie`.
 //! - **`parentComponentUniqueID` is recorded, not honored.** web-core uses it only to inherit the

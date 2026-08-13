@@ -50,8 +50,11 @@
 //!   `__AppendElement`, `__DropElement`, `__FlushElementTree` (see `lynx-element`'s crate docs). A
 //!   bundle that reaches for anything else gets a `ReferenceError` naming the missing global, which
 //!   is the intended failure: a silently wrong render would be worse.
-//! - **Element handles cross as `u32` unique-id numbers.** `__DropElement` asks the recorder to
-//!   retire the handle; this layer does not add an object wrapper or GC policy around those ids.
+//! - **Element handles cross as opaque JavaScript weak-ref objects.** Each object carries the
+//!   element arena id. When `QuickJS` collects it, the realm calls [`ElementTree::drop_element`],
+//!   which retires only that Lynx element and its corresponding DOM node. Its surviving descendants
+//!   become detached and await their own VM drop notifications. `__DropElement` remains the
+//!   explicit early-retirement path through the same operation.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -159,6 +162,12 @@ impl TreeHandle {
     }
 }
 
+impl Drop for TreeHandle {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 /// One `QuickJS` realm carrying the Lynx Element PAPI over the tree hand-off slot.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
@@ -170,6 +179,15 @@ impl fmt::Debug for MainThreadRuntime {
         formatter
             .debug_struct("MainThreadRuntime")
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for MainThreadRuntime {
+    fn drop(&mut self) {
+        // `Engine::run_script` currently retains the last committed tree after boot while the
+        // short-lived bootstrap realm goes away. Its teardown must not look like application GC.
+        self.engine.realm.clear_js_weak_ref_drop();
+        self.tree.borrow_mut().release();
     }
 }
 
@@ -234,6 +252,9 @@ fn install_element_papi(
     }));
 
     let tree = Rc::clone(&handle);
+    realm.set_js_weak_ref_drop(move |id| js_weak_ref_drop(&tree, id));
+
+    let tree = Rc::clone(&handle);
     realm.define_global_function("__CreatePage", 2, move |arguments| {
         let component_id = string_argument("__CreatePage", arguments, 0)?;
         let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
@@ -241,7 +262,7 @@ fn install_element_papi(
             .borrow_mut()
             .tree()
             .create_page(component_id, component_css_id);
-        Ok(unique_id_value(id))
+        Ok(js_weak_ref_value(id))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -252,7 +273,7 @@ fn install_element_papi(
             .tree()
             .create_view(parent_component)
             .map_err(papi_error)?;
-        Ok(unique_id_value(id))
+        Ok(js_weak_ref_value(id))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -264,7 +285,7 @@ fn install_element_papi(
             .tree()
             .append_element(parent, child)
             .map_err(papi_error)?;
-        Ok(unique_id_value(appended))
+        Ok(js_weak_ref_value(appended))
     })?;
 
     let tree = Rc::clone(&handle);
@@ -287,8 +308,15 @@ fn install_element_papi(
     Ok(handle)
 }
 
-fn unique_id_value(id: ElementId) -> HostValue {
-    HostValue::Number(f64::from(id))
+fn js_weak_ref_value(id: ElementId) -> HostValue {
+    HostValue::JsWeakRef(id)
+}
+
+fn js_weak_ref_drop(tree: &Rc<RefCell<TreeHandle>>, id: ElementId) {
+    match tree.borrow_mut().tree().drop_element(id) {
+        Ok(()) | Err(PapiError::UnknownElement(_) | PapiError::CannotRemovePage) => {}
+        Err(error) => debug_assert!(false, "unexpected weak-ref drop failure: {error}"),
+    }
 }
 
 fn papi_error(error: impl fmt::Display) -> HostFunctionError {
@@ -366,10 +394,10 @@ fn element_argument(
     arguments: &[HostValue],
     index: usize,
 ) -> Result<ElementId, HostFunctionError> {
-    let id = u32_argument(function, arguments, index)?;
-    (id != 0).then_some(id).ok_or_else(|| {
-        HostFunctionError::new(format!(
-            "{function} expects an element handle for argument {index}, got the null handle 0"
-        ))
-    })
+    let HostValue::JsWeakRef(id) = *argument(arguments, index) else {
+        return Err(HostFunctionError::new(format!(
+            "{function} expects a JavaScript element weak reference for argument {index}"
+        )));
+    };
+    Ok(id)
 }

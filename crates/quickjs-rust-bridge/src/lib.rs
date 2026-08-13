@@ -404,8 +404,23 @@ mod implementation {
                         )
                     })
             }
+            ffi::HOST_ARG_JS_WEAK_REF => {
+                debug_assert!(
+                    argument.number.is_finite()
+                        && argument.number.fract() == 0.0
+                        && argument.number >= 0.0
+                        && argument.number <= f64::from(u32::MAX),
+                    "the QuickJS shim must return an exact u32 weak-ref id"
+                );
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "the C shim created this value from a u32"
+                )]
+                Ok(HostValue::JsWeakRef(argument.number as u32))
+            }
             _ => Err(HostFunctionError::new(
-                "host functions accept undefined, null, Boolean, Number, and String arguments only",
+                "host functions accept undefined, null, Boolean, Number, String, and JS weak-ref arguments only",
             )),
         }
     }
@@ -422,6 +437,13 @@ mod implementation {
         let table = unsafe { &*opaque.cast::<HostTable>() };
         let _ = catch_unwind(AssertUnwindSafe(|| {
             table.note_released(handler.cast::<HostSlot>());
+        }));
+    }
+
+    unsafe extern "C" fn js_weak_ref_drop(opaque: *mut c_void, node_id: u32) {
+        let table = unsafe { &*opaque.cast::<HostTable>() };
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            table.note_js_weak_ref_drop(node_id);
         }));
     }
 
@@ -491,6 +513,8 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(String),
+        /// An opaque JavaScript object carrying a host node id.
+        JsWeakRef(u32),
     }
 
     /// Error returned by a Rust host function.
@@ -529,6 +553,7 @@ mod implementation {
     impl std::error::Error for HostFunctionError {}
 
     type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
+    type JsWeakRefDropHandler = Box<dyn FnMut(u32)>;
 
     struct HostSlot {
         handler: RefCell<HostHandler>,
@@ -537,6 +562,8 @@ mod implementation {
     struct HostTable {
         context: Cell<*mut ffi::JSContext>,
         pending_release: RefCell<Vec<*mut HostSlot>>,
+        pending_js_weak_ref_drop: RefCell<Vec<u32>>,
+        js_weak_ref_drop: RefCell<Option<JsWeakRefDropHandler>>,
         return_text: RefCell<Vec<u16>>,
     }
 
@@ -545,6 +572,8 @@ mod implementation {
             Self {
                 context: Cell::new(ptr::null_mut()),
                 pending_release: RefCell::new(Vec::new()),
+                pending_js_weak_ref_drop: RefCell::new(Vec::new()),
+                js_weak_ref_drop: RefCell::new(None),
                 return_text: RefCell::new(Vec::new()),
             }
         }
@@ -572,12 +601,47 @@ mod implementation {
                     out.text = scratch.as_ptr();
                     out.text_len = scratch.len();
                 }
+                HostValue::JsWeakRef(node_id) => {
+                    out.kind = ffi::HOST_ARG_JS_WEAK_REF;
+                    out.number = f64::from(*node_id);
+                }
             }
         }
 
         fn note_released(&self, slot: *mut HostSlot) {
             if let Ok(mut pending) = self.pending_release.try_borrow_mut() {
                 pending.push(slot);
+            }
+        }
+
+        fn note_js_weak_ref_drop(&self, node_id: u32) {
+            if let Ok(mut pending) = self.pending_js_weak_ref_drop.try_borrow_mut() {
+                pending.push(node_id);
+            }
+        }
+
+        fn reclaim_js_weak_refs(&self) {
+            loop {
+                let batch = {
+                    let Ok(mut pending) = self.pending_js_weak_ref_drop.try_borrow_mut() else {
+                        return;
+                    };
+                    if pending.is_empty() {
+                        return;
+                    }
+                    mem::take(&mut *pending)
+                };
+                let Ok(mut handler) = self.js_weak_ref_drop.try_borrow_mut() else {
+                    self.pending_js_weak_ref_drop.borrow_mut().extend(batch);
+                    return;
+                };
+                let Some(handler) = handler.as_mut() else {
+                    self.pending_js_weak_ref_drop.borrow_mut().extend(batch);
+                    return;
+                };
+                for node_id in batch {
+                    let _ = catch_unwind(AssertUnwindSafe(|| handler(node_id)));
+                }
             }
         }
 
@@ -618,6 +682,7 @@ mod implementation {
                 self.hosts.context.set(ptr::null_mut());
                 ffi::qjs_context_free(self.context.as_ptr());
                 ffi::qjs_runtime_free(self.runtime.as_ptr());
+                self.hosts.reclaim_js_weak_refs();
                 self.hosts.reclaim();
             }
         }
@@ -693,6 +758,11 @@ mod implementation {
                     Some(host_release),
                     (&raw const *hosts).cast_mut().cast(),
                 );
+                ffi::qjs_runtime_set_js_weak_ref_drop(
+                    runtime.as_ptr(),
+                    Some(js_weak_ref_drop),
+                    (&raw const *hosts).cast_mut().cast(),
+                );
                 Ok(Self {
                     inner: Rc::new(RealmInner {
                         runtime,
@@ -715,10 +785,61 @@ mod implementation {
             self.inner.hosts.reclaim();
         }
 
-        /// Runs a full garbage collection and reclaims collected host closures.
+        fn reclaim_js_weak_refs(&mut self) {
+            self.inner.hosts.reclaim_js_weak_refs();
+        }
+
+        /// Installs the callback invoked after a JavaScript weak-ref object is collected.
+        ///
+        /// Finalizers only enqueue ids. The callback runs outside `QuickJS`'s collector, at an
+        /// explicit collection or before the next top-level evaluation/call.
+        pub fn set_js_weak_ref_drop(&mut self, handler: impl FnMut(u32) + 'static) {
+            self.reclaim();
+            self.reclaim_js_weak_refs();
+            *self.inner.hosts.js_weak_ref_drop.borrow_mut() = Some(Box::new(handler));
+            unsafe {
+                ffi::qjs_runtime_set_js_weak_ref_drop(
+                    self.inner.runtime.as_ptr(),
+                    Some(js_weak_ref_drop),
+                    (&raw const *self.inner.hosts).cast_mut().cast(),
+                );
+            }
+            self.reclaim_js_weak_refs();
+        }
+
+        /// Removes the weak-ref callback and discards ids already awaiting delivery.
+        ///
+        /// New weak refs can be enabled later by calling [`Self::set_js_weak_ref_drop`] again.
+        pub fn clear_js_weak_ref_drop(&mut self) {
+            unsafe {
+                ffi::qjs_runtime_set_js_weak_ref_drop(
+                    self.inner.runtime.as_ptr(),
+                    None,
+                    ptr::null_mut(),
+                );
+            }
+            self.inner
+                .hosts
+                .pending_js_weak_ref_drop
+                .borrow_mut()
+                .clear();
+            *self.inner.hosts.js_weak_ref_drop.borrow_mut() = None;
+        }
+
+        /// Runs a full garbage collection, dispatches weak-ref drops, and reclaims host closures.
         pub fn run_gc(&mut self) {
             unsafe { ffi::qjs_runtime_run_gc(self.inner.runtime.as_ptr()) };
+            self.reclaim_js_weak_refs();
             self.reclaim();
+        }
+
+        /// Creates an opaque JavaScript object whose finalizer reports `node_id` through the
+        /// callback installed by [`Self::set_js_weak_ref_drop`].
+        pub fn create_weak_ref_with_node_id(&mut self, node_id: u32) -> Result<Value, Error> {
+            self.reclaim();
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_create_weak_ref_with_node_id(context, node_id)
+            })
         }
 
         pub fn global_object(&self) -> Result<Value, Error> {
@@ -881,6 +1002,7 @@ mod implementation {
             options: EvalOptions,
         ) -> Result<Value, Error> {
             self.reclaim();
+            self.reclaim_js_weak_refs();
             if options.source_type == SourceType::Module && options.top_level_await {
                 return Err(Error::bridge(
                     ErrorKind::InvalidInput,
@@ -972,6 +1094,7 @@ mod implementation {
             arguments: &[Value],
         ) -> Result<Value, Error> {
             self.reclaim();
+            self.reclaim_js_weak_refs();
             self.ensure_affinity(callable, ErrorPhase::Call)?;
             if callable.kind() != ValueKind::Function {
                 return Err(Error::bridge(
@@ -1998,6 +2121,7 @@ mod implementation {
                         HostValue::Boolean(value) => format!("boolean:{value}"),
                         HostValue::Number(value) => format!("number:{value}"),
                         HostValue::String(value) => format!("string:{value}"),
+                        HostValue::JsWeakRef(value) => format!("weak-ref:{value}"),
                     }))
                 })
                 .unwrap();
