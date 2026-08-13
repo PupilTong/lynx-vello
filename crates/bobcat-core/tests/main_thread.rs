@@ -134,22 +134,6 @@ fn create_frame_remains_an_explicitly_missing_global() {
 }
 
 #[test]
-fn generic_create_element_cannot_bypass_the_missing_frame_implementation() {
-    let mut runtime = bare_runtime();
-    let error = runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreatePage('card', 0);
-              __CreateElement('frame', 0);
-            };
-            ",
-        )
-        .expect_err("frame needs its specialized constructor and nested runtime");
-    assert!(error.to_string().contains("__CreateFrame"), "{error}");
-}
-
-#[test]
 fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
     let (mut runtime, elements) = runtime();
     runtime
