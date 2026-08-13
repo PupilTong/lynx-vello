@@ -214,21 +214,23 @@ impl ElementTree {
         Ok(child)
     }
 
-    /// Drops an element subtree and permanently retires its ids.
+    /// Drops one element and permanently retires its id.
+    ///
+    /// Its direct children are detached but remain live, along with their descendants. Each of
+    /// those elements is retired only when the JavaScript VM drops its own handle.
     pub fn drop_element(&mut self, id: ElementId) -> Result<(), PapiError> {
         if id == PAGE_UNIQUE_ID {
             return Err(PapiError::CannotRemovePage);
         }
         let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
         self.uncommitted = true;
-        let retired_ids = self.document.drop_subtree(node);
-        for unique_id in retired_ids {
-            let retired = self.elements.retire(unique_id);
-            debug_assert!(
-                retired.is_some(),
-                "a removed DOM node must have a live Lynx element"
-            );
-        }
+        let unique_id = self.document.drop_element(node);
+        debug_assert_eq!(unique_id, id, "the DOM payload must match its arena id");
+        let retired = self.elements.retire(unique_id);
+        debug_assert!(
+            retired.is_some(),
+            "a removed DOM node must have a live Lynx element"
+        );
         Ok(())
     }
 
@@ -332,19 +334,42 @@ mod tests {
     }
 
     #[test]
-    fn releasing_a_subtree_retires_every_lynx_element_in_it() {
+    fn releasing_an_element_retires_only_it_and_detaches_its_descendants() {
         let mut tree = tree();
+        let page = tree.create_page("page", 0);
         let parent = tree.create_view(0).unwrap();
         let child = tree.create_view(0).unwrap();
+        let grandchild = tree.create_view(0).unwrap();
+        tree.append_element(page, parent).unwrap();
         tree.append_element(parent, child).unwrap();
+        tree.append_element(child, grandchild).unwrap();
 
         tree.drop_element(parent).unwrap();
         assert!(tree.node_id(parent).is_none());
-        assert!(tree.node_id(child).is_none());
-        assert_eq!(tree.elements.len(), 4);
+        let child_node = tree.node_id(child).expect("the child remains live");
+        let grandchild_node = tree
+            .node_id(grandchild)
+            .expect("the grandchild remains live");
+        assert_eq!(tree.document().get(child_node).unwrap().parent_id(), None);
+        assert_eq!(
+            tree.document().get(child_node).unwrap().child_ids(),
+            &[grandchild_node],
+            "the surviving descendant subtree keeps its internal links"
+        );
+        assert_eq!(
+            tree.document().get(grandchild_node).unwrap().parent_id(),
+            Some(child_node)
+        );
+        assert!(!tree.document().is_connected(child_node));
+        assert!(!tree.document().is_connected(grandchild_node));
+        assert_eq!(tree.elements.len(), 5);
+
+        tree.append_element(page, child).unwrap();
+        assert!(tree.document().is_connected(child_node));
+        assert!(tree.document().is_connected(grandchild_node));
 
         let next = tree.create_view(0).unwrap();
-        assert_eq!(next, 4);
+        assert_eq!(next, 5);
     }
 
     #[test]

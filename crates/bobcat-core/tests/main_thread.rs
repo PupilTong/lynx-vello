@@ -53,8 +53,8 @@ fn create_view_returns_a_handle_append_element_accepts() {
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
               const view = __CreateView(0);
-              if (typeof view !== 'number') {
-                throw new Error('__CreateView must return a number, got ' + typeof view);
+              if (typeof view !== 'object') {
+                throw new Error('__CreateView must return an object, got ' + typeof view);
               }
               const appended = __AppendElement(page, view);
               if (appended !== view) {
@@ -92,7 +92,7 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
 }
 
 #[test]
-fn drop_element_retires_an_attached_subtree() {
+fn drop_element_retires_only_the_target_and_preserves_descendant_handles() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -101,8 +101,10 @@ fn drop_element_retires_an_attached_subtree() {
               const page = __CreatePage('card', 0);
               const parent = __CreateView(0);
               const child = __CreateView(0);
+              const grandchild = __CreateView(0);
               __AppendElement(page, parent);
               __AppendElement(parent, child);
+              __AppendElement(child, grandchild);
               __DropElement(parent);
             };
             ",
@@ -111,7 +113,8 @@ fn drop_element_retires_an_attached_subtree() {
 
     let elements = elements.tree();
     assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_none());
+    assert!(elements.element(3).is_some());
+    assert!(elements.element(4).is_some());
 }
 
 #[test]
@@ -212,25 +215,27 @@ fn papi_rejections_become_javascript_exceptions() {
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
-              __AppendElement(9999, 8888);
+              const retired = __CreateView(0);
+              __DropElement(retired);
+              __AppendElement(retired, __CreateView(0));
             };
             ",
         )
         .expect_err("an unknown handle");
     assert!(
-        error.to_string().contains("9999"),
+        error.to_string().contains("unique id 2"),
         "the error should name the bad handle: {error}"
     );
 }
 
 #[test]
-fn element_handles_accept_the_full_u32_range() {
+fn parent_component_ids_accept_the_full_u32_range() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
-              __AppendElement(4294967295, __CreateView(0));
+              __CreateView(4294967295);
             };
             ",
         )
@@ -239,7 +244,7 @@ fn element_handles_accept_the_full_u32_range() {
         error
             .to_string()
             .contains("no element has the unique id 4294967295"),
-        "the u32 handle should reach lynx-element validation: {error}"
+        "the u32 component id should reach lynx-element validation: {error}"
     );
 }
 
@@ -255,7 +260,7 @@ fn the_null_handle_is_rejected_by_append_element() {
             ",
         )
         .expect_err("the null handle");
-    assert!(error.to_string().contains("null handle"), "{error}");
+    assert!(error.to_string().contains("weak reference"), "{error}");
 }
 
 #[test]
@@ -311,7 +316,7 @@ fn the_mts_wrapper_hides_the_browser_globals_web_core_hides() {
 }
 
 #[test]
-fn a_second_boot_re_renders_into_the_same_tree() {
+fn the_next_realm_entry_drops_unreferenced_js_elements_before_re_rendering() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -324,8 +329,60 @@ fn a_second_boot_re_renders_into_the_same_tree() {
         .expect("first boot");
     runtime.render_page().expect("second boot");
     let elements = elements.tree();
-    assert!(elements.element(2).is_some());
+    assert!(elements.element(2).is_none());
     assert!(elements.element(3).is_some());
+}
+
+#[test]
+fn vm_drop_of_a_parent_preserves_descendants_with_live_handles() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const parent = __CreateView(0);
+              const child = __CreateView(0);
+              const grandchild = __CreateView(0);
+              __AppendElement(page, parent);
+              __AppendElement(parent, child);
+              __AppendElement(child, grandchild);
+              globalThis.savedChild = child;
+              globalThis.savedGrandchild = grandchild;
+            };
+            ",
+        )
+        .expect("first boot");
+
+    // Entering the realm again delivers the pending finalizer for the local-only parent. The two
+    // descendants still have live JavaScript handles and must not be retired with it.
+    runtime
+        .evaluate_main_thread_script("")
+        .expect("deliver pending VM drops");
+
+    let elements = elements.tree();
+    assert!(elements.element(2).is_none());
+    assert!(elements.element(3).is_some());
+    assert!(elements.element(4).is_some());
+}
+
+#[test]
+fn bootstrap_realm_teardown_preserves_the_last_committed_tree() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __AppendElement(__CreatePage('card', 0), __CreateView(0));
+            };
+            ",
+        )
+        .expect("first boot");
+    assert!(elements.tree().element(2).is_some());
+
+    drop(runtime);
+
+    assert!(elements.tree().element(2).is_some());
 }
 
 #[test]

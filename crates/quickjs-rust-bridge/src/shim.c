@@ -37,7 +37,8 @@ enum QjsHostArgKind {
     QJS_ARG_BOOLEAN = 2,
     QJS_ARG_NUMBER = 3,
     QJS_ARG_STRING = 4,
-    QJS_ARG_UNSUPPORTED = 5,
+    QJS_ARG_JS_WEAK_REF = 5,
+    QJS_ARG_UNSUPPORTED = 6,
 };
 
 
@@ -63,6 +64,12 @@ typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
 
 typedef void QjsHostRelease(void *opaque, void *handler);
 
+
+typedef void QjsJsWeakRefDrop(void *opaque, uint32_t node_id);
+
+
+typedef struct QjsJsWeakRef QjsJsWeakRef;
+
 typedef struct QjsRuntime {
     JSRuntime *raw;
     JSContext *context;
@@ -74,6 +81,13 @@ typedef struct QjsRuntime {
     QjsHostDispatch *host_dispatch;
     QjsHostRelease *host_release;
     void *host_opaque;
+    QjsJsWeakRefDrop *js_weak_ref_drop;
+    void *js_weak_ref_opaque;
+    QjsJsWeakRef **js_weak_ref_buckets;
+    size_t js_weak_ref_bucket_count;
+    size_t js_weak_ref_count;
+    JSClassID host_owner_class_id;
+    JSClassID js_weak_ref_class_id;
 } QjsRuntime;
 
 
@@ -83,10 +97,8 @@ typedef struct QjsHostOwner {
 } QjsHostOwner;
 
 
-static JSClassID qjs_host_owner_class_id;
-
 static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
-    QjsHostOwner *owner = JS_GetOpaque(value, qjs_host_owner_class_id);
+    QjsHostOwner *owner = JS_GetOpaque(value, JS_GetClassID(value));
 
     (void)raw;
     if (owner == NULL) {
@@ -102,6 +114,58 @@ static void qjs_host_owner_finalizer(JSRuntime *raw, JSValue value) {
 static const JSClassDef qjs_host_owner_class = {
     "QjsHostFunctionOwner",
     .finalizer = qjs_host_owner_finalizer,
+};
+
+
+struct QjsJsWeakRef {
+    QjsRuntime *runtime;
+    uint32_t node_id;
+    JSValue value;
+    QjsJsWeakRef *hash_previous;
+    QjsJsWeakRef *hash_next;
+};
+
+
+static size_t qjs_js_weak_ref_bucket(uint32_t node_id,
+                                     size_t bucket_count) {
+    uint32_t hash = node_id * UINT32_C(2654435761);
+    hash ^= hash >> 16;
+    return (size_t)hash & (bucket_count - 1);
+}
+
+
+static void qjs_js_weak_ref_finalizer(JSRuntime *raw, JSValue value) {
+    QjsJsWeakRef *weak_ref = JS_GetOpaque(value, JS_GetClassID(value));
+    size_t bucket;
+
+    (void)raw;
+    if (weak_ref == NULL) {
+        return;
+    }
+    bucket = qjs_js_weak_ref_bucket(
+        weak_ref->node_id, weak_ref->runtime->js_weak_ref_bucket_count);
+    if (weak_ref->hash_previous == NULL) {
+        weak_ref->runtime->js_weak_ref_buckets[bucket] =
+            weak_ref->hash_next;
+    } else {
+        weak_ref->hash_previous->hash_next = weak_ref->hash_next;
+    }
+    if (weak_ref->hash_next != NULL) {
+        weak_ref->hash_next->hash_previous = weak_ref->hash_previous;
+    }
+    assert(weak_ref->runtime->js_weak_ref_count > 0);
+    weak_ref->runtime->js_weak_ref_count--;
+    if (weak_ref->runtime->js_weak_ref_drop != NULL) {
+        weak_ref->runtime->js_weak_ref_drop(
+            weak_ref->runtime->js_weak_ref_opaque, weak_ref->node_id);
+    }
+    free(weak_ref);
+}
+
+
+static const JSClassDef qjs_js_weak_ref_class = {
+    "QjsJsWeakRef",
+    .finalizer = qjs_js_weak_ref_finalizer,
 };
 
 enum QjsValueKind {
@@ -210,9 +274,12 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
                                           runtime);
-        JS_NewClassID(&qjs_host_owner_class_id);
-        JS_NewClass(runtime->raw, qjs_host_owner_class_id,
+        JS_NewClassID(&runtime->host_owner_class_id);
+        JS_NewClass(runtime->raw, runtime->host_owner_class_id,
                     &qjs_host_owner_class);
+        JS_NewClassID(&runtime->js_weak_ref_class_id);
+        JS_NewClass(runtime->raw, runtime->js_weak_ref_class_id,
+                    &qjs_js_weak_ref_class);
     } else {
         free(runtime);
         return NULL;
@@ -235,6 +302,7 @@ void qjs_runtime_free(QjsRuntime *runtime) {
         current = next;
     }
     JS_FreeRuntime(runtime->raw);
+    free(runtime->js_weak_ref_buckets);
     free(runtime);
 }
 
@@ -510,6 +578,109 @@ void qjs_runtime_set_host_dispatch(QjsRuntime *runtime,
 }
 
 
+void qjs_runtime_set_js_weak_ref_drop(QjsRuntime *runtime,
+                                      QjsJsWeakRefDrop *drop,
+                                      void *opaque) {
+    runtime->js_weak_ref_drop = drop;
+    runtime->js_weak_ref_opaque = opaque;
+}
+
+
+static JSValue qjs_create_js_weak_ref(JSContext *context, uint32_t node_id) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsJsWeakRef *current;
+    QjsJsWeakRef *weak_ref;
+    QjsJsWeakRef **buckets;
+    JSValue object;
+    size_t bucket;
+    size_t index;
+    size_t new_bucket_count;
+
+    if (runtime == NULL) {
+        return JS_ThrowInternalError(context, "no runtime is installed");
+    }
+    bucket = runtime->js_weak_ref_bucket_count == 0
+                 ? 0
+                 : qjs_js_weak_ref_bucket(
+                       node_id, runtime->js_weak_ref_bucket_count);
+    current = runtime->js_weak_ref_bucket_count == 0
+                  ? NULL
+                  : runtime->js_weak_ref_buckets[bucket];
+    while (current != NULL) {
+        if (current->node_id == node_id) {
+            return JS_DupValue(context, current->value);
+        }
+        current = current->hash_next;
+    }
+
+    if (runtime->js_weak_ref_count >=
+        runtime->js_weak_ref_bucket_count -
+            runtime->js_weak_ref_bucket_count / 4) {
+        if (runtime->js_weak_ref_bucket_count == 0) {
+            new_bucket_count = 16;
+        } else if (runtime->js_weak_ref_bucket_count >
+                   SIZE_MAX / 2 / sizeof(*buckets)) {
+            return JS_ThrowOutOfMemory(context);
+        } else {
+            new_bucket_count = runtime->js_weak_ref_bucket_count * 2;
+        }
+        buckets = calloc(new_bucket_count, sizeof(*buckets));
+        if (buckets == NULL) {
+            return JS_ThrowOutOfMemory(context);
+        }
+        for (index = 0; index < runtime->js_weak_ref_bucket_count; ++index) {
+            current = runtime->js_weak_ref_buckets[index];
+            while (current != NULL) {
+                QjsJsWeakRef *next = current->hash_next;
+                bucket = qjs_js_weak_ref_bucket(current->node_id,
+                                                new_bucket_count);
+                current->hash_previous = NULL;
+                current->hash_next = buckets[bucket];
+                if (current->hash_next != NULL) {
+                    current->hash_next->hash_previous = current;
+                }
+                buckets[bucket] = current;
+                current = next;
+            }
+        }
+        free(runtime->js_weak_ref_buckets);
+        runtime->js_weak_ref_buckets = buckets;
+        runtime->js_weak_ref_bucket_count = new_bucket_count;
+    }
+    weak_ref = malloc(sizeof(*weak_ref));
+    if (weak_ref == NULL) {
+        return JS_ThrowOutOfMemory(context);
+    }
+    weak_ref->runtime = runtime;
+    weak_ref->node_id = node_id;
+    weak_ref->hash_previous = NULL;
+    weak_ref->hash_next = NULL;
+
+    object = JS_NewObjectClass(context, (int)runtime->js_weak_ref_class_id);
+    if (JS_IsException(object)) {
+        free(weak_ref);
+        return object;
+    }
+    JS_SetOpaque(object, weak_ref);
+    weak_ref->value = object;
+    bucket = qjs_js_weak_ref_bucket(node_id,
+                                    runtime->js_weak_ref_bucket_count);
+    weak_ref->hash_next = runtime->js_weak_ref_buckets[bucket];
+    if (weak_ref->hash_next != NULL) {
+        weak_ref->hash_next->hash_previous = weak_ref;
+    }
+    runtime->js_weak_ref_buckets[bucket] = weak_ref;
+    runtime->js_weak_ref_count++;
+    return object;
+}
+
+
+QjsValue *qjs_create_weak_ref_with_node_id(JSContext *context,
+                                           uint32_t node_id) {
+    return qjs_box(context, qjs_create_js_weak_ref(context, node_id));
+}
+
+
 #define QJS_HOST_INLINE_ARGS 8
 
 static void qjs_host_describe(JSContext *context, JSValueConst value,
@@ -543,12 +714,26 @@ static void qjs_host_describe(JSContext *context, JSValueConst value,
         slot->kind = QJS_ARG_STRING;
         slot->text = (const uint8_t *)text;
         slot->text_len = length;
+    } else if (JS_IsObject(value)) {
+        QjsRuntime *runtime = JS_GetContextOpaque(context);
+        QjsJsWeakRef *weak_ref = JS_GetOpaque(
+            value, runtime->js_weak_ref_class_id);
+        if (weak_ref == NULL) {
+            slot->kind = QJS_ARG_UNSUPPORTED;
+            return;
+        }
+        slot->kind = QJS_ARG_JS_WEAK_REF;
+        slot->number = (double)weak_ref->node_id;
     } else {
         slot->kind = QJS_ARG_UNSUPPORTED;
     }
 }
 
-static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
+static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result,
+                              int argc, JSValueConst *argv) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    int index;
+
     switch (result->kind) {
     case QJS_ARG_UNDEFINED:
         return JS_UNDEFINED;
@@ -560,6 +745,16 @@ static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
         return JS_NewFloat64(context, result->number);
     case QJS_ARG_STRING:
         return qjs_string_from_utf16(context, result->text, result->text_len);
+    case QJS_ARG_JS_WEAK_REF:
+        for (index = 0; index < argc; ++index) {
+            QjsJsWeakRef *weak_ref = JS_GetOpaque(
+                argv[index], runtime->js_weak_ref_class_id);
+            if (weak_ref != NULL &&
+                weak_ref->node_id == (uint32_t)result->number) {
+                return JS_DupValue(context, argv[index]);
+            }
+        }
+        return qjs_create_js_weak_ref(context, (uint32_t)result->number);
     default:
         return JS_ThrowInternalError(context, "invalid host return value");
     }
@@ -583,7 +778,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
     if (runtime == NULL || runtime->host_dispatch == NULL) {
         return JS_ThrowInternalError(context, "no host dispatch is installed");
     }
-    owner = JS_GetOpaque(func_data[0], qjs_host_owner_class_id);
+    owner = JS_GetOpaque(func_data[0], runtime->host_owner_class_id);
     if (owner == NULL || owner->handler == NULL) {
         return JS_ThrowInternalError(context, "this host function was released");
     }
@@ -623,7 +818,7 @@ static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
 
         return JS_EXCEPTION;
     }
-    returned = qjs_host_build(context, &result);
+    returned = qjs_host_build(context, &result, argc, argv);
     return returned;
 }
 
@@ -650,7 +845,7 @@ QjsValue *qjs_new_host_function(JSContext *context, const char *name,
     owner->runtime = runtime;
     owner->handler = handler;
 
-    data = JS_NewObjectClass(context, (int)qjs_host_owner_class_id);
+    data = JS_NewObjectClass(context, (int)runtime->host_owner_class_id);
     if (JS_IsException(data)) {
         free(owner);
         return NULL;
