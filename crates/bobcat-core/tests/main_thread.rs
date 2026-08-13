@@ -70,6 +70,78 @@ fn create_view_returns_a_handle_append_element_accepts() {
 }
 
 #[test]
+fn all_four_tree_mutation_papis_are_host_functions_with_native_return_values() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const first = __CreateView(0);
+              const second = __CreateView(0);
+              const third = __CreateView(0);
+              const replacement = __CreateView(0);
+
+              if (__AppendElement.length !== 2
+                  || __InsertElementBefore.length !== 3
+                  || __RemoveElement.length !== 2
+                  || __ReplaceElement.length !== 2) {
+                throw new Error('tree PAPI host functions expose the wrong arity');
+              }
+              if (__AppendElement(page, first) !== first) {
+                throw new Error('__AppendElement must return the child');
+              }
+              if (__InsertElementBefore(page, second, first) !== second) {
+                throw new Error('__InsertElementBefore must return the child');
+              }
+              if (__InsertElementBefore(page, third) !== third) {
+                throw new Error('__InsertElementBefore must append for an omitted ref');
+              }
+              if (__RemoveElement(page, first) !== first) {
+                throw new Error('__RemoveElement must return the child');
+              }
+              __InsertElementBefore(page, first, null);
+              if (__ReplaceElement(replacement, second) !== undefined) {
+                throw new Error('__ReplaceElement must return undefined');
+              }
+
+              globalThis.keptTreeElements = [first, second, third, replacement];
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    for id in 2..=5 {
+        assert!(
+            elements.element(id).is_some(),
+            "tree mutation must not retire element {id}"
+        );
+    }
+}
+
+#[test]
+fn tree_mutation_validation_surfaces_as_a_javascript_exception() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const otherParent = __CreateView(0);
+              const reference = __CreateView(0);
+              const child = __CreateView(0);
+              __AppendElement(page, otherParent);
+              __AppendElement(otherParent, reference);
+              __InsertElementBefore(page, child, reference);
+            };
+            ",
+        )
+        .expect_err("a reference from another parent must be rejected");
+    assert!(error.to_string().contains("not a child"), "{error}");
+}
+
+#[test]
 fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
     let (mut runtime, elements) = runtime();
     runtime
