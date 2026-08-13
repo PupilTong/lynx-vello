@@ -70,6 +70,86 @@ fn create_view_returns_a_handle_append_element_accepts() {
 }
 
 #[test]
+fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const created = [
+                __CreateElement('custom-widget', 0),
+                __CreateWrapperElement(0),
+                __CreateText(0),
+                __CreateImage(0),
+                __CreateView(0),
+                __CreateScrollView(0),
+                __CreateRawText('Hello, Lynx'),
+                __CreateList(
+                  0,
+                  function componentAtIndex() {},
+                  function enqueueComponent() {},
+                  {},
+                  function componentAtIndexes() {}
+                ),
+              ];
+              if (__CreateList.length !== 3) {
+                throw new Error('__CreateList must expose the web-core arity');
+              }
+              if (typeof globalThis.__CreateListElementHost !== 'undefined') {
+                throw new Error('the primitive list host must stay private');
+              }
+              for (const element of created) {
+                if (typeof element !== 'object') {
+                  throw new Error('every create function must return an object handle');
+                }
+                __AppendElement(page, element);
+              }
+              globalThis.created = created;
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    for id in 2..=9 {
+        assert!(elements.element(id).is_some(), "element {id} must be live");
+    }
+}
+
+#[test]
+fn create_frame_remains_an_explicitly_missing_global() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              __CreateFrame(0);
+            };
+            ",
+        )
+        .expect_err("__CreateFrame is deliberately not implemented");
+    assert!(error.to_string().contains("__CreateFrame"), "{error}");
+}
+
+#[test]
+fn generic_create_element_cannot_bypass_the_missing_frame_implementation() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              __CreateElement('frame', 0);
+            };
+            ",
+        )
+        .expect_err("frame needs its specialized constructor and nested runtime");
+    assert!(error.to_string().contains("__CreateFrame"), "{error}");
+}
+
+#[test]
 fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
     let (mut runtime, elements) = runtime();
     runtime

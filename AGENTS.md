@@ -190,10 +190,15 @@ useful signal for currently-compatible versions of those libraries.
   `MainThreadRuntime`
   installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
   `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Five of web-core's 61 PAPI members are
-  installed (`__CreatePage`, `__CreateView`, `__AppendElement`,
-  `__DropElement`, `__FlushElementTree`); unsupported globals remain precise
-  `ReferenceError`s. Creation calls return opaque QuickJS weak-ref objects
+  `renderPage` → `__FlushElementTree`. Twelve Element PAPI globals are
+  installed: every ReactLynx Snapshot constructor except `__CreateFrame`
+  (`__CreatePage`, `__CreateElement`, `__CreateWrapperElement`, `__CreateText`,
+  `__CreateImage`, `__CreateView`, `__CreateScrollView`, `__CreateRawText`,
+  `__CreateList`) plus `__AppendElement`, `__DropElement`, and
+  `__FlushElementTree`; unsupported globals remain precise `ReferenceError`s.
+  `__CreateList` consumes only its numeric parent-component argument for now;
+  callback storage/execution remains part of the unimplemented list surface.
+  Creation calls return opaque QuickJS weak-ref objects
   carrying the `u32` arena id; collection reports the id through
   `js_weak_ref_drop`, which retires only that Lynx element and matching DOM node;
   its descendants remain live but detached until their own VM notifications.
@@ -789,7 +794,7 @@ useful signal for currently-compatible versions of those libraries.
   personas already set up for this work. `crates/lynx-element` and
   `crates/bobcat-core`'s feature-gated `quickjs` module are the first pieces of this
   layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the other 56 Element PAPI members are still ahead.
+  model, and the remaining Element PAPI members are still ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
 boundary, private paint pipeline, and frame walkthrough;
