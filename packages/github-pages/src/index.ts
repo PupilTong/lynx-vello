@@ -2,7 +2,7 @@ import './styles.css';
 
 const RELOAD_MARKER = `bobcat-coi-reload:${new URL('.', document.baseURI).pathname}`;
 const RELOAD_PARAMETER = 'bobcat-coi-reload';
-const MAX_THREAD_COUNT = 8;
+const MAX_THREAD_COUNT = 3;
 const CHECKSUM_BYTES = 4 * 1024 * 1024;
 
 type IndicatorState = 'pending' | 'ok' | 'error';

@@ -6,7 +6,7 @@ use napi::bindgen_prelude::{AsyncTask, Uint8Array};
 use napi::{Env, Task};
 use napi_derive::napi;
 
-const MAX_THREADS: u32 = 8;
+const MAX_THREADS: u32 = 3;
 
 /// Result of work that ran on real Rust threads in the WASI module.
 #[napi(object)]

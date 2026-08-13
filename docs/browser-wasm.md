@@ -71,8 +71,8 @@ pnpm --filter bobcat-wasm build:wasi
 generated `.wasm`, browser loader, and workers together. The loader uses
 top-level await, ESM workers, and `import.meta.url`, all of which the Rsbuild
 package must preserve. A checked post-build transform caps its eagerly-created
-pthread pool at eight Workers; NAPI-RS also keeps its default four async-work
-Workers. Each exported CPU operation clamps its own Rust thread count to eight
+pthread pool at three Workers; NAPI-RS also keeps its default four async-work
+Workers. Each exported CPU operation clamps its own Rust thread count to three
 as well.
 
 The threaded loader and `SharedArrayBuffer` require a cross-origin-isolated

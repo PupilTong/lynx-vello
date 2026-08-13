@@ -11,7 +11,7 @@ const original = `const __workerPoolSize = Math.max(
 )`
 const capped = `const __workerPoolSize = Math.max(
   2,
-  Math.min(8, globalThis.navigator?.hardwareConcurrency ?? 4),
+  Math.min(3, globalThis.navigator?.hardwareConcurrency ?? 4),
 )`
 
 if (

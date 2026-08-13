@@ -3,7 +3,7 @@ import bindings, {
   parallelChecksum as runParallelChecksum,
 } from './bobcat_wasm_threads.wasi-browser.js'
 
-const MAX_THREADS = 8
+const MAX_THREADS = 3
 
 export function parallelChecksum(bytes, threads) {
   const hardwareThreads = Math.max(
