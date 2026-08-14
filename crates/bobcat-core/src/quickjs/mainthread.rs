@@ -375,13 +375,12 @@ fn install_bobcat_object(
     realm.set_property(&namespace, "createPage", &member)?;
 
     let tree = Rc::clone(handle);
-    let member = realm.function("createElement", 3, move |arguments| {
+    let member = realm.function("createElement", 2, move |arguments| {
         let tag = string_argument("bobcat.createElement", arguments, 0)?;
         let id = element_id_argument("bobcat.createElement", arguments, 1)?;
-        let parent_component = element_id_argument("bobcat.createElement", arguments, 2)?;
         tree.borrow_mut()
             .tree()
-            .create_element(id, tag, parent_component)
+            .create_element(id, tag)
             .map_err(papi_error)?;
         Ok(HostValue::Undefined)
     })?;

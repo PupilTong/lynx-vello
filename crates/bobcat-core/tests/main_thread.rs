@@ -365,22 +365,41 @@ fn papi_rejections_become_javascript_exceptions() {
 }
 
 #[test]
-fn parent_component_ids_accept_the_full_u32_range() {
-    let mut runtime = bare_runtime();
+fn parent_component_ids_accept_the_full_u32_range_and_bind_to_nothing() {
+    let (mut runtime, elements) = runtime();
+    // web-core reads the parent component only to inherit a CSS fragment id
+    // and falls back in silence when the id names nothing, so any in-range
+    // id creates the element; out-of-range values fail argument marshaling.
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              __AppendElement(__CreatePage('card', 0), __CreateView(4294967295));
+              globalThis.kept = __CreateView(9);
+            };
+            ",
+        )
+        .expect("in-range parent component ids are accepted");
+    {
+        let elements = elements.tree();
+        assert!(elements.is_live(2));
+        assert!(elements.is_live(3));
+    }
+
     let error = runtime
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
-              __CreateView(4294967295);
+              __CreateView(4294967296);
             };
             ",
         )
-        .expect_err("an unknown u32::MAX handle");
+        .expect_err("an out-of-range parent component id");
     assert!(
         error
             .to_string()
-            .contains("no element has the unique id 4294967295"),
-        "the u32 component id should reach liveness validation: {error}"
+            .contains("expects an unsigned 32-bit integer for argument 0"),
+        "{error}"
     );
 }
 

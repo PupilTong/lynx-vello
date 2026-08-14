@@ -93,12 +93,15 @@ impl BobcatCanvas {
     }
 
     /// Creates one detached Lynx `view` element and returns its unique id.
+    /// The parent component id is accepted for Element PAPI shape and used
+    /// nowhere: web-core reads it only to inherit a CSS fragment id, falling
+    /// back in silence when it names nothing.
     #[napi]
-    pub fn create_view(&mut self, parent_component_unique_id: u32) -> napi::Result<u32> {
+    pub fn create_view(&mut self, _parent_component_unique_id: u32) -> napi::Result<u32> {
         let unique_id = self.next_unique_id;
         self.engine
             .elements()
-            .create_element(unique_id, "view", parent_component_unique_id)
+            .create_element(unique_id, "view")
             .map_err(napi_error)?;
         self.next_unique_id += 1;
         Ok(unique_id)

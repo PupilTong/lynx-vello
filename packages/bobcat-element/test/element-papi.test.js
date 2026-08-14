@@ -5,8 +5,8 @@
 // surface and arities, unique-id allocation, tag vocabulary, argument
 // marshaling, handle identity and brand checks, and explicit drop
 // bookkeeping. The mock mirrors the native contract the real `bobcat` object
-// implements: parent-component liveness and id sequence are validated in
-// `createElement`, and `dropElement` rejects the page and unknown ids.
+// implements: the id sequence is validated in `createElement`, and
+// `dropElement` rejects the page and unknown ids.
 // Structural tree validation and the collection-driven drop path run against
 // the real native side in crates/bobcat-core/tests/main_thread.rs, where a
 // real QuickJS collector exists.
@@ -40,14 +40,8 @@ function createMockBobcat(nextUniqueId = 2) {
     /**
      * @param {string} tag
      * @param {number} uniqueId
-     * @param {number} parentComponentUniqueId
      */
-    createElement: (tag, uniqueId, parentComponentUniqueId) => {
-      if (parentComponentUniqueId !== 0 && !live.has(parentComponentUniqueId)) {
-        throw new Error(
-          `no element has the unique id ${parentComponentUniqueId}`,
-        );
-      }
+    createElement: (tag, uniqueId) => {
       if (uniqueId !== expectedId) {
         throw new Error(
           `a new element must take the next unique id ${expectedId}, got ${uniqueId}`,
@@ -55,7 +49,7 @@ function createMockBobcat(nextUniqueId = 2) {
       }
       expectedId += 1;
       live.add(uniqueId);
-      calls.push(["createElement", tag, uniqueId, parentComponentUniqueId]);
+      calls.push(["createElement", tag, uniqueId]);
     },
     nextElementUniqueId: () => nextUniqueId,
     setAttribute: record("setAttribute"),
@@ -132,7 +126,7 @@ describe("installation", () => {
     __CreateView(0);
     expect(replaced).not.toHaveBeenCalled();
     expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2, 0],
+      ["createElement", "view", 2],
     ]);
   });
 });
@@ -143,9 +137,9 @@ describe("unique ids", () => {
     __CreateText(0);
     __CreateRawText("hi");
     expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2, 0],
-      ["createElement", "text", 3, 0],
-      ["createElement", "raw-text", 4, 0],
+      ["createElement", "view", 2],
+      ["createElement", "text", 3],
+      ["createElement", "raw-text", 4],
     ]);
   });
 
@@ -156,15 +150,17 @@ describe("unique ids", () => {
     await import("../src/element-papi.js");
     __CreateView(0);
     expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 7, 0],
+      ["createElement", "view", 7],
     ]);
   });
 
   it("are not consumed by a rejected creation", () => {
-    expect(() => __CreateView(9)).toThrow("no element has the unique id 9");
+    expect(() => __CreateView(1.5)).toThrow(
+      "__CreateView expects an unsigned 32-bit integer for argument 0, got 1.5",
+    );
     __CreateView(0);
     expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2, 0],
+      ["createElement", "view", 2],
     ]);
   });
 
@@ -173,8 +169,8 @@ describe("unique ids", () => {
     __DropElement(dropped);
     __CreateView(0);
     expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2, 0],
-      ["createElement", "view", 3, 0],
+      ["createElement", "view", 2],
+      ["createElement", "view", 3],
     ]);
   });
 });
@@ -202,15 +198,10 @@ describe("__CreatePage", () => {
     );
   });
 
-  it("is a live parent component from birth, before any __CreatePage", () => {
-    expect(() => __CreateView(1)).not.toThrow();
-  });
 });
 
 describe("constructors", () => {
-  it("use the Lynx tag vocabulary and forward the parent component", () => {
-    const page = __CreatePage("card", 0);
-    void page;
+  it("use the Lynx tag vocabulary", () => {
     __CreateElement("custom-widget", 1);
     __CreateWrapperElement(0);
     __CreateText(0);
@@ -218,16 +209,14 @@ describe("constructors", () => {
     __CreateView(0);
     __CreateScrollView(0);
     __CreateList(1, () => {}, () => {});
-    expect(
-      mock.named("createElement").map((call) => [call[1], call[3]]),
-    ).toEqual([
-      ["custom-widget", 1],
-      ["wrapper", 0],
-      ["text", 0],
-      ["image", 0],
-      ["view", 0],
-      ["scroll-view", 0],
-      ["list", 1],
+    expect(mock.named("createElement").map((call) => call[1])).toEqual([
+      "custom-widget",
+      "wrapper",
+      "text",
+      "image",
+      "view",
+      "scroll-view",
+      "list",
     ]);
   });
 
@@ -238,7 +227,7 @@ describe("constructors", () => {
     expect(second).not.toBe(first);
   });
 
-  it("validate the parent component id as a u32 before the native call", () => {
+  it("validate the parent component id as a u32 and use it nowhere", () => {
     expect(() => __CreateView("x")).toThrow(
       "__CreateView expects a number for argument 0",
     );
@@ -247,31 +236,16 @@ describe("constructors", () => {
         `__CreateView expects an unsigned 32-bit integer for argument 0, got ${bad}`,
       );
     }
-    expect(() => __CreateView(4294967295)).toThrow(
-      "no element has the unique id 4294967295",
-    );
     expect(mock.named("createElement")).toEqual([]);
-  });
-
-  it("reject an unknown parent component in every constructor", () => {
-    /** @type {[string, () => object][]} */
-    const creators = [
-      ["__CreateElement", () => __CreateElement("custom-widget", 9)],
-      ["__CreateWrapperElement", () => __CreateWrapperElement(9)],
-      ["__CreateText", () => __CreateText(9)],
-      ["__CreateImage", () => __CreateImage(9)],
-      ["__CreateView", () => __CreateView(9)],
-      ["__CreateScrollView", () => __CreateScrollView(9)],
-      ["__CreateList", () => __CreateList(9)],
-    ];
-    for (const [name, create] of creators) {
-      expect(create, name).toThrow("no element has the unique id 9");
-    }
+    // Any in-range id is accepted without a liveness lookup, matching
+    // web-core's silent fallback for a parent component that names nothing.
+    expect(() => __CreateView(4294967295)).not.toThrow();
+    expect(() => __CreateElement("custom-widget", 9)).not.toThrow();
   });
 
   it("coerce nullish __CreateElement tags to the empty string", () => {
     __CreateElement(null, 0);
-    expect(mock.named("createElement")).toEqual([["createElement", "", 2, 0]]);
+    expect(mock.named("createElement")).toEqual([["createElement", "", 2]]);
     expect(() => __CreateElement(5, 0)).toThrow(
       "__CreateElement expects a string for argument 0",
     );
@@ -352,11 +326,6 @@ describe("__DropElement", () => {
     );
   });
 
-  it("removes the element from the live parent-component set", () => {
-    const view = __CreateView(0);
-    __DropElement(view);
-    expect(() => __CreateView(2)).toThrow("no element has the unique id 2");
-  });
 });
 
 describe("__FlushElementTree and delivery", () => {

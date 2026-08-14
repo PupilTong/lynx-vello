@@ -9,15 +9,10 @@ interface BobcatNative {
   /** Marks the permanent page element live and the batch uncommitted. */
   createPage(): void;
   /**
-   * Creates a detached element carrying `uniqueId` for a live parent
-   * component (or the sentinel zero). Ids must arrive in ascending sequence
-   * and are never reused.
+   * Creates a detached element carrying `uniqueId`. Ids must arrive in
+   * ascending sequence and are never reused.
    */
-  createElement(
-    tag: string,
-    uniqueId: number,
-    parentComponentUniqueId: number,
-  ): void;
+  createElement(tag: string, uniqueId: number): void;
   /** The unique id the next created element must take. */
   nextElementUniqueId(): number;
   setAttribute(uniqueId: number, name: string, value: string): void;

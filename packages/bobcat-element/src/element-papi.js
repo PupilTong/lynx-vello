@@ -63,11 +63,12 @@
 //   calls before each realm entry and after an explicit collection. Realm
 //   teardown never delivers queued drops, so the last committed tree
 //   survives the bootstrap realm.
-// - `parentComponentUniqueID` is recorded, not honored: web-core uses it only
-//   to inherit the parent component's CSS fragment id, and without
-//   `__SetCSSId` there is nothing to inherit into. It is validated against
-//   live elements and stored here. The page's `componentID` string is
-//   validated and discarded.
+// - `parentComponentUniqueID` is accepted for PAPI shape, validated as a
+//   u32, and otherwise unused: web-core uses it only to inherit the parent
+//   component's CSS fragment id (falling back to 0 in silence when the id
+//   names nothing), and without `__SetCSSId` there is nothing to inherit
+//   into, so nothing is recorded. The page's `componentID` string and
+//   `componentCSSID` are likewise validated and discarded.
 
 (function () {
   "use strict";
@@ -99,26 +100,18 @@
   const I32_MAX = 2147483647;
 
   /**
-   * @typedef {object} ElementRecord
-   * @property {number} parentComponentUniqueId Lynx bookkeeping the native
-   *   side never reads; recorded, not honored.
-   * @property {number} componentCssId
-   * @property {WeakRef<object> | undefined} handle Weak back-reference for
-   *   future PAPI members that resolve ids to handles
-   *   (`__GetElementByUniqueId` and friends).
-   */
-
-  /**
    * The element table: one slot per unique id ever allocated, indexed
    * directly by id — the same dense shape as the native id-to-node table and
-   * web-core's element map. A live element's slot holds its record;
-   * retirement tombstones the slot by assigning undefined (never `delete`,
-   * which would take the array off QuickJS's dense fast path permanently).
-   * Slot 0 is the permanent null sentinel, and the array length is the
-   * unique-id allocator: the next element takes id `elements.length`, which
-   * only advances when the native create succeeds.
+   * web-core's `unique_id_to_dom_map`. A live element's slot holds the weak
+   * back-reference to its handle (for future PAPI members that resolve ids
+   * to handles, `__GetElementByUniqueId` and friends); retirement tombstones
+   * the slot by assigning undefined (never `delete`, which would take the
+   * array off QuickJS's dense fast path permanently). Slot 0 is the
+   * permanent null sentinel, and the array length is the unique-id
+   * allocator: the next element takes id `elements.length`, which only
+   * advances when the native create succeeds.
    *
-   * @type {(ElementRecord | undefined)[]}
+   * @type {(WeakRef<object> | undefined)[]}
    */
   const elements = [];
   {
@@ -131,11 +124,6 @@
       elements.push(undefined);
     }
   }
-  elements[PAGE_UNIQUE_ID] = {
-    parentComponentUniqueId: 0,
-    componentCssId: 0,
-    handle: undefined,
-  };
 
   /**
    * The handle brand: an object is an element handle exactly when it has an
@@ -159,9 +147,12 @@
     },
   );
 
-  /** @type {object | null} */
-  let pageHandle = null;
-  let pageCreated = false;
+  // The page handle is permanent and minted at boot: repeated __CreatePage
+  // calls return the same object, and the page is exempt from the collection
+  // backstop because it can never be dropped.
+  const pageHandle = {};
+  handleUniqueIds.set(pageHandle, PAGE_UNIQUE_ID);
+  elements[PAGE_UNIQUE_ID] = new WeakRef(pageHandle);
 
   /**
    * @param {string} functionName
@@ -260,24 +251,15 @@
   }
 
   /**
-   * Creates the native element and records it live. The native side
-   * validates the parent component (0 is the null sentinel; any other id
-   * must be live) before the id sequence, exactly as before this runtime
-   * existed, so a fresh realm over a retained tree still accepts elements
-   * created by an earlier realm as parent components.
+   * Creates the native element; the slot is filled when its handle is
+   * minted.
    *
    * @param {string} tag
-   * @param {number} parentComponentUniqueId
    * @returns {number}
    */
-  function allocateElement(tag, parentComponentUniqueId) {
+  function allocateElement(tag) {
     const uniqueId = elements.length;
-    native.createElement(tag, uniqueId, parentComponentUniqueId);
-    elements[uniqueId] = {
-      parentComponentUniqueId,
-      componentCssId: 0,
-      handle: undefined,
-    };
+    native.createElement(tag, uniqueId);
     return uniqueId;
   }
 
@@ -291,10 +273,7 @@
   function createHandle(uniqueId) {
     const handle = {};
     handleUniqueIds.set(handle, uniqueId);
-    const record = elements[uniqueId];
-    if (record !== undefined) {
-      record.handle = new WeakRef(handle);
-    }
+    elements[uniqueId] = new WeakRef(handle);
     registry.register(handle, uniqueId, handle);
     return handle;
   }
@@ -306,12 +285,8 @@
    * @returns {object}
    */
   function createParentedElement(functionName, tag, parentComponentUniqueID) {
-    const parentComponentUniqueId = u32Argument(
-      functionName,
-      parentComponentUniqueID,
-      0,
-    );
-    return createHandle(allocateElement(tag, parentComponentUniqueId));
+    u32Argument(functionName, parentComponentUniqueID, 0);
+    return createHandle(allocateElement(tag));
   }
 
   /** @param {number} uniqueId */
@@ -352,25 +327,8 @@
    */
   function __CreatePage(componentID, componentCSSID) {
     stringArgument("__CreatePage", componentID, 0);
-    const componentCssId = i32Argument("__CreatePage", componentCSSID, 1);
+    i32Argument("__CreatePage", componentCSSID, 1);
     native.createPage();
-    const page = elements[PAGE_UNIQUE_ID];
-    if (!pageCreated) {
-      pageCreated = true;
-      if (page !== undefined) {
-        page.componentCssId = componentCssId;
-      }
-    }
-    if (pageHandle === null) {
-      // The page handle is permanent: repeated __CreatePage calls return the
-      // same object, and the page is exempt from the collection backstop
-      // because it can never be dropped.
-      pageHandle = {};
-      handleUniqueIds.set(pageHandle, PAGE_UNIQUE_ID);
-      if (page !== undefined) {
-        page.handle = new WeakRef(pageHandle);
-      }
-    }
     return pageHandle;
   }
 
@@ -381,12 +339,8 @@
    */
   function __CreateElement(tag, parentComponentUniqueID) {
     const tagName = stringArgument("__CreateElement", tag, 0);
-    const parentComponentUniqueId = u32Argument(
-      "__CreateElement",
-      parentComponentUniqueID,
-      1,
-    );
-    return createHandle(allocateElement(tagName, parentComponentUniqueId));
+    u32Argument("__CreateElement", parentComponentUniqueID, 1);
+    return createHandle(allocateElement(tagName));
   }
 
   /**
@@ -455,7 +409,7 @@
    */
   function __CreateRawText(text) {
     const literalText = stringArgument("__CreateRawText", text, 0);
-    const uniqueId = allocateElement("raw-text", 0);
+    const uniqueId = allocateElement("raw-text");
     native.setAttribute(uniqueId, "text", literalText);
     return createHandle(uniqueId);
   }

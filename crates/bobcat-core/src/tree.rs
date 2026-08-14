@@ -8,8 +8,8 @@
 //! ```
 //!
 //! The JavaScript runtime owns the Lynx vocabulary: PAPI member names and
-//! arities, tag names, unique-id allocation, handle identity and collection,
-//! and parent-component bookkeeping. This module owns what must stay native:
+//! arities, tag names, unique-id allocation, and handle identity and
+//! collection. This module owns what must stay native:
 //! the [`dom::Document`], the `page` root policy, the UA cascade defaults,
 //! structural validation (existence, cycles, membership — `dom`'s mutation
 //! entry points assume validated input, so these checks cannot be delegated
@@ -285,21 +285,11 @@ impl ElementTree {
         self.page_created = true;
     }
 
-    /// Creates a detached element carrying the script-allocated unique id,
-    /// for a live parent component or the sentinel zero.
+    /// Creates a detached element carrying the script-allocated unique id.
     ///
-    /// The parent component is validated first, matching the original PAPI
-    /// order. Ids must arrive in ascending sequence: the table only appends,
-    /// which is what keeps retired ids permanently unaddressable.
-    pub fn create_element(
-        &mut self,
-        id: ElementId,
-        tag: &str,
-        parent_component_unique_id: ElementId,
-    ) -> Result<(), PapiError> {
-        if parent_component_unique_id != 0 && !self.is_live(parent_component_unique_id) {
-            return Err(PapiError::UnknownElement(parent_component_unique_id));
-        }
+    /// Ids must arrive in ascending sequence: the table only appends, which
+    /// is what keeps retired ids permanently unaddressable.
+    pub fn create_element(&mut self, id: ElementId, tag: &str) -> Result<(), PapiError> {
         let expected = self.next_unique_id();
         if id != expected {
             return Err(PapiError::NonSequentialId { id, expected });
@@ -476,7 +466,7 @@ mod tests {
     /// Creates the next element as a `view`, asserting sequential allocation
     /// the way the JavaScript runtime drives this API.
     fn create_view(tree: &mut ElementTree, id: ElementId) -> ElementId {
-        tree.create_element(id, "view", 0).expect("sequential id");
+        tree.create_element(id, "view").expect("sequential id");
         id
     }
 
@@ -512,7 +502,7 @@ mod tests {
     fn element_ids_are_sequential_and_start_after_the_page() {
         let mut tree = tree();
         assert_eq!(
-            tree.create_element(3, "view", 0).unwrap_err(),
+            tree.create_element(3, "view").unwrap_err(),
             PapiError::NonSequentialId { id: 3, expected: 2 }
         );
         create_view(&mut tree, 2);
@@ -529,7 +519,7 @@ mod tests {
         assert!(!tree.is_live(2));
 
         assert_eq!(
-            tree.create_element(2, "view", 0).unwrap_err(),
+            tree.create_element(2, "view").unwrap_err(),
             PapiError::NonSequentialId { id: 2, expected: 3 }
         );
         create_view(&mut tree, 3);

@@ -335,8 +335,11 @@ useful signal for currently-compatible versions of those libraries.
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/`list`), the
   auto-incrementing unique-id allocator (ids start at 1 — the permanent page
   — and are never reused), argument marshaling and its exact error messages,
-  and `parentComponentUniqueID` bookkeeping (recorded, not honored; there is
-  no `__SetCSSId`). Element handles are plain objects minted here, one per
+  `parentComponentUniqueID` and the page's `componentID`/`componentCSSID`
+  are validated for argument shape and then discarded: web-core reads the
+  parent component only to inherit a CSS fragment id, falling back in
+  silence when the id names nothing, and without `__SetCSSId` there is
+  nothing to inherit into, so no bookkeeping exists until that member lands. Element handles are plain objects minted here, one per
   element for its whole life — every PAPI return of an element yields the
   same object — and unforgeable because identity lives in a private WeakMap;
   a `Map<id, WeakRef>` indexes live handles for future id-to-handle queries.
