@@ -332,7 +332,7 @@ describe("__ReplaceElements", () => {
 });
 
 describe("__SwapElement", () => {
-  it("forwards both node ids to the native swap", () => {
+  it("uses the native swap for two attached elements", () => {
     const page = __CreatePage("card", 0);
     const a = __CreateView(0);
     const b = __CreateView(0);
@@ -341,7 +341,47 @@ describe("__SwapElement", () => {
     mock.calls.length = 0;
 
     __SwapElement(a, b);
-    expect(mock.calls).toEqual([["swapElement", 2, 3]]);
+    expect(mock.calls).toEqual([
+      ["parentNode", 2],
+      ["parentNode", 3],
+      ["swapElement", 2, 3],
+    ]);
+  });
+
+  it("composes the degenerate patterns over the simple members", () => {
+    const page = __CreatePage("card", 0);
+    const attached = __CreateView(0);
+    const detachedA = __CreateView(0);
+    const detachedB = __CreateView(0);
+    __AppendElement(page, attached);
+    mock.calls.length = 0;
+
+    __SwapElement(attached, attached);
+    expect(mock.calls).toEqual([]);
+
+    __SwapElement(attached, detachedA);
+    expect(mock.calls).toEqual([
+      ["parentNode", 2],
+      ["parentNode", 3],
+      ["replaceElement", 3, 2],
+    ]);
+    mock.calls.length = 0;
+
+    // The first swap left detachedA attached and `attached` detached, so
+    // the roles flip: the attached operand is replaced again.
+    __SwapElement(detachedA, attached);
+    expect(mock.calls).toEqual([
+      ["parentNode", 3],
+      ["parentNode", 2],
+      ["replaceElement", 2, 3],
+    ]);
+    mock.calls.length = 0;
+
+    __SwapElement(detachedA, detachedB);
+    expect(mock.calls).toEqual([
+      ["parentNode", 3],
+      ["parentNode", 4],
+    ]);
   });
 });
 

@@ -391,7 +391,7 @@ fn install_bobcat_object(
     let member = realm.function("swapElement", 2, move |arguments| {
         let a = node_id_argument("bobcat.swapElement", arguments, 0)?;
         let b = node_id_argument("bobcat.swapElement", arguments, 1)?;
-        swap_elements(tree.borrow_mut().tree(), a, b);
+        tree.borrow_mut().tree().swap_element(a, b);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "swapElement", &member)?;
@@ -415,55 +415,6 @@ fn install_bobcat_object(
     let global = realm.global_object()?;
     realm.set_property(&global, "bobcat", &namespace)?;
     Ok(())
-}
-
-/// The parent and following sibling of an attached node.
-fn parent_and_next(
-    document: &LynxDocument,
-    node: dom::NodeId,
-) -> Option<(dom::NodeId, Option<dom::NodeId>)> {
-    let parent = document.get(node).and_then(dom::Node::parent_id)?;
-    let children = document
-        .get(parent)
-        .expect("a child's parent is live")
-        .child_ids();
-    let index = children
-        .iter()
-        .position(|&child| child == node)
-        .expect("a child appears in its parent's child list");
-    Some((parent, children.get(index + 1).copied()))
-}
-
-/// Exchanges the positions of two elements, in the same parent or across
-/// parents. Swapping with a detached element puts the attached one's place
-/// to the detached one and detaches the other; two detached elements are
-/// left alone — the observable results of web-core's transient-marker
-/// `__SwapElement`, without the marker.
-fn swap_elements(document: &mut LynxDocument, a: dom::NodeId, b: dom::NodeId) {
-    if a == b {
-        return;
-    }
-    match (parent_and_next(document, a), parent_and_next(document, b)) {
-        (Some((parent, next_a)), Some(_)) if next_a == Some(b) => {
-            document.insert_before(parent, b, Some(a));
-        }
-        (Some(_), Some((parent, next_b))) if next_b == Some(a) => {
-            document.insert_before(parent, a, Some(b));
-        }
-        (Some((parent_a, next_a)), Some((parent_b, _))) => {
-            document.insert_before(parent_b, a, Some(b));
-            document.insert_before(parent_a, b, next_a);
-        }
-        (Some((parent_a, _)), None) => {
-            document.insert_before(parent_a, b, Some(a));
-            document.remove_element(a);
-        }
-        (None, Some((parent_b, _))) => {
-            document.insert_before(parent_b, a, Some(b));
-            document.remove_element(b);
-        }
-        (None, None) => {}
-    }
 }
 
 fn argument(arguments: &[HostValue], index: usize) -> &HostValue {

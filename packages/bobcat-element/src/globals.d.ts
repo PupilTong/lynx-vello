@@ -18,7 +18,7 @@ interface BobcatNative {
   removeElement(child: number): void;
   /** Replaces `oldElement` in place, leaving it detached but live. */
   replaceElement(newElement: number, oldElement: number): void;
-  /** Exchanges the positions of two elements, in or across parents. */
+  /** Exchanges two distinct attached elements, in or across parents. */
   swapElement(childA: number, childB: number): void;
   /** Frees one element, detaching its direct children. */
   dropElement(nodeId: number): void;

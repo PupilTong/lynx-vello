@@ -26,7 +26,7 @@
 // | `__RemoveElement(parent, child)` | `bobcat.removeElement` |
 // | `__ReplaceElement(newElement, oldElement)` | `bobcat.replaceElement` |
 // | `__ReplaceElements(parent, newChildren, oldChildren?)` | `bobcat.parentNode` + `bobcat.insertBefore` + `bobcat.removeElement` |
-// | `__SwapElement(childA, childB)` | `bobcat.swapElement` |
+// | `__SwapElement(childA, childB)` | `bobcat.swapElement` / `bobcat.replaceElement` |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
@@ -286,12 +286,31 @@
   }
 
   /**
+   * The native swap covers the simple case, two distinct attached elements;
+   * the degenerate patterns of web-core's transient-marker algorithm are
+   * composed here: a self-swap does nothing, a detached operand takes the
+   * attached one's place and detaches it, two detached operands are left
+   * alone.
+   *
    * @param {unknown} childA
    * @param {unknown} childB
    * @returns {undefined}
    */
   function __SwapElement(childA, childB) {
-    native.swapElement(nodeIdOf(childA), nodeIdOf(childB));
+    const a = nodeIdOf(childA);
+    const b = nodeIdOf(childB);
+    if (a === b) {
+      return undefined;
+    }
+    const attachedA = native.parentNode(a) !== null;
+    const attachedB = native.parentNode(b) !== null;
+    if (attachedA && attachedB) {
+      native.swapElement(a, b);
+    } else if (attachedA) {
+      native.replaceElement(b, a);
+    } else if (attachedB) {
+      native.replaceElement(a, b);
+    }
     return undefined;
   }
 
