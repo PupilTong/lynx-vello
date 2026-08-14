@@ -7,9 +7,9 @@
 //! `.web.bundle`'s `lepusCode.root` runs in:
 //!
 //! 1. A global `bobcat` object whose members are Rust host functions speaking DOM vocabulary over
-//!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `insertBefore`,
-//!    `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a direct call
-//!    into [`dom::Document`] through the document hand-off.
+//!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `parentNode`,
+//!    `insertBefore`, `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a
+//!    direct call into [`dom::Document`] through the document hand-off.
 //! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
 //!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary, and
 //!    manages handle lifecycle with a symbol-keyed node id and a `FinalizationRegistry`.
@@ -41,18 +41,15 @@
 //! # The realm takes the tree for a batch, and returns it at the flush
 //!
 //! The [`LynxDocument`](crate::tree::LynxDocument) changes hands through a
-//! [`SharedTree`] slot. A batch's first `bobcat` call takes the tree out;
-//! every call after that is a plain `&mut` mutation with no
-//! synchronization — the tree's own validation is the single source of
-//! every structural `PapiError`, throwing at the call site.
-//! `bobcat.flushElementTree` is the commit boundary: it runs the style +
-//! layout commit on the taken tree, puts it back in the slot, and then
-//! notifies the presenter through the injected callback. While the tree is
-//! away the presenter works from its retained frame, so a half-applied batch
-//! is unobservable. A script that opens a batch and returns without flushing
-//! gets the tree put back uncommitted at the end of the evaluation — the
-//! presenter's `has_uncommitted_mutations` gate keeps that state off the
-//! screen.
+//! [`SharedTree`] slot. A batch's first `bobcat` call takes the document
+//! out; every call after that is a plain `&mut` mutation with no
+//! synchronization. `bobcat.flushElementTree` runs the style + layout
+//! commit on the taken document, puts it back in the slot, and then
+//! notifies the presenter through the injected callback. While the
+//! document is away the presenter works from its retained frame; once an
+//! evaluation ends the returned state may present — web-core's visibility,
+//! where the browser paints the live DOM regardless of
+//! `__FlushElementTree`.
 //!
 //! # Handle collection frees elements at job checkpoints
 //!
@@ -68,7 +65,7 @@
 //! # Recorded limits
 //!
 //! - **The PAPI surface is the runtime script's table** — every `ReactLynx` Snapshot constructor
-//!   except `__CreateFrame`, the four tree mutations, and `__FlushElementTree`. A bundle that
+//!   except `__CreateFrame`, the six tree mutations, and `__FlushElementTree`. A bundle that
 //!   reaches for another member gets a `ReferenceError` naming the missing global, which is the
 //!   intended failure: a silently wrong render would be worse.
 //! - **Nothing validates script input.** A stale or fabricated node id panics inside `dom`; the
@@ -342,6 +339,18 @@ fn install_bobcat_object(
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "setAttribute", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("parentNode", 1, move |arguments| {
+        let node = node_id_argument("bobcat.parentNode", arguments, 0)?;
+        let parent = tree
+            .borrow_mut()
+            .tree()
+            .get(node)
+            .and_then(dom::Node::parent_id);
+        Ok(parent.map_or(HostValue::Null, node_id_value))
+    })?;
+    realm.set_property(&namespace, "parentNode", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("insertBefore", 3, move |arguments| {

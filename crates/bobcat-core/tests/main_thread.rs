@@ -188,6 +188,44 @@ fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
 }
 
 #[test]
+fn replace_elements_and_swap_element_restructure_the_tree() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              if (__ReplaceElements.length !== 3 || __SwapElement.length !== 2) {
+                throw new Error('tree PAPI host functions expose the wrong arity');
+              }
+              const page = __CreatePage('card', 0);
+              const a = __CreateView(0);
+              const b = __CreateView(0);
+              const c = __CreateView(0);
+              __AppendElement(page, a);
+              __AppendElement(page, b);
+              __AppendElement(page, c);
+              __SwapElement(a, c);
+              const d = __CreateView(0);
+              const e = __CreateView(0);
+              __ReplaceElements(page, [d, e], [b, a]);
+              __ReplaceElements(page, __CreateView(0));
+              globalThis.kept = [a, b, c, d, e];
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    // Node ids: a=2, b=3, c=4; the swap's transient marker takes slot 5 and
+    // is freed, so d reuses 5, e=6, and the appended view is 7. The swap
+    // yields [c, b, a]; replacing [b, a] with [d, e] detaches a and puts
+    // d, e in b's place; the old-less form appends.
+    let elements = elements.tree();
+    assert_eq!(elements.document_element().child_ids(), [4, 5, 6, 7]);
+    assert!(elements.get(2).is_some(), "a stays live but detached");
+    assert!(!elements.is_connected(2));
+}
+
+#[test]
 fn create_frame_remains_an_explicitly_missing_global() {
     let mut runtime = bare_runtime();
     let error = runtime
