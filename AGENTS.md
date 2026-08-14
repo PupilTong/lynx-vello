@@ -207,7 +207,9 @@ useful signal for currently-compatible versions of those libraries.
   Creation calls return plain JavaScript handle objects minted by the PAPI
   runtime; each is registered with a `FinalizationRegistry` whose cleanup
   queues the unique id, and queued drops are applied at the next realm entry
-  (or `MainThreadRuntime::collect_garbage`), retiring only that element and
+  (or `MainThreadRuntime::collect_garbage`, a `gc-test-utils` test-feature
+  entry point — production reclamation rides allocation-pressure collection
+  and realm entries), retiring only that element and
   matching DOM node — its descendants remain live but detached until their
   own handles drop. Realm teardown never delivers queued drops.
   Core owns the native half of the element layer in its `tree` module —

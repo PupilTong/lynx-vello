@@ -144,7 +144,8 @@ that engine-side surface, and embedders never touch it: they hold an
    lives in the runtime's private WeakMap. Each non-page handle is registered
    with a `FinalizationRegistry` whose cleanup callback queues the unique id;
    queued drops are applied at the next realm entry (or an explicit
-   `collect_garbage`), retiring only that element and DOM node through
+   `collect_garbage`, gated behind the `gc-test-utils` test feature),
+   retiring only that element and DOM node through
    `ElementTree::drop_element`. Its children become detached roots whose
    subtrees remain live until their own handles are dropped in turn.
    A batch's first `bobcat` call takes the tree out of its hand-off

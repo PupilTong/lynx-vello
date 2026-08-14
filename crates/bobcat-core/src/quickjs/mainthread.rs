@@ -61,10 +61,10 @@
 //! `FinalizationRegistry` cleanup callback (a pending job, executed at the
 //! job checkpoint that follows every evaluation) queues the unique id.
 //! Queued drops are applied by the runtime's deliver hook, which
-//! [`MainThreadRuntime`] calls before each realm entry and inside
-//! [`MainThreadRuntime::collect_garbage`]. `FinalizationRegistry` sweeps run
-//! only during an actual collection (allocation pressure or an explicit
-//! [`collect_garbage`](MainThreadRuntime::collect_garbage)), never during
+//! [`MainThreadRuntime`] calls before each realm entry (and inside
+//! `collect_garbage`, the `gc-test-utils` test-feature entry point).
+//! `FinalizationRegistry` sweeps run only during an actual collection
+//! (allocation pressure, or that explicit trigger in tests), never during
 //! realm teardown — so dropping the runtime preserves the last committed
 //! tree.
 //!
@@ -91,7 +91,7 @@ use std::rc::Rc;
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsCallable, QuickJsInitializationError, QuickJsScriptEngine};
-use crate::script::{ScriptEngine as _, ScriptError, ScriptErrorPhase, ScriptValue};
+use crate::script::{ScriptEngine as _, ScriptError, ScriptValue};
 use crate::tree::{ElementId, ElementTree};
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
@@ -270,13 +270,19 @@ impl MainThreadRuntime {
     /// cleanup jobs, the job checkpoint runs them, and the deliver hook
     /// retires the queued elements.
     ///
+    /// Test support (`gc-test-utils`): the collection backstop is otherwise
+    /// reachable only through allocation-pressure collection, which no test
+    /// can cause deterministically. Production reclamation needs no explicit
+    /// trigger today, so normal builds do not carry this entry point.
+    ///
     /// Delivered drops mark the batch uncommitted, exactly as entry-time
     /// delivery does; the tree presents again after its next flush.
+    #[cfg(feature = "gc-test-utils")]
     pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
         self.engine.realm.run_gc();
         let checkpoint = self
             .engine
-            .checkpoint(ScriptErrorPhase::Call)
+            .checkpoint(crate::script::ScriptErrorPhase::Call)
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine("collecting garbage", &error));
         let result = checkpoint.and_then(|()| self.deliver_pending_drops());
