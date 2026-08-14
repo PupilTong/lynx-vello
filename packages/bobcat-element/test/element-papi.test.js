@@ -97,6 +97,27 @@ function createMockBobcat() {
       }
       calls.push(["replaceElement", newId, oldId]);
     },
+    /**
+     * @param {unknown} childA
+     * @param {unknown} childB
+     */
+    swapElement: (childA, childB) => {
+      const a = nodeId("swapElement", childA);
+      const b = nodeId("swapElement", childB);
+      const parentA = parents.get(a);
+      const parentB = parents.get(b);
+      if (parentA !== undefined) {
+        parents.set(b, parentA);
+      } else {
+        parents.delete(b);
+      }
+      if (parentB !== undefined) {
+        parents.set(a, parentB);
+      } else {
+        parents.delete(a);
+      }
+      calls.push(["swapElement", a, b]);
+    },
     /** @param {unknown} node */
     dropElement: (node) => {
       calls.push(["dropElement", nodeId("dropElement", node)]);
@@ -311,7 +332,7 @@ describe("__ReplaceElements", () => {
 });
 
 describe("__SwapElement", () => {
-  it("swaps through a transient marker element", () => {
+  it("forwards both node ids to the native swap", () => {
     const page = __CreatePage("card", 0);
     const a = __CreateView(0);
     const b = __CreateView(0);
@@ -320,13 +341,7 @@ describe("__SwapElement", () => {
     mock.calls.length = 0;
 
     __SwapElement(a, b);
-    expect(mock.calls).toEqual([
-      ["createElement", "wrapper"],
-      ["replaceElement", 4, 2],
-      ["replaceElement", 2, 3],
-      ["replaceElement", 3, 4],
-      ["dropElement", 4],
-    ]);
+    expect(mock.calls).toEqual([["swapElement", 2, 3]]);
   });
 });
 

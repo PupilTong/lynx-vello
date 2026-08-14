@@ -26,7 +26,7 @@
 // | `__RemoveElement(parent, child)` | `bobcat.removeElement` |
 // | `__ReplaceElement(newElement, oldElement)` | `bobcat.replaceElement` |
 // | `__ReplaceElements(parent, newChildren, oldChildren?)` | `bobcat.parentNode` + `bobcat.insertBefore` + `bobcat.removeElement` |
-// | `__SwapElement(childA, childB)` | `bobcat.createElement` + `bobcat.replaceElement` + `bobcat.dropElement` |
+// | `__SwapElement(childA, childB)` | `bobcat.swapElement` |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
@@ -70,6 +70,7 @@
     insertBefore: bobcat.insertBefore,
     removeElement: bobcat.removeElement,
     replaceElement: bobcat.replaceElement,
+    swapElement: bobcat.swapElement,
     dropElement: bobcat.dropElement,
     flushElementTree: bobcat.flushElementTree,
   };
@@ -285,22 +286,12 @@
   }
 
   /**
-   * web-core's algorithm: a transient marker takes childA's place so the
-   * swap works for any two positions, including adjacent ones and different
-   * parents.
-   *
    * @param {unknown} childA
    * @param {unknown} childB
    * @returns {undefined}
    */
   function __SwapElement(childA, childB) {
-    const a = nodeIdOf(childA);
-    const b = nodeIdOf(childB);
-    const marker = native.createElement("wrapper");
-    native.replaceElement(marker, a);
-    native.replaceElement(a, b);
-    native.replaceElement(b, marker);
-    native.dropElement(marker);
+    native.swapElement(nodeIdOf(childA), nodeIdOf(childB));
     return undefined;
   }
 
