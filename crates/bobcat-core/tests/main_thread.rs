@@ -5,12 +5,12 @@
 
 use bobcat_core::engine::SharedTree;
 use bobcat_core::quickjs::MainThreadRuntime;
-use lynx_element::{ElementTree, PageConfig, Viewport};
+use bobcat_core::tree::{PageConfig, Viewport, new_document};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
 fn runtime() -> (MainThreadRuntime, SharedTree) {
-    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let elements = SharedTree::new(new_document(VIEWPORT, PageConfig::default()));
     let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
@@ -38,10 +38,9 @@ fn a_card_root_builds_its_tree_through_the_papi() {
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.element(2).is_some());
-    assert!(elements.element(3).is_some());
-    assert!(elements.element(4).is_some());
+    assert!(elements.get(2).is_some());
+    assert!(elements.get(3).is_some());
+    assert!(elements.get(4).is_some());
 }
 
 #[test]
@@ -65,8 +64,7 @@ fn create_view_returns_a_handle_append_element_accepts() {
         )
         .expect("main-thread script");
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.element(2).is_some());
+    assert!(elements.get(2).is_some());
 }
 
 #[test]
@@ -114,14 +112,14 @@ fn all_four_tree_mutation_papis_are_host_functions_with_native_return_values() {
     let elements = elements.tree();
     for id in 2..=5 {
         assert!(
-            elements.element(id).is_some(),
+            elements.get(id).is_some(),
             "tree mutation must not retire element {id}"
         );
     }
 }
 
 #[test]
-fn tree_mutation_validation_surfaces_as_a_javascript_exception() {
+fn structural_misuse_crashes_the_host_function() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
@@ -137,8 +135,8 @@ fn tree_mutation_validation_surfaces_as_a_javascript_exception() {
             };
             ",
         )
-        .expect_err("a reference from another parent must be rejected");
-    assert!(error.to_string().contains("not a child"), "{error}");
+        .expect_err("a foreign reference crashes the host function");
+    assert!(error.to_string().contains("panicked"), "{error}");
 }
 
 #[test]
@@ -185,7 +183,7 @@ fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
 
     let elements = elements.tree();
     for id in 2..=9 {
-        assert!(elements.element(id).is_some(), "element {id} must be live");
+        assert!(elements.get(id).is_some(), "element {id} must be live");
     }
 }
 
@@ -206,54 +204,6 @@ fn create_frame_remains_an_explicitly_missing_global() {
 }
 
 #[test]
-fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreatePage('card', 0);
-              const dropped = __CreateView(0);
-              __DropElement(dropped);
-              __DropElement(dropped);
-              __CreateView(0);
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.tree();
-    assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_some());
-}
-
-#[test]
-fn drop_element_retires_only_the_target_and_preserves_descendant_handles() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              const parent = __CreateView(0);
-              const child = __CreateView(0);
-              const grandchild = __CreateView(0);
-              __AppendElement(page, parent);
-              __AppendElement(parent, child);
-              __AppendElement(child, grandchild);
-              __DropElement(parent);
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.tree();
-    assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_some());
-    assert!(elements.element(4).is_some());
-}
-
-#[test]
 fn create_page_is_idempotent_across_calls() {
     let (mut runtime, elements) = runtime();
     runtime
@@ -269,7 +219,7 @@ fn create_page_is_idempotent_across_calls() {
             ",
         )
         .expect("main-thread script");
-    assert!(elements.tree().page().is_some());
+    assert!(elements.tree().rounded_layout(1).is_some());
 }
 
 #[test]
@@ -290,7 +240,7 @@ fn process_data_runs_before_render_page_and_feeds_it() {
         .expect("main-thread script");
     let elements = elements.tree();
     for id in 2..=4 {
-        assert!(elements.element(id).is_some(), "child {id} must be live");
+        assert!(elements.get(id).is_some(), "child {id} must be live");
     }
 }
 
@@ -307,7 +257,7 @@ fn a_script_without_render_page_is_an_error() {
 }
 
 #[test]
-fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
+fn the_page_has_no_size_until_the_tree_is_flushed() {
     let (mut runtime, elements) = runtime();
     runtime
         .evaluate_main_thread_script(
@@ -318,10 +268,16 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
             ",
         )
         .expect("evaluate");
-    assert!(elements.tree().page().is_none());
+    {
+        let elements = elements.tree();
+        let unflushed = elements.rounded_layout(1).expect("layout state");
+        assert!(unflushed.size.width.abs() < f32::EPSILON);
+    }
 
     runtime.render_page().expect("render");
-    assert!(elements.tree().page().is_some());
+    let elements = elements.tree();
+    let flushed = elements.rounded_layout(1).expect("layout state");
+    assert!((flushed.size.width - 393.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -344,47 +300,6 @@ fn a_throwing_render_page_surfaces_the_javascript_error() {
 }
 
 #[test]
-fn papi_rejections_become_javascript_exceptions() {
-    let mut runtime = bare_runtime();
-    let error = runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreatePage('card', 0);
-              const retired = __CreateView(0);
-              __DropElement(retired);
-              __AppendElement(retired, __CreateView(0));
-            };
-            ",
-        )
-        .expect_err("an unknown handle");
-    assert!(
-        error.to_string().contains("unique id 2"),
-        "the error should name the bad handle: {error}"
-    );
-}
-
-#[test]
-fn parent_component_ids_accept_the_full_u32_range() {
-    let mut runtime = bare_runtime();
-    let error = runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreateView(4294967295);
-            };
-            ",
-        )
-        .expect_err("an unknown u32::MAX handle");
-    assert!(
-        error
-            .to_string()
-            .contains("no element has the unique id 4294967295"),
-        "the u32 component id should reach lynx-element validation: {error}"
-    );
-}
-
-#[test]
 fn the_null_handle_is_rejected_by_append_element() {
     let mut runtime = bare_runtime();
     let error = runtime
@@ -396,7 +311,7 @@ fn the_null_handle_is_rejected_by_append_element() {
             ",
         )
         .expect_err("the null handle");
-    assert!(error.to_string().contains("weak reference"), "{error}");
+    assert!(error.to_string().contains("expects a number"), "{error}");
 }
 
 #[test]
@@ -412,7 +327,7 @@ fn non_numeric_handles_are_rejected_rather_than_coerced() {
             ",
         )
         .expect_err("a string handle");
-    assert!(error.to_string().contains("__AppendElement"), "{error}");
+    assert!(error.to_string().contains("expects a number"), "{error}");
 }
 
 #[test]
@@ -423,6 +338,9 @@ fn a_missing_papi_global_fails_loudly() {
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
+              if (typeof globalThis.__DropElement !== 'undefined') {
+                throw new Error('__DropElement must stay absent: no web-core generation has it');
+              }
               __SetAttribute(1, 'name', 'value');
             };
             ",
@@ -452,7 +370,7 @@ fn the_mts_wrapper_hides_the_browser_globals_web_core_hides() {
 }
 
 #[test]
-fn the_next_realm_entry_drops_unreferenced_js_elements_before_re_rendering() {
+fn collection_drops_unreferenced_js_elements_before_re_rendering() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -463,10 +381,20 @@ fn the_next_realm_entry_drops_unreferenced_js_elements_before_re_rendering() {
             ",
         )
         .expect("first boot");
+    assert!(
+        elements.tree().is_connected(2),
+        "an undelivered collection must not retire the committed element"
+    );
+
+    runtime.collect_garbage().expect("collect");
+    assert!(elements.tree().get(2).is_none());
+
     runtime.render_page().expect("second boot");
     let elements = elements.tree();
-    assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_some());
+    assert!(
+        elements.is_connected(2),
+        "the re-render's view reuses the freed slot and is attached"
+    );
 }
 
 #[test]
@@ -490,16 +418,38 @@ fn vm_drop_of_a_parent_preserves_descendants_with_live_handles() {
         )
         .expect("first boot");
 
-    // Entering the realm again delivers the pending finalizer for the local-only parent. The two
-    // descendants still have live JavaScript handles and must not be retired with it.
-    runtime
-        .evaluate_main_thread_script("")
-        .expect("deliver pending VM drops");
+    // Collecting delivers the pending drop for the local-only parent. The two
+    // descendants still have live JavaScript handles and must not be retired
+    // with it.
+    runtime.collect_garbage().expect("collect");
 
     let elements = elements.tree();
-    assert!(elements.element(2).is_none());
-    assert!(elements.element(3).is_some());
-    assert!(elements.element(4).is_some());
+    assert!(elements.get(2).is_none());
+    assert!(elements.get(3).is_some());
+    assert!(elements.get(4).is_some());
+}
+
+#[test]
+fn a_fresh_realm_over_a_retained_tree_keeps_working() {
+    let elements = SharedTree::new(new_document(VIEWPORT, PageConfig::default()));
+    let script = r"
+        globalThis.renderPage = function () {
+          __AppendElement(__CreatePage('card', 0), __CreateView(0));
+        };
+        ";
+
+    let mut first = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
+    first.run_main_thread_script(script).expect("first boot");
+    drop(first);
+
+    // The Engine::run_script shape: a second bootstrap realm over the same
+    // retained tree keeps creating elements — identity is the DOM node id,
+    // so no realm-local allocator can collide with it.
+    let mut second = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
+    second.run_main_thread_script(script).expect("second boot");
+
+    let elements = elements.tree();
+    assert_eq!(elements.document_element().child_ids().len(), 2);
 }
 
 #[test]
@@ -514,11 +464,11 @@ fn bootstrap_realm_teardown_preserves_the_last_committed_tree() {
             ",
         )
         .expect("first boot");
-    assert!(elements.tree().element(2).is_some());
+    assert!(elements.tree().get(2).is_some());
 
     drop(runtime);
 
-    assert!(elements.tree().element(2).is_some());
+    assert!(elements.tree().get(2).is_some());
 }
 
 #[test]
@@ -542,7 +492,7 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     let elements = elements.tree();
     for id in 2..=4 {
         assert!(
-            elements.element(id).is_some(),
+            elements.get(id).is_some(),
             "the microtask's appends must have landed (id {id})"
         );
     }
@@ -583,7 +533,7 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
 
     let elements = elements.tree();
     assert!(
-        elements.page().is_some(),
+        elements.rounded_layout(1).is_some(),
         "the boot sequence still ran to completion"
     );
 }

@@ -120,25 +120,24 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-core` — unified native runtime core. Its always-compiled
   surface owns the protocol-only, host-injected `ResourceFetcher`, the
   ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
-  directly composes `lynx-element`, which owns the dependency edge to `dom`.
+  directly composes `dom` through its `tree` module, which owns the native
+  element tree behind the JavaScript Element PAPI runtime.
   `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
   `quickjs::MainThreadRuntime`. That runtime owns only the realm: a
-  batch's first Element-PAPI mutation takes the tree out of its hand-off
+  batch's first `bobcat` call takes the document out of its hand-off
   slot, every call after that is a plain `&mut` mutation with no
-  synchronization (the tree's own validation is the single source of every
-  `PapiError`), and `__FlushElementTree` runs the style + layout commit on
-  the taken tree, puts it back, and notifies the presenter through the
-  callback injected at construction — locks are touched twice per batch,
-  never per call;
+  synchronization, and `__FlushElementTree` runs the style + layout commit
+  on the taken document, puts it back, and notifies the presenter through
+  the callback injected at construction — locks are touched twice per
+  batch, never per call;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `lynx-element` only (strict linear layering) and
-  re-exports it whole — `bobcat_core::lynx_element` is the product's single
-  door downward. The `engine` module is the embedder boundary:
+  The core depends on `dom` only (strict linear layering) and re-exports it
+  whole — `bobcat_core::dom` is the product's single door downward. The `engine` module is the embedder boundary:
   `engine::Engine` passes the element tree to and from its engine-owned
   Lynx main thread (the `QuickJS` realm and its event loop) through the
   `SharedTree` hand-off slot — one holder at any instant — and runs input
@@ -149,8 +148,8 @@ useful signal for currently-compatible versions of those libraries.
   present's vsync wait happens outside the borrow), the slot is occupied
   while the script merely computes (a long JS task between batches cannot
   stop scrolling — one truth, no reconciliation protocol), a half-applied
-  batch is unobservable by construction, and `has_uncommitted_mutations`
-  guards the abandoned-batch edge. Embedders provide user input, device
+  batch is unobservable while the slot is empty; an abandoned batch may
+  present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline — the engine schedules through the
@@ -178,7 +177,7 @@ useful signal for currently-compatible versions of those libraries.
   exposes an acceleration query or reaches a decode ASIC, so
   `DedicatedHardware` is reserved and unreported. The module never touches
   `dom` node types: it returns an `ImageHeader` and a `DecodedImage`
-  (`to_image_data` reaches peniko through the `lynx_element::dom::vello`
+  (`to_image_data` reaches peniko through the `dom::vello`
   re-export chain), and installing those on a node and in an `ImageStore` is
   the engine loop's job. The **authoritative** recorded-limits list is
   `crates/bobcat-core/src/image/mod.rs`'s module docs. The Lynx `<image>`
@@ -188,24 +187,40 @@ useful signal for currently-compatible versions of those libraries.
   still adds no document alias, element-host trait, or injection seam of its
   own.
   `MainThreadRuntime`
-  installs the Element PAPI before evaluation, evaluates a `.web.bundle`'s
-  `lepusCode.root` inside web-core's wrapper, then runs `processData` →
-  `renderPage` → `__FlushElementTree`. Fifteen Element PAPI globals are
-  installed: every ReactLynx Snapshot constructor except `__CreateFrame`
-  (`__CreatePage`, `__CreateElement`, `__CreateWrapperElement`, `__CreateText`,
-  `__CreateImage`, `__CreateView`, `__CreateScrollView`, `__CreateRawText`,
-  `__CreateList`) plus all four tree mutation calls (`__AppendElement`,
-  `__InsertElementBefore`, `__RemoveElement`, `__ReplaceElement`),
-  `__DropElement`, and `__FlushElementTree`; unsupported globals remain precise
-  `ReferenceError`s.
+  installs the global `bobcat` object (one Rust host function per member —
+  `createPage`, `createElement`, `setAttribute`, `insertBefore`,
+  `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
+  speaking DOM vocabulary over numeric `NodeId`s), evaluates the embedded
+  Element PAPI runtime (`packages/bobcat-element`), then evaluates a
+  `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
+  `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
+  assigns the fifteen Element PAPI globals: every ReactLynx Snapshot
+  constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
+  `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
+  `__CreateScrollView`, `__CreateRawText`, `__CreateList`) plus all four tree
+  mutation calls (`__AppendElement`, `__InsertElementBefore`,
+  `__RemoveElement`, `__ReplaceElement`) and `__FlushElementTree`;
+  unsupported globals remain precise `ReferenceError`s, including
+  `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
   callback storage/execution remains part of the unimplemented list surface.
-  Creation calls return opaque QuickJS weak-ref objects
-  carrying the `u32` arena id; collection reports the id through
-  `js_weak_ref_drop`, which retires only that Lynx element and matching DOM node;
-  its descendants remain live but detached until their own VM notifications.
-  Core composes but does not own Lynx tag/root/UA policy; that vocabulary and
-  `type ElementId = u32` remain defined by `lynx-element`.
+  Creation calls return plain JavaScript handle objects minted by the PAPI
+  runtime; each carries its DOM `NodeId` under a realm-local symbol and is
+  registered with a `FinalizationRegistry` whose cleanup calls
+  `bobcat.dropElement`, freeing only that element — its descendants remain
+  live but detached until their own handles are collected. Cleanup runs as
+  a pending job at the job checkpoints (a collection comes from allocation
+  pressure or `MainThreadRuntime::collect_garbage`), and pending jobs never
+  run at realm teardown, which preserves the last committed tree.
+  Core owns Lynx page policy in its `tree` module — the `page` root tag,
+  `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
+  the `bobcat` host functions call `dom::Document` directly — while tag
+  vocabulary, handle lifecycle, and the PAPI member surface live in
+  `packages/bobcat-element`. Element identity is the DOM `NodeId`; nothing
+  validates script input, and misuse panics in `dom`, converted to a
+  JavaScript exception at the host boundary. An unflushed batch may
+  present once its evaluation ends — web-core's visibility model, where
+  the browser paints the live DOM regardless of `__FlushElementTree`.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -219,12 +234,10 @@ useful signal for currently-compatible versions of those libraries.
   `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
   table reached via the context opaque). Host callbacks speak `HostValue`, a
-  primitives-plus-one-opaque-handle boundary
-  (undefined/null/bool/number/string/`JsWeakRef(u32)`) — ordinary objects,
-  arrays, functions, symbols, and ill-formed UTF-16 strings are rejected on
-  the way in rather than lossily converted. `Realm::create_weak_ref_with_node_id`
-  creates one identity-stable object per live id, and its finalizer queues the
-  id for the realm's `js_weak_ref_drop` callback outside the collector. This
+  primitives-only boundary (undefined/null/bool/number/string) — ordinary
+  objects, arrays, functions, symbols, and ill-formed UTF-16 strings are
+  rejected on the way in rather than lossily converted; element identity
+  crosses as plain numbers, and handle objects never leave JavaScript. This
   boundary also means a callback
   cannot call back into its own realm, so host functions are strictly
   leaf calls today. A slot is vacated for the duration of its call (a guard
@@ -247,7 +260,7 @@ useful signal for currently-compatible versions of those libraries.
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
-  `bobcat-core` (the layer chain: `bobcat_core::lynx_element::dom::…` reaches
+  `bobcat-core` (the layer chain: `bobcat_core::dom::…` reaches
   every lower layer) and the sibling `lynx-template-decoder` utility; the
   per-OS codec crates it consumes are target-scoped, for `image_decoders`
   below.
@@ -318,63 +331,28 @@ useful signal for currently-compatible versions of those libraries.
   implemented. Until then this boundary does not claim `.web.bundle`
   execution. Synchronous GPU capture is likewise absent because browser WebGPU
   completion is Promise-driven.
-- `crates/lynx-element` — the Lynx runtime element layer, i.e. the crate the
-  layering diagrams drew as the dashed "future Lynx runtime adapter" box. It
-  owns exactly what `dom` is forbidden to know: Lynx tag names, Element-PAPI
-  opcodes, the unique-id handle space, `<page>` root policy, view metrics and
-  stylo `Device` construction, and the Lynx UA cascade defaults
-  (`display: linear`, `box-sizing: border-box`, `overflow: hidden`, under the
-  `defaultDisplayLinear` / `defaultOverflowVisible` page-config switches).
-  This crate defines `type ElementId = u32` and the concrete, validated
-  Element-PAPI operations on `ElementTree`; `bobcat-core` composes that type
-  directly and `dom` knows neither vocabulary. Every PAPI call mutates the
-  tree directly; `has_uncommitted_mutations` marks the span between a
-  batch's first mutation and its `flush_element_tree` so a frame producer
-  sharing the tree across threads never builds from a half-applied batch.
-  `ElementTree` owns a `dom::Document<ElementId>` plus an independent
-  `Vec<Option<LynxElement>>` arena. This crate depends on `dom` **only** — stylo/euclid are reached through
-  `dom`'s vocabulary re-exports — and re-exports `dom` whole as the next
-  layer's door; it never depends on Bobcat or a JavaScript engine. The DOM payload is only the permanent
-  `u32` unique id, which is also the direct arena index; each `LynxElement`
-  owns that id, its stable DOM `NodeId` association, component creation
-  fields. The arena permanently reserves slot 0 as web-core's
-  "no element" sentinel, so live unique ids start at 1. `__DropElement` removes
-  only the selected DOM node and takes its one arena entry, leaving a permanent
-  `None` tombstone; its live descendants become detached and await their own VM
-  drop notifications. Unique ids are never recycled, although `dom`
-  may reuse its private `NodeId` slots;
-  every fallible PAPI entry returns `PapiError` instead of panicking, because
-  the main-thread script is untrusted input and the DOM core is
-  crash-on-misuse. The owned document and `NodeId` never appear in this
-  layer's public signatures: `document()` is `cfg(test)`-gated for this
-  crate's own unit tests (DOM shape — append order, tags, committed styles,
-  flushed layout — is this layer's semantics, so this layer's tests assert
-  it), external observation speaks `ElementId` only (`page`, `element`,
-  `config`), and `handle_input` deliberately returns nothing — the future
-  event-dispatch layer gets `ElementId`-vocabulary queries designed for it,
-  not a passthrough of the DOM response. The mutable surface beyond the
-  PAPI is the invariant-safe engine-side set — `handle_input`,
-  `set_viewport`, `set_device_pixel_ratio`, `register_fonts`,
-  `add_author_stylesheet`, `render`, `needs_render`, `scene`, `images_mut` —
-  admitted one by one because none creates, moves, or retires an element.
-  There is no document accessor of any kind outside tests: topology
-  mutations outside the PAPI would desynchronise the element arena.
-  `bobcat_core::engine::Engine` is the production driver of the engine-side
-  set; embedders hold an `Engine`, not an `ElementTree`.
-  No public `paint_order` exists on either `ElementTree` or `Document`, and
-  input builds its temporary hit-test frame internally. It does not impose a runtime
-  tree-depth cap; recursive traversal hardening belongs in `dom`/`hughie`.
-  `flush_element_tree` is the single commit boundary — a plain style +
-  layout pass: the page is the permanent document element, pre-created by
-  `ElementTree::new` with the fixed unique id 1 (the id is carried by an
-  opaque JavaScript weak-ref object, so `__CreatePage` just binds the component
-  fields and returns that object),
-  and `__DropElement` on the page is a `PapiError` (recorded limit). Recorded
-  limits (see the crate docs, which are authoritative): handle objects expose
-  no element properties or methods beyond their identity; `parentComponentUniqueID` is recorded but not honored
-  (there is no `__SetCSSId`); no `rpx`/`ppx` view-unit policy; the UA sheet
-  covers only the three documented Lynx computed defaults. It must not absorb
-  DOM/CSS core behavior, and nothing below it may depend on it.
+- `packages/bobcat-element` — the Element PAPI runtime, a single
+  dependency-free classic-script JavaScript file (`src/element-papi.js`) that
+  `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
+  realm before any bundle code; its Rstest suite runs the same bytes. It owns
+  the fifteen `__*` PAPI members and their web-core arities and the Lynx tag
+  vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
+  `list`). An element handle is a plain object carrying its DOM `NodeId`
+  under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
+  object per element for its whole life, so every PAPI return of an element
+  yields the same object.
+  `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted for
+  PAPI shape and unused. Lifecycle: collection is the only release path —
+  web-core's model, where a swept `WeakRef` is what frees an element.
+  Every non-page handle is registered with a `FinalizationRegistry` whose
+  cleanup calls `bobcat.dropElement`; cleanup runs as a pending job at the
+  host's job checkpoints, and never at realm teardown, which preserves the
+  last committed tree. Nothing is validated: a foreign handle resolves to
+  undefined and crashes at the native boundary. The file must stay a classic script (no
+  import/export at runtime, ECMAScript intrinsics plus `globalThis.bobcat`
+  only — the realm has no `console`/`setTimeout`/DOM), which is also what
+  lets Rstest import it for side effects and `tsc --noEmit` check it under
+  `checkJs`.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a
@@ -689,7 +667,7 @@ useful signal for currently-compatible versions of those libraries.
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.
   Font registration takes the shared `FontBlob` resource through
-  `Engine` → `ElementTree` → `Document` → `TextContext`; an owned loader
+  `Engine` → `Document` → `TextContext`; an owned loader
   buffer is moved into Parley without copying its payload, while
   `FontBlob::copy_from_slice` is the explicit copying fallback.
   Relayout damage on an element evicts its direct text children's
@@ -793,9 +771,9 @@ useful signal for currently-compatible versions of those libraries.
 - *(planned, not yet scaffolded)* the remaining runtime crates — see
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
-  personas already set up for this work. `crates/lynx-element` and
-  `crates/bobcat-core`'s feature-gated `quickjs` module are the first pieces of this
-  layer to land; the background thread, `StyleInfo` ingestion, the event
+  personas already set up for this work. `packages/bobcat-element` with
+  `bobcat-core`'s `tree` and feature-gated `quickjs` modules are the first
+  pieces of this layer to land; the background thread, `StyleInfo` ingestion, the event
   model, and the remaining Element PAPI members are still ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
@@ -872,6 +850,14 @@ this section is the only place the absolute paths are spelled out.
 Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
+
+The Element PAPI runtime has two suites over the same file:
+`pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
+`pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
+while `crates/bobcat-core/tests/main_thread.rs` drives the identical bytes
+through the real QuickJS realm, `bobcat` object, and collector. Changing
+`packages/bobcat-element/src/element-papi.js` triggers a `bobcat-core` rebuild
+through `include_str!` — there is no generated artifact to refresh.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
 siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with

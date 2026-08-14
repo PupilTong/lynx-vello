@@ -8,19 +8,25 @@ The product dependency graph is:
 
 ```text
 bobcat-cli  ─┐
-             ├──▶ bobcat-core ──▶ lynx-element ──▶ dom ─┬─▶ hughie
-bobcat-wasm ─┘          │                                  ├─▶ vendor/stylo
-                        └──▶ quickjs-rust-bridge           └─▶ vello/wgpu
+             ├──▶ bobcat-core ──▶ dom ─┬─▶ hughie
+bobcat-wasm ─┘          │              ├─▶ vendor/stylo
+                        │              └─▶ vello/wgpu
+                        └──▶ quickjs-rust-bridge
                              [feature = "quickjs";
                               native product only]
+
+main-thread script ──▶ element-papi.js (packages/bobcat-element, embedded)
+                          ──▶ bobcat.* ──▶ dom::Document (Lynx page policy: bobcat_core::tree)
 
 bobcat-cli  ──▶ lynx-template-decoder + winit (macOS headed product only)
 bobcat-wasm ──▶ NAPI-RS + emnapi (`wasm32-wasip1-threads`, one shared-memory
                                   module for Rust threads and Vello/WebGPU Canvas)
 
 Each layer depends only on the layer directly below and re-exports it whole
-(`bobcat_core::lynx_element`, `lynx_element::dom`); `dom` re-exports the
-`vello`, `stylo`, `euclid`, and `stylo_traits` vocabulary crates.
+(`bobcat_core::dom`); `dom` re-exports the `vello`, `stylo`, `euclid`, and
+`stylo_traits` vocabulary crates. The Element PAPI surface itself is
+JavaScript: `packages/bobcat-element` is embedded into `bobcat-core` with
+`include_str!` and evaluated into the realm before any bundle code.
 ```
 
 `dom`'s `render` module is its intentionally DOM-free floor (absorbed from the
@@ -38,14 +44,17 @@ JavaScript adapter:
 - `script::ScriptEngine` is the external JavaScript-engine contract. Its
   `ImportFuture<'a>` is a GAT, so implementations return concrete futures
   without boxed `dyn Future` values.
-- `lynx-element` owns the concrete validated Element-PAPI operations and
-  `pub type ElementId = u32`. There is no element-host trait: the only real
-  host is `ElementTree`, and every PAPI call mutates it directly — the
-  tree's own validation is the single source of every `PapiError`.
-  `has_uncommitted_mutations` marks the span between a batch's first
-  mutation and its `flush_element_tree`, which is what lets a frame
-  producer sharing the tree across threads refuse to build from a
-  half-applied batch.
+- `tree` is Lynx page policy only: the `page` root tag, the UA cascade
+  defaults, view metrics, and `new_document` — the `bobcat.*` host
+  functions call `dom::Document` directly. Element identity is the DOM
+  `NodeId`; nothing validates script input — misuse panics in `dom`,
+  converted to a JavaScript exception at the host boundary. The PAPI
+  member surface, tag vocabulary, and handle lifecycle live in the
+  embedded `packages/bobcat-element` runtime. A half-applied batch is
+  invisible only while the realm holds the document; once it is back in
+  the slot, whatever state it holds may present — web-core's visibility,
+  where the browser paints the live DOM regardless of
+  `__FlushElementTree`.
 - `engine` is the embedder boundary: `Engine` shares the element tree with
   its own Lynx main thread behind one lock, and owns input routing, frame
   production, presentation, and the script thread. An embedder provides
@@ -64,7 +73,7 @@ JavaScript adapter:
   `engine::OffscreenEngine` is the windowless composition, over the
   uninhabited `NoWindow`.
 - `resource` and `view` provide resource acquisition and generic engine/view
-  composition. The crate root does not re-export `ElementTree`, `dom`,
+  composition. The crate root does not re-export a document alias, `dom`,
   or a renderer specialization. `bobcat-cli` is one embedder of `engine`,
   not the implementation of a core façade.
 
@@ -73,8 +82,8 @@ The default `quickjs` feature adds the internal QuickJS implementation,
 types have this single module path; the crate root does not duplicate their
 exports. Depending on
 `bobcat-core` with `default-features = false` excludes the QuickJS adapter and
-native QuickJS build while retaining the external engine protocols and element
-dependency. `lynx-element` has no QuickJS feature.
+native QuickJS build while retaining the external engine protocols and the
+`tree` module.
 
 ## Document-owned painting
 
@@ -112,34 +121,30 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`lynx_element::ElementTree` directly owns `Document<ElementId>`, and neither
-the document nor `NodeId` appears in its public signatures: external
-observation speaks `ElementId` only (`page`, `element`, `config`), and DOM
-shape is asserted by the layer that owns it — lynx-element's own unit tests,
-through a `cfg(test)`-gated accessor. Its mutable surface is the Element
-PAPI plus the invariant-safe engine-side methods (`handle_input`,
-`set_viewport`, `render`, `needs_render`, `scene`, `images_mut` — none
-creates, moves, or retires an element). `bobcat_core::engine::Engine` is the
-sole production driver of that engine-side surface, and embedders never
-touch it: they hold an `Engine` and relay OS facts into it.
+The runtime speaks `Document<()>` (`bobcat_core::tree::LynxDocument`)
+directly. `bobcat_core::engine::Engine` is the sole production driver of
+the presenting-side surface (`handle_input`, `set_viewport`, `render`,
+`needs_render`, `scene`, `images_mut`), and embedders never touch it: they
+hold an `Engine` and relay OS facts into it.
 
 ## Frame walkthrough
 
-1. `ElementTree::new` constructs the Lynx `Device`, creates
-   `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
-   is the same permanent `u32` id stored in the element arena; private DOM
-   `NodeId` slots may still be reused.
+1. `tree::new_document` constructs the Lynx `Device`, creates
+   `Document<()>`, and installs the Lynx UA stylesheet.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   Creation PAPI calls return an opaque, identity-stable JavaScript weak-ref
-   object carrying the element's `u32` arena id; host calls recover the id
-   only from that unforgeable object. Its finalizer queues `js_weak_ref_drop`,
-   which runs outside the collector and retires only that `LynxElement` and DOM
-   node through `ElementTree::drop_element`. Its children become detached roots
-   whose subtrees remain live until their own handles receive VM drop notifications.
-   A batch's first Element PAPI mutation takes the tree out of its hand-off
-   slot; every call after that is a plain `&mut` mutation with no
-   synchronization — the tree validates, so a bad handle throws at the call
-   site — without the script ever seeing `NodeId`.
+   The embedded Element PAPI runtime mints each element's one
+   identity-stable handle object, maps it to the `NodeId` the native create
+   returned, and passes plain numbers to the `bobcat` host functions. Each
+   non-page handle is registered with a `FinalizationRegistry` whose
+   cleanup callback calls `bobcat.dropElement` — a pending job, executed
+   at the job checkpoint after an evaluation (a collection comes from
+   allocation pressure or an explicit `collect_garbage`) — freeing only
+   that element through `Document::drop_element`. Its children become
+   detached roots whose subtrees remain live until their own handles are
+   dropped in turn. A batch's first `bobcat` call takes the tree out of its
+   hand-off slot; every call after that is a plain `&mut` mutation with no
+   synchronization, and misuse panics in `dom`, converted to a JavaScript
+   exception at the host boundary.
 3. `__FlushElementTree` is the commit boundary: the style + layout commit
    runs on the taken tree, the tree goes back in its slot, and the
    presenting side is asked for a frame. The document-owned Painter decides
@@ -185,9 +190,9 @@ so a long JavaScript task between batches never stops input routing,
 scrolling, or presentation — scroll target resolution reads the retained
 paint order and writes offsets into the borrowed tree, keeping one truth
 with no reconciliation protocol. A half-applied batch is unobservable by
-construction (the tree is simply absent), and `has_uncommitted_mutations`
-guards the one edge where an abandoned batch comes back uncommitted at
-the end of an evaluation. The law: the main thread waits only on its own
+construction (the document is simply absent); an abandoned batch that
+comes back at the end of an evaluation may present, which is web-core's
+visibility model. The law: the main thread waits only on its own
 batch boundaries; the presenting side never waits on the main thread; the
 embedder loop never blocks. The offscreen composition keeps the wall-free form: one
 thread, `Engine::run_script`, identical semantics — the golden screenshot
@@ -216,7 +221,6 @@ traversal.
 
 ```sh
 cargo check -p dom --all-targets
-cargo check -p lynx-element
 cargo check -p bobcat-core --no-default-features
 cargo check -p bobcat-core --features quickjs
 cargo check -p bobcat-cli

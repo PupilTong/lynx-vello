@@ -5,7 +5,7 @@
 //! pipeline itself — tree, commits, style, layout, paint, scheduling — is
 //! the engine's, not this crate's.
 
-use bobcat_core::lynx_element::PageConfig;
+use bobcat_core::tree::PageConfig;
 use url::Url;
 
 use crate::CliError;

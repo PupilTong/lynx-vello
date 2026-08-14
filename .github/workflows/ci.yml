@@ -29,7 +29,6 @@ jobs:
           -p bobcat-cli
           -p bobcat-wasm
           -p flashbulb
-          -p lynx-element
           -p lynx-template-decoder
           -p quickjs-rust-bridge
           -p dom
@@ -113,6 +112,33 @@ jobs:
         run: pnpm --filter github-pages build
         env:
           PAGES_BASE_PATH: /ci-preview
+
+  element-papi:
+    name: Element PAPI runtime tests (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules and no Rust toolchain: the runtime is a single
+      # JavaScript file tested over a native mock, so this job needs only the
+      # pnpm workspace.
+      - uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.15.0
+          cache: pnpm
+
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test the Element PAPI runtime
+        run: pnpm --filter bobcat-element test
+
+      - name: Type-check the Element PAPI runtime
+        run: pnpm --filter bobcat-element test:type
 
   walltime-benchmarks:
     name: bench (CodSpeed walltime, macOS)

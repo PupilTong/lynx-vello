@@ -7,10 +7,10 @@
 //! measurement is dominated by the boundary crossing rather than by compilation
 //! or realm setup.
 //!
-//! The shapes mirror four Element PAPI members: `__FlushElementTree` (no
-//! arguments), `__CreateView` (one number returning a JS weak ref),
-//! `__AppendElement` (two JS weak refs returning the child), and
-//! `__CreatePage` (a string plus a number returning a JS weak ref).
+//! The shapes mirror four `bobcat` members: `flushElementTree` (no
+//! arguments), `createElement` (a string plus a number), `insertBefore` (two
+//! numbers), and a string-returning query. Element identity crosses the
+//! boundary as plain numbers; handle objects never leave JavaScript.
 
 use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, Value};
 
@@ -22,20 +22,6 @@ const CALLS: usize = 20_000;
 
 fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Value, Value) {
     let mut realm = Realm::new().expect("realm");
-    realm.set_js_weak_ref_drop(|_| {});
-    let global = realm.global_object().expect("global");
-    let parent = realm
-        .create_weak_ref_with_node_id(u32::MAX - 1)
-        .expect("parent weak ref");
-    let child = realm
-        .create_weak_ref_with_node_id(u32::MAX)
-        .expect("child weak ref");
-    realm
-        .set_property(&global, "parent", &parent)
-        .expect("install parent");
-    realm
-        .set_property(&global, "child", &child)
-        .expect("install child");
     install(&mut realm);
     realm
         .evaluate(
@@ -55,14 +41,6 @@ fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Va
         .expect("the driver");
     let undefined = realm.undefined().expect("undefined");
     (realm, run, undefined)
-}
-
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the signature is dictated by the host-function boundary"
-)]
-fn page_handler(_: &[HostValue]) -> Result<HostValue, HostFunctionError> {
-    Ok(HostValue::JsWeakRef(1))
 }
 
 #[allow(
@@ -94,7 +72,7 @@ fn one_number_argument(bencher: divan::Bencher) {
             realm
                 .define_global_function("create", 1, move |_| {
                     next_id += 1;
-                    Ok(HostValue::JsWeakRef(next_id))
+                    Ok(HostValue::Number(f64::from(next_id)))
                 })
                 .expect("install");
         },
@@ -104,14 +82,14 @@ fn one_number_argument(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn two_weak_ref_arguments(bencher: divan::Bencher) {
+fn two_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
                 .define_global_function("append", 2, append_handler)
                 .expect("install");
         },
-        "append(parent, child)",
+        "append(1, 2)",
     );
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }
@@ -121,10 +99,10 @@ fn string_and_number_arguments(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
-                .define_global_function("page", 2, page_handler)
+                .define_global_function("create", 2, |_| Ok(HostValue::Undefined))
                 .expect("install");
         },
-        "page('card', 0)",
+        "create('view', 2)",
     );
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
 }

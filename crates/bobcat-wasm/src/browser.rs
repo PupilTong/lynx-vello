@@ -4,10 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bobcat_core::dom::FontBlob;
+use bobcat_core::dom::vello::wgpu;
 use bobcat_core::engine::{Engine, FrameRequester, FrameSize, Window, WindowTarget};
-use bobcat_core::lynx_element::PageConfig;
-use bobcat_core::lynx_element::dom::FontBlob;
-use bobcat_core::lynx_element::dom::vello::wgpu;
+use bobcat_core::tree::PageConfig;
 use napi::bindgen_prelude::{PromiseRaw, Uint8Array};
 use napi::{Env, JsValue as _, Unknown};
 use napi_derive::napi;
@@ -78,46 +78,41 @@ impl BobcatCanvas {
         self.engine.add_author_stylesheet(&css);
     }
 
-    /// Binds and returns the permanent page element.
+    /// Binds the permanent page element and returns its node id. The
+    /// component arguments are accepted for Element PAPI shape and unused.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn create_page(&mut self, component_id: String, component_css_id: i32) -> u32 {
-        self.engine
-            .elements()
-            .create_page(&component_id, component_css_id)
+    #[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
+    pub fn create_page(&mut self, _component_id: String, _component_css_id: i32) -> u32 {
+        self.engine.elements().document_element().id() as u32
     }
 
-    /// Creates one detached Lynx `view` element.
+    /// Creates one detached Lynx `view` element and returns its node id. The
+    /// parent component id is accepted for Element PAPI shape and unused.
     #[napi]
-    pub fn create_view(&mut self, parent_component_unique_id: u32) -> napi::Result<u32> {
-        self.engine
-            .elements()
-            .create_view(parent_component_unique_id)
-            .map_err(napi_error)
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create_view(&mut self, _parent_component_unique_id: u32) -> u32 {
+        self.engine.elements().create_element("view", ()) as u32
     }
 
     /// Appends an element and returns the appended child id.
     #[napi]
-    pub fn append_element(&mut self, parent: u32, child: u32) -> napi::Result<u32> {
+    pub fn append_element(&mut self, parent: u32, child: u32) -> u32 {
         self.engine
             .elements()
-            .append_element(parent, child)
-            .map_err(napi_error)
+            .insert_before(parent as usize, child as usize, None);
+        child
     }
 
-    /// Retires an element subtree.
+    /// Frees one element, detaching its direct children.
     #[napi]
-    pub fn drop_element(&mut self, element: u32) -> napi::Result<()> {
-        self.engine
-            .elements()
-            .drop_element(element)
-            .map_err(napi_error)
+    pub fn drop_element(&mut self, element: u32) {
+        self.engine.elements().drop_element(element as usize);
     }
 
     /// Commits pending Element-PAPI mutations and requests a browser frame.
     #[napi]
     pub fn flush_element_tree(&mut self) {
-        self.engine.elements().flush_element_tree();
+        self.engine.elements().layout();
         self.engine.refresh();
     }
 

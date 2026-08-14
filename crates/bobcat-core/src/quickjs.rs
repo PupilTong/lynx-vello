@@ -101,6 +101,12 @@ impl QuickJsInitializationError {
             message: Arc::from(error.message),
         }
     }
+
+    fn from_script(error: ScriptError) -> Self {
+        Self {
+            message: error.message,
+        }
+    }
 }
 
 impl fmt::Debug for QuickJsInitializationError {

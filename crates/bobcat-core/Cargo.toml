@@ -15,8 +15,8 @@ quickjs = ["dep:quickjs-rust-bridge"]
 [dependencies]
 bytes = { workspace = true }
 data-url = { workspace = true }
+dom = { workspace = true }
 http = { workspace = true }
-lynx-element = { workspace = true }
 pollster = { workspace = true }
 quickjs-rust-bridge = { workspace = true, optional = true }
 rustc-hash = { workspace = true }

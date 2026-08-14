@@ -11,10 +11,10 @@
 
 use bobcat_core::engine::SharedTree;
 use bobcat_core::quickjs::MainThreadRuntime;
-use lynx_element::{ElementTree, PageConfig, Viewport};
+use bobcat_core::tree::{PageConfig, Viewport, new_document};
 
 fn shared_tree(config: PageConfig) -> (MainThreadRuntime, SharedTree) {
-    let elements = SharedTree::new(ElementTree::new(VIEWPORT, config));
+    let elements = SharedTree::new(new_document(VIEWPORT, config));
     let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
@@ -50,9 +50,6 @@ fn the_bundle_page_config_reaches_the_ua_cascade() {
         assert!(config.default_display_linear, "{name}");
         assert!(config.default_overflow_visible, "{name}");
         assert!(config.enable_css_selector, "{name}");
-
-        let (_runtime, elements) = shared_tree(config);
-        assert_eq!(elements.tree().config(), config, "{name}");
     }
 }
 
@@ -78,7 +75,9 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             message.contains("main-thread.js:"),
             "{name}: the error should carry a source location: {message}"
         );
-        assert!(elements.tree().page().is_none(), "{name}");
+        let elements = elements.tree();
+        let layout = elements.rounded_layout(1).expect("layout state");
+        assert!(layout.size.width.abs() < f32::EPSILON, "{name}");
     }
 }
 
@@ -101,6 +100,5 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
         )
         .expect("boot");
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.element(2).is_some(), "the appended view is live");
+    assert!(elements.get(2).is_some(), "the appended view is live");
 }

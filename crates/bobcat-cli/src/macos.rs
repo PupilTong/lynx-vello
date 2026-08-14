@@ -14,11 +14,11 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
+use bobcat_core::dom::Point2D;
+use bobcat_core::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
 use bobcat_core::engine::{
     Engine, EngineEvent, FrameRequester, FrameSize, Window as EmbedderWindow,
 };
-use bobcat_core::lynx_element::dom::Point2D;
-use bobcat_core::lynx_element::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};

@@ -21,15 +21,18 @@ done/in-progress marker only where implementation has landed. The CSS/layout
 and visual files have the most such markers; the runtime ones have the fewest.
 
 The runtime work that has landed so far, none of which these files were
-written to track: `crates/lynx-element` owns the Lynx element layer (unique-id
-handles, `<page>` policy, the UA cascade defaults), and `crates/bobcat-core`'s
-feature-gated `quickjs` module runs a `.web.bundle`'s main-thread
-script against it with every ReactLynx Snapshot constructor except
-`__CreateFrame`, plus all four tree mutation calls (`__AppendElement`,
-`__InsertElementBefore`, `__RemoveElement`, `__ReplaceElement`),
-`__DropElement`, and `__FlushElementTree`. `js-runtime.md` still declines to
-enumerate the Element PAPI; the authoritative list of what exists is
-`lynx-element`'s crate docs.
+written to track: the Lynx element layer is split between
+`crates/bobcat-core`'s `tree` module (Lynx page policy: `<page>` root tag,
+the UA cascade defaults, view metrics) and
+`packages/bobcat-element` (the Element PAPI runtime: member surface, tag
+vocabulary, handle lifecycle over a symbol-keyed node id and
+`FinalizationRegistry`), and `bobcat-core`'s feature-gated
+`quickjs` module runs a `.web.bundle`'s main-thread script against them with
+every ReactLynx Snapshot constructor except `__CreateFrame`, plus all four
+tree mutation calls (`__AppendElement`, `__InsertElementBefore`,
+`__RemoveElement`, `__ReplaceElement`) and `__FlushElementTree`. `js-runtime.md` still declines to enumerate the
+Element PAPI; the authoritative list of what exists is the header of
+`packages/bobcat-element/src/element-papi.js`.
 
 ## Column conventions
 
