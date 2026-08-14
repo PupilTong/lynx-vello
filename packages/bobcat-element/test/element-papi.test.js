@@ -127,10 +127,6 @@ describe("installation", () => {
     }
   });
 
-  it("installs the drop deliverer on the native object", () => {
-    expect(mock.deliverPendingElementDrops).toBeTypeOf("function");
-  });
-
   it("does not install __DropElement: collection is the only release path", () => {
     expect("__DropElement" in globalThis).toBe(false);
   });
@@ -248,15 +244,9 @@ describe("tree mutations", () => {
   });
 });
 
-describe("__FlushElementTree and delivery", () => {
+describe("__FlushElementTree", () => {
   it("flushes through the native object", () => {
     __FlushElementTree();
     expect(mock.named("flushElementTree")).toHaveLength(1);
-  });
-
-  it("delivers nothing when no handle was collected", () => {
-    __CreateView(0);
-    mock.deliverPendingElementDrops?.();
-    expect(mock.named("dropElement")).toEqual([]);
   });
 });

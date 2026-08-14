@@ -20,8 +20,6 @@ interface BobcatNative {
   dropElement(nodeId: number): void;
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
-  /** Installed by `element-papi.js`; applies queued collection drops. */
-  deliverPendingElementDrops?: (() => void) | undefined;
 }
 
 declare var bobcat: BobcatNative;

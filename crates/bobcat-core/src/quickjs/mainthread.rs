@@ -54,18 +54,16 @@
 //! presenter's `has_uncommitted_mutations` gate keeps that state off the
 //! screen.
 //!
-//! # Handle collection is delivered at realm entries
+//! # Handle collection frees elements at job checkpoints
 //!
 //! When `QuickJS` collects an element handle, the PAPI runtime's
-//! `FinalizationRegistry` cleanup callback (a pending job, executed at the
-//! job checkpoint that follows every evaluation) queues the node id.
-//! Queued drops are applied by the runtime's deliver hook, which
-//! [`MainThreadRuntime`] calls before each realm entry and inside
-//! [`MainThreadRuntime::collect_garbage`]. `FinalizationRegistry` sweeps run
-//! only during an actual collection (allocation pressure or an explicit
-//! [`collect_garbage`](MainThreadRuntime::collect_garbage)), never during
-//! realm teardown — so dropping the runtime preserves the last committed
-//! tree.
+//! `FinalizationRegistry` cleanup callback — a pending job, executed at the
+//! job checkpoint that follows every evaluation — calls
+//! `bobcat.dropElement` directly. `FinalizationRegistry` sweeps run only
+//! during an actual collection (allocation pressure or an explicit
+//! [`collect_garbage`](MainThreadRuntime::collect_garbage)), and pending
+//! jobs never run during realm teardown — so dropping the runtime
+//! preserves the last committed tree.
 //!
 //! # Recorded limits
 //!
@@ -88,15 +86,14 @@ use std::rc::Rc;
 
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
-use super::{QuickJsCallable, QuickJsInitializationError, QuickJsScriptEngine};
-use crate::script::{ScriptEngine as _, ScriptError, ScriptValue};
+use super::{QuickJsInitializationError, QuickJsScriptEngine};
+use crate::script::ScriptError;
 use crate::tree::LynxDocument;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
 const BOBCAT_NAMESPACE_SOURCE_NAME: &str = "<bobcat namespace>";
 const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
-const DELIVER_HOOK_SOURCE_NAME: &str = "<bobcat deliver hook>";
 
 /// The Element PAPI runtime, authored in `packages/bobcat-element` where its
 /// Rstest suite runs the same bytes this realm evaluates.
@@ -201,9 +198,6 @@ impl Drop for TreeHandle {
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
-    /// The PAPI runtime's deliver hook: applies unique ids queued by
-    /// collected handles. Called before each realm entry.
-    deliver_drops: QuickJsCallable,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -232,12 +226,8 @@ impl MainThreadRuntime {
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let (tree, deliver_drops) = install_bobcat(&mut engine, elements, on_flush)?;
-        Ok(Self {
-            engine,
-            tree,
-            deliver_drops,
-        })
+        let tree = install_bobcat(&mut engine, elements, on_flush)?;
+        Ok(Self { engine, tree })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -265,49 +255,36 @@ impl MainThreadRuntime {
 
     pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
         self.engine.realm.run_gc();
-        let checkpoint = self
+        let result = self
             .engine
             .checkpoint(crate::script::ScriptErrorPhase::Call)
             .map(|_| ())
             .map_err(|error| MainThreadError::from_engine("collecting garbage", &error));
-        let result = checkpoint.and_then(|()| self.deliver_pending_drops());
         self.tree.borrow_mut().release();
         result
     }
 
     fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
-        let delivered = self.deliver_pending_drops();
-        let result = delivered.and_then(|()| {
-            self.engine
-                .evaluate_raw(quickjs::EvalSource {
-                    name: Some(name),
-                    ..quickjs::EvalSource::new(source)
-                })
-                .map(|_| ())
-                .map_err(|error| MainThreadError::from_engine(phase, &error))
-        });
+        let result = self
+            .engine
+            .evaluate_raw(quickjs::EvalSource {
+                name: Some(name),
+                ..quickjs::EvalSource::new(source)
+            })
+            .map(|_| ())
+            .map_err(|error| MainThreadError::from_engine(phase, &error));
         self.tree.borrow_mut().release();
         result
-    }
-
-    fn deliver_pending_drops(&mut self) -> Result<(), MainThreadError> {
-        let deliver = self.deliver_drops.clone();
-        self.engine
-            .call(&deliver, &ScriptValue::Undefined, &[])
-            .map(|_| ())
-            .map_err(|error| {
-                MainThreadError::from_engine("delivering pending element drops", &error)
-            })
     }
 }
 
 /// Installs the `bobcat` object and the Element PAPI runtime, returning the
-/// tree hand-off handle and the runtime's deliver hook.
+/// document hand-off handle.
 fn install_bobcat(
     engine: &mut QuickJsScriptEngine,
     elements: SharedTree,
     on_flush: impl Fn() + 'static,
-) -> Result<(Rc<RefCell<TreeHandle>>, QuickJsCallable), QuickJsInitializationError> {
+) -> Result<Rc<RefCell<TreeHandle>>, QuickJsInitializationError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
@@ -323,19 +300,7 @@ fn install_bobcat(
         })
         .map_err(QuickJsInitializationError::from_script)?;
 
-    let deliver = engine
-        .evaluate_raw(quickjs::EvalSource {
-            name: Some(DELIVER_HOOK_SOURCE_NAME),
-            ..quickjs::EvalSource::new("bobcat.deliverPendingElementDrops")
-        })
-        .map_err(QuickJsInitializationError::from_script)?;
-    if deliver.kind() != quickjs::ValueKind::Function {
-        return Err(QuickJsInitializationError::from_message(
-            "the Element PAPI runtime did not install its deliver hook",
-        ));
-    }
-
-    Ok((handle, QuickJsCallable(deliver)))
+    Ok(handle)
 }
 
 /// Builds the global `bobcat` namespace object: DOM-vocabulary tree

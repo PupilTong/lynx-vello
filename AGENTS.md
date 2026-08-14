@@ -206,11 +206,12 @@ useful signal for currently-compatible versions of those libraries.
   callback storage/execution remains part of the unimplemented list surface.
   Creation calls return plain JavaScript handle objects minted by the PAPI
   runtime; each carries its DOM `NodeId` under a realm-local symbol and is
-  registered with a `FinalizationRegistry` whose cleanup queues the node id.
-  Queued drops are applied at the next realm entry
-  (or `MainThreadRuntime::collect_garbage`), freeing only that element —
-  its descendants remain live but detached until their own handles drop.
-  Realm teardown never delivers queued drops.
+  registered with a `FinalizationRegistry` whose cleanup calls
+  `bobcat.dropElement`, freeing only that element — its descendants remain
+  live but detached until their own handles are collected. Cleanup runs as
+  a pending job at the job checkpoints (a collection comes from allocation
+  pressure or `MainThreadRuntime::collect_garbage`), and pending jobs never
+  run at realm teardown, which preserves the last committed tree.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
   `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
   the `bobcat` host functions call `dom::Document` directly — while tag
@@ -344,10 +345,9 @@ useful signal for currently-compatible versions of those libraries.
   PAPI shape and unused. Lifecycle: collection is the only release path —
   web-core's model, where a swept `WeakRef` is what frees an element.
   Every non-page handle is registered with a `FinalizationRegistry` whose
-  cleanup queues the node id, and the host applies queued drops at the
-  next realm entry through `bobcat.deliverPendingElementDrops` — never
-  during collection, and never at realm teardown, which preserves the last
-  committed tree. Nothing is validated: a foreign handle resolves to
+  cleanup calls `bobcat.dropElement`; cleanup runs as a pending job at the
+  host's job checkpoints, and never at realm teardown, which preserves the
+  last committed tree. Nothing is validated: a foreign handle resolves to
   undefined and crashes at the native boundary. The file must stay a classic script (no
   import/export at runtime, ECMAScript intrinsics plus `globalThis.bobcat`
   only — the realm has no `console`/`setTimeout`/DOM), which is also what

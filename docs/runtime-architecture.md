@@ -136,9 +136,10 @@ hold an `Engine` and relay OS facts into it.
    identity-stable handle object, maps it to the `NodeId` the native create
    returned, and passes plain numbers to the `bobcat` host functions. Each
    non-page handle is registered with a `FinalizationRegistry` whose
-   cleanup callback queues the node id; queued drops are applied at the
-   next realm entry (or an explicit `collect_garbage`), freeing only that
-   element through `Document::drop_element`. Its children become
+   cleanup callback calls `bobcat.dropElement` — a pending job, executed
+   at the job checkpoint after an evaluation (a collection comes from
+   allocation pressure or an explicit `collect_garbage`) — freeing only
+   that element through `Document::drop_element`. Its children become
    detached roots whose subtrees remain live until their own handles are
    dropped in turn. A batch's first `bobcat` call takes the tree out of its
    hand-off slot; every call after that is a plain `&mut` mutation with no

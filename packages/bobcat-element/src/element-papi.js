@@ -41,11 +41,10 @@
 //   for PAPI shape and unused.
 // - Collection is the only release path — web-core's model, where a swept
 //   WeakRef is what frees an element. Every non-page handle is registered
-//   with a FinalizationRegistry whose cleanup queues the node id; queued
-//   drops are applied by `bobcat.deliverPendingElementDrops`, which the
-//   host calls before each realm entry and inside `collect_garbage` —
-//   never at realm teardown, so the last committed tree survives the
-//   bootstrap realm.
+//   with a FinalizationRegistry whose cleanup calls `bobcat.dropElement`;
+//   cleanup runs as a pending job at the host's job checkpoints, and never
+//   at realm teardown, so the last committed tree survives the bootstrap
+//   realm.
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
 
@@ -74,12 +73,9 @@
 
   const nodeIdSymbol = Symbol("nodeId");
 
-  /** @type {number[]} */
-  const pendingDrops = [];
-
   const registry = new FinalizationRegistry(
     (/** @type {number} */ nodeId) => {
-      pendingDrops.push(nodeId);
+      native.dropElement(nodeId);
     },
   );
 
@@ -104,13 +100,6 @@
     return /** @type {number} */ (
       /** @type {Record<symbol, unknown>} */ (handle)[nodeIdSymbol]
     );
-  }
-
-  function deliverPendingElementDrops() {
-    for (const nodeId of pendingDrops) {
-      native.dropElement(nodeId);
-    }
-    pendingDrops.length = 0;
   }
 
   /**
@@ -291,6 +280,4 @@
     __ReplaceElement,
     __FlushElementTree,
   });
-
-  bobcat.deliverPendingElementDrops = deliverPendingElementDrops;
 })();
