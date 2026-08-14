@@ -265,18 +265,6 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
-    /// Runs a full garbage collection and applies the element drops it
-    /// produces: collected handles enqueue their `FinalizationRegistry`
-    /// cleanup jobs, the job checkpoint runs them, and the deliver hook
-    /// retires the queued elements.
-    ///
-    /// Test support (`gc-test-utils`): the collection backstop is otherwise
-    /// reachable only through allocation-pressure collection, which no test
-    /// can cause deterministically. Production reclamation needs no explicit
-    /// trigger today, so normal builds do not carry this entry point.
-    ///
-    /// Delivered drops mark the batch uncommitted, exactly as entry-time
-    /// delivery does; the tree presents again after its next flush.
     #[cfg(feature = "gc-test-utils")]
     pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
         self.engine.realm.run_gc();
