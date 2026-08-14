@@ -15,8 +15,8 @@ bobcat-cli ───▶ bobcat-core ───▶ dom ─┬─▶ vendor/stylo
 `dom` owns the generic document, styling, invalidation, layout seam, visual
 order, and private paint pipeline.
 The Lynx runtime element layer is split across the boundary it crosses:
-`bobcat_core::tree` is the native half — `ElementTree` over
-`dom::Document<()>`, view/device configuration, and UA defaults — and
+`bobcat_core::tree` is the native half — Lynx page policy over
+`dom::Document<()>`: view/device configuration and UA defaults — and
 `packages/bobcat-element` is the script half, owning Element-PAPI member
 policy, tag vocabulary, and handle lifecycle, without moving any of those
 concerns into the standards core.
@@ -32,7 +32,7 @@ in [dom-public-api.md](dom-public-api.md).
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
 feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
-still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
+still unbuilt — the seam is `Document::add_stylesheet`.
 
 ## The dom core: one tree, Document-mediated mutation
 
@@ -104,7 +104,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; the native element tree (`tree`: `<page>` root policy, `Viewport`/stylo `Device` construction, UA stylesheet generation, the uncommitted-batch flag; element identity is the DOM `NodeId` and misuse crashes in `dom`); optional default QuickJS adapter, the `bobcat` realm object, and the embedded Element PAPI runtime | Re-exporting GPU/render conveniences, an element-host trait, a second DOM, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; Lynx page policy (`tree`: the `page` root tag, `Viewport`/stylo `Device` construction, UA stylesheet generation; element identity is the DOM `NodeId` and misuse crashes in `dom`); optional default QuickJS adapter, the `bobcat` realm object, and the embedded Element PAPI runtime | Re-exporting GPU/render conveniences, an element-host trait, a second DOM, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The fifteen `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); the `FinalizationRegistry` drop backstop and its pending-drop queue | Validation of any kind, style/layout/paint behavior, direct DOM access, or any state the native side must gate presentation on |
@@ -112,7 +112,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 
 ## Style lifecycle
 
-1. `bobcat_core::tree::ElementTree` constructs a Stylo `Device` and creates
+1. `bobcat_core::tree::new_document` constructs a Stylo `Device` and creates
    `dom::Document<()>` through `Document::new`. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
@@ -134,7 +134,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
    `hughie` host. Computed values are lent directly from each node's
    Stylo `ElementData`, without an adapter-side style copy.
 7. `bobcat_core::engine::Engine` asks the document-owned Painter (through
-   `ElementTree`'s narrow engine-side surface) whether its retained scene is
+   the shared document) whether its retained scene is
    current. A dirty document runs `Document::render`, builds the private
    paint order, and retains the resulting Vello scene. Embedders never drive
    this lifecycle — they relay OS facts to the engine, which schedules it.
@@ -170,7 +170,7 @@ What that covers, and what it does not:
 
 - `.web.bundle` `StyleInfo` decoding exists, but no runtime layer lowers and
   mounts those decoded rules; the seam is
-  `ElementTree::add_author_stylesheet`;
+  `Document::add_stylesheet`;
 - viewport-relative `rpx`/`ppx` units have no owner;
 - event registrations, CSS-scope (`__SetCSSId`) ingestion, and the remaining
   PAPI members have no adapter;

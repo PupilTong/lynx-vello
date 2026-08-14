@@ -5,12 +5,12 @@
 
 use bobcat_core::engine::SharedTree;
 use bobcat_core::quickjs::MainThreadRuntime;
-use bobcat_core::tree::{ElementTree, PageConfig, Viewport};
+use bobcat_core::tree::{PageConfig, Viewport, new_document};
 
 const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
 
 fn runtime() -> (MainThreadRuntime, SharedTree) {
-    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let elements = SharedTree::new(new_document(VIEWPORT, PageConfig::default()));
     let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     (runtime, elements)
 }
@@ -38,10 +38,9 @@ fn a_card_root_builds_its_tree_through_the_papi() {
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(elements.page_created());
-    assert!(elements.document().get(2).is_some());
-    assert!(elements.document().get(3).is_some());
-    assert!(elements.document().get(4).is_some());
+    assert!(elements.get(2).is_some());
+    assert!(elements.get(3).is_some());
+    assert!(elements.get(4).is_some());
 }
 
 #[test]
@@ -65,8 +64,7 @@ fn create_view_returns_a_handle_append_element_accepts() {
         )
         .expect("main-thread script");
     let elements = elements.tree();
-    assert!(elements.page_created());
-    assert!(elements.document().get(2).is_some());
+    assert!(elements.get(2).is_some());
 }
 
 #[test]
@@ -114,7 +112,7 @@ fn all_four_tree_mutation_papis_are_host_functions_with_native_return_values() {
     let elements = elements.tree();
     for id in 2..=5 {
         assert!(
-            elements.document().get(id).is_some(),
+            elements.get(id).is_some(),
             "tree mutation must not retire element {id}"
         );
     }
@@ -185,10 +183,7 @@ fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
 
     let elements = elements.tree();
     for id in 2..=9 {
-        assert!(
-            elements.document().get(id).is_some(),
-            "element {id} must be live"
-        );
+        assert!(elements.get(id).is_some(), "element {id} must be live");
     }
 }
 
@@ -226,10 +221,10 @@ fn drop_element_frees_the_node_and_dom_reuses_the_slot() {
 
     let elements = elements.tree();
     assert!(
-        elements.document().get(2).is_some(),
+        elements.get(2).is_some(),
         "the freed slot is reused by the next creation"
     );
-    assert!(!elements.document().is_connected(2));
+    assert!(!elements.is_connected(2));
 }
 
 #[test]
@@ -253,9 +248,9 @@ fn drop_element_frees_only_the_target_and_preserves_descendants() {
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(elements.document().get(2).is_none());
-    assert!(elements.document().get(3).is_some());
-    assert!(elements.document().get(4).is_some());
+    assert!(elements.get(2).is_none());
+    assert!(elements.get(3).is_some());
+    assert!(elements.get(4).is_some());
 }
 
 #[test]
@@ -274,7 +269,7 @@ fn create_page_is_idempotent_across_calls() {
             ",
         )
         .expect("main-thread script");
-    assert!(elements.tree().page_created());
+    assert!(elements.tree().rounded_layout(1).is_some());
 }
 
 #[test]
@@ -295,10 +290,7 @@ fn process_data_runs_before_render_page_and_feeds_it() {
         .expect("main-thread script");
     let elements = elements.tree();
     for id in 2..=4 {
-        assert!(
-            elements.document().get(id).is_some(),
-            "child {id} must be live"
-        );
+        assert!(elements.get(id).is_some(), "child {id} must be live");
     }
 }
 
@@ -315,7 +307,7 @@ fn a_script_without_render_page_is_an_error() {
 }
 
 #[test]
-fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
+fn the_page_has_no_size_until_the_tree_is_flushed() {
     let (mut runtime, elements) = runtime();
     runtime
         .evaluate_main_thread_script(
@@ -326,10 +318,16 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
             ",
         )
         .expect("evaluate");
-    assert!(!elements.tree().page_created());
+    {
+        let elements = elements.tree();
+        let unflushed = elements.rounded_layout(1).expect("layout state");
+        assert!(unflushed.size.width.abs() < f32::EPSILON);
+    }
 
     runtime.render_page().expect("render");
-    assert!(elements.tree().page_created());
+    let elements = elements.tree();
+    let flushed = elements.rounded_layout(1).expect("layout state");
+    assert!((flushed.size.width - 393.0).abs() < f32::EPSILON);
 }
 
 #[test]
@@ -384,8 +382,8 @@ fn parent_component_ids_are_ignored_entirely() {
         )
         .expect("the parent component argument is accepted for shape only");
     let elements = elements.tree();
-    assert!(elements.document().get(2).is_some());
-    assert!(elements.document().get(3).is_some());
+    assert!(elements.get(2).is_some());
+    assert!(elements.get(3).is_some());
 }
 
 #[test]
@@ -468,17 +466,17 @@ fn collection_drops_unreferenced_js_elements_before_re_rendering() {
         )
         .expect("first boot");
     assert!(
-        elements.tree().document().is_connected(2),
+        elements.tree().is_connected(2),
         "an undelivered collection must not retire the committed element"
     );
 
     runtime.collect_garbage().expect("collect");
-    assert!(elements.tree().document().get(2).is_none());
+    assert!(elements.tree().get(2).is_none());
 
     runtime.render_page().expect("second boot");
     let elements = elements.tree();
     assert!(
-        elements.document().is_connected(2),
+        elements.is_connected(2),
         "the re-render's view reuses the freed slot and is attached"
     );
 }
@@ -510,14 +508,14 @@ fn vm_drop_of_a_parent_preserves_descendants_with_live_handles() {
     runtime.collect_garbage().expect("collect");
 
     let elements = elements.tree();
-    assert!(elements.document().get(2).is_none());
-    assert!(elements.document().get(3).is_some());
-    assert!(elements.document().get(4).is_some());
+    assert!(elements.get(2).is_none());
+    assert!(elements.get(3).is_some());
+    assert!(elements.get(4).is_some());
 }
 
 #[test]
 fn a_fresh_realm_over_a_retained_tree_keeps_working() {
-    let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
+    let elements = SharedTree::new(new_document(VIEWPORT, PageConfig::default()));
     let script = r"
         globalThis.renderPage = function () {
           __AppendElement(__CreatePage('card', 0), __CreateView(0));
@@ -535,7 +533,7 @@ fn a_fresh_realm_over_a_retained_tree_keeps_working() {
     second.run_main_thread_script(script).expect("second boot");
 
     let elements = elements.tree();
-    assert_eq!(elements.document().document_element().child_ids().len(), 2);
+    assert_eq!(elements.document_element().child_ids().len(), 2);
 }
 
 #[test]
@@ -550,11 +548,11 @@ fn bootstrap_realm_teardown_preserves_the_last_committed_tree() {
             ",
         )
         .expect("first boot");
-    assert!(elements.tree().document().get(2).is_some());
+    assert!(elements.tree().get(2).is_some());
 
     drop(runtime);
 
-    assert!(elements.tree().document().get(2).is_some());
+    assert!(elements.tree().get(2).is_some());
 }
 
 #[test]
@@ -578,7 +576,7 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     let elements = elements.tree();
     for id in 2..=4 {
         assert!(
-            elements.document().get(id).is_some(),
+            elements.get(id).is_some(),
             "the microtask's appends must have landed (id {id})"
         );
     }
@@ -619,7 +617,7 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
 
     let elements = elements.tree();
     assert!(
-        elements.page_created(),
+        elements.rounded_layout(1).is_some(),
         "the boot sequence still ran to completion"
     );
 }

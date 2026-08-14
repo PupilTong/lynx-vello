@@ -9,7 +9,7 @@
 //! 1. A global `bobcat` object whose members are Rust host functions speaking DOM vocabulary over
 //!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `insertBefore`,
 //!    `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a direct call
-//!    into [`ElementTree`](crate::tree::ElementTree) through the tree hand-off.
+//!    into [`dom::Document`] through the document hand-off.
 //! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
 //!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary, and
 //!    manages handle lifecycle with a symbol-keyed node id and a `FinalizationRegistry`.
@@ -40,7 +40,7 @@
 //!
 //! # The realm takes the tree for a batch, and returns it at the flush
 //!
-//! The [`ElementTree`](crate::tree::ElementTree) changes hands through a
+//! The [`LynxDocument`](crate::tree::LynxDocument) changes hands through a
 //! [`SharedTree`] slot. A batch's first `bobcat` call takes the tree out;
 //! every call after that is a plain `&mut` mutation with no
 //! synchronization — the tree's own validation is the single source of
@@ -90,7 +90,7 @@ use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsCallable, QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::{ScriptEngine as _, ScriptError, ScriptValue};
-use crate::tree::ElementTree;
+use crate::tree::LynxDocument;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
@@ -161,11 +161,11 @@ use crate::engine::SharedTree;
 /// that commits it.
 struct TreeHandle {
     slot: SharedTree,
-    taken: Option<ElementTree>,
+    taken: Option<LynxDocument>,
 }
 
 impl TreeHandle {
-    fn tree(&mut self) -> &mut ElementTree {
+    fn tree(&mut self) -> &mut LynxDocument {
         if self.taken.is_none() {
             self.taken = Some(self.slot.take());
         }
@@ -179,7 +179,7 @@ impl TreeHandle {
             Some(tree) => tree,
             None => self.slot.take(),
         };
-        tree.flush_element_tree();
+        tree.layout();
         self.slot.put(tree);
     }
 
@@ -355,7 +355,7 @@ fn install_bobcat_object(
 
     let tree = Rc::clone(handle);
     let member = realm.function("createPage", 0, move |_arguments| {
-        let node = tree.borrow_mut().tree().create_page();
+        let node = tree.borrow_mut().tree().document_element().id();
         Ok(node_id_value(node))
     })?;
     realm.set_property(&namespace, "createPage", &member)?;
@@ -363,7 +363,7 @@ fn install_bobcat_object(
     let tree = Rc::clone(handle);
     let member = realm.function("createElement", 1, move |arguments| {
         let tag = string_argument("bobcat.createElement", arguments, 0)?;
-        let node = tree.borrow_mut().tree().create_element(tag);
+        let node = tree.borrow_mut().tree().create_element(tag, ());
         Ok(node_id_value(node))
     })?;
     realm.set_property(&namespace, "createElement", &member)?;
@@ -402,9 +402,13 @@ fn install_bobcat_object(
     let member = realm.function("replaceElement", 2, move |arguments| {
         let new_element = node_id_argument("bobcat.replaceElement", arguments, 0)?;
         let old_element = node_id_argument("bobcat.replaceElement", arguments, 1)?;
-        tree.borrow_mut()
-            .tree()
-            .replace_element(new_element, old_element);
+        let mut handle = tree.borrow_mut();
+        let document = handle.tree();
+        // ChildNode.replaceWith over a detached old element is a no-op.
+        if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
+            document.insert_before(parent, new_element, Some(old_element));
+            document.remove_element(old_element);
+        }
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "replaceElement", &member)?;

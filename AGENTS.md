@@ -127,13 +127,12 @@ useful signal for currently-compatible versions of those libraries.
   feature adds the internal QuickJS adapter,
   opaque QuickJS-backed view factory, and the concrete
   `quickjs::MainThreadRuntime`. That runtime owns only the realm: a
-  batch's first Element-PAPI mutation takes the tree out of its hand-off
+  batch's first `bobcat` call takes the document out of its hand-off
   slot, every call after that is a plain `&mut` mutation with no
-  synchronization (the tree's own validation is the single source of every
-  `PapiError`), and `__FlushElementTree` runs the style + layout commit on
-  the taken tree, puts it back, and notifies the presenter through the
-  callback injected at construction — locks are touched twice per batch,
-  never per call;
+  synchronization, and `__FlushElementTree` runs the style + layout commit
+  on the taken document, puts it back, and notifies the presenter through
+  the callback injected at construction — locks are touched twice per
+  batch, never per call;
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
@@ -149,8 +148,8 @@ useful signal for currently-compatible versions of those libraries.
   present's vsync wait happens outside the borrow), the slot is occupied
   while the script merely computes (a long JS task between batches cannot
   stop scrolling — one truth, no reconciliation protocol), a half-applied
-  batch is unobservable by construction, and `has_uncommitted_mutations`
-  guards the abandoned-batch edge. Embedders provide user input, device
+  batch is unobservable while the slot is empty; an abandoned batch may
+  present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline — the engine schedules through the
@@ -211,13 +210,15 @@ useful signal for currently-compatible versions of those libraries.
   (or `MainThreadRuntime::collect_garbage`), freeing only that element —
   its descendants remain live but detached until their own handles drop.
   Realm teardown never delivers queued drops.
-  Core owns the native half of the element layer in its `tree` module —
-  `<page>` root policy, `Viewport`/stylo `Device` construction, the Lynx UA
-  cascade defaults, and the uncommitted-batch flag — while tag vocabulary,
-  handle lifecycle, and the PAPI member surface live in
+  Core owns Lynx page policy in its `tree` module — the `page` root tag,
+  `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
+  the `bobcat` host functions call `dom::Document` directly — while tag
+  vocabulary, handle lifecycle, and the PAPI member surface live in
   `packages/bobcat-element`. Element identity is the DOM `NodeId`; nothing
   validates script input, and misuse panics in `dom`, converted to a
-  JavaScript exception at the host boundary.
+  JavaScript exception at the host boundary. An unflushed batch may
+  present once its evaluation ends — web-core's visibility model, where
+  the browser paints the live DOM regardless of `__FlushElementTree`.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -665,7 +666,7 @@ useful signal for currently-compatible versions of those libraries.
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.
   Font registration takes the shared `FontBlob` resource through
-  `Engine` → `ElementTree` → `Document` → `TextContext`; an owned loader
+  `Engine` → `Document` → `TextContext`; an owned loader
   buffer is moved into Parley without copying its payload, while
   `FontBlob::copy_from_slice` is the explicit copying fallback.
   Relayout damage on an element evicts its direct text children's

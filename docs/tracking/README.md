@@ -22,8 +22,8 @@ and visual files have the most such markers; the runtime ones have the fewest.
 
 The runtime work that has landed so far, none of which these files were
 written to track: the Lynx element layer is split between
-`crates/bobcat-core`'s `tree` module (the native tree: `<page>` policy, the
-UA cascade defaults, the uncommitted-batch flag) and
+`crates/bobcat-core`'s `tree` module (Lynx page policy: `<page>` root tag,
+the UA cascade defaults, view metrics) and
 `packages/bobcat-element` (the Element PAPI runtime: member surface, tag
 vocabulary, handle lifecycle over a symbol-keyed node id and
 `FinalizationRegistry`), and `bobcat-core`'s feature-gated

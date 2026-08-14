@@ -232,6 +232,9 @@
    * @returns {object}
    */
   function __InsertElementBefore(parent, child, reference) {
+    if (reference === child) {
+      return /** @type {object} */ (child);
+    }
     native.insertBefore(
       nodeIdOf(parent),
       nodeIdOf(child),
@@ -259,6 +262,9 @@
    * @returns {undefined}
    */
   function __ReplaceElement(newElement, oldElement) {
+    if (newElement === oldElement) {
+      return undefined;
+    }
     native.replaceElement(nodeIdOf(newElement), nodeIdOf(oldElement));
     return undefined;
   }

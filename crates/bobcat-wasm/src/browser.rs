@@ -83,7 +83,7 @@ impl BobcatCanvas {
     #[napi]
     #[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
     pub fn create_page(&mut self, _component_id: String, _component_css_id: i32) -> u32 {
-        self.engine.elements().create_page() as u32
+        self.engine.elements().document_element().id() as u32
     }
 
     /// Creates one detached Lynx `view` element and returns its node id. The
@@ -91,7 +91,7 @@ impl BobcatCanvas {
     #[napi]
     #[allow(clippy::cast_possible_truncation)]
     pub fn create_view(&mut self, _parent_component_unique_id: u32) -> u32 {
-        self.engine.elements().create_element("view") as u32
+        self.engine.elements().create_element("view", ()) as u32
     }
 
     /// Appends an element and returns the appended child id.
@@ -112,7 +112,7 @@ impl BobcatCanvas {
     /// Commits pending Element-PAPI mutations and requests a browser frame.
     #[napi]
     pub fn flush_element_tree(&mut self) {
-        self.engine.elements().flush_element_tree();
+        self.engine.elements().layout();
         self.engine.refresh();
     }
 

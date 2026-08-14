@@ -10,28 +10,29 @@
 //!
 //! # Two threads, one hand-off slot
 //!
-//! The element tree has exactly one holder at any instant; [`SharedTree`]
-//! is the slot it changes hands through:
+//! The document has exactly one holder at any instant; [`SharedTree`] is
+//! the slot it changes hands through:
 //!
 //! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the `QuickJS`
-//!   realm and its event loop. A batch's first Element PAPI mutation takes the tree out of the
-//!   slot; every call after that is a plain `&mut` mutation with no synchronization at all;
-//!   `__FlushElementTree` runs the style + layout commit on the taken tree, puts it back, and asks
-//!   for a frame. Locks are touched twice per batch, not per call.
+//!   realm and its event loop. A batch's first `bobcat` call takes the document out of the slot;
+//!   every call after that is a plain `&mut` mutation with no synchronization at all;
+//!   `__FlushElementTree` runs the style + layout commit on the taken document, puts it back, and
+//!   asks for a frame. Locks are touched twice per batch, not per call.
 //! - **The presenting side** (the thread the embedder calls the engine from — its OS event loop):
 //!   input routing, scrolling, frame production (paint-order build + scene encode), GPU submission,
-//!   and present. It borrows the tree from the slot non-blockingly: an empty slot (a batch is open)
-//!   or a busy slot lock means re-present the retained target, buffer the input, and retry next
-//!   frame.
+//!   and present. It borrows the document from the slot non-blockingly: an empty slot (a batch is
+//!   open) or a busy slot lock means re-present the retained target, buffer the input, and retry
+//!   next frame.
 //!
 //! The slot is occupied while the script merely computes, which is the
 //! point: a long JavaScript task between batches does not stop the
 //! presenting side from scrolling — target resolution reads the retained
-//! paint order, the offset lands in the tree, and the next frame is
+//! paint order, the offset lands in the document, and the next frame is
 //! produced and presented without the script's cooperation. A half-applied
-//! batch is unobservable by construction (the tree is simply absent), and
-//! [`ElementTree::has_uncommitted_mutations`] guards the one edge where an
-//! abandoned batch comes back uncommitted at the end of an evaluation.
+//! batch is unobservable while the slot is empty; once an evaluation ends
+//! the document is back, and whatever state it holds may present — the
+//! same visibility web-core has, where the browser paints the live DOM on
+//! its own schedule regardless of `__FlushElementTree`.
 //!
 //! The law: the main thread waits only on its own batch boundaries; the
 //! presenting side never waits on the main thread; present's vsync wait
@@ -51,11 +52,11 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use dom::input::InputEvent;
 use dom::render::gpu::{GpuError, Headless};
 use dom::vello::peniko::Color;
-use dom::{FontBlob, ImageStore};
+use dom::{FontBlob, ImageStore, StylesheetOrigin};
 
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
-use crate::tree::{ElementTree, PageConfig, Viewport};
+use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
 /// The physical pixel size of the render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,10 +180,10 @@ impl FrameRequester for NoWindow {
 
 pub type OffscreenEngine = Engine<'static, NoWindow>;
 
-/// The hand-off slot for the one element tree.
+/// The hand-off slot for the one document.
 #[derive(Clone)]
 pub struct SharedTree {
-    slot: Arc<Mutex<Option<ElementTree>>>,
+    slot: Arc<Mutex<Option<LynxDocument>>>,
 }
 
 impl fmt::Debug for SharedTree {
@@ -193,7 +194,7 @@ impl fmt::Debug for SharedTree {
 
 impl SharedTree {
     #[must_use]
-    pub fn new(tree: ElementTree) -> Self {
+    pub fn new(tree: LynxDocument) -> Self {
         Self {
             slot: Arc::new(Mutex::new(Some(tree))),
         }
@@ -227,7 +228,7 @@ impl SharedTree {
     ///
     /// Panics if a batch is already open: there is one main thread.
     #[cfg(feature = "quickjs")]
-    pub(crate) fn take(&self) -> ElementTree {
+    pub(crate) fn take(&self) -> LynxDocument {
         self.lock()
             .take()
             .expect("the tree was already taken: only one batch can be open")
@@ -239,7 +240,7 @@ impl SharedTree {
     ///
     /// Panics if the slot is occupied: the tree cannot be returned twice.
     #[cfg(feature = "quickjs")]
-    pub(crate) fn put(&self, tree: ElementTree) {
+    pub(crate) fn put(&self, tree: LynxDocument) {
         let mut guard = self.lock();
         assert!(
             guard.is_none(),
@@ -248,20 +249,20 @@ impl SharedTree {
         *guard = Some(tree);
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<ElementTree>> {
+    fn lock(&self) -> MutexGuard<'_, Option<LynxDocument>> {
         self.slot
             .lock()
             .unwrap_or_else(|error| panic!("the tree slot is poisoned: {error}"))
     }
 }
 
-/// A borrow of the element tree from its slot.
+/// A borrow of the document from its slot.
 #[derive(Debug)]
-pub struct TreeGuard<'a>(MutexGuard<'a, Option<ElementTree>>);
+pub struct TreeGuard<'a>(MutexGuard<'a, Option<LynxDocument>>);
 
 impl Deref for TreeGuard<'_> {
-    type Target = ElementTree;
-    fn deref(&self) -> &ElementTree {
+    type Target = LynxDocument;
+    fn deref(&self) -> &LynxDocument {
         self.0
             .as_ref()
             .expect("a TreeGuard is only built over an occupied slot")
@@ -269,7 +270,7 @@ impl Deref for TreeGuard<'_> {
 }
 
 impl DerefMut for TreeGuard<'_> {
-    fn deref_mut(&mut self) -> &mut ElementTree {
+    fn deref_mut(&mut self) -> &mut LynxDocument {
         self.0
             .as_mut()
             .expect("a TreeGuard is only built over an occupied slot")
@@ -336,7 +337,7 @@ impl<'window, W: Window> Engine<'window, W> {
         #[cfg(feature = "quickjs")]
         let (message_sender, messages) = mpsc::channel();
         Ok(Self {
-            elements: SharedTree::new(ElementTree::new(viewport, config)),
+            elements: SharedTree::new(new_document(viewport, config)),
             viewport,
             frame_size,
             #[cfg(feature = "quickjs")]
@@ -351,7 +352,7 @@ impl<'window, W: Window> Engine<'window, W> {
         })
     }
 
-    /// A blocking borrow of the element tree, for observation and setup.
+    /// A blocking borrow of the document, for observation and setup.
     #[must_use]
     pub fn elements(&self) -> TreeGuard<'_> {
         self.elements.tree()
@@ -365,7 +366,9 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// Mounts author CSS.
     pub fn add_author_stylesheet(&mut self, css: &str) {
-        self.elements.tree().add_author_stylesheet(css);
+        self.elements
+            .tree()
+            .add_stylesheet(css, StylesheetOrigin::Author);
         self.refresh();
     }
 
@@ -388,7 +391,7 @@ impl<'window, W: Window> Engine<'window, W> {
     fn drain_deferred(
         pending_resize: &mut Option<(f32, f32, f32)>,
         pending_input: &mut VecDeque<InputEvent>,
-        tree: &mut ElementTree,
+        tree: &mut LynxDocument,
     ) {
         if let Some((width, height, ratio)) = pending_resize.take() {
             tree.set_viewport(width, height);
@@ -536,11 +539,9 @@ impl<'window, W: Window> Engine<'window, W> {
         let size = self.frame_size;
         if let Some(mut tree) = self.elements.try_tree() {
             Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
-            if !tree.has_uncommitted_mutations() {
-                let produced = tree.render();
-                if produced || !graphics.rendered_at(size) {
-                    graphics.render_to_target(&tree.scene(), size)?;
-                }
+            let produced = tree.render();
+            if produced || !graphics.rendered_at(size) {
+                graphics.render_to_target(&tree.scene(), size)?;
             }
         }
         if graphics.rendered_at(size) {
@@ -563,9 +564,6 @@ impl<'window, W: Window> Engine<'window, W> {
             return Ok(false);
         };
         Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
-        if tree.has_uncommitted_mutations() {
-            return Ok(false);
-        }
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
@@ -592,7 +590,6 @@ impl<'window, W: Window> Engine<'window, W> {
             Output::None => Err(EngineError::NoDrawTarget),
             Output::Offscreen(gpu) => {
                 if let Some(mut tree) = self.elements.try_tree()
-                    && !tree.has_uncommitted_mutations()
                     && tree.render()
                 {
                     gpu.render_frame(&tree.scene(), size.width, size.height, Color::WHITE)
@@ -602,9 +599,7 @@ impl<'window, W: Window> Engine<'window, W> {
                 Ok(Screenshot { size, pixels })
             }
             Output::Window(graphics) => {
-                if let Some(mut tree) = self.elements.try_tree()
-                    && !tree.has_uncommitted_mutations()
-                {
+                if let Some(mut tree) = self.elements.try_tree() {
                     let produced = tree.render();
                     if produced || !graphics.rendered_at(size) {
                         graphics.render_to_target(&tree.scene(), size)?;
@@ -784,18 +779,11 @@ mod tests {
         finished.expect("the script must boot");
 
         let elements = engine.elements();
-        assert!(elements.page_created(), "the page was created");
+        assert!(elements.is_connected(2), "the first view is attached");
+        assert!(elements.is_connected(3), "the second view is attached");
         assert!(
-            elements.document().get(2).is_some(),
-            "the first view is live"
-        );
-        assert!(
-            elements.document().get(3).is_some(),
-            "the second view is live"
-        );
-        assert!(
-            !elements.has_uncommitted_mutations(),
-            "the boot's final flush closed the batch"
+            elements.rounded_layout(1).is_some(),
+            "the boot's final flush laid the page out"
         );
     }
 }
