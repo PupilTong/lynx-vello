@@ -11,10 +11,6 @@ publish = false
 [features]
 default = ["quickjs"]
 quickjs = ["dep:quickjs-rust-bridge"]
-# Test-support surface: deterministic garbage collection with element-drop
-# delivery (MainThreadRuntime::collect_garbage). Enabled by this crate's own
-# integration tests through the dev-dependency below; never a default.
-gc-test-utils = []
 
 [dependencies]
 bytes = { workspace = true }
@@ -30,7 +26,6 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-bobcat-core = { workspace = true, features = ["quickjs", "gc-test-utils"] }
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }

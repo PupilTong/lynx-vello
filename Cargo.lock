@@ -216,7 +216,6 @@ dependencies = [
 name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
- "bobcat-core",
  "bytes",
  "data-url",
  "dom",

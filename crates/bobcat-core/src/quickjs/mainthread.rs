@@ -61,10 +61,10 @@
 //! `FinalizationRegistry` cleanup callback (a pending job, executed at the
 //! job checkpoint that follows every evaluation) queues the unique id.
 //! Queued drops are applied by the runtime's deliver hook, which
-//! [`MainThreadRuntime`] calls before each realm entry (and inside
-//! `collect_garbage`, the `gc-test-utils` test-feature entry point).
-//! `FinalizationRegistry` sweeps run only during an actual collection
-//! (allocation pressure, or that explicit trigger in tests), never during
+//! [`MainThreadRuntime`] calls before each realm entry and inside
+//! [`MainThreadRuntime::collect_garbage`]. `FinalizationRegistry` sweeps run
+//! only during an actual collection (allocation pressure or an explicit
+//! [`collect_garbage`](MainThreadRuntime::collect_garbage)), never during
 //! realm teardown — so dropping the runtime preserves the last committed
 //! tree.
 //!
@@ -265,7 +265,6 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
-    #[cfg(feature = "gc-test-utils")]
     pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
         self.engine.realm.run_gc();
         let checkpoint = self
