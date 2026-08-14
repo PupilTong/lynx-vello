@@ -534,7 +534,11 @@ importers:
         specifier: ^3.4.19
         version: 3.4.19
 
-  packages/bobcat-element: {}
+  packages/bobcat-element:
+    devDependencies:
+      '@rstest/core':
+        specifier: 0.11.8
+        version: 0.11.8
 
   packages/github-pages:
     dependencies:
@@ -1883,6 +1887,16 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@rsbuild/core@2.1.13':
+    resolution: {integrity: sha512-Z+6MzmjOio4+bFZQ24k+7ge/oNCOdXIunAssrswTNE8AIf6mcyXpJZevRXRiOEMZasRPA8VNyh+9JngQLg729Q==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    hasBin: true
+    peerDependencies:
+      core-js: '>= 3.0.0'
+    peerDependenciesMeta:
+      core-js:
+        optional: true
+
   '@rsbuild/core@2.1.4':
     resolution: {integrity: sha512-kdubx/qB6tXduCdqaW78OULLZJ3ludpuA4mOkDko18THsI1rUy9U34DsaDSnotE8GAvTeme+FX9MnqLEUlg8kQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -2121,6 +2135,19 @@ packages:
     peerDependencies:
       happy-dom: ^20.8.3
       jsdom: '*'
+    peerDependenciesMeta:
+      happy-dom:
+        optional: true
+      jsdom:
+        optional: true
+
+  '@rstest/core@0.11.8':
+    resolution: {integrity: sha512-XworMa277b5Cf4/Box18frFjWGP4dO/NIals+Ck/Q8nhe1z1t8j0P67zh6rv5xTdE3CCEfItICGvdjzz6VRhLg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+    hasBin: true
+    peerDependencies:
+      happy-dom: ^20.8.3
+      jsdom: '>=15.0.0'
     peerDependenciesMeta:
       happy-dom:
         optional: true
@@ -5251,6 +5278,13 @@ snapshots:
   '@rollup/rollup-win32-x64-msvc@4.62.2':
     optional: true
 
+  '@rsbuild/core@2.1.13':
+    dependencies:
+      '@rspack/core': 2.1.4(@swc/helpers@0.5.23)
+      '@swc/helpers': 0.5.23
+    transitivePeerDependencies:
+      - '@module-federation/runtime-tools'
+
   '@rsbuild/core@2.1.4':
     dependencies:
       '@rspack/core': 2.1.4(@swc/helpers@0.5.23)
@@ -5534,6 +5568,14 @@ snapshots:
   '@rstest/core@0.11.2':
     dependencies:
       '@rsbuild/core': 2.1.9
+      '@types/chai': 5.2.3
+    transitivePeerDependencies:
+      - '@module-federation/runtime-tools'
+      - core-js
+
+  '@rstest/core@0.11.8':
+    dependencies:
+      '@rsbuild/core': 2.1.13
       '@types/chai': 5.2.3
     transitivePeerDependencies:
       - '@module-federation/runtime-tools'

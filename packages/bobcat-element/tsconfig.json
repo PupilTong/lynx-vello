@@ -13,5 +13,5 @@
     "declaration": false,
     "isolatedDeclarations": false
   },
-  "include": ["src", "test", "vitest.config.ts"]
+  "include": ["src", "test", "rstest.config.ts"]
 }

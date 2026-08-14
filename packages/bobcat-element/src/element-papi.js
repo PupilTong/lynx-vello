@@ -3,8 +3,8 @@
 //
 // This file is the authoritative Element PAPI surface. It is evaluated as a
 // classic script inside the QuickJS main-thread realm before any bundle code
-// runs (bobcat-core embeds it with include_str!), and it is imported by the
-// vitest suite for its side effects. It therefore uses no import/export
+// runs (bobcat-core embeds it with include_str!), and it is imported by its
+// Rstest suite for its side effects. It therefore uses no import/export
 // syntax and reaches the outside world only through two globals:
 //
 // - `globalThis.bobcat` — the native object installed by the host before this
@@ -49,9 +49,12 @@
 //   with; a handle is unforgeable because identity lives in a private
 //   WeakMap, not on the object.
 // - Unique ids auto-increment from 1 (the permanent page) and are never
-//   reused. This script owns the counter — seeded from the native table so a
-//   fresh realm over a retained tree continues the sequence — and the native
-//   side checks that ids arrive in sequence.
+//   reused. This script owns the allocator: the element table is a dense
+//   array indexed by unique id — the same shape as the native id-to-node
+//   table and web-core's element map — so its length is the next id. It is
+//   seeded from the native table so a fresh realm over a retained tree
+//   continues the sequence, and the native side checks that ids arrive in
+//   sequence.
 // - Dropping is the only retirement path. `__DropElement` retires exactly one
 //   element immediately. As a garbage-collection backstop, every non-page
 //   handle is registered with a FinalizationRegistry whose cleanup callback
@@ -95,23 +98,44 @@
   const I32_MIN = -2147483648;
   const I32_MAX = 2147483647;
 
-  // The monotonic unique-id allocator, seeded from the native table so a
-  // fresh realm over a retained tree continues the sequence. Ids are never
-  // reused, and the counter only advances on successful creation.
-  let nextUniqueId = native.nextElementUniqueId();
+  /**
+   * @typedef {object} ElementRecord
+   * @property {number} parentComponentUniqueId Lynx bookkeeping the native
+   *   side never reads; recorded, not honored.
+   * @property {number} componentCssId
+   * @property {WeakRef<object> | undefined} handle Weak back-reference for
+   *   future PAPI members that resolve ids to handles
+   *   (`__GetElementByUniqueId` and friends).
+   */
 
   /**
-   * Live elements by unique id. Presence means the element has not been
-   * dropped; the page entry is permanent. The recorded fields are Lynx
-   * bookkeeping the native side never reads.
+   * The element table: one slot per unique id ever allocated, indexed
+   * directly by id — the same dense shape as the native id-to-node table and
+   * web-core's element map. A live element's slot holds its record;
+   * retirement tombstones the slot by assigning undefined (never `delete`,
+   * which would take the array off QuickJS's dense fast path permanently).
+   * Slot 0 is the permanent null sentinel, and the array length is the
+   * unique-id allocator: the next element takes id `elements.length`, which
+   * only advances when the native create succeeds.
    *
-   * @type {Map<number, { parentComponentUniqueId: number, componentCssId: number }>}
+   * @type {(ElementRecord | undefined)[]}
    */
-  const liveElements = new Map();
-  liveElements.set(PAGE_UNIQUE_ID, {
+  const elements = [];
+  {
+    // Seed to the native table's next id so a fresh realm over a retained
+    // tree continues the sequence. Pushing keeps the array dense; elements
+    // an earlier realm created stay slotless here, which is correct — no
+    // handle in this realm can name them.
+    const base = native.nextElementUniqueId();
+    for (let index = 0; index < base; index += 1) {
+      elements.push(undefined);
+    }
+  }
+  elements[PAGE_UNIQUE_ID] = {
     parentComponentUniqueId: 0,
     componentCssId: 0,
-  });
+    handle: undefined,
+  };
 
   /**
    * The handle brand: an object is an element handle exactly when it has an
@@ -120,14 +144,6 @@
    * @type {WeakMap<object, number>}
    */
   const handleUniqueIds = new WeakMap();
-
-  /**
-   * Weak unique-id-to-handle index for future PAPI members that resolve ids
-   * back to handles (`__GetElementByUniqueId` and friends).
-   *
-   * @type {Map<number, WeakRef<object>>}
-   */
-  const liveHandles = new Map();
 
   /**
    * Unique ids whose handles were collected; applied at the next delivery
@@ -255,13 +271,13 @@
    * @returns {number}
    */
   function allocateElement(tag, parentComponentUniqueId) {
-    const uniqueId = nextUniqueId;
+    const uniqueId = elements.length;
     native.createElement(tag, uniqueId, parentComponentUniqueId);
-    nextUniqueId = uniqueId + 1;
-    liveElements.set(uniqueId, {
+    elements[uniqueId] = {
       parentComponentUniqueId,
       componentCssId: 0,
-    });
+      handle: undefined,
+    };
     return uniqueId;
   }
 
@@ -275,7 +291,10 @@
   function createHandle(uniqueId) {
     const handle = {};
     handleUniqueIds.set(handle, uniqueId);
-    liveHandles.set(uniqueId, new WeakRef(handle));
+    const record = elements[uniqueId];
+    if (record !== undefined) {
+      record.handle = new WeakRef(handle);
+    }
     registry.register(handle, uniqueId, handle);
     return handle;
   }
@@ -297,8 +316,7 @@
 
   /** @param {number} uniqueId */
   function retireElement(uniqueId) {
-    liveElements.delete(uniqueId);
-    liveHandles.delete(uniqueId);
+    elements[uniqueId] = undefined;
   }
 
   /**
@@ -309,7 +327,7 @@
   function deliverPendingElementDrops() {
     while (pendingDrops.length > 0) {
       const uniqueId = pendingDrops.shift();
-      if (uniqueId === undefined || !liveElements.has(uniqueId)) {
+      if (uniqueId === undefined || elements[uniqueId] === undefined) {
         // Retired through __DropElement after its handle was already
         // collected; nothing left to do.
         continue;
@@ -336,9 +354,9 @@
     stringArgument("__CreatePage", componentID, 0);
     const componentCssId = i32Argument("__CreatePage", componentCSSID, 1);
     native.createPage();
+    const page = elements[PAGE_UNIQUE_ID];
     if (!pageCreated) {
       pageCreated = true;
-      const page = liveElements.get(PAGE_UNIQUE_ID);
       if (page !== undefined) {
         page.componentCssId = componentCssId;
       }
@@ -349,7 +367,9 @@
       // because it can never be dropped.
       pageHandle = {};
       handleUniqueIds.set(pageHandle, PAGE_UNIQUE_ID);
-      liveHandles.set(PAGE_UNIQUE_ID, new WeakRef(pageHandle));
+      if (page !== undefined) {
+        page.handle = new WeakRef(pageHandle);
+      }
     }
     return pageHandle;
   }
@@ -524,7 +544,7 @@
    */
   function __DropElement(element) {
     const uniqueId = elementArgument("__DropElement", element, 0);
-    if (!liveElements.has(uniqueId)) {
+    if (elements[uniqueId] === undefined) {
       // Dropping twice is tolerated: the second call is a no-op.
       return undefined;
     }

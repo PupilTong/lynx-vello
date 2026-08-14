@@ -11,7 +11,7 @@
 // the real native side in crates/bobcat-core/tests/main_thread.rs, where a
 // real QuickJS collector exists.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
 /**
  * @param {number} [nextUniqueId]
@@ -80,7 +80,7 @@ function createMockBobcat(nextUniqueId = 2) {
 let mock;
 
 beforeEach(async () => {
-  vi.resetModules();
+  rstest.resetModules();
   mock = createMockBobcat();
   globalThis.bobcat = mock;
   await import("../src/element-papi.js");
@@ -118,7 +118,7 @@ describe("installation", () => {
   });
 
   it("fails loudly when the native object is missing", async () => {
-    vi.resetModules();
+    rstest.resetModules();
     // @ts-expect-error deliberately removing the native object
     globalThis.bobcat = undefined;
     await expect(import("../src/element-papi.js")).rejects.toThrow(
@@ -127,7 +127,7 @@ describe("installation", () => {
   });
 
   it("keeps working when the native object is tampered with afterwards", () => {
-    const replaced = vi.fn();
+    const replaced = rstest.fn();
     mock.createElement = replaced;
     __CreateView(0);
     expect(replaced).not.toHaveBeenCalled();
@@ -150,7 +150,7 @@ describe("unique ids", () => {
   });
 
   it("continue a retained tree's sequence in a fresh realm", async () => {
-    vi.resetModules();
+    rstest.resetModules();
     mock = createMockBobcat(7);
     globalThis.bobcat = mock;
     await import("../src/element-papi.js");

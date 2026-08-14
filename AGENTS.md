@@ -329,7 +329,7 @@ useful signal for currently-compatible versions of those libraries.
 - `packages/bobcat-element` — the Element PAPI runtime, a single
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
-  realm before any bundle code; its vitest suite runs the same bytes. It owns
+  realm before any bundle code; its Rstest suite runs the same bytes. It owns
   what used to be the `lynx-element` crate's script-facing half: the fifteen
   `__*` PAPI members and their web-core arities, the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/`list`), the
@@ -353,7 +353,7 @@ useful signal for currently-compatible versions of those libraries.
   validated input, so a bundle calling `bobcat.*` directly cannot corrupt
   the tree. The file must stay a classic script (no import/export at
   runtime, ECMAScript intrinsics plus `globalThis.bobcat` only — the realm
-  has no `console`/`setTimeout`/DOM), which is also what lets vitest import
+  has no `console`/`setTimeout`/DOM), which is also what lets Rstest import
   it for side effects and `tsc --noEmit` check it under `checkJs`.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
@@ -854,7 +854,7 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `cargo test` must pass on the pinned nightly toolchain.
 
 The Element PAPI runtime has two suites over the same file:
-`pnpm --filter bobcat-element test` (vitest, over a recording native mock) and
+`pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
 while `crates/bobcat-core/tests/main_thread.rs` drives the identical bytes
 through the real QuickJS realm, `bobcat` object, and collector. Changing
