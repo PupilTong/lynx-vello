@@ -529,7 +529,7 @@ fn vm_drop_of_a_parent_preserves_descendants_with_live_handles() {
 }
 
 #[test]
-fn a_fresh_realm_over_a_retained_tree_continues_the_id_sequence() {
+fn a_fresh_realm_over_a_retained_tree_rejects_new_elements() {
     let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
     let script = r"
         globalThis.renderPage = function () {
@@ -542,23 +542,20 @@ fn a_fresh_realm_over_a_retained_tree_continues_the_id_sequence() {
     drop(first);
     assert!(elements.tree().is_live(2));
 
-    // A second bootstrap realm over the same tree — the Engine::run_script
-    // shape — must pick up unique ids where the first realm stopped, and may
-    // name elements the first realm created as parent components.
+    // A second bootstrap realm restarts the JavaScript allocator at 2, and
+    // the native sequence check rejects the collision instead of letting a
+    // stale id alias the retained element.
     let mut second = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
-    second
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __AppendElement(__CreatePage('card', 0), __CreateView(2));
-            };
-            ",
-        )
-        .expect("second boot");
-
-    let elements = elements.tree();
-    assert!(elements.is_live(2));
-    assert!(elements.is_live(3));
+    let error = second
+        .run_main_thread_script(script)
+        .expect_err("a fresh realm cannot extend a retained tree");
+    assert!(
+        error
+            .to_string()
+            .contains("a new element must take the next unique id 3, got 2"),
+        "{error}"
+    );
+    assert!(elements.tree().is_live(2), "the retained element survives");
 }
 
 #[test]

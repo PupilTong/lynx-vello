@@ -338,11 +338,6 @@ fn install_bobcat(
         ));
     }
 
-    // The runtime seeds its unique-id allocator during installation, which
-    // borrows the tree through the hand-off; the realm is idle until its
-    // first entry, so the tree goes back in the slot now.
-    handle.borrow_mut().release();
-
     Ok((handle, QuickJsCallable(deliver)))
 }
 
@@ -379,13 +374,6 @@ fn install_bobcat_object(
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "createElement", &member)?;
-
-    let tree = Rc::clone(handle);
-    let member = realm.function("nextElementUniqueId", 0, move |_arguments| {
-        let next = tree.borrow_mut().tree().next_unique_id();
-        Ok(HostValue::Number(f64::from(next)))
-    })?;
-    realm.set_property(&namespace, "nextElementUniqueId", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("setAttribute", 3, move |arguments| {

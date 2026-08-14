@@ -13,8 +13,6 @@ interface BobcatNative {
    * ascending sequence and are never reused.
    */
   createElement(tag: string, uniqueId: number): void;
-  /** The unique id the next created element must take. */
-  nextElementUniqueId(): number;
   setAttribute(uniqueId: number, name: string, value: string): void;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(

@@ -256,11 +256,7 @@ impl ElementTree {
         self.node_id(id).is_some()
     }
 
-    /// Returns the unique id the next created element must take. The
-    /// JavaScript Element PAPI runtime seeds its allocator from this, so a
-    /// fresh realm over a retained tree continues the sequence.
-    #[must_use]
-    pub fn next_unique_id(&self) -> ElementId {
+    fn next_unique_id(&self) -> ElementId {
         ElementId::try_from(self.nodes.len()).expect("the element table exhausted its u32 ids")
     }
 

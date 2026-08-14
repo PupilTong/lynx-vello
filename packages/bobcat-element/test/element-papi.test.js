@@ -14,10 +14,9 @@
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
 /**
- * @param {number} [nextUniqueId]
  * @returns {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }}
  */
-function createMockBobcat(nextUniqueId = 2) {
+function createMockBobcat() {
   /** @type {unknown[][]} */
   const calls = [];
   /** @param {string} name */
@@ -32,7 +31,7 @@ function createMockBobcat(nextUniqueId = 2) {
     };
   };
   const live = new Set([1]);
-  let expectedId = nextUniqueId;
+  let expectedId = 2;
   return {
     calls,
     named,
@@ -51,7 +50,6 @@ function createMockBobcat(nextUniqueId = 2) {
       live.add(uniqueId);
       calls.push(["createElement", tag, uniqueId]);
     },
-    nextElementUniqueId: () => nextUniqueId,
     setAttribute: record("setAttribute"),
     insertBefore: record("insertBefore"),
     removeElement: record("removeElement"),
@@ -132,7 +130,7 @@ describe("installation", () => {
 });
 
 describe("unique ids", () => {
-  it("start where the native table says and increment per creation", () => {
+  it("start at 2 and increment per creation", () => {
     __CreateView(0);
     __CreateText(0);
     __CreateRawText("hi");
@@ -140,17 +138,6 @@ describe("unique ids", () => {
       ["createElement", "view", 2],
       ["createElement", "text", 3],
       ["createElement", "raw-text", 4],
-    ]);
-  });
-
-  it("continue a retained tree's sequence in a fresh realm", async () => {
-    rstest.resetModules();
-    mock = createMockBobcat(7);
-    globalThis.bobcat = mock;
-    await import("../src/element-papi.js");
-    __CreateView(0);
-    expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 7],
     ]);
   });
 

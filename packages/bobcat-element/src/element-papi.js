@@ -51,10 +51,8 @@
 // - Unique ids auto-increment from 1 (the permanent page) and are never
 //   reused. This script owns the allocator: the element table is a dense
 //   array indexed by unique id — the same shape as the native id-to-node
-//   table and web-core's element map — so its length is the next id. It is
-//   seeded from the native table so a fresh realm over a retained tree
-//   continues the sequence, and the native side checks that ids arrive in
-//   sequence.
+//   table and web-core's element map — so its length is the next id, and
+//   the native side checks that ids arrive in sequence.
 // - Dropping is the only retirement path. `__DropElement` retires exactly one
 //   element immediately. As a garbage-collection backstop, every non-page
 //   handle is registered with a FinalizationRegistry whose cleanup callback
@@ -85,7 +83,6 @@
   const native = {
     createPage: bobcat.createPage,
     createElement: bobcat.createElement,
-    nextElementUniqueId: bobcat.nextElementUniqueId,
     setAttribute: bobcat.setAttribute,
     insertBefore: bobcat.insertBefore,
     removeElement: bobcat.removeElement,
@@ -100,30 +97,14 @@
   const I32_MAX = 2147483647;
 
   /**
-   * The element table: one slot per unique id ever allocated, indexed
-   * directly by id — the same dense shape as the native id-to-node table and
-   * web-core's `unique_id_to_dom_map`. A live element's slot holds the weak
-   * back-reference to its handle (for future PAPI members that resolve ids
-   * to handles, `__GetElementByUniqueId` and friends); retirement tombstones
-   * the slot by assigning undefined (never `delete`, which would take the
-   * array off QuickJS's dense fast path permanently). Slot 0 is the
-   * permanent null sentinel, and the array length is the unique-id
-   * allocator: the next element takes id `elements.length`, which only
-   * advances when the native create succeeds.
+   * The element table: slot per unique id, holding a live element's handle
+   * WeakRef. Its length is the unique-id allocator; slot 0 is the null
+   * sentinel; retirement assigns undefined — never `delete`, which would
+   * take the array off QuickJS's dense fast path permanently.
    *
    * @type {(WeakRef<object> | undefined)[]}
    */
-  const elements = [];
-  {
-    // Seed to the native table's next id so a fresh realm over a retained
-    // tree continues the sequence. Pushing keeps the array dense; elements
-    // an earlier realm created stay slotless here, which is correct — no
-    // handle in this realm can name them.
-    const base = native.nextElementUniqueId();
-    for (let index = 0; index < base; index += 1) {
-      elements.push(undefined);
-    }
-  }
+  const elements = [undefined];
 
   /**
    * The handle brand: an object is an element handle exactly when it has an
@@ -152,7 +133,7 @@
   // backstop because it can never be dropped.
   const pageHandle = {};
   handleUniqueIds.set(pageHandle, PAGE_UNIQUE_ID);
-  elements[PAGE_UNIQUE_ID] = new WeakRef(pageHandle);
+  elements.push(new WeakRef(pageHandle));
 
   /**
    * @param {string} functionName
