@@ -119,8 +119,13 @@ useful signal for currently-compatible versions of those libraries.
   template parsing only, no JS runtime, no CSS engine (yet).
 - `crates/bobcat-core` — unified native runtime core. Its always-compiled
   surface owns the protocol-only, host-injected `ResourceFetcher`, the
-  ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
-  directly composes `lynx-element`, which owns the dependency edge to `dom`.
+  ShadowRealm-inspired `ScriptEngine` protocol, the UI-thread-bound
+  `platform::{ClipboardProvider, TextInputProvider, SelectionUiProvider}`
+  native text-service protocols, and `LynxView<R, E>`, and it directly
+  composes `lynx-element`, which owns the dependency edge to `dom`. The
+  platform protocols use UTF-16 offsets and retained view-space geometry but
+  are not yet composed into `Engine`/`Window` and have no built-in or CLI
+  implementation.
   `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
   own future type and remain statically dispatched. The default `quickjs`
   feature adds the internal QuickJS adapter,
