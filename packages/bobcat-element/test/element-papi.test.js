@@ -31,6 +31,8 @@ function createMockBobcat() {
     return value;
   };
   let nextNodeId = 2;
+  /** @type {Map<number, number>} */
+  const parents = new Map();
   return {
     calls,
     named,
@@ -53,33 +55,47 @@ function createMockBobcat() {
     setAttribute: (node, name, value) => {
       calls.push(["setAttribute", nodeId("setAttribute", node), name, value]);
     },
+    /** @param {unknown} node */
+    parentNode: (node) => {
+      const id = nodeId("parentNode", node);
+      calls.push(["parentNode", id]);
+      return parents.get(id) ?? null;
+    },
     /**
      * @param {unknown} parent
      * @param {unknown} child
      * @param {unknown} reference
      */
     insertBefore: (parent, child, reference) => {
+      const parentId = nodeId("insertBefore", parent);
+      const childId = nodeId("insertBefore", child);
+      parents.set(childId, parentId);
       calls.push([
         "insertBefore",
-        nodeId("insertBefore", parent),
-        nodeId("insertBefore", child),
+        parentId,
+        childId,
         reference === null ? null : nodeId("insertBefore", reference),
       ]);
     },
     /** @param {unknown} child */
     removeElement: (child) => {
-      calls.push(["removeElement", nodeId("removeElement", child)]);
+      const childId = nodeId("removeElement", child);
+      parents.delete(childId);
+      calls.push(["removeElement", childId]);
     },
     /**
      * @param {unknown} newElement
      * @param {unknown} oldElement
      */
     replaceElement: (newElement, oldElement) => {
-      calls.push([
-        "replaceElement",
-        nodeId("replaceElement", newElement),
-        nodeId("replaceElement", oldElement),
-      ]);
+      const newId = nodeId("replaceElement", newElement);
+      const oldId = nodeId("replaceElement", oldElement);
+      const parent = parents.get(oldId);
+      if (parent !== undefined) {
+        parents.set(newId, parent);
+        parents.delete(oldId);
+      }
+      calls.push(["replaceElement", newId, oldId]);
     },
     /** @param {unknown} node */
     dropElement: (node) => {
@@ -118,6 +134,8 @@ describe("installation", () => {
       ["__InsertElementBefore", 3],
       ["__RemoveElement", 2],
       ["__ReplaceElement", 2],
+      ["__ReplaceElements", 3],
+      ["__SwapElement", 2],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -241,6 +259,74 @@ describe("tree mutations", () => {
     for (const bad of [null, undefined]) {
       expect(() => __AppendElement(bad, view)).toThrow(TypeError);
     }
+  });
+});
+
+describe("__ReplaceElements", () => {
+  it("appends when there are no old children, accepting both shapes", () => {
+    const page = __CreatePage("card", 0);
+    const first = __CreateView(0);
+    const second = __CreateView(0);
+    __ReplaceElements(page, [first, second]);
+    __ReplaceElements(page, first, null);
+    __ReplaceElements(page, first, []);
+    expect(mock.named("insertBefore")).toEqual([
+      ["insertBefore", 1, 2, null],
+      ["insertBefore", 1, 3, null],
+      ["insertBefore", 1, 2, null],
+      ["insertBefore", 1, 2, null],
+    ]);
+  });
+
+  it("detaches the tail old children and replaces the first in place", () => {
+    const page = __CreatePage("card", 0);
+    const oldA = __CreateView(0);
+    const oldB = __CreateView(0);
+    const newA = __CreateView(0);
+    const newB = __CreateView(0);
+    __AppendElement(page, oldA);
+    __AppendElement(page, oldB);
+    mock.calls.length = 0;
+
+    __ReplaceElements(page, [newA, newB], [oldA, oldB]);
+    expect(mock.calls).toEqual([
+      ["removeElement", 3],
+      ["parentNode", 2],
+      ["insertBefore", 1, 4, 2],
+      ["insertBefore", 1, 5, 2],
+      ["removeElement", 2],
+    ]);
+  });
+
+  it("does nothing when the first old child is detached, like replaceWith", () => {
+    const page = __CreatePage("card", 0);
+    const detached = __CreateView(0);
+    const replacement = __CreateView(0);
+    void page;
+    mock.calls.length = 0;
+
+    __ReplaceElements(page, replacement, detached);
+    expect(mock.calls).toEqual([["parentNode", 2]]);
+  });
+});
+
+describe("__SwapElement", () => {
+  it("swaps through a transient marker element", () => {
+    const page = __CreatePage("card", 0);
+    const a = __CreateView(0);
+    const b = __CreateView(0);
+    __AppendElement(page, a);
+    __AppendElement(page, b);
+    mock.calls.length = 0;
+
+    __SwapElement(a, b);
+    expect(mock.calls).toEqual([
+      ["createElement", "wrapper"],
+      ["replaceElement", 4, 2],
+      ["replaceElement", 2, 3],
+      ["replaceElement", 3, 4],
+      ["dropElement", 4],
+    ]);
   });
 });
 

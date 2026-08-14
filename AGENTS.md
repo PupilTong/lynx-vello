@@ -194,12 +194,13 @@ useful signal for currently-compatible versions of those libraries.
   Element PAPI runtime (`packages/bobcat-element`), then evaluates a
   `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
   `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
-  assigns the fifteen Element PAPI globals: every ReactLynx Snapshot
+  assigns the sixteen Element PAPI globals: every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
-  `__CreateScrollView`, `__CreateRawText`, `__CreateList`) plus all four tree
+  `__CreateScrollView`, `__CreateRawText`, `__CreateList`) plus all six tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`,
-  `__RemoveElement`, `__ReplaceElement`) and `__FlushElementTree`;
+  `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
+  `__SwapElement`) and `__FlushElementTree`;
   unsupported globals remain precise `ReferenceError`s, including
   `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
@@ -335,7 +336,7 @@ useful signal for currently-compatible versions of those libraries.
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
   realm before any bundle code; its Rstest suite runs the same bytes. It owns
-  the fifteen `__*` PAPI members and their web-core arities and the Lynx tag
+  the sixteen `__*` PAPI members and their web-core arities and the Lynx tag
   vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
   `list`). An element handle is a plain object carrying its DOM `NodeId`
   under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one

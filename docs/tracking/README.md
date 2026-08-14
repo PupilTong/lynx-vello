@@ -28,9 +28,10 @@ the UA cascade defaults, view metrics) and
 vocabulary, handle lifecycle over a symbol-keyed node id and
 `FinalizationRegistry`), and `bobcat-core`'s feature-gated
 `quickjs` module runs a `.web.bundle`'s main-thread script against them with
-every ReactLynx Snapshot constructor except `__CreateFrame`, plus all four
+every ReactLynx Snapshot constructor except `__CreateFrame`, plus all six
 tree mutation calls (`__AppendElement`, `__InsertElementBefore`,
-`__RemoveElement`, `__ReplaceElement`) and `__FlushElementTree`. `js-runtime.md` still declines to enumerate the
+`__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
+`__SwapElement`) and `__FlushElementTree`. `js-runtime.md` still declines to enumerate the
 Element PAPI; the authoritative list of what exists is the header of
 `packages/bobcat-element/src/element-papi.js`.
 

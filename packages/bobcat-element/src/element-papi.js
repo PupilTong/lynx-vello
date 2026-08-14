@@ -25,6 +25,8 @@
 // | `__InsertElementBefore(parent, child, reference?)` | `bobcat.insertBefore` |
 // | `__RemoveElement(parent, child)` | `bobcat.removeElement` |
 // | `__ReplaceElement(newElement, oldElement)` | `bobcat.replaceElement` |
+// | `__ReplaceElements(parent, newChildren, oldChildren?)` | `bobcat.parentNode` + `bobcat.insertBefore` + `bobcat.removeElement` |
+// | `__SwapElement(childA, childB)` | `bobcat.createElement` + `bobcat.replaceElement` + `bobcat.dropElement` |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
@@ -64,6 +66,7 @@
     createPage: bobcat.createPage,
     createElement: bobcat.createElement,
     setAttribute: bobcat.setAttribute,
+    parentNode: bobcat.parentNode,
     insertBefore: bobcat.insertBefore,
     removeElement: bobcat.removeElement,
     replaceElement: bobcat.replaceElement,
@@ -246,6 +249,62 @@
   }
 
   /**
+   * web-core's algorithm: without old children this is a plain append; with
+   * them, every old child after the first is detached and the first is
+   * replaced in place — under its actual parent, a no-op when detached,
+   * exactly `ChildNode.replaceWith`.
+   *
+   * @param {unknown} parent
+   * @param {unknown} newChildren
+   * @param {unknown} oldChildren
+   * @returns {undefined}
+   */
+  function __ReplaceElements(parent, newChildren, oldChildren) {
+    const news = Array.isArray(newChildren) ? newChildren : [newChildren];
+    if (!oldChildren || (Array.isArray(oldChildren) && oldChildren.length === 0)) {
+      const parentNodeId = nodeIdOf(parent);
+      for (const child of news) {
+        native.insertBefore(parentNodeId, nodeIdOf(child), null);
+      }
+      return undefined;
+    }
+    const olds = Array.isArray(oldChildren) ? oldChildren : [oldChildren];
+    for (let index = 1; index < olds.length; index += 1) {
+      native.removeElement(nodeIdOf(olds[index]));
+    }
+    const first = nodeIdOf(olds[0]);
+    const actualParent = native.parentNode(first);
+    if (actualParent === null) {
+      return undefined;
+    }
+    for (const child of news) {
+      native.insertBefore(actualParent, nodeIdOf(child), first);
+    }
+    native.removeElement(first);
+    return undefined;
+  }
+
+  /**
+   * web-core's algorithm: a transient marker takes childA's place so the
+   * swap works for any two positions, including adjacent ones and different
+   * parents.
+   *
+   * @param {unknown} childA
+   * @param {unknown} childB
+   * @returns {undefined}
+   */
+  function __SwapElement(childA, childB) {
+    const a = nodeIdOf(childA);
+    const b = nodeIdOf(childB);
+    const marker = native.createElement("wrapper");
+    native.replaceElement(marker, a);
+    native.replaceElement(a, b);
+    native.replaceElement(b, marker);
+    native.dropElement(marker);
+    return undefined;
+  }
+
+  /**
    * @param {unknown} newElement
    * @param {unknown} oldElement
    * @returns {undefined}
@@ -278,6 +337,8 @@
     __InsertElementBefore,
     __RemoveElement,
     __ReplaceElement,
+    __ReplaceElements,
+    __SwapElement,
     __FlushElementTree,
   });
 })();

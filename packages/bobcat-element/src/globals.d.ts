@@ -10,6 +10,8 @@ interface BobcatNative {
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
   setAttribute(nodeId: number, name: string, value: string): void;
+  /** The parent's `NodeId`, or null for a detached element. */
+  parentNode(nodeId: number): number | null;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
   /** Detaches `child` from its parent; a no-op when already detached. */
@@ -58,4 +60,10 @@ declare var __ReplaceElement: (
   newElement?: unknown,
   oldElement?: unknown,
 ) => undefined;
+declare var __ReplaceElements: (
+  parent?: unknown,
+  newChildren?: unknown,
+  oldChildren?: unknown,
+) => undefined;
+declare var __SwapElement: (childA?: unknown, childB?: unknown) => undefined;
 declare var __FlushElementTree: () => undefined;
