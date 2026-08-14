@@ -16,11 +16,10 @@ bobcat-cli ───▶ bobcat-core ───▶ dom ─┬─▶ vendor/stylo
 order, and private paint pipeline.
 The Lynx runtime element layer is split across the boundary it crosses:
 `bobcat_core::tree` is the native half — `ElementTree` over
-`dom::Document<ElementId>`, view/device configuration, UA defaults, and
-structural validation — and `packages/bobcat-element` is the script half,
-owning Element-PAPI member policy, tag vocabulary, unique-id allocation, and
-handle lifecycle, without moving any of those concerns into the standards
-core.
+`dom::Document<()>`, view/device configuration, and UA defaults — and
+`packages/bobcat-element` is the script half, owning Element-PAPI member
+policy, tag vocabulary, and handle lifecycle, without moving any of those
+concerns into the standards core.
 `bobcat-core` composes that tree with runtime protocols and optionally
 supplies QuickJS, but re-exports no DOM/GPU or renderer conveniences.
 `bobcat-cli` is an independent product that reaches every trusted workspace
@@ -65,13 +64,14 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
   must be ordinary DOM attributes.
 - **The public core is crash-on-misuse.** Query methods return `Option`;
   mutation methods treat stale IDs, cycles, a second document element, and
-  invalid insertion references as caller bugs. An untrusted runtime protocol
-  must validate its handles before calling the DOM.
+  invalid insertion references as caller bugs. The runtime layer above
+  follows the same policy: script misuse crashes here rather than being
+  validated anywhere.
 - **IDs are document-local raw indices.** `NodeId` has no document token or
   allocation generation, and an index may be reused after removal. The
-  runtime adapter therefore owns context routing, canonical `ElementId`
-  handles, and lifetime policy. Those guarantees are not synthesized by
-  `dom`.
+  Element PAPI runtime's handle objects unmap on drop, so a live handle
+  never resolves to a reused slot; anything else that replays a stale id is
+  a caller bug.
 - **One-word handles, no mirror tree.** Every node points to the fixed arena
   set. The same plain `&Node<T>` implements Stylo's `TNode`, `TElement`,
   `TDocument`, and `TShadowRoot` according to `NodeData`. Styling
@@ -104,16 +104,16 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; the native element tree (`tree`: `ElementId = u32`, the never-recycled id-to-node table with a permanent null sentinel and retirement tombstones, `<page>` root policy, `Viewport`/stylo `Device` construction, UA stylesheet generation, structural validation, the uncommitted-batch flag); optional default QuickJS adapter, the `bobcat` realm object, and the embedded Element PAPI runtime | Re-exporting GPU/render conveniences, an element-host trait, a second DOM, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `bobcat-core` | Engine-neutral resource/script/view contracts; GAT-based external `ScriptEngine`; the native element tree (`tree`: `<page>` root policy, `Viewport`/stylo `Device` construction, UA stylesheet generation, the uncommitted-batch flag; element identity is the DOM `NodeId` and misuse crashes in `dom`); optional default QuickJS adapter, the `bobcat` realm object, and the embedded Element PAPI runtime | Re-exporting GPU/render conveniences, an element-host trait, a second DOM, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `packages/bobcat-element` (the script half) | The fifteen `__*` Element-PAPI members and their arities; Lynx tag vocabulary; the auto-incrementing unique-id allocator; argument marshaling and its error messages; handle identity (one plain object per element, branded in a private WeakMap; the dense element table holds each live element's `WeakRef`, web-core's `unique_id_to_dom_map` shape); the `FinalizationRegistry` drop backstop and its pending-drop queue | Structural tree validation, style/layout/paint behavior, direct DOM access, or any state the native side must gate presentation on |
+| `packages/bobcat-element` (the script half) | The fifteen `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, mapping to its DOM `NodeId` in a private WeakMap); the `FinalizationRegistry` drop backstop and its pending-drop queue | Validation of any kind, style/layout/paint behavior, direct DOM access, or any state the native side must gate presentation on |
 | Still unowned | Lynx event payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining Element PAPI members | — |
 
 ## Style lifecycle
 
 1. `bobcat_core::tree::ElementTree` constructs a Stylo `Device` and creates
-   `dom::Document<ElementId>` through `Document::new`. Device construction is deliberately outside the
+   `dom::Document<()>` through `Document::new`. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
 2. The document creates its private stylist, stylesheet set, `about:blank`
@@ -142,7 +142,7 @@ still unbuilt — the seam is `ElementTree::add_author_stylesheet`.
 ## Runtime integration status
 
 `bobcat_core::tree` exposes the native tree operations over
-`Document<ElementId>`, and the embedded `packages/bobcat-element` runtime
+`Document<()>`, and the embedded `packages/bobcat-element` runtime
 exposes the Lynx Element PAPI over them. `bobcat-core`'s optional `quickjs`
 module runs a `.web.bundle`'s main-thread script against that composition.
 What that covers, and what it does not:
@@ -153,13 +153,13 @@ What that covers, and what it does not:
   installed as a UA stylesheet, under the `defaultDisplayLinear` and
   `defaultOverflowVisible` page-config switches;
 - view metrics and touch-first device construction (`Viewport::device`);
-- Lynx element identity (a monotone `u32` unique id used directly as its
-  permanent table index), `Document<ElementId>` payloads carrying that same
-  id, and untrusted-input validation on every native tree operation;
+- Lynx element identity as the DOM `NodeId`, with no separate id space and
+  no input validation — misuse panics in `dom` and surfaces as a
+  JavaScript exception at the host boundary;
 - plain JavaScript handle objects minted by the Element PAPI runtime, with
   both the `FinalizationRegistry` collection backstop and explicit
-  `__DropElement` retiring exactly one DOM node and table entry; descendants
-  remain live as detached subtrees until their own handles drop;
+  `__DropElement` freeing exactly one DOM node; descendants remain live as
+  detached subtrees until their own handles drop;
 - every ReactLynx Snapshot constructor except `__CreateFrame`, all four tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
   `__ReplaceElement`), `__DropElement`, `__FlushElementTree`, and web-core's
@@ -193,8 +193,9 @@ absorbed into `dom` or `hughie`.
   harvest, before the style commit proceeds.
 - Standard CSS behavior belongs in `dom`; Lynx-only runtime policy belongs
   above it or in the maintained Stylo fork when it is grammar/value behavior.
-- No JS-facing code may expose raw `NodeId` values without a context and
-  lifetime layer.
+- Element handles wrap raw `NodeId`s in JavaScript; stale or fabricated
+  ids are not validated anywhere — they crash (let it crash), and `dom`
+  remains the only owner of node lifetime.
 - `PaintOrder` and Painter stay inside `dom`; the element layer has no
   default scene/image/render delegation and builds input frames internally.
 - `dom::render` names no DOM vocabulary: no `Document`, `NodeId`, computed

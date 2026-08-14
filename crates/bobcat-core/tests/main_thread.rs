@@ -38,10 +38,10 @@ fn a_card_root_builds_its_tree_through_the_papi() {
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.is_live(2));
-    assert!(elements.is_live(3));
-    assert!(elements.is_live(4));
+    assert!(elements.page_created());
+    assert!(elements.document().get(2).is_some());
+    assert!(elements.document().get(3).is_some());
+    assert!(elements.document().get(4).is_some());
 }
 
 #[test]
@@ -65,8 +65,8 @@ fn create_view_returns_a_handle_append_element_accepts() {
         )
         .expect("main-thread script");
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.is_live(2));
+    assert!(elements.page_created());
+    assert!(elements.document().get(2).is_some());
 }
 
 #[test]
@@ -114,14 +114,14 @@ fn all_four_tree_mutation_papis_are_host_functions_with_native_return_values() {
     let elements = elements.tree();
     for id in 2..=5 {
         assert!(
-            elements.is_live(id),
+            elements.document().get(id).is_some(),
             "tree mutation must not retire element {id}"
         );
     }
 }
 
 #[test]
-fn tree_mutation_validation_surfaces_as_a_javascript_exception() {
+fn structural_misuse_crashes_the_host_function() {
     let mut runtime = bare_runtime();
     let error = runtime
         .run_main_thread_script(
@@ -137,8 +137,8 @@ fn tree_mutation_validation_surfaces_as_a_javascript_exception() {
             };
             ",
         )
-        .expect_err("a reference from another parent must be rejected");
-    assert!(error.to_string().contains("not a child"), "{error}");
+        .expect_err("a foreign reference crashes the host function");
+    assert!(error.to_string().contains("panicked"), "{error}");
 }
 
 #[test]
@@ -185,7 +185,10 @@ fn every_reactlynx_create_function_except_frame_returns_an_element_handle() {
 
     let elements = elements.tree();
     for id in 2..=9 {
-        assert!(elements.is_live(id), "element {id} must be live");
+        assert!(
+            elements.document().get(id).is_some(),
+            "element {id} must be live"
+        );
     }
 }
 
@@ -206,7 +209,7 @@ fn create_frame_remains_an_explicitly_missing_global() {
 }
 
 #[test]
-fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
+fn drop_element_frees_the_node_and_dom_reuses_the_slot() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -215,20 +218,22 @@ fn drop_element_retires_a_detached_element_and_does_not_reuse_its_id() {
               __CreatePage('card', 0);
               const dropped = __CreateView(0);
               __DropElement(dropped);
-              __DropElement(dropped);
-              __CreateView(0);
+              globalThis.kept = __CreateView(0);
             };
             ",
         )
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(!elements.is_live(2));
-    assert!(elements.is_live(3));
+    assert!(
+        elements.document().get(2).is_some(),
+        "the freed slot is reused by the next creation"
+    );
+    assert!(!elements.document().is_connected(2));
 }
 
 #[test]
-fn drop_element_retires_only_the_target_and_preserves_descendant_handles() {
+fn drop_element_frees_only_the_target_and_preserves_descendants() {
     let (mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -248,9 +253,9 @@ fn drop_element_retires_only_the_target_and_preserves_descendant_handles() {
         .expect("main-thread script");
 
     let elements = elements.tree();
-    assert!(!elements.is_live(2));
-    assert!(elements.is_live(3));
-    assert!(elements.is_live(4));
+    assert!(elements.document().get(2).is_none());
+    assert!(elements.document().get(3).is_some());
+    assert!(elements.document().get(4).is_some());
 }
 
 #[test]
@@ -269,7 +274,7 @@ fn create_page_is_idempotent_across_calls() {
             ",
         )
         .expect("main-thread script");
-    assert!(elements.tree().page().is_some());
+    assert!(elements.tree().page_created());
 }
 
 #[test]
@@ -290,7 +295,10 @@ fn process_data_runs_before_render_page_and_feeds_it() {
         .expect("main-thread script");
     let elements = elements.tree();
     for id in 2..=4 {
-        assert!(elements.is_live(id), "child {id} must be live");
+        assert!(
+            elements.document().get(id).is_some(),
+            "child {id} must be live"
+        );
     }
 }
 
@@ -318,10 +326,10 @@ fn the_page_is_not_in_the_document_until_the_tree_is_flushed() {
             ",
         )
         .expect("evaluate");
-    assert!(elements.tree().page().is_none());
+    assert!(!elements.tree().page_created());
 
     runtime.render_page().expect("render");
-    assert!(elements.tree().page().is_some());
+    assert!(elements.tree().page_created());
 }
 
 #[test]
@@ -357,50 +365,27 @@ fn papi_rejections_become_javascript_exceptions() {
             };
             ",
         )
-        .expect_err("an unknown handle");
-    assert!(
-        error.to_string().contains("unique id 2"),
-        "the error should name the bad handle: {error}"
-    );
+        .expect_err("a dropped handle no longer resolves");
+    assert!(error.to_string().contains("expects a number"), "{error}");
 }
 
 #[test]
-fn parent_component_ids_accept_the_full_u32_range_and_bind_to_nothing() {
+fn parent_component_ids_are_ignored_entirely() {
     let (mut runtime, elements) = runtime();
-    // web-core reads the parent component only to inherit a CSS fragment id
-    // and falls back in silence when the id names nothing, so any in-range
-    // id creates the element; out-of-range values fail argument marshaling.
     runtime
         .run_main_thread_script(
             r"
             globalThis.renderPage = function () {
-              __AppendElement(__CreatePage('card', 0), __CreateView(4294967295));
-              globalThis.kept = __CreateView(9);
+              const page = __CreatePage('card', 0);
+              __AppendElement(page, __CreateView(4294967295));
+              __AppendElement(page, __CreateView('not even a number'));
             };
             ",
         )
-        .expect("in-range parent component ids are accepted");
-    {
-        let elements = elements.tree();
-        assert!(elements.is_live(2));
-        assert!(elements.is_live(3));
-    }
-
-    let error = runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreateView(4294967296);
-            };
-            ",
-        )
-        .expect_err("an out-of-range parent component id");
-    assert!(
-        error
-            .to_string()
-            .contains("expects an unsigned 32-bit integer for argument 0"),
-        "{error}"
-    );
+        .expect("the parent component argument is accepted for shape only");
+    let elements = elements.tree();
+    assert!(elements.document().get(2).is_some());
+    assert!(elements.document().get(3).is_some());
 }
 
 #[test]
@@ -415,7 +400,7 @@ fn the_null_handle_is_rejected_by_append_element() {
             ",
         )
         .expect_err("the null handle");
-    assert!(error.to_string().contains("element handle"), "{error}");
+    assert!(error.to_string().contains("expects a number"), "{error}");
 }
 
 #[test]
@@ -431,7 +416,7 @@ fn non_numeric_handles_are_rejected_rather_than_coerced() {
             ",
         )
         .expect_err("a string handle");
-    assert!(error.to_string().contains("__AppendElement"), "{error}");
+    assert!(error.to_string().contains("expects a number"), "{error}");
 }
 
 #[test]
@@ -483,17 +468,19 @@ fn collection_drops_unreferenced_js_elements_before_re_rendering() {
         )
         .expect("first boot");
     assert!(
-        elements.tree().is_live(2),
+        elements.tree().document().is_connected(2),
         "an undelivered collection must not retire the committed element"
     );
 
     runtime.collect_garbage().expect("collect");
-    assert!(!elements.tree().is_live(2));
+    assert!(elements.tree().document().get(2).is_none());
 
     runtime.render_page().expect("second boot");
     let elements = elements.tree();
-    assert!(!elements.is_live(2));
-    assert!(elements.is_live(3));
+    assert!(
+        elements.document().is_connected(2),
+        "the re-render's view reuses the freed slot and is attached"
+    );
 }
 
 #[test]
@@ -523,13 +510,13 @@ fn vm_drop_of_a_parent_preserves_descendants_with_live_handles() {
     runtime.collect_garbage().expect("collect");
 
     let elements = elements.tree();
-    assert!(!elements.is_live(2));
-    assert!(elements.is_live(3));
-    assert!(elements.is_live(4));
+    assert!(elements.document().get(2).is_none());
+    assert!(elements.document().get(3).is_some());
+    assert!(elements.document().get(4).is_some());
 }
 
 #[test]
-fn a_fresh_realm_over_a_retained_tree_rejects_new_elements() {
+fn a_fresh_realm_over_a_retained_tree_keeps_working() {
     let elements = SharedTree::new(ElementTree::new(VIEWPORT, PageConfig::default()));
     let script = r"
         globalThis.renderPage = function () {
@@ -540,22 +527,15 @@ fn a_fresh_realm_over_a_retained_tree_rejects_new_elements() {
     let mut first = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
     first.run_main_thread_script(script).expect("first boot");
     drop(first);
-    assert!(elements.tree().is_live(2));
 
-    // A second bootstrap realm restarts the JavaScript allocator at 2, and
-    // the native sequence check rejects the collision instead of letting a
-    // stale id alias the retained element.
+    // The Engine::run_script shape: a second bootstrap realm over the same
+    // retained tree keeps creating elements — identity is the DOM node id,
+    // so no realm-local allocator can collide with it.
     let mut second = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
-    let error = second
-        .run_main_thread_script(script)
-        .expect_err("a fresh realm cannot extend a retained tree");
-    assert!(
-        error
-            .to_string()
-            .contains("a new element must take the next unique id 3, got 2"),
-        "{error}"
-    );
-    assert!(elements.tree().is_live(2), "the retained element survives");
+    second.run_main_thread_script(script).expect("second boot");
+
+    let elements = elements.tree();
+    assert_eq!(elements.document().document_element().child_ids().len(), 2);
 }
 
 #[test]
@@ -570,11 +550,11 @@ fn bootstrap_realm_teardown_preserves_the_last_committed_tree() {
             ",
         )
         .expect("first boot");
-    assert!(elements.tree().is_live(2));
+    assert!(elements.tree().document().get(2).is_some());
 
     drop(runtime);
 
-    assert!(elements.tree().is_live(2));
+    assert!(elements.tree().document().get(2).is_some());
 }
 
 #[test]
@@ -598,7 +578,7 @@ fn microtasks_queued_during_render_run_before_the_call_returns() {
     let elements = elements.tree();
     for id in 2..=4 {
         assert!(
-            elements.is_live(id),
+            elements.document().get(id).is_some(),
             "the microtask's appends must have landed (id {id})"
         );
     }
@@ -639,7 +619,7 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
 
     let elements = elements.tree();
     assert!(
-        elements.page().is_some(),
+        elements.page_created(),
         "the boot sequence still ran to completion"
     );
 }

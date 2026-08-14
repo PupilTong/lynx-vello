@@ -78,7 +78,7 @@ fn a_real_bundle_stops_at_the_missing_lynx_global() {
             message.contains("main-thread.js:"),
             "{name}: the error should carry a source location: {message}"
         );
-        assert!(elements.tree().page().is_none(), "{name}");
+        assert!(!elements.tree().page_created(), "{name}");
     }
 }
 
@@ -101,6 +101,9 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
         )
         .expect("boot");
     let elements = elements.tree();
-    assert!(elements.page().is_some());
-    assert!(elements.is_live(2), "the appended view is live");
+    assert!(elements.page_created());
+    assert!(
+        elements.document().get(2).is_some(),
+        "the appended view is live"
+    );
 }

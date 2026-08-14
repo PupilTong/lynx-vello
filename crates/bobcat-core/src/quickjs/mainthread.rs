@@ -7,13 +7,12 @@
 //! `.web.bundle`'s `lepusCode.root` runs in:
 //!
 //! 1. A global `bobcat` object whose members are Rust host functions speaking DOM vocabulary over
-//!    numeric unique ids — `createPage`, `createElement`, `setAttribute`, `insertBefore`,
+//!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `insertBefore`,
 //!    `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a direct call
 //!    into [`ElementTree`](crate::tree::ElementTree) through the tree hand-off.
 //! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
-//!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary and
-//!    auto-incrementing unique ids, and manages handle lifecycle with a `WeakRef`-indexed table and
-//!    a `FinalizationRegistry`.
+//!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary, and
+//!    manages handle lifecycle with a private `WeakMap` and a `FinalizationRegistry`.
 //!
 //! # What web-core does, and what we reproduce
 //!
@@ -59,7 +58,7 @@
 //!
 //! When `QuickJS` collects an element handle, the PAPI runtime's
 //! `FinalizationRegistry` cleanup callback (a pending job, executed at the
-//! job checkpoint that follows every evaluation) queues the unique id.
+//! job checkpoint that follows every evaluation) queues the node id.
 //! Queued drops are applied by the runtime's deliver hook, which
 //! [`MainThreadRuntime`] calls before each realm entry and inside
 //! [`MainThreadRuntime::collect_garbage`]. `FinalizationRegistry` sweeps run
@@ -74,9 +73,8 @@
 //!   except `__CreateFrame`, the four tree mutations, `__DropElement`, and `__FlushElementTree`. A
 //!   bundle that reaches for another member gets a `ReferenceError` naming the missing global,
 //!   which is the intended failure: a silently wrong render would be worse.
-//! - **`bobcat` is a visible realm global.** Its members validate their arguments and reject
-//!   structural violations with the same errors the PAPI surfaces, so a bundle calling it directly
-//!   cannot corrupt the tree; it can only do what the PAPI already allows.
+//! - **Nothing validates script input.** A stale or fabricated node id panics inside `dom`; the
+//!   host boundary converts the unwind into a JavaScript exception ("the host function panicked").
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -92,7 +90,7 @@ use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
 use super::{QuickJsCallable, QuickJsInitializationError, QuickJsScriptEngine};
 use crate::script::{ScriptEngine as _, ScriptError, ScriptValue};
-use crate::tree::{ElementId, ElementTree};
+use crate::tree::ElementTree;
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
@@ -101,7 +99,7 @@ const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
 const DELIVER_HOOK_SOURCE_NAME: &str = "<bobcat deliver hook>";
 
 /// The Element PAPI runtime, authored in `packages/bobcat-element` where its
-/// vitest suite runs the same bytes this realm evaluates.
+/// Rstest suite runs the same bytes this realm evaluates.
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../../packages/bobcat-element/src/element-papi.js");
 
@@ -357,80 +355,64 @@ fn install_bobcat_object(
 
     let tree = Rc::clone(handle);
     let member = realm.function("createPage", 0, move |_arguments| {
-        tree.borrow_mut().tree().create_page();
-        Ok(HostValue::Undefined)
+        let node = tree.borrow_mut().tree().create_page();
+        Ok(node_id_value(node))
     })?;
     realm.set_property(&namespace, "createPage", &member)?;
 
     let tree = Rc::clone(handle);
-    let member = realm.function("createElement", 2, move |arguments| {
+    let member = realm.function("createElement", 1, move |arguments| {
         let tag = string_argument("bobcat.createElement", arguments, 0)?;
-        let id = element_id_argument("bobcat.createElement", arguments, 1)?;
-        tree.borrow_mut()
-            .tree()
-            .create_element(id, tag)
-            .map_err(papi_error)?;
-        Ok(HostValue::Undefined)
+        let node = tree.borrow_mut().tree().create_element(tag);
+        Ok(node_id_value(node))
     })?;
     realm.set_property(&namespace, "createElement", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("setAttribute", 3, move |arguments| {
-        let id = element_id_argument("bobcat.setAttribute", arguments, 0)?;
+        let node = node_id_argument("bobcat.setAttribute", arguments, 0)?;
         let name = string_argument("bobcat.setAttribute", arguments, 1)?;
         let value = string_argument("bobcat.setAttribute", arguments, 2)?;
-        tree.borrow_mut()
-            .tree()
-            .set_attribute(id, name, value)
-            .map_err(papi_error)?;
+        tree.borrow_mut().tree().set_attribute(node, name, value);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "setAttribute", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("insertBefore", 3, move |arguments| {
-        let parent = element_id_argument("bobcat.insertBefore", arguments, 0)?;
-        let child = element_id_argument("bobcat.insertBefore", arguments, 1)?;
-        let reference = optional_element_id_argument("bobcat.insertBefore", arguments, 2)?;
+        let parent = node_id_argument("bobcat.insertBefore", arguments, 0)?;
+        let child = node_id_argument("bobcat.insertBefore", arguments, 1)?;
+        let reference = optional_node_id_argument("bobcat.insertBefore", arguments, 2)?;
         tree.borrow_mut()
             .tree()
-            .insert_before(parent, child, reference)
-            .map_err(papi_error)?;
+            .insert_before(parent, child, reference);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "insertBefore", &member)?;
 
     let tree = Rc::clone(handle);
-    let member = realm.function("removeElement", 2, move |arguments| {
-        let parent = element_id_argument("bobcat.removeElement", arguments, 0)?;
-        let child = element_id_argument("bobcat.removeElement", arguments, 1)?;
-        tree.borrow_mut()
-            .tree()
-            .remove_element(parent, child)
-            .map_err(papi_error)?;
+    let member = realm.function("removeElement", 1, move |arguments| {
+        let child = node_id_argument("bobcat.removeElement", arguments, 0)?;
+        tree.borrow_mut().tree().remove_element(child);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "removeElement", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("replaceElement", 2, move |arguments| {
-        let new_element = element_id_argument("bobcat.replaceElement", arguments, 0)?;
-        let old_element = element_id_argument("bobcat.replaceElement", arguments, 1)?;
+        let new_element = node_id_argument("bobcat.replaceElement", arguments, 0)?;
+        let old_element = node_id_argument("bobcat.replaceElement", arguments, 1)?;
         tree.borrow_mut()
             .tree()
-            .replace_element(new_element, old_element)
-            .map_err(papi_error)?;
+            .replace_element(new_element, old_element);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "replaceElement", &member)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("dropElement", 1, move |arguments| {
-        let id = element_id_argument("bobcat.dropElement", arguments, 0)?;
-        tree.borrow_mut()
-            .tree()
-            .drop_element(id)
-            .map_err(papi_error)?;
+        let node = node_id_argument("bobcat.dropElement", arguments, 0)?;
+        tree.borrow_mut().tree().drop_element(node);
         Ok(HostValue::Undefined)
     })?;
     realm.set_property(&namespace, "dropElement", &member)?;
@@ -448,45 +430,44 @@ fn install_bobcat_object(
     Ok(())
 }
 
-fn papi_error(error: impl fmt::Display) -> HostFunctionError {
-    HostFunctionError::new(error.to_string())
-}
-
 fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
-fn element_id_argument(
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "slab indices stay far below f64's exact-integer range"
+)]
+fn node_id_value(node: dom::NodeId) -> HostValue {
+    HostValue::Number(node as f64)
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "garbage input maps to a garbage index and crashes in dom"
+)]
+fn node_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<ElementId, HostFunctionError> {
+) -> Result<dom::NodeId, HostFunctionError> {
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(HostFunctionError::new(format!(
             "{function} expects a number for argument {index}"
         )));
     };
-    if !value.is_finite() || value.fract() != 0.0 || value < 0.0 || value > f64::from(u32::MAX) {
-        return Err(HostFunctionError::new(format!(
-            "{function} expects an unsigned 32-bit integer for argument {index}, got {value}"
-        )));
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the range and integrality checks above make this exact"
-    )]
-    Ok(value as ElementId)
+    Ok(value as dom::NodeId)
 }
 
-fn optional_element_id_argument(
+fn optional_node_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<Option<ElementId>, HostFunctionError> {
+) -> Result<Option<dom::NodeId>, HostFunctionError> {
     match *argument(arguments, index) {
         HostValue::Undefined | HostValue::Null => Ok(None),
-        _ => element_id_argument(function, arguments, index).map(Some),
+        _ => node_id_argument(function, arguments, index).map(Some),
     }
 }
 

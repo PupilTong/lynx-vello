@@ -22,11 +22,11 @@ and visual files have the most such markers; the runtime ones have the fewest.
 
 The runtime work that has landed so far, none of which these files were
 written to track: the Lynx element layer is split between
-`crates/bobcat-core`'s `tree` module (the native tree: never-recycled unique
-ids, `<page>` policy, the UA cascade defaults, structural validation) and
+`crates/bobcat-core`'s `tree` module (the native tree: `<page>` policy, the
+UA cascade defaults, the uncommitted-batch flag) and
 `packages/bobcat-element` (the Element PAPI runtime: member surface, tag
-vocabulary, unique-id allocation, handle lifecycle over
-`WeakRef`/`FinalizationRegistry`), and `bobcat-core`'s feature-gated
+vocabulary, handle lifecycle over a private `WeakMap` and
+`FinalizationRegistry`), and `bobcat-core`'s feature-gated
 `quickjs` module runs a `.web.bundle`'s main-thread script against them with
 every ReactLynx Snapshot constructor except `__CreateFrame`, plus all four
 tree mutation calls (`__AppendElement`, `__InsertElementBefore`,

@@ -191,7 +191,7 @@ useful signal for currently-compatible versions of those libraries.
   installs the global `bobcat` object (one Rust host function per member —
   `createPage`, `createElement`, `setAttribute`, `insertBefore`,
   `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
-  speaking DOM vocabulary over numeric unique ids), evaluates the embedded
+  speaking DOM vocabulary over numeric `NodeId`s), evaluates the embedded
   Element PAPI runtime (`packages/bobcat-element`), then evaluates a
   `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
   `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
@@ -205,17 +205,19 @@ useful signal for currently-compatible versions of those libraries.
   `__CreateList` consumes only its numeric parent-component argument for now;
   callback storage/execution remains part of the unimplemented list surface.
   Creation calls return plain JavaScript handle objects minted by the PAPI
-  runtime; each is registered with a `FinalizationRegistry` whose cleanup
-  queues the unique id, and queued drops are applied at the next realm entry
-  (or `MainThreadRuntime::collect_garbage`), retiring only that element and
-  matching DOM node — its descendants remain live but detached until their
-  own handles drop. Realm teardown never delivers queued drops.
+  runtime; each maps to its DOM `NodeId` in a private `WeakMap` and is
+  registered with a `FinalizationRegistry` whose cleanup queues the node id.
+  Queued drops are applied at the next realm entry
+  (or `MainThreadRuntime::collect_garbage`), freeing only that element —
+  its descendants remain live but detached until their own handles drop.
+  Realm teardown never delivers queued drops.
   Core owns the native half of the element layer in its `tree` module —
-  `type ElementId = u32`, the never-recycled id-to-node table, `<page>` root
-  policy, `Viewport`/stylo `Device` construction, the Lynx UA cascade
-  defaults, structural validation, and the uncommitted-batch flag — while tag
-  vocabulary, unique-id allocation, handle lifecycle, and the PAPI member
-  surface live in `packages/bobcat-element`.
+  `<page>` root policy, `Viewport`/stylo `Device` construction, the Lynx UA
+  cascade defaults, and the uncommitted-batch flag — while tag vocabulary,
+  handle lifecycle, and the PAPI member surface live in
+  `packages/bobcat-element`. Element identity is the DOM `NodeId`; nothing
+  validates script input, and misuse panics in `dom`, converted to a
+  JavaScript exception at the host boundary.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -330,34 +332,24 @@ useful signal for currently-compatible versions of those libraries.
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
   realm before any bundle code; its Rstest suite runs the same bytes. It owns
-  what used to be the `lynx-element` crate's script-facing half: the fifteen
-  `__*` PAPI members and their web-core arities, the Lynx tag vocabulary
-  (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/`list`), the
-  auto-incrementing unique-id allocator (ids start at 1 — the permanent page
-  — and are never reused), argument marshaling and its exact error messages,
-  `parentComponentUniqueID` and the page's `componentID`/`componentCSSID`
-  are validated for argument shape and then discarded: web-core reads the
-  parent component only to inherit a CSS fragment id, falling back in
-  silence when the id names nothing, and without `__SetCSSId` there is
-  nothing to inherit into, so no bookkeeping exists until that member lands. Element handles are plain objects minted here, one per
-  element for its whole life — every PAPI return of an element yields the
-  same object — and unforgeable because identity lives in a private WeakMap;
-  a `Map<id, WeakRef>` indexes live handles for future id-to-handle queries.
-  Lifecycle: `__DropElement` retires exactly one element immediately
-  (dropping twice is tolerated; dropping the page is an error); as the GC
-  backstop, every non-page handle is registered with a
-  `FinalizationRegistry` whose cleanup callback queues the unique id, and
-  the host applies queued drops at the next realm entry through
+  the fifteen `__*` PAPI members and their web-core arities and the Lynx tag
+  vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
+  `list`). An element handle is a plain object mapping to its DOM `NodeId`
+  in a private `WeakMap` — one object per element for its whole life, so
+  every PAPI return of an element yields the same object.
+  `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted for
+  PAPI shape and unused. Lifecycle: `__DropElement` frees exactly one
+  element and unmaps its handle; as the GC backstop, every non-page handle
+  is registered with a `FinalizationRegistry` whose cleanup queues the node
+  id, and the host applies queued drops at the next realm entry through
   `bobcat.deliverPendingElementDrops` — never during collection, and never
-  at realm teardown, which preserves the last committed tree. The native
-  half it drives is `bobcat_core::tree::ElementTree` behind the global
-  `bobcat` object: structural validation (existence, cycles, membership,
-  page rules) stays native because `dom`'s mutation entry points assume
-  validated input, so a bundle calling `bobcat.*` directly cannot corrupt
-  the tree. The file must stay a classic script (no import/export at
-  runtime, ECMAScript intrinsics plus `globalThis.bobcat` only — the realm
-  has no `console`/`setTimeout`/DOM), which is also what lets Rstest import
-  it for side effects and `tsc --noEmit` check it under `checkJs`.
+  at realm teardown, which preserves the last committed tree. Nothing is
+  validated: a dropped or foreign handle resolves to undefined and crashes
+  at the native boundary. The file must stay a classic script (no
+  import/export at runtime, ECMAScript intrinsics plus `globalThis.bobcat`
+  only — the realm has no `console`/`setTimeout`/DOM), which is also what
+  lets Rstest import it for side effects and `tsc --noEmit` check it under
+  `checkJs`.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a

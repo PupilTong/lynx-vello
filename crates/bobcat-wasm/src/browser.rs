@@ -58,10 +58,6 @@ pub struct BobcatCanvas {
     engine: Engine<'static, BrowserWindow>,
     canvas: HtmlCanvasElement,
     frames: FrameSignal,
-    /// The embedder-side unique-id allocator: this NAPI surface is its own
-    /// element host, so it owns the monotonic counter the way the Element
-    /// PAPI runtime does inside the QuickJS realm. Ids are never reused.
-    next_unique_id: u32,
 }
 
 impl fmt::Debug for BobcatCanvas {
@@ -82,48 +78,35 @@ impl BobcatCanvas {
         self.engine.add_author_stylesheet(&css);
     }
 
-    /// Binds and returns the permanent page element. The component id and
-    /// CSS id are accepted for Element PAPI shape and recorded nowhere: this
-    /// embedder has no CSS-scope machinery to route them into.
+    /// Binds the permanent page element and returns its node id. The
+    /// component arguments are accepted for Element PAPI shape and unused.
     #[napi]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::cast_possible_truncation)]
     pub fn create_page(&mut self, _component_id: String, _component_css_id: i32) -> u32 {
-        self.engine.elements().create_page();
-        1
+        self.engine.elements().create_page() as u32
     }
 
-    /// Creates one detached Lynx `view` element and returns its unique id.
-    /// The parent component id is accepted for Element PAPI shape and used
-    /// nowhere: web-core reads it only to inherit a CSS fragment id, falling
-    /// back in silence when it names nothing.
+    /// Creates one detached Lynx `view` element and returns its node id. The
+    /// parent component id is accepted for Element PAPI shape and unused.
     #[napi]
-    pub fn create_view(&mut self, _parent_component_unique_id: u32) -> napi::Result<u32> {
-        let unique_id = self.next_unique_id;
-        self.engine
-            .elements()
-            .create_element(unique_id, "view")
-            .map_err(napi_error)?;
-        self.next_unique_id += 1;
-        Ok(unique_id)
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create_view(&mut self, _parent_component_unique_id: u32) -> u32 {
+        self.engine.elements().create_element("view") as u32
     }
 
     /// Appends an element and returns the appended child id.
     #[napi]
-    pub fn append_element(&mut self, parent: u32, child: u32) -> napi::Result<u32> {
+    pub fn append_element(&mut self, parent: u32, child: u32) -> u32 {
         self.engine
             .elements()
-            .insert_before(parent, child, None)
-            .map_err(napi_error)?;
-        Ok(child)
+            .insert_before(parent as usize, child as usize, None);
+        child
     }
 
-    /// Retires an element subtree.
+    /// Frees one element, detaching its direct children.
     #[napi]
-    pub fn drop_element(&mut self, element: u32) -> napi::Result<()> {
-        self.engine
-            .elements()
-            .drop_element(element)
-            .map_err(napi_error)
+    pub fn drop_element(&mut self, element: u32) {
+        self.engine.elements().drop_element(element as usize);
     }
 
     /// Commits pending Element-PAPI mutations and requests a browser frame.
@@ -212,7 +195,6 @@ pub fn create_bobcat_canvas(
                     engine,
                     canvas,
                     frames,
-                    next_unique_id: 2,
                 })
             }),
             Err(error) => deferred.reject(napi_error(error)),

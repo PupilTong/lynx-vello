@@ -1,15 +1,13 @@
 // @ts-check
 // Behavior tests for the Element PAPI runtime over a recording native mock.
 //
-// These pin exactly the semantics that live in element-papi.js: the PAPI
-// surface and arities, unique-id allocation, tag vocabulary, argument
-// marshaling, handle identity and brand checks, and explicit drop
-// bookkeeping. The mock mirrors the native contract the real `bobcat` object
-// implements: the id sequence is validated in `createElement`, and
-// `dropElement` rejects the page and unknown ids.
-// Structural tree validation and the collection-driven drop path run against
-// the real native side in crates/bobcat-core/tests/main_thread.rs, where a
-// real QuickJS collector exists.
+// These pin the semantics that live in element-papi.js: the PAPI surface and
+// arities, tag vocabulary, handle-to-NodeId mapping, return identity, and
+// drop bookkeeping. The mock mirrors the real boundary's shape: it returns
+// sequential node ids and rejects non-number ids the way the native number
+// extraction does. Structural behavior and the collection-driven drop path
+// run against the real native side in
+// crates/bobcat-core/tests/main_thread.rs.
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
@@ -23,48 +21,73 @@ function createMockBobcat() {
   const named = (name) => calls.filter((call) => call[0] === name);
   /**
    * @param {string} name
-   * @returns {(...args: unknown[]) => void}
+   * @param {unknown} value
+   * @returns {number}
    */
-  const record = (name) => {
-    return (...args) => {
-      calls.push([name, ...args]);
-    };
+  const nodeId = (name, value) => {
+    if (typeof value !== "number") {
+      throw new TypeError(`${name} expects a number`);
+    }
+    return value;
   };
-  const live = new Set([1]);
-  let expectedId = 2;
+  let nextNodeId = 2;
   return {
     calls,
     named,
-    createPage: record("createPage"),
+    createPage: () => {
+      calls.push(["createPage"]);
+      return 1;
+    },
+    /** @param {string} tag */
+    createElement: (tag) => {
+      const node = nextNodeId;
+      nextNodeId += 1;
+      calls.push(["createElement", tag]);
+      return node;
+    },
     /**
-     * @param {string} tag
-     * @param {number} uniqueId
+     * @param {unknown} node
+     * @param {string} name
+     * @param {string} value
      */
-    createElement: (tag, uniqueId) => {
-      if (uniqueId !== expectedId) {
-        throw new Error(
-          `a new element must take the next unique id ${expectedId}, got ${uniqueId}`,
-        );
-      }
-      expectedId += 1;
-      live.add(uniqueId);
-      calls.push(["createElement", tag, uniqueId]);
+    setAttribute: (node, name, value) => {
+      calls.push(["setAttribute", nodeId("setAttribute", node), name, value]);
     },
-    setAttribute: record("setAttribute"),
-    insertBefore: record("insertBefore"),
-    removeElement: record("removeElement"),
-    replaceElement: record("replaceElement"),
-    /** @param {number} uniqueId */
-    dropElement: (uniqueId) => {
-      if (uniqueId === 1) {
-        throw new Error("the page element cannot be removed");
-      }
-      if (!live.delete(uniqueId)) {
-        throw new Error(`no element has the unique id ${uniqueId}`);
-      }
-      calls.push(["dropElement", uniqueId]);
+    /**
+     * @param {unknown} parent
+     * @param {unknown} child
+     * @param {unknown} reference
+     */
+    insertBefore: (parent, child, reference) => {
+      calls.push([
+        "insertBefore",
+        nodeId("insertBefore", parent),
+        nodeId("insertBefore", child),
+        reference === null ? null : nodeId("insertBefore", reference),
+      ]);
     },
-    flushElementTree: record("flushElementTree"),
+    /** @param {unknown} child */
+    removeElement: (child) => {
+      calls.push(["removeElement", nodeId("removeElement", child)]);
+    },
+    /**
+     * @param {unknown} newElement
+     * @param {unknown} oldElement
+     */
+    replaceElement: (newElement, oldElement) => {
+      calls.push([
+        "replaceElement",
+        nodeId("replaceElement", newElement),
+        nodeId("replaceElement", oldElement),
+      ]);
+    },
+    /** @param {unknown} node */
+    dropElement: (node) => {
+      calls.push(["dropElement", nodeId("dropElement", node)]);
+    },
+    flushElementTree: () => {
+      calls.push(["flushElementTree"]);
+    },
   };
 }
 
@@ -123,42 +146,7 @@ describe("installation", () => {
     mock.createElement = replaced;
     __CreateView(0);
     expect(replaced).not.toHaveBeenCalled();
-    expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2],
-    ]);
-  });
-});
-
-describe("unique ids", () => {
-  it("start at 2 and increment per creation", () => {
-    __CreateView(0);
-    __CreateText(0);
-    __CreateRawText("hi");
-    expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2],
-      ["createElement", "text", 3],
-      ["createElement", "raw-text", 4],
-    ]);
-  });
-
-  it("are not consumed by a rejected creation", () => {
-    expect(() => __CreateView(1.5)).toThrow(
-      "__CreateView expects an unsigned 32-bit integer for argument 0, got 1.5",
-    );
-    __CreateView(0);
-    expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2],
-    ]);
-  });
-
-  it("are never reused after a drop", () => {
-    const dropped = __CreateView(0);
-    __DropElement(dropped);
-    __CreateView(0);
-    expect(mock.named("createElement")).toEqual([
-      ["createElement", "view", 2],
-      ["createElement", "view", 3],
-    ]);
+    expect(mock.named("createElement")).toEqual([["createElement", "view"]]);
   });
 });
 
@@ -171,20 +159,10 @@ describe("__CreatePage", () => {
     expect(mock.named("createPage")).toHaveLength(2);
   });
 
-  it("coerces missing arguments like the native host did", () => {
+  it("ignores its arguments entirely", () => {
     expect(() => __CreatePage()).not.toThrow();
-    expect(() => __CreatePage(null, null)).not.toThrow();
+    expect(() => __CreatePage(5, {})).not.toThrow();
   });
-
-  it("rejects non-string component ids and non-integer css ids", () => {
-    expect(() => __CreatePage(5, 0)).toThrow(
-      "__CreatePage expects a string for argument 0",
-    );
-    expect(() => __CreatePage("card", 1.5)).toThrow(
-      "__CreatePage expects an integer for argument 1",
-    );
-  });
-
 });
 
 describe("constructors", () => {
@@ -207,49 +185,36 @@ describe("constructors", () => {
     ]);
   });
 
-  it("return distinct opaque object handles", () => {
+  it("return distinct opaque object handles bound to native node ids", () => {
+    const page = __CreatePage("card", 0);
     const first = __CreateView(0);
     const second = __CreateView(0);
     expect(first).toBeTypeOf("object");
     expect(second).not.toBe(first);
+    __AppendElement(page, first);
+    __AppendElement(page, second);
+    expect(mock.named("insertBefore")).toEqual([
+      ["insertBefore", 1, 2, null],
+      ["insertBefore", 1, 3, null],
+    ]);
   });
 
-  it("validate the parent component id as a u32 and use it nowhere", () => {
-    expect(() => __CreateView("x")).toThrow(
-      "__CreateView expects a number for argument 0",
-    );
-    for (const bad of [1.5, -1, 4294967296, Number.NaN, Infinity]) {
-      expect(() => __CreateView(bad)).toThrow(
-        `__CreateView expects an unsigned 32-bit integer for argument 0, got ${bad}`,
-      );
+  it("ignore the parent component id entirely", () => {
+    for (const anything of [0, 4294967295, "x", 1.5, {}, undefined]) {
+      expect(() => __CreateView(anything)).not.toThrow();
     }
-    expect(mock.named("createElement")).toEqual([]);
-    // Any in-range id is accepted without a liveness lookup, matching
-    // web-core's silent fallback for a parent component that names nothing.
-    expect(() => __CreateView(4294967295)).not.toThrow();
-    expect(() => __CreateElement("custom-widget", 9)).not.toThrow();
-  });
-
-  it("coerce nullish __CreateElement tags to the empty string", () => {
-    __CreateElement(null, 0);
-    expect(mock.named("createElement")).toEqual([["createElement", "", 2]]);
-    expect(() => __CreateElement(5, 0)).toThrow(
-      "__CreateElement expects a string for argument 0",
-    );
   });
 
   it("store raw text through setAttribute", () => {
     __CreateRawText("Hello, Lynx");
-    __CreateRawText();
     expect(mock.named("setAttribute")).toEqual([
       ["setAttribute", 2, "text", "Hello, Lynx"],
-      ["setAttribute", 3, "text", ""],
     ]);
   });
 });
 
 describe("tree mutations", () => {
-  it("forward unique ids and return the child handle", () => {
+  it("forward node ids and return the child handle", () => {
     const page = __CreatePage("card", 0);
     const first = __CreateView(0);
     const second = __CreateView(0);
@@ -265,54 +230,29 @@ describe("tree mutations", () => {
       ["insertBefore", 1, 3, null],
       ["insertBefore", 1, 3, null],
     ]);
-    expect(mock.named("removeElement")).toEqual([["removeElement", 1, 2]]);
+    expect(mock.named("removeElement")).toEqual([["removeElement", 2]]);
     expect(mock.named("replaceElement")).toEqual([["replaceElement", 3, 2]]);
   });
 
-  it("reject anything but a live-branded handle object", () => {
+  it("crash at the native boundary on foreign or primitive handles", () => {
     const view = __CreateView(0);
-    for (const bad of [0, "not a handle", null, undefined, {}, Symbol("x")]) {
-      expect(() => __AppendElement(bad, view)).toThrow(
-        "__AppendElement expects an element handle for argument 0",
-      );
+    for (const bad of [0, "not a handle", null, undefined, {}]) {
+      expect(() => __AppendElement(bad, view)).toThrow("expects a number");
     }
-    expect(() => __AppendElement(view, 7)).toThrow(
-      "__AppendElement expects an element handle for argument 1",
-    );
-  });
-
-  it("reject a non-handle insertion reference but accept nullish ones", () => {
-    const page = __CreatePage("card", 0);
-    const view = __CreateView(0);
-    expect(() => __InsertElementBefore(page, view, "x")).toThrow(
-      "__InsertElementBefore expects an element handle, null, or undefined for argument 2",
-    );
-  });
-
-  it("forward retired unique ids so the native side owns liveness errors", () => {
-    const page = __CreatePage("card", 0);
-    const dropped = __CreateView(0);
-    __DropElement(dropped);
-    __AppendElement(page, dropped);
-    expect(mock.named("insertBefore")).toEqual([["insertBefore", 1, 2, null]]);
   });
 });
 
 describe("__DropElement", () => {
-  it("retires the element natively and tolerates a second drop", () => {
+  it("frees the element and unmaps its handle", () => {
+    const page = __CreatePage("card", 0);
     const view = __CreateView(0);
     expect(__DropElement(view)).toBeUndefined();
-    expect(__DropElement(view)).toBeUndefined();
     expect(mock.named("dropElement")).toEqual([["dropElement", 2]]);
-  });
 
-  it("lets the native page rejection propagate", () => {
-    const page = __CreatePage("card", 0);
-    expect(() => __DropElement(page)).toThrow(
-      "the page element cannot be removed",
-    );
+    // The dropped handle no longer resolves; further use crashes.
+    expect(() => __DropElement(view)).toThrow("expects a number");
+    expect(() => __AppendElement(page, view)).toThrow("expects a number");
   });
-
 });
 
 describe("__FlushElementTree and delivery", () => {

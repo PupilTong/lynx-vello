@@ -1,31 +1,23 @@
 /**
  * The native object the host installs on `globalThis` before evaluating
- * `element-papi.js`. It speaks DOM vocabulary over numeric unique ids: the
- * document, structural validation, and the style/layout commit live behind
- * it, while tag vocabulary, unique-id allocation, handle lifecycle, and the
- * `__*` PAPI surface live in the script.
+ * `element-papi.js`. It speaks DOM vocabulary over numeric `NodeId`s and
+ * owns the document and the style/layout commit; misuse crashes at this
+ * boundary instead of being validated.
  */
 interface BobcatNative {
-  /** Marks the permanent page element live and the batch uncommitted. */
-  createPage(): void;
-  /**
-   * Creates a detached element carrying `uniqueId`. Ids must arrive in
-   * ascending sequence and are never reused.
-   */
-  createElement(tag: string, uniqueId: number): void;
-  setAttribute(uniqueId: number, name: string, value: string): void;
+  /** Marks the permanent page live and returns its `NodeId`. */
+  createPage(): number;
+  /** Creates a detached element and returns its `NodeId`. */
+  createElement(tag: string): number;
+  setAttribute(nodeId: number, name: string, value: string): void;
   /** Reparenting insert; appends when `reference` is null. */
-  insertBefore(
-    parent: number,
-    child: number,
-    reference: number | null,
-  ): void;
-  /** Detaches `child` from `parent` without retiring either element. */
-  removeElement(parent: number, child: number): void;
+  insertBefore(parent: number, child: number, reference: number | null): void;
+  /** Detaches `child` from its parent; a no-op when already detached. */
+  removeElement(child: number): void;
   /** Replaces `oldElement` in place, leaving it detached but live. */
   replaceElement(newElement: number, oldElement: number): void;
-  /** Retires one element permanently, detaching its direct children. */
-  dropElement(uniqueId: number): void;
+  /** Frees one element, detaching its direct children. */
+  dropElement(nodeId: number): void;
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
   /** Installed by `element-papi.js`; applies queued collection drops. */

@@ -784,9 +784,15 @@ mod tests {
         finished.expect("the script must boot");
 
         let elements = engine.elements();
-        assert!(elements.page().is_some(), "the page was created");
-        assert!(elements.is_live(2), "the first view is live");
-        assert!(elements.is_live(3), "the second view is live");
+        assert!(elements.page_created(), "the page was created");
+        assert!(
+            elements.document().get(2).is_some(),
+            "the first view is live"
+        );
+        assert!(
+            elements.document().get(3).is_some(),
+            "the second view is live"
+        );
         assert!(
             !elements.has_uncommitted_mutations(),
             "the boot's final flush closed the batch"

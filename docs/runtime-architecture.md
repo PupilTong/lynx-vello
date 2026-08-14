@@ -44,15 +44,16 @@ JavaScript adapter:
 - `script::ScriptEngine` is the external JavaScript-engine contract. Its
   `ImportFuture<'a>` is a GAT, so implementations return concrete futures
   without boxed `dyn Future` values.
-- `tree` owns the native element tree and `pub type ElementId = u32`. There
-  is no element-host trait: the only real host is `ElementTree`, and every
-  `bobcat.*` call mutates it directly — the tree's own structural validation
-  is the single source of every `PapiError`. The PAPI member surface, tag
-  vocabulary, unique-id allocation, and handle lifecycle live in the
-  embedded `packages/bobcat-element` runtime. `has_uncommitted_mutations`
-  marks the span between a batch's first mutation and its
-  `flush_element_tree`, which is what lets a frame producer sharing the
-  tree across threads refuse to build from a half-applied batch.
+- `tree` owns the native element tree. There is no element-host trait: the
+  only real host is `ElementTree`, and every `bobcat.*` call mutates it
+  directly. Element identity is the DOM `NodeId`; nothing validates script
+  input — misuse panics in `dom`, converted to a JavaScript exception at
+  the host boundary. The PAPI member surface, tag vocabulary, and handle
+  lifecycle live in the embedded `packages/bobcat-element` runtime.
+  `has_uncommitted_mutations` marks the span between a batch's first
+  mutation and its `flush_element_tree`, which is what lets a frame
+  producer sharing the tree across threads refuse to build from a
+  half-applied batch.
 - `engine` is the embedder boundary: `Engine` shares the element tree with
   its own Lynx main thread behind one lock, and owns input routing, frame
   production, presentation, and the script thread. An embedder provides
@@ -119,38 +120,33 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`bobcat_core::tree::ElementTree` directly owns `Document<ElementId>`, and
-neither the document nor `NodeId` appears in its public signatures: external
-observation speaks `ElementId` only (`page`, `is_live`, `config`), and DOM
-shape is asserted by the module that owns it — `tree`'s own unit tests,
-through a `cfg(test)`-gated accessor. Its mutable surface is the native
-tree-operation set the `bobcat` object exposes plus the invariant-safe
-engine-side methods (`handle_input`, `set_viewport`, `render`,
-`needs_render`, `scene`, `images_mut` — none creates, moves, or retires an
-element). `bobcat_core::engine::Engine` is the sole production driver of
-that engine-side surface, and embedders never touch it: they hold an
-`Engine` and relay OS facts into it.
+`bobcat_core::tree::ElementTree` directly owns `Document<()>` and speaks
+`NodeId` in its tree-operation signatures; `document()` lends a shared
+borrow for observation. Its mutable surface is the native tree-operation
+set the `bobcat` object exposes plus the invariant-safe engine-side methods
+(`handle_input`, `set_viewport`, `render`, `needs_render`, `scene`,
+`images_mut` — none creates, moves, or retires an element).
+`bobcat_core::engine::Engine` is the sole production driver of that
+engine-side surface, and embedders never touch it: they hold an `Engine`
+and relay OS facts into it.
 
 ## Frame walkthrough
 
 1. `ElementTree::new` constructs the Lynx `Device`, creates
-   `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
-   is the same permanent `u32` unique id stored in the id-to-node table;
-   private DOM `NodeId` slots may still be reused.
+   `Document<()>`, and installs the Lynx UA stylesheet.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   The embedded Element PAPI runtime allocates each element's `u32` unique
-   id, mints its one identity-stable handle object, and passes plain numbers
-   to the `bobcat` host functions; a handle is unforgeable because identity
-   lives in the runtime's private WeakMap. Each non-page handle is registered
-   with a `FinalizationRegistry` whose cleanup callback queues the unique id;
-   queued drops are applied at the next realm entry (or an explicit
-   `collect_garbage`), retiring only that element and DOM node through
-   `ElementTree::drop_element`. Its children become detached roots whose
-   subtrees remain live until their own handles are dropped in turn.
-   A batch's first `bobcat` call takes the tree out of its hand-off
-   slot; every call after that is a plain `&mut` mutation with no
-   synchronization — the tree validates, so a bad id throws at the call
-   site — without the script ever seeing `NodeId`.
+   The embedded Element PAPI runtime mints each element's one
+   identity-stable handle object, maps it to the `NodeId` the native create
+   returned, and passes plain numbers to the `bobcat` host functions. Each
+   non-page handle is registered with a `FinalizationRegistry` whose
+   cleanup callback queues the node id; queued drops are applied at the
+   next realm entry (or an explicit `collect_garbage`), freeing only that
+   element through `ElementTree::drop_element`. Its children become
+   detached roots whose subtrees remain live until their own handles are
+   dropped in turn. A batch's first `bobcat` call takes the tree out of its
+   hand-off slot; every call after that is a plain `&mut` mutation with no
+   synchronization, and misuse panics in `dom`, converted to a JavaScript
+   exception at the host boundary.
 3. `__FlushElementTree` is the commit boundary: the style + layout commit
    runs on the taken tree, the tree goes back in its slot, and the
    presenting side is asked for a frame. The document-owned Painter decides
