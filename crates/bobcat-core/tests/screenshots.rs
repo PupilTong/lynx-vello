@@ -1,7 +1,7 @@
 #![cfg(feature = "quickjs")]
 
 //! Golden screenshot comparison over the whole runtime pipeline:
-//! main-thread script → Element PAPI → `lynx-element` → `dom` →
+//! main-thread script → Element PAPI runtime → `bobcat` object → `dom` →
 //! headless GPU.
 //!
 //! This is the Rust analogue of lynx-stack's `web-core-e2e` Playwright suite:
@@ -13,9 +13,9 @@
 //! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
 
 use bobcat_core::engine::OffscreenEngine;
+use bobcat_core::tree::PageConfig;
 use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use flashbulb::{Image, Screenshots};
-use lynx_element::PageConfig;
 
 fn engine(config: PageConfig) -> OffscreenEngine {
     OffscreenEngine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")

@@ -15,7 +15,6 @@ bobcat-core = { path = "crates/bobcat-core", default-features = false }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
-lynx-element = { path = "crates/lynx-element" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
 dom = { path = "crates/dom" }
 

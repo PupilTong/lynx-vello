@@ -1,9 +1,19 @@
-//! Main-thread (MTS) script execution and the Lynx Element PAPI globals.
+//! Main-thread (MTS) script execution and the native `bobcat` realm object.
 //!
-//! This is the crate `AGENTS.md` designates for "Lynx host globals": the
-//! generic `QuickJS` bridge below stays Lynx-unaware, and the element vocabulary
-//! above lives in `lynx-element`. What is assembled here is the realm a
-//! `.web.bundle`'s `lepusCode.root` runs in.
+//! This is the crate `AGENTS.md` designates for "Lynx host globals". The
+//! generic `QuickJS` bridge below stays Lynx-unaware; the Element PAPI
+//! surface itself lives in JavaScript (`packages/bobcat-element`, embedded
+//! here with `include_str!`). What is assembled here is the realm a
+//! `.web.bundle`'s `lepusCode.root` runs in:
+//!
+//! 1. A global `bobcat` object whose members are Rust host functions speaking DOM vocabulary over
+//!    numeric unique ids — `createPage`, `createElement`, `setAttribute`, `insertBefore`,
+//!    `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a direct call
+//!    into [`ElementTree`](crate::tree::ElementTree) through the tree hand-off.
+//! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
+//!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary and
+//!    auto-incrementing unique ids, and manages handle lifecycle with a `WeakRef`-indexed table and
+//!    a `FinalizationRegistry`.
 //!
 //! # What web-core does, and what we reproduce
 //!
@@ -25,41 +35,48 @@
 //! `processData(initData)` → `renderPage(processedData)` →
 //! `__FlushElementTree()`.
 //!
-//! [`MainThreadRuntime`] follows that shape exactly — a `QuickJS` realm standing
-//! in for the iframe, host functions installed before evaluation, the same
-//! wrapper, the same post-evaluation sequence.
+//! [`MainThreadRuntime`] follows that shape exactly — a `QuickJS` realm
+//! standing in for the iframe, the `bobcat` object and PAPI runtime installed
+//! before evaluation, the same wrapper, the same post-evaluation sequence.
 //!
 //! # The realm takes the tree for a batch, and returns it at the flush
 //!
-//! The [`ElementTree`](lynx_element::ElementTree) changes hands through a
-//! [`SharedTree`] slot. A batch's first PAPI mutation takes the tree out;
+//! The [`ElementTree`](crate::tree::ElementTree) changes hands through a
+//! [`SharedTree`] slot. A batch's first `bobcat` call takes the tree out;
 //! every call after that is a plain `&mut` mutation with no
 //! synchronization — the tree's own validation is the single source of
-//! every `PapiError`, throwing at the call site. `__FlushElementTree` is
-//! the commit boundary: it runs the style + layout commit on the taken
-//! tree, puts it back in the slot, and then notifies the presenter through
-//! the injected callback. While the tree is away the presenter works from
-//! its retained frame, so a half-applied batch is unobservable. A script
-//! that opens a batch and returns without flushing gets the tree put back
-//! uncommitted at the end of the evaluation — the presenter's
-//! `has_uncommitted_mutations` gate keeps that state off the screen.
+//! every structural `PapiError`, throwing at the call site.
+//! `bobcat.flushElementTree` is the commit boundary: it runs the style +
+//! layout commit on the taken tree, puts it back in the slot, and then
+//! notifies the presenter through the injected callback. While the tree is
+//! away the presenter works from its retained frame, so a half-applied batch
+//! is unobservable. A script that opens a batch and returns without flushing
+//! gets the tree put back uncommitted at the end of the evaluation — the
+//! presenter's `has_uncommitted_mutations` gate keeps that state off the
+//! screen.
+//!
+//! # Handle collection is delivered at realm entries
+//!
+//! When `QuickJS` collects an element handle, the PAPI runtime's
+//! `FinalizationRegistry` cleanup callback (a pending job, executed at the
+//! job checkpoint that follows every evaluation) queues the unique id.
+//! Queued drops are applied by the runtime's deliver hook, which
+//! [`MainThreadRuntime`] calls before each realm entry and inside
+//! [`MainThreadRuntime::collect_garbage`]. `FinalizationRegistry` sweeps run
+//! only during an actual collection (allocation pressure or an explicit
+//! [`collect_garbage`](MainThreadRuntime::collect_garbage)), never during
+//! realm teardown — so dropping the runtime preserves the last committed
+//! tree.
 //!
 //! # Recorded limits
 //!
-//! - **Every `ReactLynx` Snapshot constructor except `__CreateFrame` is installed** —
-//!   `__CreatePage`, `__CreateElement`, `__CreateWrapperElement`, `__CreateText`, `__CreateImage`,
-//!   `__CreateView`, `__CreateScrollView`, `__CreateRawText`, and `__CreateList` — alongside all
-//!   four tree mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
-//!   `__ReplaceElement`), `__DropElement`, and `__FlushElementTree` (see `lynx-element`'s crate
-//!   docs). List construction consumes only its numeric parent-component argument; callback storage
-//!   and execution remain unimplemented. A bundle that reaches for another member gets a
-//!   `ReferenceError` naming the missing global, which is the intended failure: a silently wrong
-//!   render would be worse.
-//! - **Element handles cross as opaque JavaScript weak-ref objects.** Each object carries the
-//!   element arena id. When `QuickJS` collects it, the realm calls [`ElementTree::drop_element`],
-//!   which retires only that Lynx element and its corresponding DOM node. Its surviving descendants
-//!   become detached and await their own VM drop notifications. `__DropElement` remains the
-//!   explicit early-retirement path through the same operation.
+//! - **The PAPI surface is the runtime script's table** — every `ReactLynx` Snapshot constructor
+//!   except `__CreateFrame`, the four tree mutations, `__DropElement`, and `__FlushElementTree`. A
+//!   bundle that reaches for another member gets a `ReferenceError` naming the missing global,
+//!   which is the intended failure: a silently wrong render would be worse.
+//! - **`bobcat` is a visible realm global.** Its members validate their arguments and reject
+//!   structural violations with the same errors the PAPI surfaces, so a bundle calling it directly
+//!   cannot corrupt the tree; it can only do what the PAPI already allows.
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
 //!   `_ReportError`, `__OnLifecycleEvent`, `__LoadLepusChunk`, `_I18nResourceTranslation`,
 //!   `_AddEventListener`, `__QueryComponent`).
@@ -71,15 +88,22 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use lynx_element::{ElementId, ElementTree, PapiError};
 use quickjs_rust_bridge::{self as quickjs, HostFunctionError, HostValue};
 
-use super::{QuickJsInitializationError, QuickJsScriptEngine};
-use crate::script::ScriptError;
+use super::{QuickJsCallable, QuickJsInitializationError, QuickJsScriptEngine};
+use crate::script::{ScriptEngine as _, ScriptError, ScriptErrorPhase, ScriptValue};
+use crate::tree::{ElementId, ElementTree};
 
 const MAIN_THREAD_SOURCE_NAME: &str = "main-thread.js";
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
-const CREATE_LIST_BINDING_SOURCE_NAME: &str = "<lynx __CreateList binding>";
+const BOBCAT_NAMESPACE_SOURCE_NAME: &str = "<bobcat namespace>";
+const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
+const DELIVER_HOOK_SOURCE_NAME: &str = "<bobcat deliver hook>";
+
+/// The Element PAPI runtime, authored in `packages/bobcat-element` where its
+/// vitest suite runs the same bytes this realm evaluates.
+const ELEMENT_PAPI_SOURCE: &str =
+    include_str!("../../../../packages/bobcat-element/src/element-papi.js");
 
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
@@ -96,19 +120,6 @@ const BOOT_SEQUENCE: &str = r#"(function () {
   }
   renderPage(data);
   __FlushElementTree();
-})()"#;
-
-const CREATE_LIST_BINDING: &str = r#"(function () {
-  "use strict";
-  const createListElement = globalThis.__CreateListElementHost;
-  delete globalThis.__CreateListElementHost;
-  globalThis.__CreateList = function __CreateList(
-    parentComponentUniqueId,
-    componentAtIndex,
-    enqueueComponent
-  ) {
-    return createListElement(parentComponentUniqueId);
-  };
 })()"#;
 
 /// Why running a main-thread script failed.
@@ -187,10 +198,14 @@ impl Drop for TreeHandle {
     }
 }
 
-/// One `QuickJS` realm carrying the Lynx Element PAPI over the tree hand-off slot.
+/// One `QuickJS` realm carrying the `bobcat` object and Element PAPI runtime
+/// over the tree hand-off slot.
 pub struct MainThreadRuntime {
     engine: QuickJsScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
+    /// The PAPI runtime's deliver hook: applies unique ids queued by
+    /// collected handles. Called before each realm entry.
+    deliver_drops: QuickJsCallable,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -203,24 +218,28 @@ impl fmt::Debug for MainThreadRuntime {
 
 impl Drop for MainThreadRuntime {
     fn drop(&mut self) {
-        // `Engine::run_script` currently retains the last committed tree after boot while the
-        // short-lived bootstrap realm goes away. Its teardown must not look like application GC.
-        self.engine.realm.clear_js_weak_ref_drop();
+        // Teardown must not look like application GC: queued handle drops die
+        // with the realm, and `Engine::run_script` retains the last committed
+        // tree after its short-lived bootstrap realm goes away.
         self.tree.borrow_mut().release();
     }
 }
 
 impl MainThreadRuntime {
-    /// Creates a realm whose Element PAPI takes the tree from `elements` per batch and mutates it
-    /// directly, and installs it before any script has run.
+    /// Creates a realm whose `bobcat` object takes the tree from `elements`
+    /// per batch and mutates it directly, and installs it plus the Element
+    /// PAPI runtime before any script has run.
     pub fn new(
         elements: SharedTree,
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, QuickJsInitializationError> {
         let mut engine = QuickJsScriptEngine::new()?;
-        let tree = install_element_papi(&mut engine.realm, elements, on_flush)
-            .map_err(QuickJsInitializationError::from_quickjs)?;
-        Ok(Self { engine, tree })
+        let (tree, deliver_drops) = install_bobcat(&mut engine, elements, on_flush)?;
+        Ok(Self {
+            engine,
+            tree,
+            deliver_drops,
+        })
     }
 
     /// Evaluates a `.web.bundle`'s `lepusCode.root` in web-core's wrapper.
@@ -246,204 +265,207 @@ impl MainThreadRuntime {
         self.render_page()
     }
 
-    fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
-        let result = self
+    /// Runs a full garbage collection and applies the element drops it
+    /// produces: collected handles enqueue their `FinalizationRegistry`
+    /// cleanup jobs, the job checkpoint runs them, and the deliver hook
+    /// retires the queued elements.
+    ///
+    /// Delivered drops mark the batch uncommitted, exactly as entry-time
+    /// delivery does; the tree presents again after its next flush.
+    pub fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
+        self.engine.realm.run_gc();
+        let checkpoint = self
             .engine
-            .evaluate_raw(quickjs::EvalSource {
-                name: Some(name),
-                ..quickjs::EvalSource::new(source)
-            })
+            .checkpoint(ScriptErrorPhase::Call)
             .map(|_| ())
-            .map_err(|error| MainThreadError::from_engine(phase, &error));
+            .map_err(|error| MainThreadError::from_engine("collecting garbage", &error));
+        let result = checkpoint.and_then(|()| self.deliver_pending_drops());
         self.tree.borrow_mut().release();
         result
     }
+
+    fn evaluate(&mut self, source: &str, name: &str, phase: &str) -> Result<(), MainThreadError> {
+        let delivered = self.deliver_pending_drops();
+        let result = delivered.and_then(|()| {
+            self.engine
+                .evaluate_raw(quickjs::EvalSource {
+                    name: Some(name),
+                    ..quickjs::EvalSource::new(source)
+                })
+                .map(|_| ())
+                .map_err(|error| MainThreadError::from_engine(phase, &error))
+        });
+        self.tree.borrow_mut().release();
+        result
+    }
+
+    fn deliver_pending_drops(&mut self) -> Result<(), MainThreadError> {
+        let deliver = self.deliver_drops.clone();
+        self.engine
+            .call(&deliver, &ScriptValue::Undefined, &[])
+            .map(|_| ())
+            .map_err(|error| {
+                MainThreadError::from_engine("delivering pending element drops", &error)
+            })
+    }
 }
 
-fn install_element_papi(
-    realm: &mut quickjs::Realm,
+/// Installs the `bobcat` object and the Element PAPI runtime, returning the
+/// tree hand-off handle and the runtime's deliver hook.
+fn install_bobcat(
+    engine: &mut QuickJsScriptEngine,
     elements: SharedTree,
     on_flush: impl Fn() + 'static,
-) -> Result<Rc<RefCell<TreeHandle>>, quickjs::Error> {
+) -> Result<(Rc<RefCell<TreeHandle>>, QuickJsCallable), QuickJsInitializationError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
     }));
 
-    let tree = Rc::clone(&handle);
-    realm.set_js_weak_ref_drop(move |id| js_weak_ref_drop(&tree, id));
+    install_bobcat_object(&mut engine.realm, &handle, on_flush)
+        .map_err(QuickJsInitializationError::from_quickjs)?;
 
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreatePage", 2, move |arguments| {
-        let component_id = string_argument("__CreatePage", arguments, 0)?;
-        let component_css_id = i32_argument("__CreatePage", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
-            .tree()
-            .create_page(component_id, component_css_id);
-        Ok(js_weak_ref_value(id))
-    })?;
+    engine
+        .evaluate_raw(quickjs::EvalSource {
+            name: Some(ELEMENT_PAPI_SOURCE_NAME),
+            ..quickjs::EvalSource::new(ELEMENT_PAPI_SOURCE)
+        })
+        .map_err(QuickJsInitializationError::from_script)?;
 
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateElement", 2, move |arguments| {
-        let tag = string_argument("__CreateElement", arguments, 0)?;
-        let parent_component = u32_argument("__CreateElement", arguments, 1)?;
-        let id = tree
-            .borrow_mut()
-            .tree()
-            .create_element(tag, parent_component)
-            .map_err(papi_error)?;
-        Ok(js_weak_ref_value(id))
-    })?;
+    let deliver = engine
+        .evaluate_raw(quickjs::EvalSource {
+            name: Some(DELIVER_HOOK_SOURCE_NAME),
+            ..quickjs::EvalSource::new("bobcat.deliverPendingElementDrops")
+        })
+        .map_err(QuickJsInitializationError::from_script)?;
+    if deliver.kind() != quickjs::ValueKind::Function {
+        return Err(QuickJsInitializationError::from_message(
+            "the Element PAPI runtime did not install its deliver hook",
+        ));
+    }
 
-    define_parent_element_constructor(
-        realm,
-        &handle,
-        "__CreateWrapperElement",
-        ElementTree::create_wrapper_element,
-    )?;
-    define_parent_element_constructor(realm, &handle, "__CreateText", ElementTree::create_text)?;
-    define_parent_element_constructor(realm, &handle, "__CreateImage", ElementTree::create_image)?;
-    define_parent_element_constructor(realm, &handle, "__CreateView", ElementTree::create_view)?;
-    define_parent_element_constructor(
-        realm,
-        &handle,
-        "__CreateScrollView",
-        ElementTree::create_scroll_view,
-    )?;
+    // The runtime seeds its unique-id allocator during installation, which
+    // borrows the tree through the hand-off; the realm is idle until its
+    // first entry, so the tree goes back in the slot now.
+    handle.borrow_mut().release();
 
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateRawText", 1, move |arguments| {
-        let text = string_argument("__CreateRawText", arguments, 0)?;
-        let id = tree.borrow_mut().tree().create_raw_text(text);
-        Ok(js_weak_ref_value(id))
-    })?;
-
-    // ReactLynx passes callback functions and an info object after the parent component id. Those
-    // values stay in JavaScript until list callback execution exists; the leaf host binding sees
-    // only the primitive argument it owns.
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__CreateListElementHost", 1, move |arguments| {
-        let parent_component = u32_argument("__CreateList", arguments, 0)?;
-        let id = tree
-            .borrow_mut()
-            .tree()
-            .create_list(parent_component)
-            .map_err(papi_error)?;
-        Ok(js_weak_ref_value(id))
-    })?;
-    realm
-        .evaluate(
-            quickjs::EvalSource {
-                name: Some(CREATE_LIST_BINDING_SOURCE_NAME),
-                ..quickjs::EvalSource::new(CREATE_LIST_BINDING)
-            },
-            quickjs::EvalOptions::default(),
-        )
-        .map(|_| ())?;
-
-    define_tree_mutation_papis(realm, &handle)?;
-
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__DropElement", 1, move |arguments| {
-        let id = element_argument("__DropElement", arguments, 0)?;
-        match tree.borrow_mut().tree().drop_element(id) {
-            Ok(()) | Err(PapiError::UnknownElement(_)) => {}
-            Err(error) => return Err(papi_error(error)),
-        }
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(&handle);
-    realm.define_global_function("__FlushElementTree", 0, move |_arguments| {
-        tree.borrow_mut().flush();
-        on_flush();
-        Ok(HostValue::Undefined)
-    })?;
-
-    Ok(handle)
+    Ok((handle, QuickJsCallable(deliver)))
 }
 
-type ParentElementConstructor = fn(&mut ElementTree, ElementId) -> Result<ElementId, PapiError>;
-
-fn define_tree_mutation_papis(
+/// Builds the global `bobcat` namespace object: DOM-vocabulary tree
+/// operations over numeric unique ids, one Rust host function per member.
+fn install_bobcat_object(
     realm: &mut quickjs::Realm,
     handle: &Rc<RefCell<TreeHandle>>,
+    on_flush: impl Fn() + 'static,
 ) -> Result<(), quickjs::Error> {
-    let tree = Rc::clone(handle);
-    realm.define_global_function("__AppendElement", 2, move |arguments| {
-        let parent = element_argument("__AppendElement", arguments, 0)?;
-        let child = element_argument("__AppendElement", arguments, 1)?;
-        let appended = tree
-            .borrow_mut()
-            .tree()
-            .append_element(parent, child)
-            .map_err(papi_error)?;
-        Ok(js_weak_ref_value(appended))
-    })?;
+    let namespace = realm.evaluate(
+        quickjs::EvalSource {
+            name: Some(BOBCAT_NAMESPACE_SOURCE_NAME),
+            ..quickjs::EvalSource::new("({})")
+        },
+        quickjs::EvalOptions::default(),
+    )?;
 
     let tree = Rc::clone(handle);
-    realm.define_global_function("__InsertElementBefore", 3, move |arguments| {
-        let parent = element_argument("__InsertElementBefore", arguments, 0)?;
-        let child = element_argument("__InsertElementBefore", arguments, 1)?;
-        let reference = optional_element_argument("__InsertElementBefore", arguments, 2)?;
-        let inserted = tree
-            .borrow_mut()
-            .tree()
-            .insert_element_before(parent, child, reference)
-            .map_err(papi_error)?;
-        Ok(js_weak_ref_value(inserted))
+    let member = realm.function("createPage", 0, move |_arguments| {
+        tree.borrow_mut().tree().create_page();
+        Ok(HostValue::Undefined)
     })?;
+    realm.set_property(&namespace, "createPage", &member)?;
 
     let tree = Rc::clone(handle);
-    realm.define_global_function("__RemoveElement", 2, move |arguments| {
-        let parent = element_argument("__RemoveElement", arguments, 0)?;
-        let child = element_argument("__RemoveElement", arguments, 1)?;
-        let removed = tree
-            .borrow_mut()
+    let member = realm.function("createElement", 3, move |arguments| {
+        let tag = string_argument("bobcat.createElement", arguments, 0)?;
+        let id = element_id_argument("bobcat.createElement", arguments, 1)?;
+        let parent_component = element_id_argument("bobcat.createElement", arguments, 2)?;
+        tree.borrow_mut()
+            .tree()
+            .create_element(id, tag, parent_component)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(&namespace, "createElement", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("nextElementUniqueId", 0, move |_arguments| {
+        let next = tree.borrow_mut().tree().next_unique_id();
+        Ok(HostValue::Number(f64::from(next)))
+    })?;
+    realm.set_property(&namespace, "nextElementUniqueId", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("setAttribute", 3, move |arguments| {
+        let id = element_id_argument("bobcat.setAttribute", arguments, 0)?;
+        let name = string_argument("bobcat.setAttribute", arguments, 1)?;
+        let value = string_argument("bobcat.setAttribute", arguments, 2)?;
+        tree.borrow_mut()
+            .tree()
+            .set_attribute(id, name, value)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(&namespace, "setAttribute", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("insertBefore", 3, move |arguments| {
+        let parent = element_id_argument("bobcat.insertBefore", arguments, 0)?;
+        let child = element_id_argument("bobcat.insertBefore", arguments, 1)?;
+        let reference = optional_element_id_argument("bobcat.insertBefore", arguments, 2)?;
+        tree.borrow_mut()
+            .tree()
+            .insert_before(parent, child, reference)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(&namespace, "insertBefore", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("removeElement", 2, move |arguments| {
+        let parent = element_id_argument("bobcat.removeElement", arguments, 0)?;
+        let child = element_id_argument("bobcat.removeElement", arguments, 1)?;
+        tree.borrow_mut()
             .tree()
             .remove_element(parent, child)
             .map_err(papi_error)?;
-        Ok(js_weak_ref_value(removed))
+        Ok(HostValue::Undefined)
     })?;
+    realm.set_property(&namespace, "removeElement", &member)?;
 
     let tree = Rc::clone(handle);
-    realm.define_global_function("__ReplaceElement", 2, move |arguments| {
-        let new_element = element_argument("__ReplaceElement", arguments, 0)?;
-        let old_element = element_argument("__ReplaceElement", arguments, 1)?;
+    let member = realm.function("replaceElement", 2, move |arguments| {
+        let new_element = element_id_argument("bobcat.replaceElement", arguments, 0)?;
+        let old_element = element_id_argument("bobcat.replaceElement", arguments, 1)?;
         tree.borrow_mut()
             .tree()
             .replace_element(new_element, old_element)
             .map_err(papi_error)?;
         Ok(HostValue::Undefined)
     })?;
+    realm.set_property(&namespace, "replaceElement", &member)?;
 
-    Ok(())
-}
-
-fn define_parent_element_constructor(
-    realm: &mut quickjs::Realm,
-    handle: &Rc<RefCell<TreeHandle>>,
-    name: &'static str,
-    constructor: ParentElementConstructor,
-) -> Result<(), quickjs::Error> {
     let tree = Rc::clone(handle);
-    realm.define_global_function(name, 1, move |arguments| {
-        let parent_component = u32_argument(name, arguments, 0)?;
-        let id = constructor(tree.borrow_mut().tree(), parent_component).map_err(papi_error)?;
-        Ok(js_weak_ref_value(id))
-    })
-}
+    let member = realm.function("dropElement", 1, move |arguments| {
+        let id = element_id_argument("bobcat.dropElement", arguments, 0)?;
+        tree.borrow_mut()
+            .tree()
+            .drop_element(id)
+            .map_err(papi_error)?;
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(&namespace, "dropElement", &member)?;
 
-fn js_weak_ref_value(id: ElementId) -> HostValue {
-    HostValue::JsWeakRef(id)
-}
+    let tree = Rc::clone(handle);
+    let member = realm.function("flushElementTree", 0, move |_arguments| {
+        tree.borrow_mut().flush();
+        on_flush();
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(&namespace, "flushElementTree", &member)?;
 
-fn js_weak_ref_drop(tree: &Rc<RefCell<TreeHandle>>, id: ElementId) {
-    match tree.borrow_mut().tree().drop_element(id) {
-        Ok(()) | Err(PapiError::UnknownElement(_) | PapiError::CannotRemovePage) => {}
-        Err(error) => debug_assert!(false, "unexpected weak-ref drop failure: {error}"),
-    }
+    let global = realm.global_object()?;
+    realm.set_property(&global, "bobcat", &namespace)?;
+    Ok(())
 }
 
 fn papi_error(error: impl fmt::Display) -> HostFunctionError {
@@ -454,11 +476,11 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
-fn u32_argument(
+fn element_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<u32, HostFunctionError> {
+) -> Result<ElementId, HostFunctionError> {
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(HostFunctionError::new(format!(
             "{function} expects a number for argument {index}"
@@ -474,31 +496,17 @@ fn u32_argument(
         clippy::cast_sign_loss,
         reason = "the range and integrality checks above make this exact"
     )]
-    Ok(value as u32)
+    Ok(value as ElementId)
 }
 
-fn i32_argument(
+fn optional_element_id_argument(
     function: &str,
     arguments: &[HostValue],
     index: usize,
-) -> Result<i32, HostFunctionError> {
+) -> Result<Option<ElementId>, HostFunctionError> {
     match *argument(arguments, index) {
-        HostValue::Undefined | HostValue::Null => Ok(0),
-        HostValue::Number(value)
-            if value.is_finite()
-                && value.fract() == 0.0
-                && value >= f64::from(i32::MIN)
-                && value <= f64::from(i32::MAX) =>
-        {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "the range and integrality checks above make this exact"
-            )]
-            Ok(value as i32)
-        }
-        _ => Err(HostFunctionError::new(format!(
-            "{function} expects an integer for argument {index}"
-        ))),
+        HostValue::Undefined | HostValue::Null => Ok(None),
+        _ => element_id_argument(function, arguments, index).map(Some),
     }
 }
 
@@ -512,34 +520,6 @@ fn string_argument<'a>(
         HostValue::Undefined | HostValue::Null => Ok(""),
         _ => Err(HostFunctionError::new(format!(
             "{function} expects a string for argument {index}"
-        ))),
-    }
-}
-
-fn element_argument(
-    function: &str,
-    arguments: &[HostValue],
-    index: usize,
-) -> Result<ElementId, HostFunctionError> {
-    let HostValue::JsWeakRef(id) = *argument(arguments, index) else {
-        return Err(HostFunctionError::new(format!(
-            "{function} expects a JavaScript element weak reference for argument {index}"
-        )));
-    };
-    Ok(id)
-}
-
-fn optional_element_argument(
-    function: &str,
-    arguments: &[HostValue],
-    index: usize,
-) -> Result<Option<ElementId>, HostFunctionError> {
-    match *argument(arguments, index) {
-        HostValue::Undefined | HostValue::Null => Ok(None),
-        HostValue::JsWeakRef(id) => Ok(Some(id)),
-        _ => Err(HostFunctionError::new(format!(
-            "{function} expects a JavaScript element weak reference, null, or undefined for \
-             argument {index}"
         ))),
     }
 }

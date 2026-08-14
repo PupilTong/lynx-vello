@@ -8,19 +8,25 @@ The product dependency graph is:
 
 ```text
 bobcat-cli  ─┐
-             ├──▶ bobcat-core ──▶ lynx-element ──▶ dom ─┬─▶ hughie
-bobcat-wasm ─┘          │                                  ├─▶ vendor/stylo
-                        └──▶ quickjs-rust-bridge           └─▶ vello/wgpu
+             ├──▶ bobcat-core ──▶ dom ─┬─▶ hughie
+bobcat-wasm ─┘          │              ├─▶ vendor/stylo
+                        │              └─▶ vello/wgpu
+                        └──▶ quickjs-rust-bridge
                              [feature = "quickjs";
                               native product only]
+
+main-thread script ──▶ element-papi.js (packages/bobcat-element, embedded)
+                          ──▶ bobcat.* ──▶ bobcat_core::tree::ElementTree
 
 bobcat-cli  ──▶ lynx-template-decoder + winit (macOS headed product only)
 bobcat-wasm ──▶ NAPI-RS + emnapi (`wasm32-wasip1-threads`, one shared-memory
                                   module for Rust threads and Vello/WebGPU Canvas)
 
 Each layer depends only on the layer directly below and re-exports it whole
-(`bobcat_core::lynx_element`, `lynx_element::dom`); `dom` re-exports the
-`vello`, `stylo`, `euclid`, and `stylo_traits` vocabulary crates.
+(`bobcat_core::dom`); `dom` re-exports the `vello`, `stylo`, `euclid`, and
+`stylo_traits` vocabulary crates. The Element PAPI surface itself is
+JavaScript: `packages/bobcat-element` is embedded into `bobcat-core` with
+`include_str!` and evaluated into the realm before any bundle code.
 ```
 
 `dom`'s `render` module is its intentionally DOM-free floor (absorbed from the
@@ -38,14 +44,15 @@ JavaScript adapter:
 - `script::ScriptEngine` is the external JavaScript-engine contract. Its
   `ImportFuture<'a>` is a GAT, so implementations return concrete futures
   without boxed `dyn Future` values.
-- `lynx-element` owns the concrete validated Element-PAPI operations and
-  `pub type ElementId = u32`. There is no element-host trait: the only real
-  host is `ElementTree`, and every PAPI call mutates it directly — the
-  tree's own validation is the single source of every `PapiError`.
-  `has_uncommitted_mutations` marks the span between a batch's first
-  mutation and its `flush_element_tree`, which is what lets a frame
-  producer sharing the tree across threads refuse to build from a
-  half-applied batch.
+- `tree` owns the native element tree and `pub type ElementId = u32`. There
+  is no element-host trait: the only real host is `ElementTree`, and every
+  `bobcat.*` call mutates it directly — the tree's own structural validation
+  is the single source of every `PapiError`. The PAPI member surface, tag
+  vocabulary, unique-id allocation, and handle lifecycle live in the
+  embedded `packages/bobcat-element` runtime. `has_uncommitted_mutations`
+  marks the span between a batch's first mutation and its
+  `flush_element_tree`, which is what lets a frame producer sharing the
+  tree across threads refuse to build from a half-applied batch.
 - `engine` is the embedder boundary: `Engine` shares the element tree with
   its own Lynx main thread behind one lock, and owns input routing, frame
   production, presentation, and the script thread. An embedder provides
@@ -73,8 +80,8 @@ The default `quickjs` feature adds the internal QuickJS implementation,
 types have this single module path; the crate root does not duplicate their
 exports. Depending on
 `bobcat-core` with `default-features = false` excludes the QuickJS adapter and
-native QuickJS build while retaining the external engine protocols and element
-dependency. `lynx-element` has no QuickJS feature.
+native QuickJS build while retaining the external engine protocols and the
+`tree` module.
 
 ## Document-owned painting
 
@@ -112,33 +119,37 @@ This ownership removes two invalid states the injected design permitted:
 - callers could retain a paint-order snapshot and combine it with newer live
   styles or layout.
 
-`lynx_element::ElementTree` directly owns `Document<ElementId>`, and neither
-the document nor `NodeId` appears in its public signatures: external
-observation speaks `ElementId` only (`page`, `element`, `config`), and DOM
-shape is asserted by the layer that owns it — lynx-element's own unit tests,
-through a `cfg(test)`-gated accessor. Its mutable surface is the Element
-PAPI plus the invariant-safe engine-side methods (`handle_input`,
-`set_viewport`, `render`, `needs_render`, `scene`, `images_mut` — none
-creates, moves, or retires an element). `bobcat_core::engine::Engine` is the
-sole production driver of that engine-side surface, and embedders never
-touch it: they hold an `Engine` and relay OS facts into it.
+`bobcat_core::tree::ElementTree` directly owns `Document<ElementId>`, and
+neither the document nor `NodeId` appears in its public signatures: external
+observation speaks `ElementId` only (`page`, `is_live`, `config`), and DOM
+shape is asserted by the module that owns it — `tree`'s own unit tests,
+through a `cfg(test)`-gated accessor. Its mutable surface is the native
+tree-operation set the `bobcat` object exposes plus the invariant-safe
+engine-side methods (`handle_input`, `set_viewport`, `render`,
+`needs_render`, `scene`, `images_mut` — none creates, moves, or retires an
+element). `bobcat_core::engine::Engine` is the sole production driver of
+that engine-side surface, and embedders never touch it: they hold an
+`Engine` and relay OS facts into it.
 
 ## Frame walkthrough
 
 1. `ElementTree::new` constructs the Lynx `Device`, creates
    `Document<ElementId>`, and installs the Lynx UA stylesheet. The DOM payload
-   is the same permanent `u32` id stored in the element arena; private DOM
-   `NodeId` slots may still be reused.
+   is the same permanent `u32` unique id stored in the id-to-node table;
+   private DOM `NodeId` slots may still be reused.
 2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   Creation PAPI calls return an opaque, identity-stable JavaScript weak-ref
-   object carrying the element's `u32` arena id; host calls recover the id
-   only from that unforgeable object. Its finalizer queues `js_weak_ref_drop`,
-   which runs outside the collector and retires only that `LynxElement` and DOM
-   node through `ElementTree::drop_element`. Its children become detached roots
-   whose subtrees remain live until their own handles receive VM drop notifications.
-   A batch's first Element PAPI mutation takes the tree out of its hand-off
+   The embedded Element PAPI runtime allocates each element's `u32` unique
+   id, mints its one identity-stable handle object, and passes plain numbers
+   to the `bobcat` host functions; a handle is unforgeable because identity
+   lives in the runtime's private WeakMap. Each non-page handle is registered
+   with a `FinalizationRegistry` whose cleanup callback queues the unique id;
+   queued drops are applied at the next realm entry (or an explicit
+   `collect_garbage`), retiring only that element and DOM node through
+   `ElementTree::drop_element`. Its children become detached roots whose
+   subtrees remain live until their own handles are dropped in turn.
+   A batch's first `bobcat` call takes the tree out of its hand-off
    slot; every call after that is a plain `&mut` mutation with no
-   synchronization — the tree validates, so a bad handle throws at the call
+   synchronization — the tree validates, so a bad id throws at the call
    site — without the script ever seeing `NodeId`.
 3. `__FlushElementTree` is the commit boundary: the style + layout commit
    runs on the taken tree, the tree goes back in its slot, and the
@@ -216,7 +227,6 @@ traversal.
 
 ```sh
 cargo check -p dom --all-targets
-cargo check -p lynx-element
 cargo check -p bobcat-core --no-default-features
 cargo check -p bobcat-core --features quickjs
 cargo check -p bobcat-cli

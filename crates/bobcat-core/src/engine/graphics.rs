@@ -8,11 +8,11 @@
 //! alone.
 
 #[cfg(not(target_arch = "wasm32"))]
-use lynx_element::dom::render::gpu::read_texture;
-use lynx_element::dom::render::gpu::{render_params, renderer_options};
-use lynx_element::dom::vello;
-use lynx_element::dom::vello::peniko::Color;
-use lynx_element::dom::vello::util::{RenderContext, RenderSurface};
+use dom::render::gpu::read_texture;
+use dom::render::gpu::{render_params, renderer_options};
+use dom::vello;
+use dom::vello::peniko::Color;
+use dom::vello::util::{RenderContext, RenderSurface};
 
 use super::{EngineError, FrameRequester, FrameSize};
 

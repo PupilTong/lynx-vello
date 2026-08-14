@@ -1,7 +1,7 @@
 //! The decoded byte format every decoder produces and the paint engine
 //! consumes.
 
-use lynx_element::dom::vello::peniko;
+use dom::vello::peniko;
 
 use crate::image::error::ImageError;
 

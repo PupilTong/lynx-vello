@@ -1,17 +1,50 @@
-//! The element tree and its Element PAPI operations.
+//! The native element tree behind the JavaScript `bobcat` object.
+//!
+//! This module is the native half of the Element PAPI split:
+//!
+//! ```text
+//! main-thread script ──▶ element-papi.js (packages/bobcat-element) ──▶ bobcat.* ──▶ ElementTree ──▶ dom
+//!                        PAPI surface, tags, unique ids, handles        this module
+//! ```
+//!
+//! The JavaScript runtime owns the Lynx vocabulary: PAPI member names and
+//! arities, tag names, unique-id allocation, handle identity and collection,
+//! and parent-component bookkeeping. This module owns what must stay native:
+//! the [`dom::Document`], the `page` root policy, the UA cascade defaults,
+//! structural validation (existence, cycles, membership — `dom`'s mutation
+//! entry points assume validated input, so these checks cannot be delegated
+//! to script), the uncommitted-batch flag the presenter gates on, and the
+//! style + layout commit.
+//!
+//! # Recorded limits
+//!
+//! - **Unique ids are allocated by script and never recycled.** [`ElementId`] is `u32`; the
+//!   id-to-node table only appends, and ids must arrive in ascending sequence
+//!   ([`PapiError::NonSequentialId`] otherwise). Retiring an element leaves a permanent `None`
+//!   tombstone, so no stale script identity can ever name a later element. `dom` may reuse its
+//!   private `NodeId` slots.
+//! - **The page is permanent.** [`Document`] creates the `page` root at construction with unique id
+//!   1; it can never be removed, dropped, or reparented.
+//! - **The UA sheet covers the three documented Lynx computed defaults** (`display: linear`,
+//!   `box-sizing: border-box`, `overflow: hidden`) under their two page-config switches. Lynx's
+//!   wider default set is not modelled.
+//! - **No `rpx`/`ppx` view-unit policy yet.** The device is built from CSS pixels and a
+//!   device-pixel ratio only.
+//! - **There is no runtime tree-depth cap in this layer.** Hardening recursive walks belongs in
+//!   `dom` and `hughie`.
 
 use std::fmt;
 
 use dom::{self, Document, FontBlob, NodeId, StylesheetOrigin};
 
-use crate::arena::{ElementArena, LynxElement};
-use crate::device::Viewport;
-use crate::ua::{PageConfig, ua_stylesheet};
-use crate::{
-    ElementId, IMAGE_TAG, LIST_TAG, PAGE_TAG, RAW_TEXT_TAG, SCROLL_VIEW_TAG, TEXT_TAG, VIEW_TAG,
-    WRAPPER_TAG,
-};
+/// The script-visible element identity: a never-recycled unique id.
+pub type ElementId = u32;
 
+pub(crate) const PAGE_TAG: &str = "page";
+
+pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
+
+/// Why a native tree operation was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PapiError {
@@ -20,6 +53,7 @@ pub enum PapiError {
     WouldCycle { parent: ElementId, child: ElementId },
     CannotReparentPage,
     CannotRemovePage,
+    NonSequentialId { id: ElementId, expected: ElementId },
 }
 
 impl fmt::Display for PapiError {
@@ -39,24 +73,101 @@ impl fmt::Display for PapiError {
                 formatter.write_str("the page element cannot be given a parent")
             }
             Self::CannotRemovePage => formatter.write_str("the page element cannot be removed"),
+            Self::NonSequentialId { id, expected } => write!(
+                formatter,
+                "a new element must take the next unique id {expected}, got {id}"
+            ),
         }
     }
 }
 
 impl std::error::Error for PapiError {}
 
-/// A DOM document paired with Lynx runtime handles and page policy.
+/// Page configuration that controls the Lynx UA cascade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageConfig {
+    /// Whether elements default to `display: linear`.
+    pub default_display_linear: bool,
+    /// Whether elements default to visible overflow.
+    pub default_overflow_visible: bool,
+    /// Whether author CSS selector matching is enabled.
+    pub enable_css_selector: bool,
+}
+
+impl Default for PageConfig {
+    fn default() -> Self {
+        Self {
+            default_display_linear: true,
+            default_overflow_visible: true,
+            enable_css_selector: true,
+        }
+    }
+}
+
+/// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
+#[must_use]
+fn ua_stylesheet(config: PageConfig) -> String {
+    let display = if config.default_display_linear {
+        "display: linear;"
+    } else {
+        ""
+    };
+    let overflow = if config.default_overflow_visible {
+        ""
+    } else {
+        "overflow: hidden;"
+    };
+    format!(
+        "page, view {{ box-sizing: border-box; {display} {overflow} }}\n\
+         page {{ width: 100%; height: 100%; }}\n"
+    )
+}
+
+/// A viewport measured in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Viewport {
+    /// Viewport width in CSS pixels.
+    pub width: f32,
+    /// Viewport height in CSS pixels.
+    pub height: f32,
+    /// Physical pixels per CSS pixel.
+    pub device_pixel_ratio: f32,
+}
+
+impl Viewport {
+    /// Creates a viewport with a device-pixel ratio of 1.
+    #[must_use]
+    pub const fn new(width: f32, height: f32) -> Self {
+        Self {
+            width,
+            height,
+            device_pixel_ratio: 1.0,
+        }
+    }
+
+    #[must_use]
+    /// Returns this viewport with a new device-pixel ratio.
+    pub const fn with_device_pixel_ratio(mut self, device_pixel_ratio: f32) -> Self {
+        self.device_pixel_ratio = device_pixel_ratio;
+        self
+    }
+
+    fn device(self) -> dom::Device {
+        dom::Device::new(self.width, self.height, self.device_pixel_ratio)
+    }
+}
+
+/// A DOM document keyed by script-allocated unique ids, plus page policy.
 #[derive(Debug)]
 pub struct ElementTree {
     document: Document<ElementId>,
-    elements: ElementArena,
+    /// Unique id to DOM node, indexed directly by id. Slot zero is the
+    /// permanent null sentinel; retired ids leave permanent tombstones.
+    nodes: Vec<Option<NodeId>>,
     page_created: bool,
     uncommitted: bool,
-    page_component_id: String,
     config: PageConfig,
 }
-
-pub(crate) const PAGE_UNIQUE_ID: ElementId = 1;
 
 impl ElementTree {
     /// Creates an element tree with its permanent page element and UA cascade.
@@ -64,23 +175,14 @@ impl ElementTree {
     pub fn new(viewport: Viewport, config: PageConfig) -> Self {
         let mut document = Document::new(viewport.device(), PAGE_TAG, PAGE_UNIQUE_ID);
         document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
-        let elements = ElementArena::new();
-        assert_eq!(
-            elements.reserve(),
-            PAGE_UNIQUE_ID,
-            "the first live arena slot is reserved for the page"
-        );
-        let mut tree = Self {
+        let page_node = document.document_element().id();
+        Self {
             document,
-            elements,
+            nodes: vec![None, Some(page_node)],
             page_created: false,
             uncommitted: false,
-            page_component_id: String::new(),
             config,
-        };
-        let page_node = tree.document.document_element().id();
-        tree.elements.insert(PAGE_UNIQUE_ID, page_node, 0, 0);
-        tree
+        }
     }
 
     #[cfg(test)]
@@ -148,22 +250,27 @@ impl ElementTree {
         self.page_created.then_some(PAGE_UNIQUE_ID)
     }
 
-    /// Returns the page component id recorded by `create_page`.
-    #[cfg(test)]
+    /// Returns whether an element with this unique id is live.
     #[must_use]
-    pub fn page_component_id(&self) -> &str {
-        &self.page_component_id
+    pub fn is_live(&self, id: ElementId) -> bool {
+        self.node_id(id).is_some()
+    }
+
+    /// Returns the unique id the next created element must take. The
+    /// JavaScript Element PAPI runtime seeds its allocator from this, so a
+    /// fresh realm over a retained tree continues the sequence.
+    #[must_use]
+    pub fn next_unique_id(&self) -> ElementId {
+        ElementId::try_from(self.nodes.len()).expect("the element table exhausted its u32 ids")
     }
 
     #[must_use]
-    pub(crate) fn node_id(&self, id: ElementId) -> Option<NodeId> {
-        self.element(id).map(LynxElement::node_id)
-    }
-
-    /// Returns the live runtime element for an id.
-    #[must_use]
-    pub fn element(&self, id: ElementId) -> Option<&LynxElement> {
-        self.elements.get(id)
+    fn node_id(&self, id: ElementId) -> Option<NodeId> {
+        let index = usize::try_from(id).ok()?;
+        if index == 0 {
+            return None;
+        }
+        *self.nodes.get(index)?
     }
 
     /// Adds an author stylesheet.
@@ -171,109 +278,59 @@ impl ElementTree {
         self.document.add_stylesheet(css, StylesheetOrigin::Author);
     }
 
-    /// Binds and returns the permanent page id, ignoring repeated calls.
-    pub fn create_page(&mut self, component_id: &str, component_css_id: i32) -> ElementId {
+    /// Marks the permanent page element live and the batch uncommitted;
+    /// repeated calls are no-ops beyond the batch flag.
+    pub fn create_page(&mut self) {
         self.uncommitted = true;
-        if !self.page_created {
-            component_id.clone_into(&mut self.page_component_id);
-            self.elements
-                .get_mut(PAGE_UNIQUE_ID)
-                .expect("the page arena entry is permanent")
-                .set_component_css_id(component_css_id);
-            self.page_created = true;
-        }
-        PAGE_UNIQUE_ID
+        self.page_created = true;
     }
 
-    /// Creates a detached element with a Lynx tag for a live parent component or sentinel zero.
+    /// Creates a detached element carrying the script-allocated unique id,
+    /// for a live parent component or the sentinel zero.
+    ///
+    /// The parent component is validated first, matching the original PAPI
+    /// order. Ids must arrive in ascending sequence: the table only appends,
+    /// which is what keeps retired ids permanently unaddressable.
     pub fn create_element(
         &mut self,
+        id: ElementId,
         tag: &str,
         parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.validate_parent_component(parent_component_unique_id)?;
+    ) -> Result<(), PapiError> {
+        if parent_component_unique_id != 0 && !self.is_live(parent_component_unique_id) {
+            return Err(PapiError::UnknownElement(parent_component_unique_id));
+        }
+        let expected = self.next_unique_id();
+        if id != expected {
+            return Err(PapiError::NonSequentialId { id, expected });
+        }
         self.uncommitted = true;
-        Ok(self.insert(tag, parent_component_unique_id, 0))
+        let node = self.document.create_element(tag, id);
+        self.nodes.push(Some(node));
+        Ok(())
     }
 
-    /// Creates a detached `wrapper` for a live parent component or sentinel zero.
-    pub fn create_wrapper_element(
+    /// Sets one attribute on a live element.
+    pub fn set_attribute(
         &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(WRAPPER_TAG, parent_component_unique_id)
-    }
-
-    /// Creates a detached `text` for a live parent component or sentinel zero.
-    pub fn create_text(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(TEXT_TAG, parent_component_unique_id)
-    }
-
-    /// Creates a detached `image` for a live parent component or sentinel zero.
-    pub fn create_image(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(IMAGE_TAG, parent_component_unique_id)
-    }
-
-    /// Creates a detached `view` for a live parent component or sentinel zero.
-    pub fn create_view(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(VIEW_TAG, parent_component_unique_id)
-    }
-
-    /// Creates a detached `scroll-view` for a live parent component or sentinel zero.
-    pub fn create_scroll_view(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(SCROLL_VIEW_TAG, parent_component_unique_id)
-    }
-
-    /// Creates a detached `raw-text` leaf whose `text` attribute carries its literal contents.
-    pub fn create_raw_text(&mut self, text: &str) -> ElementId {
+        id: ElementId,
+        name: &str,
+        value: &str,
+    ) -> Result<(), PapiError> {
+        let node = self.require_node(id)?;
         self.uncommitted = true;
-        let unique_id = self.insert(RAW_TEXT_TAG, 0, 0);
-        let node = self
-            .node_id(unique_id)
-            .expect("a just-inserted raw-text element is live");
-        self.document.set_attribute(node, "text", text);
-        unique_id
+        self.document.set_attribute(node, name, value);
+        Ok(())
     }
 
-    /// Creates a detached `list` for a live parent component or sentinel zero.
-    ///
-    /// List callback storage and execution belong to the future list PAPI implementation; this
-    /// operation establishes only the element identity and tag.
-    pub fn create_list(
-        &mut self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.create_element(LIST_TAG, parent_component_unique_id)
-    }
-
-    /// Reparents `child` as the last child of `parent` and returns it.
-    pub fn append_element(
-        &mut self,
-        parent: ElementId,
-        child: ElementId,
-    ) -> Result<ElementId, PapiError> {
-        self.insert_element_before(parent, child, None)
-    }
-
-    /// Reparents `child` before `reference`, or appends it when the reference is absent.
-    pub fn insert_element_before(
+    /// Reparents `child` before `reference`, or appends it when the reference
+    /// is absent. Inserting an element before itself is a no-op.
+    pub fn insert_before(
         &mut self,
         parent: ElementId,
         child: ElementId,
         reference: Option<ElementId>,
-    ) -> Result<ElementId, PapiError> {
+    ) -> Result<(), PapiError> {
         let parent_node = self.require_node(parent)?;
         let child_node = self.require_node(child)?;
         let reference_node = reference.map(|id| self.require_node(id)).transpose()?;
@@ -291,22 +348,18 @@ impl ElementTree {
                 });
             }
             if reference == child {
-                return Ok(child);
+                return Ok(());
             }
         }
 
         self.uncommitted = true;
         self.document
             .insert_before(parent_node, child_node, reference_node);
-        Ok(child)
+        Ok(())
     }
 
-    /// Detaches `child` from `parent` without retiring either element and returns the child.
-    pub fn remove_element(
-        &mut self,
-        parent: ElementId,
-        child: ElementId,
-    ) -> Result<ElementId, PapiError> {
+    /// Detaches `child` from `parent` without retiring either element.
+    pub fn remove_element(&mut self, parent: ElementId, child: ElementId) -> Result<(), PapiError> {
         let parent_node = self.require_node(parent)?;
         let child_node = self.require_node(child)?;
         if child == PAGE_UNIQUE_ID {
@@ -318,13 +371,14 @@ impl ElementTree {
 
         self.uncommitted = true;
         self.document.remove_element(child_node);
-        Ok(child)
+        Ok(())
     }
 
-    /// Replaces `old_element` in place with `new_element`, leaving the old element detached.
+    /// Replaces `old_element` in place with `new_element`, leaving the old
+    /// element detached.
     ///
-    /// Replacing a detached element or replacing an element with itself is a no-op, matching the
-    /// Element PAPI's `ChildNode.replaceWith` behavior.
+    /// Replacing a detached element or replacing an element with itself is a
+    /// no-op, matching the Element PAPI's `ChildNode.replaceWith` behavior.
     pub fn replace_element(
         &mut self,
         new_element: ElementId,
@@ -360,21 +414,20 @@ impl ElementTree {
 
     /// Drops one element and permanently retires its id.
     ///
-    /// Its direct children are detached but remain live, along with their descendants. Each of
-    /// those elements is retired only when the JavaScript VM drops its own handle.
+    /// Its direct children are detached but remain live, along with their
+    /// descendants. Each of those elements is retired only when script drops
+    /// it in turn — explicitly, or when its collected handle's drop is
+    /// delivered.
     pub fn drop_element(&mut self, id: ElementId) -> Result<(), PapiError> {
         if id == PAGE_UNIQUE_ID {
             return Err(PapiError::CannotRemovePage);
         }
-        let node = self.node_id(id).ok_or(PapiError::UnknownElement(id))?;
+        let node = self.require_node(id)?;
         self.uncommitted = true;
         let unique_id = self.document.drop_element(node);
-        debug_assert_eq!(unique_id, id, "the DOM payload must match its arena id");
-        let retired = self.elements.retire(unique_id);
-        debug_assert!(
-            retired.is_some(),
-            "a removed DOM node must have a live Lynx element"
-        );
+        debug_assert_eq!(unique_id, id, "the DOM payload must match its table id");
+        let index = usize::try_from(id).expect("a live element id indexed the table");
+        self.nodes[index] = None;
         Ok(())
     }
 
@@ -388,16 +441,6 @@ impl ElementTree {
     #[must_use]
     pub const fn has_uncommitted_mutations(&self) -> bool {
         self.uncommitted
-    }
-
-    fn validate_parent_component(
-        &self,
-        parent_component_unique_id: ElementId,
-    ) -> Result<(), PapiError> {
-        if parent_component_unique_id != 0 && self.node_id(parent_component_unique_id).is_none() {
-            return Err(PapiError::UnknownElement(parent_component_unique_id));
-        }
-        Ok(())
     }
 
     fn require_node(&self, id: ElementId) -> Result<NodeId, PapiError> {
@@ -419,40 +462,30 @@ impl ElementTree {
         }
         Ok(())
     }
-
-    fn insert(
-        &mut self,
-        tag: &str,
-        parent_component_unique_id: ElementId,
-        component_css_id: i32,
-    ) -> ElementId {
-        let unique_id = self.elements.reserve();
-        let node = self.document.create_element(tag, unique_id);
-        self.elements.insert(
-            unique_id,
-            node,
-            parent_component_unique_id,
-            component_css_id,
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, ElementId, ElementTree, LynxElement, PapiError, dom};
-    use crate::device::Viewport;
-    use crate::ua::PageConfig;
+    use super::{Document, ElementId, ElementTree, PapiError, Viewport, dom, ua_stylesheet};
+    use crate::tree::PageConfig;
 
     fn tree() -> ElementTree {
         ElementTree::new(Viewport::new(393.0, 727.0), PageConfig::default())
     }
 
+    /// Creates the next element as a `view`, asserting sequential allocation
+    /// the way the JavaScript runtime drives this API.
+    fn create_view(tree: &mut ElementTree, id: ElementId) -> ElementId {
+        tree.create_element(id, "view", 0).expect("sequential id");
+        id
+    }
+
     #[test]
     fn a_flush_lays_the_page_out_to_the_viewport() {
         let mut tree = tree();
-        let page = tree.create_page("card", 0);
+        tree.create_page();
         tree.flush_element_tree();
-        let page_node = tree.node_id(page).expect("a live page");
+        let page_node = tree.document().document_element().id();
         let layout = tree
             .document()
             .rounded_layout(page_node)
@@ -476,50 +509,48 @@ mod tests {
     }
 
     #[test]
-    fn unique_ids_start_at_one_and_do_not_repeat() {
+    fn element_ids_are_sequential_and_start_after_the_page() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let first = tree.create_view(0).unwrap();
-        let second = tree.create_view(0).unwrap();
-        assert_eq!(page, 1);
-        assert_eq!(first, 2);
-        assert_eq!(second, 3);
+        assert_eq!(
+            tree.create_element(3, "view", 0).unwrap_err(),
+            PapiError::NonSequentialId { id: 3, expected: 2 }
+        );
+        create_view(&mut tree, 2);
+        create_view(&mut tree, 3);
+        assert!(tree.is_live(2));
+        assert!(tree.is_live(3));
     }
 
     #[test]
-    fn releasing_an_element_leaves_a_permanent_empty_arena_slot() {
+    fn dropping_an_element_leaves_a_permanent_tombstone() {
         let mut tree = tree();
-        let first = tree.create_view(0).unwrap();
-        let first_node = tree.node_id(first).unwrap();
-        let first_unique_id = *tree.document().get(first_node).unwrap().payload();
+        create_view(&mut tree, 2);
+        tree.drop_element(2).unwrap();
+        assert!(!tree.is_live(2));
 
-        tree.drop_element(first).unwrap();
-        assert!(tree.node_id(first).is_none());
-
-        let second = tree.create_view(0).unwrap();
-        let second_node = tree.node_id(second).unwrap();
-        let second_unique_id = *tree.document().get(second_node).unwrap().payload();
-
-        assert_eq!(tree.elements.len(), 4);
-        assert_eq!(first_unique_id, 2);
-        assert_eq!(second_unique_id, 3);
-        assert_eq!(second, first + 1);
-        assert!(tree.node_id(first).is_none());
+        assert_eq!(
+            tree.create_element(2, "view", 0).unwrap_err(),
+            PapiError::NonSequentialId { id: 2, expected: 3 }
+        );
+        create_view(&mut tree, 3);
+        assert!(!tree.is_live(2));
+        assert!(tree.is_live(3));
     }
 
     #[test]
-    fn releasing_an_element_retires_only_it_and_detaches_its_descendants() {
+    fn dropping_an_element_retires_only_it_and_detaches_its_descendants() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let parent = tree.create_view(0).unwrap();
-        let child = tree.create_view(0).unwrap();
-        let grandchild = tree.create_view(0).unwrap();
-        tree.append_element(page, parent).unwrap();
-        tree.append_element(parent, child).unwrap();
-        tree.append_element(child, grandchild).unwrap();
+        tree.create_page();
+        let page = 1;
+        let parent = create_view(&mut tree, 2);
+        let child = create_view(&mut tree, 3);
+        let grandchild = create_view(&mut tree, 4);
+        tree.insert_before(page, parent, None).unwrap();
+        tree.insert_before(parent, child, None).unwrap();
+        tree.insert_before(child, grandchild, None).unwrap();
 
         tree.drop_element(parent).unwrap();
-        assert!(tree.node_id(parent).is_none());
+        assert!(!tree.is_live(parent));
         let child_node = tree.node_id(child).expect("the child remains live");
         let grandchild_node = tree
             .node_id(grandchild)
@@ -536,120 +567,37 @@ mod tests {
         );
         assert!(!tree.document().is_connected(child_node));
         assert!(!tree.document().is_connected(grandchild_node));
-        assert_eq!(tree.elements.len(), 5);
 
-        tree.append_element(page, child).unwrap();
+        tree.insert_before(page, child, None).unwrap();
         assert!(tree.document().is_connected(child_node));
         assert!(tree.document().is_connected(grandchild_node));
-
-        let next = tree.create_view(0).unwrap();
-        assert_eq!(next, 5);
     }
 
     #[test]
     fn create_page_is_idempotent() {
         let mut tree = tree();
-        let first = tree.create_page("page", 0);
-        let second = tree.create_page("other", 7);
-        assert_eq!(first, second);
-        assert_eq!(tree.page(), Some(first));
-        assert_eq!(tree.page_component_id(), "page");
-        assert_eq!(
-            tree.element(first).map(LynxElement::component_css_id),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn the_page_component_id_stays_out_of_the_dom() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-        assert_eq!(tree.page_component_id(), "card");
-
-        let node = tree.node_id(page).unwrap();
-        assert_eq!(tree.document().get(node).unwrap().attributes().len(), 0);
+        assert!(tree.page().is_none());
+        tree.create_page();
+        assert_eq!(tree.page(), Some(1));
+        tree.create_page();
+        assert_eq!(tree.page(), Some(1));
     }
 
     #[test]
     fn zero_is_the_no_element_sentinel() {
-        let mut tree = tree();
-        assert!(tree.element(0).is_none());
-        assert!(tree.create_view(0).is_ok());
+        let tree = tree();
+        assert!(!tree.is_live(0));
+        assert!(tree.is_live(1));
     }
 
     #[test]
-    fn create_view_rejects_an_unknown_parent_component() {
+    fn insert_before_appends_and_links_the_child() {
         let mut tree = tree();
-        assert_eq!(
-            tree.create_view(9).unwrap_err(),
-            PapiError::UnknownElement(9)
-        );
-    }
+        tree.create_page();
+        let view = create_view(&mut tree, 2);
+        tree.insert_before(1, view, None).unwrap();
 
-    #[test]
-    fn reactlynx_create_functions_use_lynx_tags_and_record_the_parent_component() {
-        let mut tree = tree();
-        let page = tree.create_page("card", 0);
-        let elements = [
-            (
-                tree.create_element("custom-widget", page).unwrap(),
-                "custom-widget",
-            ),
-            (tree.create_wrapper_element(page).unwrap(), "wrapper"),
-            (tree.create_text(page).unwrap(), "text"),
-            (tree.create_image(page).unwrap(), "image"),
-            (tree.create_view(page).unwrap(), "view"),
-            (tree.create_scroll_view(page).unwrap(), "scroll-view"),
-            (tree.create_list(page).unwrap(), "list"),
-        ];
-
-        for (id, expected_tag) in elements {
-            let element = tree.element(id).expect("the created element is live");
-            assert_eq!(element.parent_component_unique_id(), page);
-            let node = tree.document().get(element.node_id()).unwrap();
-            assert_eq!(node.tag_name(), Some(expected_tag));
-        }
-    }
-
-    #[test]
-    fn raw_text_stores_its_literal_text_and_uses_the_null_component_sentinel() {
-        let mut tree = tree();
-        let raw_text = tree.create_raw_text("Hello, Lynx");
-        let element = tree.element(raw_text).expect("the raw text is live");
-        assert_eq!(element.parent_component_unique_id(), 0);
-
-        let node = tree.document().get(element.node_id()).unwrap();
-        assert_eq!(node.tag_name(), Some("raw-text"));
-        assert_eq!(
-            node.attributes().find(|(name, _)| *name == "text"),
-            Some(("text", "Hello, Lynx"))
-        );
-    }
-
-    #[test]
-    fn every_parent_component_create_function_rejects_an_unknown_component() {
-        let mut tree = tree();
-        for result in [
-            tree.create_element("custom-widget", 9),
-            tree.create_wrapper_element(9),
-            tree.create_text(9),
-            tree.create_image(9),
-            tree.create_view(9),
-            tree.create_scroll_view(9),
-            tree.create_list(9),
-        ] {
-            assert_eq!(result.unwrap_err(), PapiError::UnknownElement(9));
-        }
-    }
-
-    #[test]
-    fn append_element_returns_the_child_and_links_it() {
-        let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
-        assert_eq!(tree.append_element(page, view).unwrap(), view);
-
-        let page_node = tree.node_id(page).unwrap();
+        let page_node = tree.node_id(1).unwrap();
         let view_node = tree.node_id(view).unwrap();
         assert_eq!(
             tree.document().get(page_node).unwrap().child_ids(),
@@ -658,16 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn append_element_reparents_rather_than_duplicating() {
+    fn insert_before_reparents_rather_than_duplicating() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let first = tree.create_view(0).unwrap();
-        let second = tree.create_view(0).unwrap();
-        let moved = tree.create_view(0).unwrap();
-        tree.append_element(page, first).unwrap();
-        tree.append_element(page, second).unwrap();
-        tree.append_element(first, moved).unwrap();
-        tree.append_element(second, moved).unwrap();
+        tree.create_page();
+        let first = create_view(&mut tree, 2);
+        let second = create_view(&mut tree, 3);
+        let moved = create_view(&mut tree, 4);
+        tree.insert_before(1, first, None).unwrap();
+        tree.insert_before(1, second, None).unwrap();
+        tree.insert_before(first, moved, None).unwrap();
+        tree.insert_before(second, moved, None).unwrap();
 
         let first_node = tree.node_id(first).unwrap();
         let second_node = tree.node_id(second).unwrap();
@@ -686,38 +634,37 @@ mod tests {
     }
 
     #[test]
-    fn append_element_rejects_unknown_handles() {
+    fn insert_before_rejects_unknown_ids() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let ghost: ElementId = 99;
+        tree.create_page();
         assert_eq!(
-            tree.append_element(page, ghost).unwrap_err(),
+            tree.insert_before(1, 99, None).unwrap_err(),
             PapiError::UnknownElement(99)
         );
         assert_eq!(
-            tree.append_element(ghost, page).unwrap_err(),
+            tree.insert_before(99, 1, None).unwrap_err(),
             PapiError::UnknownElement(99)
         );
     }
 
     #[test]
-    fn append_element_rejects_cycles() {
+    fn insert_before_rejects_cycles() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let outer = tree.create_view(0).unwrap();
-        let inner = tree.create_view(0).unwrap();
-        tree.append_element(page, outer).unwrap();
-        tree.append_element(outer, inner).unwrap();
+        tree.create_page();
+        let outer = create_view(&mut tree, 2);
+        let inner = create_view(&mut tree, 3);
+        tree.insert_before(1, outer, None).unwrap();
+        tree.insert_before(outer, inner, None).unwrap();
 
         assert_eq!(
-            tree.append_element(inner, outer).unwrap_err(),
+            tree.insert_before(inner, outer, None).unwrap_err(),
             PapiError::WouldCycle {
                 parent: inner,
                 child: outer,
             }
         );
         assert_eq!(
-            tree.append_element(outer, outer).unwrap_err(),
+            tree.insert_before(outer, outer, None).unwrap_err(),
             PapiError::WouldCycle {
                 parent: outer,
                 child: outer,
@@ -726,42 +673,34 @@ mod tests {
     }
 
     #[test]
-    fn append_element_refuses_to_reparent_the_page() {
+    fn insert_before_refuses_to_reparent_the_page() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
-        tree.append_element(page, view).unwrap();
+        tree.create_page();
+        let view = create_view(&mut tree, 2);
+        tree.insert_before(1, view, None).unwrap();
         assert_eq!(
-            tree.append_element(view, page).unwrap_err(),
+            tree.insert_before(view, 1, None).unwrap_err(),
             PapiError::CannotReparentPage
         );
     }
 
     #[test]
-    fn tree_mutations_insert_remove_and_replace_without_retiring_handles() {
+    fn tree_mutations_insert_remove_and_replace_without_retiring_ids() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let first = tree.create_view(0).unwrap();
-        let second = tree.create_view(0).unwrap();
-        let third = tree.create_view(0).unwrap();
-        let replacement = tree.create_view(0).unwrap();
-        let second_child = tree.create_view(0).unwrap();
-        tree.append_element(second, second_child).unwrap();
+        tree.create_page();
+        let first = create_view(&mut tree, 2);
+        let second = create_view(&mut tree, 3);
+        let third = create_view(&mut tree, 4);
+        let replacement = create_view(&mut tree, 5);
+        let second_child = create_view(&mut tree, 6);
+        tree.insert_before(second, second_child, None).unwrap();
 
-        assert_eq!(
-            tree.insert_element_before(page, first, None).unwrap(),
-            first
-        );
-        assert_eq!(
-            tree.insert_element_before(page, second, Some(first))
-                .unwrap(),
-            second
-        );
-        tree.append_element(page, third).unwrap();
-        tree.insert_element_before(page, third, Some(second))
-            .unwrap();
+        tree.insert_before(1, first, None).unwrap();
+        tree.insert_before(1, second, Some(first)).unwrap();
+        tree.insert_before(1, third, None).unwrap();
+        tree.insert_before(1, third, Some(second)).unwrap();
 
-        let page_node = tree.node_id(page).unwrap();
+        let page_node = tree.node_id(1).unwrap();
         let first_node = tree.node_id(first).unwrap();
         let second_node = tree.node_id(second).unwrap();
         let third_node = tree.node_id(third).unwrap();
@@ -772,22 +711,19 @@ mod tests {
             [third_node, second_node, first_node]
         );
 
-        assert_eq!(tree.remove_element(page, second).unwrap(), second);
+        tree.remove_element(1, second).unwrap();
         assert_eq!(
             tree.document().get(page_node).unwrap().child_ids(),
             [third_node, first_node]
         );
         assert_eq!(tree.document().get(second_node).unwrap().parent_id(), None);
-        assert!(
-            tree.element(second).is_some(),
-            "remove must not retire the handle"
-        );
+        assert!(tree.is_live(second), "remove must not retire the id");
         assert_eq!(
             tree.document().get(second_child_node).unwrap().parent_id(),
             Some(second_node),
             "remove must preserve the detached subtree"
         );
-        assert!(tree.element(second_child).is_some());
+        assert!(tree.is_live(second_child));
 
         tree.replace_element(replacement, first).unwrap();
         assert_eq!(
@@ -796,39 +732,37 @@ mod tests {
         );
         assert_eq!(tree.document().get(first_node).unwrap().parent_id(), None);
         assert!(
-            tree.element(first).is_some(),
-            "replace must leave the old handle live but detached"
+            tree.is_live(first),
+            "replace must leave the old id live but detached"
         );
     }
 
     #[test]
     fn insert_and_remove_require_the_reference_or_child_to_belong_to_the_parent() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let other_parent = tree.create_view(0).unwrap();
-        let reference = tree.create_view(0).unwrap();
-        let child = tree.create_view(0).unwrap();
-        tree.append_element(page, other_parent).unwrap();
-        tree.append_element(other_parent, reference).unwrap();
+        tree.create_page();
+        let other_parent = create_view(&mut tree, 2);
+        let reference = create_view(&mut tree, 3);
+        let child = create_view(&mut tree, 4);
+        tree.insert_before(1, other_parent, None).unwrap();
+        tree.insert_before(other_parent, reference, None).unwrap();
 
         assert_eq!(
-            tree.insert_element_before(page, child, Some(reference))
-                .unwrap_err(),
+            tree.insert_before(1, child, Some(reference)).unwrap_err(),
             PapiError::NotAChild {
-                parent: page,
+                parent: 1,
                 child: reference,
             }
         );
         assert_eq!(
-            tree.remove_element(page, reference).unwrap_err(),
+            tree.remove_element(1, reference).unwrap_err(),
             PapiError::NotAChild {
-                parent: page,
+                parent: 1,
                 child: reference,
             }
         );
         assert_eq!(
-            tree.insert_element_before(page, child, Some(99))
-                .unwrap_err(),
+            tree.insert_before(1, child, Some(99)).unwrap_err(),
             PapiError::UnknownElement(99)
         );
     }
@@ -836,14 +770,14 @@ mod tests {
     #[test]
     fn insert_and_replace_reject_cycles_and_page_reparenting() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let outer = tree.create_view(0).unwrap();
-        let inner = tree.create_view(0).unwrap();
-        tree.append_element(page, outer).unwrap();
-        tree.append_element(outer, inner).unwrap();
+        tree.create_page();
+        let outer = create_view(&mut tree, 2);
+        let inner = create_view(&mut tree, 3);
+        tree.insert_before(1, outer, None).unwrap();
+        tree.insert_before(outer, inner, None).unwrap();
 
         assert_eq!(
-            tree.insert_element_before(inner, outer, None).unwrap_err(),
+            tree.insert_before(inner, outer, None).unwrap_err(),
             PapiError::WouldCycle {
                 parent: inner,
                 child: outer,
@@ -857,19 +791,19 @@ mod tests {
             }
         );
         assert_eq!(
-            tree.insert_element_before(outer, page, None).unwrap_err(),
+            tree.insert_before(outer, 1, None).unwrap_err(),
             PapiError::CannotReparentPage
         );
         assert_eq!(
-            tree.remove_element(outer, page).unwrap_err(),
+            tree.remove_element(outer, 1).unwrap_err(),
             PapiError::CannotRemovePage
         );
         assert_eq!(
-            tree.replace_element(inner, page).unwrap_err(),
+            tree.replace_element(inner, 1).unwrap_err(),
             PapiError::CannotRemovePage
         );
         assert_eq!(
-            tree.replace_element(page, inner).unwrap_err(),
+            tree.replace_element(1, inner).unwrap_err(),
             PapiError::CannotReparentPage
         );
     }
@@ -877,23 +811,19 @@ mod tests {
     #[test]
     fn self_insert_self_replace_and_detached_replace_are_no_ops() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let child = tree.create_view(0).unwrap();
-        let detached = tree.create_view(0).unwrap();
-        let unused_replacement = tree.create_view(0).unwrap();
-        tree.append_element(page, child).unwrap();
+        tree.create_page();
+        let child = create_view(&mut tree, 2);
+        let detached = create_view(&mut tree, 3);
+        let unused_replacement = create_view(&mut tree, 4);
+        tree.insert_before(1, child, None).unwrap();
         tree.flush_element_tree();
 
-        assert_eq!(
-            tree.insert_element_before(page, child, Some(child))
-                .unwrap(),
-            child
-        );
+        tree.insert_before(1, child, Some(child)).unwrap();
         tree.replace_element(child, child).unwrap();
         tree.replace_element(unused_replacement, detached).unwrap();
         assert!(!tree.has_uncommitted_mutations());
 
-        let page_node = tree.node_id(page).unwrap();
+        let page_node = tree.node_id(1).unwrap();
         let child_node = tree.node_id(child).unwrap();
         assert_eq!(
             tree.document().get(page_node).unwrap().child_ids(),
@@ -902,11 +832,44 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_page_is_rejected_before_liveness() {
+        let mut tree = tree();
+        assert_eq!(
+            tree.drop_element(1).unwrap_err(),
+            PapiError::CannotRemovePage
+        );
+        assert_eq!(
+            tree.drop_element(99).unwrap_err(),
+            PapiError::UnknownElement(99)
+        );
+    }
+
+    #[test]
+    fn set_attribute_reaches_the_dom_and_requires_liveness() {
+        let mut tree = tree();
+        let raw_text = create_view(&mut tree, 2);
+        tree.set_attribute(raw_text, "text", "Hello, Lynx").unwrap();
+        let node = tree.node_id(raw_text).unwrap();
+        assert_eq!(
+            tree.document()
+                .get(node)
+                .unwrap()
+                .attributes()
+                .find(|(name, _)| *name == "text"),
+            Some(("text", "Hello, Lynx"))
+        );
+        assert_eq!(
+            tree.set_attribute(99, "text", "x").unwrap_err(),
+            PapiError::UnknownElement(99)
+        );
+    }
+
+    #[test]
     fn the_page_is_the_document_element_from_birth() {
         let mut tree = tree();
         let document_element = tree.document().document_element().id();
-        let page = tree.create_page("page", 0);
-        assert_eq!(tree.node_id(page), Some(document_element));
+        tree.create_page();
+        assert_eq!(tree.node_id(1), Some(document_element));
 
         tree.flush_element_tree();
         assert_eq!(tree.document().document_element().id(), document_element);
@@ -931,9 +894,9 @@ mod tests {
     #[test]
     fn the_ua_sheet_gives_every_element_lynx_defaults() {
         let mut tree = tree();
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
-        tree.append_element(page, view).unwrap();
+        tree.create_page();
+        let view = create_view(&mut tree, 2);
+        tree.insert_before(1, view, None).unwrap();
         tree.flush_element_tree();
 
         let view_node = tree.node_id(view).unwrap();
@@ -962,9 +925,9 @@ mod tests {
                 ..PageConfig::default()
             },
         );
-        let page = tree.create_page("page", 0);
-        let view = tree.create_view(0).unwrap();
-        tree.append_element(page, view).unwrap();
+        tree.create_page();
+        let view = create_view(&mut tree, 2);
+        tree.insert_before(1, view, None).unwrap();
         tree.flush_element_tree();
 
         let view_node = tree.node_id(view).unwrap();
@@ -997,9 +960,9 @@ mod tests {
                     ..PageConfig::default()
                 },
             );
-            let page = tree.create_page("page", 0);
-            let view = tree.create_view(0).unwrap();
-            tree.append_element(page, view).unwrap();
+            tree.create_page();
+            let view = create_view(&mut tree, 2);
+            tree.insert_before(1, view, None).unwrap();
             tree.flush_element_tree();
 
             let view_node = tree.node_id(view).unwrap();
@@ -1015,12 +978,35 @@ mod tests {
     }
 
     #[test]
+    fn default_config_is_linear_and_overflow_visible() {
+        let config = PageConfig::default();
+        assert!(config.default_display_linear);
+        assert!(config.default_overflow_visible);
+
+        let sheet = ua_stylesheet(config);
+        assert!(sheet.contains("display: linear;"));
+        assert!(!sheet.contains("overflow: hidden;"));
+        assert!(sheet.contains("box-sizing: border-box;"));
+    }
+
+    #[test]
+    fn ua_switches_drop_the_declarations_they_gate() {
+        let sheet = ua_stylesheet(PageConfig {
+            default_display_linear: false,
+            default_overflow_visible: false,
+            enable_css_selector: true,
+        });
+        assert!(!sheet.contains("display: linear;"));
+        assert!(sheet.contains("overflow: hidden;"));
+    }
+
+    #[test]
     fn a_wide_tree_flushes() {
         let mut tree = tree();
-        let page = tree.create_page("card", 0);
-        for _ in 0..2000 {
-            let view = tree.create_view(0).unwrap();
-            tree.append_element(page, view).unwrap();
+        tree.create_page();
+        for id in 2..2002 {
+            create_view(&mut tree, id);
+            tree.insert_before(1, id, None).unwrap();
         }
         tree.flush_element_tree();
     }
@@ -1031,23 +1017,9 @@ mod tests {
 
         let mut tree = tree();
         assert_document_type(tree.document());
-        let page = tree.create_page("page", 17);
-        let view = tree.create_view(page).unwrap();
+        tree.create_page();
+        let view = create_view(&mut tree, 2);
         let node = tree.node_id(view).unwrap();
-        let payload_unique_id = *tree.document().get(node).unwrap().payload();
-        let element = tree.elements.get(payload_unique_id).unwrap();
-
-        assert_eq!(element.unique_id(), view);
-        assert_eq!(element.node_id(), node);
-        assert_eq!(
-            tree.element(view)
-                .map(LynxElement::parent_component_unique_id),
-            Some(page)
-        );
-        assert_eq!(
-            tree.element(page).map(LynxElement::component_css_id),
-            Some(17)
-        );
-        assert_eq!(payload_unique_id, view);
+        assert_eq!(*tree.document().get(node).unwrap().payload(), view);
     }
 }

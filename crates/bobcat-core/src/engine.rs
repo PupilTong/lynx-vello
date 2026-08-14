@@ -48,14 +48,14 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
-use lynx_element::dom::input::InputEvent;
-use lynx_element::dom::render::gpu::{GpuError, Headless};
-use lynx_element::dom::vello::peniko::Color;
-use lynx_element::dom::{FontBlob, ImageStore};
-use lynx_element::{ElementTree, PageConfig, Viewport};
+use dom::input::InputEvent;
+use dom::render::gpu::{GpuError, Headless};
+use dom::vello::peniko::Color;
+use dom::{FontBlob, ImageStore};
 
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+use crate::tree::{ElementTree, PageConfig, Viewport};
 
 /// The physical pixel size of the render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -725,10 +725,10 @@ mod tests {
     #[test]
     fn resource_bytes_reach_font_registration_without_copying() {
         use bytes::Bytes;
-        use lynx_element::PageConfig;
-        use lynx_element::dom::FontBlob;
+        use dom::FontBlob;
 
         use super::OffscreenEngine;
+        use crate::tree::PageConfig;
 
         let bytes = Bytes::from_static(b"not a font");
         let original = bytes.as_ptr();
@@ -745,9 +745,8 @@ mod tests {
     fn a_spawned_script_mutates_the_shared_tree() {
         use std::sync::mpsc;
 
-        use lynx_element::PageConfig;
-
         use super::{EngineEvent, OffscreenEngine};
+        use crate::tree::PageConfig;
 
         let mut engine =
             OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
@@ -786,8 +785,8 @@ mod tests {
 
         let elements = engine.elements();
         assert!(elements.page().is_some(), "the page was created");
-        assert!(elements.element(2).is_some(), "the first view is live");
-        assert!(elements.element(3).is_some(), "the second view is live");
+        assert!(elements.is_live(2), "the first view is live");
+        assert!(elements.is_live(3), "the second view is live");
         assert!(
             !elements.has_uncommitted_mutations(),
             "the boot's final flush closed the batch"

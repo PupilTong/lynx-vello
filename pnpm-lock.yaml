@@ -534,6 +534,8 @@ importers:
         specifier: ^3.4.19
         version: 3.4.19
 
+  packages/bobcat-element: {}
+
   packages/github-pages:
     dependencies:
       bobcat-wasm:

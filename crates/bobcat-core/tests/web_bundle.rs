@@ -11,7 +11,7 @@
 
 use bobcat_core::engine::SharedTree;
 use bobcat_core::quickjs::MainThreadRuntime;
-use lynx_element::{ElementTree, PageConfig, Viewport};
+use bobcat_core::tree::{ElementTree, PageConfig, Viewport};
 
 fn shared_tree(config: PageConfig) -> (MainThreadRuntime, SharedTree) {
     let elements = SharedTree::new(ElementTree::new(VIEWPORT, config));
@@ -102,5 +102,5 @@ fn the_boot_sequence_works_on_a_bundle_shaped_script() {
         .expect("boot");
     let elements = elements.tree();
     assert!(elements.page().is_some());
-    assert!(elements.element(2).is_some(), "the appended view is live");
+    assert!(elements.is_live(2), "the appended view is live");
 }

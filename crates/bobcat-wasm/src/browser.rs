@@ -4,10 +4,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bobcat_core::dom::FontBlob;
+use bobcat_core::dom::vello::wgpu;
 use bobcat_core::engine::{Engine, FrameRequester, FrameSize, Window, WindowTarget};
-use bobcat_core::lynx_element::PageConfig;
-use bobcat_core::lynx_element::dom::FontBlob;
-use bobcat_core::lynx_element::dom::vello::wgpu;
+use bobcat_core::tree::PageConfig;
 use napi::bindgen_prelude::{PromiseRaw, Uint8Array};
 use napi::{Env, JsValue as _, Unknown};
 use napi_derive::napi;
@@ -58,6 +58,10 @@ pub struct BobcatCanvas {
     engine: Engine<'static, BrowserWindow>,
     canvas: HtmlCanvasElement,
     frames: FrameSignal,
+    /// The embedder-side unique-id allocator: this NAPI surface is its own
+    /// element host, so it owns the monotonic counter the way the Element
+    /// PAPI runtime does inside the QuickJS realm. Ids are never reused.
+    next_unique_id: u32,
 }
 
 impl fmt::Debug for BobcatCanvas {
@@ -78,22 +82,26 @@ impl BobcatCanvas {
         self.engine.add_author_stylesheet(&css);
     }
 
-    /// Binds and returns the permanent page element.
+    /// Binds and returns the permanent page element. The component id and
+    /// CSS id are accepted for Element PAPI shape and recorded nowhere: this
+    /// embedder has no CSS-scope machinery to route them into.
     #[napi]
     #[allow(clippy::needless_pass_by_value)]
-    pub fn create_page(&mut self, component_id: String, component_css_id: i32) -> u32 {
-        self.engine
-            .elements()
-            .create_page(&component_id, component_css_id)
+    pub fn create_page(&mut self, _component_id: String, _component_css_id: i32) -> u32 {
+        self.engine.elements().create_page();
+        1
     }
 
-    /// Creates one detached Lynx `view` element.
+    /// Creates one detached Lynx `view` element and returns its unique id.
     #[napi]
     pub fn create_view(&mut self, parent_component_unique_id: u32) -> napi::Result<u32> {
+        let unique_id = self.next_unique_id;
         self.engine
             .elements()
-            .create_view(parent_component_unique_id)
-            .map_err(napi_error)
+            .create_element(unique_id, "view", parent_component_unique_id)
+            .map_err(napi_error)?;
+        self.next_unique_id += 1;
+        Ok(unique_id)
     }
 
     /// Appends an element and returns the appended child id.
@@ -101,8 +109,9 @@ impl BobcatCanvas {
     pub fn append_element(&mut self, parent: u32, child: u32) -> napi::Result<u32> {
         self.engine
             .elements()
-            .append_element(parent, child)
-            .map_err(napi_error)
+            .insert_before(parent, child, None)
+            .map_err(napi_error)?;
+        Ok(child)
     }
 
     /// Retires an element subtree.
@@ -200,6 +209,7 @@ pub fn create_bobcat_canvas(
                     engine,
                     canvas,
                     frames,
+                    next_unique_id: 2,
                 })
             }),
             Err(error) => deferred.reject(napi_error(error)),
