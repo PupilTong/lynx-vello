@@ -60,5 +60,4 @@ declare var __ReplaceElement: (
   newElement?: unknown,
   oldElement?: unknown,
 ) => undefined;
-declare var __DropElement: (element?: unknown) => undefined;
 declare var __FlushElementTree: () => undefined;

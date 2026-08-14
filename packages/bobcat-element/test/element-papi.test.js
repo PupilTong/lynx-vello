@@ -118,7 +118,6 @@ describe("installation", () => {
       ["__InsertElementBefore", 3],
       ["__RemoveElement", 2],
       ["__ReplaceElement", 2],
-      ["__DropElement", 1],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -130,6 +129,10 @@ describe("installation", () => {
 
   it("installs the drop deliverer on the native object", () => {
     expect(mock.deliverPendingElementDrops).toBeTypeOf("function");
+  });
+
+  it("does not install __DropElement: collection is the only release path", () => {
+    expect("__DropElement" in globalThis).toBe(false);
   });
 
   it("fails loudly when the native object is missing", async () => {
@@ -242,20 +245,6 @@ describe("tree mutations", () => {
     for (const bad of [null, undefined]) {
       expect(() => __AppendElement(bad, view)).toThrow(TypeError);
     }
-  });
-});
-
-describe("__DropElement", () => {
-  it("frees the element and unmaps its handle", () => {
-    const page = __CreatePage("card", 0);
-    const view = __CreateView(0);
-    expect(__DropElement(view)).toBeUndefined();
-    expect(mock.named("dropElement")).toEqual([["dropElement", 2]]);
-
-    // The dropped handle no longer resolves; further use crashes.
-    expect(() => __DropElement(view)).toThrow("expects a number");
-    expect(() => __AppendElement(page, view)).toThrow("expects a number");
-    void page;
   });
 });
 

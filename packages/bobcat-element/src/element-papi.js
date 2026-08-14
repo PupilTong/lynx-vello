@@ -25,13 +25,12 @@
 // | `__InsertElementBefore(parent, child, reference?)` | `bobcat.insertBefore` |
 // | `__RemoveElement(parent, child)` | `bobcat.removeElement` |
 // | `__ReplaceElement(newElement, oldElement)` | `bobcat.replaceElement` |
-// | `__DropElement(element)` | `bobcat.dropElement` |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — attributes, classes, inline styles, `__SetCSSId`, events,
-// `__CreateFrame`, tree querying, and list callback execution — is not
-// implemented. A bundle that reaches for another member fails at the missing
-// global, not silently.
+// `__CreateFrame`, `__DropElement` (absent from every web-core generation),
+// tree querying, and list callback execution — is not implemented. A bundle
+// that reaches for another member fails at the missing global, not silently.
 //
 // # Identity and lifecycle
 //
@@ -40,14 +39,15 @@
 //   return of an element yields the same object it was created with.
 //   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted
 //   for PAPI shape and unused.
-// - `__DropElement` retires exactly one element and unmaps its handle. As
-//   the collection backstop, every non-page handle is registered with a
-//   FinalizationRegistry whose cleanup queues the node id; queued drops are
-//   applied by `bobcat.deliverPendingElementDrops`, which the host calls
-//   before each realm entry and inside `collect_garbage` — never at realm
-//   teardown, so the last committed tree survives the bootstrap realm.
-// - No misuse is validated here: a dropped or foreign handle resolves to
-//   undefined and the call crashes at the native boundary.
+// - Collection is the only release path — web-core's model, where a swept
+//   WeakRef is what frees an element. Every non-page handle is registered
+//   with a FinalizationRegistry whose cleanup queues the node id; queued
+//   drops are applied by `bobcat.deliverPendingElementDrops`, which the
+//   host calls before each realm entry and inside `collect_garbage` —
+//   never at realm teardown, so the last committed tree survives the
+//   bootstrap realm.
+// - No misuse is validated here: a foreign handle resolves to undefined
+//   and the call crashes at the native boundary.
 
 (function () {
   "use strict";
@@ -269,17 +269,6 @@
     return undefined;
   }
 
-  /**
-   * @param {unknown} element
-   * @returns {undefined}
-   */
-  function __DropElement(element) {
-    native.dropElement(nodeIdOf(element));
-    delete (/** @type {Record<symbol, unknown>} */ (element))[nodeIdSymbol];
-    registry.unregister(/** @type {object} */ (element));
-    return undefined;
-  }
-
   /** @returns {undefined} */
   function __FlushElementTree() {
     native.flushElementTree();
@@ -300,7 +289,6 @@
     __InsertElementBefore,
     __RemoveElement,
     __ReplaceElement,
-    __DropElement,
     __FlushElementTree,
   });
 

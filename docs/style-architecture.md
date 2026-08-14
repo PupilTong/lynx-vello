@@ -157,12 +157,12 @@ What that covers, and what it does not:
   no input validation — misuse panics in `dom` and surfaces as a
   JavaScript exception at the host boundary;
 - plain JavaScript handle objects minted by the Element PAPI runtime, with
-  both the `FinalizationRegistry` collection backstop and explicit
-  `__DropElement` freeing exactly one DOM node; descendants remain live as
-  detached subtrees until their own handles drop;
+  `FinalizationRegistry` collection as the one release path, freeing
+  exactly one DOM node per handle; descendants remain live as detached
+  subtrees until their own handles are collected;
 - every ReactLynx Snapshot constructor except `__CreateFrame`, all four tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
-  `__ReplaceElement`), `__DropElement`, `__FlushElementTree`, and web-core's
+  `__ReplaceElement`), `__FlushElementTree`, and web-core's
   boot sequence. `__CreateList` creates the element but does not yet retain or
   execute its JavaScript callbacks.
 

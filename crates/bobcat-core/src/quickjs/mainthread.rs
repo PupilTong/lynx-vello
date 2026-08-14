@@ -70,9 +70,9 @@
 //! # Recorded limits
 //!
 //! - **The PAPI surface is the runtime script's table** — every `ReactLynx` Snapshot constructor
-//!   except `__CreateFrame`, the four tree mutations, `__DropElement`, and `__FlushElementTree`. A
-//!   bundle that reaches for another member gets a `ReferenceError` naming the missing global,
-//!   which is the intended failure: a silently wrong render would be worse.
+//!   except `__CreateFrame`, the four tree mutations, and `__FlushElementTree`. A bundle that
+//!   reaches for another member gets a `ReferenceError` naming the missing global, which is the
+//!   intended failure: a silently wrong render would be worse.
 //! - **Nothing validates script input.** A stale or fabricated node id panics inside `dom`; the
 //!   host boundary converts the unwind into a JavaScript exception ("the host function panicked").
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,

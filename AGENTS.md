@@ -199,8 +199,9 @@ useful signal for currently-compatible versions of those libraries.
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
   `__CreateScrollView`, `__CreateRawText`, `__CreateList`) plus all four tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`,
-  `__RemoveElement`, `__ReplaceElement`), `__DropElement`, and
-  `__FlushElementTree`; unsupported globals remain precise `ReferenceError`s.
+  `__RemoveElement`, `__ReplaceElement`) and `__FlushElementTree`;
+  unsupported globals remain precise `ReferenceError`s, including
+  `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
   callback storage/execution remains part of the unimplemented list surface.
   Creation calls return plain JavaScript handle objects minted by the PAPI
@@ -340,14 +341,14 @@ useful signal for currently-compatible versions of those libraries.
   object per element for its whole life, so every PAPI return of an element
   yields the same object.
   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted for
-  PAPI shape and unused. Lifecycle: `__DropElement` frees exactly one
-  element and unmaps its handle; as the GC backstop, every non-page handle
-  is registered with a `FinalizationRegistry` whose cleanup queues the node
-  id, and the host applies queued drops at the next realm entry through
-  `bobcat.deliverPendingElementDrops` — never during collection, and never
-  at realm teardown, which preserves the last committed tree. Nothing is
-  validated: a dropped or foreign handle resolves to undefined and crashes
-  at the native boundary. The file must stay a classic script (no
+  PAPI shape and unused. Lifecycle: collection is the only release path —
+  web-core's model, where a swept `WeakRef` is what frees an element.
+  Every non-page handle is registered with a `FinalizationRegistry` whose
+  cleanup queues the node id, and the host applies queued drops at the
+  next realm entry through `bobcat.deliverPendingElementDrops` — never
+  during collection, and never at realm teardown, which preserves the last
+  committed tree. Nothing is validated: a foreign handle resolves to
+  undefined and crashes at the native boundary. The file must stay a classic script (no
   import/export at runtime, ECMAScript intrinsics plus `globalThis.bobcat`
   only — the realm has no `console`/`setTimeout`/DOM), which is also what
   lets Rstest import it for side effects and `tsc --noEmit` check it under

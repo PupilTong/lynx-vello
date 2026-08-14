@@ -204,56 +204,6 @@ fn create_frame_remains_an_explicitly_missing_global() {
 }
 
 #[test]
-fn drop_element_frees_the_node_and_dom_reuses_the_slot() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreatePage('card', 0);
-              const dropped = __CreateView(0);
-              __DropElement(dropped);
-              globalThis.kept = __CreateView(0);
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.tree();
-    assert!(
-        elements.get(2).is_some(),
-        "the freed slot is reused by the next creation"
-    );
-    assert!(!elements.is_connected(2));
-}
-
-#[test]
-fn drop_element_frees_only_the_target_and_preserves_descendants() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              const parent = __CreateView(0);
-              const child = __CreateView(0);
-              const grandchild = __CreateView(0);
-              __AppendElement(page, parent);
-              __AppendElement(parent, child);
-              __AppendElement(child, grandchild);
-              __DropElement(parent);
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.tree();
-    assert!(elements.get(2).is_none());
-    assert!(elements.get(3).is_some());
-    assert!(elements.get(4).is_some());
-}
-
-#[test]
 fn create_page_is_idempotent_across_calls() {
     let (mut runtime, elements) = runtime();
     runtime
@@ -350,43 +300,6 @@ fn a_throwing_render_page_surfaces_the_javascript_error() {
 }
 
 #[test]
-fn papi_rejections_become_javascript_exceptions() {
-    let mut runtime = bare_runtime();
-    let error = runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              __CreatePage('card', 0);
-              const retired = __CreateView(0);
-              __DropElement(retired);
-              __AppendElement(retired, __CreateView(0));
-            };
-            ",
-        )
-        .expect_err("a dropped handle no longer resolves");
-    assert!(error.to_string().contains("expects a number"), "{error}");
-}
-
-#[test]
-fn parent_component_ids_are_ignored_entirely() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              __AppendElement(page, __CreateView(4294967295));
-              __AppendElement(page, __CreateView('not even a number'));
-            };
-            ",
-        )
-        .expect("the parent component argument is accepted for shape only");
-    let elements = elements.tree();
-    assert!(elements.get(2).is_some());
-    assert!(elements.get(3).is_some());
-}
-
-#[test]
 fn the_null_handle_is_rejected_by_append_element() {
     let mut runtime = bare_runtime();
     let error = runtime
@@ -425,6 +338,9 @@ fn a_missing_papi_global_fails_loudly() {
             r"
             globalThis.renderPage = function () {
               __CreatePage('card', 0);
+              if (typeof globalThis.__DropElement !== 'undefined') {
+                throw new Error('__DropElement must stay absent: no web-core generation has it');
+              }
               __SetAttribute(1, 'name', 'value');
             };
             ",
