@@ -234,10 +234,13 @@ describe("tree mutations", () => {
     expect(mock.named("replaceElement")).toEqual([["replaceElement", 3, 2]]);
   });
 
-  it("crash at the native boundary on foreign or primitive handles", () => {
+  it("crash on foreign, primitive, or nullish handles", () => {
     const view = __CreateView(0);
-    for (const bad of [0, "not a handle", null, undefined, {}]) {
+    for (const bad of [0, "not a handle", {}]) {
       expect(() => __AppendElement(bad, view)).toThrow("expects a number");
+    }
+    for (const bad of [null, undefined]) {
+      expect(() => __AppendElement(bad, view)).toThrow(TypeError);
     }
   });
 });
@@ -252,6 +255,7 @@ describe("__DropElement", () => {
     // The dropped handle no longer resolves; further use crashes.
     expect(() => __DropElement(view)).toThrow("expects a number");
     expect(() => __AppendElement(page, view)).toThrow("expects a number");
+    void page;
   });
 });
 

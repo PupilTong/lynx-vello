@@ -35,10 +35,11 @@
 //
 // # Identity and lifecycle
 //
-// - An element handle is a plain object mapping to its DOM `NodeId` in a
-//   private WeakMap; every PAPI return of an element yields the same object
-//   it was created with. `parentComponentUniqueID` and `__CreatePage`'s
-//   arguments are accepted for PAPI shape and unused.
+// - An element handle is a plain object carrying its DOM `NodeId` under a
+//   realm-local symbol — web-core's `uniqueIdSymbol` shape; every PAPI
+//   return of an element yields the same object it was created with.
+//   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted
+//   for PAPI shape and unused.
 // - `__DropElement` retires exactly one element and unmaps its handle. As
 //   the collection backstop, every non-page handle is registered with a
 //   FinalizationRegistry whose cleanup queues the node id; queued drops are
@@ -71,8 +72,7 @@
     flushElementTree: bobcat.flushElementTree,
   };
 
-  /** @type {WeakMap<object, number>} */
-  const handleNodeIds = new WeakMap();
+  const nodeIdSymbol = Symbol("nodeId");
 
   /** @type {number[]} */
   const pendingDrops = [];
@@ -91,8 +91,7 @@
    * @returns {object}
    */
   function createHandle(nodeId) {
-    const handle = {};
-    handleNodeIds.set(handle, nodeId);
+    const handle = { [nodeIdSymbol]: nodeId };
     registry.register(handle, nodeId, handle);
     return handle;
   }
@@ -103,7 +102,7 @@
    */
   function nodeIdOf(handle) {
     return /** @type {number} */ (
-      handleNodeIds.get(/** @type {object} */ (handle))
+      /** @type {Record<symbol, unknown>} */ (handle)[nodeIdSymbol]
     );
   }
 
@@ -126,8 +125,7 @@
     if (pageHandle === undefined) {
       // The page handle is permanent and exempt from the collection
       // backstop: the page can never be dropped.
-      pageHandle = {};
-      handleNodeIds.set(pageHandle, nodeId);
+      pageHandle = { [nodeIdSymbol]: nodeId };
     }
     return pageHandle;
   }
@@ -271,7 +269,7 @@
    */
   function __DropElement(element) {
     native.dropElement(nodeIdOf(element));
-    handleNodeIds.delete(/** @type {object} */ (element));
+    delete (/** @type {Record<symbol, unknown>} */ (element))[nodeIdSymbol];
     registry.unregister(/** @type {object} */ (element));
     return undefined;
   }

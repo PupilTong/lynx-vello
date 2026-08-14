@@ -25,7 +25,7 @@ written to track: the Lynx element layer is split between
 `crates/bobcat-core`'s `tree` module (the native tree: `<page>` policy, the
 UA cascade defaults, the uncommitted-batch flag) and
 `packages/bobcat-element` (the Element PAPI runtime: member surface, tag
-vocabulary, handle lifecycle over a private `WeakMap` and
+vocabulary, handle lifecycle over a symbol-keyed node id and
 `FinalizationRegistry`), and `bobcat-core`'s feature-gated
 `quickjs` module runs a `.web.bundle`'s main-thread script against them with
 every ReactLynx Snapshot constructor except `__CreateFrame`, plus all four

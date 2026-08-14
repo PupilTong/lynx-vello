@@ -12,7 +12,7 @@
 //!    into [`ElementTree`](crate::tree::ElementTree) through the tree hand-off.
 //! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
 //!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary, and
-//!    manages handle lifecycle with a private `WeakMap` and a `FinalizationRegistry`.
+//!    manages handle lifecycle with a symbol-keyed node id and a `FinalizationRegistry`.
 //!
 //! # What web-core does, and what we reproduce
 //!

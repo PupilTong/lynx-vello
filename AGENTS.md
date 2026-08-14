@@ -205,7 +205,7 @@ useful signal for currently-compatible versions of those libraries.
   `__CreateList` consumes only its numeric parent-component argument for now;
   callback storage/execution remains part of the unimplemented list surface.
   Creation calls return plain JavaScript handle objects minted by the PAPI
-  runtime; each maps to its DOM `NodeId` in a private `WeakMap` and is
+  runtime; each carries its DOM `NodeId` under a realm-local symbol and is
   registered with a `FinalizationRegistry` whose cleanup queues the node id.
   Queued drops are applied at the next realm entry
   (or `MainThreadRuntime::collect_garbage`), freeing only that element —
@@ -334,9 +334,10 @@ useful signal for currently-compatible versions of those libraries.
   realm before any bundle code; its Rstest suite runs the same bytes. It owns
   the fifteen `__*` PAPI members and their web-core arities and the Lynx tag
   vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
-  `list`). An element handle is a plain object mapping to its DOM `NodeId`
-  in a private `WeakMap` — one object per element for its whole life, so
-  every PAPI return of an element yields the same object.
+  `list`). An element handle is a plain object carrying its DOM `NodeId`
+  under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
+  object per element for its whole life, so every PAPI return of an element
+  yields the same object.
   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted for
   PAPI shape and unused. Lifecycle: `__DropElement` frees exactly one
   element and unmaps its handle; as the GC backstop, every non-page handle
