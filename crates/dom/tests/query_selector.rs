@@ -28,6 +28,12 @@ fn all(doc: &Doc, root: NodeId, selectors: &str) -> Vec<NodeId> {
         .unwrap_or_else(|error| panic!("{error}"))
 }
 
+fn closest(doc: &Doc, element: NodeId, selectors: &str) -> Option<NodeId> {
+    doc.dom
+        .closest(element, selectors)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
 #[test]
 fn query_selector_returns_the_first_match_in_tree_order() {
     let mut doc = Doc::new();
@@ -166,18 +172,31 @@ fn an_invalid_selector_is_reported_rather_than_matching_nothing() {
             .dom
             .query_selector(doc.root, selectors)
             .expect_err("invalid selector must not parse");
-        assert_eq!(error.selectors(), selectors);
+        assert_eq!(
+            error.to_string(),
+            format!("`{selectors}` is not a valid selector")
+        );
         assert!(doc.dom.query_selector_all(doc.root, selectors).is_err());
         assert!(doc.dom.matches(doc.root, selectors).is_err());
         assert!(doc.dom.closest(doc.root, selectors).is_err());
     }
+}
 
-    assert_eq!(
+#[test]
+fn unsupported_selector_features_are_reported_as_invalid() {
+    let mut doc = Doc::new();
+    let parent = doc.el(doc.root, "view");
+    doc.el(parent, "view.deep");
+
+    // The vendored selector parser keeps `:has()` and `:nth-child(... of S)`
+    // disabled, so selectors current browsers accept are invalid here — for
+    // queries exactly as for stylesheets.
+    assert!(doc.dom.query_selector(doc.root, "view:has(.deep)").is_err());
+    assert!(doc.dom.matches(parent, ":has(.deep)").is_err());
+    assert!(
         doc.dom
-            .query_selector(doc.root, "view >")
-            .expect_err("invalid selector must not parse")
-            .to_string(),
-        "`view >` is not a valid selector"
+            .query_selector(doc.root, ":nth-child(1 of view)")
+            .is_err()
     );
 }
 
@@ -187,11 +206,11 @@ fn matches_tests_the_element_itself_with_itself_as_scope() {
     let parent = doc.el(doc.root, "view#parent");
     let child = doc.el(parent, "view.child[k=v]");
 
-    assert!(doc.dom.matches(child, ".child").expect("valid selector"));
-    assert!(doc.dom.matches(child, "#parent > [k=v]").expect("valid"));
-    assert!(doc.dom.matches(child, ":scope").expect("valid selector"));
-    assert!(!doc.dom.matches(child, "#parent").expect("valid selector"));
-    assert!(!doc.dom.matches(child, "text .child").expect("valid"));
+    assert!(doc.matches(child, ".child"));
+    assert!(doc.matches(child, "#parent > [k=v]"));
+    assert!(doc.matches(child, ":scope"));
+    assert!(!doc.matches(child, "#parent"));
+    assert!(!doc.matches(child, "text .child"));
 }
 
 #[test]
@@ -201,19 +220,10 @@ fn closest_walks_inclusive_ancestors_and_stops_at_the_tree_root() {
     let middle = doc.el(outer, "view#middle");
     let inner = doc.el(middle, "view.match#inner");
 
-    assert_eq!(
-        doc.dom.closest(inner, ".match").expect("valid"),
-        Some(inner)
-    );
-    assert_eq!(
-        doc.dom.closest(middle, ".match").expect("valid"),
-        Some(outer)
-    );
-    assert_eq!(
-        doc.dom.closest(inner, "page").expect("valid"),
-        Some(doc.root)
-    );
-    assert_eq!(doc.dom.closest(inner, ".absent").expect("valid"), None);
+    assert_eq!(closest(&doc, inner, ".match"), Some(inner));
+    assert_eq!(closest(&doc, middle, ".match"), Some(outer));
+    assert_eq!(closest(&doc, inner, "page"), Some(doc.root));
+    assert_eq!(closest(&doc, inner, ".absent"), None);
 }
 
 #[test]
@@ -261,8 +271,8 @@ fn a_slotted_light_child_stays_in_the_light_tree_for_queries() {
     // from.
     assert_eq!(all(&doc, host, ".slotted"), vec![slotted]);
     assert_eq!(all(&doc, shadow, ".slotted"), Vec::new());
-    assert!(doc.dom.matches(slotted, "host > .slotted").expect("valid"));
-    assert!(!doc.dom.matches(slotted, "slot > .slotted").expect("valid"));
+    assert!(doc.matches(slotted, "host > .slotted"));
+    assert!(!doc.matches(slotted, "slot > .slotted"));
 }
 
 #[test]
@@ -273,11 +283,24 @@ fn closest_does_not_escape_a_shadow_tree() {
     let outer = doc.el(shadow, "view.match");
     let inner = doc.el(outer, "view");
 
-    assert_eq!(
-        doc.dom.closest(inner, ".match").expect("valid"),
-        Some(outer)
-    );
+    assert_eq!(closest(&doc, inner, ".match"), Some(outer));
     // The host matches too, but the walk stops at the shadow root.
-    assert_eq!(doc.dom.closest(outer, "host").expect("valid"), None);
-    assert_eq!(doc.dom.closest(host, "host").expect("valid"), Some(host));
+    assert_eq!(closest(&doc, outer, "host"), None);
+    assert_eq!(closest(&doc, host, "host"), Some(host));
+}
+
+#[test]
+fn host_selectors_resolve_against_the_shadow_host() {
+    let mut doc = Doc::new();
+    let host = doc.el(doc.root, "host.outer");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    let top = doc.el(shadow, "view.top");
+    let deep = doc.el(top, "view.deep");
+
+    // `:host` matches through the query's current host: the root's host for
+    // a shadow-rooted query, the containing host for `matches`.
+    assert_eq!(all(&doc, shadow, ":host > .top"), vec![top]);
+    assert_eq!(all(&doc, shadow, ":host(.outer) .deep"), vec![deep]);
+    assert!(doc.matches(deep, ":host .deep"));
+    assert!(!doc.matches(deep, ":host(.absent) .deep"));
 }

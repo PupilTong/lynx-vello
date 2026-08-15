@@ -413,7 +413,7 @@ fn text_nodes_cannot_have_children() {
 }
 
 #[test]
-#[should_panic(expected = "element-only Document mutation")]
+#[should_panic(expected = "element-only Document method")]
 fn text_nodes_reject_element_attributes() {
     let mut doc = test_document();
     let text = doc.create_text_node("hello", ());

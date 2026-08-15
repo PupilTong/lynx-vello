@@ -33,6 +33,13 @@
 //!   default all-ones, so the `RejectSkippingChildren` subtree skip never fires and a query visits
 //!   every descendant.
 //!
+//! One parse-level gap is shared with the cascade rather than specific to
+//! queries: the vendored Servo selector parser keeps `parse_has` and
+//! `parse_nth_child_of` disabled, so `:has(...)` and `:nth-child(An+B of S)`
+//! — which current browsers parse and match — are reported as
+//! [`InvalidSelector`] here, exactly as a stylesheet rule using them is
+//! dropped at parse time.
+//!
 //! Shadow trees follow the spec by construction: a shadow root is not among its
 //! host's children, so a pre-order walk of the node tree never descends into
 //! one. Rooting a query at the shadow root itself queries that tree instead.
@@ -77,8 +84,12 @@ impl std::error::Error for InvalidSelector {}
 impl<T: Sync> Document<T> {
     /// The first descendant of `root` matching `selectors`, in tree order.
     ///
-    /// `root` may be the document, an element, or a shadow root; it is the
-    /// `:scope` element and is itself never a candidate.
+    /// `root` may be the document, an element, or a shadow root; it is
+    /// itself never a candidate. Only an element root is the `:scope`
+    /// element: rooted at the document or a shadow root no scope element is
+    /// set, and `:scope` falls back to matching the document element — so
+    /// inside a shadow tree it matches nothing. Gecko and Servo apply the
+    /// same fallback through this [`dom_apis`] path.
     ///
     /// <https://dom.spec.whatwg.org/#dom-parentnode-queryselector>
     ///
@@ -135,7 +146,7 @@ impl<T: Sync> Document<T> {
     pub fn matches(&self, element: NodeId, selectors: &str) -> Result<bool, InvalidSelector> {
         let list = self.parse_selectors(selectors)?;
         Ok(dom_apis::element_matches(
-            &self.query_element(element),
+            &self.live_element(element),
             &list,
             self.quirks_mode(),
         ))
@@ -158,7 +169,7 @@ impl<T: Sync> Document<T> {
     ) -> Result<Option<NodeId>, InvalidSelector> {
         let list = self.parse_selectors(selectors)?;
         Ok(
-            dom_apis::element_closest(self.query_element(element), &list, self.quirks_mode())
+            dom_apis::element_closest(self.live_element(element), &list, self.quirks_mode())
                 .map(Node::id),
         )
     }
@@ -182,23 +193,10 @@ impl<T: Sync> Document<T> {
 
     /// The scoping root of a query — the spec's `ParentNode` receivers.
     fn query_root(&self, root: NodeId) -> &Node<T> {
-        let node = self
-            .get(root)
-            .expect("stale NodeId passed to a Document selector query");
+        let node = self.live(root);
         assert!(
             node.is_document() || node.is_element() || node.is_shadow_root(),
             "Document selector queries are rooted at a document, element, or shadow root"
-        );
-        node
-    }
-
-    fn query_element(&self, element: NodeId) -> &Node<T> {
-        let node = self
-            .get(element)
-            .expect("stale NodeId passed to a Document selector query");
-        assert!(
-            node.is_element(),
-            "Document::matches and Document::closest take an element"
         );
         node
     }
