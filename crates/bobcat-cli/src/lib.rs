@@ -1,4 +1,4 @@
-//! `bobcat` command-line runner — an embedder of [`bobcat_core::engine`].
+//! `bobcat` command-line runner — an embedder of [`bobcat_core::LynxView`].
 //!
 //! The CLI owns exactly the embedder's share: argument parsing, local
 //! `file:///` input bytes, OS initialization (the macOS window and its event
@@ -67,10 +67,18 @@ pub enum CliError {
     Script {
         input: String,
         #[source]
-        source: bobcat_core::engine::ScriptRunError,
+        source: bobcat_core::ScriptRunError,
+    },
+    #[error("could not start web bundle `{input}`: {source}")]
+    StartScript {
+        input: String,
+        #[source]
+        source: bobcat_core::LynxViewError,
     },
     #[error(transparent)]
-    Engine(#[from] bobcat_core::engine::EngineError),
+    View(#[from] bobcat_core::LynxViewError),
+    #[error(transparent)]
+    Engine(#[from] bobcat_core::EngineError),
     #[error("could not start the command console: {0}")]
     Console(#[source] std::io::Error),
     #[error("could not write screenshot `{path}`: {source}")]

@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
 
-use bobcat_core::engine::FrameSize;
+use bobcat_core::FrameSize;
 
 use crate::CliError;
 

@@ -1,15 +1,15 @@
 //! Lynx page policy over the generic document: the `page` root tag, the UA
 //! cascade defaults, and view metrics. Everything else the runtime does goes
 //! straight to [`dom::Document`] — element identity is the DOM [`NodeId`],
-//! and misuse panics in `dom`, converted to a JavaScript exception at the
-//! host boundary.
+//! while the private host boundary validates script-provided IDs and mutation
+//! preconditions before entering `dom`, returning misuse as a JavaScript error.
 //!
 //! [`NodeId`]: dom::NodeId
 
 use dom::{Document, StylesheetOrigin};
 
 /// The one document shape the runtime speaks.
-pub type LynxDocument = Document<()>;
+pub(crate) type LynxDocument = Document<()>;
 
 pub(crate) const PAGE_TAG: &str = "page";
 
@@ -55,7 +55,7 @@ fn ua_stylesheet(config: PageConfig) -> String {
 
 /// A viewport measured in CSS pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Viewport {
+pub(crate) struct Viewport {
     /// Viewport width in CSS pixels.
     pub width: f32,
     /// Viewport height in CSS pixels.
@@ -67,7 +67,7 @@ pub struct Viewport {
 impl Viewport {
     /// Creates a viewport with a device-pixel ratio of 1.
     #[must_use]
-    pub const fn new(width: f32, height: f32) -> Self {
+    pub(crate) const fn new(width: f32, height: f32) -> Self {
         Self {
             width,
             height,
@@ -77,7 +77,7 @@ impl Viewport {
 
     #[must_use]
     /// Returns this viewport with a new device-pixel ratio.
-    pub const fn with_device_pixel_ratio(mut self, device_pixel_ratio: f32) -> Self {
+    pub(crate) const fn with_device_pixel_ratio(mut self, device_pixel_ratio: f32) -> Self {
         self.device_pixel_ratio = device_pixel_ratio;
         self
     }
@@ -89,7 +89,7 @@ impl Viewport {
 
 /// Creates the document with its permanent `page` element and UA cascade.
 #[must_use]
-pub fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
+pub(crate) fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
     document

@@ -1,10 +1,20 @@
 # Runtime architecture
 
-The runtime keeps Lynx policy above the generic DOM and keeps JavaScript
-selection at the Bobcat boundary. Painting is different: it is one concrete
-document subsystem, not an implementation injected by an embedder.
+Bobcat exposes one runtime object to an embedder: `bobcat_core::LynxView`.
+The document, Element-PAPI tree, script realm, renderer scheduler, and the
+tree hand-off protocol are implementation state. An embedder supplies only
+capabilities and OS facts:
 
-The product dependency graph is:
+- a `ResourceFetcher`;
+- a transferable `ScriptEngineFactory`;
+- an `EventRequester` for lifecycle wakeups;
+- a draw target plus `FrameRequester`;
+- owned font bytes or already-decoded image pixels when those resources are
+  registered explicitly;
+- viewport/device metrics and normalized input events;
+- platform initialization, worker bootstrap, clocks, and file/network IO.
+
+The dependency graph is:
 
 ```text
 bobcat-cli  ─┐
@@ -12,90 +22,108 @@ bobcat-cli  ─┐
 bobcat-wasm ─┘          │              ├─▶ vendor/stylo
                         │              └─▶ vello/wgpu
                         └──▶ quickjs-rust-bridge
-                             [feature = "quickjs";
-                              native product only]
+                             [feature = "quickjs"; native adapter]
 
-main-thread script ──▶ element-papi.js (packages/bobcat-element, embedded)
-                          ──▶ bobcat.* ──▶ dom::Document (Lynx page policy: bobcat_core::tree)
+main-thread JavaScript
+  └──▶ element-papi.js (packages/bobcat-element, embedded by bobcat-core)
+        └──▶ private bobcat host callbacks
+              └──▶ private dom::Document<()> tree
 
-bobcat-cli  ──▶ lynx-template-decoder + winit (macOS headed product only)
-bobcat-wasm ──▶ wasm-bindgen + wasm_thread + rayon
-                (`wasm32-unknown-unknown`, shared memory, an explicit
-                 OffscreenCanvas embedder Worker plus its nested DOM Worker)
-
-Each layer depends only on the layer directly below and re-exports it whole
-(`bobcat_core::dom`); `dom` re-exports the `vello`, `stylo`, `euclid`, and
-`stylo_traits` vocabulary crates. The Element PAPI surface itself is
-JavaScript: `packages/bobcat-element` is embedded into `bobcat-core` with
-`include_str!` and evaluated into the realm before any bundle code.
+bobcat-cli ──▶ lynx-template-decoder + winit
+bobcat-wasm ──▶ wasm-bindgen + wasm_thread + browser JavaScript VM
 ```
 
-`dom`'s `render` module is its intentionally DOM-free floor (absorbed from the
-former `pulsar` crate): it owns the opaque image registry, the Vello
-version boundary (the crate-root `dom::vello` re-export), and the GPU
-submission/readback backend. Nothing in it names `Document`, `NodeId`,
-computed styles, layout, or paint order; the document-aware painter above it
-builds scenes, and the floor turns scenes into pixels.
+`bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
+remain independently usable libraries, but an application embedding Bobcat
+cannot reach them through a running view.
 
-## Core feature boundary
+## Startup boundary
 
-`bobcat-core` combines engine-neutral protocols and an optional built-in
-JavaScript adapter:
+Bundle IO is embedder work. `bobcat-core` does not fetch, decode, or interpret
+`.web.bundle` containers and has no public bundle-decoder types.
 
-- `script::ScriptEngine` is the external JavaScript-engine contract. Its
-  `ImportFuture<'a>` is a GAT, so implementations return concrete futures
-  without boxed `dyn Future` values.
-- `tree` is Lynx page policy only: the `page` root tag, the UA cascade
-  defaults, view metrics, and `new_document` — the `bobcat.*` host
-  functions call `dom::Document` directly. Element identity is the DOM
-  `NodeId`; nothing validates script input — misuse panics in `dom`,
-  converted to a JavaScript exception at the host boundary. The PAPI
-  member surface, tag vocabulary, and handle lifecycle live in the
-  embedded `packages/bobcat-element` runtime. A half-applied batch is
-  invisible only while the realm holds the document; once it is back in
-  the slot, whatever state it holds may present — web-core's visibility,
-  where the browser paints the live DOM regardless of
-  `__FlushElementTree`.
-- `engine` is the embedder boundary: `Engine` shares the element tree with
-  its own Lynx main thread behind one lock, and owns input routing, frame
-  production, presentation, and the script thread. An embedder provides
-  exactly five things — user input, device metrics, OS initialization, a
-  draw target, and IO primitives — and relays OS facts into the engine
-  (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks); it
-  never starts or steers the pipeline. The engine schedules through the
-  `engine::Window` capabilities supplied at attach time — one trait carrying
-  the draw target and the detachable `FrameRequester` its Lynx main thread
-  keeps. The same frame handle performs `pre_present` on the presenting side.
-  `Engine` is generic over it, so, as with
-  `ScriptEngine::ImportFuture`, the boundary needs no boxed closure and no
-  `dyn` call: `Window::Target<'window>` is a GAT, so native surfaces may
-  borrow an embedder-owned window. `Engine::attach_target` also admits an
-  owned browser canvas target without a self-referential wrapper.
-  `engine::OffscreenEngine` is the windowless composition, over the
-  uninhabited `NoWindow`.
-- `resource` and `view` provide resource acquisition and generic engine/view
-  composition. The crate root does not re-export a document alias, `dom`,
-  or a renderer specialization. `bobcat-cli` is one embedder of `engine`,
-  not the implementation of a core façade.
+For the native product, `bobcat-cli`:
 
-The default `quickjs` feature adds the internal QuickJS implementation,
-`QuickJsLynxView`, and the concrete `quickjs::MainThreadRuntime`. QuickJS-only
-types have this single module path; the crate root does not duplicate their
-exports. Depending on
-`bobcat-core` with `default-features = false` excludes the QuickJS adapter and
-native QuickJS build while retaining the external engine protocols and the
-`tree` module.
+1. reads and decodes the bundle with `lynx-template-decoder`;
+2. parses its configuration into `PageConfig`;
+3. retains `lepusCode.root` in its own `ResourceFetcher` under a URL;
+4. constructs `LynxView` with the `PageConfig` and injected capabilities;
+5. calls `LynxView::execute_script(url)`.
 
-## Document-owned painting
+`execute_script` resolves and fetches UTF-8 JavaScript through the injected
+resource contract, then starts the engine-owned Lynx main thread. Script
+completion is reported by `LynxView::pump` as
+`EngineEvent::ScriptFinished`; the engine enqueues that event before invoking
+the construction-time `EventRequester`, so the host can pump immediately
+without polling. `execute_script_with_cancellation` accepts a public resource
+`CancellationToken`; dropping the returned future cancels that same token and
+unblocks cooperative resolver/fetcher work. `load_style_sheet(url)` reserves the matching
+URL-shaped API but currently returns `LynxViewError::StyleSheetUnsupported`
+without fetching or mutating the document.
 
-The generic document type is simply `dom::Document<T>`. `T` is the opaque
-per-node payload. There is no renderer type parameter, `DocumentRenderer`
-trait, `with_renderer` constructor, or renderer/resource escape hatch.
+## Public and private boundaries
 
-Each document privately owns one reusable paint state:
+The public facade is `LynxView<'window, W>`, with
+`OffscreenLynxView` as its windowless alias. It relays input, resize, redraw,
+frame-pump, target attachment, offscreen ticks, capture, cancellable script
+startup, owned-font registration, and decoded-image URL registration. It exposes no
+tree getter, document getter, renderer getter, script-realm handle, or
+decomposition method.
+
+The following types are private to `bobcat-core`:
+
+- `Engine`, `SharedTree`, and `TreeGuard`;
+- `MainThreadRuntime` and its Element-PAPI host implementation;
+- `LynxDocument`, `Viewport`, and `new_document`;
+- the concrete QuickJS realm adapter;
+- image caches and the fetch→decode→cache loader.
+
+This prevents an embedder from bypassing commit ordering, mutating the tree
+beside JavaScript, retaining a document during presentation, submitting a
+scene independently of the view, or evaluating code directly in the view's
+realm.
+
+## Injected JavaScript VM
+
+`ScriptEngineFactory` is `Debug + Send + Sync`. It crosses to the eventual
+Lynx main thread and creates one owner-thread-bound `Box<dyn ScriptEngine>`
+there. The VM itself is intentionally not `Send`.
+
+`ScriptEngine` is a small host-integration protocol:
+
+- install a named leaf callback under a namespace;
+- execute source with a source URL/name;
+- expose the VM's optional garbage-collection operation.
+
+The callback boundary carries only `HostValue` primitives. Objects, symbols,
+functions, raw VM values, and DOM handles cannot cross it. Bobcat installs
+the private `bobcat.*` callbacks, evaluates the embedded Element PAPI, wraps
+the fetched main-thread source, then runs
+`processData → renderPage → __FlushElementTree`.
+
+Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
+its checkpoints. The browser adapter cannot synchronously drain microtasks
+between application evaluation and Bobcat's boot evaluation, so the entry
+script must still assign and run `renderPage` synchronously. It does retain
+host dispatch closures through one final browser microtask checkpoint and
+waits for that checkpoint before reporting completion, allowing microtasks
+queued by a synchronous boot to finish safely. A persistent browser JavaScript
+event loop remains a later runtime feature.
+
+The default `quickjs` feature contributes only
+`quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
+configuration, values, and runtime entry points remain private. With default
+features disabled, an embedder supplies another factory; the browser build
+uses this path with a `js_sys` implementation.
+
+## Document and rendering ownership
+
+`dom::Document<T>` privately owns its style/layout state, retained painter,
+Vello scene, and image store. In Bobcat the payload is `()` and the core adds
+the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
 ```text
-Document<T>
+private Document<()>
   ├── DOM + Stylo arenas
   ├── layout/text state
   └── private Painter
@@ -104,154 +132,93 @@ Document<T>
         └── ImageStore
 ```
 
-`Document::render` performs layout, builds the private CSS visual
-order, and rebuilds the retained scene only when it is stale. The Painter
-records the private mutation epoch represented by that scene, so it and
-`needs_render` schedule reuse without exposing the epoch to a host.
-`Document::scene` lends a guarded shared borrow of the finished scene, and
-`Document::images_mut` is the narrow resource-update seam that invalidates it
-conservatively. Neither `Painter`, the epoch, nor the private paint order is
-public. The old paint-only `paint_style`/`text_layout` reads and the entire
-`visual` module are crate-private; only the generic geometry types used by
-public input/scroll signatures are re-exported from the `dom` crate root.
+The presenting side alone runs input routing, retained-scene production, GPU
+submission, presentation, and capture. The public `EventRequester`, `Window`,
+and `FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
+scheduling capabilities; they do not expose the engine that consumes them.
 
-This ownership removes two invalid states the injected design permitted:
+Image codecs are represented by the host-implemented `image::Decoder`
+contract. Container sniffing, framing checks, decoded pixels, and sanitized
+metadata are public; the resource-driven loader and its caches are
+engine-owned and not publicly constructible. The `<image>` element has not yet
+wired that decoder into automatic loading. Current reference decoders exercise
+the standalone decode contract, and an embedder may install completed pixels
+under a CSS URL through `LynxView::register_image_url`; the private engine owns
+the corresponding `ImageStore` update and retained-scene refresh.
 
-- a document and renderer could disagree about which image store belonged to
-  a frame;
-- callers could retain a paint-order snapshot and combine it with newer live
-  styles or layout.
+## Tree hand-off and visibility
 
-The runtime speaks `Document<()>` (`bobcat_core::tree::LynxDocument`)
-directly. `bobcat_core::engine::Engine` is the sole production driver of
-the presenting-side surface (`handle_input`, `set_viewport`, `render`,
-`needs_render`, `scene`, `images_mut`), and embedders never touch it: they
-hold an `Engine` and relay OS facts into it.
+The engine and Lynx main thread share exactly one document through a private
+slot:
+
+```text
+Lynx main thread                         embedder/presenting thread
+factory creates owner-thread VM          opaque LynxView
+first PAPI mutation: take document        input, scrolling, scene production
+later mutations: plain &mut               GPU submission and present
+flush: layout, return document ─────────▶ request/present next frame
+```
+
+A batch touches the slot only when taking and returning the document. While
+the slot is empty, the presenting side never blocks: it buffers input,
+retains the last target, and retries on a later frame. A half-applied batch is
+therefore unobservable. At the end of every evaluation the runtime returns an
+open batch even if script omitted `__FlushElementTree`, matching web-core's
+live-DOM visibility.
+
+## Native and Wasm spawning
+
+`LynxView::execute_script` always delegates VM creation and execution to an
+engine-owned task. The core selects the thread builder at compile time:
+
+```text
+not wasm32  -> std::thread::Builder
+wasm32      -> wasm_thread::Builder
+```
+
+On Wasm, `configure_wasm_workers(worker_script_url, style_thread_count)` is
+the OS bootstrap seam. It configures the default `wasm_thread` worker script;
+the core then uses that same target-specific spawn path for the Lynx main
+Worker and for Stylo's Rayon Workers. Stylo pool creation belongs to the core,
+not the browser facade.
+
+The Stylo pool includes the Lynx-main owner thread, so one shared Wasm instance
+accepts one view. The npm facade satisfies this by creating a fresh Render
+Worker and Wasm instance for every `BobcatCanvas`; a second view in the same
+instance is rejected explicitly. The pool has at least two threads: the
+entry-task owner at index zero plus one managed worker that remains available
+after the synchronous entry task exits.
+
+The browser UI thread is a JavaScript coordinator only. It creates an
+embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns
+the Wasm `LynxView`, Vello/wgpu objects, resource provider, and browser
+`ScriptEngineFactory`; the factory creates its JavaScript realm implementation
+inside the nested Lynx main Worker. No direct create/append/drop/flush DOM API
+is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `tree::new_document` constructs the Lynx `Device`, creates
-   `Document<()>`, and installs the Lynx UA stylesheet.
-2. With QuickJS enabled, `quickjs::MainThreadRuntime` owns only the realm.
-   The embedded Element PAPI runtime mints each element's one
-   identity-stable handle object, maps it to the `NodeId` the native create
-   returned, and passes plain numbers to the `bobcat` host functions. Each
-   non-page handle is registered with a `FinalizationRegistry` whose
-   cleanup callback calls `bobcat.dropElement` — a pending job, executed
-   at the job checkpoint after an evaluation (a collection comes from
-   allocation pressure or an explicit `collect_garbage`) — freeing only
-   that element through `Document::drop_element`. Its children become
-   detached roots whose subtrees remain live until their own handles are
-   dropped in turn. A batch's first `bobcat` call takes the tree out of its
-   hand-off slot; every call after that is a plain `&mut` mutation with no
-   synchronization, and misuse panics in `dom`, converted to a JavaScript
-   exception at the host boundary.
-3. `__FlushElementTree` is the commit boundary: the style + layout commit
-   runs on the taken tree, the tree goes back in its slot, and the
-   presenting side is asked for a frame. The document-owned Painter decides
-   whether its retained scene is current.
-4. For a dirty frame, `render` flushes/layouts, creates its
-   temporary visual order, and runs its private
-   Painter over live styles, rounded layouts, retained text, and the
-   document-owned `ImageStore`.
-5. The Painter resets and rebuilds its retained Vello scene. Headed and
-   headless CLI backends borrow that same scene and submit it through
-   `dom::render::gpu`; neither backend duplicates DOM traversal or paint
-   policy.
-6. `Document::handle_input` and the `elements_from_point*` queries are pure
-   reads of the visual model the last render retained — hit testing never
-   re-runs the pipeline, so events target what the window actually showed.
-   `handle_input` performs the resolved default action; scrolling invalidates
-   the retained scene, so the next prepared frame rebuilds both it and the
-   frame the next event reads.
-7. A screenshot reads back the live scene through the mandatory GPU path.
-   There is no no-adapter fallback in local tests or CI, and replaced content
-   necessarily comes from the document's own image registry.
-
-## Thread topology
-
-The engine libraries are synchronous; the `engine` module passes the one
-element tree between exactly two threads through a hand-off slot
-(`SharedTree`) — one holder at any instant. The windowed composition:
-
-```text
-Lynx main thread (engine-owned)           embedder's event loop thread
-QuickJS realm + its event loop            Engine: input routing, scrolling,
-batch start = take the tree from slot,    frame production (build + encode),
-PAPI calls = plain &mut, zero locks,      GPU submission, present — vsync
-flush = commit, put back, ask for ──────▶ interacts with the OS only here
-a frame (locks touched 2× per batch)      (non-blocking borrows only)
-```
-
-The presenting side borrows the tree from the slot non-blockingly: an
-empty slot (a batch is open) means re-present the retained target, buffer
-the input, and retry next frame; present's vsync wait always happens
-outside the borrow. The slot is occupied while the script merely computes,
-so a long JavaScript task between batches never stops input routing,
-scrolling, or presentation — scroll target resolution reads the retained
-paint order and writes offsets into the borrowed tree, keeping one truth
-with no reconciliation protocol. A half-applied batch is unobservable by
-construction (the document is simply absent); an abandoned batch that
-comes back at the end of an evaluation may present, which is web-core's
-visibility model. The law: the main thread waits only on its own
-batch boundaries; the presenting side never waits on the main thread; the
-embedder loop never blocks. The offscreen composition keeps the wall-free form: one
-thread, `Engine::run_script`, identical semantics — the golden screenshot
-suite drives it end to end.
-
-The browser embedder compiles one `wasm32-unknown-unknown` module with shared
-memory, but does not instantiate it on the browser UI thread. The JavaScript
-facade creates an explicit embedder Worker and transfers an `OffscreenCanvas`;
-that Worker initializes Wasm, constructs the complete `Engine`, and permanently
-owns crates.io Vello 0.9/wgpu 29 plus every
-thread-affine Device/Queue/Surface/Renderer/Canvas handle. `Engine` then hands
-its unique main-thread document owner to a nested Worker created through
-`wasm_thread`.
-
-The nested Lynx main/DOM Worker owns Element-PAPI batches, mutations,
-Stylo/Rayon, and layout. It constructs an ordinary Stylo-compatible private
-Rayon pool, using `wasm_thread` to spawn the pool's remaining Workers while the
-DOM owner itself remains worker zero; the vendored Stylo source is unchanged.
-It and the presenting Worker synchronize exactly like
-the native composition: Rust channels carry work/results, the document moves
-through `SharedTree` under a mutex, and atomics carry frame requests. The
-presenting `Engine` never waits for an open batch; it retains the last target
-and retries after the main thread returns the document. There is no serialized
-DOM mirror and no state reconciliation protocol.
-
-The UI never blocks and owns no Rust state. `postMessage` is limited to the
-unavoidable browser host boundary (Canvas transfer and external API/events) and
-the libraries' Worker bootstrap control messages. The browser build currently
-disables QuickJS and exposes direct Element-PAPI requests for the demo; those
-requests enter the embedder Worker asynchronously and then cross to the DOM
-owner through the Rust channel. A shared atomic startup handshake gates the
-ready event, and a Rust response signal wakes the request pump independently of
-animation frames, so background rAF suspension affects drawing rather than DOM
-command completion. Porting the owner-thread QuickJS C runtime to
-`wasm32-unknown-unknown` and executing `.web.bundle` files remain unimplemented.
-
-## Static dispatch and intentional dynamic boundaries
-
-The JavaScript protocol and Hughie layout host use static dispatch. The Element
-PAPI host and painting are concrete runtime/document behavior, so neither has
-a trait dispatch boundary. The DOM payload is an ordinary generic parameter.
-Dynamic dispatch remains only where heterogeneity is the protocol requirement:
-resource fetcher handles, async byte readers, font providers inherited from
-Stylo, and resource-path leases. Those objects do not enter layout or scene
-traversal.
+1. `LynxView::new` builds the private document from `PageConfig` and device
+   metrics.
+2. `execute_script(url)` fetches source through `ResourceFetcher` and spawns
+   the target-specific Lynx main task.
+3. The task creates the injected VM, installs Bobcat callbacks and Element
+   PAPI, evaluates the named source, and runs the boot sequence.
+4. `__FlushElementTree` performs style/layout commit, returns the document,
+   and asks `FrameRequester` for a frame.
+5. The presenting side non-blockingly renders the retained document scene and
+   submits it to its attached target.
+6. The task enqueues sanitized script completion and calls `EventRequester`;
+   the awakened host observes it through `pump`. No realm or tree object
+   crosses the boundary.
 
 ## Validation matrix
 
 ```sh
-cargo check -p dom --all-targets
 cargo check -p bobcat-core --no-default-features
-cargo check -p bobcat-core --features quickjs
+cargo check -p bobcat-core --all-features
+cargo check -p bobcat-core --target wasm32-unknown-unknown --no-default-features
 cargo check -p bobcat-cli
+cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets
 ```
-
-The DOM target
-check compiles the private painter, the DOM-free `render` floor, and the paint
-tests and benchmark.
-The two core builds validate external-engine and built-in QuickJS boundaries;
-the final commands validate the product composition.

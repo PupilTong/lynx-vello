@@ -23,20 +23,36 @@ if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
 }
 for (const requiredExport of [
   'export class BobcatRenderer',
+  'export function finishBrowserScriptCheckpoint',
   'export function wasm_thread_entry_point',
 ]) {
   if (!glue.includes(requiredExport)) {
     throw new Error(`generated glue is missing ${requiredExport}`)
   }
 }
-if (!glue.includes('waitForResponse()')) {
-  throw new Error('generated renderer is missing its DOM response wakeup')
+for (const requiredMethod of [
+  'registerScript(',
+  'executeScript(',
+  'loadStyleSheet(',
+  'pollScript(',
+  'registerFonts(',
+  'scriptStarted(',
+  'waitForEngineEvent(',
+]) {
+  if (!glue.includes(requiredMethod)) {
+    throw new Error(`generated renderer is missing ${requiredMethod}`)
+  }
+}
+if (!glue.includes('passArray8ToWasm0(bytes')) {
+  throw new Error('generated script registry must accept raw Uint8Array bytes')
 }
 for (const removedExport of [
   'createBrowserSession',
   'initThreadPool',
   'parallelChecksum',
   'pollDomCommand',
+  'pollResponse',
+  'waitForResponse',
   'wasmMemory',
 ]) {
   if (glue.includes(removedExport)) {
@@ -48,23 +64,78 @@ const facade = await readFile(
   path.join(packageDirectory, 'facade.js'),
   'utf8',
 )
+const declarations = await readFile(
+  path.join(packageDirectory, 'facade.d.ts'),
+  'utf8',
+)
 if (facade.includes('./pkg/bobcat_wasm.js')) {
   throw new Error('browser UI facade must not instantiate the Wasm module')
+}
+for (const requiredDeclaration of [
+  'pageConfig: PageConfig',
+  'executeScript(url: string | URL)',
+  'loadStyleSheet(url: string | URL)',
+  'registerFonts(data: ArrayBuffer | Uint8Array)',
+]) {
+  if (!declarations.includes(requiredDeclaration)) {
+    throw new Error(`browser declarations are missing ${requiredDeclaration}`)
+  }
 }
 
 const renderWorker = await readFile(
   path.join(packageDirectory, 'render-worker.js'),
   'utf8',
 )
+const domWorker = await readFile(
+  path.join(packageDirectory, 'dom-worker.js'),
+  'utf8',
+)
 const engineConstruction = renderWorker.indexOf('await BobcatRenderer.create(')
 if (engineConstruction === -1 || !renderWorker.includes('message.threadCount')) {
-  throw new Error('Render Worker must pass the style thread count to Engine construction')
+  throw new Error('Render Worker must pass the style thread count to view construction')
 }
 if (renderWorker.includes('initThreadPool')) {
   throw new Error('Render Worker still initializes wasm-bindgen-rayon')
 }
-if (!renderWorker.includes('await renderer.waitForResponse()')) {
-  throw new Error('DOM responses must be pumped independently of animation frames')
+if (!renderWorker.includes('await renderer.executeScript(registeredUrl)')) {
+  throw new Error('Render Worker must route fetched URLs through executeScript')
+}
+if (renderWorker.includes('setTimeout(resolve, 1)')) {
+  throw new Error('Render Worker still polls script completion on a timer')
+}
+if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
+  throw new Error('Render Worker must await core engine events')
+}
+if (!domWorker.includes('finishBrowserScriptCheckpoint()')) {
+  throw new Error('DOM Worker must release browser host callbacks before closing')
+}
+if (!facade.includes('document.baseURI')) {
+  throw new Error('browser facade must resolve relative URLs against document.baseURI')
+}
+if (renderWorker.includes('self.location.href')) {
+  throw new Error('Render Worker must not resolve resource URLs against its own package URL')
+}
+if (
+  !renderWorker.includes('await response.arrayBuffer()') ||
+  renderWorker.includes('await response.text()')
+) {
+  throw new Error('Render Worker must preserve raw script bytes for core UTF-8 validation')
+}
+for (const forbiddenDomApi of [
+  'addAuthorStylesheet',
+  'appendElement',
+  'createPage',
+  'createView',
+  'dropElement',
+  'flushElementTree',
+]) {
+  if (
+    facade.includes(forbiddenDomApi) ||
+    declarations.includes(forbiddenDomApi) ||
+    renderWorker.includes(forbiddenDomApi)
+  ) {
+    throw new Error(`browser facade still exposes direct DOM API ${forbiddenDomApi}`)
+  }
 }
 
 const wasmBytes = await readFile(wasmPath)

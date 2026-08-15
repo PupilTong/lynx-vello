@@ -41,7 +41,7 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
         .expect("start interactive bobcat");
     write!(
         child.stdin.take().expect("piped stdin"),
-        "pause\nset vsync 30\nshow vsync\nframe\nscreenshot {}\nquit\n",
+        "screenshot {}\npause\nset vsync 30\nshow vsync\nframe\nquit\n",
         screenshot_path.display()
     )
     .unwrap();
@@ -69,6 +69,13 @@ fn a_file_bundle_supports_debugger_style_screenshots() {
     }
     let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
     assert_eq!((image.width(), image.height()), (32, 24));
+    assert!(
+        image
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel != [255, 255, 255, 255]),
+        "the screenshot-first command must wait for the script's non-white frame"
+    );
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -80,9 +87,16 @@ fn minimal_bundle() -> Vec<u8> {
         "enableCSSSelector": "true"
     }"#;
     let script = r"
+        const deadline = Date.now() + 200;
+        while (Date.now() < deadline) {}
         globalThis.renderPage = function renderPage() {
             const page = __CreatePage('card', 0);
-            __AppendElement(page, __CreateView(0));
+            const view = __CreateView(0);
+            __SetInlineStyles(
+                view,
+                'width:32px;height:24px;background-color:#ff0000'
+            );
+            __AppendElement(page, view);
         };
     ";
 

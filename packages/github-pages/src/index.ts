@@ -212,126 +212,38 @@ async function ensureCrossOriginIsolation(shell: Shell): Promise<void> {
   await reloadForIsolation();
 }
 
-const DEMO_STYLES = `
-  page {
-    display: flex;
-    flex-direction: column;
-    box-sizing: border-box;
-    width: 100%;
-    height: 100%;
-    padding: 28px;
-    gap: 16px;
-    background-color: #0d1017;
-  }
-
-  page > view {
-    box-sizing: border-box;
-    border-radius: 22px;
-  }
-
-  page > view:nth-child(1) {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-end;
-    justify-content: space-between;
-    height: 37%;
-    padding: 24px;
-    background-color: #c8f560;
-  }
-
-  page > view:nth-child(1) > view:nth-child(1) {
-    width: 42%;
-    height: 32%;
-    border-radius: 999px;
-    background-color: #17261d;
-  }
-
-  page > view:nth-child(1) > view:nth-child(2) {
-    width: 54px;
-    height: 54px;
-    border-radius: 999px;
-    background-color: #f8f1e7;
-  }
-
-  page > view:nth-child(2) {
-    display: flex;
-    flex: 1;
-    flex-direction: row;
-    gap: 16px;
-  }
-
-  page > view:nth-child(2) > view {
-    flex: 1;
-    border-radius: 18px;
-  }
-
-  page > view:nth-child(2) > view:nth-child(1) {
-    background-color: #ff7d52;
-  }
-
-  page > view:nth-child(2) > view:nth-child(2) {
-    background-color: #786cf5;
-  }
-
-  page > view:nth-child(2) > view:nth-child(3) {
-    background-color: #f8f1e7;
-  }
-
-  page > view:nth-child(3) {
-    height: 13%;
-    background-color: #202631;
-  }
-
-  @media (max-width: 560px) {
-    page {
-      padding: 16px;
-      gap: 10px;
-    }
-
-    page > view:nth-child(1) {
-      height: 31%;
-      padding: 16px;
-    }
-
-    page > view:nth-child(2) {
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    page > view:nth-child(3) {
-      height: 10%;
-    }
-  }
+const DEMO_SCRIPT = `
+  globalThis.renderPage = function () {
+    const page = __CreatePage('github-pages-demo', 0);
+    const text = __CreateText(0);
+    __AppendElement(text, __CreateRawText('Bobcat WebAssembly VM is running'));
+    __AppendElement(page, text);
+  };
 `;
 
-async function createDemoTree(canvas: {
-  addAuthorStylesheet(css: string): Promise<void>;
-  appendElement(parent: number, child: number): Promise<number>;
-  createPage(componentId: string, cssId: number): Promise<number>;
-  createView(parentComponentUniqueId: number): Promise<number>;
-  flushElementTree(): Promise<void>;
+async function executeDemoScript(canvas: {
+  executeScript(url: string | URL): Promise<void>;
+  registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>;
 }): Promise<void> {
-  await canvas.addAuthorStylesheet(DEMO_STYLES);
+  const fontUrl = new URL('Roboto-Regular.ttf', document.baseURI);
+  const fontResponse = await fetch(fontUrl);
+  if (!fontResponse.ok) {
+    throw new Error(
+      `Could not load demo font: ${String(fontResponse.status)} ${fontResponse.statusText}`,
+    );
+  }
+  const registered = await canvas.registerFonts(await fontResponse.arrayBuffer());
+  if (registered === 0) {
+    throw new Error('The demo font container did not contain a usable font face');
+  }
 
-  const page = await canvas.createPage('github-pages-demo', 0);
-  const hero = await canvas.createView(0);
-  const heroBar = await canvas.createView(0);
-  const heroDot = await canvas.createView(0);
-  const grid = await canvas.createView(0);
-  const firstCard = await canvas.createView(0);
-  const secondCard = await canvas.createView(0);
-  const thirdCard = await canvas.createView(0);
-  const footer = await canvas.createView(0);
-
-  await canvas.appendElement(hero, heroBar);
-  await canvas.appendElement(hero, heroDot);
-  await canvas.appendElement(grid, firstCard);
-  await canvas.appendElement(grid, secondCard);
-  await canvas.appendElement(grid, thirdCard);
-  await canvas.appendElement(page, hero);
-  await canvas.appendElement(page, grid);
-  await canvas.appendElement(page, footer);
-  await canvas.flushElementTree();
+  const script = new Blob([DEMO_SCRIPT], { type: 'text/javascript' });
+  const url = URL.createObjectURL(script);
+  try {
+    await canvas.executeScript(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function canvasMetrics(canvas: HTMLCanvasElement): {
@@ -381,13 +293,18 @@ async function start(shell: Shell): Promise<void> {
     initial.width,
     initial.height,
     initial.dpr,
+    {
+      defaultDisplayLinear: true,
+      defaultOverflowVisible: true,
+      enableCSSSelector: true,
+    },
   );
   bobcat.onerror = (error): void => {
     setIndicator(shell.renderer, 'Failed', 'error');
     shell.message.textContent = error.message;
   };
   setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
-  await createDemoTree(bobcat);
+  await executeDemoScript(bobcat);
 
   let lastWidth = initial.width;
   let lastHeight = initial.height;
@@ -423,7 +340,7 @@ async function start(shell: Shell): Promise<void> {
   resize();
 
   shell.message.textContent =
-    'Bobcat is running: the OffscreenCanvas embedder Worker owns Engine and a nested wasm_thread DOM worker.';
+    'Bobcat is running: the OffscreenCanvas embedder owns resources and pixels while core keeps its view, VM, and tree private.';
 }
 
 function errorMessage(error: unknown): string {

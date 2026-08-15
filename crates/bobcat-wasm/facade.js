@@ -1,7 +1,7 @@
 const MAX_THREADS = 6
 const REQUEST_TIMEOUT_MS = 30_000
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
-const DOM_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
+const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
 
 let initialization
 
@@ -10,7 +10,7 @@ function preferredThreadCount() {
     1,
     globalThis.navigator?.hardwareConcurrency ?? 1,
   )
-  return Math.max(1, Math.min(MAX_THREADS, hardwareThreads - 1 || 1))
+  return Math.max(2, Math.min(MAX_THREADS, hardwareThreads - 1 || 2))
 }
 
 function asError(error) {
@@ -19,6 +19,20 @@ function asError(error) {
 
 function errorMessage(error) {
   return asError(error).message
+}
+
+function documentUrl(input) {
+  return new URL(String(input), document.baseURI).href
+}
+
+function fontBytes(data) {
+  if (data instanceof ArrayBuffer) {
+    return new Uint8Array(data)
+  }
+  if (data instanceof Uint8Array) {
+    return new Uint8Array(data)
+  }
+  throw new TypeError('BobcatCanvas.registerFonts requires an ArrayBuffer or Uint8Array')
 }
 
 class RenderWorkerClient {
@@ -78,10 +92,10 @@ class RenderWorkerClient {
       pending.reject(this.#fatalError)
     }
     this.#pending.clear()
+    this.#worker.terminate()
     for (const listener of this.#fatalListeners) {
       listener(this.#fatalError)
     }
-    this.#worker.terminate()
   }
 
   #onError = (event) => {
@@ -198,7 +212,13 @@ export class BobcatCanvas {
     })
   }
 
-  static async create(canvas, width, height, devicePixelRatio) {
+  static async create(
+    canvas,
+    width,
+    height,
+    devicePixelRatio,
+    pageConfig,
+  ) {
     await init()
     if (
       typeof globalThis.HTMLCanvasElement !== 'function' ||
@@ -208,6 +228,19 @@ export class BobcatCanvas {
     }
     if (typeof canvas.transferControlToOffscreen !== 'function') {
       throw new Error('This browser does not support OffscreenCanvas transfer')
+    }
+    if (pageConfig === null || typeof pageConfig !== 'object') {
+      throw new TypeError('BobcatCanvas.create pageConfig must be an object')
+    }
+    const config = {
+      defaultDisplayLinear: pageConfig.defaultDisplayLinear,
+      defaultOverflowVisible: pageConfig.defaultOverflowVisible,
+      enableCSSSelector: pageConfig.enableCSSSelector,
+    }
+    for (const [name, value] of Object.entries(config)) {
+      if (typeof value !== 'boolean') {
+        throw new TypeError(`Bobcat pageConfig.${name} must be a boolean`)
+      }
     }
 
     const offscreen = canvas.transferControlToOffscreen()
@@ -223,10 +256,11 @@ export class BobcatCanvas {
         {
           type: 'bobcat-init',
           canvas: offscreen,
+          config,
           devicePixelRatio,
-          domWorkerUrl: DOM_WORKER_URL,
           height,
           threadCount: preferredThreadCount(),
+          workerUrl: THREAD_WORKER_URL,
           width,
         },
         [offscreen],
@@ -257,32 +291,31 @@ export class BobcatCanvas {
     return this.#client.request(operation, values)
   }
 
-  async addAuthorStylesheet(css) {
-    await this.#request('addAuthorStylesheet', { css })
+  /**
+   * Fetch and run the main-thread script at `url`.
+   *
+   * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
+   * VM initialization, or evaluation failure. Relative URLs are resolved
+   * against this document's base URL before they cross the Worker boundary.
+   * The browser VM has no execution interrupt: a non-terminating script leaves
+   * this Promise pending. Dispose this canvas and create a replacement to
+   * recover; native QuickJS embedders may provide different timeout policy.
+   */
+  async executeScript(url) {
+    await this.#request('executeScript', { url: documentUrl(url) })
   }
 
-  appendElement(parent, child) {
-    return this.#request('appendElement', { child, parent })
+  /**
+   * Reserved URL entry point; currently rejects as unsupported. Relative URLs
+   * are resolved against this document's base URL.
+   */
+  async loadStyleSheet(url) {
+    await this.#request('loadStyleSheet', { url: documentUrl(url) })
   }
 
-  createPage(_componentId, _componentCssId) {
-    return this.#request('createPage')
-  }
-
-  createView(_parentComponentUniqueId) {
-    return this.#request('createView')
-  }
-
-  async dropElement(element) {
-    await this.#request('dropElement', { element })
-  }
-
-  async flushElementTree() {
-    await this.#request('flushElementTree')
-  }
-
-  registerFonts(bytes) {
-    return this.#request('registerFonts', { bytes })
+  /** Register one or more font faces from an OpenType font container. */
+  async registerFonts(data) {
+    return await this.#request('registerFonts', { bytes: fontBytes(data) })
   }
 
   async resize(width, height, devicePixelRatio) {

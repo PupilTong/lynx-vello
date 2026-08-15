@@ -2,20 +2,21 @@
 //!
 //! An embedder provides exactly five things: user input, device metrics,
 //! OS initialization (its event loop and window), a draw target, and IO
-//! primitives (bundle bytes in, pixels out). It never starts or steers the
+//! primitives (resource bytes in, pixels out). It never starts or steers the
 //! internal pipeline. Its event handlers are relays — they hand the engine
 //! an OS fact (`dispatch_input`, `resize`, `notify_redraw`, `pump`) and the
 //! engine decides what the pipeline does with it, requesting frames itself
-//! through the [`Window`] capabilities supplied at attach time.
+//! through the [`Window`] capabilities supplied at attach time, while
+//! lifecycle completion wakes the host event loop through [`EventRequester`].
 //!
 //! # Two threads, one hand-off slot
 //!
 //! The document has exactly one holder at any instant; [`SharedTree`] is
 //! the slot it changes hands through:
 //!
-//! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the `QuickJS`
-//!   realm and its event loop. A batch's first `bobcat` call takes the document out of the slot;
-//!   every call after that is a plain `&mut` mutation with no synchronization at all;
+//! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the injected
+//!   JavaScript VM and its job loop. A batch's first `bobcat` call takes the document out of the
+//!   slot; every call after that is a plain `&mut` mutation with no synchronization at all;
 //!   `__FlushElementTree` runs the style + layout commit on the taken document, puts it back, and
 //!   asks for a frame. Locks are touched twice per batch, not per call.
 //! - **The presenting side** (the thread the embedder calls the engine from — its OS event loop):
@@ -40,22 +41,32 @@
 
 mod graphics;
 
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-#[cfg(feature = "quickjs")]
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+#[cfg(target_arch = "wasm32")]
+use std::sync::OnceLock;
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
+#[cfg(not(target_arch = "wasm32"))]
+use std::thread::Builder as ThreadBuilder;
 
+use dom::FontBlob;
 use dom::input::InputEvent;
-use dom::render::gpu::{GpuError, Headless};
+use dom::render::gpu::Headless;
 use dom::vello::peniko::Color;
-use dom::{FontBlob, ImageStore, StylesheetOrigin};
+#[cfg(target_arch = "wasm32")]
+use wasm_thread::Builder as ThreadBuilder;
 
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+use crate::image::DecodedImage;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
 /// The physical pixel size of the render target.
@@ -67,37 +78,97 @@ pub struct FrameSize {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
+#[cfg(target_arch = "wasm32")]
+static WASM_STYLE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(1);
+#[cfg(target_arch = "wasm32")]
+static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
+#[cfg(target_arch = "wasm32")]
+static WASM_SCRIPT_OWNER_CLAIMED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
+
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+thread_local! {
+    /// The event sink for the script task on this Worker only. The panic
+    /// hook itself is process-global, so it must not retain or attribute
+    /// panics from render/style Workers to one particular view.
+    static WASM_SCRIPT_PANIC_REPORTER: RefCell<Option<EngineEventSender>> = const {
+        RefCell::new(None)
+    };
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
     #[error("invalid viewport: {0}")]
     Viewport(String),
-    #[error("{0}")]
-    Gpu(#[source] GpuError),
+    #[error("GPU operation failed: {0}")]
+    Gpu(String),
     #[error("rendering failed: {0}")]
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
-    #[error("the engine's Lynx main-thread document owner was already taken")]
-    MainThreadAlreadyTaken,
+    #[error("this view has already started its entry script")]
+    ScriptAlreadyStarted,
     #[error("the engine has no draw target attached")]
     NoDrawTarget,
+    #[error(
+        "the document is busy in a script batch; retry the resource update after the next engine event"
+    )]
+    ResourceUpdateBusy,
 }
 
-#[cfg(feature = "quickjs")]
+/// Configures the Worker bootstrap shared by the engine-owned Lynx main
+/// thread and Stylo workers in a Wasm build.
+///
+/// This is an OS bootstrap capability only; the spawned task and document
+/// remain private to the engine. `style_thread_count` must be at least two:
+/// index zero is the entry-task owner and at least one managed Rayon worker
+/// must remain after that synchronous task exits.
+#[cfg(target_arch = "wasm32")]
+pub fn configure_wasm_workers(
+    worker_script_url: String,
+    style_thread_count: usize,
+) -> Result<(), EngineError> {
+    if worker_script_url.is_empty() {
+        return Err(EngineError::Thread {
+            name: "wasm worker configuration",
+            message: "the worker script URL must not be empty".to_owned(),
+        });
+    }
+    if style_thread_count < 2 {
+        return Err(EngineError::Thread {
+            name: "wasm worker configuration",
+            message: "the style thread count must be at least two so one managed worker remains after the entry task"
+                .to_owned(),
+        });
+    }
+    if WASM_STYLE_POOL.get().is_some() {
+        return Err(EngineError::Thread {
+            name: "wasm worker configuration",
+            message: "the style thread pool was already initialized".to_owned(),
+        });
+    }
+    WASM_STYLE_THREAD_COUNT.store(style_thread_count, Ordering::Release);
+    wasm_thread::Builder::empty()
+        .worker_script_url(worker_script_url)
+        .set_default();
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ScriptRunError {
     #[error("could not initialize the main-thread runtime: {0}")]
-    Initialization(#[source] crate::quickjs::QuickJsInitializationError),
-    #[error("the engine's Lynx main-thread document owner was already taken")]
-    MainThreadAlreadyTaken,
-    #[error(transparent)]
-    Script(crate::quickjs::MainThreadError),
+    Initialization(#[source] crate::script::ScriptError),
+    #[error("main-thread script failed: {0}")]
+    Script(#[source] crate::script::ScriptError),
+    #[error("could not initialize the script thread: {0}")]
+    Platform(String),
 }
 
 /// A message crossing from an engine-owned thread.
-#[cfg(feature = "quickjs")]
 enum EngineMessage {
     /// The main-thread script ran to completion (or failed) on its thread.
     ScriptDone(Result<(), ScriptRunError>),
@@ -106,7 +177,6 @@ enum EngineMessage {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    #[cfg(feature = "quickjs")]
     ScriptFinished(Result<(), ScriptRunError>),
 }
 
@@ -134,7 +204,7 @@ impl fmt::Debug for Screenshot {
 /// — a window is a type, not a set of boxed closures. The draw target is a
 /// GAT, which lets native surfaces borrow an embedder-owned window. Browser
 /// embedders can instead attach an owned canvas target through
-/// [`Engine::attach_target`].
+/// [`crate::LynxView::attach_target`].
 pub trait Window {
     type Target<'window>: Into<WindowTarget<'window>>
     where
@@ -160,6 +230,41 @@ pub trait FrameRequester: Send + Sync + 'static {
     fn pre_present(&self) {}
 }
 
+/// The host event-loop capability used to wake [`crate::LynxView::pump`].
+///
+/// Engine-owned threads enqueue their event before invoking this callback, so
+/// an embedder may immediately call `pump` when its event loop receives the
+/// wakeup. This capability is separate from [`FrameRequester`]: lifecycle
+/// progress must not depend on a visible or attached draw target.
+pub trait EventRequester: Send + Sync + 'static {
+    fn request_event(&self);
+}
+
+impl<F> EventRequester for F
+where
+    F: Fn() + Send + Sync + 'static,
+{
+    fn request_event(&self) {
+        self();
+    }
+}
+
+#[derive(Clone)]
+struct EngineEventSender {
+    sender: mpsc::Sender<EngineMessage>,
+    requester: Arc<dyn EventRequester>,
+}
+
+impl EngineEventSender {
+    fn send(&self, message: EngineMessage) {
+        if self.sender.send(message).is_ok() {
+            // Enqueue first: after this wakeup, pump must be able to observe
+            // the event without a polling race.
+            self.requester.request_event();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum NoWindow {}
 
@@ -182,11 +287,12 @@ impl FrameRequester for NoWindow {
     }
 }
 
-pub type OffscreenEngine = Engine<'static, NoWindow>;
+#[cfg(test)]
+pub(crate) type OffscreenEngine = Engine<'static, NoWindow>;
 
 /// The hand-off slot for the one document.
 #[derive(Clone)]
-pub struct SharedTree {
+pub(crate) struct SharedTree {
     slot: Arc<Mutex<Option<LynxDocument>>>,
 }
 
@@ -198,7 +304,7 @@ impl fmt::Debug for SharedTree {
 
 impl SharedTree {
     #[must_use]
-    pub fn new(tree: LynxDocument) -> Self {
+    pub(crate) fn new(tree: LynxDocument) -> Self {
         Self {
             slot: Arc::new(Mutex::new(Some(tree))),
         }
@@ -206,7 +312,8 @@ impl SharedTree {
 
     /// Blocking borrow for setup and observation.
     #[must_use]
-    pub fn tree(&self) -> TreeGuard<'_> {
+    #[cfg(test)]
+    pub(crate) fn tree(&self) -> TreeGuard<'_> {
         let guard = self.lock();
         assert!(
             guard.is_some(),
@@ -258,79 +365,9 @@ impl SharedTree {
     }
 }
 
-/// The engine-owned Lynx main thread's side of the document hand-off.
-///
-/// An [`Engine`] creates the document and can transfer this owner exactly
-/// once to the runtime that permanently runs its Element PAPI. The first
-/// mutation in a batch takes the document out of [`SharedTree`]; subsequent
-/// mutations are ordinary `&mut` accesses, and [`Self::flush`] lays it out and
-/// returns it to the presenting side. Dropping the owner also returns an open
-/// batch, without turning runtime teardown into an implicit flush.
-///
-/// This type is `Send` and contains no browser or GPU handles, so a browser
-/// embedder can move it into a shared-memory Worker through `wasm_thread` while
-/// keeping the `Engine` and its draw target on the presenting Worker.
-pub struct MainThreadDocument {
-    slot: SharedTree,
-    taken: Option<LynxDocument>,
-}
-
-impl fmt::Debug for MainThreadDocument {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MainThreadDocument")
-            .field("batch_open", &self.taken.is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-impl MainThreadDocument {
-    fn new(slot: SharedTree) -> Self {
-        Self { slot, taken: None }
-    }
-
-    /// Opens the current mutation batch if needed and returns its document.
-    pub fn document(&mut self) -> &mut LynxDocument {
-        if self.taken.is_none() {
-            self.taken = Some(self.slot.take());
-        }
-        self.taken
-            .as_mut()
-            .expect("the main thread just took the document")
-    }
-
-    /// Commits the current batch through style and layout and returns the
-    /// document to the presenting side.
-    pub fn flush(&mut self) {
-        let mut tree = match self.taken.take() {
-            Some(tree) => tree,
-            None => self.slot.take(),
-        };
-        tree.layout();
-        self.slot.put(tree);
-    }
-
-    fn release(&mut self) {
-        if let Some(tree) = self.taken.take() {
-            self.slot.put(tree);
-        }
-    }
-
-    #[cfg(feature = "quickjs")]
-    fn shared_tree(&self) -> SharedTree {
-        self.slot.clone()
-    }
-}
-
-impl Drop for MainThreadDocument {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
 /// A borrow of the document from its slot.
 #[derive(Debug)]
-pub struct TreeGuard<'a>(MutexGuard<'a, Option<LynxDocument>>);
+pub(crate) struct TreeGuard<'a>(MutexGuard<'a, Option<LynxDocument>>);
 
 impl Deref for TreeGuard<'_> {
     type Target = LynxDocument;
@@ -364,23 +401,22 @@ enum Output<'window> {
 ///
 /// Generic over the embedder's [`Window`] capability types. A native surface
 /// may borrow its window for the life of the engine; an owned browser canvas
-/// target does not. [`OffscreenEngine`] is the composition with no window at
-/// all.
+/// target does not. The public windowless composition is
+/// [`crate::OffscreenLynxView`].
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
-pub struct Engine<'window, W: Window> {
+pub(crate) struct Engine<'window, W: Window> {
     elements: SharedTree,
-    main_thread: Option<MainThreadDocument>,
+    script_owner_available: bool,
     viewport: Viewport,
     frame_size: FrameSize,
-    #[cfg(feature = "quickjs")]
     messages: mpsc::Receiver<EngineMessage>,
-    #[cfg(feature = "quickjs")]
-    message_sender: mpsc::Sender<EngineMessage>,
+    event_sender: EngineEventSender,
     output: Output<'window>,
     /// The window's frame-request handle, behind `Arc` so the Lynx main
-    /// thread keeps one of its own.
-    frames: Option<Arc<W::Frames>>,
+    /// thread always observes the currently attached target rather than a
+    /// startup-time snapshot.
+    frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
     thread_bound: PhantomData<Rc<()>>,
@@ -399,28 +435,29 @@ impl<W: Window> fmt::Debug for Engine<'_, W> {
 
 impl<'window, W: Window> Engine<'window, W> {
     /// Builds the engine and its element tree at the given CSS viewport.
-    pub fn new(
+    pub(crate) fn new(
         config: PageConfig,
+        event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<Self, EngineError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        #[cfg(feature = "quickjs")]
         let (message_sender, messages) = mpsc::channel();
         let elements = SharedTree::new(new_document(viewport, config));
         Ok(Self {
-            main_thread: Some(MainThreadDocument::new(elements.clone())),
+            script_owner_available: true,
             elements,
             viewport,
             frame_size,
-            #[cfg(feature = "quickjs")]
             messages,
-            #[cfg(feature = "quickjs")]
-            message_sender,
+            event_sender: EngineEventSender {
+                sender: message_sender,
+                requester: event_requester,
+            },
             output: Output::None,
-            frames: None,
+            frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
             thread_bound: PhantomData,
@@ -429,50 +466,55 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// A blocking borrow of the document, for observation and setup.
     #[must_use]
-    pub fn elements(&self) -> TreeGuard<'_> {
+    #[cfg(test)]
+    pub(crate) fn elements(&self) -> TreeGuard<'_> {
         self.elements.tree()
     }
 
-    /// Transfers the document's unique mutation owner to an external Lynx
-    /// main-thread runtime.
-    ///
-    /// The presenting [`Engine`] keeps only the non-blocking [`SharedTree`]
-    /// side. A second call fails because two main threads could otherwise open
-    /// overlapping Element-PAPI batches.
-    pub fn take_main_thread_document(&mut self) -> Result<MainThreadDocument, EngineError> {
-        self.main_thread
-            .take()
-            .ok_or(EngineError::MainThreadAlreadyTaken)
+    /// Hands the private slot to the one engine-owned script task. A second
+    /// task could otherwise open an overlapping Element-PAPI batch.
+    fn take_script_tree(&mut self) -> Result<SharedTree, EngineError> {
+        if !self.script_owner_available {
+            return Err(EngineError::ScriptAlreadyStarted);
+        }
+        self.script_owner_available = false;
+        Ok(self.elements.clone())
     }
 
     /// The current physical render-target size in device pixels.
     #[must_use]
-    pub const fn frame_size(&self) -> FrameSize {
+    pub(crate) const fn frame_size(&self) -> FrameSize {
         self.frame_size
     }
 
-    /// Mounts author CSS.
-    pub fn add_author_stylesheet(&mut self, css: &str) {
-        self.elements
-            .tree()
-            .add_stylesheet(css, StylesheetOrigin::Author);
-        self.refresh();
-    }
-
-    /// Registers shared font data for text measurement without copying it.
-    pub fn register_fonts(&mut self, data: FontBlob) -> usize {
-        let registered = self.elements.tree().register_fonts(data);
+    /// Registers shared font data without exposing the document to the host.
+    pub(crate) fn register_fonts(&mut self, data: FontBlob) -> Result<usize, EngineError> {
+        let Some(mut tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        let registered = tree.register_fonts(data);
         if registered > 0 {
+            tree.layout();
+            drop(tree);
             self.refresh();
         }
-        registered
+        Ok(registered)
     }
 
-    /// Registers or updates decoded images, then keeps the next frame fresh.
-    pub fn with_images<R>(&mut self, update: impl FnOnce(&mut ImageStore) -> R) -> R {
-        let result = update(self.elements.tree().images_mut());
+    /// Installs decoded pixels under their CSS URL without publishing the
+    /// paint registry itself.
+    pub(crate) fn register_image_url(
+        &mut self,
+        url: impl Into<String>,
+        image: &DecodedImage,
+    ) -> Result<(), EngineError> {
+        let Some(mut tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        tree.images_mut().insert_url(url, image.to_image_data());
+        drop(tree);
         self.refresh();
-        result
+        Ok(())
     }
 
     fn drain_deferred(
@@ -490,7 +532,7 @@ impl<'window, W: Window> Engine<'window, W> {
     }
 
     /// Routes one host input event on the presenting side.
-    pub fn dispatch_input(&mut self, event: InputEvent) {
+    pub(crate) fn dispatch_input(&mut self, event: InputEvent) {
         self.pending_input.push_back(event);
         let needs_frame = match self.elements.try_tree() {
             Some(mut tree) => {
@@ -505,7 +547,7 @@ impl<'window, W: Window> Engine<'window, W> {
     }
 
     /// Applies new device metrics from the embedder.
-    pub fn resize(
+    pub(crate) fn resize(
         &mut self,
         width: f32,
         height: f32,
@@ -537,36 +579,35 @@ impl<'window, W: Window> Engine<'window, W> {
     }
 
     /// Asks the OS for a frame through the window's frame-request handle.
-    pub fn refresh(&self) {
-        if let Some(frames) = &self.frames {
+    pub(crate) fn refresh(&self) {
+        if let Some(frames) = self.frame_requester() {
             frames.request_frame();
         }
     }
 
+    fn frame_requester(&self) -> Option<Arc<W::Frames>> {
+        self.frames
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}"))
+            .clone()
+    }
+
     /// Drains lifecycle messages from engine-owned threads.
-    pub fn pump(&mut self) -> Vec<EngineEvent> {
-        #[cfg(feature = "quickjs")]
-        {
-            let mut events = Vec::new();
-            while let Ok(message) = self.messages.try_recv() {
-                match message {
-                    EngineMessage::ScriptDone(result) => {
-                        events.push(EngineEvent::ScriptFinished(result));
-                    }
+    pub(crate) fn pump(&mut self) -> Vec<EngineEvent> {
+        let mut events = Vec::new();
+        while let Ok(message) = self.messages.try_recv() {
+            match message {
+                EngineMessage::ScriptDone(result) => {
+                    events.push(EngineEvent::ScriptFinished(result));
                 }
             }
-            events
         }
-
-        #[cfg(not(feature = "quickjs"))]
-        {
-            Vec::new()
-        }
+        events
     }
 
     /// Attaches an offscreen GPU target.
-    pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
-        let gpu = Headless::new().map_err(EngineError::Gpu)?;
+    pub(crate) fn attach_offscreen(&mut self) -> Result<(), EngineError> {
+        let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
         self.output = Output::Offscreen(Box::new(gpu));
         Ok(())
     }
@@ -577,7 +618,7 @@ impl<'window, W: Window> Engine<'window, W> {
     /// thread. The surface borrows the window, which therefore outlives the
     /// engine.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn attach_window(
+    pub(crate) fn attach_window(
         &mut self,
         window: &'window W,
         size: FrameSize,
@@ -587,11 +628,12 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// Asynchronously attaches the embedder's window as the draw target.
     ///
-    /// Browser WebGPU obtains its adapter and device through JavaScript
-    /// promises, so embedders targeting Wasm must use this entry rather than
-    /// blocking the browser thread. Native embedders may use this directly or
-    /// the synchronous [`Self::attach_window`] convenience wrapper.
-    pub async fn attach_window_async(
+    /// Native embedders may use this internally when they already have an
+    /// async initialization context; the public synchronous convenience is
+    /// [`crate::LynxView::attach_window`]. Browser embedders attach an owned
+    /// canvas through [`crate::LynxView::attach_target`] instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn attach_window_async(
         &mut self,
         window: &'window W,
         size: FrameSize,
@@ -605,7 +647,7 @@ impl<'window, W: Window> Engine<'window, W> {
     /// This is the browser-friendly form: `SurfaceTarget::Canvas` owns a
     /// JavaScript canvas reference, so the Wasm wrapper does not need a
     /// self-referential Rust struct merely to keep a `Window` borrow alive.
-    pub async fn attach_target(
+    pub(crate) async fn attach_target(
         &mut self,
         target: impl Into<WindowTarget<'window>>,
         frames: W::Frames,
@@ -613,13 +655,18 @@ impl<'window, W: Window> Engine<'window, W> {
     ) -> Result<(), EngineError> {
         let graphics = WindowGraphics::new(target, size).await?;
         self.output = Output::Window(Box::new(graphics));
-        self.frames = Some(Arc::new(frames));
+        *self
+            .frames
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}")) =
+            Some(Arc::new(frames));
         self.refresh();
         Ok(())
     }
 
     /// Relays the OS's "the window wants a frame" fact.
-    pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
+    pub(crate) fn notify_redraw(&mut self) -> Result<(), EngineError> {
+        let frames = self.frame_requester();
         let Output::Window(graphics) = &mut self.output else {
             return Ok(());
         };
@@ -635,8 +682,7 @@ impl<'window, W: Window> Engine<'window, W> {
             }
             None => true,
         };
-        let frames = self
-            .frames
+        let frames = frames
             .as_deref()
             .expect("a window output always installs its frame capability");
         // A script/DOM batch can take the slot after requesting this frame.
@@ -653,7 +699,7 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// Renders one frame to the offscreen target if the document changed (or unconditionally with
     /// `force`), returning whether a frame was submitted.
-    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+    pub(crate) fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
         let Output::Offscreen(gpu) = &mut self.output else {
             return Err(EngineError::NoDrawTarget);
         };
@@ -671,8 +717,9 @@ impl<'window, W: Window> Engine<'window, W> {
             self.frame_size.height,
             Color::WHITE,
         )
-        .map_err(EngineError::Gpu)?;
-        gpu.wait_idle().map_err(EngineError::Gpu)?;
+        .map_err(|error| EngineError::Gpu(error.to_string()))?;
+        gpu.wait_idle()
+            .map_err(|error| EngineError::Gpu(error.to_string()))?;
         Ok(true)
     }
 
@@ -681,7 +728,7 @@ impl<'window, W: Window> Engine<'window, W> {
     /// tree is available; a tree busy mid-commit (window mode) captures the
     /// retained frame, which is what the window is showing.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
+    pub(crate) fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         match &mut self.output {
             Output::None => Err(EngineError::NoDrawTarget),
@@ -690,9 +737,11 @@ impl<'window, W: Window> Engine<'window, W> {
                     && tree.render()
                 {
                     gpu.render_frame(&tree.scene(), size.width, size.height, Color::WHITE)
-                        .map_err(EngineError::Gpu)?;
+                        .map_err(|error| EngineError::Gpu(error.to_string()))?;
                 }
-                let pixels = gpu.read_pixels().map_err(EngineError::Gpu)?;
+                let pixels = gpu
+                    .read_pixels()
+                    .map_err(|error| EngineError::Gpu(error.to_string()))?;
                 Ok(Screenshot { size, pixels })
             }
             Output::Window(graphics) => {
@@ -713,52 +762,68 @@ impl<'window, W: Window> Engine<'window, W> {
         }
     }
 
-    /// Runs a main-thread script to completion on the calling thread over the shared tree.
-    #[cfg(feature = "quickjs")]
-    pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let main_thread = self
-            .main_thread
-            .as_ref()
-            .ok_or(ScriptRunError::MainThreadAlreadyTaken)?;
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(main_thread.shared_tree(), || {})
-            .map_err(ScriptRunError::Initialization)?;
-        let result = runtime
-            .run_main_thread_script(source)
-            .map_err(ScriptRunError::Script);
-        self.refresh();
-        result
-    }
-
-    /// Spawns the Lynx main thread: the `QuickJS` realm running `source` over the shared tree.
-    #[cfg(feature = "quickjs")]
-    pub fn spawn_script(
+    /// Spawns the Lynx main thread and creates its injected JavaScript VM on
+    /// that owner thread before running `source`.
+    pub(crate) fn spawn_script(
         &mut self,
         source: String,
-        wakeup: impl Fn() + Send + Sync + 'static,
+        source_name: String,
+        factory: Arc<dyn crate::script::ScriptEngineFactory>,
     ) -> Result<(), EngineError> {
-        let main_thread = self.take_main_thread_document()?;
-        let elements = main_thread.shared_tree();
-        let sender = self.message_sender.clone();
-        let on_flush = self.frames.clone();
-        let spawn = std::thread::Builder::new()
+        let elements = self.take_script_tree()?;
+        #[cfg(target_arch = "wasm32")]
+        if WASM_SCRIPT_OWNER_CLAIMED.swap(true, Ordering::AcqRel) {
+            self.script_owner_available = true;
+            return Err(EngineError::Thread {
+                name: "script",
+                message: "one Wasm instance supports one Lynx view; create each view in its own Render Worker"
+                    .to_owned(),
+            });
+        }
+        let events = self.event_sender.clone();
+        let frame_requesters = Arc::clone(&self.frames);
+        let spawn = ThreadBuilder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
-                let result = (|| {
-                    let mut runtime = crate::quickjs::MainThreadRuntime::new(elements, move || {
-                        if let Some(frames) = &on_flush {
-                            frames.request_frame();
-                        }
-                    })
-                    .map_err(ScriptRunError::Initialization)?;
-                    runtime
-                        .run_main_thread_script(&source)
-                        .map_err(ScriptRunError::Script)
-                })();
-                let _ = sender.send(EngineMessage::ScriptDone(result));
-                wakeup();
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                install_script_panic_hook();
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                set_script_panic_reporter(Some(events.clone()));
+                let on_flush = Arc::clone(&frame_requesters);
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    (|| {
+                        #[cfg(target_arch = "wasm32")]
+                        prepare_script_thread()?;
+                        let mut runtime = crate::runtime::MainThreadRuntime::new(
+                            factory.as_ref(),
+                            elements,
+                            move || {
+                                request_current_frame(&on_flush);
+                            },
+                        )
+                        .map_err(|error| {
+                            ScriptRunError::Initialization(error.into_script_error())
+                        })?;
+                        runtime
+                            .run_main_thread_script(&source, &source_name)
+                            .map_err(|error| ScriptRunError::Script(error.into_script_error()))
+                    })()
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(ScriptRunError::Platform(format!(
+                        "the injected VM panicked: {}",
+                        panic_payload(payload.as_ref())
+                    )))
+                });
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                set_script_panic_reporter(None);
+                events.send(EngineMessage::ScriptDone(result));
+                request_current_frame(&frame_requesters);
             });
         if let Err(error) = spawn {
-            self.main_thread = Some(main_thread);
+            self.script_owner_available = true;
+            #[cfg(target_arch = "wasm32")]
+            WASM_SCRIPT_OWNER_CLAIMED.store(false, Ordering::Release);
             return Err(EngineError::Thread {
                 name: "script",
                 message: error.to_string(),
@@ -766,6 +831,87 @@ impl<'window, W: Window> Engine<'window, W> {
         }
         Ok(())
     }
+}
+
+fn request_current_frame<F: FrameRequester>(frames: &Mutex<Option<Arc<F>>>) {
+    let current = frames
+        .lock()
+        .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}"))
+        .clone();
+    if let Some(frames) = current {
+        frames.request_frame();
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+fn install_script_panic_hook() {
+    WASM_SCRIPT_PANIC_HOOK.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            WASM_SCRIPT_PANIC_REPORTER.with(|reporter| {
+                if let Some(reporter) = reporter.borrow().as_ref() {
+                    let location = info
+                        .location()
+                        .map_or_else(String::new, |location| format!(" at {location}"));
+                    reporter.send(EngineMessage::ScriptDone(Err(ScriptRunError::Platform(
+                        format!(
+                            "the script Worker aborted after a panic{location}: {}",
+                            panic_payload(info.payload())
+                        ),
+                    ))));
+                }
+            });
+            previous(info);
+        }));
+    });
+}
+
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+fn set_script_panic_reporter(reporter: Option<EngineEventSender>) {
+    WASM_SCRIPT_PANIC_REPORTER.with(|slot| *slot.borrow_mut() = reporter);
+}
+
+fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else {
+        "non-string panic payload"
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn prepare_script_thread() -> Result<(), ScriptRunError> {
+    WASM_STYLE_POOL
+        .get_or_init(|| {
+            let thread_count = WASM_STYLE_THREAD_COUNT.load(Ordering::Acquire);
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(thread_count)
+                .use_current_thread()
+                .thread_name(|index| format!("StyleThread#{index}"))
+                .start_handler(|_| {
+                    dom::stylo::thread_state::initialize_layout_worker_thread();
+                })
+                .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
+                .spawn_handler(|thread| {
+                    let mut builder = wasm_thread::Builder::new();
+                    if let Some(name) = thread.name() {
+                        builder = builder.name(name.to_owned());
+                    }
+                    if let Some(stack_size) = thread.stack_size() {
+                        builder = builder.stack_size(stack_size);
+                    }
+                    builder.spawn(move || thread.run()).map(|_| ())
+                })
+                .build()
+                .map_err(|error| error.to_string())?;
+            dom::install_style_thread_pool(pool)
+                .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())?;
+            Ok(())
+        })
+        .clone()
+        .map_err(ScriptRunError::Platform)
 }
 
 fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameSize, EngineError> {
@@ -808,7 +954,24 @@ fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameS
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::frame_size;
+
+    fn engine_with_events(events: Arc<dyn super::EventRequester>) -> super::OffscreenEngine {
+        super::OffscreenEngine::new(
+            crate::tree::PageConfig::default(),
+            events,
+            393.0,
+            727.0,
+            1.0,
+        )
+        .expect("engine")
+    }
+
+    fn engine() -> super::OffscreenEngine {
+        engine_with_events(Arc::new(|| {}))
+    }
 
     #[test]
     fn frame_size_applies_the_device_scale_once() {
@@ -827,43 +990,85 @@ mod tests {
         use bytes::Bytes;
         use dom::FontBlob;
 
-        use super::OffscreenEngine;
-        use crate::tree::PageConfig;
-
         let bytes = Bytes::from_static(b"not a font");
         let original = bytes.as_ptr();
         let blob = FontBlob::new(bytes);
         assert_eq!(blob.as_ref().as_ptr(), original);
 
-        let mut engine =
-            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
-        assert_eq!(engine.register_fonts(blob), 0);
+        let mut engine = engine();
+        assert_eq!(engine.register_fonts(blob).expect("available tree"), 0);
     }
 
     #[test]
-    fn main_thread_document_is_unique_and_hides_an_open_batch() {
-        use super::OffscreenEngine;
-        use crate::tree::PageConfig;
+    fn decoded_image_registration_reaches_the_private_url_registry() {
+        use crate::image::{AlphaType, DecodedImage, ImageFormat};
 
-        let mut engine =
-            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
-        let mut main_thread = engine
-            .take_main_thread_document()
-            .expect("the engine creates one main-thread owner");
+        let mut engine = engine();
+        let image = DecodedImage::from_rgba8(
+            1,
+            1,
+            AlphaType::Straight,
+            vec![1, 2, 3, 255],
+            ImageFormat::Png,
+        )
+        .expect("image");
+        let image_id = image.id();
+        engine
+            .register_image_url("app:///pixel.png", &image)
+            .expect("available tree");
+
+        let mut tree = engine.elements();
+        assert_eq!(
+            tree.images_mut()
+                .url("app:///pixel.png")
+                .expect("registered URL")
+                .data
+                .id(),
+            image_id
+        );
+    }
+
+    #[test]
+    fn resource_updates_report_a_busy_script_batch() {
+        use bytes::Bytes;
+        use dom::FontBlob;
+
+        let mut engine = engine();
+        let script_tree = engine
+            .take_script_tree()
+            .expect("the engine creates one script owner");
+        let tree = script_tree.take();
+
+        assert!(matches!(
+            engine.register_fonts(FontBlob::new(Bytes::from_static(b"font"))),
+            Err(super::EngineError::ResourceUpdateBusy)
+        ));
+
+        script_tree.put(tree);
+    }
+
+    #[test]
+    fn the_script_slot_is_unique_and_hides_an_open_batch() {
+        let mut engine = engine();
+        let script_tree = engine
+            .take_script_tree()
+            .expect("the engine creates one script owner");
         assert!(
-            engine.take_main_thread_document().is_err(),
+            engine.take_script_tree().is_err(),
             "the engine cannot create a second mutation owner"
         );
 
-        let page = main_thread.document().document_element().id();
-        let view = main_thread.document().create_element("view", ());
-        main_thread.document().insert_before(page, view, None);
+        let mut tree = script_tree.take();
+        let page = tree.document_element().id();
+        let view = tree.create_element("view", ());
+        tree.insert_before(page, view, None);
         assert!(
             engine.elements.try_tree().is_none(),
             "the presenting side cannot observe a half-applied batch"
         );
 
-        main_thread.flush();
+        tree.layout();
+        script_tree.put(tree);
         assert!(engine.elements().is_connected(view));
     }
 
@@ -871,13 +1076,14 @@ mod tests {
     #[test]
     fn a_spawned_script_mutates_the_shared_tree() {
         use std::sync::mpsc;
+        use std::time::Duration;
 
-        use super::{EngineEvent, OffscreenEngine};
-        use crate::tree::PageConfig;
+        use super::EngineEvent;
 
-        let mut engine =
-            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
-        let (wake_sender, wakeups) = mpsc::channel();
+        let (wake_sender, wake_receiver) = mpsc::channel();
+        let mut engine = engine_with_events(Arc::new(move || {
+            let _ = wake_sender.send(());
+        }));
         engine
             .spawn_script(
                 r"
@@ -889,25 +1095,22 @@ mod tests {
                 };
                 "
                 .to_owned(),
-                move || {
-                    let _ = wake_sender.send(());
-                },
+                "test-entry.js".to_owned(),
+                crate::quickjs::engine_factory(),
             )
             .expect("script thread");
 
-        let finished = loop {
-            wakeups.recv().expect("the script thread wakes the loop");
-            let done = engine
-                .pump()
-                .into_iter()
-                .map(|event| match event {
-                    EngineEvent::ScriptFinished(result) => result,
-                })
-                .next();
-            if let Some(result) = done {
-                break result;
-            }
-        };
+        wake_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("script completion must wake the host event loop");
+        let finished = engine
+            .pump()
+            .into_iter()
+            .map(|event| match event {
+                EngineEvent::ScriptFinished(result) => result,
+            })
+            .next()
+            .expect("the event must be enqueued before the wakeup");
         finished.expect("the script must boot");
 
         let elements = engine.elements();

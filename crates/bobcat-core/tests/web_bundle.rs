@@ -1,25 +1,15 @@
 #![cfg(feature = "quickjs")]
 
-//! How far a real `.web.bundle`'s main-thread script gets today.
-//!
-//! The fixtures are the same `ReactLynx` build artifacts
-//! `lynx-template-decoder` decodes, vendored from lynx-stack's `web-core-e2e`
-//! suite. Running their `lepusCode.root` end to end needs far more than the
-//! Element PAPI constructors that exist; this test pins *exactly* where the
-//! wall is, so the gap is a failing assertion to update rather than a
-//! paragraph of prose that rots.
+mod support;
 
-use bobcat_core::engine::SharedTree;
-use bobcat_core::quickjs::MainThreadRuntime;
-use bobcat_core::tree::{PageConfig, Viewport, new_document};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-fn shared_tree(config: PageConfig) -> (MainThreadRuntime, SharedTree) {
-    let elements = SharedTree::new(new_document(VIEWPORT, config));
-    let runtime = MainThreadRuntime::new(elements.clone(), || {}).expect("QuickJS realm");
-    (runtime, elements)
-}
-
-const VIEWPORT: Viewport = Viewport::new(393.0, 727.0);
+use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::{
+    EngineEvent, LynxView, NoWindow, PageConfig, ScriptRunError, quickjs_engine_factory,
+};
+use support::FetcherDouble;
 
 const FIXTURES: &[(&str, &[u8])] = &[
     (
@@ -42,8 +32,38 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
     }
 }
 
+async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptRunError> {
+    let resources: Arc<dyn ResourceFetcher> =
+        Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
+    let mut view = LynxView::<NoWindow>::new(
+        config,
+        resources,
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        393.0,
+        727.0,
+        1.0,
+    )
+    .expect("view");
+    view.execute_script("main.js")
+        .await
+        .expect("fetch and start");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
+            EngineEvent::ScriptFinished(result) => Some(result),
+            _ => None,
+        }) {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "script thread did not finish");
+        std::thread::yield_now();
+    }
+}
+
 #[test]
-fn the_bundle_page_config_reaches_the_ua_cascade() {
+fn decoded_bundle_page_config_is_supplied_at_view_construction() {
     for (name, bytes) in FIXTURES {
         let template = lynx_template_decoder::decode(bytes).expect("decode");
         let config = page_config(&template);
@@ -53,52 +73,43 @@ fn the_bundle_page_config_reaches_the_ua_cascade() {
     }
 }
 
-#[test]
-fn a_real_bundle_stops_at_the_missing_lynx_global() {
+#[tokio::test]
+async fn decoded_script_is_passed_to_the_public_view_without_moving_decode_into_core() {
     for (name, bytes) in FIXTURES {
         let template = lynx_template_decoder::decode(bytes).expect("decode");
         let root = template
             .lepus_code
             .get("root")
             .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
-
-        let (mut runtime, elements) = shared_tree(page_config(&template));
-        let error = runtime
-            .evaluate_main_thread_script(root)
-            .expect_err("a real ReactLynx bundle needs the main-thread global object");
+        let url = format!("app:///{name}/main-thread.js");
+        let error = run(page_config(&template), root, &url)
+            .await
+            .expect_err("the pending lynx global must remain a precise error");
         let message = error.to_string();
         assert!(
             message.contains("'lynx' is not defined"),
-            "{name}: expected the missing `lynx` global, got: {message}"
+            "{name}: {message}"
         );
-        assert!(
-            message.contains("main-thread.js:"),
-            "{name}: the error should carry a source location: {message}"
-        );
-        let elements = elements.tree();
-        let layout = elements.rounded_layout(1).expect("layout state");
-        assert!(layout.size.width.abs() < f32::EPSILON, "{name}");
+        assert!(message.contains(&url), "{name}: {message}");
     }
 }
 
-#[test]
-fn the_boot_sequence_works_on_a_bundle_shaped_script() {
+#[tokio::test]
+async fn bundle_shaped_boot_sequence_runs_through_the_public_facade() {
     let template = lynx_template_decoder::decode(FIXTURES[0].1).expect("decode");
-    let (mut runtime, elements) = shared_tree(page_config(&template));
-
-    runtime
-        .run_main_thread_script(
-            r"
-            Object.assign(globalThis, {
-              processData: function (data) { return data; },
-              renderPage: function () {
-                __AppendElement(__CreatePage('card', 0), __CreateView(0));
-              },
-              updatePage: function () {},
-            });
-            ",
-        )
-        .expect("boot");
-    let elements = elements.tree();
-    assert!(elements.get(2).is_some(), "the appended view is live");
+    run(
+        page_config(&template),
+        r"
+        Object.assign(globalThis, {
+          processData: function (data) { return data; },
+          renderPage: function () {
+            __AppendElement(__CreatePage('card', 0), __CreateView(0));
+          },
+          updatePage: function () {},
+        });
+        ",
+        "app:///bundle-main.js",
+    )
+    .await
+    .expect("boot");
 }

@@ -228,6 +228,6 @@ impl<'window> WindowGraphics<'window> {
             size.width,
             size.height,
         )
-        .map_err(EngineError::Gpu)
+        .map_err(|error| EngineError::Gpu(error.to_string()))
     }
 }

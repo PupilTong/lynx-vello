@@ -1,4 +1,4 @@
-//! Shared test scaffolding: an in-process PNG encoder and a scriptable
+//! Loader unit-test scaffolding: an in-process PNG encoder and a scriptable
 //! `ResourceFetcher` double.
 
 #![allow(dead_code)]
@@ -7,15 +7,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, CancellationToken, HttpRequest, HttpResponse,
-    PrefetchReceipt, PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourcePath, ResourcePathLease,
-    ResourceRequest, ResourceResponse, ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
-};
 use bytes::Bytes;
 use url::Url;
+
+use crate::resource::{
+    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
+    PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
+    ResourceMetadata, ResourcePath, ResourcePathLease, ResourceRequest, ResourceResponse,
+    ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
+};
 
 /// Encodes an RGBA8 buffer as a PNG, so PNG fixtures never need committing.
 #[must_use]
@@ -61,7 +62,7 @@ pub fn checker_png(side: u32) -> Vec<u8> {
 #[derive(Debug)]
 pub struct PngDouble;
 
-use bobcat_core::image::{
+use crate::image::{
     Acceleration, AlphaType, Capabilities, DecodeRequest, DecodeResponse, DecodedImage, Decoder,
     ImageError, ImageFormat, ImageHeader, PixelSize,
 };
@@ -184,7 +185,6 @@ pub struct FetcherDouble {
     pub fetches: AtomicUsize,
     pub prefetches: AtomicUsize,
     pub cancels: AtomicUsize,
-    pub observed_cancellation: Mutex<Option<CancellationToken>>,
 }
 
 impl FetcherDouble {
@@ -200,7 +200,6 @@ impl FetcherDouble {
             fetches: AtomicUsize::new(0),
             prefetches: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
-            observed_cancellation: Mutex::new(None),
         }
     }
 
@@ -234,13 +233,6 @@ impl FetcherDouble {
 
     pub fn resolve_count(&self) -> usize {
         self.resolves.load(Ordering::Relaxed)
-    }
-
-    pub fn request_cancellation(&self) -> Option<CancellationToken> {
-        self.observed_cancellation
-            .lock()
-            .expect("observed cancellation")
-            .clone()
     }
 
     fn metadata(&self, resource: ResolvedLocator, id: RequestId) -> ResourceMetadata {
@@ -287,10 +279,6 @@ impl ResourceFetcher for FetcherDouble {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
-        *self
-            .observed_cancellation
-            .lock()
-            .expect("observed cancellation") = Some(request.context.cancellation.clone());
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
         let hang = self.hang_resolve;

@@ -1,10 +1,6 @@
-//! Default QuickJS-backed runtime composition for Bobcat.
-//!
-//! [`MainThreadRuntime`] adds the Lynx side: a realm carrying the Element PAPI,
-//! and main-thread (MTS) script execution over it.
+//! Built-in `QuickJS` adapter for Bobcat's injected VM contract.
 
-mod mainthread;
-
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -12,68 +8,19 @@ use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
 
-use crate::resource::ResourceFetcher;
 use crate::script::{
-    ScriptEngine, ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation, ScriptValue,
+    HostCallback, HostValue, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind,
+    ScriptErrorPhase, ScriptSourceLocation,
 };
-use crate::view::LynxView;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
-
 const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
     realm_options: quickjs::RealmOptions,
     max_jobs_per_checkpoint: NonZeroUsize,
-}
-
-#[cfg(test)]
-impl QuickJsConfig {
-    #[must_use]
-    const fn with_memory_limit(mut self, memory_limit: Option<usize>) -> Self {
-        self.realm_options.memory_limit = memory_limit;
-        self
-    }
-
-    #[must_use]
-    const fn with_max_stack_size(mut self, max_stack_size: Option<usize>) -> Self {
-        self.realm_options.max_stack_size = max_stack_size;
-        self
-    }
-
-    #[must_use]
-    const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
-        self.realm_options.execution_timeout = execution_timeout;
-        self
-    }
-
-    #[must_use]
-    const fn with_max_jobs_per_checkpoint(mut self, max_jobs_per_checkpoint: NonZeroUsize) -> Self {
-        self.max_jobs_per_checkpoint = max_jobs_per_checkpoint;
-        self
-    }
-
-    #[must_use]
-    const fn max_jobs_per_checkpoint(self) -> NonZeroUsize {
-        self.max_jobs_per_checkpoint
-    }
-
-    #[must_use]
-    const fn memory_limit(self) -> Option<usize> {
-        self.realm_options.memory_limit
-    }
-
-    #[must_use]
-    const fn max_stack_size(self) -> Option<usize> {
-        self.realm_options.max_stack_size
-    }
-
-    #[must_use]
-    const fn execution_timeout(self) -> Option<Duration> {
-        self.realm_options.execution_timeout
-    }
 }
 
 impl Default for QuickJsConfig {
@@ -89,179 +36,88 @@ impl Default for QuickJsConfig {
     }
 }
 
-/// Failure to allocate or initialize a `QuickJS` realm.
-#[derive(Clone, PartialEq, Eq)]
-pub struct QuickJsInitializationError {
-    message: Arc<str>,
-}
+#[derive(Debug)]
+struct QuickJsFactory;
 
-impl QuickJsInitializationError {
-    fn from_quickjs(error: quickjs::Error) -> Self {
-        Self {
-            message: Arc::from(error.message),
-        }
-    }
-
-    fn from_script(error: ScriptError) -> Self {
-        Self {
-            message: error.message,
-        }
+impl ScriptEngineFactory for QuickJsFactory {
+    fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError> {
+        QuickJsScriptEngine::new()
+            .map(|engine| Box::new(engine) as Box<dyn ScriptEngine>)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))
     }
 }
 
-impl fmt::Debug for QuickJsInitializationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsInitializationError")
-            .field("message", &self.message)
-            .finish()
-    }
-}
-
-impl fmt::Display for QuickJsInitializationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "could not initialize the QuickJS runtime: {}",
-            self.message
-        )
-    }
-}
-
-impl std::error::Error for QuickJsInitializationError {}
-
-#[derive(Clone)]
-struct QuickJsCallable(quickjs::Value);
-
-impl fmt::Debug for QuickJsCallable {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsCallable")
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone)]
-struct QuickJsSymbol(quickjs::Value);
-
-impl fmt::Debug for QuickJsSymbol {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsSymbol")
-            .finish_non_exhaustive()
-    }
+/// Returns Bobcat's opaque built-in `QuickJS` VM factory.
+///
+/// The returned capability is `Send + Sync`; each owner-thread-bound realm is
+/// allocated only when [`ScriptEngineFactory::create`] is called.
+#[must_use]
+pub fn engine_factory() -> Arc<dyn ScriptEngineFactory> {
+    Arc::new(QuickJsFactory)
 }
 
 struct QuickJsScriptEngine {
     realm: quickjs::Realm,
+    namespaces: HashMap<String, quickjs::Value>,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
     deferred_checkpoint_error: Option<ScriptError>,
 }
 
 impl QuickJsScriptEngine {
-    fn new() -> Result<Self, QuickJsInitializationError> {
+    fn new() -> Result<Self, quickjs::Error> {
         Self::with_config(QuickJsConfig::default())
     }
 
-    fn with_config(config: QuickJsConfig) -> Result<Self, QuickJsInitializationError> {
+    fn with_config(config: QuickJsConfig) -> Result<Self, quickjs::Error> {
         Ok(Self {
-            realm: quickjs::Realm::with_options(config.realm_options)
-                .map_err(QuickJsInitializationError::from_quickjs)?,
+            realm: quickjs::Realm::with_options(config.realm_options)?,
+            namespaces: HashMap::new(),
             config,
             checkpoint_incomplete: false,
             deferred_checkpoint_error: None,
         })
     }
 
-    #[cfg(test)]
-    #[must_use]
-    const fn config(&self) -> QuickJsConfig {
-        self.config
+    fn namespace(&mut self, name: &str) -> Result<quickjs::Value, ScriptError> {
+        if let Some(namespace) = self.namespaces.get(name) {
+            return Ok(namespace.clone());
+        }
+        let namespace = self
+            .realm
+            .evaluate(
+                quickjs::EvalSource {
+                    name: Some("<bobcat host namespace>"),
+                    ..quickjs::EvalSource::new("({})")
+                },
+                quickjs::EvalOptions::default(),
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
+        let global = self
+            .realm
+            .global_object()
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
+        self.realm
+            .set_property(&global, name, &namespace)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
+        self.namespaces.insert(name.to_owned(), namespace.clone());
+        Ok(namespace)
     }
 
-    fn evaluate_raw(
+    fn execute_raw(
         &mut self,
         source: quickjs::EvalSource<'_>,
-    ) -> Result<quickjs::Value, ScriptError> {
-        self.resume_incomplete_checkpoint(ScriptErrorPhase::Evaluate)?;
+        phase: ScriptErrorPhase,
+    ) -> Result<(), ScriptError> {
+        self.resume_incomplete_checkpoint(phase)?;
         let result = self
             .realm
             .evaluate(source, quickjs::EvalOptions::default())
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Evaluate));
-        self.finish_operation(result, ScriptErrorPhase::Evaluate)
+            .map(|_| ())
+            .map_err(|error| map_quickjs_error(error, phase));
+        self.finish_operation(result, phase)
     }
 
-    fn evaluate_source(
-        &mut self,
-        source: quickjs::EvalSource<'_>,
-    ) -> Result<ScriptValue<QuickJsCallable, QuickJsSymbol>, ScriptError> {
-        let value = self.evaluate_raw(source)?;
-        quickjs_to_script_value(value, ScriptErrorPhase::Evaluate)
-    }
-}
-
-impl fmt::Debug for QuickJsScriptEngine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsScriptEngine")
-            .field("config", &self.config)
-            .field("checkpoint_incomplete", &self.checkpoint_incomplete)
-            .field(
-                "has_deferred_checkpoint_error",
-                &self.deferred_checkpoint_error.is_some(),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-impl ScriptEngine for QuickJsScriptEngine {
-    type Callable = QuickJsCallable;
-    type Symbol = QuickJsSymbol;
-    type ImportFuture<'a> =
-        std::future::Ready<Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>>;
-
-    fn evaluate(
-        &mut self,
-        source_text: &str,
-    ) -> Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError> {
-        self.evaluate_source(quickjs::EvalSource::new(source_text))
-    }
-
-    fn import_value<'a>(
-        &'a mut self,
-        _specifier: &'a str,
-        _export_name: &'a str,
-    ) -> Self::ImportFuture<'a> {
-        std::future::ready(Err(script_error(
-            ScriptErrorKind::ModuleLoad,
-            ScriptErrorPhase::ImportValue,
-            "QuickJS module loading is not configured",
-        )))
-    }
-
-    fn call(
-        &mut self,
-        callable: &Self::Callable,
-        this_value: &ScriptValue<Self::Callable, Self::Symbol>,
-        arguments: &[ScriptValue<Self::Callable, Self::Symbol>],
-    ) -> Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError> {
-        self.resume_incomplete_checkpoint(ScriptErrorPhase::Call)?;
-        let this_value = self.script_to_quickjs_value(this_value, ScriptErrorPhase::Call)?;
-        let arguments = arguments
-            .iter()
-            .map(|value| self.script_to_quickjs_value(value, ScriptErrorPhase::Call))
-            .collect::<Result<Vec<_>, _>>()?;
-        let result = self
-            .realm
-            .call(&callable.0, Some(&this_value), &arguments)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Call));
-        let value = self.finish_operation(result, ScriptErrorPhase::Call)?;
-        quickjs_to_script_value(value, ScriptErrorPhase::Call)
-    }
-}
-
-impl QuickJsScriptEngine {
     fn finish_operation<T>(
         &mut self,
         result: Result<T, ScriptError>,
@@ -313,76 +169,86 @@ impl QuickJsScriptEngine {
         }
         Ok(())
     }
+}
 
-    fn script_to_quickjs_value(
+impl fmt::Debug for QuickJsScriptEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QuickJsScriptEngine")
+            .field("config", &self.config)
+            .field("checkpoint_incomplete", &self.checkpoint_incomplete)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScriptEngine for QuickJsScriptEngine {
+    fn register_host_function(
         &mut self,
-        value: &ScriptValue<QuickJsCallable, QuickJsSymbol>,
-        phase: ScriptErrorPhase,
-    ) -> Result<quickjs::Value, ScriptError> {
-        let result = match value {
-            ScriptValue::Undefined => self.realm.undefined(),
-            ScriptValue::Null => self.realm.null(),
-            ScriptValue::Boolean(value) => self.realm.boolean(*value),
-            ScriptValue::Number(value) => self.realm.number(*value),
-            ScriptValue::BigInt(value) => self.realm.big_int_decimal(value),
-            ScriptValue::String(value) => self.realm.string(value),
-            ScriptValue::Symbol(value) => return Ok(value.0.clone()),
-            ScriptValue::Callable(value) => return Ok(value.0.clone()),
-        };
-        result.map_err(|error| map_quickjs_error(error, phase))
+        namespace: &str,
+        name: &str,
+        arity: u8,
+        mut callback: HostCallback,
+    ) -> Result<(), ScriptError> {
+        let namespace = self.namespace(namespace)?;
+        let function_name = name.to_owned();
+        let member = self
+            .realm
+            .function(name, u32::from(arity), move |arguments| {
+                let arguments = arguments
+                    .iter()
+                    .map(host_value_from_quickjs)
+                    .collect::<Result<Vec<_>, _>>()?;
+                callback(&arguments)
+                    .map(host_value_to_quickjs)
+                    .map_err(quickjs::HostFunctionError::new)
+            })
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
+        self.realm
+            .set_property(&namespace, &function_name, &member)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))
+    }
+
+    fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
+        self.execute_raw(
+            quickjs::EvalSource {
+                name: Some(source_name),
+                ..quickjs::EvalSource::new(source)
+            },
+            ScriptErrorPhase::Execute,
+        )
+    }
+
+    fn collect_garbage(&mut self) -> Result<(), ScriptError> {
+        self.resume_incomplete_checkpoint(ScriptErrorPhase::CollectGarbage)?;
+        self.realm.run_gc();
+        self.checkpoint(ScriptErrorPhase::CollectGarbage)
+            .map(|_| ())
     }
 }
 
-fn quickjs_to_script_value(
-    value: quickjs::Value,
-    phase: ScriptErrorPhase,
-) -> Result<ScriptValue<QuickJsCallable, QuickJsSymbol>, ScriptError> {
-    match value.kind() {
-        quickjs::ValueKind::Undefined => Ok(ScriptValue::Undefined),
-        quickjs::ValueKind::Null => Ok(ScriptValue::Null),
-        quickjs::ValueKind::Boolean => value
-            .as_boolean()
-            .map(ScriptValue::Boolean)
-            .ok_or_else(|| conversion_error(phase, "QuickJS Boolean conversion failed")),
-        quickjs::ValueKind::Number => value
-            .as_number()
-            .map(ScriptValue::Number)
-            .ok_or_else(|| conversion_error(phase, "QuickJS Number conversion failed")),
-        quickjs::ValueKind::BigInt => value
-            .to_big_int_decimal()
-            .map(|value| ScriptValue::BigInt(Arc::from(value)))
-            .map_err(|error| map_quickjs_error(error, phase)),
-        quickjs::ValueKind::String => value
-            .to_utf16()
-            .map_err(|error| map_quickjs_error(error, phase))
-            .and_then(|units| {
-                String::from_utf16(&units)
-                    .map(|value| ScriptValue::String(Arc::from(value)))
-                    .map_err(|_| {
-                        script_error(
-                            ScriptErrorKind::NonTransferableValue,
-                            phase,
-                            "an ill-formed UTF-16 string cannot cross Bobcat's UTF-8 boundary",
-                        )
-                    })
-            }),
-        quickjs::ValueKind::Symbol => Ok(ScriptValue::Symbol(QuickJsSymbol(value))),
-        quickjs::ValueKind::Function => Ok(ScriptValue::Callable(QuickJsCallable(value))),
-        quickjs::ValueKind::Object | quickjs::ValueKind::Other => Err(script_error(
-            ScriptErrorKind::NonTransferableValue,
-            phase,
-            "ordinary QuickJS objects cannot cross the script boundary",
-        )),
-        _ => Err(script_error(
-            ScriptErrorKind::NonTransferableValue,
-            phase,
-            "this QuickJS value kind cannot cross the script boundary",
+fn host_value_from_quickjs(
+    value: &quickjs::HostValue,
+) -> Result<HostValue, quickjs::HostFunctionError> {
+    match value {
+        quickjs::HostValue::Undefined => Ok(HostValue::Undefined),
+        quickjs::HostValue::Null => Ok(HostValue::Null),
+        quickjs::HostValue::Boolean(value) => Ok(HostValue::Boolean(*value)),
+        quickjs::HostValue::Number(value) => Ok(HostValue::Number(*value)),
+        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::from(value.as_str()))),
+        _ => Err(quickjs::HostFunctionError::new(
+            "this QuickJS value cannot cross Bobcat's host boundary",
         )),
     }
 }
 
-fn conversion_error(phase: ScriptErrorPhase, message: &'static str) -> ScriptError {
-    script_error(ScriptErrorKind::Other, phase, message)
+fn host_value_to_quickjs(value: HostValue) -> quickjs::HostValue {
+    match value {
+        HostValue::Undefined => quickjs::HostValue::Undefined,
+        HostValue::Null => quickjs::HostValue::Null,
+        HostValue::Boolean(value) => quickjs::HostValue::Boolean(value),
+        HostValue::Number(value) => quickjs::HostValue::Number(value),
+        HostValue::String(value) => quickjs::HostValue::String(value.to_string()),
+    }
 }
 
 fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptError {
@@ -392,7 +258,6 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
         quickjs::ErrorKind::InvalidInput if error.phase == quickjs::ErrorPhase::ConstructValue => {
             ScriptErrorKind::InvalidBoundaryValue
         }
-        quickjs::ErrorKind::WrongRealm => ScriptErrorKind::WrongEngine,
         quickjs::ErrorKind::Interrupted | quickjs::ErrorKind::ExecutionTimeout => {
             ScriptErrorKind::Other
         }
@@ -430,41 +295,76 @@ fn script_error(
     }
 }
 
-/// A QuickJS-backed Bobcat view whose script runtime is kept private.
-pub struct QuickJsLynxView<R: ResourceFetcher + ?Sized> {
-    inner: LynxView<R, QuickJsScriptEngine>,
-}
-
-impl<R: ResourceFetcher + ?Sized> QuickJsLynxView<R> {
-    #[must_use]
-    pub fn resource_fetcher(&self) -> &R {
-        self.inner.resource_fetcher()
-    }
-
-    #[must_use]
-    pub const fn shared_resource_fetcher(&self) -> &Arc<R> {
-        self.inner.shared_resource_fetcher()
-    }
-}
-
-impl<R: ResourceFetcher + ?Sized> fmt::Debug for QuickJsLynxView<R> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsLynxView")
-            .finish_non_exhaustive()
-    }
-}
-
-pub fn new_quickjs_view<R: ResourceFetcher>(
-    resource_fetcher: R,
-) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> {
-    let script_engine = QuickJsScriptEngine::new()?;
-    Ok(QuickJsLynxView {
-        inner: LynxView::new(resource_fetcher, script_engine),
-    })
-}
-
-pub use self::mainthread::{MainThreadError, MainThreadRuntime};
-
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    fn assert_transferable<T: Send + Sync>() {}
+
+    #[test]
+    fn factory_capability_is_transferable_while_realms_remain_owner_thread_bound() {
+        assert_transferable::<Arc<dyn ScriptEngineFactory>>();
+        let _factory = engine_factory();
+    }
+
+    #[test]
+    fn factory_delays_realm_creation_and_executes_named_scripts() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .execute_script("globalThis.answer = 42", "app:///main.js")
+            .expect("execute");
+    }
+
+    #[test]
+    fn host_functions_are_installed_under_a_namespace() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .register_host_function(
+                "bobcat",
+                "answer",
+                0,
+                Box::new(|_| Ok(HostValue::Number(42.0))),
+            )
+            .expect("register");
+        engine
+            .execute_script(
+                "if (bobcat.answer() !== 42) throw new Error('wrong answer')",
+                "host-test.js",
+            )
+            .expect("call host function");
+    }
+
+    #[test]
+    fn execute_runs_a_microtask_checkpoint() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .execute_script(
+                "globalThis.answer = 0; Promise.resolve().then(() => answer = 42)",
+                "app:///schedule.js",
+            )
+            .expect("execute and checkpoint");
+        engine
+            .execute_script(
+                "if (answer !== 42) throw new Error('checkpoint did not run')",
+                "app:///verify.js",
+            )
+            .expect("microtask ran");
+    }
+
+    #[test]
+    fn source_name_is_preserved_in_sanitized_errors() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        let error = engine
+            .execute_script("const = 1", "app:///broken.js")
+            .expect_err("syntax error");
+        assert_eq!(error.kind, ScriptErrorKind::Syntax);
+        assert_eq!(
+            error.location.and_then(|location| location.source),
+            Some(Arc::from("app:///broken.js"))
+        );
+    }
+}

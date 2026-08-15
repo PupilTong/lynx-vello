@@ -1,184 +1,71 @@
 #![cfg(feature = "quickjs")]
 
-//! Golden screenshot comparison over the whole runtime pipeline:
-//! main-thread script → Element PAPI runtime → `bobcat` object → `dom` →
-//! headless GPU.
+//! Public-facade coverage for the offscreen render path.
 //!
-//! This is the Rust analogue of lynx-stack's `web-core-e2e` Playwright suite:
-//! a fixture drives the Element PAPI, the result is captured at the same
-//! Pixel 5 CSS viewport their Chromium project uses, and the image is compared
-//! to a committed golden with `pixelmatch` tolerances.
-//!
-//! Refresh the goldens with:
-//! `FLASHBULB_UPDATE_SNAPSHOTS=1 cargo test -p bobcat-core --test screenshots`.
+//! CSS, document, image-store, and tree mutation are deliberately absent from
+//! this integration-test boundary. Element construction happens only inside
+//! the fetched Element-PAPI script.
 
-use bobcat_core::engine::OffscreenEngine;
-use bobcat_core::tree::PageConfig;
-use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+mod support;
+
+use std::future::Future;
+use std::sync::Arc;
+use std::task::Poll;
+use std::time::{Duration, Instant};
+
+use bobcat_core::image::{AlphaType, DecodedImage, ImageFormat};
+use bobcat_core::resource::{
+    CancellationToken, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+};
+use bobcat_core::{
+    EngineEvent, LynxViewError, OffscreenLynxView, PageConfig, ScriptRunError,
+    quickjs_engine_factory,
+};
 use flashbulb::{Image, Screenshots};
+use support::FetcherDouble;
 
-fn engine(config: PageConfig) -> OffscreenEngine {
-    OffscreenEngine::new(config, VIEWPORT_WIDTH, VIEWPORT_HEIGHT, 1.0).expect("engine")
-}
-
-const VIEWPORT_WIDTH: f32 = 393.0;
-const VIEWPORT_HEIGHT: f32 = 727.0;
-
-const STYLE: &str = r"
-page {
-  background-color: #e5e7eb;
-  padding: 16px;
-}
-page > view {
-  linear-direction: row;
-  height: 96px;
-  margin-bottom: 16px;
-}
-page > view > view {
-  width: 96px;
-  height: 96px;
-  margin-right: 16px;
-  border: 4px solid #1f2937;
-}
-page > view:nth-child(1) > view:nth-child(1) { background-color: #2563eb; }
-page > view:nth-child(1) > view:nth-child(2) { background-color: #14b8a6; }
-page > view:nth-child(1) > view:nth-child(3) { background-color: #f59e0b; }
-page > view:nth-child(2) > view:nth-child(1) { background-color: #ef4444; }
-page > view:nth-child(2) > view:nth-child(2) { background-color: #8b5cf6; }
-page > view:nth-child(3) > view:nth-child(1) { background-color: #0f766e; }
-";
-
+const SCRIPT_URL: &str = "app:///main.js";
 const MAIN_THREAD_SCRIPT: &str = r"
-globalThis.renderPage = function renderPage() {
-  const page = __CreatePage('card', 0);
-  const rows = [3, 2, 1];
-  for (const cells of rows) {
-    const row = __CreateView(0);
-    __AppendElement(page, row);
-    for (let index = 0; index < cells; index += 1) {
-      __AppendElement(row, __CreateView(0));
-    }
-  }
-};
-";
-
-fn screenshots() -> Screenshots {
-    flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
-}
-
-#[track_caller]
-fn capture_engine(engine: &mut OffscreenEngine, test: &str) -> Image {
-    engine
-        .attach_offscreen()
-        .unwrap_or_else(|error| panic!("{test}: GPU initialization failed: {error}"));
-    let shot = engine.capture().expect("capture");
-    Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels).expect("image")
-}
-
-#[test]
-fn a_main_thread_script_renders_its_element_tree() {
-    let mut engine = engine(PageConfig::default());
-    engine.add_author_stylesheet(STYLE);
-    engine
-        .run_script(MAIN_THREAD_SCRIPT)
-        .expect("main-thread script");
-
-    let image = capture_engine(&mut engine, "a_main_thread_script_renders_its_element_tree");
-
-    assert_eq!(image.width(), 393);
-    assert_eq!(image.height(), 727);
-    screenshots().assert_matches(&["create-view-append-element"], &image);
-}
-
-const OVERFLOW_STYLE: &str = r"
-page {
-  background-color: #e5e7eb;
-  padding: 16px;
-}
-page > view {
-  width: 120px;
-  height: 120px;
-  margin-bottom: 24px;
-  background-color: #ffffff;
-  border: 4px solid #1f2937;
-}
-page > view > view {
-  width: 220px;
-  height: 90px;
-  background-color: #2563eb;
-}
-";
-
-const OVERFLOW_SCRIPT: &str = r"
-globalThis.renderPage = function renderPage() {
-  const page = __CreatePage('card', 0);
-  for (let row = 0; row < 2; row += 1) {
-    const box = __CreateView(0);
-    __AppendElement(page, box);
-    __AppendElement(box, __CreateView(0));
-  }
-};
-";
-
-fn render_overflow(config: PageConfig, test: &str, golden: &str) {
-    let mut engine = engine(config);
-    engine.add_author_stylesheet(OVERFLOW_STYLE);
-    engine
-        .run_script(OVERFLOW_SCRIPT)
-        .expect("main-thread script");
-
-    let image = capture_engine(&mut engine, test);
-    screenshots().assert_matches(&[golden], &image);
-}
-
-#[test]
-fn overflow_visible_lets_a_child_spill_out_of_its_parent() {
-    render_overflow(
-        PageConfig::default(),
-        "overflow_visible_lets_a_child_spill_out_of_its_parent",
-        "overflow-visible",
-    );
-}
-
-#[test]
-fn overflow_hidden_clips_a_child_to_its_parent() {
-    render_overflow(
-        PageConfig {
-            default_overflow_visible: false,
-            ..PageConfig::default()
-        },
-        "overflow_hidden_clips_a_child_to_its_parent",
-        "overflow-hidden",
-    );
-}
-
-const IMAGE_URL: &str = "https://example.test/retained-checker.png";
-
-const IMAGE_STYLE: &str = r#"
-page {
-  background-color: #e5e7eb;
-  padding: 16px;
-}
-page > view {
-  width: 128px;
-  height: 96px;
-  border: 4px solid #1f2937;
-  background-color: #ffffff;
-  background-image: url("https://example.test/retained-checker.png");
-  background-repeat: no-repeat;
-  background-size: 120px 88px;
-  image-rendering: pixelated;
-}
-"#;
-
-const IMAGE_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   __AppendElement(page, __CreateView(0));
 };
 ";
 
-fn checker_image() -> ImageData {
+const IMAGE_URL: &str = "https://example.test/retained-checker.png";
+const IMAGE_SCRIPT: &str = r#"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'background-color:#e5e7eb;padding:16px');
+  const image = __CreateView(0);
+  __SetInlineStyles(
+    image,
+    'width:128px;height:96px;border:4px solid #1f2937;background-color:#ffffff;background-image:url("https://example.test/retained-checker.png");background-repeat:no-repeat;background-size:120px 88px;image-rendering:pixelated',
+  );
+  __AppendElement(page, image);
+};
+"#;
+
+fn view(source: &[u8]) -> OffscreenLynxView {
+    let resources: Arc<dyn ResourceFetcher> =
+        Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
+    OffscreenLynxView::new(
+        PageConfig::default(),
+        resources,
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        393.0,
+        727.0,
+        1.0,
+    )
+    .expect("view")
+}
+
+fn screenshots() -> Screenshots {
+    flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn checker_image() -> DecodedImage {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
         for x in 0..4 {
@@ -191,25 +78,123 @@ fn checker_image() -> ImageData {
             rgba.extend_from_slice(&pixel);
         }
     }
-    ImageData {
-        data: Blob::from(rgba),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width: 4,
-        height: 4,
+    DecodedImage::from_rgba8(4, 4, AlphaType::Straight, rgba, ImageFormat::Png)
+        .expect("valid checker image")
+}
+
+#[tokio::test]
+async fn a_pre_cancelled_entry_request_returns_a_typed_error() {
+    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let error = view
+        .execute_script_with_cancellation(SCRIPT_URL, cancellation)
+        .await
+        .expect_err("pre-cancelled request");
+    let LynxViewError::Resource(error) = error else {
+        panic!("expected resource cancellation, got {error:?}");
+    };
+    assert_eq!(error.kind, ResourceErrorKind::Cancelled);
+    assert_eq!(error.phase, ResourceErrorPhase::Resolve);
+    assert_eq!(error.locator.as_deref(), Some(SCRIPT_URL));
+    assert!(error.request_id.is_some());
+}
+
+#[tokio::test]
+async fn dropping_entry_request_cancels_the_token_seen_by_the_host() {
+    let resources = Arc::new(
+        FetcherDouble::new(MAIN_THREAD_SCRIPT.as_bytes().to_vec())
+            .resolving_to(SCRIPT_URL)
+            .with_hung_resolve(),
+    );
+    let mut view = OffscreenLynxView::new(
+        PageConfig::default(),
+        resources.clone(),
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        393.0,
+        727.0,
+        1.0,
+    )
+    .expect("view");
+    let external = CancellationToken::new();
+    let mut execution =
+        Box::pin(view.execute_script_with_cancellation(SCRIPT_URL, external.clone()));
+    std::future::poll_fn(|context| match execution.as_mut().poll(context) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(result) => panic!("hung resolver unexpectedly completed: {result:?}"),
+    })
+    .await;
+    let host_token = resources
+        .request_cancellation()
+        .expect("resource provider observed request context");
+
+    drop(execution);
+
+    assert!(external.is_cancelled());
+    assert!(host_token.is_cancelled());
+}
+
+async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
+            EngineEvent::ScriptFinished(result) => Some(result),
+            _ => None,
+        }) {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "script thread did not finish");
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
 
-#[test]
-fn document_image_store_reaches_the_private_painter() {
-    let mut engine = engine(PageConfig::default());
-    engine.add_author_stylesheet(IMAGE_STYLE);
-    engine.with_images(|images| images.insert_url(IMAGE_URL, checker_image()));
-    engine.run_script(IMAGE_SCRIPT).expect("main-thread script");
+#[tokio::test]
+async fn fetched_script_reaches_the_offscreen_draw_target() {
+    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
 
-    let image = capture_engine(
-        &mut engine,
-        "document_image_store_reaches_the_private_painter",
+    let shot = view.capture().expect("capture the committed page");
+    assert_eq!(shot.size.width, 393);
+    assert_eq!(shot.size.height, 727);
+    assert_eq!(
+        shot.pixels.len(),
+        shot.size.width as usize * shot.size.height as usize * 4
     );
+}
+
+#[tokio::test]
+async fn decoded_image_url_reaches_the_private_painter() {
+    let mut view = view(IMAGE_SCRIPT.as_bytes());
+    view.register_image_url(IMAGE_URL, &checker_image())
+        .expect("available private image registry");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
+
+    let shot = view.capture().expect("capture the committed image");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
     screenshots().assert_matches(&["retained-image-store"], &image);
+}
+
+#[tokio::test]
+async fn stylesheet_loading_is_a_closed_url_api_for_now() {
+    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
+    let error = view
+        .load_style_sheet("app:///author.css")
+        .expect_err("author stylesheets are deliberately not implemented yet");
+    assert!(matches!(
+        error,
+        LynxViewError::StyleSheetUnsupported { ref url } if url == "app:///author.css"
+    ));
 }

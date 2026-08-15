@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 bobcat-core = { workspace = true, features = ["quickjs"] }
 fast_image_resize = { workspace = true }
+http = { workspace = true }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }

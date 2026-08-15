@@ -1,75 +1,322 @@
-//! Per-view ownership of resource and script runtime state.
+//! The opaque per-view runtime facade exposed to embedders.
 
-use std::any::type_name;
-use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fmt, str};
 
-use crate::resource::ResourceFetcher;
-use crate::script::ScriptEngine;
+use http::HeaderMap;
 
-/// An independent Lynx runtime view.
-pub struct LynxView<R: ResourceFetcher + ?Sized, E: ScriptEngine> {
-    resource_fetcher: Arc<R>,
-    script_engine: E,
+#[cfg(not(target_arch = "wasm32"))]
+use crate::engine::Screenshot;
+use crate::engine::{
+    Engine, EngineError, EngineEvent, EventRequester, FrameSize, NoWindow, Window, WindowTarget,
+};
+use crate::image::DecodedImage;
+use crate::input::InputEvent;
+use crate::resource::{
+    BufferedResourceRequest, CachePolicy, CancellationToken, RequestContext, RequestId,
+    ResolveRequest, ResourceDescriptor, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
+    ResourceRequest, RetryAdvice,
+};
+use crate::script::ScriptEngineFactory;
+use crate::tree::PageConfig;
+
+const MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
+static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
+/// A running Lynx view.
+///
+/// The document, element tree, script realm, and presentation engine are all
+/// private implementation state. Embedders provide resources, a JavaScript VM
+/// factory, a draw target, and normalized OS events.
+pub struct LynxView<'window, W: Window = NoWindow> {
+    resource_fetcher: Arc<dyn ResourceFetcher>,
+    script_engine_factory: Arc<dyn ScriptEngineFactory>,
+    engine: Engine<'window, W>,
+    script_started: bool,
+    request_namespace: u64,
+    next_request_sequence: u64,
 }
 
-/// The independently owned services recovered from a consumed Lynx view.
-#[derive(Debug)]
-pub struct LynxViewParts<R: ResourceFetcher + ?Sized, E: ScriptEngine> {
-    pub resource_fetcher: Arc<R>,
-    pub script_engine: E,
-}
+/// The offscreen composition of [`LynxView`].
+pub type OffscreenLynxView = LynxView<'static, NoWindow>;
 
-impl<R: ResourceFetcher, E: ScriptEngine> LynxView<R, E> {
-    #[must_use]
-    pub fn new(resource_fetcher: R, script_engine: E) -> Self {
-        Self::from_shared_resource_fetcher(Arc::new(resource_fetcher), script_engine)
-    }
-}
-
-impl<R: ResourceFetcher + ?Sized, E: ScriptEngine> LynxView<R, E> {
-    #[must_use]
-    pub const fn from_shared_resource_fetcher(resource_fetcher: Arc<R>, script_engine: E) -> Self {
-        Self {
-            resource_fetcher,
-            script_engine,
-        }
-    }
-
-    #[must_use]
-    pub fn resource_fetcher(&self) -> &R {
-        self.resource_fetcher.as_ref()
-    }
-
-    #[must_use]
-    pub const fn shared_resource_fetcher(&self) -> &Arc<R> {
-        &self.resource_fetcher
-    }
-
-    #[must_use]
-    pub const fn script_engine(&self) -> &E {
-        &self.script_engine
-    }
-
-    pub const fn script_engine_mut(&mut self) -> &mut E {
-        &mut self.script_engine
-    }
-
-    #[must_use]
-    pub fn into_parts(self) -> LynxViewParts<R, E> {
-        LynxViewParts {
-            resource_fetcher: self.resource_fetcher,
-            script_engine: self.script_engine,
-        }
-    }
-}
-
-impl<R: ResourceFetcher + ?Sized, E: ScriptEngine> fmt::Debug for LynxView<R, E> {
+impl<W: Window> fmt::Debug for LynxView<'_, W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LynxView")
-            .field("resource_fetcher", &type_name::<R>())
-            .field("script_engine", &type_name::<E>())
-            .finish()
+        formatter.debug_struct("LynxView").finish_non_exhaustive()
+    }
+}
+
+/// Failure to load or start view content.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LynxViewError {
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Resource(#[from] crate::resource::ResourceError),
+    #[error("script `{url}` is not valid UTF-8: {message}")]
+    InvalidScriptEncoding { url: String, message: String },
+    #[error("loading author stylesheets is not implemented: `{url}`")]
+    StyleSheetUnsupported { url: String },
+}
+
+impl<'window, W: Window> LynxView<'window, W> {
+    /// Creates a view at the supplied CSS viewport and device-pixel ratio.
+    pub fn new(
+        config: PageConfig,
+        resource_fetcher: Arc<dyn ResourceFetcher>,
+        script_engine_factory: Arc<dyn ScriptEngineFactory>,
+        event_requester: Arc<dyn EventRequester>,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<Self, LynxViewError> {
+        Ok(Self {
+            resource_fetcher,
+            script_engine_factory,
+            engine: Engine::new(config, event_requester, width, height, device_pixel_ratio)?,
+            script_started: false,
+            request_namespace: NEXT_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            next_request_sequence: 0,
+        })
+    }
+
+    /// Fetches a UTF-8 main-thread script through the injected resource
+    /// provider and starts it on the engine-owned Lynx main thread.
+    ///
+    /// Completion is reported through [`EngineEvent::ScriptFinished`].
+    /// A view currently accepts one entry script; a second call is rejected.
+    pub async fn execute_script(&mut self, url: &str) -> Result<(), LynxViewError> {
+        self.execute_script_with_cancellation(url, CancellationToken::new())
+            .await
+    }
+
+    /// Fetches and starts an entry script with host-controlled cancellation.
+    ///
+    /// Dropping the returned future cancels `cancellation`; retain a clone to
+    /// cancel it from another task. The same token is carried in every
+    /// [`RequestContext`] passed to the resource provider.
+    pub async fn execute_script_with_cancellation(
+        &mut self,
+        url: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(), LynxViewError> {
+        let cancellation_guard = cancellation.clone().drop_guard();
+        let result = self.execute_script_inner(url, cancellation).await;
+        cancellation_guard.disarm();
+        result
+    }
+
+    async fn execute_script_inner(
+        &mut self,
+        url: &str,
+        cancellation: CancellationToken,
+    ) -> Result<(), LynxViewError> {
+        if self.script_started {
+            return Err(EngineError::ScriptAlreadyStarted.into());
+        }
+        let context = self.next_request_context(cancellation.clone());
+        let original_locator: Arc<str> = Arc::from(url);
+        let descriptor = ResourceDescriptor {
+            locator: ResourceLocator {
+                specifier: Arc::clone(&original_locator),
+                base_url: None,
+            },
+            kind: ResourceKind::ExternalJs,
+            hints: ResourceHints::None,
+        };
+        let resolved = cancellation
+            .run_until_cancelled(self.resource_fetcher.resolve_locator(ResolveRequest {
+                context: context.clone(),
+                resource: descriptor,
+                percent_decode: false,
+            }))
+            .await;
+        if cancellation.is_cancelled() || resolved.is_none() {
+            return Err(Self::cancelled_resource_error(
+                context.id,
+                ResourceErrorPhase::Resolve,
+                original_locator,
+            )
+            .into());
+        }
+        let resolved = resolved.expect("checked above")?;
+        let source_name = resolved.url.to_string();
+        let response = cancellation
+            .run_until_cancelled(
+                self.resource_fetcher
+                    .fetch_resource(BufferedResourceRequest {
+                        request: ResourceRequest {
+                            context: context.clone(),
+                            resource: resolved,
+                            headers: HeaderMap::new(),
+                            cache_policy: CachePolicy::Default,
+                        },
+                        max_bytes: MAX_SCRIPT_BYTES,
+                    }),
+            )
+            .await;
+        if cancellation.is_cancelled() || response.is_none() {
+            return Err(Self::cancelled_resource_error(
+                context.id,
+                ResourceErrorPhase::ReadBody,
+                Arc::from(source_name.as_str()),
+            )
+            .into());
+        }
+        let response = response.expect("checked above")?;
+        let source = str::from_utf8(&response.bytes).map_err(|error| {
+            LynxViewError::InvalidScriptEncoding {
+                url: source_name.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        if cancellation.is_cancelled() {
+            return Err(Self::cancelled_resource_error(
+                context.id,
+                ResourceErrorPhase::ReadBody,
+                Arc::from(source_name.as_str()),
+            )
+            .into());
+        }
+        self.engine.spawn_script(
+            source.to_owned(),
+            source_name,
+            Arc::clone(&self.script_engine_factory),
+        )?;
+        self.script_started = true;
+        Ok(())
+    }
+
+    fn cancelled_resource_error(
+        request_id: RequestId,
+        phase: ResourceErrorPhase,
+        locator: Arc<str>,
+    ) -> ResourceError {
+        ResourceError {
+            request_id: Some(request_id),
+            kind: ResourceErrorKind::Cancelled,
+            phase,
+            locator: Some(locator),
+            status: None,
+            message: "the script resource request was cancelled".into(),
+            retry: RetryAdvice::Never,
+        }
+    }
+
+    /// Registers owned font bytes with the private text engine.
+    ///
+    /// The payload is retained without copying. If a script batch currently
+    /// owns the document, the update is rejected with
+    /// [`EngineError::ResourceUpdateBusy`] and may be retried after the next
+    /// engine event.
+    pub fn register_fonts<Data>(&mut self, data: Data) -> Result<usize, EngineError>
+    where
+        Data: AsRef<[u8]> + Send + Sync + 'static,
+    {
+        self.engine.register_fonts(dom::FontBlob::new(data))
+    }
+
+    /// Installs decoded pixels under a CSS image URL in the private paint
+    /// registry, replacing an earlier registration for the same URL.
+    pub fn register_image_url(
+        &mut self,
+        url: impl Into<String>,
+        image: &DecodedImage,
+    ) -> Result<(), EngineError> {
+        self.engine.register_image_url(url, image)
+    }
+
+    /// Reserves the URL-based stylesheet entry point without exposing direct
+    /// CSS or document mutation to the embedder.
+    pub fn load_style_sheet(&mut self, url: &str) -> Result<(), LynxViewError> {
+        Err(LynxViewError::StyleSheetUnsupported {
+            url: url.to_owned(),
+        })
+    }
+
+    #[must_use]
+    pub fn frame_size(&self) -> FrameSize {
+        self.engine.frame_size()
+    }
+
+    pub fn dispatch_input(&mut self, event: InputEvent) {
+        self.engine.dispatch_input(event);
+    }
+
+    pub fn resize(
+        &mut self,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<(), EngineError> {
+        self.engine.resize(width, height, device_pixel_ratio)
+    }
+
+    pub fn refresh(&self) {
+        self.engine.refresh();
+    }
+
+    pub fn pump(&mut self) -> Vec<EngineEvent> {
+        self.engine.pump()
+    }
+
+    pub async fn attach_target(
+        &mut self,
+        target: impl Into<WindowTarget<'window>>,
+        frames: W::Frames,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
+        self.engine.attach_target(target, frames, size).await
+    }
+
+    pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
+        self.engine.notify_redraw()
+    }
+
+    fn next_request_context(&mut self, cancellation: CancellationToken) -> RequestContext {
+        let sequence = self.next_request_sequence;
+        self.next_request_sequence = self
+            .next_request_sequence
+            .checked_add(1)
+            .expect("one Lynx view exhausted its resource request id space");
+        RequestContext {
+            id: RequestId {
+                namespace: self.request_namespace,
+                sequence,
+            },
+            cancellation,
+            priority: ResourcePriority::Critical,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'window, W: Window> LynxView<'window, W> {
+    pub fn attach_window(
+        &mut self,
+        window: &'window W,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
+        self.engine.attach_window(window, size)
+    }
+}
+
+impl LynxView<'static, NoWindow> {
+    pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
+        self.engine.attach_offscreen()
+    }
+
+    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+        self.engine.tick(force)
+    }
+}
+
+impl<W: Window> LynxView<'_, W> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
+        self.engine.capture()
     }
 }

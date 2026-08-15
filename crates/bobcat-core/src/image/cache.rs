@@ -15,14 +15,14 @@ use crate::image::decode::{DecodeResponse, ImageHeader, PixelSize};
 
 /// What one decode-cache entry is keyed on.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct CacheKey {
+pub(crate) struct CacheKey {
     source: Arc<str>,
     target: Option<PixelSize>,
 }
 
 impl CacheKey {
     #[must_use]
-    pub fn new(source: impl Into<Arc<str>>, target: Option<PixelSize>) -> Self {
+    pub(crate) fn new(source: impl Into<Arc<str>>, target: Option<PixelSize>) -> Self {
         Self {
             source: source.into(),
             target,
@@ -30,7 +30,7 @@ impl CacheKey {
     }
 
     #[must_use]
-    pub fn source(&self) -> &str {
+    pub(crate) fn source(&self) -> &str {
         &self.source
     }
 }
@@ -100,7 +100,7 @@ impl ResolvedMap {
         self.entries.insert(key, (source, self.clock));
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();
     }
@@ -108,7 +108,7 @@ impl ResolvedMap {
 
 /// An exact LRU bounded by **total decoded bytes**, not entry count.
 #[derive(Debug)]
-pub struct DecodeCache {
+pub(crate) struct DecodeCache {
     entries: FxHashMap<CacheKey, Entry>,
     recency: BTreeMap<u64, CacheKey>,
     clock: u64,
@@ -124,7 +124,7 @@ struct Entry {
 
 impl DecodeCache {
     #[must_use]
-    pub fn with_budget(max_bytes: u64) -> Self {
+    pub(crate) fn with_budget(max_bytes: u64) -> Self {
         Self {
             entries: FxHashMap::default(),
             recency: BTreeMap::new(),
@@ -135,7 +135,7 @@ impl DecodeCache {
     }
 
     /// Fetches and marks recently used.
-    pub fn get(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
+    pub(crate) fn get(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
         let tick = self.next_tick();
         let entry = self.entries.get_mut(key)?;
         self.recency.remove(&entry.tick);
@@ -147,7 +147,7 @@ impl DecodeCache {
     }
 
     /// Inserts, evicting least-recently-used entries until the budget holds.
-    pub fn insert(&mut self, key: CacheKey, response: DecodeResponse) {
+    pub(crate) fn insert(&mut self, key: CacheKey, response: DecodeResponse) {
         let size = response.image.byte_len() as u64;
         if size > self.budget {
             return;
@@ -164,36 +164,36 @@ impl DecodeCache {
         self.bytes += size;
     }
 
-    pub fn remove(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
+    pub(crate) fn remove(&mut self, key: &CacheKey) -> Option<DecodeResponse> {
         let entry = self.entries.remove(key)?;
         self.recency.remove(&entry.tick);
         self.bytes -= entry.response.image.byte_len() as u64;
         Some(entry.response)
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();
         self.bytes = 0;
     }
 
     #[must_use]
-    pub const fn byte_len(&self) -> u64 {
+    pub(crate) const fn byte_len(&self) -> u64 {
         self.bytes
     }
 
     #[must_use]
-    pub const fn budget(&self) -> u64 {
+    pub(crate) const fn budget(&self) -> u64 {
         self.budget
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
@@ -218,7 +218,7 @@ impl DecodeCache {
 
 /// Natural sizes, bounded by entry count.
 #[derive(Debug)]
-pub struct HeaderCache {
+pub(crate) struct HeaderCache {
     entries: FxHashMap<Arc<str>, (ImageHeader, u64)>,
     recency: BTreeMap<u64, Arc<str>>,
     clock: u64,
@@ -227,7 +227,7 @@ pub struct HeaderCache {
 
 impl HeaderCache {
     #[must_use]
-    pub fn with_capacity(entries: usize) -> Self {
+    pub(crate) fn with_capacity(entries: usize) -> Self {
         Self {
             entries: FxHashMap::default(),
             recency: BTreeMap::new(),
@@ -236,7 +236,7 @@ impl HeaderCache {
         }
     }
 
-    pub fn get(&mut self, source: &str) -> Option<ImageHeader> {
+    pub(crate) fn get(&mut self, source: &str) -> Option<ImageHeader> {
         self.clock += 1;
         let tick = self.clock;
         let (header, stored) = self.entries.get_mut(source)?;
@@ -248,7 +248,7 @@ impl HeaderCache {
         Some(header)
     }
 
-    pub fn insert(&mut self, source: impl Into<Arc<str>>, header: ImageHeader) {
+    pub(crate) fn insert(&mut self, source: impl Into<Arc<str>>, header: ImageHeader) {
         let source = source.into();
         if let Some((_, tick)) = self.entries.remove(&source) {
             self.recency.remove(&tick);
@@ -266,18 +266,18 @@ impl HeaderCache {
         self.entries.insert(source, (header, self.clock));
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();
     }
 
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }

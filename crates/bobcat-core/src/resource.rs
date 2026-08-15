@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-use tokio_util::sync::CancellationToken;
+pub use tokio_util::sync::CancellationToken;
 use url::Url;
 
 pub type ResourceFuture<'a, T> =
