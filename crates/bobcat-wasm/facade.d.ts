@@ -1,3 +1,9 @@
+export interface PageConfig {
+  defaultDisplayLinear: boolean
+  defaultOverflowVisible: boolean
+  enableCSSSelector: boolean
+}
+
 export declare class BobcatCanvas {
   private constructor()
 
@@ -9,16 +15,19 @@ export declare class BobcatCanvas {
     width: number,
     height: number,
     devicePixelRatio: number,
+    pageConfig: PageConfig,
   ): Promise<BobcatCanvas>
 
-  addAuthorStylesheet(css: string): Promise<void>
-  appendElement(parent: number, child: number): Promise<number>
-  createPage(componentId: string, componentCssId: number): Promise<number>
-  createView(parentComponentUniqueId: number): Promise<number>
   dispose(): Promise<void>
-  dropElement(element: number): Promise<void>
-  flushElementTree(): Promise<void>
-  registerFonts(bytes: Uint8Array): Promise<number>
+
+  /**
+   * Fetches and runs the main-thread entry script. This resolves after the
+   * script boot sequence finishes and rejects on loading or evaluation error.
+   */
+  executeScript(url: string | URL): Promise<void>
+
+  /** Reserved URL entry point; currently rejects as unsupported. */
+  loadStyleSheet(url: string | URL): Promise<void>
   resize(
     width: number,
     height: number,

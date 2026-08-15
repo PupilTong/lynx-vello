@@ -3,15 +3,16 @@
 //!
 //! This module owns the replaced-content pipeline below the DOM: it identifies
 //! a container from its leading bytes ([`sniff`]), verifies the container's own
-//! framing ([`is_complete`]), and — through [`ImageLoader`] — drives
-//! fetch→decode→cache from a host [`ResourceFetcher`](crate::resource::ResourceFetcher)
-//! with byte budgets, cancellation, and bounded caches for both the pixels and
-//! the much cheaper natural sizes. It lives in the engine crate because the
-//! engine owns the pipeline; what stays outside is the codec.
+//! framing ([`is_complete`]), and internally drives fetch→decode→cache from a
+//! host [`ResourceFetcher`](crate::resource::ResourceFetcher) with byte budgets,
+//! cancellation, and bounded caches for both the pixels and the much cheaper
+//! natural sizes. The loader and its caches are engine-owned implementation
+//! details; what stays outside is the codec contract in this module.
 //!
 //! **No codec ships here.** Decoding happens behind the [`Decoder`] trait, and
-//! the embedder injects the implementation when it constructs the loader (or
-//! calls [`decode_bytes`] directly). The reference implementations live in the
+//! the embedder implements that codec contract. The view-level `<image>`
+//! integration is not wired yet, so current consumers call [`decode_bytes`]
+//! directly. The reference implementations live in the
 //! reference embedder, `bobcat-cli`'s `image_decoders` module:
 //!
 //! - **Apple** (macOS/iOS): `ImageIO`, claiming PNG, JPEG, WebP, GIF, HEIC and AVIF. The system
@@ -24,7 +25,7 @@
 //!
 //! An embedder with its own image pipeline (an app already running `SDWebImage`,
 //! `Fresco` or similar) implements [`Decoder`] over that pipeline instead and
-//! injects it the same way — that is the point of the seam.
+//! injects it through the same codec seam — that is the point of the boundary.
 //!
 //! This module deliberately never touches `dom`'s node types. It returns an
 //! [`ImageHeader`] and a [`DecodedImage`]; installing the natural size on a
@@ -91,22 +92,27 @@
 //!     all (the reference decoder is Linux-only); shipping there means accepting that or injecting
 //!     an embedder-side fallback.
 
+// Retained as an engine-owned pipeline while the Lynx `<image>` element is wired above it.
+#[allow(dead_code)]
 mod cache;
 mod capability;
+#[allow(dead_code)]
 mod data_url;
 mod decode;
 mod error;
 mod format;
+#[allow(dead_code)]
 mod loader;
 mod pixels;
 
-pub use cache::{CacheKey, DecodeCache, HeaderCache};
 pub use capability::{Acceleration, Capabilities};
 pub use decode::{DecodeRequest, DecodeResponse, Decoder, ImageHeader, PixelSize};
 pub use error::ImageError;
 pub use format::{ImageFormat, is_complete, sniff};
-pub use loader::{ImageLoader, ImagePrefetchTarget, LoaderConfig};
 pub use pixels::{AlphaType, DecodedImage, expected_byte_len};
+
+#[cfg(test)]
+mod loader_tests;
 
 /// Identifies, validates and decodes one in-memory image with the injected decoder.
 pub fn decode_bytes(

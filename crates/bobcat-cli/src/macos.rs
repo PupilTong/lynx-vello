@@ -2,8 +2,8 @@
 //!
 //! This file owns the embedder's share and nothing more: the winit event
 //! loop, the window, device metrics, input translation, the command prompt,
-//! and PNG output. Every handler is a relay into
-//! [`bobcat_core::engine::Engine`] — an OS fact goes in
+//! and PNG output. Every handler is a relay into [`bobcat_core::LynxView`] —
+//! an OS fact goes in
 //! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
 //! decides what the pipeline does with it. The engine owns the Lynx main
 //! thread (the script realm) and shares the element tree with it behind
@@ -14,15 +14,15 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bobcat_core::dom::Point2D;
-use bobcat_core::dom::input::{DeltaMode, InputEvent, PointerKind, PointerPhase};
-use bobcat_core::engine::{
-    Engine, EngineEvent, FrameRequester, FrameSize, Window as EmbedderWindow,
+use bobcat_core::input::{DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase};
+use bobcat_core::{
+    EngineEvent, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
+    quickjs_engine_factory,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -34,7 +34,6 @@ use crate::screenshot::save_screenshot;
 #[derive(Debug)]
 enum UserEvent {
     Command(Command),
-    Pump,
 }
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
@@ -85,13 +84,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     console.prompt();
 
     let window = OnceLock::new();
-    let mut application = MacApplication::new(
-        program,
-        options,
-        console,
-        event_loop.create_proxy(),
-        &window,
-    );
+    let mut application = MacApplication::new(program, options, console, &window);
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -106,9 +99,8 @@ struct MacApplication<'window> {
     input: String,
     initial_width: f32,
     initial_height: f32,
-    engine: Option<Engine<'window, MacWindow>>,
+    view: Option<LynxView<'window, MacWindow>>,
     window: &'window OnceLock<MacWindow>,
-    proxy: EventLoopProxy<UserEvent>,
     console: Console,
     occluded: bool,
     pointer: Option<PhysicalPosition<f64>>,
@@ -134,7 +126,6 @@ impl<'window> MacApplication<'window> {
         program: Program,
         options: &Options,
         console: Console,
-        proxy: EventLoopProxy<UserEvent>,
         window: &'window OnceLock<MacWindow>,
     ) -> Self {
         Self {
@@ -142,9 +133,8 @@ impl<'window> MacApplication<'window> {
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
-            engine: None,
+            view: None,
             window,
-            proxy,
             console,
             occluded: false,
             pointer: None,
@@ -182,21 +172,29 @@ impl<'window> MacApplication<'window> {
             .expect("the program is consumed by the first window only");
         program.warn_about_dropped_author_rules();
 
-        let mut engine = Engine::new(program.config, css_width, css_height, scale_factor)?;
-        engine.attach_window(
+        let mut view = LynxView::new(
+            program.config,
+            program.resource_fetcher,
+            quickjs_engine_factory(),
+            css_width,
+            css_height,
+            scale_factor,
+        )?;
+        view.attach_window(
             window,
             FrameSize {
                 width: physical_size.width,
                 height: physical_size.height,
             },
         )?;
-
-        let script_wakeup = self.proxy.clone();
-        engine.spawn_script(program.source, move || {
-            let _ = script_wakeup.send_event(UserEvent::Pump);
+        pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
+            CliError::StartScript {
+                input: program.input,
+                source,
+            }
         })?;
 
-        self.engine = Some(engine);
+        self.view = Some(view);
         Ok(())
     }
 
@@ -209,9 +207,9 @@ impl<'window> MacApplication<'window> {
             .expect("resize events arrive only after window creation");
         let (css_width, css_height, scale_factor) =
             viewport_metrics(physical_size, window.os.scale_factor());
-        self.engine
+        self.view
             .as_mut()
-            .expect("the engine is installed with the window")
+            .expect("the view is installed with the window")
             .resize(css_width, css_height, scale_factor)?;
         Ok(())
     }
@@ -220,16 +218,16 @@ impl<'window> MacApplication<'window> {
         match command {
             Command::Continue => {
                 println!("Continuing with display vsync.");
-                if let Some(engine) = &self.engine {
-                    engine.refresh();
+                if let Some(view) = &self.view {
+                    view.refresh();
                 }
             }
             Command::Pause => {
                 println!("The window repaints only on new frames; nothing to pause.");
             }
             Command::Frame => {
-                if let Some(engine) = &self.engine {
-                    engine.refresh();
+                if let Some(view) = &self.view {
+                    view.refresh();
                 }
                 println!("Rendering one frame.");
             }
@@ -249,11 +247,11 @@ impl<'window> MacApplication<'window> {
     }
 
     fn screenshot(&mut self, path: &Path) {
-        let Some(engine) = self.engine.as_mut() else {
+        let Some(view) = self.view.as_mut() else {
             eprintln!("bobcat: no window yet to capture");
             return;
         };
-        let saved = engine
+        let saved = view
             .capture()
             .map_err(CliError::Engine)
             .and_then(|shot| save_screenshot(path, shot.size, &shot.pixels));
@@ -263,8 +261,8 @@ impl<'window> MacApplication<'window> {
     }
 
     fn dispatch(&mut self, event: InputEvent) {
-        if let Some(engine) = self.engine.as_mut() {
-            engine.dispatch_input(event);
+        if let Some(view) = self.view.as_mut() {
+            view.dispatch_input(event);
         }
     }
 
@@ -344,6 +342,25 @@ impl<'window> MacApplication<'window> {
         }
         event_loop.exit();
     }
+
+    fn pump(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        let error = view.pump().into_iter().find_map(|event| match event {
+            EngineEvent::ScriptFinished(Err(source)) => Some(source),
+            _ => None,
+        });
+        if let Some(source) = error {
+            self.fail(
+                event_loop,
+                CliError::Script {
+                    input: self.input.clone(),
+                    source,
+                },
+            );
+        }
+    }
 }
 
 impl ApplicationHandler<UserEvent> for MacApplication<'_> {
@@ -378,13 +395,13 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
             }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
-                if !occluded && let Some(engine) = &self.engine {
-                    engine.refresh();
+                if !occluded && let Some(view) = &self.view {
+                    view.refresh();
                 }
                 Ok(())
             }
-            WindowEvent::RedrawRequested => match self.engine.as_mut() {
-                Some(engine) => engine.notify_redraw().map_err(CliError::Engine),
+            WindowEvent::RedrawRequested => match self.view.as_mut() {
+                Some(view) => view.notify_redraw().map_err(CliError::Engine),
                 None => Ok(()),
             },
             WindowEvent::CursorMoved { position, .. } => {
@@ -421,24 +438,16 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
         };
         if let Err(error) = result {
             self.fail(event_loop, error);
+        } else {
+            self.pump(event_loop);
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
-            UserEvent::Pump => {
-                let Some(engine) = self.engine.as_mut() else {
-                    return;
-                };
-                for engine_event in engine.pump() {
-                    if let EngineEvent::ScriptFinished(Err(source)) = engine_event {
-                        let input = self.input.clone();
-                        self.fail(event_loop, CliError::Script { input, source });
-                    }
-                }
-            }
         }
+        self.pump(event_loop);
     }
 }
 

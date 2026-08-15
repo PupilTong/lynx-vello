@@ -117,16 +117,26 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
-- `crates/bobcat-core` — unified native runtime core. Its always-compiled
-  surface owns the protocol-only, host-injected `ResourceFetcher`, the
-  ShadowRealm-inspired `ScriptEngine` protocol, and `LynxView<R, E>`, and it
-  directly composes `dom` through its `tree` module, which owns the native
-  element tree behind the JavaScript Element PAPI runtime.
-  `ScriptEngine::ImportFuture<'a>` is a GAT so external engines return their
-  own future type and remain statically dispatched. The default `quickjs`
-  feature adds the internal QuickJS adapter,
-  opaque QuickJS-backed view factory, and the concrete
-  `quickjs::MainThreadRuntime`. That runtime owns only the realm: a
+- `crates/bobcat-core` — unified native runtime core. Its public runtime is the
+  opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
+  `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec
+  `Decoder`,
+  draw-target, and OS-input capabilities. `PageConfig` is supplied when the
+  view is constructed. Bundle retrieval, `.web.bundle` decoding, and config
+  parsing are embedder responsibilities; core accepts a script URL through
+  `LynxView::execute_script`, resolves/fetches its UTF-8 source through the
+  injected `ResourceFetcher`, and reports completion through `pump`.
+  `load_style_sheet(url)` is reserved but currently returns a precise
+  unsupported error without fetching. The document, tree, engine, and realm
+  cannot be borrowed or decomposed from the facade.
+  `ScriptEngineFactory` is `Send + Sync` and creates the owner-thread-bound,
+  non-`Send` `ScriptEngine` only after the factory reaches the engine-owned
+  Lynx main thread. The VM contract installs named host callbacks, evaluates
+  named source, and provides the optional GC seam; `HostValue` is primitives-only,
+  so realm values and DOM handles never cross it. The default `quickjs`
+  feature adds a private QuickJS adapter and exposes only
+  `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. The private
+  `MainThreadRuntime` owns the realm integration: a
   batch's first `bobcat` call takes the document out of its hand-off
   slot, every call after that is a plain `&mut` mutation with no
   synchronization, and `__FlushElementTree` runs the style + layout commit
@@ -136,11 +146,9 @@ useful signal for currently-compatible versions of those libraries.
   `default-features = false` excludes QuickJS while preserving all external
   injection contracts. Workspace dependencies disable defaults explicitly;
   only an upper layer that wants the built-in engine enables `quickjs`.
-  The core depends on `dom` only (strict linear layering) and re-exports it
-  whole — `bobcat_core::dom` is the product's single door downward. The `engine` module is the embedder boundary:
-  `engine::Engine` passes the element tree to and from its engine-owned
-  Lynx main thread (the `QuickJS` realm and its event loop) through the
-  `SharedTree` hand-off slot — one holder at any instant — and runs input
+  The core depends on `dom` but does **not** re-export it. Its private `Engine`
+  passes the element tree to and from its engine-owned Lynx main thread through
+  the private `SharedTree` hand-off slot — one holder at any instant — and runs input
   routing, scrolling, frame production, and presentation on the thread the
   embedder calls it from; vsync interacts with the OS only there. The
   presenting side borrows the tree non-blockingly (an empty slot = batch
@@ -152,41 +160,45 @@ useful signal for currently-compatible versions of those libraries.
   present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
-  they never start or steer the pipeline — the engine schedules through the
-  `engine::Window` it borrows at attach time (`target`, `frames`). `Engine`
-  is generic over that trait, so no capability is a boxed closure or a `dyn`
-  call; the draw target is a GAT, which is what lets a native surface borrow
+  they never start or steer the pipeline — the view schedules through the
+  public `Window` capability it borrows at attach time (`target`, `frames`).
+  The private `Engine` is generic over that trait; the draw target is a GAT,
+  which is what lets a native surface borrow
   the embedder's window instead of requiring a `'static` refcounted handle.
   Browser embedders may instead pass an owned canvas target through the async
   `attach_target`; `FrameRequester` owns both redraw requests and the optional
-  presenting-side `pre_present` hook. `engine::OffscreenEngine` is the
-  windowless composition, over the uninhabited `NoWindow`.
-  The `image` module is the replaced-content decode **contract** and pipeline:
+  presenting-side `pre_present` hook. `OffscreenLynxView` is the public
+  windowless facade over the uninhabited `NoWindow`.
+  The `image` module contains the replaced-content decode **contract** and a
+  private engine pipeline:
   container identification from magic bytes (PNG, JPEG, WebP, GIF, HEIC,
   AVIF), per-container framing/truncation checks, the injected `Decoder`
-  trait, and the async fetch→decode→cache `ImageLoader` over the resource
-  protocol. **No codec ships in the engine**: the engine only designs the
-  contract, and the embedder injects a `Decoder` (the reference embedder's
+  trait, plus the internal fetch→decode→cache loader over the resource
+  protocol. Cache keys, caches, loader configuration, and `ImageLoader` are
+  not public. **No codec ships in the engine**: the engine only designs the
+  contract, and the embedder implements a `Decoder` (the reference embedder's
   `image_decoders::platform_decoder()`, or its own implementation over an
-  existing app image pipeline — that seam is the point). The engine's own
+  existing app image pipeline — that seam is the point). View-level decoder
+  wiring awaits the Lynx `<image>` element; current callers use the standalone
+  decode contract. The engine's own
   contract tests inject a PNG decoder double the same way
-  (`tests/support`'s `PngDouble`). A sniffed format the injected decoder does not claim is
+  (`src/image/loader_test_support.rs`'s `PngDouble`). A sniffed format the injected decoder does not claim is
   `ImageError::Unsupported`, distinct from `UnknownFormat`. **Static only.**
   `Acceleration` reports codec *provenance* (`Software`/`PlatformSoftware`),
   never a claim about silicon — no still-image API on any supported platform
   exposes an acceleration query or reaches a decode ASIC, so
   `DedicatedHardware` is reserved and unreported. The module never touches
   `dom` node types: it returns an `ImageHeader` and a `DecodedImage`
-  (`to_image_data` reaches peniko through the `dom::vello`
-  re-export chain), and installing those on a node and in an `ImageStore` is
+  (internally `to_image_data` reaches peniko through `dom`), and installing
+  those on a node and in an `ImageStore` is
   the engine loop's job. The **authoritative** recorded-limits list is
   `crates/bobcat-core/src/image/mod.rs`'s module docs. The Lynx `<image>`
   element surface (`mode`, `placeholder` racing, `cap-insets`, `blur-radius`,
   `load`/`error` events) belongs above this module and is not implemented.
-  Beyond the three injected contracts (script, resource, decode), the core
-  still adds no document alias, element-host trait, or injection seam of its
-  own.
-  `MainThreadRuntime`
+  `Engine`, `SharedTree`, `TreeGuard`, `LynxDocument`,
+  `Viewport`, `new_document`, `MainThreadRuntime`, and the concrete QuickJS
+  adapter are all crate-private.
+  The private `MainThreadRuntime`
   installs the global `bobcat` object (one Rust host function per member —
   `createPage`, `createElement`, `setAttribute`, `removeAttribute`,
   `getAttribute`, `tagName`, `insertBefore`,
@@ -229,15 +241,16 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat.dropElement`, freeing only that element — its descendants remain
   live but detached until their own handles are collected. Cleanup runs as
   a pending job at the job checkpoints (a collection comes from allocation
-  pressure or `MainThreadRuntime::collect_garbage`), and pending jobs never
+  pressure or its private garbage-collection checkpoint), and pending jobs never
   run at realm teardown, which preserves the last committed tree.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
   `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
   the `bobcat` host functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
-  `packages/bobcat-element`. Element identity is the DOM `NodeId`; nothing
-  validates script input, and misuse panics in `dom`, converted to a
-  JavaScript exception at the host boundary. An unflushed batch may
+  `packages/bobcat-element`. Element identity is the DOM `NodeId`; the host
+  boundary validates primitive arguments, live IDs, and tree-mutation
+  preconditions before entering `dom`, returning misuse as a JavaScript
+  exception (unexpected internal panics remain fatal on abort-only Wasm). An unflushed batch may
   present once its evaluation ends — web-core's visibility model, where
   the browser paints the live DOM regardless of `__FlushElementTree`.
   The resource module must not decode images/fonts/templates, upload render
@@ -279,23 +292,24 @@ useful signal for currently-compatible versions of those libraries.
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
-  `bobcat-core` (the layer chain: `bobcat_core::dom::…` reaches
-  every lower layer) and the sibling `lynx-template-decoder` utility; the
+  `bobcat-core` and the sibling `lynx-template-decoder` utility; the
   per-OS codec crates it consumes are target-scoped, for `image_decoders`
   below.
   `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
-  remain rejected at the boundary. The CLI is an **embedder** of
-  `bobcat_core::engine`: it owns argument parsing, bundle bytes and
-  decoding, the winit window and event loop, device metrics, input
+  remain rejected at the boundary. The CLI is an **embedder** of the opaque
+  `bobcat_core::LynxView`: it owns argument parsing, bundle bytes, decoding,
+  `PageConfig` parsing, an in-memory `ResourceFetcher` for the decoded root
+  script URL, the winit window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
-  pipeline. Every event handler is a relay into the `Engine`
+  pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
   headless mode); the engine owns the tree, commits, scheduling, and its
   script and render threads, and calls back only through the `MacWindow` it
   borrows at attach time (the winit window as the draw target,
-  `request_redraw`, `pre_present_notify`) and the script-completion wakeup
-  `spawn_script` was given. Headed mode attaches the window as the draw target;
-  headless mode attaches the engine's offscreen target and relays synthetic
+  `request_redraw`, `pre_present_notify`). The CLI starts the root with
+  `execute_script(url)` and observes `ScriptFinished` through `pump`. Headed
+  mode attaches the window as the draw target; headless mode attaches the
+  view's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
   The `image_decoders` module carries the **reference implementations** of
   the engine's `bobcat_core::image::Decoder` contract — implementing the
@@ -337,21 +351,26 @@ useful signal for currently-compatible versions of those libraries.
   thread is a JavaScript-only host coordinator: it creates one explicit
   embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
   Wasm or owns engine state. That Worker initializes the module, constructs
-  the complete `Engine`, permanently owns
+  the complete opaque `LynxView`, permanently owns
   every thread-affine GPU object — crates.io Vello 0.9/wgpu 29 Device, Queue,
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
-  nested Lynx main/DOM Worker. The DOM Worker builds Stylo's ordinary private
-  Rayon pool with `wasm_thread` as its browser thread spawner, leaving the
-  vendored Stylo sources unchanged. `Engine` transfers that Worker one unique
-  main-thread document owner; Element-PAPI batches, Stylo/Rayon, layout, and
+  nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
+  there with `wasm_thread` as its browser thread spawner, leaving the vendored
+  Stylo sources unchanged. The public `ScriptEngineFactory` creates the
+  owner-thread-bound browser JavaScript VM inside that Worker; Element-PAPI
+  batches, Stylo/Rayon, layout, and
   render hand-off then synchronize through Rust channels, mutexes, atomics,
   and the shared Wasm memory exactly as in a native embedder. JavaScript
   `postMessage` is only the browser host boundary (initial Canvas transfer,
-  direct-demo API requests/results, resize/input/lifecycle) or a library's
+  URL-based script requests/results, resize/input/lifecycle) or a library's
   Worker bootstrap control plane; it is not a DOM/render reconciliation
-  protocol. A shared atomic startup handshake gates readiness, and DOM results
-  wake a Rust async response signal independently of Worker rAF, so a hidden
-  page may pause drawing without stranding control-plane Promises. The UI never
+  protocol. A shared atomic startup handshake gates readiness. URL requests
+  are serialized, and script completion is polled on a control-plane timer
+  independently of Worker rAF, so a hidden page may pause drawing without
+  stranding the `executeScript` Promise. One Wasm instance owns one view and
+  its Stylo pool; every public `BobcatCanvas` gets a separate Render Worker and
+  Wasm instance. The pool minimum is two threads so one managed Rayon worker
+  remains after the synchronous entry-task Worker exits. The UI never
   blocks, while Worker-side Rust may block wherever the native runtime does.
   The browser target enables `parking_lot_core/nightly` so transitive
   Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
@@ -360,16 +379,22 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
-  The module depends on `bobcat-core` with QuickJS disabled: porting QuickJS to
-  `wasm32-unknown-unknown` remains unfinished, so this boundary does not claim
-  `.web.bundle` execution. Synchronous GPU capture is likewise absent because
+  The module depends on `bobcat-core` with QuickJS disabled and injects a
+  `js_sys` browser `ScriptEngine`. Browser `fetch` remains outside Wasm: the
+  Render Worker registers raw fetched bytes in its `ResourceFetcher`, core
+  performs strict UTF-8 validation, and the worker calls `execute_script(url)`.
+  The facade exposes no create/append/drop/flush,
+  document, tree, or engine API. It does not decode `.web.bundle` containers;
+  callers supply `PageConfig` and executable script URLs. Synchronous GPU
+  capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the Element PAPI runtime, a single
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
-  `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
-  realm before any bundle code; its Rstest suite runs the same bytes. It owns
-  the twenty-six `__*` PAPI members and their web-core arities and the Lynx
-  tag vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
+  `bobcat-core` embeds with `include_str!` and evaluates into the injected
+  script-engine realm before any bundle code; its Rstest suite runs the same
+  bytes. It owns the twenty-six `__*` PAPI members and their web-core arities,
+  plus the Lynx tag vocabulary
+  (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
   `list`). It also owns the value coercions web-core gets from the HTML DOM for
   free: truthiness-not-null clearing for classes, ids, and inline styles,
   `String(value)` for every attribute, and camelCase-to-kebab hyphenation of a
@@ -385,11 +410,13 @@ useful signal for currently-compatible versions of those libraries.
   Every non-page handle is registered with a `FinalizationRegistry` whose
   cleanup calls `bobcat.dropElement`; cleanup runs as a pending job at the
   host's job checkpoints, and never at realm teardown, which preserves the
-  last committed tree. Nothing is validated: a foreign handle resolves to
-  undefined and crashes at the native boundary. The file must stay a classic script (no
-  import/export at runtime, ECMAScript intrinsics plus `globalThis.bobcat`
-  only — the realm has no `console`/`setTimeout`/DOM), which is also what
-  lets Rstest import it for side effects and `tsc --noEmit` check it under
+  last committed tree. The JavaScript layer deliberately does not validate
+  handles: a foreign handle resolves to `undefined`, which the private native
+  boundary rejects as a JavaScript error before entering `dom`. The file must
+  stay a classic script (no import/export at runtime, ECMAScript intrinsics
+  plus `globalThis.bobcat` only — the realm has no
+  `console`/`setTimeout`/DOM), which is also what lets Rstest import it for
+  side effects and `tsc --noEmit` check it under
   `checkJs`.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the

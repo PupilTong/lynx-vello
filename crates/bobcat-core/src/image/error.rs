@@ -72,6 +72,7 @@ impl ImageError {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn transport(context: &'static str, error: &std::io::Error) -> Self {
         Self::Transport {
             context,
@@ -79,6 +80,7 @@ impl ImageError {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn decode_join(error: &tokio::task::JoinError) -> Self {
         if error.is_cancelled() {
             return Self::Cancelled;

@@ -1,57 +1,66 @@
-//! Host-injected JavaScript realm contracts.
+//! Host-injected JavaScript virtual-machine contracts.
+//!
+//! The embedder supplies a [`ScriptEngineFactory`], while Bobcat owns every
+//! script executed in the resulting VM and every host function installed in
+//! it.  The VM is intentionally created by the factory on the caller's
+//! thread: factories are transferable, VM instances need not be.
 
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 
-use thiserror::Error;
-
-#[derive(Clone, Debug)]
+/// A value allowed across a Bobcat host-function boundary.
+///
+/// Objects, functions, symbols and VM handles deliberately have no
+/// representation here. This keeps an injected VM from exposing its realm to
+/// the runtime and keeps DOM identity private to Bobcat's callbacks.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum ScriptValue<C, S> {
+pub enum HostValue {
     Undefined,
     Null,
     Boolean(bool),
     Number(f64),
-    BigInt(Arc<str>),
     String(Arc<str>),
-    Symbol(S),
-    Callable(C),
 }
 
-/// An isolated JavaScript engine supplied to Bobcat.
-pub trait ScriptEngine {
-    type Callable: fmt::Debug;
+/// A leaf host callback installed by Bobcat in an injected VM.
+///
+/// The VM must turn a returned message into a JavaScript exception and must
+/// not invoke the callback re-entrantly. On unwind-capable targets it should
+/// also translate a caught callback panic; an abort-only platform treats an
+/// unexpected panic as a fatal VM-owner failure instead.
+pub type HostCallback = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, String> + 'static>;
 
-    type Symbol: fmt::Debug;
-
-    type ImportFuture<'a>: Future<Output = Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>>
-        + 'a
-    where
-        Self: 'a;
-
-    fn evaluate(
+/// One owner-thread-bound JavaScript VM supplied to Bobcat.
+///
+/// `register_host_function` creates the namespace when it does not exist and
+/// adds/replaces the named member; registration must retain the callback but
+/// must not invoke it. `execute_script` is a synchronous evaluation boundary.
+/// A VM with an explicitly owned job queue may drain its checkpoint before
+/// returning. The VM instance itself is deliberately not required to be
+/// `Send`.
+pub trait ScriptEngine: fmt::Debug {
+    fn register_host_function(
         &mut self,
-        source_text: &str,
-    ) -> Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>;
+        namespace: &str,
+        name: &str,
+        arity: u8,
+        callback: HostCallback,
+    ) -> Result<(), ScriptError>;
 
-    fn import_value<'a>(
-        &'a mut self,
-        specifier: &'a str,
-        export_name: &'a str,
-    ) -> Self::ImportFuture<'a>;
+    fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError>;
 
-    fn call(
-        &mut self,
-        callable: &Self::Callable,
-        this_value: &ScriptValue<Self::Callable, Self::Symbol>,
-        arguments: &[ScriptValue<Self::Callable, Self::Symbol>],
-    ) -> Result<ScriptValue<Self::Callable, Self::Symbol>, ScriptError>;
+    fn collect_garbage(&mut self) -> Result<(), ScriptError>;
+}
+
+/// Transferable capability for constructing a VM on its eventual owner
+/// thread.
+pub trait ScriptEngineFactory: fmt::Debug + Send + Sync {
+    fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError>;
 }
 
 /// Sanitized script failure details that are safe to expose outside a realm.
-#[derive(Clone, Debug, Error)]
-#[error("{kind:?} during {phase:?}: {message}")]
+#[derive(Clone, Debug)]
 pub struct ScriptError {
     pub kind: ScriptErrorKind,
     pub phase: ScriptErrorPhase,
@@ -59,22 +68,34 @@ pub struct ScriptError {
     pub location: Option<ScriptSourceLocation>,
 }
 
+impl fmt::Display for ScriptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:?} during {:?}: {}",
+            self.kind, self.phase, self.message
+        )?;
+        if let Some(location) = &self.location {
+            let source = location.source.as_deref().unwrap_or("<unknown>");
+            match (location.line, location.column) {
+                (Some(line), Some(column)) => write!(formatter, " (at {source}:{line}:{column})")?,
+                (Some(line), None) => write!(formatter, " (at {source}:{line})")?,
+                _ => write!(formatter, " (at {source})")?,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ScriptError {}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ScriptErrorKind {
     EvaluationDenied,
     Syntax,
     Exception,
-    ModuleResolve,
-    ModuleLoad,
-    ModuleParse,
-    ModuleLink,
-    ModuleEvaluate,
-    MissingExport,
-    NonTransferableValue,
     InvalidBoundaryValue,
-    WrongEngine,
-    StaleHandle,
     Terminated,
     Other,
 }
@@ -82,9 +103,10 @@ pub enum ScriptErrorKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ScriptErrorPhase {
-    Evaluate,
-    ImportValue,
-    Call,
+    Initialize,
+    RegisterHostFunction,
+    Execute,
+    CollectGarbage,
 }
 
 /// Sanitized source location for a [`ScriptError`].

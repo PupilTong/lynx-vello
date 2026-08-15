@@ -2,9 +2,9 @@
 //!
 //! The browser UI thread only transfers an `OffscreenCanvas` and host events
 //! to a dedicated embedder Worker. That Worker initializes this module and
-//! permanently owns the engine, Vello/wgpu stack, and canvas; the engine's
-//! unique DOM mutation owner runs on a nested shared-memory `wasm_thread`
-//! Worker and communicates through Rust synchronization primitives.
+//! permanently owns the opaque Lynx view, Vello/wgpu stack, and canvas. Core
+//! owns its nested main-thread VM Worker and Stylo workers; no document or
+//! element-tree handle crosses the embedder boundary.
 
 #[cfg(target_arch = "wasm32")]
 mod browser;

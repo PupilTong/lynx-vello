@@ -1,21 +1,20 @@
 #![cfg(feature = "quickjs")]
 
-use std::error::Error;
 use std::sync::Arc;
 
-use bobcat_core::quickjs::{QuickJsInitializationError, QuickJsLynxView, new_quickjs_view};
-use bobcat_core::resource::ResourceFetcher;
-
-#[allow(dead_code)]
-fn public_view_contract<R: ResourceFetcher>(view: &mut QuickJsLynxView<R>) {
-    let _: fn(R) -> Result<QuickJsLynxView<R>, QuickJsInitializationError> = new_quickjs_view::<R>;
-    let _: &R = view.resource_fetcher();
-    let _: &Arc<R> = view.shared_resource_fetcher();
-}
+use bobcat_core::quickjs_engine_factory;
+use bobcat_core::script::ScriptEngineFactory;
 
 #[test]
-fn expected_public_error_contract_is_available() {
-    fn assert_error<T: Error + Send + Sync + 'static>() {}
+fn quickjs_is_exposed_only_as_a_transferable_factory_capability() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Arc<dyn ScriptEngineFactory>>();
 
-    assert_error::<QuickJsInitializationError>();
+    let factory = quickjs_engine_factory();
+    let mut vm = factory.create().expect("QuickJS realm");
+    vm.execute_script("globalThis.answer = 42", "app:///main.js")
+        .expect("named script");
+
+    let debug = format!("{factory:?}");
+    assert!(!debug.contains("Realm"));
 }

@@ -31,30 +31,30 @@ use crate::resource::{
 /// Everything a loader is configured with.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct LoaderConfig {
+pub(crate) struct LoaderConfig {
     /// The owning template's bundle URL, handed to the fetcher as [`ResourceLocator::base_url`].
-    pub base_url: Option<Url>,
+    pub(crate) base_url: Option<Url>,
     /// The [`RequestId`] namespace this loader owns.
-    pub request_namespace: u64,
+    pub(crate) request_namespace: u64,
     /// Applies to every transport, not just the buffered one — a hostile or broken host must not
     /// be able to OOM the process through the stream or path branch that the buffered branch
     /// was hardened against.
-    pub max_encoded_bytes: u64,
-    pub decode_cache_bytes: u64,
-    pub header_cache_entries: usize,
+    pub(crate) max_encoded_bytes: u64,
+    pub(crate) decode_cache_bytes: u64,
+    pub(crate) header_cache_entries: usize,
     /// In-flight decode cap.
-    pub max_concurrent_decodes: usize,
+    pub(crate) max_concurrent_decodes: usize,
     /// In-flight *load* cap, acquired before the fetch and held until the decode ends.
-    pub max_concurrent_loads: usize,
-    pub decode: DecodeRequest,
-    pub device_scale: Option<f32>,
-    pub priority: ResourcePriority,
+    pub(crate) max_concurrent_loads: usize,
+    pub(crate) decode: DecodeRequest,
+    pub(crate) device_scale: Option<f32>,
+    pub(crate) priority: ResourcePriority,
 }
 
 impl LoaderConfig {
     /// A configuration for the loader owning `request_namespace`.
     #[must_use]
-    pub fn new(request_namespace: u64) -> Self {
+    pub(crate) fn new(request_namespace: u64) -> Self {
         Self {
             request_namespace,
             ..Self::with_namespace_zero()
@@ -63,43 +63,46 @@ impl LoaderConfig {
 
     /// Sets the encoded-byte ceiling every transport is held to.
     #[must_use]
-    pub const fn with_max_encoded_bytes(mut self, max_encoded_bytes: u64) -> Self {
+    pub(crate) const fn with_max_encoded_bytes(mut self, max_encoded_bytes: u64) -> Self {
         self.max_encoded_bytes = max_encoded_bytes;
         self
     }
 
     #[must_use]
-    pub const fn with_decode_cache_bytes(mut self, decode_cache_bytes: u64) -> Self {
+    pub(crate) const fn with_decode_cache_bytes(mut self, decode_cache_bytes: u64) -> Self {
         self.decode_cache_bytes = decode_cache_bytes;
         self
     }
 
     #[must_use]
-    pub const fn with_header_cache_entries(mut self, header_cache_entries: usize) -> Self {
+    pub(crate) const fn with_header_cache_entries(mut self, header_cache_entries: usize) -> Self {
         self.header_cache_entries = header_cache_entries;
         self
     }
 
     #[must_use]
-    pub const fn with_max_concurrent_decodes(mut self, max_concurrent_decodes: usize) -> Self {
+    pub(crate) const fn with_max_concurrent_decodes(
+        mut self,
+        max_concurrent_decodes: usize,
+    ) -> Self {
         self.max_concurrent_decodes = max_concurrent_decodes;
         self
     }
 
     #[must_use]
-    pub const fn with_max_concurrent_loads(mut self, max_concurrent_loads: usize) -> Self {
+    pub(crate) const fn with_max_concurrent_loads(mut self, max_concurrent_loads: usize) -> Self {
         self.max_concurrent_loads = max_concurrent_loads;
         self
     }
 
     #[must_use]
-    pub fn with_base_url(mut self, base_url: Option<Url>) -> Self {
+    pub(crate) fn with_base_url(mut self, base_url: Option<Url>) -> Self {
         self.base_url = base_url;
         self
     }
 
     #[must_use]
-    pub const fn with_decode(mut self, decode: DecodeRequest) -> Self {
+    pub(crate) const fn with_decode(mut self, decode: DecodeRequest) -> Self {
         self.decode = decode;
         self
     }
@@ -123,7 +126,7 @@ impl LoaderConfig {
 
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
-pub enum ImagePrefetchTarget {
+pub(crate) enum ImagePrefetchTarget {
     Encoded(CacheTarget),
     Decoded { target: Option<PixelSize> },
 }
@@ -137,7 +140,7 @@ struct LoaderState {
 }
 
 /// Fetches, decodes and caches images for one view.
-pub struct ImageLoader {
+pub(crate) struct ImageLoader {
     fetcher: Arc<dyn ResourceFetcher>,
     decoder: Arc<dyn Decoder>,
     state: Mutex<LoaderState>,
@@ -162,7 +165,7 @@ impl fmt::Debug for ImageLoader {
 
 impl ImageLoader {
     /// Builds a loader over `fetcher`, decoding through the injected `decoder`.
-    pub fn new(
+    pub(crate) fn new(
         fetcher: Arc<dyn ResourceFetcher>,
         config: LoaderConfig,
         decoder: Arc<dyn Decoder>,
@@ -194,12 +197,12 @@ impl ImageLoader {
 
     /// The formats the injected decoder claims, and at which provenance tier.
     #[must_use]
-    pub fn capabilities(&self) -> Capabilities {
+    pub(crate) fn capabilities(&self) -> Capabilities {
         self.decoder.capabilities()
     }
 
     /// Header-only load: resolve, then cache-or-fetch, then probe.
-    pub async fn header(
+    pub(crate) async fn header(
         &self,
         specifier: &str,
         cancel: CancellationToken,
@@ -223,7 +226,7 @@ impl ImageLoader {
     }
 
     /// Full load.
-    pub async fn load(
+    pub(crate) async fn load(
         &self,
         specifier: &str,
         target: Option<PixelSize>,
@@ -279,7 +282,11 @@ impl ImageLoader {
     /// Non-blocking decode-cache probe, for a caller already inside a frame commit that must not
     /// await.
     #[must_use]
-    pub fn cached(&self, specifier: &str, target: Option<PixelSize>) -> Option<DecodedImage> {
+    pub(crate) fn cached(
+        &self,
+        specifier: &str,
+        target: Option<PixelSize>,
+    ) -> Option<DecodedImage> {
         let mut state = self.lock();
         let source = state.resolved.get(&ResolvedKey::new(specifier, target))?;
         state
@@ -290,14 +297,14 @@ impl ImageLoader {
 
     /// Non-blocking natural-size probe.
     #[must_use]
-    pub fn cached_header(&self, specifier: &str) -> Option<ImageHeader> {
+    pub(crate) fn cached_header(&self, specifier: &str) -> Option<ImageHeader> {
         let mut state = self.lock();
         let source = state.resolved.get(&ResolvedKey::new(specifier, None))?;
         state.headers.get(&source)
     }
 
     /// Warms a cache ahead of render.
-    pub async fn prefetch(
+    pub(crate) async fn prefetch(
         &self,
         specifier: &str,
         target: ImagePrefetchTarget,
@@ -325,7 +332,7 @@ impl ImageLoader {
     }
 
     /// Drops every cached pixel, header and resolution, atomically.
-    pub fn clear_caches(&self) {
+    pub(crate) fn clear_caches(&self) {
         let mut state = self.lock();
         state.decodes.clear();
         state.headers.clear();

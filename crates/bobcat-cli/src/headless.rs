@@ -1,8 +1,8 @@
 //! The headless embedder: a synthetic vsync clock and a command prompt over
-//! the engine's offscreen output.
+//! the view's offscreen output.
 //!
 //! The clock is this embedder's substitute for an OS display loop — it
-//! relays ticks; whether a tick becomes GPU work is the engine's decision
+//! relays ticks; whether a tick becomes GPU work is the view's decision
 //! (`tick` renders only when the document changed). Screenshots come back as
 //! pixels, and writing the PNG is this side's IO.
 
@@ -10,7 +10,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::engine::OffscreenEngine;
+use bobcat_core::{EngineEvent, OffscreenLynxView, quickjs_engine_factory};
 
 use crate::CliError;
 use crate::args::Options;
@@ -19,22 +19,24 @@ use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    let mut engine = OffscreenEngine::new(
+    program.warn_about_dropped_author_rules();
+    let mut view = OffscreenLynxView::new(
         program.config,
+        program.resource_fetcher,
+        quickjs_engine_factory(),
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
     )?;
-    program.warn_about_dropped_author_rules();
-    engine
-        .run_script(&program.source)
-        .map_err(|source| CliError::Script {
-            input: program.input,
+    view.attach_offscreen()?;
+    pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
+        CliError::StartScript {
+            input: program.input.clone(),
             source,
-        })?;
-    engine.attach_offscreen()?;
+        }
+    })?;
 
-    engine.tick(true)?;
+    view.tick(true)?;
     let (sender, receiver) = mpsc::channel();
     let console =
         Console::start(move |command| sender.send(command).is_ok()).map_err(CliError::Console)?;
@@ -47,20 +49,22 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     console.prompt();
 
     loop {
+        check_script(&mut view, &program.input)?;
         let command = if running {
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(command) => Some(command),
                 Err(RecvTimeoutError::Timeout) => {
-                    engine.tick(false)?;
+                    view.tick(false)?;
                     clock.advance();
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         } else {
-            match receiver.recv() {
+            match receiver.recv_timeout(Duration::from_millis(50)) {
                 Ok(command) => Some(command),
-                Err(_) => return Ok(()),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         };
 
@@ -78,12 +82,12 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
                 println!("Frame clock paused.");
             }
             Command::Frame => {
-                engine.tick(true)?;
+                view.tick(true)?;
                 clock.restart();
                 println!("Rendered one frame.");
             }
             Command::Screenshot(path) => {
-                let result = engine
+                let result = view
                     .capture()
                     .map_err(CliError::Engine)
                     .and_then(|shot| save_screenshot(&path, shot.size, &shot.pixels));
@@ -104,6 +108,20 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
             Command::Invalid(message) => eprintln!("bobcat: {message}"),
         }
         console.prompt();
+    }
+}
+
+fn check_script(view: &mut OffscreenLynxView, input: &str) -> Result<(), CliError> {
+    let error = view.pump().into_iter().find_map(|event| match event {
+        EngineEvent::ScriptFinished(Err(source)) => Some(source),
+        _ => None,
+    });
+    match error {
+        Some(source) => Err(CliError::Script {
+            input: input.to_owned(),
+            source,
+        }),
+        None => Ok(()),
     }
 }
 

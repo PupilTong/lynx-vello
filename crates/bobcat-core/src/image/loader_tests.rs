@@ -1,13 +1,17 @@
 //! The loader: transports, the `data:` short-circuit, caching and cancellation.
 
+#[path = "loader_test_support.rs"]
 mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::image::{ImageError, ImageLoader, ImagePrefetchTarget, LoaderConfig, PixelSize};
-use bobcat_core::resource::ResourceCapability;
 use support::{FetcherDouble, checker_png, decoder};
 use tokio_util::sync::CancellationToken;
+
+use super::PixelSize;
+use super::error::ImageError;
+use super::loader::{ImageLoader, ImagePrefetchTarget, LoaderConfig};
+use crate::resource::ResourceCapability;
 
 fn loader(double: Arc<FetcherDouble>) -> ImageLoader {
     ImageLoader::new(double, LoaderConfig::new(0), decoder())
@@ -251,7 +255,7 @@ async fn prefetch_warms_the_decode_cache_or_delegates_to_the_host() {
     delegating
         .prefetch(
             "icon.png",
-            ImagePrefetchTarget::Encoded(bobcat_core::resource::CacheTarget::Disk),
+            ImagePrefetchTarget::Encoded(crate::resource::CacheTarget::Disk),
         )
         .await
         .expect("encoded prefetch");
@@ -336,7 +340,7 @@ async fn an_oversized_body_is_refused_rather_than_truncated() {
 async fn a_decode_cache_hit_does_not_need_the_header_cache() {
     let double = Arc::new(FetcherDouble::new(checker_png(4)));
     let loader = ImageLoader::new(
-        Arc::clone(&double) as Arc<dyn bobcat_core::resource::ResourceFetcher>,
+        Arc::clone(&double) as Arc<dyn crate::resource::ResourceFetcher>,
         LoaderConfig::new(0).with_header_cache_entries(1),
         decoder(),
     )
