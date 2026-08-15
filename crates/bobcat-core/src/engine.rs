@@ -78,6 +78,8 @@ pub enum EngineError {
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
+    #[error("the engine's Lynx main-thread document owner was already taken")]
+    MainThreadAlreadyTaken,
     #[error("the engine has no draw target attached")]
     NoDrawTarget,
 }
@@ -88,6 +90,8 @@ pub enum EngineError {
 pub enum ScriptRunError {
     #[error("could not initialize the main-thread runtime: {0}")]
     Initialization(#[source] crate::quickjs::QuickJsInitializationError),
+    #[error("the engine's Lynx main-thread document owner was already taken")]
+    MainThreadAlreadyTaken,
     #[error(transparent)]
     Script(crate::quickjs::MainThreadError),
 }
@@ -227,7 +231,6 @@ impl SharedTree {
     /// # Panics
     ///
     /// Panics if a batch is already open: there is one main thread.
-    #[cfg(feature = "quickjs")]
     pub(crate) fn take(&self) -> LynxDocument {
         self.lock()
             .take()
@@ -239,7 +242,6 @@ impl SharedTree {
     /// # Panics
     ///
     /// Panics if the slot is occupied: the tree cannot be returned twice.
-    #[cfg(feature = "quickjs")]
     pub(crate) fn put(&self, tree: LynxDocument) {
         let mut guard = self.lock();
         assert!(
@@ -253,6 +255,76 @@ impl SharedTree {
         self.slot
             .lock()
             .unwrap_or_else(|error| panic!("the tree slot is poisoned: {error}"))
+    }
+}
+
+/// The engine-owned Lynx main thread's side of the document hand-off.
+///
+/// An [`Engine`] creates the document and can transfer this owner exactly
+/// once to the runtime that permanently runs its Element PAPI. The first
+/// mutation in a batch takes the document out of [`SharedTree`]; subsequent
+/// mutations are ordinary `&mut` accesses, and [`Self::flush`] lays it out and
+/// returns it to the presenting side. Dropping the owner also returns an open
+/// batch, without turning runtime teardown into an implicit flush.
+///
+/// This type is `Send` and contains no browser or GPU handles, so a browser
+/// embedder can move it into a shared-memory Worker through `wasm_thread` while
+/// keeping the `Engine` and its draw target on the presenting Worker.
+pub struct MainThreadDocument {
+    slot: SharedTree,
+    taken: Option<LynxDocument>,
+}
+
+impl fmt::Debug for MainThreadDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MainThreadDocument")
+            .field("batch_open", &self.taken.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MainThreadDocument {
+    fn new(slot: SharedTree) -> Self {
+        Self { slot, taken: None }
+    }
+
+    /// Opens the current mutation batch if needed and returns its document.
+    pub fn document(&mut self) -> &mut LynxDocument {
+        if self.taken.is_none() {
+            self.taken = Some(self.slot.take());
+        }
+        self.taken
+            .as_mut()
+            .expect("the main thread just took the document")
+    }
+
+    /// Commits the current batch through style and layout and returns the
+    /// document to the presenting side.
+    pub fn flush(&mut self) {
+        let mut tree = match self.taken.take() {
+            Some(tree) => tree,
+            None => self.slot.take(),
+        };
+        tree.layout();
+        self.slot.put(tree);
+    }
+
+    fn release(&mut self) {
+        if let Some(tree) = self.taken.take() {
+            self.slot.put(tree);
+        }
+    }
+
+    #[cfg(feature = "quickjs")]
+    fn shared_tree(&self) -> SharedTree {
+        self.slot.clone()
+    }
+}
+
+impl Drop for MainThreadDocument {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -298,6 +370,7 @@ enum Output<'window> {
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub struct Engine<'window, W: Window> {
     elements: SharedTree,
+    main_thread: Option<MainThreadDocument>,
     viewport: Viewport,
     frame_size: FrameSize,
     #[cfg(feature = "quickjs")]
@@ -336,8 +409,10 @@ impl<'window, W: Window> Engine<'window, W> {
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         #[cfg(feature = "quickjs")]
         let (message_sender, messages) = mpsc::channel();
+        let elements = SharedTree::new(new_document(viewport, config));
         Ok(Self {
-            elements: SharedTree::new(new_document(viewport, config)),
+            main_thread: Some(MainThreadDocument::new(elements.clone())),
+            elements,
             viewport,
             frame_size,
             #[cfg(feature = "quickjs")]
@@ -356,6 +431,18 @@ impl<'window, W: Window> Engine<'window, W> {
     #[must_use]
     pub fn elements(&self) -> TreeGuard<'_> {
         self.elements.tree()
+    }
+
+    /// Transfers the document's unique mutation owner to an external Lynx
+    /// main-thread runtime.
+    ///
+    /// The presenting [`Engine`] keeps only the non-blocking [`SharedTree`]
+    /// side. A second call fails because two main threads could otherwise open
+    /// overlapping Element-PAPI batches.
+    pub fn take_main_thread_document(&mut self) -> Result<MainThreadDocument, EngineError> {
+        self.main_thread
+            .take()
+            .ok_or(EngineError::MainThreadAlreadyTaken)
     }
 
     /// The current physical render-target size in device pixels.
@@ -537,18 +624,28 @@ impl<'window, W: Window> Engine<'window, W> {
             return Ok(());
         };
         let size = self.frame_size;
-        if let Some(mut tree) = self.elements.try_tree() {
-            Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
-            let produced = tree.render();
-            if produced || !graphics.rendered_at(size) {
-                graphics.render_to_target(&tree.scene(), size)?;
+        let tree_was_busy = match self.elements.try_tree() {
+            Some(mut tree) => {
+                Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+                let produced = tree.render();
+                if produced || !graphics.rendered_at(size) {
+                    graphics.render_to_target(&tree.scene(), size)?;
+                }
+                false
             }
+            None => true,
+        };
+        let frames = self
+            .frames
+            .as_deref()
+            .expect("a window output always installs its frame capability");
+        // A script/DOM batch can take the slot after requesting this frame.
+        // Keep the request alive so event-driven embedders retry instead of
+        // losing the only wakeup while presenting the retained target.
+        if tree_was_busy {
+            frames.request_frame();
         }
         if graphics.rendered_at(size) {
-            let frames = self
-                .frames
-                .as_deref()
-                .expect("a window output always installs its frame capability");
             graphics.present(frames)?;
         }
         Ok(())
@@ -619,7 +716,11 @@ impl<'window, W: Window> Engine<'window, W> {
     /// Runs a main-thread script to completion on the calling thread over the shared tree.
     #[cfg(feature = "quickjs")]
     pub fn run_script(&mut self, source: &str) -> Result<(), ScriptRunError> {
-        let mut runtime = crate::quickjs::MainThreadRuntime::new(self.elements.clone(), || {})
+        let main_thread = self
+            .main_thread
+            .as_ref()
+            .ok_or(ScriptRunError::MainThreadAlreadyTaken)?;
+        let mut runtime = crate::quickjs::MainThreadRuntime::new(main_thread.shared_tree(), || {})
             .map_err(ScriptRunError::Initialization)?;
         let result = runtime
             .run_main_thread_script(source)
@@ -635,10 +736,11 @@ impl<'window, W: Window> Engine<'window, W> {
         source: String,
         wakeup: impl Fn() + Send + Sync + 'static,
     ) -> Result<(), EngineError> {
-        let elements = self.elements.clone();
+        let main_thread = self.take_main_thread_document()?;
+        let elements = main_thread.shared_tree();
         let sender = self.message_sender.clone();
         let on_flush = self.frames.clone();
-        std::thread::Builder::new()
+        let spawn = std::thread::Builder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
                 let result = (|| {
@@ -654,11 +756,14 @@ impl<'window, W: Window> Engine<'window, W> {
                 })();
                 let _ = sender.send(EngineMessage::ScriptDone(result));
                 wakeup();
-            })
-            .map_err(|error| EngineError::Thread {
+            });
+        if let Err(error) = spawn {
+            self.main_thread = Some(main_thread);
+            return Err(EngineError::Thread {
                 name: "script",
                 message: error.to_string(),
-            })?;
+            });
+        }
         Ok(())
     }
 }
@@ -733,6 +838,33 @@ mod tests {
         let mut engine =
             OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
         assert_eq!(engine.register_fonts(blob), 0);
+    }
+
+    #[test]
+    fn main_thread_document_is_unique_and_hides_an_open_batch() {
+        use super::OffscreenEngine;
+        use crate::tree::PageConfig;
+
+        let mut engine =
+            OffscreenEngine::new(PageConfig::default(), 393.0, 727.0, 1.0).expect("engine");
+        let mut main_thread = engine
+            .take_main_thread_document()
+            .expect("the engine creates one main-thread owner");
+        assert!(
+            engine.take_main_thread_document().is_err(),
+            "the engine cannot create a second mutation owner"
+        );
+
+        let page = main_thread.document().document_element().id();
+        let view = main_thread.document().create_element("view", ());
+        main_thread.document().insert_before(page, view, None);
+        assert!(
+            engine.elements.try_tree().is_none(),
+            "the presenting side cannot observe a half-applied batch"
+        );
+
+        main_thread.flush();
+        assert!(engine.elements().is_connected(view));
     }
 
     #[cfg(feature = "quickjs")]

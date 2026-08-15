@@ -5,6 +5,6 @@
 pub(crate) mod damage;
 pub(crate) mod device;
 pub(crate) mod engine;
-mod flush;
+pub(crate) mod flush;
 mod invalidation;
 mod traits;

@@ -157,7 +157,7 @@ impl<'window> WindowGraphics<'window> {
         );
         handle.queue.submit([encoder.finish()]);
         frames.pre_present();
-        handle.queue.present(surface_texture);
+        surface_texture.present();
         if reconfigure_after {
             context.configure_surface(surface);
         }

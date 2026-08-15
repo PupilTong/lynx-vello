@@ -2,9 +2,17 @@
   "name": "bobcat-wasm",
   "version": "0.0.0",
   "private": true,
-  "main": "index.js",
+  "type": "module",
+  "main": "facade.js",
   "browser": "facade.js",
   "types": "facade.d.ts",
+  "files": [
+    "dom-worker.js",
+    "facade.d.ts",
+    "facade.js",
+    "pkg",
+    "render-worker.js"
+  ],
   "exports": {
     ".": {
       "types": "./facade.d.ts",
@@ -13,31 +21,7 @@
     }
   },
   "scripts": {
-    "build": "pnpm run build:wasi",
-    "build:wasi": "napi build --platform --release --target wasm32-wasip1-threads && node scripts/postbuild-wasi.mjs"
-  },
-  "dependencies": {
-    "@emnapi/core": "2.0.0-alpha.3",
-    "@emnapi/runtime": "2.0.0-alpha.3",
-    "@napi-rs/wasm-runtime": "1.2.2"
-  },
-  "devDependencies": {
-    "@napi-rs/cli": "3.8.5"
-  },
-  "napi": {
-    "binaryName": "bobcat_wasm_threads",
-    "targets": [
-      "wasm32-wasip1-threads"
-    ],
-    "wasm": {
-      "initialMemory": 2048,
-      "maximumMemory": 16384,
-      "browser": {
-        "fs": false,
-        "asyncInit": false,
-        "buffer": false,
-        "errorEvent": true
-      }
-    }
+    "build": "node scripts/build.mjs",
+    "verify": "node scripts/verify-pkg.mjs"
   }
 }

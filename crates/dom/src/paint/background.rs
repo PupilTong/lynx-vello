@@ -417,19 +417,15 @@ pub(super) fn paint_pattern_layer(
             None,
         ),
         Source::Gradient(gradient) => match gradient_brush(style, gradient, grid.tile) {
-            None => {}
-            Some(GradientBrush::Solid(color)) => {
-                if color.components[3] > 0.0 {
-                    fill_area(
-                        scene,
-                        fragment.transform,
-                        &layer.clip,
-                        grid.draw_rect(clip_bounds),
-                        BrushRef::Solid(color),
-                        None,
-                    );
-                }
-            }
+            Some(GradientBrush::Solid(color)) if color.components[3] > 0.0 => fill_area(
+                scene,
+                fragment.transform,
+                &layer.clip,
+                grid.draw_rect(clip_bounds),
+                BrushRef::Solid(color),
+                None,
+            ),
+            None | Some(GradientBrush::Solid(_)) => {}
             Some(GradientBrush::Gradient { gradient, local }) => {
                 fill_gradient_tiles(
                     scene,

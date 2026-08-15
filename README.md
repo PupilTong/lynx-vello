@@ -8,7 +8,7 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | --- | --- |
 | [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining engine-neutral resource/script/view protocols with the optional QuickJS adapter and main-thread host globals. It does not expose a renderer façade or re-export DOM/GPU internals. |
 | [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
-| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust browser embedder built as one NAPI-RS `wasm32-wasip1-threads` module. Its shared-memory Wasm supplies real Rust threads/blocking synchronization while the vendored wgpu WASI bridge lets Vello present the current Element-PAPI scene to an HTML canvas. |
+| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas`; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The UI is a JavaScript-only asynchronous host boundary. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`packages/bobcat-element`](packages/bobcat-element) | The Element PAPI runtime: a single classic-script JavaScript file evaluated inside the QuickJS realm (embedded into `bobcat-core` with `include_str!`). It owns the `__*` PAPI members, Lynx tag vocabulary, auto-incrementing unique ids, and element-handle lifecycle over `WeakRef`/`FinalizationRegistry`. |
@@ -70,9 +70,11 @@ prints an explicit warning that author styles are omitted.
 
 ## Running the browser embedder
 
-The `github-pages` pnpm package builds the threaded `bobcat-wasm` module,
-installs a COOP/COEP service worker, runs an NAPI-RS WASI thread probe, and
-renders a small Element-PAPI scene into an HTML canvas from that same module:
+The `github-pages` pnpm package builds the shared-memory `bobcat-wasm` module,
+installs a COOP/COEP service worker, and renders a small Element-PAPI scene
+through a complete Worker-owned embedder into its `OffscreenCanvas`. That
+embedder starts the DOM owner as a nested `wasm_thread` Worker and synchronizes
+the two Rust sides through shared memory:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -87,7 +89,7 @@ the current browser-runtime boundary.
 
 ## Toolchain
 
-The workspace pins the **2026-07-01 nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
+The workspace pins the **2026-04-20 nightly** toolchain via [`rust-toolchain.toml`](rust-toolchain.toml)
 (edition 2024, resolver 3, workspace lints, nightly `rustfmt` options).
 Initialize the pinned Stylo and QuickJS sources before the first build:
 
@@ -110,10 +112,10 @@ corepack pnpm install --frozen-lockfile
 
 ## CI
 
-CI separates native checks, browser/WASI checks, wall-time benchmarks, and
+CI separates native checks, browser Wasm checks, wall-time benchmarks, and
 memory benchmarks. Native rustfmt, clippy (`-D warnings`), tests, and coverage
 ([Codecov](https://codecov.io)) run on `macos-latest` aarch64; the browser job
-builds the shared-memory WASIP1-threads artifact and GitHub Pages demo on
+builds the threaded `wasm-bindgen` artifact and GitHub Pages demo on
 Ubuntu. [CodSpeed](https://codspeed.io) tracks wall time on macOS and memory on
 Ubuntu.
 

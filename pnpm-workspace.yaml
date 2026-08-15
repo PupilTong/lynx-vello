@@ -3,14 +3,6 @@ packages:
   - packages/*
   - crates/bobcat-wasm
 
-# NAPI-RS publishes its browser WASI runtime as a wasm32 CPU package. Keep the
-# host architecture too so pnpm installs both the normal toolchain and the
-# threaded browser runtime.
-supportedArchitectures:
-  cpu:
-    - current
-    - wasm32
-
 enablePrePostScripts: false
 engineStrict: true
 hoistWorkspacePackages: true
@@ -26,7 +18,6 @@ minimumReleaseAgeExclude:
   - "@rspack/*"
   - "@rsbuild/*"
   - "@rstest/*"
-  - "@napi-rs/cli@3.8.5"
 minimumReleaseAgeStrict: false
 
 catalog:

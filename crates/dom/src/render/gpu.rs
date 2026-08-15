@@ -230,9 +230,7 @@ impl Headless {
                 });
             match waited {
                 Ok(()) => {
-                    let mapped = slice
-                        .get_mapped_range()
-                        .map_err(|error| GpuError::Render(error.to_string()))?;
+                    let mapped = slice.get_mapped_range();
                     let mut pixels =
                         Vec::with_capacity(tight_bytes_per_row as usize * height as usize);
                     for row in mapped.chunks_exact(readback.padded_bytes_per_row as usize) {
@@ -374,9 +372,7 @@ pub fn read_texture(
         .map_err(|_| GpuError::Render("readback map callback dropped".to_owned()))?
         .map_err(|error| GpuError::Render(error.to_string()))?;
 
-    let mapped = slice
-        .get_mapped_range()
-        .map_err(|error| GpuError::Render(error.to_string()))?;
+    let mapped = slice.get_mapped_range();
     let mut pixels = Vec::with_capacity(tight_bytes_per_row as usize * height as usize);
     for row in mapped.chunks_exact(padded_bytes_per_row as usize) {
         pixels.extend_from_slice(&row[..tight_bytes_per_row as usize]);
