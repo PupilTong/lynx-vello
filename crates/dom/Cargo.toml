@@ -56,5 +56,9 @@ harness = false
 name = "shadow"
 harness = false
 
+[[bench]]
+name = "query_selector"
+harness = false
+
 [lints]
 workspace = true

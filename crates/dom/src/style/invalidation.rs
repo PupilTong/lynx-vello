@@ -43,14 +43,14 @@ impl<T> Document<T> {
 
     pub(crate) fn live(&self, id: NodeId) -> &Node<T> {
         self.get(id)
-            .expect("stale NodeId passed to a Document mutation method")
+            .expect("stale NodeId passed to a Document method")
     }
 
-    fn live_element(&self, id: NodeId) -> &Node<T> {
+    pub(crate) fn live_element(&self, id: NodeId) -> &Node<T> {
         let node = self.live(id);
         assert!(
             node.is_element(),
-            "element-only Document mutation called with a non-element node"
+            "element-only Document method called with a non-element node"
         );
         node
     }
