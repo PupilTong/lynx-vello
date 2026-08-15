@@ -5,10 +5,6 @@
 
 use dom::{Device, Document, NodeId, StylesheetOrigin, standards_device};
 use euclid::{Scale, Size2D};
-use selectors::matching::{
-    MatchingContext, MatchingForInvalidation, MatchingMode, NeedsSelectorFlags, SelectorCaches,
-    matches_selector_list,
-};
 use stylo::color::AbsoluteColor;
 use stylo::context::QuirksMode;
 use stylo::device::servo::FontMetricsProvider;
@@ -164,20 +160,9 @@ impl Doc {
 
     #[must_use]
     pub(crate) fn matches(&self, id: NodeId, selector: &str) -> bool {
-        let list = SelectorParser::parse_author_origin_no_namespace(selector, &url_data())
-            .unwrap_or_else(|_| panic!("selector `{selector}` must parse"));
-        let node = self.dom.get(id).expect("node id is live");
-        let node_handle = &node;
-        let mut caches = SelectorCaches::default();
-        let mut context = MatchingContext::new(
-            MatchingMode::Normal,
-            None,
-            &mut caches,
-            QuirksMode::NoQuirks,
-            NeedsSelectorFlags::No,
-            MatchingForInvalidation::No,
-        );
-        matches_selector_list(&list, node_handle, &mut context)
+        self.dom
+            .matches(id, selector)
+            .unwrap_or_else(|_| panic!("selector `{selector}` must parse"))
     }
 
     #[must_use]
