@@ -33,6 +33,10 @@ function createMockBobcat() {
   let nextNodeId = 2;
   /** @type {Map<number, number>} */
   const parents = new Map();
+  /** @type {Map<number, Map<string, string>>} */
+  const attributes = new Map();
+  /** @type {Map<number, string>} */
+  const tags = new Map([[1, "page"]]);
   return {
     calls,
     named,
@@ -44,6 +48,7 @@ function createMockBobcat() {
     createElement: (tag) => {
       const node = nextNodeId;
       nextNodeId += 1;
+      tags.set(node, tag);
       calls.push(["createElement", tag]);
       return node;
     },
@@ -53,7 +58,45 @@ function createMockBobcat() {
      * @param {string} value
      */
     setAttribute: (node, name, value) => {
-      calls.push(["setAttribute", nodeId("setAttribute", node), name, value]);
+      const id = nodeId("setAttribute", node);
+      if (typeof value !== "string") {
+        throw new TypeError("setAttribute expects a string for argument 2");
+      }
+      let element = attributes.get(id);
+      if (element === undefined) {
+        element = new Map();
+        attributes.set(id, element);
+      }
+      element.set(name, value);
+      calls.push(["setAttribute", id, name, value]);
+    },
+    /**
+     * @param {unknown} node
+     * @param {string} name
+     */
+    removeAttribute: (node, name) => {
+      const id = nodeId("removeAttribute", node);
+      attributes.get(id)?.delete(name);
+      calls.push(["removeAttribute", id, name]);
+    },
+    /**
+     * @param {unknown} node
+     * @param {string} name
+     */
+    getAttribute: (node, name) => {
+      const id = nodeId("getAttribute", node);
+      calls.push(["getAttribute", id, name]);
+      return attributes.get(id)?.get(name) ?? null;
+    },
+    /** @param {unknown} node */
+    tagName: (node) => {
+      const id = nodeId("tagName", node);
+      calls.push(["tagName", id]);
+      const tag = tags.get(id);
+      if (tag === undefined) {
+        throw new Error(`tagName: ${id} is not a live element`);
+      }
+      return tag;
     },
     /** @param {unknown} node */
     parentNode: (node) => {
@@ -157,6 +200,17 @@ describe("installation", () => {
       ["__ReplaceElement", 2],
       ["__ReplaceElements", 3],
       ["__SwapElement", 2],
+      ["__SetClasses", 2],
+      ["__SetID", 2],
+      ["__GetID", 1],
+      ["__GetTag", 1],
+      ["__GetElementUniqueID", 1],
+      ["__SetInlineStyles", 2],
+      ["__SetAttribute", 3],
+      ["__SetCSSId", 3],
+      ["__AddEvent", 4],
+      ["__GetEvent", 3],
+      ["__GetEvents", 1],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -382,6 +436,289 @@ describe("__SwapElement", () => {
       ["parentNode", 3],
       ["parentNode", 4],
     ]);
+  });
+});
+
+describe("__SetClasses", () => {
+  it("sets the class attribute", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetClasses(view, "row bold");
+    expect(mock.calls).toEqual([["setAttribute", 2, "class", "row bold"]]);
+  });
+
+  it("removes the attribute for every falsy class list", () => {
+    const view = __CreateView(0);
+    for (const empty of ["", null, undefined]) {
+      mock.calls.length = 0;
+      __SetClasses(view, empty);
+      expect(mock.calls, String(empty)).toEqual([
+        ["removeAttribute", 2, "class"],
+      ]);
+    }
+  });
+});
+
+describe("id", () => {
+  it("sets, reads back, and removes the id attribute", () => {
+    const view = __CreateView(0);
+    expect(__GetID(view)).toBe(null);
+
+    __SetID(view, "header");
+    expect(__GetID(view)).toBe("header");
+
+    __SetID(view, null);
+    expect(__GetID(view)).toBe(null);
+  });
+
+  it("treats an empty id as a removal, like web-core", () => {
+    const view = __CreateView(0);
+    __SetID(view, "header");
+    mock.calls.length = 0;
+
+    __SetID(view, "");
+    expect(mock.calls).toEqual([["removeAttribute", 2, "id"]]);
+  });
+});
+
+describe("__GetTag", () => {
+  it("reports the tag each element was created with", () => {
+    const page = __CreatePage("card", 0);
+    expect(__GetTag(page)).toBe("page");
+    expect(__GetTag(__CreateView(0))).toBe("view");
+    expect(__GetTag(__CreateText(0))).toBe("text");
+    expect(__GetTag(__CreateImage(0))).toBe("image");
+    expect(__GetTag(__CreateScrollView(0))).toBe("scroll-view");
+    expect(__GetTag(__CreateWrapperElement(0))).toBe("wrapper");
+    expect(__GetTag(__CreateRawText("x"))).toBe("raw-text");
+    expect(__GetTag(__CreateList(0, () => {}, () => {}))).toBe("list");
+    expect(__GetTag(__CreateElement("custom-widget", 0))).toBe("custom-widget");
+  });
+});
+
+describe("__GetElementUniqueID", () => {
+  it("reports the handle's node id", () => {
+    const page = __CreatePage("card", 0);
+    const view = __CreateView(0);
+    expect(__GetElementUniqueID(page)).toBe(1);
+    expect(__GetElementUniqueID(view)).toBe(2);
+  });
+
+  it("reports -1 for a falsy or foreign element instead of throwing", () => {
+    for (const foreign of [null, undefined, {}, [], "x"]) {
+      expect(__GetElementUniqueID(foreign), String(foreign)).toBe(-1);
+    }
+  });
+});
+
+describe("__SetInlineStyles", () => {
+  it("sets a declaration string verbatim", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, "color:red;width:10px");
+    expect(mock.calls).toEqual([
+      ["setAttribute", 2, "style", "color:red;width:10px"],
+    ]);
+  });
+
+  it("hyphenates a record and skips null and undefined values", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, {
+      backgroundColor: "red",
+      borderTopLeftRadius: 4,
+      color: undefined,
+      width: null,
+    });
+    expect(mock.calls).toEqual([[
+      "setAttribute",
+      2,
+      "style",
+      "background-color:red;border-top-left-radius:4;",
+    ]]);
+  });
+
+  it("removes the attribute for every falsy value", () => {
+    const view = __CreateView(0);
+    for (const empty of ["", null, undefined]) {
+      mock.calls.length = 0;
+      __SetInlineStyles(view, empty);
+      expect(mock.calls, String(empty)).toEqual([
+        ["removeAttribute", 2, "style"],
+      ]);
+    }
+  });
+});
+
+describe("__SetAttribute", () => {
+  it("stringifies the value", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetAttribute(view, "text", "hello");
+    __SetAttribute(view, "flex-grow", 1);
+    __SetAttribute(view, "clip-radius", true);
+    expect(mock.calls).toEqual([
+      ["setAttribute", 2, "text", "hello"],
+      ["setAttribute", 2, "flex-grow", "1"],
+      ["setAttribute", 2, "clip-radius", "true"],
+    ]);
+  });
+
+  it("removes the attribute for null and undefined", () => {
+    const view = __CreateView(0);
+    for (const absent of [null, undefined]) {
+      mock.calls.length = 0;
+      __SetAttribute(view, "text", absent);
+      expect(mock.calls, String(absent)).toEqual([
+        ["removeAttribute", 2, "text"],
+      ]);
+    }
+  });
+
+  it("hands id, class, and style to the native boundary unchanged", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetAttribute(view, "id", "header");
+    __SetAttribute(view, "class", "row");
+    __SetAttribute(view, "style", "color:red");
+    expect(mock.calls).toEqual([
+      ["setAttribute", 2, "id", "header"],
+      ["setAttribute", 2, "class", "row"],
+      ["setAttribute", 2, "style", "color:red"],
+    ]);
+  });
+
+  it("refuses update-list-info rather than writing a command object", () => {
+    const list = __CreateList(0, () => {}, () => {});
+    mock.calls.length = 0;
+
+    expect(() =>
+      __SetAttribute(list, "update-list-info", {
+        insertAction: [],
+        removeAction: [],
+      })
+    ).toThrow("update-list-info");
+    expect(mock.calls).toEqual([]);
+  });
+});
+
+describe("__SetCSSId", () => {
+  it("writes the scope id onto every element of the batch", () => {
+    const first = __CreateView(0);
+    const second = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetCSSId([first, second], 7);
+    expect(mock.calls).toEqual([
+      ["setAttribute", 2, "l-css-id", "7"],
+      ["setAttribute", 3, "l-css-id", "7"],
+    ]);
+  });
+
+  it("removes the scope id at 0 and null, ReactLynx's default scope", () => {
+    const view = __CreateView(0);
+    for (const empty of [0, null, undefined]) {
+      mock.calls.length = 0;
+      __SetCSSId([view], empty);
+      expect(mock.calls, String(empty)).toEqual([
+        ["removeAttribute", 2, "l-css-id"],
+      ]);
+    }
+  });
+
+  it("writes the entry name only when the bundle passes one", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetCSSId([view], 3, "lazy-entry");
+    expect(mock.calls).toEqual([
+      ["setAttribute", 2, "l-e-name", "lazy-entry"],
+      ["setAttribute", 2, "l-css-id", "3"],
+    ]);
+    mock.calls.length = 0;
+
+    __SetCSSId([view], 3);
+    expect(mock.calls).toEqual([["setAttribute", 2, "l-css-id", "3"]]);
+  });
+});
+
+describe("events", () => {
+  it("records a background-thread handler name and reads it back", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __AddEvent(view, "bindEvent", "tap", "handler:1");
+    expect(__GetEvent(view, "tap", "bindEvent")).toBe("handler:1");
+    expect(__GetEvents(view)).toEqual([
+      { type: "bindevent", name: "tap", function: "handler:1" },
+    ]);
+    // Registration is this runtime's own bookkeeping, not a DOM mutation.
+    expect(mock.calls).toEqual([]);
+  });
+
+  it("lowercases the event type and name", () => {
+    const view = __CreateView(0);
+    __AddEvent(view, "CATCHEvent", "TouchStart", "handler:1");
+    expect(__GetEvent(view, "touchstart", "catchevent")).toBe("handler:1");
+    expect(__GetEvents(view)).toEqual([
+      { type: "catchevent", name: "touchstart", function: "handler:1" },
+    ]);
+  });
+
+  it("keeps the worklet slot separate from the background one", () => {
+    const view = __CreateView(0);
+    const worklet = { type: "worklet", value: { _wkltId: "1:2" } };
+
+    __AddEvent(view, "bindEvent", "tap", worklet);
+    // __GetEvent reads the background slot alone, as web-core's does.
+    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
+    expect(__GetEvents(view)).toEqual([
+      { type: "bindevent", name: "tap", function: worklet },
+    ]);
+
+    __AddEvent(view, "bindEvent", "tap", "handler:1");
+    expect(__GetEvent(view, "tap", "bindEvent")).toBe("handler:1");
+    expect(__GetEvents(view)).toEqual([
+      { type: "bindevent", name: "tap", function: "handler:1" },
+      { type: "bindevent", name: "tap", function: worklet },
+    ]);
+  });
+
+  it("clears both slots for a null handler", () => {
+    const view = __CreateView(0);
+    __AddEvent(view, "bindEvent", "tap", "handler:1");
+    __AddEvent(view, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    __AddEvent(view, "bindEvent", "tap", null);
+    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
+    expect(__GetEvents(view)).toEqual([]);
+  });
+
+  it("keeps one registration per element, type, and name", () => {
+    const first = __CreateView(0);
+    const second = __CreateView(0);
+    __AddEvent(first, "bindEvent", "tap", "handler:1");
+    __AddEvent(first, "catchEvent", "tap", "handler:2");
+    __AddEvent(second, "bindEvent", "tap", "handler:3");
+
+    expect(__GetEvents(first)).toEqual([
+      { type: "bindevent", name: "tap", function: "handler:1" },
+      { type: "catchevent", name: "tap", function: "handler:2" },
+    ]);
+    expect(__GetEvents(second)).toEqual([
+      { type: "bindevent", name: "tap", function: "handler:3" },
+    ]);
+  });
+
+  it("reports no events for an element that never registered one", () => {
+    const view = __CreateView(0);
+    expect(__GetEvents(view)).toEqual([]);
+    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
   });
 });
 

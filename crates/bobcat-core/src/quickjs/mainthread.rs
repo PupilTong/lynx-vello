@@ -7,12 +7,14 @@
 //! `.web.bundle`'s `lepusCode.root` runs in:
 //!
 //! 1. A global `bobcat` object whose members are Rust host functions speaking DOM vocabulary over
-//!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `parentNode`,
-//!    `insertBefore`, `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — each a
-//!    direct call into [`dom::Document`] through the document hand-off.
+//!    numeric `NodeId`s — `createPage`, `createElement`, `setAttribute`, `removeAttribute`,
+//!    `getAttribute`, `tagName`, `parentNode`, `insertBefore`, `removeElement`, `replaceElement`,
+//!    `dropElement`, `flushElementTree` — each a direct call into [`dom::Document`] through the
+//!    document hand-off.
 //! 2. The Element PAPI runtime script, evaluated before any bundle code. It assigns the
-//!    `__Create*`/`__*Element`/`__FlushElementTree` globals over `bobcat`, owns tag vocabulary, and
-//!    manages handle lifecycle with a symbol-keyed node id and a `FinalizationRegistry`.
+//!    `__Create*`/`__*Element`/`__Set*`/`__Get*`/`__AddEvent`/`__FlushElementTree` globals over
+//!    `bobcat`, owns tag vocabulary, and manages handle lifecycle with a symbol-keyed node id and a
+//!    `FinalizationRegistry`.
 //!
 //! # What web-core does, and what we reproduce
 //!
@@ -65,9 +67,16 @@
 //! # Recorded limits
 //!
 //! - **The PAPI surface is the runtime script's table** — every `ReactLynx` Snapshot constructor
-//!   except `__CreateFrame`, the six tree mutations, and `__FlushElementTree`. A bundle that
-//!   reaches for another member gets a `ReferenceError` naming the missing global, which is the
-//!   intended failure: a silently wrong render would be worse.
+//!   except `__CreateFrame`, the six tree mutations, the class/id/attribute/inline-style/CSS-scope
+//!   setters with the id, tag, and unique-id queries, `__AddEvent` and its two readers, and
+//!   `__FlushElementTree`. A bundle that reaches for another member gets a `ReferenceError` naming
+//!   the missing global, which is the intended failure: a silently wrong render would be worse.
+//! - **Two members are recorded but unconsumed.** `__AddEvent` stores handlers in the realm and
+//!   nothing dispatches to them: routing an input event to one needs the phase walk and gesture
+//!   arena that no layer implements yet. `__SetCSSId` writes web-core's `l-css-id`/`l-e-name`
+//!   attributes, and no layer lowers a decoded `StyleInfo` into scoped author rules that would
+//!   match them. `__SetAttribute` throws for `update-list-info` rather than writing a stringified
+//!   command object, because the list surface behind it is absent.
 //! - **Nothing validates script input.** A stale or fabricated node id panics inside `dom`; the
 //!   host boundary converts the unwind into a JavaScript exception ("the host function panicked").
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,
@@ -330,15 +339,7 @@ fn install_bobcat_object(
     })?;
     realm.set_property(&namespace, "createElement", &member)?;
 
-    let tree = Rc::clone(handle);
-    let member = realm.function("setAttribute", 3, move |arguments| {
-        let node = node_id_argument("bobcat.setAttribute", arguments, 0)?;
-        let name = string_argument("bobcat.setAttribute", arguments, 1)?;
-        let value = string_argument("bobcat.setAttribute", arguments, 2)?;
-        tree.borrow_mut().tree().set_attribute(node, name, value);
-        Ok(HostValue::Undefined)
-    })?;
-    realm.set_property(&namespace, "setAttribute", &member)?;
+    install_attribute_members(realm, &namespace, handle)?;
 
     let tree = Rc::clone(handle);
     let member = realm.function("parentNode", 1, move |arguments| {
@@ -414,6 +415,64 @@ fn install_bobcat_object(
 
     let global = realm.global_object()?;
     realm.set_property(&global, "bobcat", &namespace)?;
+    Ok(())
+}
+
+/// The attribute half of the namespace. `bobcat.setAttribute` is where the
+/// `id`/`class`/`style` names reach [`dom`]'s specialized paths, so the PAPI
+/// runtime above needs no separate member for any of the three.
+fn install_attribute_members(
+    realm: &mut quickjs::Realm,
+    namespace: &quickjs::Value,
+    handle: &Rc<RefCell<TreeHandle>>,
+) -> Result<(), quickjs::Error> {
+    let tree = Rc::clone(handle);
+    let member = realm.function("setAttribute", 3, move |arguments| {
+        let node = node_id_argument("bobcat.setAttribute", arguments, 0)?;
+        let name = string_argument("bobcat.setAttribute", arguments, 1)?;
+        let value = string_argument("bobcat.setAttribute", arguments, 2)?;
+        tree.borrow_mut().tree().set_attribute(node, name, value);
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(namespace, "setAttribute", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("removeAttribute", 2, move |arguments| {
+        let node = node_id_argument("bobcat.removeAttribute", arguments, 0)?;
+        let name = string_argument("bobcat.removeAttribute", arguments, 1)?;
+        tree.borrow_mut().tree().remove_attribute(node, name);
+        Ok(HostValue::Undefined)
+    })?;
+    realm.set_property(namespace, "removeAttribute", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("getAttribute", 2, move |arguments| {
+        let node = node_id_argument("bobcat.getAttribute", arguments, 0)?;
+        let name = string_argument("bobcat.getAttribute", arguments, 1)?;
+        let value = tree
+            .borrow_mut()
+            .tree()
+            .get(node)
+            .expect("bobcat.getAttribute: the node id must name a live node")
+            .attribute(name)
+            .map(str::to_owned);
+        Ok(value.map_or(HostValue::Null, HostValue::String))
+    })?;
+    realm.set_property(namespace, "getAttribute", &member)?;
+
+    let tree = Rc::clone(handle);
+    let member = realm.function("tagName", 1, move |arguments| {
+        let node = node_id_argument("bobcat.tagName", arguments, 0)?;
+        let tag = tree
+            .borrow_mut()
+            .tree()
+            .get(node)
+            .and_then(dom::Node::tag_name)
+            .expect("bobcat.tagName: the node id must name a live element")
+            .to_owned();
+        Ok(HostValue::String(tag))
+    })?;
+    realm.set_property(namespace, "tagName", &member)?;
     Ok(())
 }
 

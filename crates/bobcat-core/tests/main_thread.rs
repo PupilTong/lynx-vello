@@ -416,12 +416,12 @@ fn a_missing_papi_global_fails_loudly() {
               if (typeof globalThis.__DropElement !== 'undefined') {
                 throw new Error('__DropElement must stay absent: no web-core generation has it');
               }
-              __SetAttribute(1, 'name', 'value');
+              __AddInlineStyle(__CreateView(0), 'color', 'red');
             };
             ",
         )
         .expect_err("an unimplemented PAPI member");
-    assert!(error.to_string().contains("__SetAttribute"), "{error}");
+    assert!(error.to_string().contains("__AddInlineStyle"), "{error}");
 }
 
 #[test]
@@ -611,4 +611,239 @@ fn a_run_that_exceeds_the_job_limit_finishes_before_the_next_one_starts() {
         elements.rounded_layout(1).is_some(),
         "the boot sequence still ran to completion"
     );
+}
+#[test]
+fn classes_attributes_and_the_id_reach_the_document() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __SetClasses(view, 'row bold');
+              __SetID(view, 'header');
+              __SetAttribute(view, 'flex-grow', 1);
+              if (__GetID(view) !== 'header') {
+                throw new Error('__GetID must read the id back, got ' + __GetID(view));
+              }
+              if (__GetTag(view) !== 'view' || __GetTag(page) !== 'page') {
+                throw new Error('__GetTag must report the Lynx tag');
+              }
+              if (__GetElementUniqueID(page) !== 1) {
+                throw new Error('the page is node 1, got ' + __GetElementUniqueID(page));
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    let view = elements.get(2).expect("the view is live");
+    assert_eq!(view.classes().collect::<Vec<_>>(), ["row", "bold"]);
+    assert_eq!(view.id_attribute(), Some("header"));
+    assert_eq!(view.attribute("flex-grow"), Some("1"));
+    assert_eq!(view.tag_name(), Some("view"));
+}
+
+#[test]
+fn clearing_a_class_id_or_attribute_removes_it_from_the_document() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __SetClasses(view, 'row');
+              __SetID(view, 'header');
+              __SetAttribute(view, 'text', 'hello');
+              __SetClasses(view, '');
+              __SetID(view, null);
+              __SetAttribute(view, 'text', undefined);
+              if (__GetID(view) !== null) {
+                throw new Error('__GetID must report null once the id is cleared');
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    let view = elements.get(2).expect("the view is live");
+    assert_eq!(view.classes().len(), 0);
+    assert_eq!(view.id_attribute(), None);
+    assert_eq!(view.attribute("text"), None);
+}
+
+#[test]
+fn inline_styles_reach_computed_style_and_layout() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const fromString = __CreateView(0);
+              const fromRecord = __CreateView(0);
+              __AppendElement(page, fromString);
+              __AppendElement(page, fromRecord);
+              __SetInlineStyles(fromString, 'width:10px;height:10px');
+              __SetInlineStyles(fromRecord, { width: '20px', height: '20px' });
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    for (id, expected) in [(2, 10.0_f32), (3, 20.0_f32)] {
+        let layout = elements
+            .rounded_layout(id)
+            .expect("the styled view is laid out");
+        assert!(
+            (layout.size.width - expected).abs() < f32::EPSILON,
+            "node {id} width {} should be {expected}",
+            layout.size.width
+        );
+    }
+}
+
+#[test]
+fn a_record_inline_style_is_hyphenated_on_the_way_to_stylo() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __SetInlineStyles(view, { paddingLeft: '4px', color: null });
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    assert_eq!(
+        elements
+            .get(2)
+            .expect("the view is live")
+            .attribute("style"),
+        Some("padding-left:4px;")
+    );
+}
+
+#[test]
+fn clearing_an_inline_style_removes_the_attribute() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              __SetInlineStyles(view, 'width:10px');
+              __SetInlineStyles(view, undefined);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    let view = elements.get(2).expect("the view is live");
+    assert_eq!(view.attribute("style"), None);
+    let layout = elements.rounded_layout(2).expect("the view is laid out");
+    assert!(
+        (layout.size.width - 393.0).abs() < f32::EPSILON,
+        "the cleared width falls back to the page's, got {}",
+        layout.size.width
+    );
+}
+
+#[test]
+fn set_css_id_records_the_scope_on_every_element_of_the_batch() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const first = __CreateView(0);
+              const second = __CreateView(0);
+              __AppendElement(page, first);
+              __AppendElement(page, second);
+              __SetCSSId([first, second], 7, 'lazy-entry');
+              __SetCSSId([second], 0);
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    let first = elements.get(2).expect("the first view is live");
+    assert_eq!(first.attribute("l-css-id"), Some("7"));
+    assert_eq!(first.attribute("l-e-name"), Some("lazy-entry"));
+    let second = elements.get(3).expect("the second view is live");
+    assert_eq!(second.attribute("l-css-id"), None);
+    assert_eq!(second.attribute("l-e-name"), Some("lazy-entry"));
+}
+
+#[test]
+fn event_registrations_live_in_the_realm_and_never_reach_the_document() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              const worklet = { type: 'worklet', value: { _wkltId: '1:2' } };
+              __AddEvent(view, 'bindEvent', 'Tap', 'handler:1');
+              __AddEvent(view, 'bindEvent', 'Tap', worklet);
+              if (__GetEvent(view, 'tap', 'bindevent') !== 'handler:1') {
+                throw new Error('the background slot must survive the worklet one');
+              }
+              const events = __GetEvents(view);
+              if (events.length !== 2 || events[1].function !== worklet) {
+                throw new Error('both slots must be reported, got ' + events.length);
+              }
+              __AddEvent(view, 'bindEvent', 'tap', null);
+              if (__GetEvents(view).length !== 0) {
+                throw new Error('a null handler must clear both slots');
+              }
+            };
+            ",
+        )
+        .expect("main-thread script");
+
+    let elements = elements.tree();
+    let view = elements.get(2).expect("the view is live");
+    assert_eq!(
+        view.attributes().len(),
+        0,
+        "registration is realm bookkeeping, not a DOM mutation"
+    );
+}
+
+#[test]
+fn update_list_info_is_refused_rather_than_written_as_an_attribute() {
+    let mut runtime = bare_runtime();
+    let error = runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const list = __CreateList(0, function () {}, function () {});
+              __AppendElement(page, list);
+              __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
+            };
+            ",
+        )
+        .expect_err("the unimplemented list surface");
+    assert!(error.to_string().contains("update-list-info"), "{error}");
 }
