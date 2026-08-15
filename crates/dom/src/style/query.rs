@@ -27,11 +27,18 @@
 //!   its default `Err(())`, so `#id` is a subtree walk filtered by `has_id` rather than a hash
 //!   lookup. Gecko and Servo maintain that index for `getElementById` and fragment navigation
 //!   anyway; here it would be a new side table on every mutation path, which this crate does not
-//!   add without a benchmark that asks for it.
+//!   add without a benchmark that asks for it. `benches/query_selector.rs::query_selector_id_*` is
+//!   that benchmark, and what it currently reports is the whole case: over 4,096 rows an id on the
+//!   last row costs about 350× the same query for an id on the first (~61 µs against ~0.17 µs per
+//!   query), and the walking side grows linearly with the tree while the early-exit side stays
+//!   flat.
 //! - **No subtree bloom filter.**
 //!   [`TElement::subtree_bloom_filter`](stylo::dom::TElement::subtree_bloom_filter) keeps its
-//!   default all-ones, so the `RejectSkippingChildren` subtree skip never fires and a query visits
-//!   every descendant.
+//!   default all-ones, so `bloom_may_have_hash` is always true, the `RejectSkippingChildren`
+//!   subtree skip never fires, and a query visits every descendant.
+//!   `benches/query_selector.rs::query_selector_all_class_absent` is the shape that pays for it: a
+//!   class present on no element still walks the whole tree, ~63 µs per query over 4,096 rows, all
+//!   of it work a populated filter would reject at the root.
 //!
 //! One parse-level gap is shared with the cascade rather than specific to
 //! queries: the vendored Servo selector parser keeps `parse_has` and
