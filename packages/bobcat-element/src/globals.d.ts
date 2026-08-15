@@ -90,11 +90,6 @@ declare var __SetAttribute: (
   name?: unknown,
   value?: unknown,
 ) => undefined;
-declare var __SetCSSId: (
-  elements?: unknown,
-  cssId?: unknown,
-  entryName?: unknown,
-) => undefined;
 declare var __AddEvent: (
   element?: unknown,
   eventType?: unknown,

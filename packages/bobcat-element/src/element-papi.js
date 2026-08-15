@@ -34,29 +34,32 @@
 // | `__GetElementUniqueID(element)` | the handle's own node id |
 // | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__SetAttribute(element, name, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
-// | `__SetCSSId(elements, cssId, entryName?)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__AddEvent(element, eventType, eventName, handler)` | this runtime's own store |
 // | `__GetEvent(element, eventName, eventType)` | this runtime's own store |
 // | `__GetEvents(element)` | this runtime's own store |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
-// web-core generation), `__AddClass`, `__AddInlineStyle`, the dataset,
-// component-info, config, template-part and animation members, tree and
-// selector querying, and list callback execution — is not implemented. A
+// web-core generation), `__SetCSSId`, `__AddClass`, `__AddInlineStyle`, the
+// dataset, component-info, config, template-part and animation members, tree
+// and selector querying, and list callback execution — is not implemented. A
 // bundle that reaches for another member fails at the missing global, not
 // silently.
+//
+// `__SetCSSId` is absent on purpose rather than by omission. Its whole job is
+// to name the author-CSS scope an element cascades in, and no layer lowers a
+// decoded `StyleInfo` into scoped author rules yet — so any encoding chosen
+// here (web-core writes `l-css-id`/`l-e-name` attributes; native Lynx keeps
+// css_id on the element) would be a design guess with nothing to validate it.
+// It lands with the ingestion side that reads it.
 //
 // # What the recorded state does not yet reach
 //
 // `__AddEvent` records handlers and nothing dispatches to them: routing an
 // input event to a handler (hit testing, Lynx's bind/catch phase walk, the
-// gesture arena) belongs to a layer that does not exist yet. `__SetCSSId`
-// likewise writes web-core's `l-css-id`/`l-e-name` attributes onto the
-// element, but no layer lowers a decoded `StyleInfo` into scoped author
-// rules, so nothing matches them. Both are registration without consumption,
-// deliberately: the call a bundle makes is answered, and the subsystem behind
-// it is absent rather than faked.
+// gesture arena) belongs to a layer that does not exist yet. The registration
+// a bundle makes is answered and kept; the subsystem behind it is absent
+// rather than faked.
 //
 // # Identity and lifecycle
 //
@@ -103,11 +106,6 @@
   };
 
   const nodeIdSymbol = Symbol("nodeId");
-
-  // web-core's CSS-scope attributes, `cssIdAttribute` and
-  // `lynxEntryNameAttribute` (web-platform/web-core/ts/constants.ts).
-  const CSS_ID_ATTRIBUTE = "l-css-id";
-  const ENTRY_NAME_ATTRIBUTE = "l-e-name";
 
   const EVENT_KEY_SEPARATOR = ":";
 
@@ -536,34 +534,6 @@
   }
 
   /**
-   * CSS scoping, as the two attributes web-core writes for it: the scope id
-   * `l-css-id` (removed at scope 0, ReactLynx's `DEFAULT_CSS_ID`) and the
-   * lazy-bundle entry name `l-e-name`. Nothing consumes them yet — no layer
-   * lowers a decoded `StyleInfo` into scoped author rules — so this records
-   * the scope on the element and stops there.
-   *
-   * @param {unknown} elements
-   * @param {unknown} cssId
-   * @param {unknown} entryName
-   * @returns {undefined}
-   */
-  function __SetCSSId(elements, cssId, entryName) {
-    const scope = cssId ?? 0;
-    for (const element of /** @type {unknown[]} */ (elements)) {
-      const nodeId = nodeIdOf(element);
-      if (entryName !== null && entryName !== undefined) {
-        native.setAttribute(nodeId, ENTRY_NAME_ATTRIBUTE, String(entryName));
-      }
-      if (scope === 0) {
-        native.removeAttribute(nodeId, CSS_ID_ATTRIBUTE);
-      } else {
-        native.setAttribute(nodeId, CSS_ID_ATTRIBUTE, String(scope));
-      }
-    }
-    return undefined;
-  }
-
-  /**
    * Registration only: a handler is recorded against its element, and nothing
    * dispatches to it — the routing half (hit testing, Lynx's bind/catch phase
    * walk, the gesture arena) belongs to a layer that does not exist yet.
@@ -686,7 +656,6 @@
     __GetElementUniqueID,
     __SetInlineStyles,
     __SetAttribute,
-    __SetCSSId,
     __AddEvent,
     __GetEvent,
     __GetEvents,

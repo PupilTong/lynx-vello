@@ -207,7 +207,6 @@ describe("installation", () => {
       ["__GetElementUniqueID", 1],
       ["__SetInlineStyles", 2],
       ["__SetAttribute", 3],
-      ["__SetCSSId", 3],
       ["__AddEvent", 4],
       ["__GetEvent", 3],
       ["__GetEvents", 1],
@@ -222,6 +221,10 @@ describe("installation", () => {
 
   it("does not install __DropElement: collection is the only release path", () => {
     expect("__DropElement" in globalThis).toBe(false);
+  });
+
+  it("does not install __SetCSSId: the scope it names has no consumer", () => {
+    expect("__SetCSSId" in globalThis).toBe(false);
   });
 
   it("fails loudly when the native object is missing", async () => {
@@ -604,46 +607,6 @@ describe("__SetAttribute", () => {
       })
     ).toThrow("update-list-info");
     expect(mock.calls).toEqual([]);
-  });
-});
-
-describe("__SetCSSId", () => {
-  it("writes the scope id onto every element of the batch", () => {
-    const first = __CreateView(0);
-    const second = __CreateView(0);
-    mock.calls.length = 0;
-
-    __SetCSSId([first, second], 7);
-    expect(mock.calls).toEqual([
-      ["setAttribute", 2, "l-css-id", "7"],
-      ["setAttribute", 3, "l-css-id", "7"],
-    ]);
-  });
-
-  it("removes the scope id at 0 and null, ReactLynx's default scope", () => {
-    const view = __CreateView(0);
-    for (const empty of [0, null, undefined]) {
-      mock.calls.length = 0;
-      __SetCSSId([view], empty);
-      expect(mock.calls, String(empty)).toEqual([
-        ["removeAttribute", 2, "l-css-id"],
-      ]);
-    }
-  });
-
-  it("writes the entry name only when the bundle passes one", () => {
-    const view = __CreateView(0);
-    mock.calls.length = 0;
-
-    __SetCSSId([view], 3, "lazy-entry");
-    expect(mock.calls).toEqual([
-      ["setAttribute", 2, "l-e-name", "lazy-entry"],
-      ["setAttribute", 2, "l-css-id", "3"],
-    ]);
-    mock.calls.length = 0;
-
-    __SetCSSId([view], 3);
-    expect(mock.calls).toEqual([["setAttribute", 2, "l-css-id", "3"]]);
   });
 });
 

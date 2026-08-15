@@ -67,16 +67,18 @@
 //! # Recorded limits
 //!
 //! - **The PAPI surface is the runtime script's table** — every `ReactLynx` Snapshot constructor
-//!   except `__CreateFrame`, the six tree mutations, the class/id/attribute/inline-style/CSS-scope
-//!   setters with the id, tag, and unique-id queries, `__AddEvent` and its two readers, and
+//!   except `__CreateFrame`, the six tree mutations, the class/id/attribute/inline-style setters
+//!   with the id, tag, and unique-id queries, `__AddEvent` and its two readers, and
 //!   `__FlushElementTree`. A bundle that reaches for another member gets a `ReferenceError` naming
 //!   the missing global, which is the intended failure: a silently wrong render would be worse.
-//! - **Two members are recorded but unconsumed.** `__AddEvent` stores handlers in the realm and
-//!   nothing dispatches to them: routing an input event to one needs the phase walk and gesture
-//!   arena that no layer implements yet. `__SetCSSId` writes web-core's `l-css-id`/`l-e-name`
-//!   attributes, and no layer lowers a decoded `StyleInfo` into scoped author rules that would
-//!   match them. `__SetAttribute` throws for `update-list-info` rather than writing a stringified
-//!   command object, because the list surface behind it is absent.
+//! - **`__SetCSSId` is deliberately absent**, not merely unimplemented: it names the author-CSS
+//!   scope an element cascades in, and no layer lowers a decoded `StyleInfo` into scoped author
+//!   rules yet, so any encoding chosen for it now would be a design guess. It lands with the
+//!   ingestion side that reads it.
+//! - **`__AddEvent` is recorded but unconsumed.** It stores handlers in the realm and nothing
+//!   dispatches to them: routing an input event to one needs the phase walk and gesture arena that
+//!   no layer implements yet. `__SetAttribute` likewise throws for `update-list-info` rather than
+//!   writing a stringified command object, because the list surface behind it is absent.
 //! - **Nothing validates script input.** A stale or fabricated node id panics inside `dom`; the
 //!   host boundary converts the unwind into a JavaScript exception ("the host function panicked").
 //! - **The non-element main-thread globals are absent** (`lynx`, `SystemInfo`, `__globalProps`,

@@ -167,11 +167,11 @@ What that covers, and what it does not:
   boot sequence. `__CreateList` creates the element but does not yet retain or
   execute its JavaScript callbacks;
 - the property surface a Snapshot writes through — `__SetClasses`, `__SetID`,
-  `__SetAttribute`, `__SetInlineStyles`, `__SetCSSId`, `__AddEvent` — and the
-  queries that read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`,
-  `__GetEvent`, `__GetEvents`). Classes, ids, attributes, and inline styles
-  reach stylo through the ordinary `Document` setters, so they cascade and lay
-  out on the next flush;
+  `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
+  read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
+  `__GetEvents`). Classes, ids, attributes, and inline styles reach stylo
+  through the ordinary `Document` setters, so they cascade and lay out on the
+  next flush;
 
 **Still open**
 
@@ -179,11 +179,15 @@ What that covers, and what it does not:
   mounts those decoded rules; the seam is
   `Document::add_stylesheet`;
 - viewport-relative `rpx`/`ppx` units have no owner;
-- event *dispatch* and CSS-scope *ingestion* — the consuming halves of the two
-  members that only record. `__AddEvent` stores handlers in the realm with
-  nothing routing input to them (no phase walk, no gesture arena), and
-  `__SetCSSId` writes web-core's `l-css-id`/`l-e-name` attributes with no
-  scoped author rules to match them;
+- event *dispatch*, the consuming half of the one member that only records:
+  `__AddEvent` stores handlers in the realm with nothing routing input to them
+  (no phase walk, no gesture arena);
+- CSS scoping in both halves. `__SetCSSId` is deliberately absent from the PAPI
+  surface rather than stubbed: it names the author-CSS scope an element
+  cascades in, so it belongs with the `StyleInfo` lowering above, which is what
+  would give an encoding (an attribute the scoped rules match, a field on the
+  element) something to be right or wrong about. Its parent-component css-id
+  inheritance lands at the same time;
 - the remaining PAPI members (`__AddClass`, `__AddInlineStyle`, the dataset,
   component-info, config, template-part, animation, and selector-query
   members) have no adapter;

@@ -765,34 +765,6 @@ fn clearing_an_inline_style_removes_the_attribute() {
 }
 
 #[test]
-fn set_css_id_records_the_scope_on_every_element_of_the_batch() {
-    let (mut runtime, elements) = runtime();
-    runtime
-        .run_main_thread_script(
-            r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              const first = __CreateView(0);
-              const second = __CreateView(0);
-              __AppendElement(page, first);
-              __AppendElement(page, second);
-              __SetCSSId([first, second], 7, 'lazy-entry');
-              __SetCSSId([second], 0);
-            };
-            ",
-        )
-        .expect("main-thread script");
-
-    let elements = elements.tree();
-    let first = elements.get(2).expect("the first view is live");
-    assert_eq!(first.attribute("l-css-id"), Some("7"));
-    assert_eq!(first.attribute("l-e-name"), Some("lazy-entry"));
-    let second = elements.get(3).expect("the second view is live");
-    assert_eq!(second.attribute("l-css-id"), None);
-    assert_eq!(second.attribute("l-e-name"), Some("lazy-entry"));
-}
-
-#[test]
 fn event_registrations_live_in_the_realm_and_never_reach_the_document() {
     let (mut runtime, elements) = runtime();
     runtime
