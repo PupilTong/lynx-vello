@@ -507,6 +507,38 @@ impl<T> Document<T> {
         self.insert_before(parent, child, None);
     }
 
+    /// Exchanges the positions of two distinct attached elements, within one
+    /// parent or across parents.
+    pub fn swap_element(&mut self, a: NodeId, b: NodeId) {
+        assert_ne!(a, b, "swap_element: the operands must differ");
+        let position = |document: &Self, node: NodeId| {
+            let parent = document
+                .get(node)
+                .expect("swap_element: stale NodeId")
+                .parent_id()
+                .expect("swap_element: both operands must be attached");
+            let siblings = document
+                .get(parent)
+                .expect("a child's parent is live")
+                .child_ids();
+            let index = siblings
+                .iter()
+                .position(|&sibling| sibling == node)
+                .expect("a child appears in its parent's child list");
+            (parent, siblings.get(index + 1).copied())
+        };
+        let (parent_a, next_a) = position(self, a);
+        let (parent_b, next_b) = position(self, b);
+        if next_a == Some(b) {
+            self.insert_before(parent_a, b, Some(a));
+        } else if next_b == Some(a) {
+            self.insert_before(parent_b, a, Some(b));
+        } else {
+            self.insert_before(parent_b, a, Some(b));
+            self.insert_before(parent_a, b, next_a);
+        }
+    }
+
     pub fn remove_element(&mut self, child: NodeId) {
         let base = self.begin_reactions();
         self.unlink_from_parent(child);
@@ -870,6 +902,43 @@ pub(crate) mod tests {
         let _ = document.images_mut().remove_url("missing");
         assert!(document.needs_render());
         assert!(document.render());
+    }
+
+    #[test]
+    fn swap_element_exchanges_positions_within_and_across_parents() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let a = document.create_element("view", ());
+        let b = document.create_element("view", ());
+        let c = document.create_element("view", ());
+        let inner = document.create_element("view", ());
+        document.insert_before(page, a, None);
+        document.insert_before(page, b, None);
+        document.insert_before(page, c, None);
+        document.insert_before(c, inner, None);
+
+        document.swap_element(a, b);
+        assert_eq!(document.get(page).unwrap().child_ids(), [b, a, c]);
+        document.swap_element(a, b);
+        assert_eq!(document.get(page).unwrap().child_ids(), [a, b, c]);
+
+        document.swap_element(a, c);
+        assert_eq!(document.get(page).unwrap().child_ids(), [c, b, a]);
+
+        document.swap_element(b, inner);
+        assert_eq!(document.get(page).unwrap().child_ids(), [c, inner, a]);
+        assert_eq!(document.get(c).unwrap().child_ids(), [b]);
+    }
+
+    #[test]
+    #[should_panic(expected = "swap_element: both operands must be attached")]
+    fn swap_element_rejects_a_detached_operand() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let attached = document.create_element("view", ());
+        let detached = document.create_element("view", ());
+        document.insert_before(page, attached, None);
+        document.swap_element(attached, detached);
     }
 
     #[test]
