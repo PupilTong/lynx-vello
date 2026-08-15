@@ -10,9 +10,12 @@
 //! details; what stays outside is the codec contract in this module.
 //!
 //! **No codec ships here.** Decoding happens behind the [`Decoder`] trait, and
-//! the embedder implements that codec contract. The view-level `<image>`
-//! integration is not wired yet, so current consumers call [`decode_bytes`]
-//! directly. The reference implementations live in the
+//! the embedder implements that codec contract. Embedders can install decoded
+//! CSS URL pixels through [`LynxView::register_image_url`](crate::LynxView::register_image_url)
+//! without gaining access to the private document or paint registry. The
+//! view-level `<image>` element integration (natural-size installation,
+//! request arbitration, and events) is not wired yet, so current consumers
+//! call [`decode_bytes`] directly. The reference implementations live in the
 //! reference embedder, `bobcat-cli`'s `image_decoders` module:
 //!
 //! - **Apple** (macOS/iOS): `ImageIO`, claiming PNG, JPEG, WebP, GIF, HEIC and AVIF. The system
@@ -29,8 +32,8 @@
 //!
 //! This module deliberately never touches `dom`'s node types. It returns an
 //! [`ImageHeader`] and a [`DecodedImage`]; installing the natural size on a
-//! node and the pixels in a paint-side store is the engine loop's job, and
-//! ordering that against the style flush is the engine loop's problem.
+//! node remains the future element loop's job, while URL-keyed decoded pixels
+//! enter the private paint-side store through the narrow view capability.
 //!
 //! # What "hardware decoding" actually means here
 //!

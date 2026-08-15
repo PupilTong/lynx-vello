@@ -23,6 +23,7 @@ if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
 }
 for (const requiredExport of [
   'export class BobcatRenderer',
+  'export function finishBrowserScriptCheckpoint',
   'export function wasm_thread_entry_point',
 ]) {
   if (!glue.includes(requiredExport)) {
@@ -34,6 +35,9 @@ for (const requiredMethod of [
   'executeScript(',
   'loadStyleSheet(',
   'pollScript(',
+  'registerFonts(',
+  'scriptStarted(',
+  'waitForEngineEvent(',
 ]) {
   if (!glue.includes(requiredMethod)) {
     throw new Error(`generated renderer is missing ${requiredMethod}`)
@@ -71,6 +75,7 @@ for (const requiredDeclaration of [
   'pageConfig: PageConfig',
   'executeScript(url: string | URL)',
   'loadStyleSheet(url: string | URL)',
+  'registerFonts(data: ArrayBuffer | Uint8Array)',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
@@ -79,6 +84,10 @@ for (const requiredDeclaration of [
 
 const renderWorker = await readFile(
   path.join(packageDirectory, 'render-worker.js'),
+  'utf8',
+)
+const domWorker = await readFile(
+  path.join(packageDirectory, 'dom-worker.js'),
   'utf8',
 )
 const engineConstruction = renderWorker.indexOf('await BobcatRenderer.create(')
@@ -90,6 +99,21 @@ if (renderWorker.includes('initThreadPool')) {
 }
 if (!renderWorker.includes('await renderer.executeScript(registeredUrl)')) {
   throw new Error('Render Worker must route fetched URLs through executeScript')
+}
+if (renderWorker.includes('setTimeout(resolve, 1)')) {
+  throw new Error('Render Worker still polls script completion on a timer')
+}
+if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
+  throw new Error('Render Worker must await core engine events')
+}
+if (!domWorker.includes('finishBrowserScriptCheckpoint()')) {
+  throw new Error('DOM Worker must release browser host callbacks before closing')
+}
+if (!facade.includes('document.baseURI')) {
+  throw new Error('browser facade must resolve relative URLs against document.baseURI')
+}
+if (renderWorker.includes('self.location.href')) {
+  throw new Error('Render Worker must not resolve resource URLs against its own package URL')
 }
 if (
   !renderWorker.includes('await response.arrayBuffer()') ||
@@ -104,7 +128,6 @@ for (const forbiddenDomApi of [
   'createView',
   'dropElement',
   'flushElementTree',
-  'registerFonts',
 ]) {
   if (
     facade.includes(forbiddenDomApi) ||

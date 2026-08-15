@@ -37,6 +37,14 @@ export default defineConfig({
     // as a build-machine file URL.
     copy: [
       {
+        from: path.resolve(
+          packageDirectory,
+          '../hughie/tests/fixtures/Roboto-Regular.ttf',
+        ),
+        to: 'Roboto-Regular.ttf',
+        info: { minimized: true },
+      },
+      {
         from: path.join(packageDirectory, 'dom-worker.js'),
         to: 'bobcat-wasm/dom-worker.js',
         info: { minimized: true },

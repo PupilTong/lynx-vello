@@ -223,7 +223,20 @@ const DEMO_SCRIPT = `
 
 async function executeDemoScript(canvas: {
   executeScript(url: string | URL): Promise<void>;
+  registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>;
 }): Promise<void> {
+  const fontUrl = new URL('Roboto-Regular.ttf', document.baseURI);
+  const fontResponse = await fetch(fontUrl);
+  if (!fontResponse.ok) {
+    throw new Error(
+      `Could not load demo font: ${String(fontResponse.status)} ${fontResponse.statusText}`,
+    );
+  }
+  const registered = await canvas.registerFonts(await fontResponse.arrayBuffer());
+  if (registered === 0) {
+    throw new Error('The demo font container did not contain a usable font face');
+  }
+
   const script = new Blob([DEMO_SCRIPT], { type: 'text/javascript' });
   const url = URL.createObjectURL(script);
   try {

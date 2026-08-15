@@ -6,6 +6,7 @@ let initialized = false
 let executeQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
+const SCRIPT_START_TIMEOUT_MS = 10_000
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
@@ -73,7 +74,9 @@ async function initialize(message) {
 }
 
 function absoluteUrl(input) {
-  return new URL(input, self.location.href).href
+  // The UI facade resolves relative URLs against document.baseURI. A Worker
+  // cannot reconstruct that base and must reject accidental relative input.
+  return new URL(String(input)).href
 }
 
 async function fetchScript(url) {
@@ -131,8 +134,30 @@ async function readBoundedBytes(response, limit) {
 }
 
 async function waitForScriptCompletion() {
-  while (running && renderer !== undefined && !renderer.pollScript()) {
-    await new Promise((resolve) => setTimeout(resolve, 1))
+  let startupTimeout
+  let startupDeadline
+  try {
+    while (running && renderer !== undefined && !renderer.pollScript()) {
+      if (renderer.scriptStarted()) {
+        clearTimeout(startupTimeout)
+        // A running browser script has deliberately no execution deadline:
+        // browsers expose no synchronous interrupt for this injected VM.
+        await renderer.waitForEngineEvent()
+      } else {
+        startupDeadline ??= new Promise((_, reject) => {
+          startupTimeout = setTimeout(() => {
+            reject(
+              new Error(
+                `Bobcat script Worker did not start within ${String(SCRIPT_START_TIMEOUT_MS)} ms`,
+              ),
+            )
+          }, SCRIPT_START_TIMEOUT_MS)
+        })
+        await Promise.race([renderer.waitForEngineEvent(), startupDeadline])
+      }
+    }
+  } finally {
+    clearTimeout(startupTimeout)
   }
   if (!running || renderer === undefined) {
     throw new Error('Bobcat was disposed before the script completed')
@@ -158,6 +183,9 @@ async function dispatchRequest(message) {
     case 'loadStyleSheet':
       await renderer.loadStyleSheet(absoluteUrl(message.url))
       postResponse(request, true)
+      break
+    case 'registerFonts':
+      postResponse(request, true, renderer.registerFonts(message.bytes))
       break
     case 'resize':
       renderer.resize(

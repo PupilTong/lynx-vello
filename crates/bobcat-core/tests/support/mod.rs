@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
-    PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
-    ResourceMetadata, ResourcePath, ResourcePathLease, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
+    BufferedResourceRequest, CacheStatus, CancellationToken, HttpRequest, HttpResponse,
+    PrefetchReceipt, PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator,
+    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+    ResourceFuture, ResourceLocality, ResourceMetadata, ResourcePath, ResourcePathLease,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
 use bytes::Bytes;
 use url::Url;
@@ -184,6 +184,7 @@ pub struct FetcherDouble {
     pub fetches: AtomicUsize,
     pub prefetches: AtomicUsize,
     pub cancels: AtomicUsize,
+    pub observed_cancellation: Mutex<Option<CancellationToken>>,
 }
 
 impl FetcherDouble {
@@ -199,6 +200,7 @@ impl FetcherDouble {
             fetches: AtomicUsize::new(0),
             prefetches: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
+            observed_cancellation: Mutex::new(None),
         }
     }
 
@@ -232,6 +234,13 @@ impl FetcherDouble {
 
     pub fn resolve_count(&self) -> usize {
         self.resolves.load(Ordering::Relaxed)
+    }
+
+    pub fn request_cancellation(&self) -> Option<CancellationToken> {
+        self.observed_cancellation
+            .lock()
+            .expect("observed cancellation")
+            .clone()
     }
 
     fn metadata(&self, resource: ResolvedLocator, id: RequestId) -> ResourceMetadata {
@@ -278,6 +287,10 @@ impl ResourceFetcher for FetcherDouble {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
+        *self
+            .observed_cancellation
+            .lock()
+            .expect("observed cancellation") = Some(request.context.cancellation.clone());
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
         let hang = self.hang_resolve;

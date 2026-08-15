@@ -196,6 +196,7 @@ dependencies = [
  "bobcat-core",
  "fast_image_resize",
  "flashbulb",
+ "http",
  "image-webp",
  "libc",
  "lynx-template-decoder",

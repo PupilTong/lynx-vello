@@ -9,12 +9,13 @@ use std::sync::Arc;
 
 use bobcat_core::PageConfig;
 use bobcat_core::resource::{
-    BufferedResourceRequest, HttpRequest, HttpResponse, PrefetchReceipt, PrefetchRequest,
-    RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
+    PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
     ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse, ResourceSource,
-    ResourceStream, RetryAdvice,
+    ResourceStream, ResourceTiming, RetryAdvice,
 };
+use http::HeaderMap;
 use url::Url;
 
 use crate::CliError;
@@ -182,12 +183,12 @@ impl ResourceFetcher for ProgramResourceFetcher {
                 metadata: ResourceMetadata {
                     request_id,
                     resource,
-                    headers: Default::default(),
+                    headers: HeaderMap::default(),
                     content_length: Some(content_length),
                     media_type: Some(Arc::from("text/javascript; charset=utf-8")),
                     source: ResourceSource::MemoryCache,
-                    cache_status: Default::default(),
-                    timing: Default::default(),
+                    cache_status: CacheStatus::default(),
+                    timing: ResourceTiming::default(),
                 },
                 bytes: source.as_bytes().to_vec().into(),
             })

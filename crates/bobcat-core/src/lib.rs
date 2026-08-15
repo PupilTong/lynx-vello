@@ -35,8 +35,8 @@ pub mod input {
 #[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{
-    EngineError, EngineEvent, FrameRequester, FrameSize, NoWindow, Screenshot, ScriptRunError,
-    Window, WindowTarget,
+    EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, NoWindow, Screenshot,
+    ScriptRunError, Window, WindowTarget,
 };
 #[cfg(feature = "quickjs")]
 pub use quickjs::engine_factory as quickjs_engine_factory;

@@ -1,9 +1,13 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::{fmt, mem};
 
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
@@ -17,14 +21,15 @@ use bobcat_core::script::{
     ScriptErrorPhase, ScriptSourceLocation,
 };
 use bobcat_core::{
-    EngineEvent, FrameRequester, FrameSize, LynxView, PageConfig, Window, WindowTarget,
-    configure_wasm_workers,
+    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
+    WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
-use js_sys::{Array, Function, JsString, Object, Reflect};
+use js_sys::{Array, Function, JsString, Object, Promise, Reflect};
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 
 const MAX_RENDER_DIMENSION: f64 = 16_384.0;
@@ -45,6 +50,99 @@ impl FrameSignal {
 impl FrameRequester for FrameSignal {
     fn request_frame(&self) {
         self.requested.store(true, Ordering::Release);
+    }
+}
+
+/// Lost-wake-safe lifecycle signal shared between core-owned Workers and the
+/// Render Worker. The atomic is the durable edge; the waker list only turns it
+/// into an awaitable browser Promise.
+#[derive(Debug, Default)]
+struct EventSignal {
+    pending: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl EventSignal {
+    fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+
+    fn wait(self: &Arc<Self>) -> EventWait {
+        EventWait {
+            signal: Arc::clone(self),
+        }
+    }
+}
+
+impl EventRequester for EventSignal {
+    fn request_event(&self) {
+        self.pending.store(true, Ordering::Release);
+        let wakers = mem::take(
+            &mut *self
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| panic!("the browser event signal is poisoned: {error}")),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+}
+
+struct EventWait {
+    signal: Arc<EventSignal>,
+}
+
+impl Future for EventWait {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.signal.pending.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+
+        let mut wakers = self
+            .signal
+            .wakers
+            .lock()
+            .unwrap_or_else(|error| panic!("the browser event signal is poisoned: {error}"));
+        // EventRequester stores the atomic before taking this mutex. This
+        // second check closes the only lost-wake window between the first
+        // check and registering our waker.
+        if self.signal.pending.load(Ordering::Acquire) {
+            return Poll::Ready(());
+        }
+        if !wakers.iter().any(|waker| waker.will_wake(context.waker())) {
+            wakers.push(context.waker().clone());
+        }
+        Poll::Pending
+    }
+}
+
+#[derive(Debug)]
+struct BrowserScriptLifecycle {
+    started: AtomicBool,
+    checkpoint_done: AtomicBool,
+    events: Arc<EventSignal>,
+}
+
+impl BrowserScriptLifecycle {
+    fn new(events: Arc<EventSignal>) -> Self {
+        Self {
+            started: AtomicBool::new(false),
+            checkpoint_done: AtomicBool::new(false),
+            events,
+        }
+    }
+
+    fn mark_started(&self) {
+        self.started.store(true, Ordering::Release);
+        self.events.request_event();
+    }
+
+    fn mark_checkpoint_done(&self) {
+        self.checkpoint_done.store(true, Ordering::Release);
+        self.events.request_event();
     }
 }
 
@@ -281,19 +379,39 @@ impl ResourceFetcher for BrowserResources {
 }
 
 #[derive(Debug)]
-struct BrowserScriptEngineFactory;
+struct BrowserScriptEngineFactory {
+    lifecycle: Arc<BrowserScriptLifecycle>,
+}
 
 impl ScriptEngineFactory for BrowserScriptEngineFactory {
     fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError> {
-        Ok(Box::new(BrowserScriptEngine::default()))
+        let engine = BrowserScriptEngine {
+            dispatchers: Vec::new(),
+            lifecycle: Arc::clone(&self.lifecycle),
+        };
+        self.lifecycle.mark_started();
+        Ok(Box::new(engine))
     }
 }
 
 type HostDispatcher = Closure<dyn FnMut(Array) -> Array>;
 
-#[derive(Default)]
 struct BrowserScriptEngine {
     dispatchers: Vec<HostDispatcher>,
+    lifecycle: Arc<BrowserScriptLifecycle>,
+}
+
+struct BrowserScriptCompletion {
+    dispatchers: Vec<HostDispatcher>,
+    lifecycle: Arc<BrowserScriptLifecycle>,
+}
+
+thread_local! {
+    /// Host callbacks retained on the VM Worker until its completion task.
+    /// Keeping this Worker-local avoids making owner-thread JS closures Send.
+    static BROWSER_SCRIPT_COMPLETION: RefCell<Option<BrowserScriptCompletion>> = const {
+        RefCell::new(None)
+    };
 }
 
 impl fmt::Debug for BrowserScriptEngine {
@@ -303,6 +421,40 @@ impl fmt::Debug for BrowserScriptEngine {
             .field("host_function_count", &self.dispatchers.len())
             .finish_non_exhaustive()
     }
+}
+
+impl Drop for BrowserScriptEngine {
+    fn drop(&mut self) {
+        let completion = BrowserScriptCompletion {
+            dispatchers: mem::take(&mut self.dispatchers),
+            lifecycle: Arc::clone(&self.lifecycle),
+        };
+        BROWSER_SCRIPT_COMPLETION.with(|slot| {
+            assert!(
+                slot.borrow().is_none(),
+                "the browser VM Worker already has a pending completion"
+            );
+            *slot.borrow_mut() = Some(completion);
+        });
+    }
+}
+
+/// Release browser host callbacks immediately before the VM Worker reports
+/// `ThreadComplete` and closes. The Worker bootstrap calls this from a timer
+/// task, after the entry task's microtask checkpoint. `FinalizationRegistry`
+/// cleanup either runs before this task while callbacks are live, or is
+/// discarded by the close performed in the same task.
+#[wasm_bindgen(js_name = finishBrowserScriptCheckpoint)]
+pub fn finish_browser_script_checkpoint() {
+    BROWSER_SCRIPT_COMPLETION.with(|slot| {
+        let Some(completion) = slot.borrow_mut().take() else {
+            // This worker ran a non-script wasm_thread task (for example a
+            // Stylo worker), so it has no browser VM callbacks to release.
+            return;
+        };
+        drop(completion.dispatchers);
+        completion.lifecycle.mark_checkpoint_done();
+    });
 }
 
 impl ScriptEngine for BrowserScriptEngine {
@@ -458,6 +610,9 @@ pub struct BobcatRenderer {
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     frames: FrameSignal,
+    events: Arc<EventSignal>,
+    script_lifecycle: Arc<BrowserScriptLifecycle>,
+    script_finished: bool,
     disposed: bool,
 }
 
@@ -508,7 +663,12 @@ impl BobcatRenderer {
 
             let resources = Arc::new(BrowserResources::default());
             let resource_fetcher: Arc<dyn ResourceFetcher> = resources.clone();
-            let script_engine: Arc<dyn ScriptEngineFactory> = Arc::new(BrowserScriptEngineFactory);
+            let events = Arc::new(EventSignal::default());
+            let script_lifecycle = Arc::new(BrowserScriptLifecycle::new(Arc::clone(&events)));
+            let script_engine: Arc<dyn ScriptEngineFactory> =
+                Arc::new(BrowserScriptEngineFactory {
+                    lifecycle: Arc::clone(&script_lifecycle),
+                });
             let config = PageConfig {
                 default_display_linear,
                 default_overflow_visible,
@@ -518,6 +678,7 @@ impl BobcatRenderer {
                 config,
                 resource_fetcher,
                 script_engine,
+                events.clone(),
                 width,
                 height,
                 device_pixel_ratio,
@@ -536,6 +697,9 @@ impl BobcatRenderer {
                 resources,
                 canvas,
                 frames,
+                events,
+                script_lifecycle,
+                script_finished: false,
                 disposed: false,
             })
         }
@@ -559,7 +723,7 @@ impl BobcatRenderer {
     }
 
     /// Start the registered main-thread script through `LynxView`'s resource
-    /// boundary. The Render Worker polls completion independently from drawing.
+    /// boundary. The Render Worker awaits completion independently from drawing.
     #[wasm_bindgen(js_name = executeScript)]
     pub async fn execute_script(&mut self, url: String) -> Result<(), JsValue> {
         self.ensure_running()?;
@@ -578,19 +742,50 @@ impl BobcatRenderer {
         self.view.load_style_sheet(&url).map_err(js_error)
     }
 
+    /// Register every usable face in an embedder-provided font container.
+    #[wasm_bindgen(js_name = registerFonts)]
+    pub fn register_fonts(&mut self, bytes: Vec<u8>) -> Result<usize, JsValue> {
+        self.ensure_running()?;
+        self.view.register_fonts(bytes).map_err(js_error)
+    }
+
+    /// Internal Render-Worker seam used to apply the startup-only watchdog.
+    #[wasm_bindgen(js_name = scriptStarted)]
+    pub fn script_started(&self) -> Result<bool, JsValue> {
+        self.ensure_running()?;
+        Ok(self.script_lifecycle.started.load(Ordering::Acquire))
+    }
+
+    /// Await the next durable engine/lifecycle wakeup without timer polling.
+    #[wasm_bindgen(js_name = waitForEngineEvent)]
+    pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
+        self.ensure_running()?;
+        let wait = self.events.wait();
+        Ok(future_to_promise(async move {
+            wait.await;
+            Ok(JsValue::UNDEFINED)
+        }))
+    }
+
     /// Drain the script lifecycle channel independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
-        let mut finished = false;
+        if !self.events.take() {
+            return Ok(false);
+        }
         for event in self.view.pump() {
             match event {
-                EngineEvent::ScriptFinished(Ok(())) => finished = true,
+                EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
                 EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
                 _ => {}
             }
         }
-        Ok(finished)
+        Ok(self.script_finished
+            && self
+                .script_lifecycle
+                .checkpoint_done
+                .load(Ordering::Acquire))
     }
 
     /// Present a requested frame without exposing the engine or document to

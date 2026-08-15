@@ -2,6 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
+use bobcat_core::image::{AlphaType, DecodedImage, ImageFormat};
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::script::{
     HostCallback, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind, ScriptErrorPhase,
@@ -56,12 +57,35 @@ fn external_vm_factory_composes_into_the_opaque_view() {
     assert_factory_contract::<InjectedFactory>();
     let resources: Arc<dyn ResourceFetcher> = Arc::new(FetcherDouble::new(Vec::new()));
     let scripts: Arc<dyn ScriptEngineFactory> = Arc::new(InjectedFactory);
-    let view =
-        LynxView::<NoWindow>::new(PageConfig::default(), resources, scripts, 393.0, 727.0, 2.0)
-            .expect("opaque view");
+    let mut view = LynxView::<NoWindow>::new(
+        PageConfig::default(),
+        resources,
+        scripts,
+        Arc::new(|| {}),
+        393.0,
+        727.0,
+        2.0,
+    )
+    .expect("opaque view");
 
     assert_eq!(view.frame_size().width, 786);
     assert_eq!(view.frame_size().height, 1454);
+
+    assert_eq!(
+        view.register_fonts(Vec::from(b"not a font"))
+            .expect("available document"),
+        0
+    );
+    let image = DecodedImage::from_rgba8(
+        1,
+        1,
+        AlphaType::Straight,
+        vec![0, 0, 0, 255],
+        ImageFormat::Png,
+    )
+    .expect("decoded image");
+    view.register_image_url("app:///pixel.png", &image)
+        .expect("available document");
 }
 
 #[test]

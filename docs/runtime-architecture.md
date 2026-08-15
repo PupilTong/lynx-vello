@@ -7,7 +7,10 @@ capabilities and OS facts:
 
 - a `ResourceFetcher`;
 - a transferable `ScriptEngineFactory`;
+- an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
+- owned font bytes or already-decoded image pixels when those resources are
+  registered explicitly;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, clocks, and file/network IO.
 
@@ -50,7 +53,11 @@ For the native product, `bobcat-cli`:
 `execute_script` resolves and fetches UTF-8 JavaScript through the injected
 resource contract, then starts the engine-owned Lynx main thread. Script
 completion is reported by `LynxView::pump` as
-`EngineEvent::ScriptFinished`. `load_style_sheet(url)` reserves the matching
+`EngineEvent::ScriptFinished`; the engine enqueues that event before invoking
+the construction-time `EventRequester`, so the host can pump immediately
+without polling. `execute_script_with_cancellation` accepts a public resource
+`CancellationToken`; dropping the returned future cancels that same token and
+unblocks cooperative resolver/fetcher work. `load_style_sheet(url)` reserves the matching
 URL-shaped API but currently returns `LynxViewError::StyleSheetUnsupported`
 without fetching or mutating the document.
 
@@ -58,7 +65,8 @@ without fetching or mutating the document.
 
 The public facade is `LynxView<'window, W>`, with
 `OffscreenLynxView` as its windowless alias. It relays input, resize, redraw,
-frame-pump, target attachment, offscreen ticks, and capture. It exposes no
+frame-pump, target attachment, offscreen ticks, capture, cancellable script
+startup, owned-font registration, and decoded-image URL registration. It exposes no
 tree getter, document getter, renderer getter, script-realm handle, or
 decomposition method.
 
@@ -94,10 +102,13 @@ the fetched main-thread source, then runs
 `processData → renderPage → __FlushElementTree`.
 
 Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
-its checkpoints; the initial browser adapter does not expose a synchronous
-microtask drain, so a browser entry script must assign and run `renderPage`
-synchronously. A persistent browser JavaScript event loop is a later runtime
-feature.
+its checkpoints. The browser adapter cannot synchronously drain microtasks
+between application evaluation and Bobcat's boot evaluation, so the entry
+script must still assign and run `renderPage` synchronously. It does retain
+host dispatch closures through one final browser microtask checkpoint and
+waits for that checkpoint before reporting completion, allowing microtasks
+queued by a synchronous boot to finish safely. A persistent browser JavaScript
+event loop remains a later runtime feature.
 
 The default `quickjs` feature contributes only
 `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
@@ -122,16 +133,18 @@ private Document<()>
 ```
 
 The presenting side alone runs input routing, retained-scene production, GPU
-submission, presentation, and capture. The public `Window` and
-`FrameRequester` traits describe draw-target and scheduling capabilities;
-they do not expose the engine that consumes them.
+submission, presentation, and capture. The public `EventRequester`, `Window`,
+and `FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
+scheduling capabilities; they do not expose the engine that consumes them.
 
 Image codecs are represented by the host-implemented `image::Decoder`
 contract. Container sniffing, framing checks, decoded pixels, and sanitized
 metadata are public; the resource-driven loader and its caches are
 engine-owned and not publicly constructible. The `<image>` element has not yet
-wired that decoder into `LynxView`, so current reference decoders exercise the
-standalone decode contract.
+wired that decoder into automatic loading. Current reference decoders exercise
+the standalone decode contract, and an embedder may install completed pixels
+under a CSS URL through `LynxView::register_image_url`; the private engine owns
+the corresponding `ImageStore` update and retained-scene refresh.
 
 ## Tree hand-off and visibility
 
@@ -195,8 +208,9 @@ is exposed to JavaScript.
    and asks `FrameRequester` for a frame.
 5. The presenting side non-blockingly renders the retained document scene and
    submits it to its attached target.
-6. `pump` reports sanitized script completion; no realm or tree object crosses
-   the boundary.
+6. The task enqueues sanitized script completion and calls `EventRequester`;
+   the awakened host observes it through `pump`. No realm or tree object
+   crosses the boundary.
 
 ## Validation matrix
 

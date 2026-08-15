@@ -21,6 +21,20 @@ function errorMessage(error) {
   return asError(error).message
 }
 
+function documentUrl(input) {
+  return new URL(String(input), document.baseURI).href
+}
+
+function fontBytes(data) {
+  if (data instanceof ArrayBuffer) {
+    return new Uint8Array(data)
+  }
+  if (data instanceof Uint8Array) {
+    return new Uint8Array(data)
+  }
+  throw new TypeError('BobcatCanvas.registerFonts requires an ArrayBuffer or Uint8Array')
+}
+
 class RenderWorkerClient {
   #fatalError
   #fatalListeners = new Set()
@@ -281,15 +295,27 @@ export class BobcatCanvas {
    * Fetch and run the main-thread script at `url`.
    *
    * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
-   * VM initialization, or evaluation failure.
+   * VM initialization, or evaluation failure. Relative URLs are resolved
+   * against this document's base URL before they cross the Worker boundary.
+   * The browser VM has no execution interrupt: a non-terminating script leaves
+   * this Promise pending. Dispose this canvas and create a replacement to
+   * recover; native QuickJS embedders may provide different timeout policy.
    */
   async executeScript(url) {
-    await this.#request('executeScript', { url: String(url) })
+    await this.#request('executeScript', { url: documentUrl(url) })
   }
 
-  /** Reserved URL entry point; currently rejects as unsupported. */
+  /**
+   * Reserved URL entry point; currently rejects as unsupported. Relative URLs
+   * are resolved against this document's base URL.
+   */
   async loadStyleSheet(url) {
-    await this.#request('loadStyleSheet', { url: String(url) })
+    await this.#request('loadStyleSheet', { url: documentUrl(url) })
+  }
+
+  /** Register one or more font faces from an OpenType font container. */
+  async registerFonts(data) {
+    return await this.#request('registerFonts', { bytes: fontBytes(data) })
   }
 
   async resize(width, height, devicePixelRatio) {

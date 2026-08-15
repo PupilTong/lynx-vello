@@ -120,12 +120,15 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec
-  `Decoder`,
-  draw-target, and OS-input capabilities. `PageConfig` is supplied when the
-  view is constructed. Bundle retrieval, `.web.bundle` decoding, and config
-  parsing are embedder responsibilities; core accepts a script URL through
-  `LynxView::execute_script`, resolves/fetches its UTF-8 source through the
-  injected `ResourceFetcher`, and reports completion through `pump`.
+  `Decoder`, draw-target, OS-input, and lifecycle-wakeup capabilities, plus
+  narrow view-level font and decoded-image registration. `PageConfig` is
+  supplied when the view is constructed. Bundle retrieval, `.web.bundle`
+  decoding, and config parsing are embedder responsibilities; core accepts a
+  script URL through `LynxView::execute_script`, resolves/fetches its UTF-8
+  source through the injected `ResourceFetcher`, and reports completion
+  through `pump`. `execute_script_with_cancellation` accepts the resource
+  protocol's public `CancellationToken`; dropping its future cancels the same
+  token observed by pending resolution/fetch work.
   `load_style_sheet(url)` is reserved but currently returns a precise
   unsupported error without fetching. The document, tree, engine, and realm
   cannot be borrowed or decomposed from the facade.
@@ -160,8 +163,10 @@ useful signal for currently-compatible versions of those libraries.
   present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
-  they never start or steer the pipeline — the view schedules through the
-  public `Window` capability it borrows at attach time (`target`, `frames`).
+  they never start or steer the pipeline. Engine events are enqueued and then
+  wake the host's `pump` through the construction-time `EventRequester`;
+  drawing is scheduled through the public `Window` capability borrowed at
+  attach time (`target`, `frames`).
   The private `Engine` is generic over that trait; the draw target is a GAT,
   which is what lets a native surface borrow
   the embedder's window instead of requiring a `'static` refcounted handle.
@@ -178,9 +183,12 @@ useful signal for currently-compatible versions of those libraries.
   not public. **No codec ships in the engine**: the engine only designs the
   contract, and the embedder implements a `Decoder` (the reference embedder's
   `image_decoders::platform_decoder()`, or its own implementation over an
-  existing app image pipeline — that seam is the point). View-level decoder
-  wiring awaits the Lynx `<image>` element; current callers use the standalone
-  decode contract. The engine's own
+  existing app image pipeline — that seam is the point). Automatic
+  decode/loading for the Lynx `<image>` element remains unwired; current
+  callers may use the standalone decode contract and install finished pixels
+  under a CSS URL through `LynxView::register_image_url`. The private engine
+  writes that registration into its `ImageStore` and refreshes the retained
+  scene without exposing either object. The engine's own
   contract tests inject a PNG decoder double the same way
   (`src/image/loader_test_support.rs`'s `PngDouble`). A sniffed format the injected decoder does not claim is
   `ImageError::Unsupported`, distinct from `UnknownFormat`. **Static only.**
@@ -304,9 +312,10 @@ useful signal for currently-compatible versions of those libraries.
   pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
   headless mode); the engine owns the tree, commits, scheduling, and its
-  script and render threads, and calls back only through the `MacWindow` it
+  script and render threads. Frame callbacks go through the `MacWindow` it
   borrows at attach time (the winit window as the draw target,
-  `request_redraw`, `pre_present_notify`). The CLI starts the root with
+  `request_redraw`, `pre_present_notify`); lifecycle events wake the event
+  loop through the separately injected `EventRequester`. The CLI starts the root with
   `execute_script(url)` and observes `ScriptFinished` through `pump`. Headed
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
@@ -365,9 +374,13 @@ useful signal for currently-compatible versions of those libraries.
   URL-based script requests/results, resize/input/lifecycle) or a library's
   Worker bootstrap control plane; it is not a DOM/render reconciliation
   protocol. A shared atomic startup handshake gates readiness. URL requests
-  are serialized, and script completion is polled on a control-plane timer
-  independently of Worker rAF, so a hidden page may pause drawing without
-  stranding the `executeScript` Promise. One Wasm instance owns one view and
+  are serialized, and a lost-wake-safe `EventSignal` Promise wakes script
+  completion independently of Worker rAF, so a hidden page may pause drawing
+  without stranding the `executeScript` Promise. Startup has a ten-second
+  watchdog until the nested VM Worker begins; after that the browser VM
+  deliberately has no execution timeout or safe interrupt, so recovery from
+  an infinite script requires disposing and recreating the canvas/Worker.
+  One Wasm instance owns one view and
   its Stylo pool; every public `BobcatCanvas` gets a separate Render Worker and
   Wasm instance. The pool minimum is two threads so one managed Rayon worker
   remains after the synchronous entry-task Worker exits. The UI never

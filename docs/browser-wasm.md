@@ -27,8 +27,8 @@ Render Worker
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
-limited to view creation with `PageConfig`, `executeScript(url)`, the reserved
-`loadStyleSheet(url)`, resize, error observation, and disposal.
+limited to view creation with `PageConfig`, URL-based script and stylesheet
+requests, font registration, resize, error observation, and disposal.
 
 The Render Worker constructs `LynxView`, attaches the transferred canvas, and
 calls `configure_wasm_workers`. That core API configures the worker bootstrap
@@ -49,23 +49,35 @@ the opaque Rust view's `execute_script(url)`. The view resolves and reads the
 bytes through `ResourceFetcher` and performs strict UTF-8 validation; it never
 receives a bundle decoder.
 
-The browser `ScriptEngineFactory` is a transferable, zero-state capability.
-Core moves it into the Lynx main Worker and calls `create` there. Its
-owner-thread-bound `BrowserScriptEngine` uses the Worker's JavaScript global,
-installs Bobcat's primitive-only host callbacks, evaluates named source, and
-maps JavaScript failures into sanitized `ScriptError` values. Raw JS values,
-realm handles, numeric DOM ids, and host callbacks are not surfaced by the
-npm facade.
+The UI facade resolves relative script and stylesheet URLs against the
+embedding document's `document.baseURI` before crossing the Worker boundary.
+The Render Worker accepts only absolute URLs: resolving there against
+`self.location` would incorrectly use the npm package/Worker URL as the base.
 
-The current browser VM is a synchronous entry-script adapter. Browsers expose
-no synchronous microtask-drain API between app evaluation and Bobcat's boot
-evaluation, so Promise-deferred installation of `renderPage` is not supported
-yet. QuickJS retains its ordinary owned-job checkpoints.
+The browser `ScriptEngineFactory` is a transferable capability that retains
+only shared lifecycle atomics and the engine-event signal, never a realm,
+tree, or document. Core moves it into the Lynx main Worker and calls `create`
+there. Its owner-thread-bound `BrowserScriptEngine` uses the Worker's
+JavaScript global, installs Bobcat's primitive-only host callbacks, evaluates
+named source, and maps JavaScript failures into sanitized `ScriptError`
+values. Raw JS values, realm handles, numeric DOM ids, and host callbacks are
+not surfaced by the npm facade.
 
-There is no browser create/append/drop/flush/register-font/direct-stylesheet
-API. Element mutation is reachable only from the fetched main-thread script
-through the embedded Element PAPI. `loadStyleSheet(url)` currently forwards to
-core and rejects as unsupported without fetching.
+The current browser VM is a synchronous entry-script adapter. Promise
+microtasks queued by a synchronous `renderPage` boot are allowed one browser
+checkpoint before the VM Worker completes: host dispatch closures remain live
+through that checkpoint. Promise-deferred installation of `renderPage` is
+still not supported because browsers expose no synchronous microtask-drain API
+between app evaluation and Bobcat's boot evaluation. QuickJS retains its
+ordinary owned-job checkpoints.
+
+There is no browser create/append/drop/flush/direct-stylesheet API. Element
+mutation is reachable only from the fetched main-thread script through the
+embedded Element PAPI. `registerFonts(bytes)` is a narrow resource capability:
+it registers every usable face in an OpenType container through the opaque
+view and returns the number accepted, without exposing the document or text
+engine. `loadStyleSheet(url)` currently forwards to core and rejects as
+unsupported without fetching.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
 may execute suitable JavaScript by URL; bundle retrieval, decode, `PageConfig`
@@ -79,10 +91,16 @@ takes the document; the Render Worker only tries a non-blocking borrow. An
 open batch therefore cannot expose partial mutation or stall the last retained
 frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
 Worker to the Render Worker, whose animation loop calls `renderIfRequested`.
-Script completion is polled on a separate serialized control-plane timer, so
-hidden-page rAF suspension cannot strand an `executeScript` Promise. That
-Promise resolves after boot and rejects on fetch, VM initialization, or
-evaluation failure.
+A separate lost-wake-safe event signal wakes a Promise whenever core queues an
+engine event or the browser VM reaches its final microtask checkpoint. Script
+completion therefore does not poll and does not depend on rAF, so a hidden
+page cannot strand an `executeScript` Promise merely by suspending drawing.
+The startup handshake has a ten-second deadline until the nested VM Worker
+starts. After that point there is deliberately no execution deadline: the
+browser-injected VM has no safe interrupt API, so an infinite script leaves
+`executeScript` pending. Dispose the `BobcatCanvas` and create a replacement
+canvas/Worker to recover. This limitation is specific to the browser adapter;
+native QuickJS embedders may apply a different timeout or interrupt policy.
 
 The release Wasm build uses `panic=abort`. Script-visible node IDs and mutation
 preconditions are checked before entering the DOM, producing JavaScript errors

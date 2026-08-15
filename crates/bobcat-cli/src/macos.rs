@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 
 use bobcat_core::input::{DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
-    EngineEvent, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
+    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
     quickjs_engine_factory,
 };
 use winit::application::ApplicationHandler;
@@ -34,6 +34,7 @@ use crate::screenshot::save_screenshot;
 #[derive(Debug)]
 enum UserEvent {
     Command(Command),
+    Pump,
 }
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
@@ -77,6 +78,10 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         .map_err(|error| CliError::Window(error.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    let event_proxy = proxy.clone();
+    let event_requester: Arc<dyn EventRequester> = Arc::new(move || {
+        let _ = event_proxy.send_event(UserEvent::Pump);
+    });
     let console =
         Console::start(move |command| proxy.send_event(UserEvent::Command(command)).is_ok())
             .map_err(CliError::Console)?;
@@ -84,7 +89,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     console.prompt();
 
     let window = OnceLock::new();
-    let mut application = MacApplication::new(program, options, console, &window);
+    let mut application = MacApplication::new(program, options, console, event_requester, &window);
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -100,6 +105,7 @@ struct MacApplication<'window> {
     initial_width: f32,
     initial_height: f32,
     view: Option<LynxView<'window, MacWindow>>,
+    event_requester: Arc<dyn EventRequester>,
     window: &'window OnceLock<MacWindow>,
     console: Console,
     occluded: bool,
@@ -126,6 +132,7 @@ impl<'window> MacApplication<'window> {
         program: Program,
         options: &Options,
         console: Console,
+        event_requester: Arc<dyn EventRequester>,
         window: &'window OnceLock<MacWindow>,
     ) -> Self {
         Self {
@@ -134,6 +141,7 @@ impl<'window> MacApplication<'window> {
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             view: None,
+            event_requester,
             window,
             console,
             occluded: false,
@@ -176,6 +184,7 @@ impl<'window> MacApplication<'window> {
             program.config,
             program.resource_fetcher,
             quickjs_engine_factory(),
+            Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
@@ -446,6 +455,7 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
+            UserEvent::Pump => {}
         }
         self.pump(event_loop);
     }
