@@ -10,6 +10,11 @@ interface BobcatNative {
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
   setAttribute(nodeId: number, name: string, value: string): void;
+  removeAttribute(nodeId: number, name: string): void;
+  /** The attribute's value, or null when the element does not carry it. */
+  getAttribute(nodeId: number, name: string): string | null;
+  /** The element's local name, verbatim as it was created. */
+  tagName(nodeId: number): string;
   /** The parent's `NodeId`, or null for a detached element. */
   parentNode(nodeId: number): number | null;
   /** Reparenting insert; appends when `reference` is null. */
@@ -68,4 +73,35 @@ declare var __ReplaceElements: (
   oldChildren?: unknown,
 ) => undefined;
 declare var __SwapElement: (childA?: unknown, childB?: unknown) => undefined;
+declare var __SetClasses: (
+  element?: unknown,
+  classNames?: unknown,
+) => undefined;
+declare var __SetID: (element?: unknown, id?: unknown) => undefined;
+declare var __GetID: (element?: unknown) => string | null;
+declare var __GetTag: (element?: unknown) => string;
+declare var __GetElementUniqueID: (element?: unknown) => number;
+declare var __SetInlineStyles: (
+  element?: unknown,
+  value?: unknown,
+) => undefined;
+declare var __SetAttribute: (
+  element?: unknown,
+  name?: unknown,
+  value?: unknown,
+) => undefined;
+declare var __AddEvent: (
+  element?: unknown,
+  eventType?: unknown,
+  eventName?: unknown,
+  handler?: unknown,
+) => undefined;
+declare var __GetEvent: (
+  element?: unknown,
+  eventName?: unknown,
+  eventType?: unknown,
+) => unknown;
+declare var __GetEvents: (
+  element?: unknown,
+) => { type: string; name: string; function: unknown }[];
 declare var __FlushElementTree: () => undefined;

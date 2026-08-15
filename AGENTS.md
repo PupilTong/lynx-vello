@@ -188,23 +188,41 @@ useful signal for currently-compatible versions of those libraries.
   own.
   `MainThreadRuntime`
   installs the global `bobcat` object (one Rust host function per member —
-  `createPage`, `createElement`, `setAttribute`, `insertBefore`,
+  `createPage`, `createElement`, `setAttribute`, `removeAttribute`,
+  `getAttribute`, `tagName`, `insertBefore`,
   `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
   speaking DOM vocabulary over numeric `NodeId`s), evaluates the embedded
   Element PAPI runtime (`packages/bobcat-element`), then evaluates a
   `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
   `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
-  assigns the sixteen Element PAPI globals: every ReactLynx Snapshot
+  assigns the twenty-six Element PAPI globals: every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
-  `__CreateScrollView`, `__CreateRawText`, `__CreateList`) plus all six tree
+  `__CreateScrollView`, `__CreateRawText`, `__CreateList`), all six tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`,
   `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
-  `__SwapElement`) and `__FlushElementTree`;
+  `__SwapElement`), the property surface a Snapshot's `create`/`update`
+  functions write through (`__SetClasses`, `__SetID`, `__SetAttribute`,
+  `__SetInlineStyles`, `__AddEvent`) with the queries that read it back
+  (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
+  `__GetEvents`), and `__FlushElementTree`;
   unsupported globals remain precise `ReferenceError`s, including
   `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
-  callback storage/execution remains part of the unimplemented list surface.
+  callback storage/execution remains part of the unimplemented list surface,
+  and `__SetAttribute` throws for `update-list-info` — the one name that is a
+  list command rather than an attribute — instead of writing a stringified
+  command object onto the element.
+  `__AddEvent` is recorded but unconsumed, deliberately: it stores handlers in
+  the realm (web-core's two slots per event type and name, a background-thread
+  handler name and a main-thread worklet, cleared together by a null handler)
+  and nothing dispatches to them.
+  `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
+  scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
+  into scoped author rules there is nothing to validate an encoding against
+  (web-core writes `l-css-id`/`l-e-name` attributes; native Lynx keeps css_id
+  on the element). It lands with the ingestion side that reads it, together
+  with the parent-component css-id inheritance that feeds it.
   Creation calls return plain JavaScript handle objects minted by the PAPI
   runtime; each carries its DOM `NodeId` under a realm-local symbol and is
   registered with a `FinalizationRegistry` whose cleanup calls
@@ -350,9 +368,14 @@ useful signal for currently-compatible versions of those libraries.
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS
   realm before any bundle code; its Rstest suite runs the same bytes. It owns
-  the sixteen `__*` PAPI members and their web-core arities and the Lynx tag
-  vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
-  `list`). An element handle is a plain object carrying its DOM `NodeId`
+  the twenty-six `__*` PAPI members and their web-core arities and the Lynx
+  tag vocabulary (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
+  `list`). It also owns the value coercions web-core gets from the HTML DOM for
+  free: truthiness-not-null clearing for classes, ids, and inline styles,
+  `String(value)` for every attribute, and camelCase-to-kebab hyphenation of a
+  record-shaped inline style. Event registrations live here too, in a WeakMap
+  keyed by the handle, so a registration can never keep its element alive.
+  An element handle is a plain object carrying its DOM `NodeId`
   under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
   object per element for its whole life, so every PAPI return of an element
   yields the same object.

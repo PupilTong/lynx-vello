@@ -165,7 +165,13 @@ What that covers, and what it does not:
   `__ReplaceElement`, `__ReplaceElements`, `__SwapElement`),
   `__FlushElementTree`, and web-core's
   boot sequence. `__CreateList` creates the element but does not yet retain or
-  execute its JavaScript callbacks.
+  execute its JavaScript callbacks;
+- the property surface a Snapshot writes through — `__SetClasses`, `__SetID`,
+  `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
+  read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
+  `__GetEvents`). Classes, ids, attributes, and inline styles reach stylo
+  through the ordinary `Document` setters, so they cascade and lay out on the
+  next flush;
 
 **Still open**
 
@@ -173,8 +179,18 @@ What that covers, and what it does not:
   mounts those decoded rules; the seam is
   `Document::add_stylesheet`;
 - viewport-relative `rpx`/`ppx` units have no owner;
-- event registrations, CSS-scope (`__SetCSSId`) ingestion, and the remaining
-  PAPI members have no adapter;
+- event *dispatch*, the consuming half of the one member that only records:
+  `__AddEvent` stores handlers in the realm with nothing routing input to them
+  (no phase walk, no gesture arena);
+- CSS scoping in both halves. `__SetCSSId` is deliberately absent from the PAPI
+  surface rather than stubbed: it names the author-CSS scope an element
+  cascades in, so it belongs with the `StyleInfo` lowering above, which is what
+  would give an encoding (an attribute the scoped rules match, a field on the
+  element) something to be right or wrong about. Its parent-component css-id
+  inheritance lands at the same time;
+- the remaining PAPI members (`__AddClass`, `__AddInlineStyle`, the dataset,
+  component-info, config, template-part, animation, and selector-query
+  members) have no adapter;
 - a generic external `ScriptEngine` does not yet have a host-function
   installation protocol equivalent to the internal QuickJS main-thread
   adapter; it can use the engine-neutral `LynxView<R, E>` composition, but MTS
