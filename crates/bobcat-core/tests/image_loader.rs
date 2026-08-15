@@ -368,7 +368,7 @@ async fn a_cancelled_token_unsticks_a_hung_resolve() {
     });
 
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_millis(2000),
+        std::time::Duration::from_secs(2),
         loader.load("stuck.png", None, cancel),
     )
     .await

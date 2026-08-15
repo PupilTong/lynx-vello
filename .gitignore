@@ -11,14 +11,6 @@ dist-*/
 coverage/
 *.tsbuildinfo
 /crates/bobcat-wasm/pkg/
-/crates/bobcat-wasm/*.wasm
-/crates/bobcat-wasm/*.wasi-browser.js
-/crates/bobcat-wasm/*.wasi.cjs
-/crates/bobcat-wasm/*.wasi.d.cts
-/crates/bobcat-wasm/browser.js
-/crates/bobcat-wasm/index.d.ts
-/crates/bobcat-wasm/index.js
-/crates/bobcat-wasm/wasi-worker*.mjs
 
 crates/*/tests/artifacts/
 /.playwright-cli/

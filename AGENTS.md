@@ -313,24 +313,38 @@ useful signal for currently-compatible versions of those libraries.
   remains a precise `bobcat-core` QuickJS error, and non-empty decoded `StyleInfo`
   currently produces an explicit author-styles-omitted warning rather than silent
   claimed compatibility.
-- `crates/bobcat-wasm` — the pure-Rust browser embedder and npm facade. NAPI-RS
-  builds one `wasm32-wasip1-threads` module: real `std::thread`, atomic
-  wait/notify, and blocking synchronization run in emnapi's shared-memory
-  Workers, while the vendored wgpu WASI Node-API bridge gives Vello an HTML
-  Canvas WebGPU surface from the same artifact. The current NAPI
-  `parallelChecksum` is an end-to-end thread/atomic/join probe. The module
-  depends on `bobcat-core` with QuickJS disabled and owns an `Engine` on the
-  browser UI thread; it attaches the Canvas target asynchronously, relays CSS
-  viewport size and DPR, and presents the retained scene directly through
-  WebGPU. Its facade exposes the five implemented Element-PAPI mutations plus
-  stylesheet, font, resize, and frame methods. WebGPU objects are thread-affine
-  and remain on the browser UI thread — CPU workers must never own or use the
-  Device, Queue, Surface, Renderer, or Canvas handles. A future browser QuickJS
-  realm must likewise live permanently on one dedicated WASI thread because of
-  realm affinity, but its integration with the UI-thread engine is not yet
-  implemented. Until then this boundary does not claim `.web.bundle`
-  execution. Synchronous GPU capture is likewise absent because browser WebGPU
-  completion is Promise-driven.
+- `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
+  facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
+  thread is a JavaScript-only host coordinator: it creates one explicit
+  embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
+  Wasm or owns engine state. That Worker initializes the module, constructs
+  the complete `Engine`, permanently owns
+  every thread-affine GPU object — crates.io Vello 0.9/wgpu 29 Device, Queue,
+  Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
+  nested Lynx main/DOM Worker. The DOM Worker builds Stylo's ordinary private
+  Rayon pool with `wasm_thread` as its browser thread spawner, leaving the
+  vendored Stylo sources unchanged. `Engine` transfers that Worker one unique
+  main-thread document owner; Element-PAPI batches, Stylo/Rayon, layout, and
+  render hand-off then synchronize through Rust channels, mutexes, atomics,
+  and the shared Wasm memory exactly as in a native embedder. JavaScript
+  `postMessage` is only the browser host boundary (initial Canvas transfer,
+  direct-demo API requests/results, resize/input/lifecycle) or a library's
+  Worker bootstrap control plane; it is not a DOM/render reconciliation
+  protocol. A shared atomic startup handshake gates readiness, and DOM results
+  wake a Rust async response signal independently of Worker rAF, so a hidden
+  page may pause drawing without stranding control-plane Promises. The UI never
+  blocks, while Worker-side Rust may block wherever the native runtime does.
+  The browser target enables `parking_lot_core/nightly` so transitive
+  Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
+  non-atomic Wasm backend that panics on contention.
+  `wasm_thread` is pinned to the upstream
+  `spawn_from_worker` change because its crates.io release otherwise forwards
+  nested spawns to a parent protocol handler that an explicit embedder Worker
+  does not have; Chrome 135 supports the resulting nested module Worker.
+  The module depends on `bobcat-core` with QuickJS disabled: porting QuickJS to
+  `wasm32-unknown-unknown` remains unfinished, so this boundary does not claim
+  `.web.bundle` execution. Synchronous GPU capture is likewise absent because
+  browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the Element PAPI runtime, a single
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the QuickJS

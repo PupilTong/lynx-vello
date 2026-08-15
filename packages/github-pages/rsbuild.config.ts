@@ -1,4 +1,11 @@
 import { defineConfig } from '@rsbuild/core';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const packageDirectory = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../crates/bobcat-wasm',
+);
 
 function pagesBasePath(value: string | undefined): string {
   const segments = (value ?? '')
@@ -25,6 +32,31 @@ export default defineConfig({
   },
   output: {
     assetPrefix: basePath,
+    // wasm_thread imports the generated glue by its real URL. Keep this small
+    // package as native ESM instead of letting Rspack inline import.meta.url
+    // as a build-machine file URL.
+    copy: [
+      {
+        from: path.join(packageDirectory, 'dom-worker.js'),
+        to: 'bobcat-wasm/dom-worker.js',
+        info: { minimized: true },
+      },
+      {
+        from: path.join(packageDirectory, 'facade.js'),
+        to: 'bobcat-wasm/facade.js',
+        info: { minimized: true },
+      },
+      {
+        from: path.join(packageDirectory, 'render-worker.js'),
+        to: 'bobcat-wasm/render-worker.js',
+        info: { minimized: true },
+      },
+      {
+        from: path.join(packageDirectory, 'pkg'),
+        to: 'bobcat-wasm/pkg',
+        info: { minimized: true },
+      },
+    ],
   },
   html: {
     title: 'Bobcat · Rust on the web',

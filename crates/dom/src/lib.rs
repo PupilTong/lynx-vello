@@ -30,6 +30,9 @@ pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;
 pub use crate::style::engine::StylesheetOrigin;
+#[cfg(target_arch = "wasm32")]
+#[doc(hidden)]
+pub use crate::style::flush::install_style_thread_pool;
 pub use crate::tree::custom::CustomElement;
 pub use crate::tree::document::{Document, NodeId};
 #[doc(hidden)]

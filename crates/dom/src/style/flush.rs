@@ -18,6 +18,21 @@ use crate::style::damage::StyleDamage;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
 
+#[cfg(target_arch = "wasm32")]
+static EMBEDDER_STYLE_THREAD_POOL: std::sync::OnceLock<rayon::ThreadPool> =
+    std::sync::OnceLock::new();
+
+/// Installs the process-wide style traversal pool supplied by a Wasm embedder.
+///
+/// The pool must include the thread that owns and mutates the document, as
+/// Stylo reserves worker index zero for that caller. It must be installed
+/// before the first style flush. Subsequent calls return the supplied pool
+/// unchanged.
+#[cfg(target_arch = "wasm32")]
+pub fn install_style_thread_pool(pool: rayon::ThreadPool) -> Result<(), rayon::ThreadPool> {
+    EMBEDDER_STYLE_THREAD_POOL.set(pool)
+}
+
 /// The CSS Paint API is unsupported: no speculative painters are registered.
 #[derive(Debug)]
 struct NoPainters;
@@ -141,8 +156,19 @@ impl<T: Sync> Document<T> {
                 let _pool_guard = STYLE_POOL_GUARD
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let pool = STYLE_THREAD_POOL.pool();
-                Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
+                #[cfg(target_arch = "wasm32")]
+                if let Some(pool) = EMBEDDER_STYLE_THREAD_POOL.get() {
+                    Node::id(driver::traverse_dom(&traversal, token, Some(pool)))
+                } else {
+                    let pool = STYLE_THREAD_POOL.pool();
+                    Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let pool = STYLE_THREAD_POOL.pool();
+                    Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
+                }
             } else {
                 root
             }

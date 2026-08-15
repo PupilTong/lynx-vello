@@ -204,58 +204,15 @@ h2 {
   display: flex;
   gap: 24px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   min-height: 88px;
   padding: 18px 5px 0;
   color: #8d95a2;
 }
 
 #runtime-message {
-  margin-bottom: 7px;
+  margin: 0;
   font-size: 0.9rem;
-}
-
-.checksum-row {
-  display: flex;
-  gap: 9px;
-  align-items: center;
-  color: #656e7c;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.72rem;
-}
-
-.checksum-row .status-dot {
-  width: 6px;
-  height: 6px;
-}
-
-.checksum-row .status-value {
-  color: #9da5b1;
-  font-family: inherit;
-  font-size: inherit;
-}
-
-#checksum-button {
-  flex: none;
-  padding: 10px 15px;
-  border: 1px solid #343b48;
-  border-radius: 999px;
-  color: #f6f0e8;
-  background: #1c222c;
-  cursor: pointer;
-  transition: 150ms ease;
-  transition-property: color, border-color, background, transform;
-}
-
-#checksum-button:hover:not(:disabled) {
-  border-color: #c8f560;
-  color: #c8f560;
-  transform: translateY(-1px);
-}
-
-#checksum-button:disabled {
-  cursor: wait;
-  opacity: 0.45;
 }
 
 @media (max-width: 760px) {

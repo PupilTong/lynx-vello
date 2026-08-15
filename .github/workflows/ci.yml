@@ -90,6 +90,11 @@ jobs:
         with:
           shared-key: browser-wasm
 
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
       - name: Install pnpm
         uses: pnpm/action-setup@v6
 
@@ -102,8 +107,11 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build threaded Rust Wasm bindings
+      - name: Build threaded wasm-bindgen bindings
         run: pnpm --filter bobcat-wasm build
+
+      - name: Verify shared-memory and npm artifacts
+        run: pnpm --filter bobcat-wasm verify
 
       - name: Type-check GitHub Pages
         run: pnpm --filter github-pages test:type

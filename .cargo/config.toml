@@ -1,0 +1,29 @@
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C",
+    # Chrome 135 is the browser floor. Enable every LLVM/Rust WebAssembly
+    # feature from that floor that can improve generated code for this module;
+    # proposals that change the runtime model without helping this artifact
+    # (GC, exceptions, multi-memory) and post-135 features stay disabled.
+    "target-feature=+atomics,+bulk-memory,+bulk-memory-opt,+extended-const,+multivalue,+mutable-globals,+nontrapping-fptoint,+reference-types,+relaxed-simd,+sign-ext,+simd128,+tail-call",
+    "-C",
+    "link-arg=--shared-memory",
+    "-C",
+    "link-arg=--initial-memory=134217728",
+    "-C",
+    "link-arg=--max-memory=1073741824",
+    "-C",
+    "link-arg=--import-memory",
+    "-C",
+    "link-arg=--export=__heap_base",
+    "-C",
+    "link-arg=--export=__data_end",
+    "-C",
+    "link-arg=--export=__wasm_init_tls",
+    "-C",
+    "link-arg=--export=__tls_size",
+    "-C",
+    "link-arg=--export=__tls_align",
+    "-C",
+    "link-arg=--export=__tls_base",
+]

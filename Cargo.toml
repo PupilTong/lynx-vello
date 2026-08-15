@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/stylo", "vendor/vello", "vendor/wgpu"]
+exclude = ["vendor/stylo"]
 
 [workspace.package]
 version = "0.1.0"
@@ -40,17 +40,12 @@ image-webp = "0.2.4"
 fast_image_resize = "6.1"
 data-url = "0.3"
 markup5ever_rcdom = "0.39"
-napi = { version = "3.12.1", default-features = false, features = [
-    "dyn-symbols",
-    "napi4",
-] }
-napi-build = "2.4.1"
-napi-derive = "3.6.3"
 parley = { version = "0.11", default-features = false, features = [
     "std",
     "system",
     "complex-scripts",
 ] }
+parking_lot_core = { version = "0.9", features = ["nightly"] }
 pollster = "1"
 png = "0.18"
 rkyv = { version = "0.7", features = ["validation"] }
@@ -63,6 +58,16 @@ thiserror = "2"
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }
 tokio-util = "0.7"
 url = "2"
+js-sys = "0.3"
+rayon = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# wasm_thread 0.3.3 forwards Worker-originated spawns to its parent through a
+# private control message. Bobcat's explicit OffscreenCanvas embedder Worker
+# has no such parent handler, so use the upstream opt-in that directly creates
+# a nested module Worker (supported by the Chrome 135 browser floor).
+wasm_thread = { git = "https://github.com/utooland/wasm_thread", rev = "94438ff771ee0a6a55d79e49a655707970acb615", features = ["spawn_from_worker"] }
+web-sys = "0.3"
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
@@ -94,11 +99,7 @@ windows = { version = "0.62.2", features = [
 ] }
 ndk-sys = { version = "0.6.0", features = ["bitmap"] }
 libc = "0.2"
-vello = { path = "vendor/vello/vello", default-features = false }
-
-[patch.crates-io]
-naga = { path = "vendor/wgpu/naga" }
-wgpu = { path = "vendor/wgpu/wgpu" }
+vello = { version = "0.9", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

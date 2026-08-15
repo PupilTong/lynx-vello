@@ -2,8 +2,6 @@ import './styles.css';
 
 const RELOAD_MARKER = `bobcat-coi-reload:${new URL('.', document.baseURI).pathname}`;
 const RELOAD_PARAMETER = 'bobcat-coi-reload';
-const MAX_THREAD_COUNT = 3;
-const CHECKSUM_BYTES = 4 * 1024 * 1024;
 
 type IndicatorState = 'pending' | 'ok' | 'error';
 
@@ -15,12 +13,9 @@ interface Indicator {
 interface Shell {
   readonly canvas: HTMLCanvasElement;
   readonly canvasSize: HTMLElement;
-  readonly checksumButton: HTMLButtonElement;
-  readonly checksum: Indicator;
   readonly isolation: Indicator;
   readonly message: HTMLElement;
   readonly renderer: Indicator;
-  readonly threads: Indicator;
 }
 
 function requiredElement<T extends Element>(
@@ -55,8 +50,8 @@ function mountShell(): Shell {
         <div class="hero-copy">
           <h1>Rust, threaded<br>in the browser.</h1>
           <p class="lede">
-            One Bobcat WASI module drives a WebGPU Canvas and real Rust threads
-            with atomics, isolated in the browser by COOP/COEP.
+            A Worker-owned wasm-bindgen engine spans a nested DOM worker and
+            OffscreenCanvas WebGPU, isolated by COOP/COEP.
           </p>
         </div>
       </header>
@@ -71,11 +66,6 @@ function mountShell(): Shell {
           <span class="status-dot" aria-hidden="true"></span>
           <span class="status-label">Renderer</span>
           <strong class="status-value">Checking…</strong>
-        </article>
-        <article class="status-card" data-status="threads" data-state="pending">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span class="status-label">Rust workers</span>
-          <strong class="status-value">Waiting…</strong>
         </article>
       </section>
 
@@ -93,17 +83,9 @@ function mountShell(): Shell {
       </section>
 
       <footer class="runtime-footer">
-        <div>
-          <p id="runtime-message" role="status" aria-live="polite">
-            Preparing cross-origin isolation…
-          </p>
-          <div class="checksum-row" data-status="checksum" data-state="pending">
-            <span class="status-dot" aria-hidden="true"></span>
-            <span>Parallel checksum</span>
-            <strong class="status-value">Waiting…</strong>
-          </div>
-        </div>
-        <button id="checksum-button" type="button" disabled>Run again</button>
+        <p id="runtime-message" role="status" aria-live="polite">
+          Preparing cross-origin isolation…
+        </p>
       </footer>
     </main>
   `;
@@ -111,12 +93,9 @@ function mountShell(): Shell {
   return {
     canvas: requiredElement<HTMLCanvasElement>(root, '#bobcat-canvas'),
     canvasSize: requiredElement<HTMLElement>(root, '#canvas-size'),
-    checksumButton: requiredElement<HTMLButtonElement>(root, '#checksum-button'),
-    checksum: indicator(root, 'checksum'),
     isolation: indicator(root, 'isolation'),
     message: requiredElement<HTMLElement>(root, '#runtime-message'),
     renderer: indicator(root, 'renderer'),
-    threads: indicator(root, 'threads'),
   };
 }
 
@@ -233,19 +212,6 @@ async function ensureCrossOriginIsolation(shell: Shell): Promise<void> {
   await reloadForIsolation();
 }
 
-function preferredThreadCount(): number {
-  const available = Math.max(1, navigator.hardwareConcurrency || 1);
-  return Math.max(1, Math.min(MAX_THREAD_COUNT, available - 1 || 1));
-}
-
-function checksumInput(): Uint8Array {
-  const bytes = new Uint8Array(CHECKSUM_BYTES);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = (index * 31 + (index >>> 7)) & 0xff;
-  }
-  return bytes;
-}
-
 const DEMO_STYLES = `
   page {
     display: flex;
@@ -338,34 +304,34 @@ const DEMO_STYLES = `
   }
 `;
 
-function createDemoTree(canvas: {
-  addAuthorStylesheet(css: string): void;
-  appendElement(parent: number, child: number): number;
-  createPage(componentId: string, cssId: number): number;
-  createView(parentComponentUniqueId: number): number;
-  flushElementTree(): void;
-}): void {
-  canvas.addAuthorStylesheet(DEMO_STYLES);
+async function createDemoTree(canvas: {
+  addAuthorStylesheet(css: string): Promise<void>;
+  appendElement(parent: number, child: number): Promise<number>;
+  createPage(componentId: string, cssId: number): Promise<number>;
+  createView(parentComponentUniqueId: number): Promise<number>;
+  flushElementTree(): Promise<void>;
+}): Promise<void> {
+  await canvas.addAuthorStylesheet(DEMO_STYLES);
 
-  const page = canvas.createPage('github-pages-demo', 0);
-  const hero = canvas.createView(0);
-  const heroBar = canvas.createView(0);
-  const heroDot = canvas.createView(0);
-  const grid = canvas.createView(0);
-  const firstCard = canvas.createView(0);
-  const secondCard = canvas.createView(0);
-  const thirdCard = canvas.createView(0);
-  const footer = canvas.createView(0);
+  const page = await canvas.createPage('github-pages-demo', 0);
+  const hero = await canvas.createView(0);
+  const heroBar = await canvas.createView(0);
+  const heroDot = await canvas.createView(0);
+  const grid = await canvas.createView(0);
+  const firstCard = await canvas.createView(0);
+  const secondCard = await canvas.createView(0);
+  const thirdCard = await canvas.createView(0);
+  const footer = await canvas.createView(0);
 
-  canvas.appendElement(hero, heroBar);
-  canvas.appendElement(hero, heroDot);
-  canvas.appendElement(grid, firstCard);
-  canvas.appendElement(grid, secondCard);
-  canvas.appendElement(grid, thirdCard);
-  canvas.appendElement(page, hero);
-  canvas.appendElement(page, grid);
-  canvas.appendElement(page, footer);
-  canvas.flushElementTree();
+  await canvas.appendElement(hero, heroBar);
+  await canvas.appendElement(hero, heroDot);
+  await canvas.appendElement(grid, firstCard);
+  await canvas.appendElement(grid, secondCard);
+  await canvas.appendElement(grid, thirdCard);
+  await canvas.appendElement(page, hero);
+  await canvas.appendElement(page, grid);
+  await canvas.appendElement(page, footer);
+  await canvas.flushElementTree();
 }
 
 function canvasMetrics(canvas: HTMLCanvasElement): {
@@ -396,47 +362,18 @@ async function start(shell: Shell): Promise<void> {
   setIndicator(shell.renderer, 'Initializing…', 'pending');
 
   shell.message.textContent = 'Loading the threaded Rust module…';
-  const { BobcatCanvas, default: init, parallelChecksum } = await import(
-    'bobcat-wasm'
-  );
+  const bobcatModuleUrl = new URL(
+    'bobcat-wasm/facade.js',
+    document.baseURI,
+  ).href;
+  const { BobcatCanvas, default: init } = (await import(
+    /* webpackIgnore: true */ bobcatModuleUrl
+  )) as typeof import('bobcat-wasm');
 
   await init();
-  const requestedThreads = preferredThreadCount();
-  const input = checksumInput();
 
-  const runChecksum = async (): Promise<void> => {
-    shell.checksumButton.disabled = true;
-    setIndicator(shell.checksum, 'Running…', 'pending');
-
-    // Give the pending state one paint before NAPI-RS dispatches the AsyncTask.
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    try {
-      const startedAt = performance.now();
-      const report = await parallelChecksum(input, requestedThreads);
-      const elapsed = performance.now() - startedAt;
-      setIndicator(
-        shell.threads,
-        `${String(report.threads)} worker${report.threads === 1 ? '' : 's'}`,
-        'ok',
-      );
-      setIndicator(
-        shell.checksum,
-        `${String(report.checksum)} · ${elapsed.toFixed(1)} ms`,
-        'ok',
-      );
-    } catch (error) {
-      setIndicator(shell.threads, 'Failed', 'error');
-      setIndicator(shell.checksum, 'Failed', 'error');
-      shell.message.textContent = errorMessage(error);
-      throw error;
-    } finally {
-      shell.checksumButton.disabled = false;
-    }
-  };
-
-  await runChecksum();
-
-  // Let CSS establish the canvas size before allocating the WebGPU surface.
+  // Let CSS establish the canvas size before transferring it to the Render
+  // Worker and allocating the worker-owned WebGPU surface.
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   const initial = canvasMetrics(shell.canvas);
   const bobcat = await BobcatCanvas.create(
@@ -445,20 +382,12 @@ async function start(shell: Shell): Promise<void> {
     initial.height,
     initial.dpr,
   );
-  setIndicator(shell.renderer, 'WASI WebGPU', 'ok');
-  createDemoTree(bobcat);
-
-  const renderFrame = (): void => {
-    try {
-      bobcat.renderIfRequested();
-    } catch (error) {
-      setIndicator(shell.renderer, 'Failed', 'error');
-      shell.message.textContent = errorMessage(error);
-      return;
-    }
-    window.requestAnimationFrame(renderFrame);
+  bobcat.onerror = (error): void => {
+    setIndicator(shell.renderer, 'Failed', 'error');
+    shell.message.textContent = error.message;
   };
-  window.requestAnimationFrame(renderFrame);
+  setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
+  await createDemoTree(bobcat);
 
   let lastWidth = initial.width;
   let lastHeight = initial.height;
@@ -477,7 +406,12 @@ async function start(shell: Shell): Promise<void> {
         lastWidth = next.width;
         lastHeight = next.height;
         lastDpr = next.dpr;
-        bobcat.resize(next.width, next.height, next.dpr);
+        void bobcat
+          .resize(next.width, next.height, next.dpr)
+          .catch((error: unknown) => {
+            setIndicator(shell.renderer, 'Failed', 'error');
+            shell.message.textContent = errorMessage(error);
+          });
       }
       shell.canvasSize.textContent = `${String(next.width)} × ${String(next.height)} · ${next.dpr.toFixed(2)}×`;
     });
@@ -488,13 +422,8 @@ async function start(shell: Shell): Promise<void> {
   window.addEventListener('resize', resize, { passive: true });
   resize();
 
-  shell.checksumButton.addEventListener('click', () => {
-    void runChecksum().catch((error: unknown) => {
-      console.error(error);
-    });
-  });
   shell.message.textContent =
-    'Bobcat Canvas and the Rust thread probe are running in one WASI module.';
+    'Bobcat is running: the OffscreenCanvas embedder Worker owns Engine and a nested wasm_thread DOM worker.';
 }
 
 function errorMessage(error: unknown): string {
@@ -513,12 +442,6 @@ void start(shell).catch((error: unknown) => {
     setIndicator(shell.renderer, 'Unavailable', 'error');
   } else if (shell.renderer.root.dataset['state'] !== 'ok') {
     setIndicator(shell.renderer, 'Not started', 'error');
-  }
-  if (shell.threads.root.dataset['state'] !== 'ok') {
-    setIndicator(shell.threads, 'Not started', 'error');
-  }
-  if (shell.checksum.root.dataset['state'] !== 'ok') {
-    setIndicator(shell.checksum, 'Not run', 'error');
   }
   console.error(error);
 });

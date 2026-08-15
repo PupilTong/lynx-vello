@@ -19,8 +19,9 @@ main-thread script ──▶ element-papi.js (packages/bobcat-element, embedded)
                           ──▶ bobcat.* ──▶ dom::Document (Lynx page policy: bobcat_core::tree)
 
 bobcat-cli  ──▶ lynx-template-decoder + winit (macOS headed product only)
-bobcat-wasm ──▶ NAPI-RS + emnapi (`wasm32-wasip1-threads`, one shared-memory
-                                  module for Rust threads and Vello/WebGPU Canvas)
+bobcat-wasm ──▶ wasm-bindgen + wasm_thread + rayon
+                (`wasm32-unknown-unknown`, shared memory, an explicit
+                 OffscreenCanvas embedder Worker plus its nested DOM Worker)
 
 Each layer depends only on the layer directly below and re-exports it whole
 (`bobcat_core::dom`); `dom` re-exports the `vello`, `stylo`, `euclid`, and
@@ -198,14 +199,36 @@ embedder loop never blocks. The offscreen composition keeps the wall-free form: 
 thread, `Engine::run_script`, identical semantics — the golden screenshot
 suite drives it end to end.
 
-The browser embedder has one compiled `wasm32-wasip1-threads` module. Its
-NAPI/Emnapi async-work Workers can run blocking Rust CPU work and share the
-module's linear memory, but the browser UI thread exclusively owns the Canvas,
-wgpu Device/Queue/Surface, and Vello renderer. Those WebGPU objects are
-thread-affine and are never sent to a Rust worker. The browser build currently
-disables QuickJS and exposes direct Element-PAPI operations for the demo; a
-dedicated owner thread for a future QuickJS realm and `.web.bundle` execution
-remain unimplemented.
+The browser embedder compiles one `wasm32-unknown-unknown` module with shared
+memory, but does not instantiate it on the browser UI thread. The JavaScript
+facade creates an explicit embedder Worker and transfers an `OffscreenCanvas`;
+that Worker initializes Wasm, constructs the complete `Engine`, and permanently
+owns crates.io Vello 0.9/wgpu 29 plus every
+thread-affine Device/Queue/Surface/Renderer/Canvas handle. `Engine` then hands
+its unique main-thread document owner to a nested Worker created through
+`wasm_thread`.
+
+The nested Lynx main/DOM Worker owns Element-PAPI batches, mutations,
+Stylo/Rayon, and layout. It constructs an ordinary Stylo-compatible private
+Rayon pool, using `wasm_thread` to spawn the pool's remaining Workers while the
+DOM owner itself remains worker zero; the vendored Stylo source is unchanged.
+It and the presenting Worker synchronize exactly like
+the native composition: Rust channels carry work/results, the document moves
+through `SharedTree` under a mutex, and atomics carry frame requests. The
+presenting `Engine` never waits for an open batch; it retains the last target
+and retries after the main thread returns the document. There is no serialized
+DOM mirror and no state reconciliation protocol.
+
+The UI never blocks and owns no Rust state. `postMessage` is limited to the
+unavoidable browser host boundary (Canvas transfer and external API/events) and
+the libraries' Worker bootstrap control messages. The browser build currently
+disables QuickJS and exposes direct Element-PAPI requests for the demo; those
+requests enter the embedder Worker asynchronously and then cross to the DOM
+owner through the Rust channel. A shared atomic startup handshake gates the
+ready event, and a Rust response signal wakes the request pump independently of
+animation frames, so background rAF suspension affects drawing rather than DOM
+command completion. Porting the owner-thread QuickJS C runtime to
+`wasm32-unknown-unknown` and executing `.web.bundle` files remain unimplemented.
 
 ## Static dispatch and intentional dynamic boundaries
 

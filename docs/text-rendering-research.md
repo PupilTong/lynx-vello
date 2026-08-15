@@ -6,9 +6,10 @@ wgpu/Vello ecosystem offers, and what — if anything — we should adopt. Every
 claim about a crate here was read out of that crate's source at the version
 named, not out of its README.
 
-Dependency update, 2026-08-10: this workspace's vendored Vello integration now
-targets WGPU 30. Version-specific observations below remain useful, but the
-WGPU 29 compatibility notes for `vello_hybrid` 0.0.9 are historical.
+Dependency update, 2026-08-14: this workspace now uses the crates.io Vello 0.9
+release and WGPU 29; the former private Vello/WGPU forks have been removed.
+The WGPU 29 compatibility notes for `vello_hybrid` 0.0.9 therefore apply to
+the current workspace again.
 
 ## Short answer
 
@@ -209,11 +210,9 @@ than one would expect.
 
 **What lines up:**
 
-- `vello_hybrid` 0.0.9 (2026-05-30) depends on **wgpu 29.0.3**. That matched
-  `vello` 0.9 when this note was written, but no longer matches this
-  workspace's WGPU 30 integration. A migration now needs a WGPU 30-compatible
-  `vello_hybrid` release or the same fork migration before both renderers can
-  share an adapter, device, and queue.
+- `vello_hybrid` 0.0.9 (2026-05-30) depends on **wgpu 29.0.3**, matching this
+  workspace's Vello 0.9/WGPU 29 dependency family. It can therefore share a
+  single adapter, device, and queue without a cross-major WGPU migration.
 - Its `Scene` covers essentially everything DOM's private painter uses today:
   `fill_path`, `stroke_path`, `push_clip_layer`, `push_blend_layer`,
   `push_opacity_layer`, `push_mask_layer`, `push_filter_layer`,
@@ -274,8 +273,8 @@ maintained, ~1.08 M downloads.
 font-matching and shaping engines with two different sets of metrics, against a
 layout engine (`hughie`) whose closed leaf model is explicitly Parley. Text
 measured by one and painted by the other is a conformance bug generator. Its
-WGPU 30 dependency now aligns with this workspace, so version skew is no longer
-an independent blocker.
+WGPU 30 dependency no longer aligns with this workspace's WGPU 29, so version
+skew is once again an independent blocker as well.
 
 Worth knowing about; not worth adopting.
 
