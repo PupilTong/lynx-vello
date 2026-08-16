@@ -312,15 +312,10 @@ impl ResourceFetcher for FetcherDouble {
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
         let Some(sheet) = self.style_sheet.clone() else {
-            let bytes = Bytes::from(self.bytes.clone());
-            let metadata =
-                self.metadata(request.request.resource.clone(), request.request.context.id);
-            return Box::pin(async move {
-                Ok(StyleSheetResponse {
-                    metadata,
-                    payload: StyleSheetPayload::Text(bytes),
-                })
-            });
+            // No pre-parsed sheet registered, so behave like a host that only
+            // moves bytes: run the trait's own default, which is the code path
+            // a browser embedder takes in production.
+            return bobcat_core::resource::fetch_style_sheet_as_text(self, request);
         };
         let metadata = self.metadata(request.request.resource.clone(), request.request.context.id);
         Box::pin(async move {

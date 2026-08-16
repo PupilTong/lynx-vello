@@ -75,6 +75,13 @@ impl Selector {
     #[must_use]
     pub fn to_css_string(&self) -> String {
         let mut buf = String::new();
+        self.write_css_string(&mut buf);
+        buf
+    }
+
+    /// Appends [`Self::to_css_string`] to `buf`, without allocating a
+    /// temporary for each selector of a list.
+    pub fn write_css_string(&self, buf: &mut String) {
         for component in &self.components {
             match component.kind {
                 SimpleSelectorKind::Type | SimpleSelectorKind::UnknownText => {
@@ -116,7 +123,6 @@ impl Selector {
                 }
             }
         }
-        buf
     }
 }
 

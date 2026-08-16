@@ -129,7 +129,7 @@ fn selector_text(prelude: &RulePrelude) -> Option<String> {
         if index > 0 {
             text.push(',');
         }
-        text.push_str(&selector.to_css_string());
+        selector.write_css_string(&mut text);
     }
     Some(text)
 }
@@ -140,49 +140,18 @@ fn declarations(block: &DeclarationBlock) -> Vec<PreparsedDeclaration> {
         .iter()
         .filter(|declaration| !declaration.property.name().is_empty())
         .map(|declaration| {
-            // Value tokens carry their own delimiters, quotes and separating
-            // whitespace, so concatenation reproduces the authored value.
-            let value = declaration.value_text();
-            let (value, important) = split_important(&value);
+            // The wire leaves `is_important` false and appends the marker to
+            // the value instead, so the decoder splits it back out at token
+            // level; handing the raw value to a CSS value parser would drop
+            // the whole declaration.
+            let (value, important) = declaration.value_and_importance();
             PreparsedDeclaration {
                 property: declaration.property.name().to_owned(),
-                value: value.to_owned(),
-                important: important || declaration.is_important,
+                value,
+                important,
             }
         })
         .collect()
-}
-
-/// Splits a trailing `!important` off a declaration value.
-///
-/// `ParsedDeclaration::is_important` is dead on the wire: web-core's encoder
-/// hard-codes it to `false` and the CSS serializer that feeds it appends
-/// ` !important` to the *value* string instead, so the marker arrives as
-/// ordinary value tokens. Leaving it there would not merely lose the
-/// importance — the value would fail to parse and the whole declaration would
-/// be dropped, letting a later normal declaration win.
-///
-/// Only a genuine trailing marker is removed. A value ending in the bare ident
-/// `important`, or in a string that happens to contain the word, is untouched
-/// because the `!` is required.
-fn split_important(value: &str) -> (&str, bool) {
-    const MARKER: &str = "important";
-    let trimmed = value.trim_end();
-    let Some(head) = trimmed.len().checked_sub(MARKER.len()) else {
-        return (value, false);
-    };
-    let Some(head) = trimmed.get(..head) else {
-        return (value, false);
-    };
-    if !trimmed[head.len()..].eq_ignore_ascii_case(MARKER) {
-        return (value, false);
-    }
-    // `!` and the keyword may be separated, and the keyword is ASCII-case
-    // insensitive: `red ! IMPORTANT` is the same declaration as `red!important`.
-    let Some(head) = head.trim_end().strip_suffix('!') else {
-        return (value, false);
-    };
-    (head.trim_end(), true)
 }
 
 fn descriptor_text(block: &DeclarationBlock) -> String {
@@ -194,7 +163,10 @@ fn descriptor_text(block: &DeclarationBlock) -> String {
         }
         text.push_str(name);
         text.push(':');
-        text.push_str(&declaration.value_text());
+        // Descriptors are wire-faithful: `!important` is invalid in a
+        // font-face block, so leaving it in the text makes stylo reject that
+        // descriptor, which is what a browser does with the same input.
+        declaration.write_value_text(&mut text);
         text.push(';');
     }
     text
@@ -208,6 +180,21 @@ mod tests {
     };
 
     use super::*;
+
+    fn preparsed(property: &str, value: &str) -> PreparsedDeclaration {
+        PreparsedDeclaration {
+            property: property.to_owned(),
+            value: value.to_owned(),
+            important: false,
+        }
+    }
+
+    fn important(property: &str, value: &str) -> PreparsedDeclaration {
+        PreparsedDeclaration {
+            important: true,
+            ..preparsed(property, value)
+        }
+    }
 
     fn class_selector(name: &str) -> Selector {
         Selector {
@@ -275,7 +262,7 @@ mod tests {
             sheet.rules,
             vec![PreparsedRule::Style {
                 selectors: ".basic".to_owned(),
-                declarations: vec![PreparsedDeclaration::new("color", "red")],
+                declarations: vec![preparsed("color", "red")],
             }]
         );
     }
@@ -375,11 +362,11 @@ mod tests {
                 keyframes: vec![
                     PreparsedKeyframe {
                         selector: "from".to_owned(),
-                        declarations: vec![PreparsedDeclaration::new("opacity", "0")],
+                        declarations: vec![preparsed("opacity", "0")],
                     },
                     PreparsedKeyframe {
                         selector: "to".to_owned(),
-                        declarations: vec![PreparsedDeclaration::new("opacity", "1")],
+                        declarations: vec![preparsed("opacity", "1")],
                     },
                 ],
             }]
@@ -437,30 +424,12 @@ mod tests {
         assert_eq!(declarations[0].property, "color");
     }
 
-    /// The wire never sets `is_important`; the marker rides in the value.
-    #[test]
-    fn a_trailing_important_marker_becomes_the_importance_flag() {
-        let cases = [
-            ("red !important", "red", true),
-            ("red!important", "red", true),
-            ("red ! IMPORTANT", "red", true),
-            ("0 auto !important", "0 auto", true),
-            ("red", "red", false),
-            // A bare `important` keyword is a value, not a marker.
-            ("important", "important", false),
-            // Strings keep their quotes, so the word inside one cannot be
-            // mistaken for the marker.
-            ("\"x !important\"", "\"x !important\"", false),
-        ];
-        for (input, value, important) in cases {
-            assert_eq!(super::split_important(input), (value, important), "{input}");
-        }
-    }
-
+    /// The wire leaves `is_important` false and puts the marker in the value,
+    /// so lowering must recover it.
     #[test]
     fn an_important_declaration_survives_lowering() {
-        let mut important = declaration(CssPropertyId::Color, "");
-        important.value_tokens = vec![
+        let mut marked = declaration(CssPropertyId::Color, "");
+        marked.value_tokens = vec![
             ValueToken {
                 token_type: token_types::IDENT_TOKEN,
                 value: "red".to_owned(),
@@ -482,7 +451,7 @@ mod tests {
             0,
             StyleSheet {
                 imports: vec![],
-                rules: vec![style_rule(vec![class_selector("a")], vec![important])],
+                rules: vec![style_rule(vec![class_selector("a")], vec![marked])],
             },
         )]);
 
@@ -490,10 +459,7 @@ mod tests {
         else {
             panic!("a style rule");
         };
-        assert_eq!(
-            declarations[0],
-            PreparsedDeclaration::new("color", "red").important(true)
-        );
+        assert_eq!(declarations[0], important("color", "red"));
     }
 
     /// An importing fragment's own rules must land after the ones it imports,

@@ -59,6 +59,14 @@ globalThis.renderPage = function renderPage() {
 };
 "#;
 
+fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
+    PreparsedDeclaration {
+        property: property.to_owned(),
+        value: value.to_owned(),
+        important: false,
+    }
+}
+
 fn view(source: &[u8]) -> OffscreenLynxView {
     let resources: Arc<dyn ResourceFetcher> =
         Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
@@ -218,9 +226,9 @@ globalThis.renderPage = function renderPage() {
 ";
     let sized = |color: &str| {
         vec![
-            PreparsedDeclaration::new("width", "16px"),
-            PreparsedDeclaration::new("height", "12px"),
-            PreparsedDeclaration::new("background-color", color),
+            declaration("width", "16px"),
+            declaration("height", "12px"),
+            declaration("background-color", color),
         ]
     };
     let resources: Arc<dyn ResourceFetcher> = Arc::new(
@@ -288,18 +296,18 @@ async fn a_preparsed_author_sheet_paints() {
                     PreparsedRule::Style {
                         selectors: ".card".to_owned(),
                         declarations: vec![
-                            PreparsedDeclaration::new("width", "200px"),
-                            PreparsedDeclaration::new("height", "120px"),
-                            PreparsedDeclaration::new("background-color", "rebeccapurple"),
-                            PreparsedDeclaration::new("margin", "40px"),
+                            declaration("width", "200px"),
+                            declaration("height", "120px"),
+                            declaration("background-color", "rebeccapurple"),
+                            declaration("margin", "40px"),
                         ],
                     },
                     PreparsedRule::Style {
                         selectors: ".card > .badge".to_owned(),
                         declarations: vec![
-                            PreparsedDeclaration::new("width", "60px"),
-                            PreparsedDeclaration::new("height", "60px"),
-                            PreparsedDeclaration::new("background-color", "gold"),
+                            declaration("width", "60px"),
+                            declaration("height", "60px"),
+                            declaration("background-color", "gold"),
                         ],
                     },
                 ],

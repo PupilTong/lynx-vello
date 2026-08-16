@@ -26,6 +26,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let event_requester: std::sync::Arc<dyn EventRequester> = std::sync::Arc::new(move || {
         let _ = event_sender.send(HostEvent::Pump);
     });
+    let style_sheet_url = program.resource_fetcher.style_sheet_url().cloned();
     let mut view = OffscreenLynxView::new(
         program.config,
         program.resource_fetcher,
@@ -38,7 +39,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     view.attach_offscreen()?;
     // The bundle's author CSS mounts before the script builds its tree, so
     // the first commit is already styled.
-    if let Some(url) = &program.style_sheet_url {
+    if let Some(url) = style_sheet_url.as_ref() {
         pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
             CliError::LoadStyleSheet {
                 input: program.input.clone(),

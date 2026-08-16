@@ -32,12 +32,6 @@ pub struct PreparsedStyleSheet {
 }
 
 impl PreparsedStyleSheet {
-    /// Creates an empty sheet.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Whether this sheet would contribute nothing to the cascade.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -97,34 +91,6 @@ pub struct PreparsedDeclaration {
     pub important: bool,
 }
 
-impl PreparsedDeclaration {
-    /// Creates a declaration without `!important`.
-    #[must_use]
-    pub fn new(property: impl Into<String>, value: impl Into<String>) -> Self {
-        Self {
-            property: property.into(),
-            value: value.into(),
-            important: false,
-        }
-    }
-
-    /// Returns this declaration marked `!important`.
-    #[must_use]
-    pub fn important(mut self, important: bool) -> Self {
-        self.important = important;
-        self
-    }
-}
-
-/// An author stylesheet in whichever form reached the engine.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum StyleSheetSource<'a> {
-    /// A stylesheet the host parsed before the engine saw it.
-    Preparsed(&'a PreparsedStyleSheet),
-    /// CSS source text.
-    Text(&'a str),
-}
-
 fn declarations(source: &[PreparsedDeclaration]) -> impl Iterator<Item = CssDeclaration<'_>> {
     source.iter().map(|declaration| CssDeclaration {
         property: declaration.property.as_str(),
@@ -168,7 +134,13 @@ pub(crate) fn add_preparsed_style_sheet(document: &mut LynxDocument, sheet: &Pre
 }
 
 /// Mounts an author stylesheet supplied as CSS text.
+///
+/// The CSS Syntax §3.2 decode step is applied here rather than at the fetch
+/// boundary, so every caller gets it: a leading BOM is decoding metadata, and
+/// left in place U+FEFF is an ident code point that fuses with the first
+/// selector, costing the sheet its first rule.
 pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
+    let css = css.strip_prefix('\u{feff}').unwrap_or(css);
     document.add_stylesheet(css, StylesheetOrigin::Author);
 }
 
@@ -179,6 +151,21 @@ mod tests {
 
     fn document() -> LynxDocument {
         new_document(Viewport::new(393.0, 727.0), PageConfig::default())
+    }
+
+    fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
+        PreparsedDeclaration {
+            property: property.to_owned(),
+            value: value.to_owned(),
+            important: false,
+        }
+    }
+
+    fn important(property: &str, value: &str) -> PreparsedDeclaration {
+        PreparsedDeclaration {
+            important: true,
+            ..declaration(property, value)
+        }
     }
 
     fn style(selectors: &str, declarations: Vec<PreparsedDeclaration>) -> PreparsedRule {
@@ -197,8 +184,8 @@ mod tests {
                 rules: vec![style(
                     ".basic",
                     vec![
-                        PreparsedDeclaration::new("width", "100px"),
-                        PreparsedDeclaration::new("height", "100px"),
+                        declaration("width", "100px"),
+                        declaration("height", "100px"),
                     ],
                 )],
             },
@@ -224,7 +211,7 @@ mod tests {
             &PreparsedStyleSheet {
                 rules: vec![style(
                     "view[data-status=\"complete\"]:nth-child(2n)",
-                    vec![PreparsedDeclaration::new("width", "42px")],
+                    vec![declaration("width", "42px")],
                 )],
             },
         );
@@ -254,11 +241,8 @@ mod tests {
             &mut document,
             &PreparsedStyleSheet {
                 rules: vec![
-                    style(
-                        ".a",
-                        vec![PreparsedDeclaration::new("width", "10px").important(true)],
-                    ),
-                    style(".a", vec![PreparsedDeclaration::new("width", "20px")]),
+                    style(".a", vec![important("width", "10px")]),
+                    style(".a", vec![declaration("width", "20px")]),
                 ],
             },
         );
@@ -276,21 +260,18 @@ mod tests {
     }
 
     #[test]
-    fn an_unparsable_rule_does_not_take_its_neighbours_down() {
+    fn an_unparsable_rule_does_not_reject_the_other_rules() {
         let mut document = document();
         add_preparsed_style_sheet(
             &mut document,
             &PreparsedStyleSheet {
                 rules: vec![
-                    style(
-                        "!!! not a selector",
-                        vec![PreparsedDeclaration::new("width", "1px")],
-                    ),
+                    style("!!! not a selector", vec![declaration("width", "1px")]),
                     style(
                         ".a",
                         vec![
-                            PreparsedDeclaration::new("width", "not-a-length"),
-                            PreparsedDeclaration::new("height", "33px"),
+                            declaration("width", "not-a-length"),
+                            declaration("height", "33px"),
                         ],
                     ),
                 ],
@@ -313,8 +294,8 @@ mod tests {
             &mut document,
             &PreparsedStyleSheet {
                 rules: vec![
-                    style(".wide", vec![PreparsedDeclaration::new("width", "300px")]),
-                    style(".narrow", vec![PreparsedDeclaration::new("width", "30px")]),
+                    style(".wide", vec![declaration("width", "300px")]),
+                    style(".narrow", vec![declaration("width", "30px")]),
                 ],
             },
         );
@@ -339,10 +320,7 @@ mod tests {
         add_preparsed_style_sheet(
             &mut document,
             &PreparsedStyleSheet {
-                rules: vec![style(
-                    ".a",
-                    vec![PreparsedDeclaration::new("width", "10px")],
-                )],
+                rules: vec![style(".a", vec![declaration("width", "10px")])],
             },
         );
         let page = document.document_element().id();
@@ -362,10 +340,7 @@ mod tests {
         add_preparsed_style_sheet(
             &mut document,
             &PreparsedStyleSheet {
-                rules: vec![style(
-                    "#tall",
-                    vec![PreparsedDeclaration::new("height", "77px")],
-                )],
+                rules: vec![style("#tall", vec![declaration("height", "77px")])],
             },
         );
         let page = document.document_element().id();
@@ -383,16 +358,28 @@ mod tests {
         assert!((document.rounded_layout(view).unwrap().size.height - 77.0).abs() < f32::EPSILON);
     }
 
+    /// A BOM is decoding metadata, not the first character of a selector.
+    #[test]
+    fn a_byte_order_mark_does_not_cost_the_sheet_its_first_rule() {
+        let mut document = document();
+        add_style_sheet_text(&mut document, "\u{feff}.a { width: 44px; }");
+        let page = document.document_element().id();
+        let view = document.create_element("view", ());
+        document.insert_before(page, view, None);
+        document.set_classes(view, "a");
+        document.layout();
+
+        let layout = document.rounded_layout(view).expect("laid out");
+        assert!((layout.size.width - 44.0).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn author_text_and_preparsed_sheets_cascade_in_mount_order() {
         let mut document = document();
         add_preparsed_style_sheet(
             &mut document,
             &PreparsedStyleSheet {
-                rules: vec![style(
-                    ".a",
-                    vec![PreparsedDeclaration::new("width", "10px")],
-                )],
+                rules: vec![style(".a", vec![declaration("width", "10px")])],
             },
         );
         add_style_sheet_text(&mut document, ".a { width: 20px; }");
@@ -422,7 +409,7 @@ mod tests {
                     PreparsedRule::FontFace {
                         descriptors: "font-family:Custom;src:url(custom.ttf);".to_owned(),
                     },
-                    style(".a", vec![PreparsedDeclaration::new("width", "21px")]),
+                    style(".a", vec![declaration("width", "21px")]),
                 ],
             },
         );
@@ -436,8 +423,8 @@ mod tests {
         assert!((layout.size.width - 21.0).abs() < f32::EPSILON);
     }
 
-    /// A descriptor block that parses to nothing must not take the rule, or
-    /// the sheet, down with it.
+    /// A descriptor block that parses to nothing must not cause the rule, or
+    /// the whole sheet, to be rejected.
     #[test]
     fn an_empty_font_face_block_is_harmless() {
         let mut document = document();
@@ -448,7 +435,7 @@ mod tests {
                     PreparsedRule::FontFace {
                         descriptors: String::new(),
                     },
-                    style(".a", vec![PreparsedDeclaration::new("width", "22px")]),
+                    style(".a", vec![declaration("width", "22px")]),
                 ],
             },
         );
@@ -477,24 +464,15 @@ mod tests {
                         keyframes: vec![
                             PreparsedKeyframe {
                                 selector: "from".to_owned(),
-                                declarations: vec![PreparsedDeclaration::new(
-                                    "transform",
-                                    "rotate(0deg)",
-                                )],
+                                declarations: vec![declaration("transform", "rotate(0deg)")],
                             },
                             PreparsedKeyframe {
                                 selector: "to".to_owned(),
-                                declarations: vec![PreparsedDeclaration::new(
-                                    "transform",
-                                    "rotate(360deg)",
-                                )],
+                                declarations: vec![declaration("transform", "rotate(360deg)")],
                             },
                         ],
                     },
-                    style(
-                        ".spinner",
-                        vec![PreparsedDeclaration::new("animation-name", "spin")],
-                    ),
+                    style(".spinner", vec![declaration("animation-name", "spin")]),
                 ],
             },
         );

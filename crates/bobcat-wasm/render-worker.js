@@ -80,28 +80,34 @@ function absoluteUrl(input) {
   return new URL(String(input)).href
 }
 
-async function fetchScript(url) {
+// The Render Worker applies the browser's URL, fetch, CORS, cache and
+// credentials policy, then hands raw bytes to the engine's resource registry.
+async function fetchAndRegister(kind, url, limit, register) {
   const response = await fetch(absoluteUrl(url))
   if (!response.ok) {
     throw new Error(
-      `Could not fetch script ${response.url || url}: ${String(response.status)} ${response.statusText}`,
+      `Could not fetch ${kind} ${response.url || url}: ${String(response.status)} ${response.statusText}`,
     )
   }
-  const bytes = await readBoundedBytes(response, MAX_SCRIPT_BYTES)
-  return renderer.registerScript(response.url || absoluteUrl(url), bytes)
+  const bytes = await readBoundedBytes(response, limit)
+  return register(response.url || absoluteUrl(url), bytes)
+}
+
+function fetchScript(url) {
+  return fetchAndRegister('script', url, MAX_SCRIPT_BYTES, (registered, bytes) =>
+    renderer.registerScript(registered, bytes),
+  )
 }
 
 // A browser host never decodes a `.web.bundle`, so the bytes it registers are
 // CSS text; core takes the text arm of the stylesheet contract.
-async function fetchStyleSheet(url) {
-  const response = await fetch(absoluteUrl(url))
-  if (!response.ok) {
-    throw new Error(
-      `Could not fetch stylesheet ${response.url || url}: ${String(response.status)} ${response.statusText}`,
-    )
-  }
-  const bytes = await readBoundedBytes(response, MAX_STYLE_SHEET_BYTES)
-  return renderer.registerStyleSheet(response.url || absoluteUrl(url), bytes)
+function fetchStyleSheet(url) {
+  return fetchAndRegister(
+    'stylesheet',
+    url,
+    MAX_STYLE_SHEET_BYTES,
+    (registered, bytes) => renderer.registerStyleSheet(registered, bytes),
+  )
 }
 
 async function readBoundedBytes(response, limit) {
@@ -129,7 +135,7 @@ async function readBoundedBytes(response, limit) {
       }
       length += value.byteLength
       if (length > limit) {
-        await reader.cancel('Bobcat script response exceeded its byte limit')
+        await reader.cancel('Bobcat response exceeded its byte limit')
         throw new Error(`Response exceeds the ${String(limit)} byte limit`)
       }
       chunks.push(value)
@@ -242,7 +248,13 @@ self.addEventListener('message', (event) => {
         postResponse(message.request, false, error)
       }
     }
-    if (message.operation === 'executeScript') {
+    // `executeScript` and `loadStyleSheet` both reach engine state the script
+    // thread can be holding, and stylesheets cascade in load order, so they
+    // share one queue rather than dispatching as their fetches complete.
+    if (
+      message.operation === 'executeScript' ||
+      message.operation === 'loadStyleSheet'
+    ) {
       executeQueue = executeQueue.then(dispatch)
     } else {
       void dispatch()

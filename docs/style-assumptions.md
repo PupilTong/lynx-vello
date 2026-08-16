@@ -212,7 +212,10 @@ and §D.16 with what the wire format actually permits.)*
     Routing values through `parse_one_declaration_into` also keeps stylo's
     own property gating on. Declaration *values* are never re-serialized:
     the wire's value tokens are a lossless partition of the authored text,
-    so concatenating them reproduces it byte for byte.
+    so concatenating them reproduces it byte for byte — except that a trailing
+    `!important` must first be split back out at token level, because the wire's
+    `is_important` flag is never set and the marker travels inside the value
+    (see [web-binary-template.md](web-binary-template.md)).
 
 21. **Fragments flatten in reverse-topological order; per-component scoping
     is not implemented.** All `css_id` fragments mount as one author sheet,

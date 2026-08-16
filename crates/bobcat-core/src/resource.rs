@@ -42,13 +42,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
         &self,
         request: BufferedResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
-        Box::pin(async move {
-            let response = self.fetch_resource(request).await?;
-            Ok(StyleSheetResponse {
-                metadata: response.metadata,
-                payload: StyleSheetPayload::Text(response.bytes),
-            })
-        })
+        fetch_style_sheet_as_text(self, request)
     }
 
     fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream>;
@@ -60,6 +54,28 @@ pub trait ResourceFetcher: Send + Sync + 'static {
     fn prefetch(&self, request: PrefetchRequest) -> ResourceFuture<'_, PrefetchReceipt>;
 
     fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()>;
+}
+
+/// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as
+/// [`StyleSheetPayload::Text`] — the body of the default
+/// [`ResourceFetcher::fetch_style_sheet`].
+///
+/// An override that answers only *some* requests pre-parsed calls this for the
+/// rest, rather than re-implementing the byte path.
+pub fn fetch_style_sheet_as_text<F>(
+    fetcher: &F,
+    request: BufferedResourceRequest,
+) -> ResourceFuture<'_, StyleSheetResponse>
+where
+    F: ResourceFetcher + ?Sized,
+{
+    Box::pin(async move {
+        let response = fetcher.fetch_resource(request).await?;
+        Ok(StyleSheetResponse {
+            metadata: response.metadata,
+            payload: StyleSheetPayload::Text(response.bytes),
+        })
+    })
 }
 
 /// A caller-generated identifier unique within one fetcher instance.

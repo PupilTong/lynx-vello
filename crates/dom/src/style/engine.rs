@@ -11,7 +11,7 @@ use stylo::custom_properties::AttrTaint;
 use stylo::device::Device;
 use stylo::font_face::parse_font_face_block;
 use stylo::media_queries::MediaList;
-use stylo::parser::ParserContext;
+use stylo::parser::{Parse, ParserContext};
 use stylo::properties::declaration_block::parse_one_declaration_into;
 use stylo::properties::{
     Importance, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
@@ -242,9 +242,17 @@ impl StyleEngine {
         name: &str,
         keyframes: impl IntoIterator<Item = CssKeyframe<'d>>,
     ) -> Option<CssRule> {
-        if name.is_empty() {
-            return None;
-        }
+        // `<keyframes-name>` is an ident *or* a string, and a producer that
+        // preserves the authored prelude hands over the quotes with it. Parsing
+        // resolves both spellings to the same atom, which is what
+        // `animation-name` is matched against; taking the text as an ident
+        // would leave `"spin"` unable to match `spin`, and would make the names
+        // that only exist in string form (`"none"`) unreachable.
+        let context = self.parser_context(CssRuleType::Keyframes);
+        let mut input = ParserInput::new(name);
+        let name = Parser::new(&mut input)
+            .parse_entirely(|input| KeyframesName::parse(&context, input))
+            .ok()?;
         let keyframes = keyframes
             .into_iter()
             .filter_map(|keyframe| {
@@ -261,7 +269,7 @@ impl StyleEngine {
             .collect();
         Some(CssRule::new(
             StyloCssRule::Keyframes(Arc::new(self.lock.wrap(KeyframesRule {
-                name: KeyframesName::from_ident(name),
+                name,
                 keyframes,
                 vendor_prefix: None,
                 source_location: SourceLocation { line: 0, column: 0 },
@@ -564,13 +572,39 @@ mod tests {
         assert_eq!(keyframes.read_with(&guard).keyframes.len(), 1);
     }
 
+    /// `<keyframes-name>` accepts a string as well as an ident, and both
+    /// spellings must reach the same atom `animation-name` is matched against.
     #[test]
-    fn an_unnamed_keyframes_rule_is_refused() {
-        assert!(
-            document()
-                .build_keyframes_rule("", std::iter::empty::<CssKeyframe<'_>>())
-                .is_none()
-        );
+    fn a_quoted_keyframes_name_resolves_to_the_same_atom_as_the_ident() {
+        let document = document();
+        for spelling in ["spin", "\"spin\"", "'spin'"] {
+            let rule = document
+                .build_keyframes_rule(spelling, std::iter::empty::<CssKeyframe<'_>>())
+                .unwrap_or_else(|| panic!("{spelling} is a valid keyframes name"));
+            let engine = document.style_engine();
+            let guard = engine.shared_lock().read();
+            let StyloCssRule::Keyframes(keyframes) = &rule.inner else {
+                panic!("a keyframes rule");
+            };
+            assert_eq!(
+                keyframes.read_with(&guard).name.as_atom().to_string(),
+                "spin",
+                "{spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_keyframes_name_that_is_not_a_name_is_refused() {
+        let document = document();
+        for spelling in ["", "none", "\"\"", "50%", "a b"] {
+            assert!(
+                document
+                    .build_keyframes_rule(spelling, std::iter::empty::<CssKeyframe<'_>>())
+                    .is_none(),
+                "{spelling:?} is not a <keyframes-name>"
+            );
+        }
     }
 
     /// A rule built by one document must never enter another's cascade: the

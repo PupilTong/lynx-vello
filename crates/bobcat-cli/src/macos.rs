@@ -180,6 +180,7 @@ impl<'window> MacApplication<'window> {
             .expect("the program is consumed by the first window only");
         program.warn_about_unscoped_author_styles();
 
+        let style_sheet_url = program.resource_fetcher.style_sheet_url().cloned();
         let mut view = LynxView::new(
             program.config,
             program.resource_fetcher,
@@ -198,7 +199,7 @@ impl<'window> MacApplication<'window> {
         )?;
         // The bundle's author CSS mounts before the script builds its tree, so
         // the first commit is already styled.
-        if let Some(url) = &program.style_sheet_url {
+        if let Some(url) = style_sheet_url.as_ref() {
             pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
                 CliError::LoadStyleSheet {
                     input: program.input.clone(),

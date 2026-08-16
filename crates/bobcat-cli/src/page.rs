@@ -24,9 +24,6 @@ use crate::CliError;
 pub(crate) struct Program {
     pub(crate) input: String,
     pub(crate) script_url: Url,
-    /// `Some` when the bundle carried author CSS to mount before the script
-    /// runs.
-    pub(crate) style_sheet_url: Option<Url>,
     /// The non-global CSS fragment ids this bundle carries, if any.
     scoped_css_ids: Vec<i32>,
     pub(crate) resource_fetcher: Arc<ProgramResourceFetcher>,
@@ -63,6 +60,14 @@ impl ProgramResourceFetcher {
         self.style_sheet_url = Some(url);
         self.style_sheet = Some(Arc::new(sheet));
         self
+    }
+
+    /// The URL the bundle's author CSS is registered under, if it carried any.
+    ///
+    /// The registration is the single source of truth: a bundle whose sheet was
+    /// never registered has no URL to load, and one that was cannot be missed.
+    pub(crate) fn style_sheet_url(&self) -> Option<&Url> {
+        self.style_sheet_url.as_ref()
     }
 
     fn error<T>(
@@ -319,14 +324,11 @@ impl Program {
                 ids.sort_unstable();
                 ids
             });
-        let style_sheet_url = if let Some(sheet) = style_sheet {
+        if let Some(sheet) = style_sheet {
             let url = Url::parse("bobcat-memory://bundle/style-info.css")
                 .expect("the built-in stylesheet URL must be valid");
-            fetcher = fetcher.with_style_sheet(url.clone(), sheet);
-            Some(url)
-        } else {
-            None
-        };
+            fetcher = fetcher.with_style_sheet(url, sheet);
+        }
         let config = PageConfig {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
@@ -335,7 +337,6 @@ impl Program {
         Ok(Self {
             input: input.to_string(),
             script_url,
-            style_sheet_url,
             scoped_css_ids,
             resource_fetcher: Arc::new(fetcher),
             config,

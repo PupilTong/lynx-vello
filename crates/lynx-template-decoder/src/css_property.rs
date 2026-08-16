@@ -493,12 +493,91 @@ pub struct ParsedDeclaration {
 }
 
 impl ParsedDeclaration {
+    /// The declaration's value, exactly as authored.
+    ///
+    /// Value tokens partition the original value text without loss — they
+    /// carry their own delimiters, quotes and separating whitespace — so
+    /// concatenating them reproduces it byte for byte. That includes a
+    /// trailing `!important`; see [`Self::value_and_importance`].
     #[must_use]
     pub fn value_text(&self) -> String {
+        let mut text = String::with_capacity(self.value_text_len());
+        self.write_value_text(&mut text);
+        text
+    }
+
+    /// Appends [`Self::value_text`] to `out`, without allocating a temporary.
+    pub fn write_value_text(&self, out: &mut String) {
+        out.reserve(self.value_text_len());
+        for token in &self.value_tokens {
+            out.push_str(&token.value);
+        }
+    }
+
+    /// The value with any trailing `!important` removed, plus whether the
+    /// declaration carries one.
+    ///
+    /// [`Self::is_important`] alone is not enough. The producing toolchain
+    /// leaves that field `false` and appends ` !important` to the *value*
+    /// instead (`@lynx-js/css-serializer` builds the value as
+    /// `toString(node.value) + (node.important ? ' !important' : '')`), so on
+    /// the wire the marker arrives as ordinary value tokens. A consumer that
+    /// hands the raw value to a CSS value parser does not merely lose the
+    /// importance: the marker is not part of any value grammar, so the whole
+    /// declaration fails to parse and is dropped.
+    ///
+    /// The match is on the token sequence — an `important` ident preceded by a
+    /// `!` delimiter, either side of which may carry whitespace or comments —
+    /// so a value that merely ends in the ident `important`, or in a string
+    /// containing the word, is left alone.
+    #[must_use]
+    pub fn value_and_importance(&self) -> (String, bool) {
+        let end = self.value_end_before_important();
+        let important = end < self.value_tokens.len();
+        let mut text = String::with_capacity(self.value_text_len());
+        for token in &self.value_tokens[..end] {
+            text.push_str(&token.value);
+        }
+        (text, important || self.is_important)
+    }
+
+    fn value_text_len(&self) -> usize {
         self.value_tokens
             .iter()
-            .map(|token| token.value.as_str())
-            .collect()
+            .map(|token| token.value.len())
+            .sum()
+    }
+
+    /// The token count remaining once a trailing `!important` is removed, or
+    /// the full count when there is none.
+    fn value_end_before_important(&self) -> usize {
+        let significant = |index: usize| {
+            self.value_tokens[..index].iter().rposition(|token| {
+                !matches!(
+                    token.token_type,
+                    token_types::WHITESPACE_TOKEN | token_types::COMMENT_TOKEN
+                )
+            })
+        };
+        let all = self.value_tokens.len();
+        let Some(keyword) = significant(all) else {
+            return all;
+        };
+        let token = &self.value_tokens[keyword];
+        if token.token_type != token_types::IDENT_TOKEN
+            || !token.value.eq_ignore_ascii_case("important")
+        {
+            return all;
+        }
+        let Some(bang) = significant(keyword) else {
+            return all;
+        };
+        let token = &self.value_tokens[bang];
+        if token.token_type != token_types::DELIM_TOKEN || token.value != "!" {
+            return all;
+        }
+        // Drop the whitespace that separated the marker from the value too.
+        significant(bang).map_or(0, |last| last + 1)
     }
 }
 
@@ -530,4 +609,115 @@ pub mod token_types {
     pub const LEFT_CURLY_BRACKET_TOKEN: u8 = 23;
     pub const RIGHT_CURLY_BRACKET_TOKEN: u8 = 24;
     pub const COMMENT_TOKEN: u8 = 25;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declaration(tokens: &[(u8, &str)]) -> ParsedDeclaration {
+        ParsedDeclaration {
+            property: CssProperty {
+                id: CssPropertyId::Color,
+                unknown_name: None,
+            },
+            value_tokens: tokens
+                .iter()
+                .map(|(token_type, value)| ValueToken {
+                    token_type: *token_type,
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+            is_important: false,
+        }
+    }
+
+    const WS: u8 = token_types::WHITESPACE_TOKEN;
+    const IDENT: u8 = token_types::IDENT_TOKEN;
+    const BANG: u8 = token_types::DELIM_TOKEN;
+    const STRING: u8 = token_types::STRING_TOKEN;
+    const COMMENT: u8 = token_types::COMMENT_TOKEN;
+
+    #[test]
+    fn a_trailing_important_marker_is_split_off_the_value() {
+        let declaration =
+            declaration(&[(IDENT, "red"), (WS, " "), (BANG, "!"), (IDENT, "important")]);
+        assert_eq!(declaration.value_text(), "red !important");
+        assert_eq!(declaration.value_and_importance(), ("red".to_owned(), true));
+    }
+
+    #[test]
+    fn the_marker_is_recognized_without_whitespace_and_in_any_case() {
+        for tokens in [
+            vec![(IDENT, "red"), (BANG, "!"), (IDENT, "important")],
+            vec![(IDENT, "red"), (WS, " "), (BANG, "!"), (IDENT, "IMPORTANT")],
+            vec![
+                (IDENT, "red"),
+                (WS, " "),
+                (BANG, "!"),
+                (WS, " "),
+                (IDENT, "Important"),
+            ],
+            vec![
+                (IDENT, "red"),
+                (COMMENT, "/* x */"),
+                (BANG, "!"),
+                (IDENT, "important"),
+            ],
+        ] {
+            assert_eq!(
+                declaration(&tokens).value_and_importance(),
+                ("red".to_owned(), true),
+                "{tokens:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_only_looks_like_the_marker_is_left_alone() {
+        // The `!` delimiter is required, so a bare keyword is a value...
+        let keyword = declaration(&[(IDENT, "important")]);
+        assert_eq!(
+            keyword.value_and_importance(),
+            ("important".to_owned(), false)
+        );
+
+        // ...as is the word inside a string, which keeps its quotes.
+        let quoted = declaration(&[(STRING, "\"x !important\"")]);
+        assert_eq!(
+            quoted.value_and_importance(),
+            ("\"x !important\"".to_owned(), false)
+        );
+    }
+
+    /// CSS whitespace is only U+0009/000A/000C/000D/0020. A code point such as
+    /// U+00A0 is an ident code point, so it belongs to the value and must not
+    /// be trimmed away — matching the token boundaries is what keeps that
+    /// distinction, which trimming the concatenated text would lose.
+    #[test]
+    fn a_non_ascii_space_stays_part_of_the_value() {
+        let declaration = declaration(&[
+            (IDENT, "red\u{a0}"),
+            (WS, " "),
+            (BANG, "!"),
+            (IDENT, "important"),
+        ]);
+        assert_eq!(
+            declaration.value_and_importance(),
+            ("red\u{a0}".to_owned(), true)
+        );
+    }
+
+    #[test]
+    fn the_wire_flag_is_still_honored_when_it_is_set() {
+        let mut declaration = declaration(&[(IDENT, "red")]);
+        declaration.is_important = true;
+        assert_eq!(declaration.value_and_importance(), ("red".to_owned(), true));
+    }
+
+    #[test]
+    fn a_value_that_is_only_a_marker_leaves_an_empty_value() {
+        let declaration = declaration(&[(BANG, "!"), (IDENT, "important")]);
+        assert_eq!(declaration.value_and_importance(), (String::new(), true));
+    }
 }

@@ -35,6 +35,14 @@ const CLASSED_VIEW_SCRIPT: &str = r"
     });
 ";
 
+fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
+    PreparsedDeclaration {
+        property: property.to_owned(),
+        value: value.to_owned(),
+        important: false,
+    }
+}
+
 fn style_rule(selectors: &str, declarations: Vec<PreparsedDeclaration>) -> PreparsedRule {
     PreparsedRule::Style {
         selectors: selectors.to_owned(),
@@ -47,8 +55,8 @@ fn basic_sheet() -> PreparsedStyleSheet {
         rules: vec![style_rule(
             ".basic",
             vec![
-                PreparsedDeclaration::new("width", "100px"),
-                PreparsedDeclaration::new("height", "100px"),
+                declaration("width", "100px"),
+                declaration("height", "100px"),
             ],
         )],
     }
@@ -104,8 +112,8 @@ async fn a_preparsed_sheet_loads_through_the_resource_provider() {
 
 #[tokio::test]
 async fn a_css_text_sheet_loads_through_the_same_entry_point() {
-    // No pre-parsed sheet registered, so the default trait method answers from
-    // `fetch_resource` — the arm a browser embedder that only moves bytes uses.
+    // No pre-parsed sheet registered, so the request falls through to the
+    // byte path — the arm a browser embedder that only moves bytes uses.
     let mut view = view_with(FetcherDouble::new(
         b".basic { width: 100px; height: 100px; }".to_vec(),
     ));
@@ -113,6 +121,20 @@ async fn a_css_text_sheet_loads_through_the_same_entry_point() {
     view.load_style_sheet(SHEET_URL)
         .await
         .expect("the text arm mounts");
+}
+
+/// A BOM survives the fetch boundary intact and reaches the decode step.
+/// (That the rule it prefixes still matches is asserted where computed style
+/// is observable, in `bobcat_core::style`.)
+#[tokio::test]
+async fn a_byte_order_mark_prefixed_sheet_loads() {
+    let mut css = "\u{feff}".as_bytes().to_vec();
+    css.extend_from_slice(b".basic { width: 100px; }");
+    let mut view = view_with(FetcherDouble::new(css));
+
+    view.load_style_sheet(SHEET_URL)
+        .await
+        .expect("a BOM-prefixed sheet mounts");
 }
 
 #[tokio::test]

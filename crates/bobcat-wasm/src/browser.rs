@@ -197,6 +197,22 @@ impl BrowserResources {
         Ok(normalized)
     }
 
+    /// How a request of this kind is named in a message a host reads.
+    fn label(kind: &ResourceKind) -> &'static str {
+        match kind {
+            ResourceKind::StyleSheet => "stylesheet",
+            _ => "script",
+        }
+    }
+
+    /// The media type a response of this kind is stamped with.
+    fn media_type(kind: &ResourceKind) -> &'static str {
+        match kind {
+            ResourceKind::StyleSheet => "text/css; charset=utf-8",
+            _ => "text/javascript; charset=utf-8",
+        }
+    }
+
     /// The registry a request of this kind is answered from.
     fn registry(&self, kind: &ResourceKind) -> Option<&Mutex<HashMap<String, Arc<[u8]>>>> {
         match kind {
@@ -258,7 +274,8 @@ impl ResourceFetcher for BrowserResources {
                 "script resolution was cancelled",
             );
         }
-        let Some(registry) = self.registry(&request.resource.kind) else {
+        let kind = request.resource.kind.clone();
+        let Some(registry) = self.registry(&kind) else {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::UnsupportedKind,
@@ -283,7 +300,7 @@ impl ResourceFetcher for BrowserResources {
                 ResourceErrorKind::InvalidUrl,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
-                "the script locator is not a valid URL",
+                format!("the {} locator is not a valid URL", Self::label(&kind)),
             );
         };
         let present = registry
@@ -329,22 +346,25 @@ impl ResourceFetcher for BrowserResources {
             );
         }
 
-        let source = self
-            .registry(&request.request.resource.resource.kind)
-            .and_then(|registry| {
-                registry
-                    .lock()
-                    .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-                    .get(request.request.resource.url.as_str())
-                    .cloned()
-            });
+        let kind = request.request.resource.resource.kind.clone();
+        let media_type = Self::media_type(&kind);
+        let source = self.registry(&kind).and_then(|registry| {
+            registry
+                .lock()
+                .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+                .get(request.request.resource.url.as_str())
+                .cloned()
+        });
         let Some(source) = source else {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
-                "the registered script disappeared before it was loaded",
+                format!(
+                    "the registered {} disappeared before it was loaded",
+                    Self::label(&kind)
+                ),
             );
         };
         let content_length = source.len() as u64;
@@ -354,7 +374,10 @@ impl ResourceFetcher for BrowserResources {
                 ResourceErrorKind::ResponseTooLarge,
                 ResourceErrorPhase::ReadBody,
                 Some(locator),
-                "the registered script exceeds Bobcat's buffered-script limit",
+                format!(
+                    "the registered {} exceeds Bobcat's buffered-resource limit",
+                    Self::label(&kind)
+                ),
             );
         }
 
@@ -366,7 +389,7 @@ impl ResourceFetcher for BrowserResources {
                     resource,
                     headers: HeaderMap::default(),
                     content_length: Some(content_length),
-                    media_type: Some(Arc::from("text/javascript; charset=utf-8")),
+                    media_type: Some(Arc::from(media_type)),
                     source: ResourceSource::MemoryCache,
                     cache_status: CacheStatus::default(),
                     timing: ResourceTiming::default(),
