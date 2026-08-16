@@ -889,6 +889,11 @@ this section is the only place the absolute paths are spelled out.
 
 ## Reference knowledge
 
+- `docs/lynx-xml-template.md` — the implementation-derived Lynx XML source
+  format: exact restricted grammar, section extraction, errors and offsets,
+  fixed template mapping, and the intentional CSS difference between the
+  merged XML-to-`.web.bundle` encoder and the still-proposed raw web loader.
+  XML is a source front end, not a third bundle encoding.
 - `docs/web-binary-template.md` — **read this before touching
   `crates/lynx-template-decoder` or any StyleInfo/wire-format code.** The
   web-target bundle format this repo decodes today: container layout,
