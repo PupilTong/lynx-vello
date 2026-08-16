@@ -31,8 +31,9 @@ export declare class BobcatCanvas {
   executeScript(url: string | URL): Promise<void>
 
   /**
-   * Reserved URL entry point; currently rejects as unsupported. Relative URLs
-   * use the embedding document's base URL.
+   * Fetches an author stylesheet and mounts it on the document. Sheets
+   * cascade in load order. Relative URLs use the embedding document's base
+   * URL.
    */
   loadStyleSheet(url: string | URL): Promise<void>
 

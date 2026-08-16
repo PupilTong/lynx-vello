@@ -31,8 +31,10 @@ The audited normal-build surface and every test-feature exception are listed
 in [dom-public-api.md](dom-public-api.md).
 See
 [`runtime-architecture.md`](runtime-architecture.md) for the full dependency,
-feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion is
-still unbuilt — the seam is `Document::add_stylesheet`.
+feature, and frame-flow walkthrough. Decoded `.web.bundle` style ingestion runs
+through the rule-construction seam (`Document::build_style_rule` and friends,
+then `Document::append_rules`); `Document::add_stylesheet` remains the seam for
+CSS supplied as text.
 
 ## The dom core: one tree, Document-mediated mutation
 
@@ -118,7 +120,11 @@ still unbuilt — the seam is `Document::add_stylesheet`.
    belong to the runtime environment.
 2. The document creates its private stylist, stylesheet set, `about:blank`
    base URL, and lock. Callers add complete CSS text through
-   `Document::add_stylesheet`; rule objects and locks never cross the API.
+   `Document::add_stylesheet`, or — for CSS a host already parsed — build rules
+   with `Document::build_style_rule`/`build_keyframes_rule`/`build_font_face_rule`
+   and mount them with `Document::append_rules`. Locks and base URLs still never
+   cross the API: a `dom::CssRule` is opaque and carries the lock that minted
+   it, and `append_rules` rejects a rule built by a different document.
 3. DOM mutation methods record snapshots/restyle hints internally.
    Selector-visible data lives in the real node fields and attribute map.
 4. `Document::layout` first drives Stylo traversal from the document element:
@@ -178,21 +184,28 @@ What that covers, and what it does not:
   `MainThreadRuntime` installs the callbacks and performs the same boot for
   QuickJS and external/browser factories;
 
+- `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
+  `bobcat_core::style::PreparsedStyleSheet` and loads it through
+  `LynxView::load_style_sheet`, which mounts it as author-origin rules built
+  directly — no stylesheet text is produced and no sheet is re-tokenized. The
+  CSS parser still owns one selector-list parse per rule and one value parse
+  per declaration, because the wire format keeps attribute selectors and
+  functional pseudo-classes as text and stylo builds specified values only
+  through its value parsers;
+
 **Still open**
 
-- `.web.bundle` `StyleInfo` decoding exists, but no runtime layer lowers and
-  mounts those decoded rules; the seam is
-  `Document::add_stylesheet`;
+- per-component CSS scoping. `StyleInfo` ingestion lands without it: every
+  fragment's rules mount globally, which is exactly web-core's own output for
+  a bundle compiled with `enableRemoveCSSScope = true` (css id `0`), and the
+  CLI warns when a bundle carries non-zero fragment ids. `__SetCSSId` stays
+  absent from the PAPI surface until the guard synthesis
+  (`:where([l-css-id="N"])`) that gives it meaning exists, together with its
+  parent-component css-id inheritance;
 - viewport-relative `rpx`/`ppx` units have no owner;
 - event *dispatch*, the consuming half of the one member that only records:
   `__AddEvent` stores handlers in the realm with nothing routing input to them
   (no phase walk, no gesture arena);
-- CSS scoping in both halves. `__SetCSSId` is deliberately absent from the PAPI
-  surface rather than stubbed: it names the author-CSS scope an element
-  cascades in, so it belongs with the `StyleInfo` lowering above, which is what
-  would give an encoding (an attribute the scoped rules match, a field on the
-  element) something to be right or wrong about. Its parent-component css-id
-  inheritance lands at the same time;
 - the remaining PAPI members (`__AddClass`, `__AddInlineStyle`, the dataset,
   component-info, config, template-part, animation, and selector-query
   members) have no adapter;

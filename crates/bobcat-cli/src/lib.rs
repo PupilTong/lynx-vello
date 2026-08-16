@@ -22,6 +22,7 @@ pub mod image_decoders;
 mod macos;
 mod page;
 mod screenshot;
+mod style_info;
 
 pub use screenshot::ScreenshotError;
 
@@ -68,6 +69,12 @@ pub enum CliError {
         input: String,
         #[source]
         source: bobcat_core::ScriptRunError,
+    },
+    #[error("could not load the author stylesheet of web bundle `{input}`: {source}")]
+    LoadStyleSheet {
+        input: String,
+        #[source]
+        source: bobcat_core::LynxViewError,
     },
     #[error("could not start web bundle `{input}`: {source}")]
     StartScript {

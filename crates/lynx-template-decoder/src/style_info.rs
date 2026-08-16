@@ -89,9 +89,9 @@ impl Selector {
                     buf.push_str(&component.value);
                 }
                 SimpleSelectorKind::Attribute => {
-                    buf.push('[');
+                    // The encoder stores the generated attribute-selector text
+                    // with its brackets already included (`[type=submit]`).
                     buf.push_str(&component.value);
-                    buf.push(']');
                 }
                 SimpleSelectorKind::PseudoClass => {
                     buf.push(':');
@@ -105,9 +105,14 @@ impl Selector {
                     buf.push('*');
                 }
                 SimpleSelectorKind::Combinator => {
-                    buf.push(' ');
-                    buf.push_str(&component.value);
-                    buf.push(' ');
+                    // The descendant combinator is encoded as a single space.
+                    if component.value.trim().is_empty() {
+                        buf.push(' ');
+                    } else {
+                        buf.push(' ');
+                        buf.push_str(&component.value);
+                        buf.push(' ');
+                    }
                 }
             }
         }
@@ -238,6 +243,56 @@ mod tests {
         let declaration = &keyframe.declaration_block.declarations[0];
         assert_eq!(declaration.property.name(), "transform");
         assert_eq!(declaration.value_text(), "rotate(360deg)");
+    }
+
+    #[test]
+    fn selector_text_round_trips_the_encoder_shapes() {
+        let selector = Selector {
+            components: vec![
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Class,
+                    value: "card".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Combinator,
+                    value: " ".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Type,
+                    value: "view".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Attribute,
+                    value: "[type=submit]".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::PseudoClass,
+                    value: "nth-child(4n+1)".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(
+            selector.to_css_string(),
+            ".card view[type=submit]:nth-child(4n+1)"
+        );
+
+        let child = Selector {
+            components: vec![
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Class,
+                    value: "a".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::Combinator,
+                    value: ">".to_owned(),
+                },
+                SimpleSelector {
+                    kind: SimpleSelectorKind::PseudoElement,
+                    value: "placeholder".to_owned(),
+                },
+            ],
+        };
+        assert_eq!(child.to_css_string(), ".a > ::placeholder");
     }
 
     #[test]

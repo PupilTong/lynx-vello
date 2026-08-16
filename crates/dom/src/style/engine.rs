@@ -1,22 +1,82 @@
 //! Standards-oriented CSS parsing, selector matching, and cascade execution.
 
+use std::borrow::Cow;
 use std::sync::Arc as StdArc;
+use std::sync::atomic::AtomicBool;
 
+use cssparser::{Parser, ParserInput};
 use stylo::author_styles::AuthorStyles;
 use stylo::context::QuirksMode;
+use stylo::custom_properties::AttrTaint;
 use stylo::device::Device;
+use stylo::font_face::parse_font_face_block;
 use stylo::media_queries::MediaList;
+use stylo::parser::ParserContext;
+use stylo::properties::declaration_block::parse_one_declaration_into;
+use stylo::properties::{
+    Importance, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
+};
+use stylo::selector_parser::SelectorParser;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
+use stylo::stylesheets::keyframes_rule::{Keyframe, KeyframeSelectors, KeyframesRule};
 use stylo::stylesheets::{
-    AllowImportRules, CustomMediaMap, DocumentStyleSheet, Origin, Stylesheet, UrlExtraData,
+    AllowImportRules, CssRule as StyloCssRule, CssRuleType, CssRules, CustomMediaMap,
+    DocumentStyleSheet, Origin, StyleRule, Stylesheet, StylesheetContents, UrlExtraData,
 };
 use stylo::stylist::Stylist;
+use stylo::values::{KeyframesName, SourceLocation};
+use stylo_traits::ParsingMode;
 
 use crate::Document;
 use crate::tree::document::NodeId;
 use crate::tree::shadow::ShadowRootData;
+
+/// One declaration of a directly constructed rule: a property name plus the
+/// value text a decoded wire format already carries.
+///
+/// This is the pre-parsed ingestion boundary. The name is resolved to a
+/// [`PropertyId`] and the value text is handed to stylo's value parser, so no
+/// declaration list is ever tokenized and no property name is looked up twice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CssDeclaration<'a> {
+    /// The CSS property name, as spelled by the source that produced it.
+    pub property: &'a str,
+    /// The declaration value text, without the trailing `!important`.
+    pub value: Cow<'a, str>,
+    /// Whether the declaration carries `!important`.
+    pub important: bool,
+}
+
+/// One `@keyframes` child block of a directly constructed keyframes rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CssKeyframe<'a> {
+    /// The keyframe selector text (`from`, `to`, `50%`, or a comma list).
+    pub selector: &'a str,
+    /// The declarations of this keyframe block.
+    pub declarations: Vec<CssDeclaration<'a>>,
+}
+
+/// One pre-built CSS rule, branded with the document context that parsed and
+/// locked it.
+///
+/// The inner stylo rule and the [`SharedRwLock`] that guards it never leave
+/// this type, so a rule can only be appended to the document that built it.
+#[derive(Clone, Debug)]
+pub struct CssRule {
+    inner: StyloCssRule,
+    owner: StdArc<SharedRwLock>,
+}
+
+impl CssRule {
+    fn new(inner: StyloCssRule, owner: &StdArc<SharedRwLock>) -> Self {
+        Self {
+            inner,
+            owner: StdArc::clone(owner),
+        }
+    }
+}
 
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
@@ -128,6 +188,157 @@ impl StyleEngine {
         drop(styles.flush(&mut self.stylist, &guard));
     }
 
+    /// Installs rules this engine built as one author-origin sheet.
+    pub(crate) fn append_rules(&mut self, rules: Vec<CssRule>) {
+        assert!(
+            rules
+                .iter()
+                .all(|rule| StdArc::ptr_eq(&rule.owner, &self.lock)),
+            "CSS rule belongs to another Document"
+        );
+        let rules = rules.into_iter().map(|rule| rule.inner).collect();
+        let rules = CssRules::new(rules, &self.lock);
+        let contents = StylesheetContents::from_rules(
+            rules,
+            Origin::Author,
+            self.url_data.clone(),
+            QuirksMode::NoQuirks,
+        );
+        let sheet = Stylesheet {
+            contents: self.lock.wrap(contents),
+            shared_lock: self.lock.as_ref().clone(),
+            media: Arc::new(self.lock.wrap(MediaList::empty())),
+            disabled: AtomicBool::new(false),
+        };
+        let guard = self.lock.read();
+        self.stylist
+            .append_stylesheet(DocumentStyleSheet(Arc::new(sheet)), &guard);
+        self.stylist.flush(&StylesheetGuards::same(&guard));
+    }
+
+    #[must_use]
+    pub(crate) fn build_style_rule<'d>(
+        &self,
+        selectors: &str,
+        declarations: impl IntoIterator<Item = CssDeclaration<'d>>,
+    ) -> Option<CssRule> {
+        let selectors =
+            SelectorParser::parse_author_origin_no_namespace(selectors, &self.url_data).ok()?;
+        let block = self.parse_declaration_block(declarations, CssRuleType::Style);
+        Some(CssRule::new(
+            StyloCssRule::Style(Arc::new(self.lock.wrap(StyleRule {
+                selectors,
+                block: Arc::new(self.lock.wrap(block)),
+                rules: None,
+                source_location: SourceLocation { line: 0, column: 0 },
+            }))),
+            &self.lock,
+        ))
+    }
+
+    #[must_use]
+    pub(crate) fn build_keyframes_rule<'d>(
+        &self,
+        name: &str,
+        keyframes: impl IntoIterator<Item = CssKeyframe<'d>>,
+    ) -> Option<CssRule> {
+        if name.is_empty() {
+            return None;
+        }
+        let keyframes = keyframes
+            .into_iter()
+            .filter_map(|keyframe| {
+                let mut input = ParserInput::new(keyframe.selector);
+                let selector = KeyframeSelectors::parse(&mut Parser::new(&mut input)).ok()?;
+                let block =
+                    self.parse_declaration_block(keyframe.declarations, CssRuleType::Keyframe);
+                Some(Arc::new(self.lock.wrap(Keyframe {
+                    selector,
+                    block: Arc::new(self.lock.wrap(block)),
+                    source_location: SourceLocation { line: 0, column: 0 },
+                })))
+            })
+            .collect();
+        Some(CssRule::new(
+            StyloCssRule::Keyframes(Arc::new(self.lock.wrap(KeyframesRule {
+                name: KeyframesName::from_ident(name),
+                keyframes,
+                vendor_prefix: None,
+                source_location: SourceLocation { line: 0, column: 0 },
+            }))),
+            &self.lock,
+        ))
+    }
+
+    /// Builds an `@font-face` rule from its descriptor block text.
+    ///
+    /// Font-face descriptors are not CSS properties, so stylo exposes no
+    /// per-descriptor constructor and this one block is parsed as text. Its
+    /// input is a single rule body, never a stylesheet.
+    #[must_use]
+    pub(crate) fn build_font_face_rule(&self, descriptors: &str) -> CssRule {
+        let context = self.parser_context(CssRuleType::FontFace);
+        let mut input = ParserInput::new(descriptors);
+        let mut parser = Parser::new(&mut input);
+        let rule =
+            parse_font_face_block(&context, &mut parser, SourceLocation { line: 0, column: 0 });
+        CssRule::new(
+            StyloCssRule::FontFace(Arc::new(self.lock.wrap(rule))),
+            &self.lock,
+        )
+    }
+
+    fn parse_declaration_block<'d>(
+        &self,
+        declarations: impl IntoIterator<Item = CssDeclaration<'d>>,
+        rule_type: CssRuleType,
+    ) -> PropertyDeclarationBlock {
+        let context = self.parser_context(rule_type);
+        let mut block = PropertyDeclarationBlock::new();
+        let mut source = SourcePropertyDeclaration::default();
+        for declaration in declarations {
+            let Ok(id) = PropertyId::parse(declaration.property, &context) else {
+                continue;
+            };
+            drop(source.drain());
+            if parse_one_declaration_into(
+                &mut source,
+                id,
+                declaration.value.as_ref(),
+                Origin::Author,
+                &self.url_data,
+                None,
+                ParsingMode::DEFAULT,
+                QuirksMode::NoQuirks,
+                rule_type,
+            )
+            .is_ok()
+            {
+                let importance = if declaration.important {
+                    Importance::Important
+                } else {
+                    Importance::Normal
+                };
+                block.extend(source.drain(), importance);
+            }
+        }
+        block
+    }
+
+    fn parser_context(&self, rule_type: CssRuleType) -> ParserContext<'_> {
+        ParserContext::new(
+            Origin::Author,
+            &self.url_data,
+            Some(rule_type),
+            ParsingMode::DEFAULT,
+            QuirksMode::NoQuirks,
+            Cow::default(),
+            None,
+            None,
+            AttrTaint::default(),
+        )
+    }
+
     fn refresh_device(&mut self) {
         let guard = self.lock.read();
         let guards = StylesheetGuards::same(&guard);
@@ -172,6 +383,57 @@ impl<T> Document<T> {
         self.change_style_context(|engine| engine.add_stylesheet(css, origin));
     }
 
+    /// Appends rules this document built as one author-origin stylesheet.
+    ///
+    /// This is the pre-parsed ingestion path: the caller lowers an already
+    /// decoded wire format through [`Document::build_style_rule`] and friends,
+    /// so no CSS stylesheet text is produced or tokenized. Later calls cascade
+    /// over earlier ones, as later stylesheets do in a document.
+    ///
+    /// The origin is fixed rather than chosen, because the builders resolve
+    /// property names and values in an author parser context; a sheet mounted
+    /// at another origin would not be the sheet that was parsed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any rule was built by a different document.
+    pub fn append_rules(&mut self, rules: Vec<CssRule>) {
+        self.change_style_context(|engine| engine.append_rules(rules));
+    }
+
+    /// Builds one style rule from selector text and pre-parsed declarations.
+    ///
+    /// Returns `None` if the selector list does not parse; individual
+    /// declarations that do not parse are dropped, as in a stylesheet.
+    #[must_use]
+    pub fn build_style_rule<'d>(
+        &self,
+        selectors: &str,
+        declarations: impl IntoIterator<Item = CssDeclaration<'d>>,
+    ) -> Option<CssRule> {
+        self.style_engine()
+            .build_style_rule(selectors, declarations)
+    }
+
+    /// Builds one `@keyframes` rule from its name and its keyframe blocks.
+    ///
+    /// Returns `None` for an empty name; keyframes whose selector does not
+    /// parse are dropped.
+    #[must_use]
+    pub fn build_keyframes_rule<'d>(
+        &self,
+        name: &str,
+        keyframes: impl IntoIterator<Item = CssKeyframe<'d>>,
+    ) -> Option<CssRule> {
+        self.style_engine().build_keyframes_rule(name, keyframes)
+    }
+
+    /// Builds one `@font-face` rule from its descriptor block text.
+    #[must_use]
+    pub fn build_font_face_rule(&self, descriptors: &str) -> CssRule {
+        self.style_engine().build_font_face_rule(descriptors)
+    }
+
     /// Adds an author stylesheet scoped to one shadow tree.
     pub fn add_shadow_stylesheet(&mut self, shadow_root: NodeId, css: &str) {
         let host = self
@@ -203,5 +465,123 @@ impl<T> Document<T> {
         change(self.style_engine_mut());
         let root = self.document_element().id();
         self.mark_subtree_dirty(root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stylo_traits::ToCss;
+
+    use super::*;
+    use crate::tree::document::tests::device;
+
+    fn document() -> Document<()> {
+        Document::<()>::new(device(), "page", ())
+    }
+
+    fn declaration<'a>(property: &'a str, value: &'a str) -> CssDeclaration<'a> {
+        CssDeclaration {
+            property,
+            value: Cow::Borrowed(value),
+            important: false,
+        }
+    }
+
+    /// Nothing above this crate can observe the keyframes registry, so the
+    /// name atom and the per-block selector parse are checked here, where the
+    /// built rule is still readable.
+    #[test]
+    fn a_built_keyframes_rule_carries_its_name_selectors_and_blocks() {
+        let document = document();
+        let rule = document
+            .build_keyframes_rule(
+                "spin",
+                [
+                    CssKeyframe {
+                        selector: "from",
+                        declarations: vec![declaration("opacity", "0")],
+                    },
+                    CssKeyframe {
+                        selector: "50%, 75%",
+                        declarations: vec![declaration("opacity", "0.5")],
+                    },
+                    CssKeyframe {
+                        selector: "to",
+                        declarations: vec![declaration("opacity", "1")],
+                    },
+                ],
+            )
+            .expect("a named keyframes rule");
+
+        let engine = document.style_engine();
+        let guard = engine.shared_lock().read();
+        let StyloCssRule::Keyframes(keyframes) = &rule.inner else {
+            panic!("a keyframes rule");
+        };
+        let keyframes = keyframes.read_with(&guard);
+        assert_eq!(keyframes.name.as_atom().to_string(), "spin");
+
+        let selectors: Vec<String> = keyframes
+            .keyframes
+            .iter()
+            .map(|keyframe| keyframe.read_with(&guard).selector.to_css_string())
+            .collect();
+        assert_eq!(selectors, ["0%", "50%, 75%", "100%"]);
+
+        let declarations = keyframes.keyframes[1]
+            .read_with(&guard)
+            .block
+            .read_with(&guard)
+            .len();
+        assert_eq!(declarations, 1, "each keyframe keeps its own block");
+    }
+
+    /// A keyframe whose offset does not parse is dropped; the rest survive.
+    #[test]
+    fn an_unparsable_keyframe_selector_drops_only_its_own_block() {
+        let document = document();
+        let rule = document
+            .build_keyframes_rule(
+                "slide",
+                [
+                    CssKeyframe {
+                        selector: "not-an-offset",
+                        declarations: vec![declaration("opacity", "0")],
+                    },
+                    CssKeyframe {
+                        selector: "to",
+                        declarations: vec![declaration("opacity", "1")],
+                    },
+                ],
+            )
+            .expect("a named keyframes rule");
+
+        let engine = document.style_engine();
+        let guard = engine.shared_lock().read();
+        let StyloCssRule::Keyframes(keyframes) = &rule.inner else {
+            panic!("a keyframes rule");
+        };
+        assert_eq!(keyframes.read_with(&guard).keyframes.len(), 1);
+    }
+
+    #[test]
+    fn an_unnamed_keyframes_rule_is_refused() {
+        assert!(
+            document()
+                .build_keyframes_rule("", std::iter::empty::<CssKeyframe<'_>>())
+                .is_none()
+        );
+    }
+
+    /// A rule built by one document must never enter another's cascade: the
+    /// lock that guards its contents belongs to the document that minted it.
+    #[test]
+    #[should_panic(expected = "CSS rule belongs to another Document")]
+    fn a_rule_from_another_document_is_refused() {
+        let other = document();
+        let rule = other
+            .build_style_rule(".a", [declaration("width", "1px")])
+            .expect("a style rule");
+        document().append_rules(vec![rule]);
     }
 }

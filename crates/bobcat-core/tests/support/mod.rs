@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bobcat_core::PreparsedStyleSheet;
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, CancellationToken, HttpRequest, HttpResponse,
     PrefetchReceipt, PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator,
     ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
     ResourceFuture, ResourceLocality, ResourceMetadata, ResourcePath, ResourcePathLease,
     ResourceRequest, ResourceResponse, ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
+    StyleSheetPayload, StyleSheetResponse,
 };
 use bytes::Bytes;
 use url::Url;
@@ -185,6 +187,10 @@ pub struct FetcherDouble {
     pub prefetches: AtomicUsize,
     pub cancels: AtomicUsize,
     pub observed_cancellation: Mutex<Option<CancellationToken>>,
+    /// When set, stylesheet requests are answered pre-parsed instead of as
+    /// CSS text — the arm a bundle-decoding embedder uses.
+    pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
+    pub style_sheet_fetches: AtomicUsize,
 }
 
 impl FetcherDouble {
@@ -201,7 +207,22 @@ impl FetcherDouble {
             prefetches: AtomicUsize::new(0),
             cancels: AtomicUsize::new(0),
             observed_cancellation: Mutex::new(None),
+            style_sheet: None,
+            style_sheet_fetches: AtomicUsize::new(0),
         }
+    }
+
+    /// Answers stylesheet requests with a host-decoded sheet.
+    #[must_use]
+    pub fn with_preparsed_style_sheet(mut self, sheet: PreparsedStyleSheet) -> Self {
+        self.style_sheet = Some(Arc::new(sheet));
+        self.capabilities
+            .push(ResourceCapability::PreparsedStyleSheet);
+        self
+    }
+
+    pub fn style_sheet_fetch_count(&self) -> usize {
+        self.style_sheet_fetches.load(Ordering::Relaxed)
     }
 
     #[must_use]
@@ -283,6 +304,31 @@ impl Drop for TempPathLease {
 impl ResourceFetcher for FetcherDouble {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         self.capabilities.contains(&capability)
+    }
+
+    fn fetch_style_sheet(
+        &self,
+        request: BufferedResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
+        let Some(sheet) = self.style_sheet.clone() else {
+            let bytes = Bytes::from(self.bytes.clone());
+            let metadata =
+                self.metadata(request.request.resource.clone(), request.request.context.id);
+            return Box::pin(async move {
+                Ok(StyleSheetResponse {
+                    metadata,
+                    payload: StyleSheetPayload::Text(bytes),
+                })
+            });
+        };
+        let metadata = self.metadata(request.request.resource.clone(), request.request.context.id);
+        Box::pin(async move {
+            Ok(StyleSheetResponse {
+                metadata,
+                payload: StyleSheetPayload::Preparsed(sheet),
+            })
+        })
     }
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {

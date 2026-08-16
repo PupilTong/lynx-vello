@@ -29,7 +29,7 @@ pub use crate::render::images::ImageStore;
 pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;
-pub use crate::style::engine::StylesheetOrigin;
+pub use crate::style::engine::{CssDeclaration, CssKeyframe, CssRule, StylesheetOrigin};
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 pub use crate::style::flush::install_style_thread_pool;

@@ -67,6 +67,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
 use crate::image::DecodedImage;
+use crate::style::StyleSheetSource;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
 /// The physical pixel size of the render target.
@@ -499,6 +500,28 @@ impl<'window, W: Window> Engine<'window, W> {
             self.refresh();
         }
         Ok(registered)
+    }
+
+    /// Mounts an author stylesheet, in either supplied form, on the document.
+    ///
+    /// Mount order is cascade order: a sheet mounted later wins ties against
+    /// one mounted earlier, exactly as later sheets do in a document.
+    pub(crate) fn add_style_sheet(
+        &mut self,
+        sheet: &StyleSheetSource<'_>,
+    ) -> Result<(), EngineError> {
+        let Some(mut tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        match sheet {
+            StyleSheetSource::Preparsed(sheet) => {
+                crate::style::add_preparsed_style_sheet(&mut tree, sheet);
+            }
+            StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(&mut tree, css),
+        }
+        drop(tree);
+        self.refresh();
+        Ok(())
     }
 
     /// Installs decoded pixels under their CSS URL without publishing the

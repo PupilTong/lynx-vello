@@ -178,7 +178,7 @@ impl<'window> MacApplication<'window> {
             .program
             .take()
             .expect("the program is consumed by the first window only");
-        program.warn_about_dropped_author_rules();
+        program.warn_about_unscoped_author_styles();
 
         let mut view = LynxView::new(
             program.config,
@@ -196,6 +196,16 @@ impl<'window> MacApplication<'window> {
                 height: physical_size.height,
             },
         )?;
+        // The bundle's author CSS mounts before the script builds its tree, so
+        // the first commit is already styled.
+        if let Some(url) = &program.style_sheet_url {
+            pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
+                CliError::LoadStyleSheet {
+                    input: program.input.clone(),
+                    source,
+                }
+            })?;
+        }
         pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
             CliError::StartScript {
                 input: program.input,

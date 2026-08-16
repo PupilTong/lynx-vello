@@ -14,6 +14,8 @@ use tokio::io::AsyncRead;
 pub use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::style::PreparsedStyleSheet;
+
 pub type ResourceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ResourceError>> + Send + 'a>>;
 
@@ -28,6 +30,26 @@ pub trait ResourceFetcher: Send + Sync + 'static {
         &self,
         request: BufferedResourceRequest,
     ) -> ResourceFuture<'_, ResourceResponse>;
+
+    /// Loads a stylesheet in whichever form this host has it.
+    ///
+    /// The default answers from [`Self::fetch_resource`] as
+    /// [`StyleSheetPayload::Text`], which is correct for any host that only
+    /// moves bytes — a browser embedder cannot decode a `.web.bundle` at all.
+    /// A host that reports [`ResourceCapability::PreparsedStyleSheet`]
+    /// overrides this to return [`StyleSheetPayload::Preparsed`].
+    fn fetch_style_sheet(
+        &self,
+        request: BufferedResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        Box::pin(async move {
+            let response = self.fetch_resource(request).await?;
+            Ok(StyleSheetResponse {
+                metadata: response.metadata,
+                payload: StyleSheetPayload::Text(response.bytes),
+            })
+        })
+    }
 
     fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream>;
 
@@ -72,6 +94,7 @@ pub enum ResourceKind {
     Audio,
     Video,
     Svg,
+    StyleSheet,
     Template,
     LazyBundle,
     Frame,
@@ -202,6 +225,27 @@ pub struct ResourceResponse {
     pub bytes: Bytes,
 }
 
+/// A stylesheet in whichever of the two accepted forms the host has.
+///
+/// A host that only moves bytes returns [`StyleSheetPayload::Text`]; one that
+/// already decoded a `.web.bundle`'s pre-parsed CSS returns
+/// [`StyleSheetPayload::Preparsed`], which skips the CSS parser.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum StyleSheetPayload {
+    /// UTF-8 CSS source text.
+    Text(Bytes),
+    /// A stylesheet the host parsed before the engine saw it.
+    Preparsed(Arc<PreparsedStyleSheet>),
+}
+
+/// A fully buffered stylesheet response.
+#[derive(Clone, Debug)]
+pub struct StyleSheetResponse {
+    pub metadata: ResourceMetadata,
+    pub payload: StyleSheetPayload,
+}
+
 /// An encoded resource whose body remains asynchronous.
 pub struct ResourceStream {
     pub metadata: ResourceMetadata,
@@ -329,6 +373,9 @@ pub struct PrefetchReceipt {
 #[non_exhaustive]
 pub enum ResourceCapability {
     BufferedResource,
+    /// Answering a stylesheet request with a host-decoded
+    /// [`PreparsedStyleSheet`] instead of CSS text.
+    PreparsedStyleSheet,
     ResourceStream,
     ResourcePath,
     Http,

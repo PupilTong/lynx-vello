@@ -76,13 +76,17 @@ mutation is reachable only from the fetched main-thread script through the
 embedded Element PAPI. `registerFonts(bytes)` is a narrow resource capability:
 it registers every usable face in an OpenType container through the opaque
 view and returns the number accepted, without exposing the document or text
-engine. `loadStyleSheet(url)` currently forwards to core and rejects as
-unsupported without fetching.
+engine. `loadStyleSheet(url)` fetches CSS in the Render Worker, registers the bytes,
+and mounts them as author-origin rules through the same resource boundary the
+main-thread script uses; sheets cascade in load order. The stylesheet contract
+has a second arm for a host that already parsed its CSS, but a browser host
+never does, so this embedder always takes the text arm.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
 may execute suitable JavaScript by URL; bundle retrieval, decode, `PageConfig`
-parsing, and future `StyleInfo` lowering remain external work, exactly as in
-the native CLI.
+parsing, and `StyleInfo` lowering remain external work, exactly as in the
+native CLI — where the CLI does perform them and hands core the pre-parsed
+arm.
 
 ## Synchronization and rendering
 

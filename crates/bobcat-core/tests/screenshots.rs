@@ -18,8 +18,8 @@ use bobcat_core::resource::{
     CancellationToken, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
 };
 use bobcat_core::{
-    EngineEvent, LynxViewError, OffscreenLynxView, PageConfig, ScriptRunError,
-    quickjs_engine_factory,
+    EngineEvent, LynxViewError, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, ScriptRunError, quickjs_engine_factory,
 };
 use flashbulb::{Image, Screenshots};
 use support::FetcherDouble;
@@ -29,6 +29,19 @@ const MAIN_THREAD_SCRIPT: &str = r"
 globalThis.renderPage = function renderPage() {
   const page = __CreatePage('card', 0);
   __AppendElement(page, __CreateView(0));
+};
+";
+
+/// Builds a `.card` with a `.badge` child; every visual is author CSS.
+const STYLED_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  const card = __CreateView(0);
+  __SetClasses(card, 'card');
+  const badge = __CreateView(0);
+  __SetClasses(badge, 'badge');
+  __AppendElement(card, badge);
+  __AppendElement(page, card);
 };
 ";
 
@@ -187,14 +200,134 @@ async fn decoded_image_url_reaches_the_private_painter() {
     screenshots().assert_matches(&["retained-image-store"], &image);
 }
 
+/// Requirement: a class change made by script must restyle against author
+/// rules that were never parsed from text. The script paints itself red, then
+/// swaps the class and flushes again; only the second commit is captured.
 #[tokio::test]
-async fn stylesheet_loading_is_a_closed_url_api_for_now() {
-    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
-    let error = view
-        .load_style_sheet("app:///author.css")
-        .expect_err("author stylesheets are deliberately not implemented yet");
-    assert!(matches!(
-        error,
-        LynxViewError::StyleSheetUnsupported { ref url } if url == "app:///author.css"
-    ));
+async fn a_scripted_class_change_restyles_against_preparsed_rules() {
+    const SWAP_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __SetClasses(box, 'before');
+  __AppendElement(page, box);
+  __FlushElementTree();
+  __SetClasses(box, 'after');
+  __FlushElementTree();
+};
+";
+    let sized = |color: &str| {
+        vec![
+            PreparsedDeclaration::new("width", "16px"),
+            PreparsedDeclaration::new("height", "12px"),
+            PreparsedDeclaration::new("background-color", color),
+        ]
+    };
+    let resources: Arc<dyn ResourceFetcher> = Arc::new(
+        FetcherDouble::new(SWAP_SCRIPT.as_bytes().to_vec())
+            .resolving_to(SCRIPT_URL)
+            .with_preparsed_style_sheet(PreparsedStyleSheet {
+                rules: vec![
+                    PreparsedRule::Style {
+                        selectors: ".before".to_owned(),
+                        declarations: sized("#ff0000"),
+                    },
+                    PreparsedRule::Style {
+                        selectors: ".after".to_owned(),
+                        declarations: sized("#00ff00"),
+                    },
+                ],
+            }),
+    );
+    let mut view = OffscreenLynxView::new(
+        PageConfig::default(),
+        resources,
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        32.0,
+        24.0,
+        1.0,
+    )
+    .expect("view");
+
+    view.load_style_sheet("app:///author.css")
+        .await
+        .expect("the pre-parsed sheet mounts");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
+
+    let shot = view.capture().expect("capture the restyled page");
+    let count = |wanted: [u8; 4]| {
+        shot.pixels
+            .chunks_exact(4)
+            .filter(|pixel| *pixel == wanted)
+            .count()
+    };
+    assert_eq!(
+        count([0, 255, 0, 255]),
+        16 * 12,
+        "the class swap must restyle against the author rules"
+    );
+    assert_eq!(count([255, 0, 0, 255]), 0, "no pre-swap pixels survive");
+}
+
+/// The whole pre-parsed ingestion path, end to end: a host-decoded sheet is
+/// loaded through the resource provider, a script builds a classed element,
+/// and the committed frame is compared against a golden.
+#[tokio::test]
+async fn a_preparsed_author_sheet_paints() {
+    let resources: Arc<dyn ResourceFetcher> = Arc::new(
+        FetcherDouble::new(STYLED_SCRIPT.as_bytes().to_vec())
+            .resolving_to(SCRIPT_URL)
+            .with_preparsed_style_sheet(PreparsedStyleSheet {
+                rules: vec![
+                    PreparsedRule::Style {
+                        selectors: ".card".to_owned(),
+                        declarations: vec![
+                            PreparsedDeclaration::new("width", "200px"),
+                            PreparsedDeclaration::new("height", "120px"),
+                            PreparsedDeclaration::new("background-color", "rebeccapurple"),
+                            PreparsedDeclaration::new("margin", "40px"),
+                        ],
+                    },
+                    PreparsedRule::Style {
+                        selectors: ".card > .badge".to_owned(),
+                        declarations: vec![
+                            PreparsedDeclaration::new("width", "60px"),
+                            PreparsedDeclaration::new("height", "60px"),
+                            PreparsedDeclaration::new("background-color", "gold"),
+                        ],
+                    },
+                ],
+            }),
+    );
+    let mut view = OffscreenLynxView::new(
+        PageConfig::default(),
+        resources,
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        393.0,
+        727.0,
+        1.0,
+    )
+    .expect("view");
+
+    view.load_style_sheet("app:///author.css")
+        .await
+        .expect("the pre-parsed sheet mounts");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
+
+    let shot = view.capture().expect("capture the styled page");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["preparsed-author-sheet"], &image);
 }

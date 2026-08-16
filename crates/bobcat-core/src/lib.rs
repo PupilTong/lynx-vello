@@ -22,6 +22,7 @@ mod quickjs;
 pub mod resource;
 mod runtime;
 pub mod script;
+pub mod style;
 mod tree;
 mod view;
 
@@ -40,5 +41,6 @@ pub use engine::{
 };
 #[cfg(feature = "quickjs")]
 pub use quickjs::engine_factory as quickjs_engine_factory;
+pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 pub use tree::PageConfig;
 pub use view::{LynxView, LynxViewError, OffscreenLynxView};

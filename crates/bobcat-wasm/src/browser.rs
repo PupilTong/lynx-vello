@@ -169,18 +169,41 @@ impl Window for BrowserWindow {
 #[derive(Debug, Default)]
 struct BrowserResources {
     scripts: Mutex<HashMap<String, Arc<[u8]>>>,
+    style_sheets: Mutex<HashMap<String, Arc<[u8]>>>,
 }
 
 impl BrowserResources {
     fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
+        Self::register(&self.scripts, "script", url, bytes)
+    }
+
+    fn register_style_sheet(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
+        Self::register(&self.style_sheets, "stylesheet", url, bytes)
+    }
+
+    fn register(
+        registry: &Mutex<HashMap<String, Arc<[u8]>>>,
+        kind: &str,
+        url: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, JsValue> {
         let url = Url::parse(url)
-            .map_err(|error| js_error(format!("the script URL `{url}` is invalid: {error}")))?;
+            .map_err(|error| js_error(format!("the {kind} URL `{url}` is invalid: {error}")))?;
         let normalized = url.to_string();
-        self.scripts
+        registry
             .lock()
             .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
             .insert(normalized.clone(), Arc::from(bytes));
         Ok(normalized)
+    }
+
+    /// The registry a request of this kind is answered from.
+    fn registry(&self, kind: &ResourceKind) -> Option<&Mutex<HashMap<String, Arc<[u8]>>>> {
+        match kind {
+            ResourceKind::ExternalJs => Some(&self.scripts),
+            ResourceKind::StyleSheet => Some(&self.style_sheets),
+            _ => None,
+        }
     }
 
     fn error<T>(
@@ -235,15 +258,15 @@ impl ResourceFetcher for BrowserResources {
                 "script resolution was cancelled",
             );
         }
-        if !matches!(request.resource.kind, ResourceKind::ExternalJs) {
+        let Some(registry) = self.registry(&request.resource.kind) else {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::UnsupportedKind,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
-                "the browser source registry only contains external scripts",
+                "the browser source registry only contains external scripts and stylesheets",
             );
-        }
+        };
 
         let parsed = Url::parse(&locator).or_else(|_| {
             request
@@ -263,8 +286,7 @@ impl ResourceFetcher for BrowserResources {
                 "the script locator is not a valid URL",
             );
         };
-        let present = self
-            .scripts
+        let present = registry
             .lock()
             .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
             .contains_key(url.as_str());
@@ -274,7 +296,7 @@ impl ResourceFetcher for BrowserResources {
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
-                "the Render Worker has not registered this script URL",
+                "the Render Worker has not registered this URL",
             );
         }
 
@@ -308,11 +330,14 @@ impl ResourceFetcher for BrowserResources {
         }
 
         let source = self
-            .scripts
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .get(request.request.resource.url.as_str())
-            .cloned();
+            .registry(&request.request.resource.resource.kind)
+            .and_then(|registry| {
+                registry
+                    .lock()
+                    .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+                    .get(request.request.resource.url.as_str())
+                    .cloned()
+            });
         let Some(source) = source else {
             return Self::error(
                 Some(request_id),
@@ -730,16 +755,27 @@ impl BobcatRenderer {
         self.view.execute_script(&url).await.map_err(js_error)
     }
 
-    /// Forward the reserved URL-based stylesheet entry. Core intentionally
-    /// reports this as unsupported until the stylesheet pipeline exists.
+    /// Load an author stylesheet through `LynxView`'s resource boundary.
+    ///
+    /// A browser embedder never decodes a `.web.bundle`, so the bytes it
+    /// registers are CSS text and core takes the text arm of the stylesheet
+    /// contract.
     #[wasm_bindgen(js_name = loadStyleSheet)]
+    pub async fn load_style_sheet(&mut self, url: String) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        self.view.load_style_sheet(&url).await.map_err(js_error)
+    }
+
+    /// Register CSS bytes the browser host fetched, under the URL
+    /// [`Self::load_style_sheet`] will ask for.
+    #[wasm_bindgen(js_name = registerStyleSheet)]
     #[allow(
         clippy::needless_pass_by_value,
-        reason = "wasm-bindgen owns JavaScript string arguments"
+        reason = "wasm-bindgen owns JavaScript string and Uint8Array arguments"
     )]
-    pub fn load_style_sheet(&mut self, url: String) -> Result<(), JsValue> {
+    pub fn register_style_sheet(&self, url: String, bytes: Vec<u8>) -> Result<String, JsValue> {
         self.ensure_running()?;
-        self.view.load_style_sheet(&url).map_err(js_error)
+        self.resources.register_style_sheet(&url, bytes)
     }
 
     /// Register every usable face in an embedder-provided font container.

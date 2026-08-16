@@ -6,6 +6,7 @@ let initialized = false
 let executeQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
+const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
 const SCRIPT_START_TIMEOUT_MS = 10_000
 
 function errorMessage(error) {
@@ -90,16 +91,29 @@ async function fetchScript(url) {
   return renderer.registerScript(response.url || absoluteUrl(url), bytes)
 }
 
+// A browser host never decodes a `.web.bundle`, so the bytes it registers are
+// CSS text; core takes the text arm of the stylesheet contract.
+async function fetchStyleSheet(url) {
+  const response = await fetch(absoluteUrl(url))
+  if (!response.ok) {
+    throw new Error(
+      `Could not fetch stylesheet ${response.url || url}: ${String(response.status)} ${response.statusText}`,
+    )
+  }
+  const bytes = await readBoundedBytes(response, MAX_STYLE_SHEET_BYTES)
+  return renderer.registerStyleSheet(response.url || absoluteUrl(url), bytes)
+}
+
 async function readBoundedBytes(response, limit) {
   const declaredLength = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredLength) && declaredLength > limit) {
-    throw new Error(`Script response exceeds the ${String(limit)} byte limit`)
+    throw new Error(`Response exceeds the ${String(limit)} byte limit`)
   }
 
   if (response.body === null) {
     const bytes = new Uint8Array(await response.arrayBuffer())
     if (bytes.byteLength > limit) {
-      throw new Error(`Script response exceeds the ${String(limit)} byte limit`)
+      throw new Error(`Response exceeds the ${String(limit)} byte limit`)
     }
     return bytes
   }
@@ -116,7 +130,7 @@ async function readBoundedBytes(response, limit) {
       length += value.byteLength
       if (length > limit) {
         await reader.cancel('Bobcat script response exceeded its byte limit')
-        throw new Error(`Script response exceeds the ${String(limit)} byte limit`)
+        throw new Error(`Response exceeds the ${String(limit)} byte limit`)
       }
       chunks.push(value)
     }
@@ -180,10 +194,12 @@ async function dispatchRequest(message) {
       )
       break
     }
-    case 'loadStyleSheet':
-      await renderer.loadStyleSheet(absoluteUrl(message.url))
+    case 'loadStyleSheet': {
+      const registeredUrl = await fetchStyleSheet(message.url)
+      await renderer.loadStyleSheet(registeredUrl)
       postResponse(request, true)
       break
+    }
     case 'registerFonts':
       postResponse(request, true, renderer.registerFonts(message.bytes))
       break
