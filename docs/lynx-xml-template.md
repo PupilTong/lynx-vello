@@ -532,14 +532,23 @@ lynx-vello's current artifact boundary is the ordinary `.web.bundle`. A Lynx
 XML card compiled with `encodeLynxXML()` already fits that boundary and needs no
 new decoder format.
 
-Accepting raw XML directly would instead be a separate source front end. It
-would require the grammar above, the fixed template mapping, JavaScript source
-registration, and a raw stylesheet channel that today's bundle ingestion does
-not have. Once such source CSS is admitted, standard at-rules fall under this
-repo's W3C-correctness policy and should be evaluated by Stylo; traversal of
-their contents must also specify where Lynx-only selector, unit, and declaration
-rewrites apply. The decision to support that additional input path must be made
-explicitly before implementation. It must not be hidden inside
+`crates/lynx-xml` implements the separate source-parsing front end: it validates
+the restricted grammar and returns borrowed style, main-thread script, and
+background-thread script sections. Its primary error offset counts UTF-16 code
+units like the reference web parser, while `byte_offset()` exposes the same
+position as a UTF-8 byte boundary for Rust callers. The parser deliberately
+does not sniff inputs, perform I/O, apply the fixed template mapping, parse CSS,
+encode a bundle, or launch a runtime. Rust `&str` cannot represent the lone
+UTF-16 surrogates that a JavaScript string can contain; this does not affect the
+raw UTF-8/TextDecoder ingestion path.
+
+Accepting raw XML in a product still requires the fixed template mapping,
+JavaScript source registration, and a raw stylesheet channel that today's
+bundle ingestion does not have. Once such source CSS is admitted, standard
+at-rules fall under this repo's W3C-correctness policy and should be evaluated
+by Stylo; traversal of their contents must also specify where Lynx-only
+selector, unit, and declaration rewrites apply. That integration must remain an
+explicit embedder/source-front-end path. It must not be hidden inside
 `lynx-template-decoder` as another binary encoding.
 
 ## Primary evidence

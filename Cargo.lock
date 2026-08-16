@@ -1672,6 +1672,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lynx-xml"
+version = "0.1.0"
+
+[[package]]
 name = "malloc_size_of_derive"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
