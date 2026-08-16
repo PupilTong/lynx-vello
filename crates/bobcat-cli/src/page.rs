@@ -7,14 +7,14 @@
 
 use std::sync::Arc;
 
-use bobcat_core::PageConfig;
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
     PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
     ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse, ResourceSource,
-    ResourceStream, ResourceTiming, RetryAdvice,
+    ResourceStream, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
+use bobcat_core::{PageConfig, PreparsedStyleSheet};
 use http::HeaderMap;
 use url::Url;
 
@@ -24,9 +24,10 @@ use crate::CliError;
 pub(crate) struct Program {
     pub(crate) input: String,
     pub(crate) script_url: Url,
+    /// The non-global CSS fragment ids this bundle carries, if any.
+    scoped_css_ids: Vec<i32>,
     pub(crate) resource_fetcher: Arc<ProgramResourceFetcher>,
     pub(crate) config: PageConfig,
-    author_rule_count: usize,
 }
 
 /// The CLI's resource provider for sources extracted from one decoded bundle.
@@ -38,6 +39,11 @@ pub(crate) struct Program {
 pub(crate) struct ProgramResourceFetcher {
     script_url: Url,
     source: Arc<str>,
+    style_sheet_url: Option<Url>,
+    /// The bundle's author CSS, already lowered out of its rkyv wire form.
+    /// Answering the stylesheet request with this rather than CSS text is the
+    /// point of [`ResourceCapability::PreparsedStyleSheet`].
+    style_sheet: Option<Arc<PreparsedStyleSheet>>,
 }
 
 impl ProgramResourceFetcher {
@@ -45,7 +51,23 @@ impl ProgramResourceFetcher {
         Self {
             script_url,
             source: Arc::from(source),
+            style_sheet_url: None,
+            style_sheet: None,
         }
+    }
+
+    fn with_style_sheet(mut self, url: Url, sheet: PreparsedStyleSheet) -> Self {
+        self.style_sheet_url = Some(url);
+        self.style_sheet = Some(Arc::new(sheet));
+        self
+    }
+
+    /// The URL the bundle's author CSS is registered under, if it carried any.
+    ///
+    /// The registration is the single source of truth: a bundle whose sheet was
+    /// never registered has no URL to load, and one that was cannot be missed.
+    pub(crate) fn style_sheet_url(&self) -> Option<&Url> {
+        self.style_sheet_url.as_ref()
     }
 
     fn error<T>(
@@ -84,7 +106,11 @@ impl ProgramResourceFetcher {
 
 impl ResourceFetcher for ProgramResourceFetcher {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        capability == ResourceCapability::BufferedResource
+        match capability {
+            ResourceCapability::BufferedResource => true,
+            ResourceCapability::PreparsedStyleSheet => self.style_sheet.is_some(),
+            _ => false,
+        }
     }
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
@@ -118,7 +144,7 @@ impl ResourceFetcher for ProgramResourceFetcher {
                 "resource locator is not a valid URL",
             );
         };
-        if url != self.script_url {
+        if url != self.script_url && Some(&url) != self.style_sheet_url.as_ref() {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
@@ -195,6 +221,43 @@ impl ResourceFetcher for ProgramResourceFetcher {
         })
     }
 
+    fn fetch_style_sheet(
+        &self,
+        request: BufferedResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        let request_id = request.request.context.id;
+        let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
+        let Some(sheet) = self
+            .style_sheet
+            .clone()
+            .filter(|_| Some(&request.request.resource.url) == self.style_sheet_url.as_ref())
+        else {
+            return Self::error(
+                Some(request_id),
+                ResourceErrorKind::NotFound,
+                ResourceErrorPhase::Open,
+                Some(locator),
+                "the decoded bundle carries no stylesheet at this URL",
+            );
+        };
+        let resource = request.request.resource;
+        Box::pin(async move {
+            Ok(StyleSheetResponse {
+                metadata: ResourceMetadata {
+                    request_id,
+                    resource,
+                    headers: HeaderMap::default(),
+                    content_length: None,
+                    media_type: Some(Arc::from("text/css; charset=utf-8")),
+                    source: ResourceSource::MemoryCache,
+                    cache_status: CacheStatus::default(),
+                    timing: ResourceTiming::default(),
+                },
+                payload: StyleSheetPayload::Preparsed(sheet),
+            })
+        })
+    }
+
     fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Open)
     }
@@ -242,35 +305,67 @@ impl Program {
             .ok_or_else(|| CliError::MissingRoot(input.to_string()))?;
         let script_url = Url::parse("bobcat-memory://bundle/lepus-root.js")
             .expect("the built-in root-script URL must be valid");
-        let resource_fetcher = Arc::new(ProgramResourceFetcher::new(script_url.clone(), source));
+        let mut fetcher = ProgramResourceFetcher::new(script_url.clone(), source);
+        let style_sheet = template
+            .style_info
+            .as_ref()
+            .map(crate::style_info::to_preparsed_style_sheet)
+            .filter(|sheet| !sheet.is_empty());
+        let scoped_css_ids = template
+            .style_info
+            .as_ref()
+            .map_or_else(Vec::new, |style_info| {
+                let mut ids: Vec<i32> = style_info
+                    .css_id_to_style_sheet
+                    .keys()
+                    .copied()
+                    .filter(|id| *id != 0)
+                    .collect();
+                ids.sort_unstable();
+                ids
+            });
+        if let Some(sheet) = style_sheet {
+            let url = Url::parse("bobcat-memory://bundle/style-info.css")
+                .expect("the built-in stylesheet URL must be valid");
+            fetcher = fetcher.with_style_sheet(url, sheet);
+        }
         let config = PageConfig {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
         };
-        let author_rule_count = template.style_info.as_ref().map_or(0, |style_info| {
-            style_info
-                .css_id_to_style_sheet
-                .values()
-                .map(|sheet| sheet.rules.len())
-                .sum()
-        });
         Ok(Self {
             input: input.to_string(),
             script_url,
-            resource_fetcher,
+            scoped_css_ids,
+            resource_fetcher: Arc::new(fetcher),
             config,
-            author_rule_count,
         })
     }
 
-    pub(crate) fn warn_about_dropped_author_rules(&self) {
-        if self.author_rule_count != 0 {
-            eprintln!(
-                "bobcat: warning: {} contains {} decoded author rule(s), but StyleInfo ingestion \
-                 is not implemented yet; author styles are omitted",
-                self.input, self.author_rule_count
-            );
+    /// Reports CSS fragments whose rules will apply more widely than the
+    /// bundle intended.
+    ///
+    /// A bundle compiled with `enableRemoveCSSScope = false` keeps one
+    /// fragment per component and expects each fragment's rules to match only
+    /// inside that component. Per-component scoping is not implemented, so
+    /// those rules mount globally and two components that style the same class
+    /// name will collide. Rendering them is still better than rendering
+    /// nothing, but it is not silent.
+    pub(crate) fn warn_about_unscoped_author_styles(&self) {
+        if self.scoped_css_ids.is_empty() {
+            return;
         }
+        let ids: Vec<String> = self
+            .scoped_css_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        eprintln!(
+            "bobcat: warning: {} carries component-scoped CSS fragments (css ids {}); per-component \
+             scoping is not implemented, so their rules apply globally",
+            self.input,
+            ids.join(", ")
+        );
     }
 }

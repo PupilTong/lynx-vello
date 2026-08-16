@@ -191,6 +191,64 @@ the semantics are stylo's.** Everything below refines that sentence.
     specificity (per-class application order), so "convert to `.class`
     rules" would be an approximation.
 
+## D-bis. `StyleInfo` ingestion, as landed
+
+*(Recorded when ingestion landed, after the 2026-07-11 session. Refines §B.5
+and §D.16 with what the wire format actually permits.)*
+
+20. **The parse-skipping floor is one selector-list parse per rule and one
+    value parse per declaration.** Everything above that is skipped: no
+    stylesheet text is produced, no sheet is tokenized, no at-rule or
+    declaration-block parsing runs, and rules, keyframes and font-face rules
+    are built as stylo structures directly
+    (`StylesheetContents::from_rules`, already seeded in the fork). The floor
+    is not a shortcut — it is forced twice over. The wire format does not
+    decompose attribute selectors (`Attribute` values carry `[type=submit]`
+    whole) or functional pseudo-classes (`nth-child(4n+1)`,
+    `not(:has(figcaption))`), so a component-level selector path would still
+    have to parse those as text; and stylo constructs specified values only
+    through its value parsers, with shorthand expansion (`margin`, `border`,
+    `flex`, `animation`, … are all on the wire) reachable no other way.
+    Routing values through `parse_one_declaration_into` also keeps stylo's
+    own property gating on. Declaration *values* are never re-serialized:
+    the wire's value tokens are a lossless partition of the authored text,
+    so concatenating them reproduces it byte for byte — except that a trailing
+    `!important` must first be split back out at token level, because the wire's
+    `is_important` flag is never set and the marker travels inside the value
+    (see [web-binary-template.md](web-binary-template.md)).
+
+21. **Fragments flatten in reverse-topological order; per-component scoping
+    is not implemented.** All `css_id` fragments mount as one author sheet,
+    imported fragments before importing ones, ties broken by ascending id.
+    That order is what web-core's own TypeScript decoder used
+    (`processStyleInfo.js` reverses its Kahn sort) and what the C++ engine's
+    `ImportOtherFragment` means; shipped web-core lost it to `FnvHashMap`
+    iteration order, so it is deterministic here and undefined there. For the
+    common bundle — `enableRemoveCSSScope = true`, css id `0` only — the
+    result is semantically identical to web-core. For an
+    `enableRemoveCSSScope = false` bundle, the `:where([l-css-id="N"])` guards
+    of §D.16 are absent, so component-scoped rules apply globally and two
+    components styling the same class name collide; the CLI warns, naming the
+    fragment ids, rather than rendering nothing or failing silently. Unlike
+    web-core, an import cycle or a duplicated import edge does not drop a
+    fragment.
+
+22. **web-core's browser-shape selector rewrites are deliberately absent**, as
+    is its `:not([l-e-name])` entry guard. The rewrites compensate for a
+    browser DOM this engine does not have: Lynx tag names are this document's
+    real element names (no `view` → `x-view` map), and the `page` element is
+    the document element, so `:root` matches natively. Dropping the entry
+    guard lowers every author rule by a uniform (0,1,0), which changes no
+    ordering outcome. One divergence is a correctness *fix* rather than a
+    simplification: web-core emits attribute selectors double-bracketed
+    (`[[type=submit]]`), which no browser matches, so attribute rules match
+    here where they silently do not there.
+
+23. **`enableCSSSelector = false` is ignored rather than honored.** The flag
+    is threaded from the bundle to the runtime and now, for the first time,
+    reaches a layer that could act on it. Rules mount normally; the legacy
+    `css_og` class→declarations side table stays out of scope per §D.17.
+
 ## E. The performance bar
 
 18. **Match or beat native C++ Lynx.** The bar for "high performance" is the

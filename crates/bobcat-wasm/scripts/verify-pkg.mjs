@@ -32,6 +32,7 @@ for (const requiredExport of [
 }
 for (const requiredMethod of [
   'registerScript(',
+  'registerStyleSheet(',
   'executeScript(',
   'loadStyleSheet(',
   'pollScript(',
@@ -99,6 +100,11 @@ if (renderWorker.includes('initThreadPool')) {
 }
 if (!renderWorker.includes('await renderer.executeScript(registeredUrl)')) {
   throw new Error('Render Worker must route fetched URLs through executeScript')
+}
+if (!renderWorker.includes('await renderer.loadStyleSheet(registeredUrl)')) {
+  throw new Error(
+    'Render Worker must register fetched stylesheet bytes before loading them',
+  )
 }
 if (renderWorker.includes('setTimeout(resolve, 1)')) {
   throw new Error('Render Worker still polls script completion on a timer')

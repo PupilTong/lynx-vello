@@ -57,9 +57,10 @@ completion is reported by `LynxView::pump` as
 the construction-time `EventRequester`, so the host can pump immediately
 without polling. `execute_script_with_cancellation` accepts a public resource
 `CancellationToken`; dropping the returned future cancels that same token and
-unblocks cooperative resolver/fetcher work. `load_style_sheet(url)` reserves the matching
-URL-shaped API but currently returns `LynxViewError::StyleSheetUnsupported`
-without fetching or mutating the document.
+unblocks cooperative resolver/fetcher work. `load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
+resolves and fetches through the same `ResourceFetcher`, which answers with
+either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
+the result as author-origin rules. Load order is cascade order.
 
 ## Public and private boundaries
 

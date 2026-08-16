@@ -129,8 +129,21 @@ useful signal for currently-compatible versions of those libraries.
   through `pump`. `execute_script_with_cancellation` accepts the resource
   protocol's public `CancellationToken`; dropping its future cancels the same
   token observed by pending resolution/fetch work.
-  `load_style_sheet(url)` is reserved but currently returns a precise
-  unsupported error without fetching. The document, tree, engine, and realm
+  `load_style_sheet(url)` loads author CSS through the same fetcher and mounts
+  it on the document; the protocol's `fetch_style_sheet` answers with either
+  CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
+  itself, since a `.web.bundle` ships CSS a build step already tokenized and
+  re-serializing it to a sheet blob is the startup cost the design rules out.
+  Lowering it produces no stylesheet text: rules, keyframes, and font-face
+  rules are built directly through `dom`'s branded `CssRule` builders, leaving
+  stylo one selector-list parse per rule and one value parse per declaration —
+  the floor, because the wire format keeps attribute selectors and functional
+  pseudo-classes as text and stylo builds specified values only through its
+  value parsers. Decoding a container stays embedder work: core owns the
+  `PreparsedStyleSheet` vocabulary, and the embedder fills it. Load order is
+  cascade order. Per-component css-id scoping is **not** implemented — every
+  fragment mounts globally, which is what web-core itself emits for a
+  `enableRemoveCSSScope = true` bundle. The document, tree, engine, and realm
   cannot be borrowed or decomposed from the facade.
   `ScriptEngineFactory` is `Send + Sync` and creates the owner-thread-bound,
   non-`Send` `ScriptEngine` only after the factory reaches the engine-owned
@@ -239,7 +252,8 @@ useful signal for currently-compatible versions of those libraries.
   and nothing dispatches to them.
   `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
   scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
-  into scoped author rules there is nothing to validate an encoding against
+  into **scoped** author rules there is nothing to validate an encoding against
+  (ingestion has landed, but mounts every fragment globally)
   (web-core writes `l-css-id`/`l-e-name` attributes; native Lynx keeps css_id
   on the element). It lands with the ingestion side that reads it, together
   with the parent-component css-id inheritance that feeds it.
@@ -352,9 +366,12 @@ useful signal for currently-compatible versions of those libraries.
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
   It must not
   duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
-  remains a precise `bobcat-core` QuickJS error, and non-empty decoded `StyleInfo`
-  currently produces an explicit author-styles-omitted warning rather than silent
-  claimed compatibility.
+  remains a precise `bobcat-core` QuickJS error. Its `style_info` module lowers
+  a decoded `StyleInfo` into `bobcat_core::PreparsedStyleSheet` — flattening
+  every `css_id` fragment in reverse-topological order, imported before
+  importing — and registers it in the fetcher so both runners load it before
+  the first script batch. A bundle carrying non-zero fragment ids warns that
+  per-component scoping is not implemented rather than claiming compatibility.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
@@ -609,7 +626,15 @@ useful signal for currently-compatible versions of those libraries.
   inline-style parsing, and a private per-document `StyleEngine` containing
   the `Stylist`, cascade pipeline, device, stylesheet set, and
   `SharedRwLock`. `Document::new` creates that entire context afresh, so
-  different documents cannot share stylesheets. The generic `T` payload remains associated with
+  different documents cannot share stylesheets. Author CSS enters either as
+  text (`add_stylesheet`) or, for CSS a host already parsed, as rules the
+  document itself builds — `build_style_rule` / `build_keyframes_rule` /
+  `build_font_face_rule` mint an opaque `CssRule` branded with the lock that
+  created it, and `append_rules` mounts a batch of them as one sheet, refusing
+  any rule minted by another document. That keeps the `SharedRwLock`, the base
+  URL, and stylo's own rule types inside the crate while letting the layer
+  above skip the sheet, at-rule, and declaration-block parsers.
+  The generic `T` payload remains associated with
   each element/text node in the NodeId-aligned payload slab but is opaque and read-only to the DOM
   core; selector-visible state comes only
   from real DOM fields, so payloads cannot synthesize attributes. DOM setters
@@ -817,7 +842,7 @@ useful signal for currently-compatible versions of those libraries.
   automatic style-damage→layout-invalidation wiring (boundary-stopped and
   engine-internal — not a runtime-adapter concern) now live in `dom`
   (see above). Still L3 work in the runtime adapter: the remaining Element-PAPI
-  surface, `rpx`-aware view/device policy, decoded `StyleInfo` ingestion,
+  surface, `rpx`-aware view/device policy, per-component css-id scoping,
   sticky lowering,
   component-specific staggered layout, and Lynx-specific text
   attribute/raw-text/truncation policy. Generic W3C text style, document
@@ -851,8 +876,9 @@ useful signal for currently-compatible versions of those libraries.
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work. `packages/bobcat-element` with
   `bobcat-core`'s `tree` and feature-gated `quickjs` modules are the first
-  pieces of this layer to land; the background thread, `StyleInfo` ingestion, the event
-  model, and the remaining Element PAPI members are still ahead.
+  pieces of this layer to land, joined by `StyleInfo` ingestion; the background
+  thread, the event model, css-id scoping, and the remaining Element PAPI
+  members are still ahead.
 
 See `docs/runtime-architecture.md` for the runtime dependency graph, feature
 boundary, private paint pipeline, and frame walkthrough;

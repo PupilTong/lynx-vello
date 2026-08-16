@@ -108,6 +108,16 @@ CSSPropertyEnum  // #[repr(u32)], 216 variants: Unknown=0, Top=1 … OffsetDista
 ValueToken     { token_type: u8, value: String }   // token_type from web-core's css_tokenizer
 ```
 
+**`is_important` is dead on the wire.** The encoder hard-codes it `false`, and
+`@lynx-js/css-serializer` appends ` !important` to the declaration *value*
+instead (`toString(node.value) + (node.important ? ' !important' : '')`), so the
+marker arrives as ordinary value tokens — a `!` delimiter plus an `important`
+ident. A consumer that hands the raw value to a CSS value parser does not merely
+lose the importance: the marker is not part of any value grammar, so the whole
+declaration fails to parse and is dropped, letting a later normal declaration
+win. `ParsedDeclaration::value_and_importance()` splits it back out at token
+level; `value_text()` stays wire-faithful.
+
 `css_id_to_style_sheet` keys are the per-entry CSS fragment ids (`cssId`);
 `imports` model `@import` between fragments (flattening uses Kahn topological
 sort in `flattened_style_info.rs`).

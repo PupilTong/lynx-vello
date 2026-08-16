@@ -43,6 +43,7 @@ ndk-sys = { workspace = true }
 
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }
+rkyv = { workspace = true }
 
 [lints]
 workspace = true

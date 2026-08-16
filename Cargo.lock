@@ -206,6 +206,7 @@ dependencies = [
  "objc2-image-io",
  "png",
  "pollster",
+ "rkyv",
  "thiserror 2.0.18",
  "url",
  "windows",

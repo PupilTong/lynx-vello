@@ -20,12 +20,13 @@ use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    program.warn_about_dropped_author_rules();
+    program.warn_about_unscoped_author_styles();
     let (sender, receiver) = mpsc::channel();
     let event_sender = sender.clone();
     let event_requester: std::sync::Arc<dyn EventRequester> = std::sync::Arc::new(move || {
         let _ = event_sender.send(HostEvent::Pump);
     });
+    let style_sheet_url = program.resource_fetcher.style_sheet_url().cloned();
     let mut view = OffscreenLynxView::new(
         program.config,
         program.resource_fetcher,
@@ -36,6 +37,16 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         options.device_pixel_ratio,
     )?;
     view.attach_offscreen()?;
+    // The bundle's author CSS mounts before the script builds its tree, so
+    // the first commit is already styled.
+    if let Some(url) = style_sheet_url.as_ref() {
+        pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
+            CliError::LoadStyleSheet {
+                input: program.input.clone(),
+                source,
+            }
+        })?;
+    }
     pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
         CliError::StartScript {
             input: program.input.clone(),
