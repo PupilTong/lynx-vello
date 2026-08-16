@@ -12,6 +12,12 @@ plain JavaScript, and its CSS is pre-parsed into rkyv-serialized Rust structs.
 `crates/lynx-template-decoder` in this repo implements a native Rust decoder
 for exactly this format.
 
+Hand-written [Lynx XML markup templates](lynx-xml-template.md) are a **source
+format**, not another `.web.bundle` encoding. The merged `encodeLynxXML()` path
+lowers them to the ordinary binary container documented here. A separate raw
+XML decode-worker bypass remains proposed in `lynx-stack#3390` and must not be
+inferred from this wire specification.
+
 ## Two encodings, one target
 
 `@lynx-js/template-webpack-plugin` `WebEncodePlugin` picks the encoding via the
@@ -140,6 +146,13 @@ Option<String>, css_og_… map }` back over the wasm boundary.
 5. CustomSections → UTF-16LE → `JSON.parse`.
 6. StyleInfo → wasm `decode_style_info(...)` (flags read from `config`).
 7. Manifest / ElementTemplates → ignored server-side; unknown labels → error.
+
+An XML document compiled by `encodeLynxXML()` enters exactly this pipeline;
+downstream decoders cannot and need not know its source format. The proposed
+buildless raw-XML loader instead bypasses this binary pipeline: it translates
+source to the JSON-artifact shape and enters the worker's section-message
+assembly path. Its grammar and the two paths' differing CSS fallback rules are
+documented in [lynx-xml-template.md](lynx-xml-template.md).
 
 ## Where things live (lynx-stack repo)
 

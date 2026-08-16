@@ -8,6 +8,11 @@ so implementation work on any subsystem starts from a real spec instead of
 re-deriving Lynx behavior from scratch each time — **read the relevant file
 below before implementing a new subsystem.**
 
+Source and wire formats are specified separately: see
+[`lynx-xml-template.md`](../lynx-xml-template.md) for the restricted Lynx XML
+source format and [`web-binary-template.md`](../web-binary-template.md) for the
+`.web.bundle` artifact it can be compiled into.
+
 A third local checkout, `Paws/` (absolute path defined once in `AGENTS.md`),
 is *not* a Lynx behavior spec — it's a sibling native Rust UI engine (stylo +
 Taffy + parley) used purely as an **implementation-pattern** reference for
