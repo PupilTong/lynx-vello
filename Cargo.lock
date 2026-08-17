@@ -2493,6 +2493,7 @@ dependencies = [
  "cc",
  "codspeed-divan-compat",
  "smallvec",
+ "web-time",
 ]
 
 [[package]]

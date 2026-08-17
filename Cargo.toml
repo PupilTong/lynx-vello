@@ -63,6 +63,7 @@ js-sys = "0.3"
 rayon = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+web-time = "1.1.0"
 # wasm_thread 0.3.3 forwards Worker-originated spawns to its parent through a
 # private control message. Bobcat's explicit OffscreenCanvas embedder Worker
 # has no such parent handler, so use the upstream opt-in that directly creates

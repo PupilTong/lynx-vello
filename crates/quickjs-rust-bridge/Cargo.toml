@@ -12,6 +12,9 @@ links = "quickjs"
 [dependencies]
 smallvec = { workspace = true }
 
+[target.wasm32-unknown-unknown.dependencies]
+web-time = { workspace = true }
+
 [dev-dependencies]
 divan = { workspace = true }
 

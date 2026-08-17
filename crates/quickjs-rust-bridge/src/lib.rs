@@ -25,10 +25,14 @@ mod implementation {
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    use std::time::Instant;
     use std::{fmt, mem};
 
     use smallvec::SmallVec;
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    use web_time::Instant;
 
     use super::ffi;
 
@@ -237,6 +241,16 @@ mod implementation {
         reason: Cell<Option<InterruptReason>>,
     }
 
+    fn deadline_from_timeout(
+        timeout: Option<Duration>,
+        now: impl FnOnce() -> Instant,
+    ) -> Option<Instant> {
+        timeout.map(|timeout| {
+            let now = now();
+            now.checked_add(timeout).unwrap_or(now)
+        })
+    }
+
     impl InterruptState {
         fn new(timeout: Option<Duration>) -> Self {
             Self {
@@ -263,10 +277,7 @@ mod implementation {
             }
             self.next_generation.set(generation);
             let token = generation << 1;
-            let now = Instant::now();
-            let deadline = self
-                .timeout
-                .map(|timeout| now.checked_add(timeout).unwrap_or(now));
+            let deadline = deadline_from_timeout(self.timeout, Instant::now);
 
             self.reason.set(None);
             self.deadline.set(deadline);
@@ -1455,8 +1466,12 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use std::sync::mpsc;
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         use std::time::Instant;
         use std::{panic, thread};
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        use web_time::Instant;
 
         use super::*;
 
@@ -1744,6 +1759,15 @@ mod implementation {
             drop(result);
             drop(realm);
             assert!(!handle.request_interrupt_if_running());
+        }
+
+        #[test]
+        fn disabled_timeout_does_not_read_the_monotonic_clock() {
+            let deadline = deadline_from_timeout(None, || {
+                panic!("the clock must remain unused when execution timeout is disabled")
+            });
+
+            assert!(deadline.is_none());
         }
 
         #[test]
