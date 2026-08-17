@@ -200,7 +200,13 @@ static int qjs_interrupt_trampoline(JSRuntime *raw, void *opaque) {
     return runtime->interrupt_callback(runtime->interrupt_opaque);
 }
 
-QjsRuntime *qjs_runtime_new(void) {
+JSClassID qjs_host_owner_class_id_new(void) {
+    JSClassID class_id = 0;
+
+    return JS_NewClassID(&class_id);
+}
+
+QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id) {
     QjsRuntime *runtime = calloc(1, sizeof(*runtime));
     if (runtime == NULL) {
         return NULL;
@@ -211,9 +217,13 @@ QjsRuntime *qjs_runtime_new(void) {
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
                                           runtime);
-        JS_NewClassID(&runtime->host_owner_class_id);
-        JS_NewClass(runtime->raw, runtime->host_owner_class_id,
-                    &qjs_host_owner_class);
+        runtime->host_owner_class_id = host_owner_class_id;
+        if (JS_NewClass(runtime->raw, runtime->host_owner_class_id,
+                        &qjs_host_owner_class) < 0) {
+            JS_FreeRuntime(runtime->raw);
+            free(runtime);
+            return NULL;
+        }
     } else {
         free(runtime);
         return NULL;

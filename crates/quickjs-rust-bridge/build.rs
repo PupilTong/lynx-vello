@@ -10,9 +10,9 @@ fn main() {
     let version = fs::read_to_string(&version_path)
         .expect("the pinned QuickJS submodule must contain VERSION");
     let version_define = format!("\"{}\"", version.trim());
+    let allocator_header = manifest_dir.join("src/rust-allocator.h");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo always provides target OS");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
 
     assert!(
         target_os != "windows" || target_env == "gnu",
@@ -31,6 +31,10 @@ fn main() {
         let mut build = cc::Build::new();
         build
             .define("CONFIG_VERSION", Some(version_define.as_str()))
+            .define("QJS_NO_JS_SHARED_MEMORY", None)
+            .define("QJS_RUST_ALLOCATOR", None)
+            .flag("-include")
+            .flag(&allocator_header)
             .flag_if_supported("-std=gnu11")
             .flag_if_supported("-fwrapv");
         if target_os == "windows" {
@@ -59,11 +63,6 @@ fn main() {
 
     if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         println!("cargo:rustc-link-lib=m");
-        if target_vendor != "apple" {
-            println!("cargo:rustc-link-lib=pthread");
-        }
-    } else if target_os == "windows" {
-        println!("cargo:rustc-link-lib=winpthread");
     }
 
     println!("cargo:rerun-if-changed={}", version_path.display());
@@ -71,6 +70,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/shim.c").display()
     );
+    println!("cargo:rerun-if-changed={}", allocator_header.display());
     for source in sources {
         rerun_if_changed(&quickjs_dir.join(source));
     }

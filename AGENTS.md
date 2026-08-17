@@ -292,6 +292,17 @@ useful signal for currently-compatible versions of those libraries.
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, and pending-job pump.
+  Every heap allocation made by the C shim or the five compiled QuickJS C
+  translation units is redirected through a private C ABI into Rust's global
+  allocator; a fixed aligned prefix supplies the size required for matching
+  `realloc`/`free` and QuickJS memory accounting. The realm deliberately does
+  not install JavaScript shared-memory primitives: both `Atomics` and
+  `SharedArrayBuffer` are absent, while ordinary `ArrayBuffer`, typed arrays,
+  and `DataView` remain available. This does not disable Rust-side atomics used
+  for interruption or host synchronization. Because QuickJS formerly coupled
+  its process-global class-ID mutex to the same feature, the bridge allocates
+  its one host class ID through a Rust `OnceLock` and registers that ID
+  separately in each runtime, preserving concurrent native realm creation.
   It also owns the **host-function seam**: `Realm::function` /
   `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback

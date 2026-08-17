@@ -1,5 +1,15 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
+//!
+//! Every C heap allocation compiled into this bridge is routed through Rust's
+//! global allocator. The realm deliberately omits JavaScript shared-memory
+//! primitives (`Atomics` and `SharedArrayBuffer`); this does not disable Rust
+//! or host-side synchronization.
 
+#[allow(
+    unsafe_code,
+    reason = "this private module implements the allocator ABI used by the C translation units"
+)]
+mod allocator;
 mod ffi;
 
 #[allow(
@@ -13,8 +23,8 @@ mod implementation {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
     use std::{fmt, mem};
 
@@ -30,6 +40,8 @@ mod implementation {
     const JS_EVAL_FLAG_BACKTRACE_BARRIER: i32 = 1 << 6;
     const JS_EVAL_FLAG_ASYNC: i32 = 1 << 7;
     const QJS_EVAL_FAILURE_COMPILE: i32 = 1;
+
+    static HOST_OWNER_CLASS_ID: OnceLock<u32> = OnceLock::new();
 
     /// Limits and timeout applied when a realm is created.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -658,13 +670,16 @@ mod implementation {
             }
 
             unsafe {
-                let runtime = NonNull::new(ffi::qjs_runtime_new()).ok_or_else(|| {
-                    Error::bridge(
-                        ErrorKind::OutOfMemory,
-                        ErrorPhase::CreateRealm,
-                        "QuickJS could not allocate a runtime",
-                    )
-                })?;
+                let host_owner_class_id =
+                    *HOST_OWNER_CLASS_ID.get_or_init(|| ffi::qjs_host_owner_class_id_new());
+                let runtime =
+                    NonNull::new(ffi::qjs_runtime_new(host_owner_class_id)).ok_or_else(|| {
+                        Error::bridge(
+                            ErrorKind::OutOfMemory,
+                            ErrorPhase::CreateRealm,
+                            "QuickJS could not allocate a runtime",
+                        )
+                    })?;
                 if let Some(limit) = options.memory_limit {
                     ffi::qjs_runtime_set_memory_limit(runtime.as_ptr(), limit);
                 }
