@@ -5,6 +5,7 @@ rustflags = [
     # feature from that floor that can improve generated code for this module;
     # proposals that change the runtime model without helping this artifact
     # (GC, exceptions, multi-memory) and post-135 features stay disabled.
+    # Keep quickjs-rust-bridge's Clang `-m` mirror in build.rs in sync.
     "target-feature=+atomics,+bulk-memory,+bulk-memory-opt,+extended-const,+multivalue,+mutable-globals,+nontrapping-fptoint,+reference-types,+relaxed-simd,+sign-ext,+simd128,+tail-call",
     "-C",
     "link-arg=--shared-memory",

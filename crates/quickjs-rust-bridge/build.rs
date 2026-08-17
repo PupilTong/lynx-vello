@@ -11,6 +11,7 @@ fn main() {
         .expect("the pinned QuickJS submodule must contain VERSION");
     let version_define = format!("\"{}\"", version.trim());
     let allocator_header = manifest_dir.join("src/rust-allocator.h");
+    let target = env::var("TARGET").expect("Cargo always provides TARGET");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo always provides target OS");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
@@ -41,6 +42,24 @@ fn main() {
             build.define("__USE_MINGW_ANSI_STDIO", None);
         } else {
             build.define("_GNU_SOURCE", None);
+        }
+        if target == "wasm32-unknown-unknown" {
+            // Match the Rust target features in `.cargo/config.toml`. These
+            // flags describe the C object code; `QJS_NO_JS_SHARED_MEMORY`
+            // above still omits JS Atomics and SAB.
+            build
+                .flag("-matomics")
+                .flag("-mbulk-memory")
+                .flag("-mbulk-memory-opt")
+                .flag("-mextended-const")
+                .flag("-mmultivalue")
+                .flag("-mmutable-globals")
+                .flag("-mnontrapping-fptoint")
+                .flag("-mreference-types")
+                .flag("-mrelaxed-simd")
+                .flag("-msign-ext")
+                .flag("-msimd128")
+                .flag("-mtail-call");
         }
         build
     };
