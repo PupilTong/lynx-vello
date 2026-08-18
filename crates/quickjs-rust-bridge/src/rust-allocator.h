@@ -1,9 +1,9 @@
 /*
  * C allocation boundary for every translation unit built by
  * quickjs-rust-bridge. This header is force-included by build.rs and consumes
- * the platform allocator headers before defining the macros below. They affect
- * calls in the pinned QuickJS sources and shim without replacing the
- * process-wide libc symbols.
+ * the bridge's platform-independent declarations before defining the macros
+ * below. They affect calls in the pinned QuickJS sources and shim without
+ * replacing process-wide standard-library symbols.
  */
 
 #ifndef QJS_RUST_ALLOCATOR_H
@@ -11,15 +11,6 @@
 
 #include <stddef.h>
 #include <stdlib.h>
-#if defined(__APPLE__)
-#include <malloc/malloc.h>
-#elif defined(_WIN32)
-#include <malloc.h>
-#elif defined(__linux__) || defined(__GLIBC__)
-#include <malloc.h>
-#elif defined(__FreeBSD__)
-#include <malloc_np.h>
-#endif
 
 #ifdef __cplusplus
 extern "C" {

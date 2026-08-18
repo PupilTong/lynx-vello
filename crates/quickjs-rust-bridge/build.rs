@@ -36,6 +36,7 @@ fn main() {
         build
             .define("CONFIG_VERSION", Some(version_define.as_str()))
             .define("QJS_NO_JS_SHARED_MEMORY", None)
+            .define("QJS_NO_STDIO_DIAGNOSTICS", None)
             .define("QJS_RUST_ALLOCATOR", None)
             .define("QJS_RUST_TIME_HOST", None)
             .define("QJS_RUST_TIMEZONE_HOST", None)
@@ -44,11 +45,6 @@ fn main() {
             .flag(&platform_header)
             .flag_if_supported("-std=gnu11");
         configure_target(&mut build, &target);
-        if target_os == "windows" {
-            build.define("__USE_MINGW_ANSI_STDIO", None);
-        } else {
-            build.define("_GNU_SOURCE", None);
-        }
         build
     };
 
@@ -94,7 +90,7 @@ fn main() {
     rerun_if_changed(&nanoprintf_header);
     rerun_if_changed(&platform_header);
     rerun_if_changed(&manifest_dir.join("src/rust-allocator.h"));
-    rerun_if_changed(&manifest_dir.join("src/include/assert.h"));
+    rerun_if_platform_headers_changed(&manifest_dir);
     for source in sources {
         rerun_if_changed(&quickjs_dir.join(source));
     }
@@ -138,4 +134,17 @@ fn configure_target(build: &mut cc::Build, target: &str) {
 
 fn rerun_if_changed(path: &Path) {
     println!("cargo:rerun-if-changed={}", path.display());
+}
+
+fn rerun_if_platform_headers_changed(manifest_dir: &Path) {
+    for header in [
+        "assert.h",
+        "inttypes.h",
+        "math.h",
+        "stdio.h",
+        "stdlib.h",
+        "string.h",
+    ] {
+        rerun_if_changed(&manifest_dir.join("src/include").join(header));
+    }
 }

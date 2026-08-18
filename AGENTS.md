@@ -299,7 +299,12 @@ useful signal for currently-compatible versions of those libraries.
   `vsnprintf` calls are likewise redirected to a crate-private wrapper around
   the pinned, allocator-free `nanoprintf` header; native and Wasm builds use
   the same integer/string formatter without importing libc `stdio`, `FILE`,
-  locale, or another heap. The realm deliberately does
+  locale, or another heap. All targets compile the C sources against the same
+  crate-private `stdlib`/`stdio`/`inttypes`/`string`/`math` declaration facade:
+  host allocation and the audited C gaps route to Rust, stack and basic
+  memory operations remain compiler builtins, and the bridge-unexposed
+  `FILE`/standard-stream diagnostic API is compiled out rather than modelled
+  as a platform ABI. The realm deliberately does
   not install JavaScript shared-memory primitives: both `Atomics` and
   `SharedArrayBuffer` are absent, while ordinary `ArrayBuffer`, typed arrays,
   and `DataView` remain available. This does not disable Rust-side atomics used

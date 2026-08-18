@@ -1,25 +1,28 @@
 /*
  * Private C-to-Rust platform boundary for every translation unit built by
  * quickjs-rust-bridge. Consume the platform declarations before defining the
- * mappings below: no macro may rewrite a declaration inside a system header,
- * and no process-wide standard-library symbol is replaced.
+ * mappings below: no macro may rewrite one of the declaration facades, and no
+ * process-wide standard-library symbol is replaced.
  */
 
 #ifndef QJS_RUST_PLATFORM_H
 #define QJS_RUST_PLATFORM_H
 
-#include <ctype.h>
-#include <fenv.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <math.h>
-#include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if !defined(QJS_PLATFORM_INTTYPES_H) || !defined(QJS_PLATFORM_MATH_H) ||      \
+    !defined(QJS_PLATFORM_STDIO_H) || !defined(QJS_PLATFORM_STDLIB_H) ||      \
+    !defined(QJS_PLATFORM_STRING_H)
+#error "QuickJS must compile against the bridge's platform declaration headers"
+#endif
 
 #include "rust-allocator.h"
 

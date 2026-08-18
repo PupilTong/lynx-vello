@@ -2,9 +2,11 @@
 //!
 //! Every C heap allocation compiled into this bridge is routed through Rust's
 //! global allocator. Its C formatting calls use one private, allocator-free
-//! formatter on native and Wasm. The realm deliberately omits JavaScript
-//! shared-memory primitives (`Atomics` and `SharedArrayBuffer`); this does not
-//! disable Rust or host-side synchronization.
+//! formatter on native and Wasm. Both targets compile against the same narrow
+//! standard-library declaration facade; unsupported `FILE` diagnostics are
+//! removed instead of becoming a host ABI. The realm deliberately omits
+//! JavaScript shared-memory primitives (`Atomics` and `SharedArrayBuffer`);
+//! this does not disable Rust or host-side synchronization.
 
 #[allow(
     unsafe_code,
