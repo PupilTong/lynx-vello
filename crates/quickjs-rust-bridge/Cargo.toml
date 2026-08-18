@@ -15,6 +15,8 @@ getrandom = { workspace = true }
 smallvec = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
 web-time = { workspace = true }
 
 [dev-dependencies]

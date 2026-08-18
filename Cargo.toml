@@ -31,13 +31,13 @@ app_units = "0.7"
 bytecheck = "0.6"
 bytes = "1"
 cc = "1"
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "wasmbind"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cssparser = "0.37"
 divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
 html5ever = "0.39"
 http = "1"
-getrandom = { version = "0.4.3", features = ["wasm_js"] }
+getrandom = "0.4.3"
 zune-jpeg = "0.5.15"
 image-webp = "0.2.4"
 fast_image_resize = "6.1"
