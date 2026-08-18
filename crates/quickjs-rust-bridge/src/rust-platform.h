@@ -35,6 +35,22 @@ char *qjs_rust_strchr(const char *string, int byte);
 int qjs_rust_strcmp(const char *left, const char *right);
 char *qjs_rust_strrchr(const char *string, int byte);
 
+#if defined(__GNUC__) || defined(__clang__)
+#define QJS_PLATFORM_PRINTF_LIKE(format_index, first_argument)                 \
+  __attribute__((format(printf, format_index, first_argument)))
+#else
+#define QJS_PLATFORM_PRINTF_LIKE(format_index, first_argument)
+#endif
+
+int qjs_platform_snprintf(char *destination, size_t capacity,
+                          const char *format, ...)
+    QJS_PLATFORM_PRINTF_LIKE(3, 4);
+int qjs_platform_vsnprintf(char *destination, size_t capacity,
+                           const char *format, va_list arguments)
+    QJS_PLATFORM_PRINTF_LIKE(3, 0);
+
+#undef QJS_PLATFORM_PRINTF_LIKE
+
 #ifdef __cplusplus
 }
 #endif
@@ -50,6 +66,8 @@ char *qjs_rust_strrchr(const char *string, int byte);
 #undef strchr
 #undef strcmp
 #undef strrchr
+#undef snprintf
+#undef vsnprintf
 
 #define abort qjs_rust_abort
 #define atanh qjs_rust_atanh
@@ -58,6 +76,8 @@ char *qjs_rust_strrchr(const char *string, int byte);
 #define strchr qjs_rust_strchr
 #define strcmp qjs_rust_strcmp
 #define strrchr qjs_rust_strrchr
+#define snprintf qjs_platform_snprintf
+#define vsnprintf qjs_platform_vsnprintf
 
 /* This resolves to the bridge's private header through build.rs's include
  * path. Include it only after the Rust abort hook has been declared.

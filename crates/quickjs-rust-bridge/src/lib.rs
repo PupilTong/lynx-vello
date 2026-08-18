@@ -1,9 +1,10 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
 //!
 //! Every C heap allocation compiled into this bridge is routed through Rust's
-//! global allocator. The realm deliberately omits JavaScript shared-memory
-//! primitives (`Atomics` and `SharedArrayBuffer`); this does not disable Rust
-//! or host-side synchronization.
+//! global allocator. Its C formatting calls use one private, allocator-free
+//! formatter on native and Wasm. The realm deliberately omits JavaScript
+//! shared-memory primitives (`Atomics` and `SharedArrayBuffer`); this does not
+//! disable Rust or host-side synchronization.
 
 #[allow(
     unsafe_code,

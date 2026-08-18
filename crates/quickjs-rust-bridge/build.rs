@@ -11,6 +11,9 @@ fn main() {
         .expect("the pinned QuickJS submodule must contain VERSION");
     let version_define = format!("\"{}\"", version.trim());
     let platform_header = manifest_dir.join("src/rust-platform.h");
+    let platform_printf_source = manifest_dir.join("src/platform_printf.c");
+    let nanoprintf_dir = manifest_dir.join("vendor/nanoprintf");
+    let nanoprintf_header = nanoprintf_dir.join("nanoprintf.h");
     let target = env::var("TARGET").expect("Cargo always provides TARGET");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo always provides target OS");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -28,7 +31,7 @@ fn main() {
         "cutils.c",
     ];
 
-    let configure_build = || {
+    let configure_quickjs_build = || {
         let mut build = cc::Build::new();
         build
             .define("CONFIG_VERSION", Some(version_define.as_str()))
@@ -39,35 +42,17 @@ fn main() {
             .include(manifest_dir.join("src/include"))
             .flag("-include")
             .flag(&platform_header)
-            .flag_if_supported("-std=gnu11")
-            .flag_if_supported("-fwrapv");
+            .flag_if_supported("-std=gnu11");
+        configure_target(&mut build, &target);
         if target_os == "windows" {
             build.define("__USE_MINGW_ANSI_STDIO", None);
         } else {
             build.define("_GNU_SOURCE", None);
         }
-        if target == "wasm32-unknown-unknown" {
-            // Match the Rust target features in `.cargo/config.toml`. These
-            // flags describe the C object code; `QJS_NO_JS_SHARED_MEMORY`
-            // above still omits JS Atomics and SAB.
-            build
-                .flag("-matomics")
-                .flag("-mbulk-memory")
-                .flag("-mbulk-memory-opt")
-                .flag("-mextended-const")
-                .flag("-mmultivalue")
-                .flag("-mmutable-globals")
-                .flag("-mnontrapping-fptoint")
-                .flag("-mreference-types")
-                .flag("-mrelaxed-simd")
-                .flag("-msign-ext")
-                .flag("-msimd128")
-                .flag("-mtail-call");
-        }
         build
     };
 
-    let mut shim_build = configure_build();
+    let mut shim_build = configure_quickjs_build();
     shim_build
         .flag("-isystem")
         .flag(&quickjs_dir)
@@ -76,12 +61,25 @@ fn main() {
         .warnings_into_errors(true)
         .compile("quickjs_bridge_shim");
 
-    let mut quickjs_build = configure_build();
+    let mut quickjs_build = configure_quickjs_build();
     quickjs_build.include(&quickjs_dir).warnings(false);
     for source in sources {
         quickjs_build.file(quickjs_dir.join(source));
     }
     quickjs_build.compile("quickjs_bridge_core");
+
+    // Keep the formatter in its own translation unit. In particular, do not
+    // force-include `rust-platform.h`: that header maps `vsnprintf` to this
+    // wrapper and would make the implementation recurse into itself.
+    let mut printf_build = cc::Build::new();
+    configure_target(&mut printf_build, &target);
+    printf_build
+        .include(&nanoprintf_dir)
+        .file(&platform_printf_source)
+        .flag_if_supported("-std=gnu11")
+        .warnings(true)
+        .warnings_into_errors(true)
+        .compile("quickjs_bridge_printf");
 
     if env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
         println!("cargo:rustc-link-lib=m");
@@ -92,6 +90,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("src/shim.c").display()
     );
+    rerun_if_changed(&platform_printf_source);
+    rerun_if_changed(&nanoprintf_header);
     rerun_if_changed(&platform_header);
     rerun_if_changed(&manifest_dir.join("src/rust-allocator.h"));
     rerun_if_changed(&manifest_dir.join("src/include/assert.h"));
@@ -111,6 +111,28 @@ fn main() {
         "list.h",
     ] {
         rerun_if_changed(&quickjs_dir.join(header));
+    }
+}
+
+fn configure_target(build: &mut cc::Build, target: &str) {
+    build.flag_if_supported("-fwrapv");
+    if target == "wasm32-unknown-unknown" {
+        // Match the Rust target features in `.cargo/config.toml`. These flags
+        // describe C object code only; the QuickJS build still omits its
+        // JavaScript Atomics and SharedArrayBuffer intrinsics.
+        build
+            .flag("-matomics")
+            .flag("-mbulk-memory")
+            .flag("-mbulk-memory-opt")
+            .flag("-mextended-const")
+            .flag("-mmultivalue")
+            .flag("-mmutable-globals")
+            .flag("-mnontrapping-fptoint")
+            .flag("-mreference-types")
+            .flag("-mrelaxed-simd")
+            .flag("-msign-ext")
+            .flag("-msimd128")
+            .flag("-mtail-call");
     }
 }
 

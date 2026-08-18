@@ -295,7 +295,11 @@ useful signal for currently-compatible versions of those libraries.
   Every heap allocation made by the C shim or the five compiled QuickJS C
   translation units is redirected through a private C ABI into Rust's global
   allocator; a fixed aligned prefix supplies the size required for matching
-  `realloc`/`free` and QuickJS memory accounting. The realm deliberately does
+  `realloc`/`free` and QuickJS memory accounting. QuickJS's `snprintf` and
+  `vsnprintf` calls are likewise redirected to a crate-private wrapper around
+  the pinned, allocator-free `nanoprintf` header; native and Wasm builds use
+  the same integer/string formatter without importing libc `stdio`, `FILE`,
+  locale, or another heap. The realm deliberately does
   not install JavaScript shared-memory primitives: both `Atomics` and
   `SharedArrayBuffer` are absent, while ordinary `ArrayBuffer`, typed arrays,
   and `DataView` remain available. This does not disable Rust-side atomics used
