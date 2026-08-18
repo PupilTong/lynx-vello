@@ -26,6 +26,10 @@ divan = { workspace = true }
 name = "host_calls"
 harness = false
 
+[[bench]]
+name = "js_execution"
+harness = false
+
 [build-dependencies]
 cc = { workspace = true }
 
