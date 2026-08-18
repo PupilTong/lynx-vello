@@ -203,12 +203,17 @@ impl<T> TreeArenas<T> {
     /// the key the caller already holds, so it issues alongside the node load
     /// rather than after it — unlike the id-to-slot hop, it does not lengthen
     /// the dependency chain a tree walk is bound by.
+    /// The node a slot names, or `None` if the slot is stale.
+    ///
+    /// The check reads the node's own recorded slot rather than the
+    /// generation table, so a walk touches one array, as it did before ids
+    /// were split from storage. Both stale cases still fail closed: a slot
+    /// whose key has not been reused finds the arena entry vacant, and one
+    /// whose key *has* been reused finds a node recording a later generation.
     #[inline]
     pub(crate) fn try_at(&self, slot: NodeSlot) -> Option<&Node<T>> {
-        if !self.slot_is_current(slot) {
-            return None;
-        }
-        self.nodes.get(slot.arena_key())
+        let node = self.nodes.get(slot.arena_key())?;
+        (node.slot() == slot).then_some(node)
     }
 
     #[inline]
@@ -219,13 +224,15 @@ impl<T> TreeArenas<T> {
 
     #[inline]
     fn at_mut(&mut self, slot: NodeSlot) -> &mut Node<T> {
+        let node = self
+            .nodes
+            .get_mut(slot.arena_key())
+            .expect("stale NodeSlot: its node was freed after the slot was taken");
         assert!(
-            self.slot_is_current(slot),
+            node.slot() == slot,
             "stale NodeSlot: its node was freed after the slot was taken"
         );
-        self.nodes
-            .get_mut(slot.arena_key())
-            .expect("a current slot always selects its node")
+        node
     }
 
     #[inline]

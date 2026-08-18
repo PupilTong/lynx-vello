@@ -346,7 +346,40 @@ impl<T> Document<T> {
         if self.get(parent).and_then(Node::shadow_root_id).is_some() {
             self.unassign_slottable(child);
         }
+        self.clear_departing_slot_assignments(child);
         self.note_slot_set_change(parent, child);
+    }
+
+    /// Drops the assignments held by any slot in a subtree that just left the
+    /// tree it was assigning for.
+    ///
+    /// [`Document::assign_slots`] only rewrites the slots it can still reach
+    /// from the shadow root, so a detached slot keeps whatever it was holding.
+    /// Those entries name nodes that can be freed while the detached slot is
+    /// still alive, which leaves it pointing at storage that has moved on —
+    /// and an unassigned slot renders its fallback content anyway, so the
+    /// empty list is also the right answer.
+    fn clear_departing_slot_assignments(&mut self, root: NodeId) {
+        let Some(root_slot) = self.slot(root) else {
+            return;
+        };
+        let mut departing: Vec<NodeId> = Vec::new();
+        let mut stack = vec![root_slot];
+        while let Some(current) = stack.pop() {
+            let node = self.arenas().at(current);
+            if node.is_slot() && !node.assigned_node_slots().is_empty() {
+                departing.push(node.id());
+            }
+            stack.extend_from_slice(node.child_slots());
+        }
+        for slot in departing {
+            let assigned: Vec<NodeId> = self.live(slot).assigned_node_ids().collect();
+            for node in assigned {
+                self.live_node_mut(node).clear_assigned_slot();
+            }
+            self.live_node_mut(slot).links_mut().assigned_nodes.clear();
+            self.mark_subtree_dirty(slot);
+        }
     }
 
     fn note_slot_set_change(&mut self, parent: NodeId, child: NodeId) {
