@@ -19,6 +19,8 @@ jobs:
     name: Build threaded Wasm site
     runs-on: ubuntu-26.04
     env:
+      CC: clang-22
+      CXX: clang++-22
       CC_wasm32_unknown_unknown: clang-22
       AR_wasm32_unknown_unknown: llvm-ar-22
     steps:

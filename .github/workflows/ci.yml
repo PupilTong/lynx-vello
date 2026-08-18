@@ -20,6 +20,12 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
 
+      - name: Install LLVM 22 from Homebrew
+        run: |
+          brew install llvm@22
+          echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm@22)/bin/clang++" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
@@ -79,6 +85,8 @@ jobs:
     name: threaded Wasm + Pages build (Ubuntu)
     runs-on: ubuntu-26.04
     env:
+      CC: clang-22
+      CXX: clang++-22
       CC_wasm32_unknown_unknown: clang-22
       AR_wasm32_unknown_unknown: llvm-ar-22
     steps:
@@ -167,6 +175,12 @@ jobs:
       - name: Install pinned toolchain
         run: rustup toolchain install
 
+      - name: Install LLVM 22 from Homebrew
+        run: |
+          brew install llvm@22
+          echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$(brew --prefix llvm@22)/bin/clang++" >> "$GITHUB_ENV"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-codspeed 5
@@ -186,7 +200,10 @@ jobs:
 
   memory-benchmarks:
     name: bench (CodSpeed memory, Ubuntu)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    env:
+      CC: clang-22
+      CXX: clang++-22
     steps:
       - uses: actions/checkout@v4
         with:
@@ -198,7 +215,7 @@ jobs:
       - name: Install benchmark system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libfontconfig1-dev
+          sudo apt-get install --yes clang-22 llvm-22 libfontconfig1-dev
 
       - uses: Swatinem/rust-cache@v2
 
