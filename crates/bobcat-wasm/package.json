@@ -22,6 +22,6 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "verify": "node scripts/verify-pkg.mjs"
+    "verify": "node --test scripts/wasm-target-features.test.mjs && node scripts/verify-pkg.mjs"
   }
 }

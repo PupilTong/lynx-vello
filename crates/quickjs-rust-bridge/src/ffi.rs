@@ -54,7 +54,8 @@ pub(crate) struct QjsValue {
 }
 
 unsafe extern "C" {
-    pub(crate) fn qjs_runtime_new() -> *mut QjsRuntime;
+    pub(crate) fn qjs_host_owner_class_id_new() -> u32;
+    pub(crate) fn qjs_runtime_new(host_owner_class_id: u32) -> *mut QjsRuntime;
     pub(crate) fn qjs_runtime_free(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_context_new(runtime: *mut QjsRuntime) -> *mut JSContext;
     pub(crate) fn qjs_context_free(context: *mut JSContext);

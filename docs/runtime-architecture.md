@@ -30,7 +30,7 @@ main-thread JavaScript
               └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ lynx-template-decoder + winit
-bobcat-wasm ──▶ wasm-bindgen + wasm_thread + browser JavaScript VM
+bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 ```
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
@@ -103,19 +103,16 @@ the fetched main-thread source, then runs
 `processData → renderPage → __FlushElementTree`.
 
 Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
-its checkpoints. The browser adapter cannot synchronously drain microtasks
-between application evaluation and Bobcat's boot evaluation, so the entry
-script must still assign and run `renderPage` synchronously. It does retain
-host dispatch closures through one final browser microtask checkpoint and
-waits for that checkpoint before reporting completion, allowing microtasks
-queued by a synchronous boot to finish safely. A persistent browser JavaScript
-event loop remains a later runtime feature.
+each checkpoint before returning, including jobs queued by the entry script
+and synchronous boot sequence. A persistent JavaScript event loop remains a
+later runtime feature.
 
 The default `quickjs` feature contributes only
 `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
 configuration, values, and runtime entry points remain private. With default
-features disabled, an embedder supplies another factory; the browser build
-uses this path with a `js_sys` implementation.
+features disabled, an embedder supplies another factory. The browser embedder
+enables QuickJS explicitly and uses a thin factory wrapper solely to signal
+successful realm creation to its startup watchdog.
 
 ## Document and rendering ownership
 
@@ -192,10 +189,10 @@ after the synchronous entry task exits.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns
-the Wasm `LynxView`, Vello/wgpu objects, resource provider, and browser
-`ScriptEngineFactory`; the factory creates its JavaScript realm implementation
-inside the nested Lynx main Worker. No direct create/append/drop/flush DOM API
-is exposed to JavaScript.
+the Wasm `LynxView`, Vello/wgpu objects, resource provider, and a thin
+lifecycle wrapper around core's QuickJS `ScriptEngineFactory`; the factory
+creates its owner-thread-bound realm inside the nested Lynx main Worker. No
+direct create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 

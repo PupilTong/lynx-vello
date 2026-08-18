@@ -1,6 +1,29 @@
 //! A small, safe Rust boundary around the repository's pinned `QuickJS` source.
+//!
+//! Every C heap allocation compiled into this bridge is routed through Rust's
+//! global allocator. Its C formatting calls use one private, allocator-free
+//! formatter on native and Wasm. Both targets compile against the same narrow
+//! standard-library declaration facade; unsupported `FILE` diagnostics are
+//! removed instead of becoming a host ABI. The realm deliberately omits
+//! JavaScript shared-memory primitives (`Atomics` and `SharedArrayBuffer`);
+//! this does not disable Rust or host-side synchronization.
 
+#[allow(
+    unsafe_code,
+    reason = "this private module implements the allocator ABI used by the C translation units"
+)]
+mod allocator;
 mod ffi;
+#[allow(
+    unsafe_code,
+    reason = "this private module exports the Rust standard-library ABI used by the C translation units"
+)]
+mod platform_stdlib;
+#[allow(
+    unsafe_code,
+    reason = "this private module exports the C ABI used by QuickJS's time hooks"
+)]
+mod platform_time;
 
 #[allow(
     unsafe_code,
@@ -13,12 +36,16 @@ mod implementation {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
     use std::rc::Rc;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Instant;
     use std::{fmt, mem};
 
     use smallvec::SmallVec;
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
 
     use super::ffi;
 
@@ -30,6 +57,8 @@ mod implementation {
     const JS_EVAL_FLAG_BACKTRACE_BARRIER: i32 = 1 << 6;
     const JS_EVAL_FLAG_ASYNC: i32 = 1 << 7;
     const QJS_EVAL_FAILURE_COMPILE: i32 = 1;
+
+    static HOST_OWNER_CLASS_ID: OnceLock<u32> = OnceLock::new();
 
     /// Limits and timeout applied when a realm is created.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -225,6 +254,16 @@ mod implementation {
         reason: Cell<Option<InterruptReason>>,
     }
 
+    fn deadline_from_timeout(
+        timeout: Option<Duration>,
+        now: impl FnOnce() -> Instant,
+    ) -> Option<Instant> {
+        timeout.map(|timeout| {
+            let now = now();
+            now.checked_add(timeout).unwrap_or(now)
+        })
+    }
+
     impl InterruptState {
         fn new(timeout: Option<Duration>) -> Self {
             Self {
@@ -251,10 +290,7 @@ mod implementation {
             }
             self.next_generation.set(generation);
             let token = generation << 1;
-            let now = Instant::now();
-            let deadline = self
-                .timeout
-                .map(|timeout| now.checked_add(timeout).unwrap_or(now));
+            let deadline = deadline_from_timeout(self.timeout, Instant::now);
 
             self.reason.set(None);
             self.deadline.set(deadline);
@@ -658,13 +694,16 @@ mod implementation {
             }
 
             unsafe {
-                let runtime = NonNull::new(ffi::qjs_runtime_new()).ok_or_else(|| {
-                    Error::bridge(
-                        ErrorKind::OutOfMemory,
-                        ErrorPhase::CreateRealm,
-                        "QuickJS could not allocate a runtime",
-                    )
-                })?;
+                let host_owner_class_id =
+                    *HOST_OWNER_CLASS_ID.get_or_init(|| ffi::qjs_host_owner_class_id_new());
+                let runtime =
+                    NonNull::new(ffi::qjs_runtime_new(host_owner_class_id)).ok_or_else(|| {
+                        Error::bridge(
+                            ErrorKind::OutOfMemory,
+                            ErrorPhase::CreateRealm,
+                            "QuickJS could not allocate a runtime",
+                        )
+                    })?;
                 if let Some(limit) = options.memory_limit {
                     ffi::qjs_runtime_set_memory_limit(runtime.as_ptr(), limit);
                 }
@@ -1440,8 +1479,12 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use std::sync::mpsc;
+        #[cfg(not(target_arch = "wasm32"))]
         use std::time::Instant;
         use std::{panic, thread};
+
+        #[cfg(target_arch = "wasm32")]
+        use web_time::Instant;
 
         use super::*;
 
@@ -1528,6 +1571,50 @@ mod implementation {
 
             assert_eq!(function.kind(), ValueKind::Function);
             assert_eq!(result.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn date_timezone_and_random_intrinsics_are_operational() {
+            let mut realm = Realm::new().unwrap();
+            let result = realm
+                .evaluate(
+                    EvalSource::new(
+                        "(() => { \
+                         const random = Math.random(); \
+                         return Number.isFinite(Date.now()) && \
+                           Number.isFinite(new Date(0).getTimezoneOffset()) && \
+                           random >= 0 && random < 1; \
+                         })()",
+                    ),
+                    EvalOptions::default(),
+                )
+                .expect("time and random intrinsics should execute");
+
+            assert_eq!(result.as_boolean(), Some(true));
+        }
+
+        #[test]
+        fn rust_stdlib_math_hooks_are_operational() {
+            let mut realm = Realm::new().unwrap();
+            let atanh = realm
+                .evaluate(EvalSource::new("Math.atanh(0.5)"), EvalOptions::default())
+                .expect("Math.atanh should execute through its Rust hook")
+                .as_number()
+                .expect("Math.atanh should return a number");
+            let clamped = realm
+                .evaluate(
+                    EvalSource::new(
+                        "(() => { \
+                         const values = new Uint8ClampedArray([0.5, 1.5, 2.5, 3.5]); \
+                         return values[0] * 1000 + values[1] * 100 + values[2] * 10 + values[3]; \
+                         })()",
+                    ),
+                    EvalOptions::default(),
+                )
+                .expect("Uint8ClampedArray conversion should execute through its Rust hook");
+
+            assert_eq!(atanh.to_bits(), 0.5_f64.atanh().to_bits());
+            assert_eq!(clamped.as_number(), Some(224.0));
         }
 
         #[test]
@@ -1729,6 +1816,15 @@ mod implementation {
             drop(result);
             drop(realm);
             assert!(!handle.request_interrupt_if_running());
+        }
+
+        #[test]
+        fn disabled_timeout_does_not_read_the_monotonic_clock() {
+            let deadline = deadline_from_timeout(None, || {
+                panic!("the clock must remain unused when execution timeout is disabled")
+            });
+
+            assert!(deadline.is_none());
         }
 
         #[test]

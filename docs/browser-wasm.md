@@ -2,9 +2,8 @@
 
 `crates/bobcat-wasm` is the `wasm-bindgen` browser embedder and npm facade for
 `wasm32-unknown-unknown`. It builds with shared memory and uses crates.io
-Vello 0.9/wgpu 29. The browser build disables Bobcat's QuickJS feature and
-injects a browser JavaScript VM through the same `ScriptEngineFactory`
-contract used by native QuickJS.
+Vello 0.9/wgpu 29. The browser build enables Bobcat's QuickJS feature and uses
+the same built-in `ScriptEngineFactory` as native Bobcat.
 
 ## Execution and ownership
 
@@ -20,7 +19,7 @@ Render Worker
   owns opaque LynxView + resource registry
   owns Vello/wgpu/OffscreenCanvas
   └── core wasm_thread spawn -> Lynx main/VM Worker
-                               ├── browser ScriptEngine
+                               ├── owner-thread-bound QuickJS realm
                                ├── Element PAPI + private document batches
                                └── core wasm_thread spawn -> Stylo workers
 ```
@@ -54,22 +53,21 @@ embedding document's `document.baseURI` before crossing the Worker boundary.
 The Render Worker accepts only absolute URLs: resolving there against
 `self.location` would incorrectly use the npm package/Worker URL as the base.
 
-The browser `ScriptEngineFactory` is a transferable capability that retains
-only shared lifecycle atomics and the engine-event signal, never a realm,
-tree, or document. Core moves it into the Lynx main Worker and calls `create`
-there. Its owner-thread-bound `BrowserScriptEngine` uses the Worker's
-JavaScript global, installs Bobcat's primitive-only host callbacks, evaluates
-named source, and maps JavaScript failures into sanitized `ScriptError`
-values. Raw JS values, realm handles, numeric DOM ids, and host callbacks are
-not surfaced by the npm facade.
+The browser's transferable `ScriptEngineFactory` is a thin lifecycle wrapper
+around `quickjs_engine_factory()`. It retains only the opaque inner factory,
+shared lifecycle atomics, and the engine-event signal, never a realm, tree, or
+document. Core moves it into the Lynx main Worker and calls `create` there;
+only after QuickJS realm creation succeeds does the wrapper mark the VM Worker
+as started for the startup watchdog. The resulting realm is owner-thread-bound
+and uses Bobcat's primitive-only host callbacks. Raw QuickJS values, realm
+handles, numeric DOM ids, and host callbacks are not surfaced by the npm
+facade.
 
-The current browser VM is a synchronous entry-script adapter. Promise
-microtasks queued by a synchronous `renderPage` boot are allowed one browser
-checkpoint before the VM Worker completes: host dispatch closures remain live
-through that checkpoint. Promise-deferred installation of `renderPage` is
-still not supported because browsers expose no synchronous microtask-drain API
-between app evaluation and Bobcat's boot evaluation. QuickJS retains its
-ordinary owned-job checkpoints.
+Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
+each execution checkpoint before returning to core, so script completion is
+exactly the `ScriptFinished` engine event. No browser microtask checkpoint,
+timer interception, or JavaScript callback-retention protocol participates in
+completion.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched main-thread script through the
@@ -96,15 +94,13 @@ open batch therefore cannot expose partial mutation or stall the last retained
 frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
 Worker to the Render Worker, whose animation loop calls `renderIfRequested`.
 A separate lost-wake-safe event signal wakes a Promise whenever core queues an
-engine event or the browser VM reaches its final microtask checkpoint. Script
-completion therefore does not poll and does not depend on rAF, so a hidden
-page cannot strand an `executeScript` Promise merely by suspending drawing.
-The startup handshake has a ten-second deadline until the nested VM Worker
-starts. After that point there is deliberately no execution deadline: the
-browser-injected VM has no safe interrupt API, so an infinite script leaves
-`executeScript` pending. Dispose the `BobcatCanvas` and create a replacement
-canvas/Worker to recover. This limitation is specific to the browser adapter;
-native QuickJS embedders may apply a different timeout or interrupt policy.
+engine event or QuickJS realm creation completes. Script completion therefore
+does not poll and does not depend on rAF, so a hidden page cannot strand an
+`executeScript` Promise merely by suspending drawing. The startup handshake has
+a ten-second deadline until the nested VM Worker creates its realm. After that,
+the built-in QuickJS adapter applies a five-second timeout to synchronous
+execution and pending-job drains; a non-terminating script is interrupted and
+reported through `ScriptFinished` as a sanitized script error.
 
 The release Wasm build uses `panic=abort`. Script-visible node IDs and mutation
 preconditions are checked before entering the DOM, producing JavaScript errors
@@ -129,6 +125,14 @@ Build and verify the browser package with:
 ```sh
 pnpm --filter bobcat-wasm build
 ```
+
+The build script probes Clang by compiling a Wasm object with the complete C
+target-feature set, including `-mbulk-memory-opt`, and then verifies `llvm-ar`
+can archive that object before starting Cargo. Apple clang has no WebAssembly
+backend; on macOS install Homebrew LLVM (`brew install llvm`). The script finds
+the standard Homebrew locations automatically. Set `BOBCAT_WASM_LLVM_BIN` to
+another LLVM `bin` directory, or set `CC_wasm32_unknown_unknown` and
+`AR_wasm32_unknown_unknown` to override the compiler and archiver explicitly.
 
 The package invokes `wasm-pack` for the `web` target. Generated glue and Wasm
 live under `crates/bobcat-wasm/pkg/` and are not checked in. The verification

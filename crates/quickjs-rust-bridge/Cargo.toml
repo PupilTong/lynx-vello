@@ -10,13 +10,24 @@ publish = false
 links = "quickjs"
 
 [dependencies]
+chrono = { workspace = true }
+getrandom = { workspace = true }
 smallvec = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+chrono = { workspace = true, features = ["wasmbind"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
+web-time = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
 
 [[bench]]
 name = "host_calls"
+harness = false
+
+[[bench]]
+name = "js_execution"
 harness = false
 
 [build-dependencies]

@@ -1,10 +1,18 @@
 [target.wasm32-unknown-unknown]
+# This section configures Rust and rust-lld. QuickJS's C objects are compiled
+# separately by cc-rs; `crates/bobcat-wasm/scripts/build.mjs` probes and exports
+# its target-specific Clang/llvm-ar pair. Direct Cargo invocations that enable
+# QuickJS must set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown.
 rustflags = [
     "-C",
     # Chrome 135 is the browser floor. Enable every LLVM/Rust WebAssembly
     # feature from that floor that can improve generated code for this module;
     # proposals that change the runtime model without helping this artifact
     # (GC, exceptions, multi-memory) and post-135 features stay disabled.
+    # This is the single source of truth for Rust and C target features.
+    # quickjs-rust-bridge derives Clang's `-m` flags from Cargo's encoded
+    # rustflags, and bobcat-wasm's toolchain probe reads this value through
+    # `cargo config get`.
     "target-feature=+atomics,+bulk-memory,+bulk-memory-opt,+extended-const,+multivalue,+mutable-globals,+nontrapping-fptoint,+reference-types,+relaxed-simd,+sign-ext,+simd128,+tail-call",
     "-C",
     "link-arg=--shared-memory",

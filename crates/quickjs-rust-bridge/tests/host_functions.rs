@@ -24,6 +24,42 @@ fn tight_realm() -> Realm {
 }
 
 #[test]
+fn javascript_shared_memory_is_not_exposed() {
+    let mut realm = Realm::new().unwrap();
+    let value = realm
+        .evaluate(
+            EvalSource::new(
+                "(() => {
+                    const buffer = new ArrayBuffer(8);
+                    const bytes = new Uint8Array(buffer);
+                    const view = new DataView(buffer);
+                    bytes[0] = 42;
+                    view.setUint16(1, 0x1234);
+                    return [
+                        typeof Atomics,
+                        'Atomics' in globalThis,
+                        Object.getOwnPropertyDescriptor(globalThis, 'Atomics') === undefined,
+                        typeof SharedArrayBuffer,
+                        'SharedArrayBuffer' in globalThis,
+                        Object.getOwnPropertyDescriptor(globalThis, 'SharedArrayBuffer') === undefined,
+                        bytes.buffer === buffer,
+                        view.buffer === buffer,
+                        ArrayBuffer.isView(bytes),
+                        view.getUint8(0),
+                        view.getUint16(1),
+                    ].join(':');
+                })()",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        String::from_utf16(&value.to_utf16().unwrap()).unwrap(),
+        "undefined:false:true:undefined:false:true:true:true:true:42:4660"
+    );
+}
+
+#[test]
 fn string_round_trip_does_not_leak() {
     let mut realm = tight_realm();
     realm

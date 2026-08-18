@@ -23,10 +23,9 @@ export declare class BobcatCanvas {
   /**
    * Fetches and runs the main-thread entry script. This resolves after the
    * script boot sequence finishes and rejects on loading or evaluation error.
-   * Relative URLs use the embedding document's base URL. The browser VM has
-   * no execution interrupt: a non-terminating script leaves this Promise
-   * pending, and recovery requires disposing this canvas and creating a new
-   * one. Native QuickJS embedders may provide different timeout policy.
+   * Relative URLs use the embedding document's base URL. The embedded QuickJS
+   * realm applies Bobcat's five-second execution limit; exceeding it rejects
+   * this Promise with a sanitized script error.
    */
   executeScript(url: string | URL): Promise<void>
 

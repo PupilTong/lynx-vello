@@ -17,7 +17,12 @@ concurrency:
 jobs:
   build:
     name: Build threaded Wasm site
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    env:
+      CC: clang-22
+      CXX: clang++-22
+      CC_wasm32_unknown_unknown: clang-22
+      AR_wasm32_unknown_unknown: llvm-ar-22
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -26,6 +31,11 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
+
+      - name: Install LLVM 22 from Ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-22 llvm-22
 
       - uses: Swatinem/rust-cache@v2
         with:

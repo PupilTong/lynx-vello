@@ -23,6 +23,15 @@ struct QuickJsConfig {
     max_jobs_per_checkpoint: NonZeroUsize,
 }
 
+#[cfg(test)]
+impl QuickJsConfig {
+    #[must_use]
+    const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
+        self.realm_options.execution_timeout = execution_timeout;
+        self
+    }
+}
+
 impl Default for QuickJsConfig {
     fn default() -> Self {
         Self {
@@ -297,9 +306,50 @@ fn script_error(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, mpsc};
+    use std::{panic, thread};
+
     use super::*;
 
     fn assert_transferable<T: Send + Sync>() {}
+
+    fn engine_with(config: QuickJsConfig) -> QuickJsScriptEngine {
+        QuickJsScriptEngine::with_config(config).expect("QuickJS realm")
+    }
+
+    /// Runs `operation` on its own thread so a wedged interrupt fails the test
+    /// instead of hanging the suite.
+    fn with_watchdog<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let outcome = panic::catch_unwind(panic::AssertUnwindSafe(operation));
+            let _ = sender.send(outcome);
+        });
+        let outcome = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| panic!("the QuickJS interrupt watchdog expired: {error}"));
+        worker.join().expect("the watchdog worker captured a panic");
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn execution_timeout_policy_is_configurable() {
+        let default = QuickJsConfig::default();
+        assert_eq!(
+            default.realm_options.execution_timeout,
+            Some(DEFAULT_EXECUTION_TIMEOUT)
+        );
+        assert_eq!(
+            default
+                .with_execution_timeout(None)
+                .realm_options
+                .execution_timeout,
+            None
+        );
+    }
 
     #[test]
     fn factory_capability_is_transferable_while_realms_remain_owner_thread_bound() {
@@ -365,6 +415,257 @@ mod tests {
         assert_eq!(
             error.location.and_then(|location| location.source),
             Some(Arc::from("app:///broken.js"))
+        );
+    }
+
+    #[test]
+    fn a_thrown_error_keeps_its_constructor_name_and_stays_an_exception() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+
+        let error = engine
+            .execute_script("throw new TypeError('invalid receiver')", "throw.js")
+            .expect_err("a throw fails");
+        assert_eq!(error.kind, ScriptErrorKind::Exception);
+        assert_eq!(error.message.as_ref(), "TypeError: invalid receiver");
+
+        // A `SyntaxError` *object* thrown at run time is still an exception:
+        // `Syntax` names a source that would not parse, which this one did.
+        let thrown = engine
+            .execute_script(
+                "throw new SyntaxError('a runtime object')",
+                "throw-syntax.js",
+            )
+            .expect_err("a throw fails");
+        assert_eq!(thrown.kind, ScriptErrorKind::Exception);
+    }
+
+    #[test]
+    fn realms_from_one_factory_do_not_share_globals() {
+        let factory = engine_factory();
+        let mut first = factory.create().expect("QuickJS realm");
+        let mut second = factory.create().expect("QuickJS realm");
+
+        first
+            .execute_script("globalThis.answer = 42", "first.js")
+            .expect("execute");
+        second
+            .execute_script(
+                "if (typeof answer !== 'undefined') throw new Error('realms share a global')",
+                "second.js",
+            )
+            .expect("the second realm has its own global object");
+    }
+
+    #[test]
+    fn every_boundary_primitive_round_trips_through_a_host_function() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        let seen: Arc<Mutex<Vec<HostValue>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        engine
+            .register_host_function(
+                "bobcat",
+                "echo",
+                1,
+                Box::new(move |arguments| {
+                    let value = arguments.first().cloned().unwrap_or(HostValue::Undefined);
+                    recorder
+                        .lock()
+                        .expect("the recorder is not poisoned")
+                        .push(value.clone());
+                    Ok(value)
+                }),
+            )
+            .expect("register");
+
+        engine
+            .execute_script(
+                r"
+                const cases = [undefined, null, true, -0, 'a\u{1F980}b'];
+                for (const value of cases) {
+                    const echoed = bobcat.echo(value);
+                    if (!Object.is(echoed, value)) {
+                        throw new Error('echo changed ' + String(value));
+                    }
+                }
+                if (!Number.isNaN(bobcat.echo(NaN))) throw new Error('NaN did not survive');
+                ",
+                "round-trip.js",
+            )
+            .expect("every primitive crosses in both directions unchanged");
+
+        let seen = seen.lock().expect("the recorder is not poisoned");
+        assert!(matches!(seen[0], HostValue::Undefined));
+        assert!(matches!(seen[1], HostValue::Null));
+        assert!(matches!(seen[2], HostValue::Boolean(true)));
+        assert!(matches!(seen[3], HostValue::Number(value) if value.is_sign_negative()));
+        assert!(matches!(&seen[4], HostValue::String(value) if value.as_ref() == "a🦀b"));
+    }
+
+    #[test]
+    fn a_non_primitive_argument_is_refused_at_the_host_boundary() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .register_host_function("bobcat", "echo", 1, Box::new(|_| Ok(HostValue::Undefined)))
+            .expect("register");
+
+        // The refusal is a JavaScript exception the script can observe, not a
+        // lossy conversion: an object never reaches the callback at all.
+        engine
+            .execute_script(
+                r"
+                let refused = '';
+                try { bobcat.echo({ answer: 42 }); } catch (error) { refused = String(error); }
+                if (!refused.includes('String arguments only')) {
+                    throw new Error('an object was not refused at the boundary: ' + refused);
+                }
+                ",
+                "non-primitive.js",
+            )
+            .expect("the script observes the refusal and continues");
+    }
+
+    #[test]
+    fn an_ill_formed_string_is_refused_at_the_host_boundary() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .register_host_function("bobcat", "echo", 1, Box::new(|_| Ok(HostValue::Undefined)))
+            .expect("register");
+
+        // `HostValue::String` is an `Arc<str>`, so a lone surrogate has no
+        // representation on the Rust side; it is refused rather than replaced.
+        engine
+            .execute_script(
+                r"
+                let refused = '';
+                try { bobcat.echo('\uD800'); } catch (error) { refused = String(error); }
+                if (!refused.includes('ill-formed UTF-16')) {
+                    throw new Error('a lone surrogate was not refused: ' + refused);
+                }
+                ",
+                "surrogate.js",
+            )
+            .expect("the script observes the refusal");
+    }
+
+    #[test]
+    fn an_unhandled_rejection_fails_the_checkpoint_that_follows_the_script() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        let error = engine
+            .execute_script(
+                "Promise.reject(new Error('microtask rejection'))",
+                "app:///reject.js",
+            )
+            .expect_err("the checkpoint reports the rejection the script left behind");
+
+        assert_eq!(error.kind, ScriptErrorKind::Exception);
+        assert_eq!(error.phase, ScriptErrorPhase::Execute);
+        assert_eq!(error.message.as_ref(), "Error: microtask rejection");
+    }
+
+    #[test]
+    fn a_checkpoint_error_beside_a_primary_one_is_reported_before_the_next_script() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        let primary = engine
+            .execute_script(
+                "Promise.reject(new Error('deferred')); throw new Error('primary')",
+                "app:///both.js",
+            )
+            .expect_err("the script's own exception wins");
+        assert_eq!(primary.message.as_ref(), "Error: primary");
+
+        let deferred = engine
+            .execute_script("globalThis.reentered = true", "app:///after.js")
+            .expect_err("the deferred checkpoint error is reported first");
+        assert_eq!(deferred.kind, ScriptErrorKind::Exception);
+        assert_eq!(deferred.message.as_ref(), "Error: deferred");
+
+        engine
+            .execute_script(
+                "if (typeof reentered !== 'undefined') throw new Error('the script ran anyway')",
+                "app:///verify.js",
+            )
+            .expect("the refused script never entered JavaScript");
+    }
+
+    #[test]
+    fn a_checkpoint_at_exactly_the_job_limit_is_not_an_error() {
+        let mut engine = engine_with(QuickJsConfig {
+            max_jobs_per_checkpoint: NonZeroUsize::MIN,
+            ..QuickJsConfig::default()
+        });
+        engine
+            .execute_script(
+                "globalThis.jobs = 0; Promise.resolve().then(() => jobs = 1)",
+                "one-job.js",
+            )
+            .expect("one job fits a one-job checkpoint");
+        engine
+            .execute_script(
+                "if (jobs !== 1) throw new Error('the job did not run')",
+                "verify.js",
+            )
+            .expect("the single job ran");
+    }
+
+    #[test]
+    fn exceeding_the_job_limit_is_an_error_and_the_rest_runs_before_reentry() {
+        let mut engine = engine_with(QuickJsConfig {
+            max_jobs_per_checkpoint: NonZeroUsize::MIN,
+            ..QuickJsConfig::default()
+        });
+        let error = engine
+            .execute_script(
+                "globalThis.order = [];
+                 Promise.resolve().then(() => order.push('old-1'));
+                 Promise.resolve().then(() => order.push('old-2'))",
+                "two-jobs.js",
+            )
+            .expect_err("two jobs exceed a one-job checkpoint");
+        assert_eq!(error.kind, ScriptErrorKind::Other);
+        assert_eq!(error.phase, ScriptErrorPhase::Execute);
+
+        engine
+            .execute_script(
+                "order.push('new');
+                 if (order.join(',') !== 'old-1,old-2,new') {
+                     throw new Error('left-over jobs ran late: ' + order.join(','));
+                 }",
+                "reentry.js",
+            )
+            .expect("the queued job finishes before the next script's own code");
+    }
+
+    #[test]
+    fn an_execution_timeout_is_reported_and_leaves_the_engine_usable() {
+        let (error, reusable) = with_watchdog(|| {
+            let mut engine = engine_with(
+                QuickJsConfig::default().with_execution_timeout(Some(Duration::from_millis(20))),
+            );
+            let error = engine
+                .execute_script("for (;;) {}", "app:///spin.js")
+                .expect_err("an endless script must be interrupted");
+            let reusable = engine
+                .execute_script("globalThis.answer = 6 * 7", "app:///after.js")
+                .is_ok();
+            (error, reusable)
+        });
+
+        assert_eq!(error.kind, ScriptErrorKind::Other);
+        assert_eq!(error.phase, ScriptErrorPhase::Execute);
+        assert!(
+            error.message.contains("timeout"),
+            "the interrupt must be the configured timeout, not some other Other: {}",
+            error.message
+        );
+        assert!(
+            reusable,
+            "an interrupted realm stays usable: the timeout is a script failure, not a teardown"
         );
     }
 }

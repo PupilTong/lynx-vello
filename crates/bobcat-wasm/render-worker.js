@@ -160,8 +160,8 @@ async function waitForScriptCompletion() {
     while (running && renderer !== undefined && !renderer.pollScript()) {
       if (renderer.scriptStarted()) {
         clearTimeout(startupTimeout)
-        // A running browser script has deliberately no execution deadline:
-        // browsers expose no synchronous interrupt for this injected VM.
+        // QuickJS owns its synchronous execution deadline and wakes this
+        // Render Worker through the ordinary ScriptFinished engine event.
         await renderer.waitForEngineEvent()
       } else {
         startupDeadline ??= new Promise((_, reject) => {
