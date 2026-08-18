@@ -60,7 +60,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
-        let tree = self.tree();
+        let tree = self.arenas();
         let mut next = tree.get(id).and_then(Node::flat_parent_id);
         while let Some(pid) = next {
             if pid == DOCUMENT_NODE_ID {
@@ -136,7 +136,7 @@ impl<T> Document<T> {
     fn note_emptiness_change(&mut self, id: NodeId) {
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
         let later_siblings: Vec<NodeId> = {
-            let tree = self.tree();
+            let tree = self.arenas();
             tree.get(id)
                 .and_then(|node| {
                     let siblings = tree

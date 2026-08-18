@@ -181,10 +181,9 @@ impl<T> Document<T> {
     }
 
     fn stored_scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
-        self.layout_state()
-            .nodes
-            .get(id)
-            .map_or_else(Vector2D::zero, |state| state.scroll_offset)
+        self.slot(id).map_or_else(Vector2D::zero, |slot| {
+            self.layout_state().at(slot).scroll_offset
+        })
     }
 
     /// Scrolls to a clamped offset and returns the applied offset.
@@ -200,11 +199,10 @@ impl<T> Document<T> {
         if clamped != scroll_box.offset {
             self.note_visual_mutation();
         }
-        self.layout_state_mut()
-            .nodes
-            .get_mut(id)
-            .expect("a scroll container is a live node with layout-arena state")
-            .scroll_offset = clamped;
+        let slot = self
+            .slot(id)
+            .expect("a scroll container is a live node with layout-arena state");
+        self.layout_state_mut().at_mut(slot).scroll_offset = clamped;
         clamped
     }
 

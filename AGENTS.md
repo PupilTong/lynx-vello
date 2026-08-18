@@ -277,7 +277,9 @@ useful signal for currently-compatible versions of those libraries.
   `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
   the `bobcat` host functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
-  `packages/bobcat-element`. Element identity is the DOM `NodeId`; the host
+  `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
+  also the element's Lynx `unique_id` — one number, issued by the DOM, never
+  reissued; the JS side mints no ids of its own; the host
   boundary validates primitive arguments, live IDs, and tree-mutation
   preconditions before entering `dom`, returning misuse as a JavaScript
   exception (unexpected internal panics remain fatal on abort-only Wasm). An unflushed batch may
@@ -462,9 +464,20 @@ useful signal for currently-compatible versions of those libraries.
   fixed-address boxed
   `TreeArenas<T>` containing two `Slab`s: a primary `Slab<Node<T>>` (slot
   zero is the real DOM Document node and carries its node-visible style
-  context; later slots are element/text nodes) plus a NodeId-aligned payload
+  context; later slots are element/text nodes) plus a slot-aligned payload
   slab. A separate inline
-  `DocumentLayoutState` owns the NodeId-aligned layout slab. Stylo's
+  `DocumentLayoutState` owns the third slot-aligned slab, for layout.
+  Identity and storage are deliberately split (`tree/arena.rs`): a `NodeId`
+  is an index into `TreeArenas::slots`, a `Vec<Option<NodeSlot>>` whose entry
+  holds the arena slot the node's state actually occupies. Ids only count
+  upward and a freed one is never reissued, so a `NodeId` names one node for
+  the life of the document and a stale id resolves to nothing rather than to
+  a stranger — which is why the tree carries no generation counters and no
+  epoch gate on the retained frame, and why the same number can be handed to
+  script as Lynx's element `unique_id`. The arena slot *is* recycled, so
+  only the four-byte table entry leaks, per node ever created. The raw slabs
+  are private to `tree/arena.rs`: nothing else can index one with a `NodeId`,
+  which is what keeps the split enforced rather than merely documented. Stylo's
   per-element style data (the upstream `ElementDataWrapper`, no outer cell)
   and its traversal/invalidation flags live inline on `Node` (bench-defended
   2026-08-03: the paired A/B showed no traversal regression and a measurably
@@ -626,8 +639,8 @@ useful signal for currently-compatible versions of those libraries.
   *can* mutate may detach any node but may not *free* one the mutation that
   called it is still holding: `create_element` and the constructor call pin
   that id, `drop_element`/`drop_subtree` refuse to free a pinned node, because
-  a `NodeId` is a slab key the arena recycles and a replacement would otherwise
-  inherit it while every liveness check passed.
+  freeing retires the id permanently and the mutation would otherwise link in
+  and return a handle that already names nothing.
   Every node points directly back only to `TreeArenas`, and the
   same plain one-word `&Node` implements Stylo's document/node/element/shadow-root traits
   according to its `NodeData` (styling runs in place, no mirror tree),

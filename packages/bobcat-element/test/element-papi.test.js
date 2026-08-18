@@ -12,9 +12,13 @@
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
 /**
+ * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
+ *   Defaults to the real boundary's shape (2, 3, 4, ...); a test that needs to
+ *   prove the runtime carries native's number through rather than numbering
+ *   handles itself passes a sequence no counter would produce.
  * @returns {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }}
  */
-function createMockBobcat() {
+function createMockBobcat(issuedIds) {
   /** @type {unknown[][]} */
   const calls = [];
   /** @param {string} name */
@@ -31,6 +35,21 @@ function createMockBobcat() {
     return value;
   };
   let nextNodeId = 2;
+  let issued = 0;
+  /** @returns {number} */
+  const issueNodeId = () => {
+    if (issuedIds !== undefined) {
+      const id = issuedIds[issued];
+      issued += 1;
+      if (id === undefined) {
+        throw new Error("the mock ran out of ids to issue");
+      }
+      return id;
+    }
+    const id = nextNodeId;
+    nextNodeId += 1;
+    return id;
+  };
   /** @type {Map<number, number>} */
   const parents = new Map();
   /** @type {Map<number, Map<string, string>>} */
@@ -46,8 +65,7 @@ function createMockBobcat() {
     },
     /** @param {string} tag */
     createElement: (tag) => {
-      const node = nextNodeId;
-      nextNodeId += 1;
+      const node = issueNodeId();
       tags.set(node, tag);
       calls.push(["createElement", tag]);
       return node;
@@ -501,11 +519,30 @@ describe("__GetTag", () => {
 });
 
 describe("__GetElementUniqueID", () => {
-  it("reports the handle's node id", () => {
+  it("reports the handle's node id, which is the id native issued", () => {
     const page = __CreatePage("card", 0);
     const view = __CreateView(0);
     expect(__GetElementUniqueID(page)).toBe(1);
     expect(__GetElementUniqueID(view)).toBe(2);
+    expect(mock.named("createElement")).toHaveLength(1);
+  });
+
+  it("mints no id of its own: it reports back exactly what native issued", async () => {
+    // Ids no counter on this side could produce: out of order, with gaps.
+    // Anything the runtime derived itself would disagree with this sequence.
+    const issued = [41, 7, 900];
+    rstest.resetModules();
+    globalThis.bobcat = createMockBobcat(issued);
+    await import("../src/element-papi.js");
+
+    const created = [
+      __CreateView(0),
+      __CreateText(0),
+      __CreateElement("custom-widget", 0),
+    ];
+
+    expect(created.map((element) => __GetElementUniqueID(element)))
+      .toStrictEqual(issued);
   });
 
   it("reports -1 for a falsy or foreign element instead of throwing", () => {

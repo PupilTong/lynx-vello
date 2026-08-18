@@ -87,9 +87,10 @@
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`] and the constructor call pin the id they will still be naming
 //!   once the drain returns, and [`Document::drop_element`]/[`Document::drop_subtree`] refuse to
-//!   free a pinned node. Not a convenience limit: a [`NodeId`] is a slab key the arena recycles on
-//!   free, so without the pin a callback that frees the node and creates a replacement hands its
-//!   caller a live id naming a *different* node — and every liveness check passes while it happens.
+//!   free a pinned node. Not a convenience limit: freeing retires the id permanently, so without
+//!   the pin a callback that frees the node under construction hands its caller a dead id — an
+//!   element the mutation is about to link into the tree and return, that already resolves to
+//!   nothing.
 //! - **A panicking callback leaves the document unspecified but not wedged.** The depth token
 //!   balances its counter on the unwinding path and records that the frame was abandoned, so the
 //!   next mutation discards the leftovers silently rather than blaming itself, while a scope in
@@ -244,8 +245,8 @@ impl<T> Document<T> {
         assert!(
             !self.custom_elements.pinned.contains(&element),
             "a custom element lifecycle callback destroyed a node the mutation that called it is \
-             still holding: detaching it is allowed, freeing it is not, because the arena would \
-             recycle its id"
+             still holding: detaching it is allowed, freeing it is not, because freeing retires \
+             the id and the mutation would return one that names nothing"
         );
     }
 }
@@ -314,13 +315,10 @@ impl<T> Document<T> {
             .by_name
             .insert(name.clone(), definition);
 
-        let existing = self
-            .tree()
-            .iter()
-            .find(|(id, node)| {
-                *id != DOCUMENT_ELEMENT_NODE_ID && node.local_name.as_ref() == Some(&name)
-            })
-            .map(|(id, _)| id);
+        let arenas = self.arenas();
+        let existing = arenas.ids().find(|&id| {
+            id != DOCUMENT_ELEMENT_NODE_ID && arenas.live(id).local_name.as_ref() == Some(&name)
+        });
         assert!(
             existing.is_none(),
             "Document::define: `{local_name}` already has elements, and a definition never \

@@ -43,7 +43,7 @@ use crate::layout::{
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::scroll::ScrollAxes;
-use crate::tree::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
+use crate::tree::document::{Document, DocumentLayoutState, TreeArenas};
 use crate::tree::node::Node;
 use crate::{NodeId, scroll};
 
@@ -59,7 +59,6 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         layers: Vec::new(),
         current_layer: None,
     };
-    let epoch = document.node_removal_epoch();
     let visual_epoch = document.visual_epoch();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
@@ -79,7 +78,6 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         items: builder.items,
         clips: builder.clips,
         layers: builder.layers,
-        epoch,
         visual_epoch,
     }
 }
@@ -144,15 +142,15 @@ struct Builder<'doc, T> {
 
 impl<'doc, T> Builder<'doc, T> {
     fn node(&self, id: NodeId) -> &'doc Node<T> {
-        slab_get_for_live_node(&self.tree.nodes, id)
+        self.tree.live(id)
     }
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
-        &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
+        &self.state.at(self.tree.live_slot(id)).slot.rounded
     }
 
     fn scroll_translation(&self, id: NodeId, style: &ComputedValues) -> Vector2D<f32> {
-        let state = slab_get_for_live_node(&self.state.nodes, id);
+        let state = self.state.at(self.tree.live_slot(id));
         let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
         else {
             return Vector2D::zero();

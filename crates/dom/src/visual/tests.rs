@@ -1037,22 +1037,35 @@ fn contents_order_interleave_paints_and_survives_hidden_siblings() {
     let _ = hidden;
 }
 
+/// A removal drops its own node out of the retained frame's answers and
+/// leaves the rest of the frame answering. The replacement built on the freed
+/// node's storage is not in that frame at all, so it only appears once the
+/// next render puts it there — it can never be mistaken for its predecessor,
+/// because it carries a different id.
 #[test]
-fn a_removal_fails_hit_queries_closed_until_the_next_render() {
+fn a_removal_drops_only_its_own_node_from_the_retained_frame() {
     let mut h = Harness::new(&format!("{PAGE} {}", abs_box("")));
     let root = h.root();
     let removed = h.el(root, "view.box");
     h.doc.dom.render();
-    h.doc.dom.drop_subtree(removed);
-    let recycled = h.el(root, "view.box");
     assert_eq!(
         h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
-        Vec::new()
+        vec![removed, root]
     );
+
+    h.doc.dom.drop_subtree(removed);
+    let replacement = h.el(root, "view.box");
+    assert_ne!(replacement, removed, "the removed id is retired");
+    assert_eq!(
+        h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
+        vec![root],
+        "the removed node is skipped while every other item still answers"
+    );
+
     h.doc.dom.render();
     assert_eq!(
         h.doc.dom.elements_from_point(Point2D::new(50.0, 50.0)),
-        vec![recycled, root]
+        vec![replacement, root]
     );
 }
 

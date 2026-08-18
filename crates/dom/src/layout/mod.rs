@@ -55,9 +55,9 @@ impl<T> Document<T> {
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
             let node = self
-                .tree_mut()
+                .arenas_mut()
                 .get_mut(id)
-                .expect("vacant NodeId passed to Document::set_natural_size");
+                .expect("stale NodeId passed to Document::set_natural_size");
             assert!(
                 node.is_element(),
                 "non-element NodeId passed to Document::set_natural_size"
@@ -84,9 +84,9 @@ impl<T> Document<T> {
         first_baseline: Option<f32>,
     ) {
         let node = self
-            .tree_mut()
+            .arenas_mut()
             .get_mut(id)
-            .expect("vacant NodeId passed to Document::set_leaf_metrics_for_testing");
+            .expect("stale NodeId passed to Document::set_leaf_metrics_for_testing");
         assert!(
             node.is_element(),
             "non-element NodeId passed to Document::set_leaf_metrics_for_testing"
@@ -112,20 +112,14 @@ impl<T> Document<T> {
 
     #[must_use]
     pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
-        self.layout_state()
-            .nodes
-            .get(id)
-            .map(|state| &state.slot.rounded)
+        let slot = self.slot(id)?;
+        Some(&self.layout_state().at(slot).slot.rounded)
     }
 
     #[must_use]
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
-        self.layout_state()
-            .nodes
-            .get(id)?
-            .text
-            .as_deref()?
-            .committed()
+        let slot = self.slot(id)?;
+        self.layout_state().at(slot).text.as_deref()?.committed()
     }
 
     #[must_use]
@@ -136,29 +130,25 @@ impl<T> Document<T> {
     #[must_use]
     #[cfg(test)]
     pub(crate) fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
-        self.layout_state()
-            .nodes
-            .get(id)
-            .map(|state| state.slot.layout_cache_is_empty())
+        let slot = self.slot(id)?;
+        Some(self.layout_state().at(slot).slot.layout_cache_is_empty())
     }
 
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
         let (boundary, reached_root) = {
             let (tree, state, parked) = self.layout_parts();
-            let start = tree
-                .nodes
-                .get(id)
-                .expect("vacant NodeId passed to Document::invalidate_layout");
-            state.clear_layout_cache(id);
+            let slot = tree
+                .slot(id)
+                .expect("stale NodeId passed to Document::invalidate_layout");
+            let start = tree.at(slot);
+            state.clear_layout_cache(slot);
 
             let mut boundary = None;
             let mut reached_root = true;
             let mut current = start.flat_parent_id();
             while let Some(node_id) = current {
-                let node = tree
-                    .nodes
-                    .get(node_id)
-                    .expect("internal tree link must resolve to a live node");
+                let node_slot = tree.live_slot(node_id);
+                let node = tree.at(node_slot);
                 let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
@@ -170,16 +160,9 @@ impl<T> Document<T> {
                     break;
                 }
                 let boundary_input = is_boundary
-                    .then(|| {
-                        state
-                            .nodes
-                            .get(node_id)
-                            .expect("live node must have layout-arena state")
-                            .slot
-                            .committed_input()
-                    })
+                    .then(|| state.at(node_slot).slot.committed_input())
                     .flatten();
-                state.clear_layout_cache(node_id);
+                state.clear_layout_cache(node_slot);
                 if let Some(input) = boundary_input {
                     boundary = Some((node_id, input));
                     reached_root = false;
@@ -275,11 +258,10 @@ mod tests {
 
         let input = LayoutInput::default();
         for id in [DOCUMENT_NODE_ID, root, image] {
+            let slot = document.live_slot(id);
             document
                 .layout_state_mut()
-                .nodes
-                .get_mut(id)
-                .expect("live node has aligned layout state")
+                .at_mut(slot)
                 .slot
                 .store_cached_layout(input, LayoutOutput::default());
         }

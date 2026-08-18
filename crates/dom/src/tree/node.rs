@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsiz
 use hughie::compute::LeafMetrics;
 use hughie::compute::NaturalSize;
 use selectors::matching::ElementSelectorFlags;
-use slab::Slab;
 use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
@@ -177,10 +176,6 @@ impl<T> Node<T> {
         }
     }
 
-    pub(crate) fn tree(&self) -> &slab::Slab<Node<T>> {
-        &self.arenas().nodes
-    }
-
     #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
         &self.styling
@@ -198,7 +193,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
-        self.tree()
+        self.arenas()
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
     }
@@ -380,12 +375,8 @@ impl<T> Node<T> {
     pub fn payload(&self) -> &T {
         match &self.data {
             NodeData::Element(_) | NodeData::Text => {
-                let slot = self
-                    .arenas()
-                    .payloads
-                    .get(self.id)
-                    .expect("live node must have payload-arena state");
-                match slot {
+                let arenas = self.arenas();
+                match arenas.payload_at(arenas.live_slot(self.id)) {
                     PayloadSlot::Node(payload) => payload,
                     PayloadSlot::Document | PayloadSlot::ShadowRoot => {
                         unreachable!("payload-less sentinels belong to non-element nodes")
@@ -576,7 +567,7 @@ impl<T> Node<T> {
         self.text().is_none_or(str::is_empty)
             && self.children.iter().all(|&id| {
                 let child = self
-                    .tree()
+                    .arenas()
                     .get(id)
                     .expect("internal tree links always resolve");
                 !child.is_element()
@@ -589,7 +580,7 @@ impl<T> Node<T> {
     #[must_use]
     pub fn parent(&self) -> Option<&Node<T>> {
         self.parent.map(|id| {
-            self.tree()
+            self.arenas()
                 .get(id)
                 .expect("internal tree links always resolve")
         })
@@ -598,7 +589,7 @@ impl<T> Node<T> {
     #[must_use]
     pub fn first_child(&self) -> Option<&Node<T>> {
         self.children.first().map(|&id| {
-            self.tree()
+            self.arenas()
                 .get(id)
                 .expect("internal tree links always resolve")
         })
@@ -607,7 +598,7 @@ impl<T> Node<T> {
     #[must_use]
     pub fn last_child(&self) -> Option<&Node<T>> {
         self.children.last().map(|&id| {
-            self.tree()
+            self.arenas()
                 .get(id)
                 .expect("internal tree links always resolve")
         })
@@ -627,7 +618,7 @@ impl<T> Node<T> {
         if self.is_shadow_root() {
             return None;
         }
-        let tree = self.tree();
+        let tree = self.arenas();
         let siblings = &tree
             .get(self.parent?)
             .expect("internal tree links always resolve")
@@ -650,7 +641,7 @@ impl<T> Node<T> {
 
     pub(crate) fn children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
-            tree: self.tree(),
+            tree: self.arenas(),
             children: &self.children,
             index: 0,
         }
@@ -658,7 +649,7 @@ impl<T> Node<T> {
 
     pub(crate) fn flat_children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
-            tree: self.tree(),
+            tree: self.arenas(),
             children: self.flat_children(),
             index: 0,
         }
@@ -714,7 +705,7 @@ impl<T> std::hash::Hash for Node<T> {
 /// traversal walks.
 #[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
-    tree: &'a Slab<Node<T>>,
+    tree: &'a TreeArenas<T>,
     children: &'a [NodeId],
     index: usize,
 }
@@ -889,35 +880,20 @@ mod tests {
         assert!(document.get(element).unwrap().content.is_none());
 
         let text_id = document.create_text_node("hello", ());
+        let text_slot = document.live_slot(text_id);
         let text = document.get(text_id).unwrap();
         let Some(NodeContent::Text(_)) = text.content.as_deref() else {
             unreachable!("text nodes carry literal-text content")
         };
-        assert!(
-            document
-                .layout_state()
-                .nodes
-                .get(text_id)
-                .expect("text node has aligned layout state")
-                .text
-                .is_none()
-        );
+        assert!(document.layout_state().at(text_slot).text.is_none());
 
         let first = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_id);
+            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
             std::ptr::from_mut(artifacts)
         };
-        assert!(
-            document
-                .layout_state()
-                .nodes
-                .get(text_id)
-                .expect("text node has aligned layout state")
-                .text
-                .is_some()
-        );
+        assert!(document.layout_state().at(text_slot).text.is_some());
         let second = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_id);
+            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
             std::ptr::from_mut(artifacts)
         };
         assert_eq!(first, second);

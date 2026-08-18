@@ -23,9 +23,7 @@ use super::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
     skips_contents,
 };
-use crate::tree::document::{
-    Document, DocumentLayoutState, NodeId, TreeArenas, slab_get_for_live_node,
-};
+use crate::tree::document::{Document, DocumentLayoutState, NodeId, TreeArenas};
 use crate::tree::node::Node;
 
 impl<T> LayoutTree for TreeArenas<T> {
@@ -41,24 +39,19 @@ impl<T> LayoutTree for TreeArenas<T> {
         Self: 'tree;
 
     fn children(&self, node: NodeId) -> Self::ChildIter<'_> {
-        slab_get_for_live_node(&self.nodes, node)
-            .flat_children()
-            .iter()
-            .copied()
+        self.live(node).flat_children().iter().copied()
     }
 
     fn child_count(&self, node: NodeId) -> usize {
-        slab_get_for_live_node(&self.nodes, node)
-            .flat_children()
-            .len()
+        self.live(node).flat_children().len()
     }
 
     fn style(&self, node: NodeId) -> Self::Style<'_> {
-        StyleView::of(slab_get_for_live_node(&self.nodes, node))
+        StyleView::of(self.live(node))
     }
 
     fn layout<'state>(&self, state: &'state Self::State, node: NodeId) -> &'state LayoutSlot {
-        &slab_get_for_live_node(&state.nodes, node).slot
+        &state.at(self.live_slot(node)).slot
     }
 
     fn layout_mut<'state>(
@@ -66,11 +59,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         state: &'state mut Self::State,
         node: NodeId,
     ) -> &'state mut LayoutSlot {
-        &mut state
-            .nodes
-            .get_mut(node)
-            .expect("live node must have layout-arena state")
-            .slot
+        &mut state.at_mut(self.live_slot(node)).slot
     }
 
     fn compute_layout(
@@ -79,7 +68,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         node: NodeId,
         input: LayoutInput,
     ) -> LayoutOutput {
-        let node_ref = slab_get_for_live_node(&self.nodes, node);
+        let node_ref = self.live(node);
         let display = if node_ref.is_text_node() {
             DisplayMode::Leaf
         } else {
@@ -109,7 +98,7 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
-                    let node_ref = slab_get_for_live_node(&tree.nodes, node);
+                    let node_ref = tree.live(node);
                     let output = if node_ref.is_text_node() {
                         let view = TextStyleView::of(node_ref);
                         let run = TextRun {
@@ -117,7 +106,7 @@ impl<T> LayoutTree for TreeArenas<T> {
                             style: &view,
                             preserve_newlines: false,
                         };
-                        let (context, artifacts) = state.text_parts(node);
+                        let (context, artifacts) = state.text_parts(tree.live_slot(node));
                         let mut measurer =
                             TextMeasurer::new(context, artifacts, &view, std::iter::once(run));
                         measurer.compute_layout(input)
@@ -149,7 +138,7 @@ impl<T> LayoutTree for TreeArenas<T> {
     }
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: NodeId) {
-        state.clear_layout_cache(node);
+        state.clear_layout_cache(self.live_slot(node));
     }
 }
 
@@ -163,7 +152,7 @@ pub(super) fn run_layout<T: Sync>(
     let parked = collect_parked_boundaries(document);
     let (tree, state, parked_ids) = document.layout_parts();
     for &(_, id, input) in &parked {
-        if let Some(node) = tree.nodes.get(id)
+        if let Some(node) = tree.get(id)
             && node.is_element()
             && is_relayout_boundary(&StyleView::of(node))
         {
@@ -220,7 +209,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
     scale: f32,
 ) {
     for &(_, id, _) in parked {
-        let Some(node) = tree.nodes.get(id) else {
+        let Some(node) = tree.get(id) else {
             continue;
         };
         if !node.is_element() || !is_relayout_boundary(&StyleView::of(node)) {
@@ -249,7 +238,7 @@ fn has_parked_ancestor<T>(
         if parked_ids.contains(&id) {
             return true;
         }
-        current = slab_get_for_live_node(&tree.nodes, id).flat_parent_id();
+        current = tree.live(id).flat_parent_id();
     }
     false
 }
@@ -264,7 +253,7 @@ fn accumulated_unrounded_origin<T>(
     while let Some(id) = current {
         let location = tree.layout(state, id).unrounded.location;
         origin = Point::new(origin.x + location.x, origin.y + location.y);
-        current = slab_get_for_live_node(&tree.nodes, id).flat_parent_id();
+        current = tree.live(id).flat_parent_id();
     }
     origin
 }
@@ -285,7 +274,7 @@ fn pre_position<T: Sync>(
     node_id: NodeId,
     viewport: Size<f32>,
 ) -> bool {
-    let node = slab_get_for_live_node(&tree.nodes, node_id);
+    let node = tree.live(node_id);
     let Some(style) = StyleView::try_of(node) else {
         return false;
     };
@@ -299,7 +288,7 @@ fn pre_position<T: Sync>(
     }
     if node
         .flat_parent_id()
-        .and_then(|id| tree.nodes.get(id))
+        .and_then(|id| tree.get(id))
         .is_some_and(Node::is_element)
         && resolve_position(node, style.values()) == PositionProperty::Fixed
     {
@@ -316,7 +305,7 @@ fn position_hoisted<T: Sync>(
     viewport: Size<f32>,
     fixed: bool,
 ) {
-    let node = slab_get_for_live_node(&tree.nodes, node_id);
+    let node = tree.live(node_id);
     let Some(parent_id) = node.flat_parent_id() else {
         return;
     };
@@ -324,7 +313,7 @@ fn position_hoisted<T: Sync>(
     let mut containing = None;
     let mut ancestor = node.flat_parent_id();
     while let Some(current_id) = ancestor {
-        let current = slab_get_for_live_node(&tree.nodes, current_id);
+        let current = tree.live(current_id);
         let Some(style) = StyleView::try_of(current) else {
             break;
         };
@@ -383,7 +372,7 @@ fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeId, target: NodeI
     let target_key = (0_i32, target_index);
     let mut rank = 0u32;
     for (index, (child_id, ..)) in tree.flattened_children(parent_id).enumerate() {
-        let child = slab_get_for_live_node(&tree.nodes, child_id);
+        let child = tree.live(child_id);
         let Some(order) = sibling_effective_paint_order(child) else {
             continue;
         };

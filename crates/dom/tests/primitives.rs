@@ -18,7 +18,7 @@ fn node(doc: &mut Document<()>, tag: &str) -> NodeId {
 }
 
 #[test]
-fn removed_node_ids_may_be_reused_without_confusing_the_root() {
+fn a_removed_node_id_is_retired_rather_than_handed_to_the_next_node() {
     let mut doc = test_document();
     assert!(doc.root_node().is_document());
     let document_id = doc.root_node().id();
@@ -34,11 +34,12 @@ fn removed_node_ids_may_be_reused_without_confusing_the_root() {
     assert!(doc.get(a).is_none());
 
     let b = node(&mut doc, "div");
-    assert_eq!(a, b, "Slab should reuse the vacant slot");
+    assert_ne!(a, b, "a retired id is never issued again");
     assert!(
-        doc.get(a).is_some(),
-        "the raw index now resolves to its new occupant"
+        doc.get(a).is_none(),
+        "so the old id keeps resolving to nothing, however many nodes come after it"
     );
+    assert!(doc.get(b).is_some());
     assert_eq!(doc.document_element().id(), root);
 }
 

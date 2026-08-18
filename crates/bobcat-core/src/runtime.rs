@@ -483,9 +483,14 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
+/// A `NodeId` crossing into script *is* the element's Lynx `unique_id`: the
+/// DOM issues it, and `__GetElementUniqueID` hands back the same number the
+/// creating PAPI returned. Ids count upward and are never reissued, so this
+/// stays exact well past any document a runtime will build — f64 represents
+/// every integer below 2^53.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "slab indices stay far below f64's exact-integer range"
+    reason = "node ids stay far below f64's exact-integer range"
 )]
 fn node_id_value(node: dom::NodeId) -> HostValue {
     HostValue::Number(node as f64)
@@ -605,6 +610,65 @@ mod tests {
         assert!(
             elements.try_tree().is_some(),
             "a rejected callback must return the private document to the presenter"
+        );
+    }
+
+    /// The number script holds *is* the DOM's `NodeId` and the element's
+    /// Lynx `unique_id` — one identity, issued by native — and dropping an
+    /// element retires it. The element built afterwards reuses the freed
+    /// node's storage but reports a different `unique_id`, so a handle that
+    /// outlived its element can only ever name nothing.
+    #[test]
+    fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  let doomed = __CreateView(0);
+                  __AppendElement(page, doomed);
+                  if (__GetElementUniqueID(doomed) !== 2) {
+                    throw new Error(
+                      'the first element is node 2, got ' + __GetElementUniqueID(doomed),
+                    );
+                  }
+                  __RemoveElement(page, doomed);
+                  doomed = undefined;
+                };
+                ",
+                "app:///collected.js",
+            )
+            .expect("main-thread script");
+        assert!(
+            elements.tree().get(2).is_some(),
+            "the detached element is still allocated while script could reach it"
+        );
+
+        runtime.collect_garbage().expect("collection");
+        assert!(
+            elements.tree().get(2).is_none(),
+            "a swept handle drops its element through the finalization registry"
+        );
+
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const replacement = __CreateView(0);
+                  __AppendElement(page, replacement);
+                  if (__GetElementUniqueID(replacement) === 2) {
+                    throw new Error('a retired unique id was handed to a new element');
+                  }
+                };
+                ",
+                "app:///replacement.js",
+            )
+            .expect("main-thread script");
+        assert!(
+            elements.tree().get(2).is_none(),
+            "and the retired id keeps naming nothing"
         );
     }
 

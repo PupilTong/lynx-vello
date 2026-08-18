@@ -1,8 +1,12 @@
 //! Lynx page policy over the generic document: the `page` root tag, the UA
 //! cascade defaults, and view metrics. Everything else the runtime does goes
 //! straight to [`dom::Document`] — element identity is the DOM [`NodeId`],
-//! while the private host boundary validates script-provided IDs and mutation
-//! preconditions before entering `dom`, returning misuse as a JavaScript error.
+//! which is also the element's Lynx `unique_id`: one number, issued by the
+//! DOM, never reissued after the element is freed. Script therefore cannot
+//! name a stranger by holding an id too long, only something that no longer
+//! exists. The private host boundary still validates script-provided IDs and
+//! mutation preconditions before entering `dom`, returning misuse as a
+//! JavaScript error.
 //!
 //! [`NodeId`]: dom::NodeId
 

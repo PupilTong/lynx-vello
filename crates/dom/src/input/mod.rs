@@ -63,12 +63,13 @@
 //! by reading the frame the last [`Document::render`] retained — the same
 //! pure read as [`Document::elements_from_point`], never a flush or a
 //! rebuild. Input therefore targets what is on screen: before the first
-//! render nothing is, and after node removals the retained frame fails
-//! closed until the next render, because freed ids recycle and the old frame
-//! could name a stranger — the same rule that kills a latched drag across a
-//! removal. Geometric staleness is allowed and wanted: an event that lands
-//! between a scroll and its repaint hits the content the user was actually
-//! shown. The frame itself stays a DOM implementation detail; callers never
+//! render nothing is. A node freed since that render drops out of the answer
+//! on its own, because its id is retired rather than reissued and so names
+//! nothing — the same check that ends a latched drag whose scroller was
+//! removed mid-gesture, and the reason a removal elsewhere in the tree no
+//! longer blanks routing. Geometric staleness is allowed and wanted: an
+//! event that lands between a scroll and its repaint hits the content the
+//! user was actually shown. The frame itself stays a DOM implementation detail; callers never
 //! coordinate or retain a `PaintOrder` beside the document.
 //!
 //! # Recorded limits
@@ -237,7 +238,6 @@ pub struct InputResponse {
 struct Drag {
     pointer: PointerId,
     scroller: NodeId,
-    epoch: u64,
     origin: Point2D<f32>,
     scrolling: bool,
 }
@@ -251,10 +251,15 @@ pub(crate) struct InputState {
 }
 
 impl InputState {
-    fn find(&mut self, pointer: PointerId, epoch: u64) -> Option<&mut Drag> {
+    fn find(&mut self, pointer: PointerId) -> Option<&mut Drag> {
+        self.drags.iter_mut().find(|drag| drag.pointer == pointer)
+    }
+
+    fn scroller(&self, pointer: PointerId) -> Option<NodeId> {
         self.drags
-            .iter_mut()
-            .find(|drag| drag.pointer == pointer && drag.epoch == epoch)
+            .iter()
+            .find(|drag| drag.pointer == pointer)
+            .map(|drag| drag.scroller)
     }
 
     fn end(&mut self, pointer: PointerId) {
@@ -299,7 +304,6 @@ impl<T: Sync> Document<T> {
         device: PointerKind,
         phase: PointerPhase,
     ) -> DefaultAction {
-        let epoch = self.node_removal_epoch();
         match phase {
             PointerPhase::Down => {
                 self.input_state_mut().end(id);
@@ -312,14 +316,13 @@ impl<T: Sync> Document<T> {
                     self.input_state_mut().drags.push(Drag {
                         pointer: id,
                         scroller,
-                        epoch,
                         origin: event.position,
                         scrolling: false,
                     });
                 }
                 DefaultAction::None
             }
-            PointerPhase::Move => self.drag_step(event, id, epoch),
+            PointerPhase::Move => self.drag_step(event, id),
             PointerPhase::Up | PointerPhase::Cancel => {
                 self.input_state_mut().end(id);
                 DefaultAction::None
@@ -327,10 +330,21 @@ impl<T: Sync> Document<T> {
         }
     }
 
-    fn drag_step(&mut self, event: &InputEvent, id: PointerId, epoch: u64) -> DefaultAction {
-        let Some(drag) = self.input_state_mut().find(id, epoch) else {
+    fn drag_step(&mut self, event: &InputEvent, id: PointerId) -> DefaultAction {
+        let Some(scroller) = self.input_state().scroller(id) else {
             return DefaultAction::None;
         };
+        // The latched scroller can be freed mid-gesture. Its id is retired
+        // rather than reissued, so this is a plain liveness question and the
+        // gesture simply ends.
+        if !self.contains_node(scroller) {
+            self.input_state_mut().end(id);
+            return DefaultAction::None;
+        }
+        let drag = self
+            .input_state_mut()
+            .find(id)
+            .expect("the drag was found one statement ago");
         if event.default_prevented {
             drag.origin = event.position;
             return DefaultAction::None;
@@ -347,7 +361,6 @@ impl<T: Sync> Document<T> {
             travel * ((distance - TOUCH_SLOP) / distance)
         };
         drag.origin = event.position;
-        let scroller = drag.scroller;
 
         match self.scroll_chain(scroller, -movement) {
             Some((node, delta)) => DefaultAction::Scroll { node, delta },

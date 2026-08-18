@@ -91,7 +91,7 @@ impl<T> Node<T> {
         };
         if let Some(root) = links.shadow_root {
             return &self
-                .tree()
+                .arenas()
                 .get(root)
                 .expect("a host's shadow root outlives the host")
                 .children;
@@ -114,7 +114,7 @@ impl<T> Node<T> {
         }
         let parent_id = self.parent?;
         let parent = self
-            .tree()
+            .arenas()
             .get(parent_id)
             .expect("internal tree links always resolve");
         if let Some(host) = parent.shadow_host_id() {
@@ -129,7 +129,7 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn flat_parent(&self) -> Option<&Node<T>> {
         self.flat_parent_id().map(|id| {
-            self.tree()
+            self.arenas()
                 .get(id)
                 .expect("internal tree links always resolve")
         })
@@ -154,7 +154,7 @@ impl<T> Node<T> {
 
     #[must_use]
     pub(crate) fn containing_shadow_root(&self) -> Option<&Node<T>> {
-        let tree = self.tree();
+        let tree = self.arenas();
         let mut current = self.parent;
         while let Some(id) = current {
             let node = tree.get(id).expect("internal tree links always resolve");

@@ -31,7 +31,7 @@
 // | `__SetID(element, id)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__GetID(element)` | `bobcat.getAttribute` |
 // | `__GetTag(element)` | `bobcat.tagName` |
-// | `__GetElementUniqueID(element)` | the handle's own node id |
+// | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
 // | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__SetAttribute(element, name, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__AddEvent(element, eventType, eventName, handler)` | this runtime's own store |
@@ -68,6 +68,18 @@
 //   return of an element yields the same object it was created with.
 //   `parentComponentUniqueID` and `__CreatePage`'s arguments are accepted
 //   for PAPI shape and unused.
+// - **That number is Lynx's `unique_id`, and nothing here mints it.** The
+//   DOM issues it when the element is created and this runtime only carries
+//   it: there is no counter in this file, and `__GetElementUniqueID` reports
+//   back exactly what the creating PAPI was handed. One id space, one
+//   authority. Older web-core generations kept a JS-side counter beside the
+//   native id; that split does not exist here.
+// - A `unique_id` is never reissued. Freeing an element retires its id for
+//   the life of the document, so a handle that outlives its element — one
+//   the registry has not swept yet, an id a bundle stashed in a variable —
+//   can only ever name something gone, never a later element that happens to
+//   sit in the freed one's storage. Nothing in this file has to guard
+//   against that case because it cannot arise.
 // - Collection is the only release path — web-core's model, where a swept
 //   WeakRef is what frees an element. Every non-page handle is registered
 //   with a FinalizationRegistry whose cleanup calls `bobcat.dropElement`;
@@ -456,9 +468,14 @@
   }
 
   /**
+   * The element's Lynx `unique_id`, which is the same number as its native
+   * node id — the handle carries one value and this reads it back, rather
+   * than mapping between two id spaces.
+   *
    * The one query web-core answers instead of crashing: a falsy or foreign
    * element reports `-1` rather than throwing, which is the contract its
-   * callers read.
+   * callers read. `-1` is safe as the sentinel precisely because real ids
+   * are issued from zero upward and never recycled.
    *
    * @param {unknown} element
    * @returns {number}

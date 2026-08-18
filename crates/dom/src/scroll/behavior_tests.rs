@@ -363,6 +363,63 @@ fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
     assert_eq!(h.hit(50.0, 40.0), Some(rows[1]));
 }
 
+/// A `NodeId` is retired on free and never reissued, so a latched gesture
+/// only has to ask whether its own scroller is still live. Freeing something
+/// else in the tree — even a sibling that was on screen — leaves the gesture
+/// alone; freeing the scroller ends it.
+#[test]
+fn a_latched_drag_survives_an_unrelated_free_and_ends_with_its_own_scroller() {
+    let drag = |h: &mut Harness, y: f32, phase| {
+        h.input(InputEvent::pointer(
+            Point2D::new(50.0, y),
+            7,
+            PointerKind::Touch,
+            phase,
+        ))
+    };
+
+    let mut h = Harness::new(SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    for _ in 0..4 {
+        h.el(scroller, "view.row");
+    }
+    let bystander = h.el(root, "view.row");
+
+    drag(&mut h, 90.0, PointerPhase::Down);
+    h.doc.dom.drop_subtree(bystander);
+    let moved = drag(&mut h, 20.0, PointerPhase::Move);
+    assert_eq!(
+        moved.default_action,
+        DefaultAction::Scroll {
+            node: scroller,
+            delta: Vector2D::new(0.0, 62.0),
+        },
+        "a free elsewhere in the tree cannot alias the latched scroller, so the gesture continues",
+    );
+
+    // The scroller itself is a different matter: its id names nothing after
+    // the free, so the gesture has nothing left to scroll.
+    let mut h = Harness::new(SCROLLER);
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    for _ in 0..4 {
+        h.el(scroller, "view.row");
+    }
+
+    drag(&mut h, 90.0, PointerPhase::Down);
+    h.doc.dom.drop_subtree(scroller);
+    assert_eq!(
+        drag(&mut h, 20.0, PointerPhase::Move).default_action,
+        DefaultAction::None,
+    );
+    assert_eq!(
+        drag(&mut h, 40.0, PointerPhase::Move).default_action,
+        DefaultAction::None,
+        "and the gesture stays ended rather than reviving on the next move",
+    );
+}
+
 #[test]
 fn input_targets_through_the_scrolled_frame() {
     let mut h = Harness::new(SCROLLER);
