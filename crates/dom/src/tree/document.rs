@@ -861,8 +861,8 @@ pub(crate) mod tests {
         let next = document.create_text_node("replacement", 11);
         assert_ne!(next, id, "a retired id is never handed out again");
         assert_eq!(
-            document.live_slot(next),
-            slot,
+            document.live_slot(next).arena_key(),
+            slot.arena_key(),
             "the freed storage is handed to the next node"
         );
         assert_eq!(document.get(next).unwrap().payload(), &11);
@@ -929,8 +929,8 @@ pub(crate) mod tests {
 
         let next = document.create_element("view", ());
         assert_eq!(
-            document.live_slot(next),
-            slot,
+            document.live_slot(next).arena_key(),
+            slot.arena_key(),
             "the freed storage is handed to the next node",
         );
         assert!(
@@ -1019,7 +1019,8 @@ pub(crate) mod tests {
 
         let next = document.create_element("replacement", ());
         assert!(
-            [removed_slot, descendant_slot].contains(&document.live_slot(next)),
+            [removed_slot.arena_key(), descendant_slot.arena_key()]
+                .contains(&document.live_slot(next).arena_key()),
             "the next node should take storage freed by the removed subtree"
         );
         assert_eq!(

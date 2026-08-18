@@ -42,24 +42,33 @@ pub type NodeId = usize;
 /// nothing outside this crate may hold one, and no `NodeId` may be used as
 /// one without going through [`TreeArenas::slot`].
 ///
-/// It holds the arena key directly. Key zero is permanently occupied by the
+/// The key is the arena index. Key zero is permanently occupied by the
 /// reservation [`TreeArenas::reserve_zero`] makes, so no live node ever sits
-/// there and [`NonZeroU32`] is the key's own type rather than an encoding —
-/// which is what gives `Option<NodeSlot>` its four-byte width, the whole
-/// per-node cost of never reusing an id.
+/// there and [`NonZeroU32`] is the key's own type rather than an encoding.
+///
+/// The generation is what makes a slot *checkable*. A slot is the recycled
+/// half of the split, so on its own it is exactly the reusable handle this
+/// whole change exists to get rid of: hold one across a free and the next
+/// node lands underneath it. The arena bumps that key's generation on every
+/// free, so a slot taken before the free no longer matches and every getter
+/// that takes one answers `None` instead of a stranger.
+///
+/// The generation is **not** stored in [`TreeArenas::slots`] — that table
+/// only ever maps live ids, where the generation is current by construction,
+/// so it stays four bytes per entry and the deliberate leak does not grow.
+/// It is rebuilt by [`TreeArenas::slot`] and carried only in locals.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct NodeSlot(NonZeroU32);
+pub(crate) struct NodeSlot {
+    key: NonZeroU32,
+    generation: u32,
+}
 
 impl NodeSlot {
+    /// The storage position, with the generation dropped. Only for asking
+    /// "is this the same physical slot" — nothing accepts a bare key back.
     #[inline]
-    fn from_arena_key(key: usize) -> Self {
-        let key = u32::try_from(key).expect("a document holds fewer than u32::MAX nodes");
-        Self(NonZeroU32::new(key).expect("arena key zero is reserved and never allocated"))
-    }
-
-    #[inline]
-    const fn arena_key(self) -> usize {
-        self.0.get() as usize
+    pub(crate) const fn arena_key(self) -> usize {
+        self.key.get() as usize
     }
 }
 
@@ -90,7 +99,13 @@ pub(crate) enum PayloadSlot<T> {
 pub(crate) struct TreeArenas<T> {
     nodes: Slab<Node<T>>,
     payloads: Slab<PayloadSlot<T>>,
-    slots: Vec<Option<NodeSlot>>,
+    /// `NodeId` -> the arena key its node occupies, for live ids only.
+    /// Four bytes per node ever created, never reclaimed.
+    slots: Vec<Option<NonZeroU32>>,
+    /// Arena key -> how many times that key has been handed to a new node.
+    /// Indexed by *key*, so it is bounded by the peak number of live nodes,
+    /// not by how many ids the document has ever issued.
+    generations: Vec<u32>,
 }
 
 impl<T> TreeArenas<T> {
@@ -99,6 +114,7 @@ impl<T> TreeArenas<T> {
             nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             slots: Vec::with_capacity(INITIAL_NODE_CAPACITY),
+            generations: Vec::with_capacity(INITIAL_NODE_CAPACITY),
         }
     }
 
@@ -120,6 +136,7 @@ impl<T> TreeArenas<T> {
         );
         assert_eq!(self.payloads.insert(PayloadSlot::Reserved), RESERVED);
         self.slots.push(None);
+        self.generations.push(0);
     }
 
     /// The arena slot a live node occupies, or `None` for an id that was
@@ -128,7 +145,23 @@ impl<T> TreeArenas<T> {
     /// than a crash.
     #[inline]
     pub(crate) fn slot(&self, id: NodeId) -> Option<NodeSlot> {
-        self.slots.get(id).copied().flatten()
+        let key = self.slots.get(id).copied().flatten()?;
+        Some(NodeSlot {
+            key,
+            generation: self.generations[key.get() as usize],
+        })
+    }
+
+    /// Whether a slot still names the node it was taken for.
+    ///
+    /// False for a slot held across the free of its node, whether or not the
+    /// key has since been handed to someone else — which is the case a bare
+    /// arena key cannot distinguish.
+    #[inline]
+    pub(crate) fn slot_is_current(&self, slot: NodeSlot) -> bool {
+        self.generations
+            .get(slot.arena_key())
+            .is_some_and(|generation| *generation == slot.generation)
     }
 
     #[inline]
@@ -160,22 +193,43 @@ impl<T> TreeArenas<T> {
         self.slot(id).is_some()
     }
 
+    /// The node a slot names, or `None` if the slot is stale.
+    ///
+    /// The generation compare is the whole check. Its address depends only on
+    /// the key the caller already holds, so it issues alongside the node load
+    /// rather than after it — unlike the id-to-slot hop, it does not lengthen
+    /// the dependency chain a tree walk is bound by.
+    #[inline]
+    pub(crate) fn try_at(&self, slot: NodeSlot) -> Option<&Node<T>> {
+        if !self.slot_is_current(slot) {
+            return None;
+        }
+        self.nodes.get(slot.arena_key())
+    }
+
     #[inline]
     pub(crate) fn at(&self, slot: NodeSlot) -> &Node<T> {
-        self.nodes
-            .get(slot.arena_key())
-            .expect("a live slot always selects its node")
+        self.try_at(slot)
+            .expect("stale NodeSlot: its node was freed after the slot was taken")
     }
 
     #[inline]
     fn at_mut(&mut self, slot: NodeSlot) -> &mut Node<T> {
+        assert!(
+            self.slot_is_current(slot),
+            "stale NodeSlot: its node was freed after the slot was taken"
+        );
         self.nodes
             .get_mut(slot.arena_key())
-            .expect("a live slot always selects its node")
+            .expect("a current slot always selects its node")
     }
 
     #[inline]
     pub(crate) fn payload_at(&self, slot: NodeSlot) -> &PayloadSlot<T> {
+        assert!(
+            self.slot_is_current(slot),
+            "stale NodeSlot: its node was freed after the slot was taken"
+        );
         self.payloads
             .get(slot.arena_key())
             .expect("live primary node must have matching payload-arena state")
@@ -220,17 +274,28 @@ impl<T> TreeArenas<T> {
         make: impl FnOnce(*mut Self, NodeId) -> Node<T>,
     ) -> (NodeId, NodeSlot) {
         let owner = std::ptr::from_mut::<Self>(self);
-        let slot = NodeSlot::from_arena_key(self.nodes.vacant_key());
+        let arena_key = self.nodes.vacant_key();
+        let key = u32::try_from(arena_key).expect("a document holds fewer than u32::MAX nodes");
+        let key = NonZeroU32::new(key).expect("arena key zero is reserved and never allocated");
+        // A key the slab has never handed out yet starts at generation zero;
+        // a recycled one carries whatever its last free bumped it to.
+        if arena_key == self.generations.len() {
+            self.generations.push(0);
+        }
+        let slot = NodeSlot {
+            key,
+            generation: self.generations[arena_key],
+        };
         // The id is claimed here but published last: until its table entry
         // exists the id resolves to nothing, so an unwind out of `make` or
         // out of either insert leaves an unissued id rather than a live one
         // pointing at an empty slot.
         let id = self.slots.len();
         let node = make(owner, id);
-        assert_eq!(self.nodes.insert(node), slot.arena_key());
-        assert_eq!(self.payloads.vacant_key(), slot.arena_key());
-        assert_eq!(self.payloads.insert(payload), slot.arena_key());
-        self.slots.push(Some(slot));
+        assert_eq!(self.nodes.insert(node), arena_key);
+        assert_eq!(self.payloads.vacant_key(), arena_key);
+        assert_eq!(self.payloads.insert(payload), arena_key);
+        self.slots.push(Some(key));
         (id, slot)
     }
 
@@ -252,6 +317,9 @@ impl<T> TreeArenas<T> {
             .try_remove(slot.arena_key())
             .expect("removed element/text node must have payload-arena state");
         self.retire_id(id);
+        // Every slot taken for this node before now stops matching, so a held
+        // one cannot follow the key to whoever the slab hands it to next.
+        self.generations[slot.arena_key()] = self.generations[slot.arena_key()].wrapping_add(1);
         (slot, node, payload)
     }
 }
@@ -370,7 +438,7 @@ mod tests {
         let (freed_id, freed_slot) = issued[1];
         let (slot, _, payload) = arenas.remove_node(freed_id);
         layout.remove(slot);
-        assert_eq!(slot, freed_slot);
+        assert_eq!(slot.arena_key(), freed_slot.arena_key());
         assert!(matches!(payload, PayloadSlot::Node(1)));
         assert_eq!(arenas.nodes.len(), arenas.payloads.len());
         assert_eq!(arenas.slot(freed_id), None);
@@ -379,7 +447,11 @@ mod tests {
             Node::new_text(owner, id, String::new())
         });
         layout.insert(next_slot);
-        assert_eq!(next_slot, freed_slot, "the freed storage comes back");
+        assert_eq!(
+            next_slot.arena_key(),
+            freed_slot.arena_key(),
+            "the freed storage comes back"
+        );
         assert_eq!(
             next_id,
             issued.last().expect("ids were issued").0 + 1,
@@ -406,9 +478,47 @@ mod tests {
         }
     }
 
-    /// The table entry is the whole per-node cost of never reusing an id.
+    /// The table entry is the whole per-node cost of never reusing an id, so
+    /// it stores the bare key. A generation-carrying `NodeSlot` is twice the
+    /// width and never goes in the table — it is rebuilt per lookup.
     #[test]
     fn the_id_table_entry_is_four_bytes() {
-        assert_eq!(size_of::<Option<NodeSlot>>(), 4);
+        assert_eq!(size_of::<Option<NonZeroU32>>(), 4);
+        assert_eq!(size_of::<Option<NodeSlot>>(), 8);
+    }
+
+    /// The generation is what stops a slot from being the reusable handle
+    /// this whole split exists to remove.
+    #[test]
+    fn a_slot_held_across_its_nodes_free_is_refused_even_once_reused() {
+        let mut arenas: TreeArenas<u32> = TreeArenas::new();
+        arenas.reserve_zero();
+        let (doomed, held) = arenas.insert_node(PayloadSlot::Node(1), |owner, id| {
+            Node::new_text(owner, id, String::new())
+        });
+        assert!(arenas.slot_is_current(held));
+        assert!(arenas.try_at(held).is_some());
+
+        arenas.remove_node(doomed);
+        assert!(
+            !arenas.slot_is_current(held),
+            "freeing invalidates every slot taken for that node"
+        );
+        assert!(arenas.try_at(held).is_none());
+
+        let (_, reused) = arenas.insert_node(PayloadSlot::Node(2), |owner, id| {
+            Node::new_text(owner, id, String::new())
+        });
+        assert_eq!(
+            reused.arena_key(),
+            held.arena_key(),
+            "the storage really did come back"
+        );
+        assert_ne!(reused, held, "but the old slot does not name it");
+        assert!(
+            arenas.try_at(held).is_none(),
+            "a stale slot must not follow the key to its new occupant"
+        );
+        assert!(arenas.try_at(reused).is_some());
     }
 }
