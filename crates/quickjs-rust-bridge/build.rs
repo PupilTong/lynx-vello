@@ -34,6 +34,8 @@ fn main() {
             .define("CONFIG_VERSION", Some(version_define.as_str()))
             .define("QJS_NO_JS_SHARED_MEMORY", None)
             .define("QJS_RUST_ALLOCATOR", None)
+            .define("QJS_RUST_TIME_HOST", None)
+            .define("QJS_RUST_TIMEZONE_HOST", None)
             .flag("-include")
             .flag(&allocator_header)
             .flag_if_supported("-std=gnu11")

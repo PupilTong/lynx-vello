@@ -10,6 +10,8 @@ publish = false
 links = "quickjs"
 
 [dependencies]
+chrono = { workspace = true }
+getrandom = { workspace = true }
 smallvec = { workspace = true }
 
 [target.wasm32-unknown-unknown.dependencies]

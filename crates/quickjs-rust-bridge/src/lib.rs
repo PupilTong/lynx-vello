@@ -11,6 +11,11 @@
 )]
 mod allocator;
 mod ffi;
+#[allow(
+    unsafe_code,
+    reason = "this private module exports the C ABI used by QuickJS's time hooks"
+)]
+mod platform_time;
 
 #[allow(
     unsafe_code,
@@ -1558,6 +1563,26 @@ mod implementation {
 
             assert_eq!(function.kind(), ValueKind::Function);
             assert_eq!(result.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn date_timezone_and_random_intrinsics_are_operational() {
+            let mut realm = Realm::new().unwrap();
+            let result = realm
+                .evaluate(
+                    EvalSource::new(
+                        "(() => { \
+                         const random = Math.random(); \
+                         return Number.isFinite(Date.now()) && \
+                           Number.isFinite(new Date(0).getTimezoneOffset()) && \
+                           random >= 0 && random < 1; \
+                         })()",
+                    ),
+                    EvalOptions::default(),
+                )
+                .expect("time and random intrinsics should execute");
+
+            assert_eq!(result.as_boolean(), Some(true));
         }
 
         #[test]
