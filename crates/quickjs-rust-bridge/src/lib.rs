@@ -13,6 +13,11 @@ mod allocator;
 mod ffi;
 #[allow(
     unsafe_code,
+    reason = "this private module exports the Rust standard-library ABI used by the C translation units"
+)]
+mod platform_stdlib;
+#[allow(
+    unsafe_code,
     reason = "this private module exports the C ABI used by QuickJS's time hooks"
 )]
 mod platform_time;
@@ -1583,6 +1588,30 @@ mod implementation {
                 .expect("time and random intrinsics should execute");
 
             assert_eq!(result.as_boolean(), Some(true));
+        }
+
+        #[test]
+        fn rust_stdlib_math_hooks_are_operational() {
+            let mut realm = Realm::new().unwrap();
+            let atanh = realm
+                .evaluate(EvalSource::new("Math.atanh(0.5)"), EvalOptions::default())
+                .expect("Math.atanh should execute through its Rust hook")
+                .as_number()
+                .expect("Math.atanh should return a number");
+            let clamped = realm
+                .evaluate(
+                    EvalSource::new(
+                        "(() => { \
+                         const values = new Uint8ClampedArray([0.5, 1.5, 2.5, 3.5]); \
+                         return values[0] * 1000 + values[1] * 100 + values[2] * 10 + values[3]; \
+                         })()",
+                    ),
+                    EvalOptions::default(),
+                )
+                .expect("Uint8ClampedArray conversion should execute through its Rust hook");
+
+            assert_eq!(atanh.to_bits(), 0.5_f64.atanh().to_bits());
+            assert_eq!(clamped.as_number(), Some(224.0));
         }
 
         #[test]
