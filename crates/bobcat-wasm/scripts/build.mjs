@@ -4,24 +4,17 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { cargoClangTargetFeatureFlags } from './wasm-target-features.mjs'
+
 const packageDirectory = fileURLToPath(new URL('..', import.meta.url))
 const wasmTarget = 'wasm32-unknown-unknown'
 const ccEnvironmentName = 'CC_wasm32_unknown_unknown'
 const arEnvironmentName = 'AR_wasm32_unknown_unknown'
-const requiredClangFlags = [
-  '-matomics',
-  '-mbulk-memory',
-  '-mbulk-memory-opt',
-  '-mextended-const',
-  '-mmultivalue',
-  '-mmutable-globals',
-  '-mnontrapping-fptoint',
-  '-mreference-types',
-  '-mrelaxed-simd',
-  '-msign-ext',
-  '-msimd128',
-  '-mtail-call',
-]
+const wasmClangTargetFeatureFlags = cargoClangTargetFeatureFlags({
+  cargo: process.env.CARGO ?? 'cargo',
+  cwd: packageDirectory,
+  target: wasmTarget,
+})
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))]
@@ -87,7 +80,16 @@ function selectWasmCToolchain() {
     for (const clang of clangCandidates()) {
       const compile = run(
         clang,
-        [`--target=${wasmTarget}`, ...requiredClangFlags, '-x', 'c', '-c', '-', '-o', objectPath],
+        [
+          `--target=${wasmTarget}`,
+          ...wasmClangTargetFeatureFlags,
+          '-x',
+          'c',
+          '-c',
+          '-',
+          '-o',
+          objectPath,
+        ],
         { input: 'int bobcat_wasm_llvm_probe(void) { return 0; }\n' },
       )
       if (compile.status !== 0) {
@@ -118,7 +120,7 @@ function selectWasmCToolchain() {
   throw new Error(
     [
       'bobcat-wasm needs LLVM Clang with a WebAssembly backend and these target flags:',
-      requiredClangFlags.join(' '),
+      wasmClangTargetFeatureFlags.join(' '),
       'Apple clang has no WebAssembly backend. Install LLVM 22 or newer',
       '(for example, `brew install llvm` on macOS), then set',
       `${ccEnvironmentName} and ${arEnvironmentName}, or set`,

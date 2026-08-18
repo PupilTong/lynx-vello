@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("Cargo always provides CARGO_MANIFEST_DIR"),
     );
@@ -17,11 +19,13 @@ fn main() {
     let target = env::var("TARGET").expect("Cargo always provides TARGET");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo always provides target OS");
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let clang_target_feature_flags = if target == "wasm32-unknown-unknown" {
+        clang_target_feature_flags_from_cargo()
+    } else {
+        Vec::new()
+    };
 
-    assert!(
-        target_os != "windows" || target_env == "gnu",
-        "the pinned QuickJS C sources support Windows through GNU/MinGW, not the MSVC ABI"
-    );
+    assert_supported_target(&target_os, &target_env);
 
     let sources = [
         "quickjs.c",
@@ -44,7 +48,7 @@ fn main() {
             .flag("-include")
             .flag(&platform_header)
             .flag_if_supported("-std=gnu11");
-        configure_target(&mut build, &target);
+        configure_target(&mut build, &target, &clang_target_feature_flags);
         build
     };
 
@@ -68,7 +72,7 @@ fn main() {
     // force-include `rust-platform.h`: that header maps `vsnprintf` to this
     // wrapper and would make the implementation recurse into itself.
     let mut printf_build = cc::Build::new();
-    configure_target(&mut printf_build, &target);
+    configure_target(&mut printf_build, &target, &clang_target_feature_flags);
     printf_build
         .include(&nanoprintf_dir)
         .file(&platform_printf_source)
@@ -110,26 +114,68 @@ fn main() {
     }
 }
 
-fn configure_target(build: &mut cc::Build, target: &str) {
+fn assert_supported_target(target_os: &str, target_env: &str) {
+    assert!(
+        target_os != "windows" || target_env == "gnu",
+        "the pinned QuickJS C sources support Windows through GNU/MinGW, not the MSVC ABI"
+    );
+}
+
+fn configure_target(build: &mut cc::Build, target: &str, clang_target_feature_flags: &[String]) {
     build.flag_if_supported("-fwrapv");
     if target == "wasm32-unknown-unknown" {
-        // Match the Rust target features in `.cargo/config.toml`. These flags
-        // describe C object code only; the QuickJS build still omits its
-        // JavaScript Atomics and SharedArrayBuffer intrinsics.
-        build
-            .flag("-matomics")
-            .flag("-mbulk-memory")
-            .flag("-mbulk-memory-opt")
-            .flag("-mextended-const")
-            .flag("-mmultivalue")
-            .flag("-mmutable-globals")
-            .flag("-mnontrapping-fptoint")
-            .flag("-mreference-types")
-            .flag("-mrelaxed-simd")
-            .flag("-msign-ext")
-            .flag("-msimd128")
-            .flag("-mtail-call");
+        // These describe C object code only; the QuickJS build still omits
+        // its JavaScript Atomics and SharedArrayBuffer intrinsics.
+        for flag in clang_target_feature_flags {
+            build.flag(flag);
+        }
     }
+}
+
+fn clang_target_feature_flags_from_cargo() -> Vec<String> {
+    let encoded = env::var("CARGO_ENCODED_RUSTFLAGS")
+        .expect("Cargo always provides CARGO_ENCODED_RUSTFLAGS to build scripts");
+    let rustflags: Vec<_> = encoded.split('\u{1f}').collect();
+    let mut clang_flags = Vec::new();
+    let mut index = 0;
+
+    while index < rustflags.len() {
+        let rustflag = rustflags[index];
+        let codegen_option = if rustflag == "-C" {
+            index += 1;
+            rustflags.get(index).copied()
+        } else {
+            rustflag.strip_prefix("-C")
+        };
+
+        if let Some(features) =
+            codegen_option.and_then(|option| option.strip_prefix("target-feature="))
+        {
+            for feature in features.split(',').filter(|feature| !feature.is_empty()) {
+                let (clang_prefix, name) = match feature.as_bytes()[0] {
+                    b'+' => ("-m", &feature[1..]),
+                    b'-' => ("-mno-", &feature[1..]),
+                    _ => panic!("Rust target feature '{feature}' must start with '+' or '-'"),
+                };
+                assert!(
+                    !name.is_empty()
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+                    "Rust target feature '{feature}' cannot be translated to a Clang flag"
+                );
+                clang_flags.push(format!("{clang_prefix}{name}"));
+            }
+        }
+        index += 1;
+    }
+
+    assert!(
+        !clang_flags.is_empty(),
+        "wasm32-unknown-unknown must configure an explicit Rust target-feature list; \
+         the QuickJS C flags are derived from it"
+    );
+    clang_flags
 }
 
 fn rerun_if_changed(path: &Path) {

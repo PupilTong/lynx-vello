@@ -106,7 +106,7 @@ fn snprintf_supports_the_quickjs_integer_and_dynamic_format_set() {
         qjs_platform_snprintf(
             buffer.as_mut_ptr().cast(),
             buffer.len(),
-            c"%+07d|%0*d|%.*s|%02x|%c|%lld|%zu".as_ptr(),
+            c"%+07d|%0*d|%.*s|%02x|%c|%lld|%zu|%#x|%b|%d".as_ptr(),
             42 as c_int,
             6 as c_int,
             -42 as c_int,
@@ -116,14 +116,74 @@ fn snprintf_supports_the_quickjs_integer_and_dynamic_format_set() {
             c_int::from(b'Q'),
             c_longlong::MIN,
             usize::MAX,
+            10 as c_uint,
+            5 as c_uint,
+            9 as c_int,
         )
     };
-    let expected = format!("+000042|-00042|abc|0a|Q|{}|{}", c_longlong::MIN, usize::MAX);
+    let expected = format!(
+        "+000042|-00042|abc|0a|Q|{}|{}|0xa|101|9",
+        c_longlong::MIN,
+        usize::MAX
+    );
     assert_eq!(
         usize::try_from(required).expect("the formatter returned a negative length"),
         expected.len()
     );
     assert_eq!(buffer_text(&buffer), expected);
+}
+
+#[test]
+fn snprintf_float_conversions_consume_their_arguments() {
+    let mut buffer = [0_u8; 160];
+    // Keep an integer after every floating-point family. If any family is
+    // compiled out, nanoprintf emits the conversion literally without
+    // consuming its double and the following integer exposes the va_list
+    // desynchronization.
+    // SAFETY: the arguments exactly match their promoted C conversion types.
+    let required = unsafe {
+        qjs_platform_snprintf(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            c"%.2f|%d|%.1e|%d|%.3g|%d|%a|%d".as_ptr(),
+            1.25_f64,
+            2 as c_int,
+            12.0_f64,
+            3 as c_int,
+            125.0_f64,
+            4 as c_int,
+            1.5_f64,
+            5 as c_int,
+        )
+    };
+    let output = buffer_text(&buffer);
+
+    assert_eq!(output, "1.25|2|12.0|3|125.000|4|0x1.8000000000000p+0|5");
+    assert_eq!(
+        usize::try_from(required).expect("the formatter returned a negative length"),
+        output.len()
+    );
+}
+
+#[test]
+fn snprintf_writeback_consumes_its_pointer_and_preserves_later_arguments() {
+    let mut buffer = [0_u8; 32];
+    let mut written = -1 as c_int;
+    // SAFETY: `written` is live and writable for the `%n` conversion, and the
+    // following integer has the promoted type required by `%d`.
+    let required = unsafe {
+        qjs_platform_snprintf(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            c"abc%n|%d".as_ptr(),
+            &mut written,
+            7 as c_int,
+        )
+    };
+
+    assert_eq!(written, 3);
+    assert_eq!(required, 5);
+    assert_eq!(buffer_text(&buffer), "abc|7");
 }
 
 #[test]
