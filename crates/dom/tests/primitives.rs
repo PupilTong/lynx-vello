@@ -156,7 +156,10 @@ fn insert_before_reorders_within_one_parent() {
     doc.append_child(parent, c);
 
     doc.insert_before(parent, c, Some(a));
-    assert_eq!(doc.get(parent).unwrap().child_ids(), &[c, a, b]);
+    assert_eq!(
+        doc.get(parent).unwrap().child_ids().collect::<Vec<_>>(),
+        &[c, a, b]
+    );
     assert_eq!(doc.get(c).unwrap().parent_id(), Some(parent));
 }
 
@@ -184,7 +187,7 @@ fn drop_subtree_frees_detaches_and_returns_payloads() {
     assert!(doc.get(child).is_none());
     assert!(doc.get(grandchild).is_none());
     assert!(doc.get(container).is_some());
-    assert!(doc.get(container).unwrap().child_ids().is_empty());
+    assert!(doc.get(container).unwrap().child_ids().len() == 0);
 }
 
 #[test]
@@ -208,7 +211,7 @@ fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
 
     assert!(doc.get(child).is_none());
     assert!(
-        doc.get(container).unwrap().child_ids().is_empty(),
+        doc.get(container).unwrap().child_ids().len() == 0,
         "the dropped element is gone from its parent's child list"
     );
     let orphan = doc.get(grandchild).expect("the child outlives its parent");
@@ -220,7 +223,10 @@ fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
     );
 
     doc.append_child(container, grandchild);
-    assert_eq!(doc.get(container).unwrap().child_ids(), &[grandchild]);
+    assert_eq!(
+        doc.get(container).unwrap().child_ids().collect::<Vec<_>>(),
+        &[grandchild]
+    );
 }
 
 #[test]
@@ -240,12 +246,12 @@ fn remove_element_unlinks_without_freeing() {
         "the removed node stays allocated, just parentless"
     );
     assert_eq!(
-        doc.get(container).unwrap().child_ids(),
+        doc.get(container).unwrap().child_ids().collect::<Vec<_>>(),
         &[leaf],
         "and keeps its own subtree"
     );
     assert!(!doc.is_connected(leaf));
-    assert!(doc.get(root).unwrap().child_ids().is_empty());
+    assert!(doc.get(root).unwrap().child_ids().len() == 0);
 
     doc.append_child(root, container);
     assert!(doc.is_connected(leaf), "the same ids re-insert intact");
@@ -279,8 +285,14 @@ fn ancestor_and_child_queries() {
     assert!(doc.is_ancestor(root, leaf));
     assert!(doc.is_ancestor(container, leaf));
     assert!(!doc.is_ancestor(leaf, root));
-    assert_eq!(doc.get(root).unwrap().child_ids(), &[container]);
-    assert_eq!(doc.get(container).unwrap().child_ids(), &[leaf]);
+    assert_eq!(
+        doc.get(root).unwrap().child_ids().collect::<Vec<_>>(),
+        &[container]
+    );
+    assert_eq!(
+        doc.get(container).unwrap().child_ids().collect::<Vec<_>>(),
+        &[leaf]
+    );
 }
 
 #[test]

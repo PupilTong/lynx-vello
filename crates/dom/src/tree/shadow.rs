@@ -34,7 +34,7 @@ use stylo::LocalName;
 use stylo::author_styles::AuthorStyles;
 use stylo::stylesheets::DocumentStyleSheet;
 
-use crate::tree::document::{Document, NodeId, PayloadSlot};
+use crate::tree::document::{Document, NodeId, NodeSlot, PayloadSlot};
 use crate::tree::node::Node;
 
 static SLOT: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("slot"));
@@ -54,14 +54,14 @@ pub enum ShadowRootMode {
 
 /// State owned by a shadow-root node.
 pub(crate) struct ShadowRootData {
-    pub(crate) host: NodeId,
+    pub(crate) host: NodeSlot,
     pub(crate) mode: ShadowRootMode,
     pub(crate) styles: AuthorStyles<DocumentStyleSheet>,
     slots: Option<Vec<NodeId>>,
 }
 
 impl ShadowRootData {
-    fn new(host: NodeId, mode: ShadowRootMode) -> Self {
+    fn new(host: NodeSlot, mode: ShadowRootMode) -> Self {
         Self {
             host,
             mode,
@@ -74,9 +74,9 @@ impl ShadowRootData {
 /// Optional host, slot, and assignment links.
 #[derive(Default)]
 pub(crate) struct ShadowLinks {
-    pub(crate) shadow_root: Option<NodeId>,
-    pub(crate) assigned_slot: Option<NodeId>,
-    pub(crate) assigned_nodes: Vec<NodeId>,
+    pub(crate) shadow_root: Option<NodeSlot>,
+    pub(crate) assigned_slot: Option<NodeSlot>,
+    pub(crate) assigned_nodes: Vec<NodeSlot>,
 }
 
 impl<T> Node<T> {
@@ -85,16 +85,12 @@ impl<T> Node<T> {
         self.local_name.as_ref().is_some_and(|name| *name == *SLOT)
     }
 
-    pub(crate) fn flat_children(&self) -> &[NodeId] {
+    pub(crate) fn flat_children(&self) -> &[NodeSlot] {
         let Some(links) = self.shadow.as_deref() else {
             return &self.children;
         };
         if let Some(root) = links.shadow_root {
-            return &self
-                .arenas()
-                .get(root)
-                .expect("a host's shadow root outlives the host")
-                .children;
+            return &self.arenas().at(root).children;
         }
         if links.assigned_nodes.is_empty() {
             &self.children
@@ -103,61 +99,79 @@ impl<T> Node<T> {
         }
     }
 
-    pub(crate) fn flat_parent_id(&self) -> Option<NodeId> {
+    pub(crate) fn flat_parent_slot(&self) -> Option<NodeSlot> {
         if let Some(links) = self.shadow.as_deref()
             && let Some(slot) = links.assigned_slot
         {
             return Some(slot);
         }
-        if let Some(host) = self.shadow_host_id() {
+        if let Some(host) = self.shadow_host_slot() {
             return Some(host);
         }
-        let parent_id = self.parent?;
-        let parent = self
-            .arenas()
-            .get(parent_id)
-            .expect("internal tree links always resolve");
-        if let Some(host) = parent.shadow_host_id() {
+        let parent_slot = self.parent?;
+        let parent = self.arenas().at(parent_slot);
+        if let Some(host) = parent.shadow_host_slot() {
             return Some(host);
         }
-        if parent.shadow_root_id().is_some() {
+        if parent.shadow_root_slot().is_some() {
             return None;
         }
-        Some(parent_id)
+        Some(parent_slot)
+    }
+
+    #[must_use]
+    pub(crate) fn flat_parent_id(&self) -> Option<NodeId> {
+        self.flat_parent_slot()
+            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
     pub(crate) fn flat_parent(&self) -> Option<&Node<T>> {
-        self.flat_parent_id().map(|id| {
-            self.arenas()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.flat_parent_slot().map(|slot| self.arenas().at(slot))
     }
 
     #[must_use]
-    pub(crate) fn shadow_root_id(&self) -> Option<NodeId> {
+    pub(crate) fn shadow_root_slot(&self) -> Option<NodeSlot> {
         self.shadow.as_deref()?.shadow_root
     }
 
     #[must_use]
-    pub(crate) fn assigned_slot_id(&self) -> Option<NodeId> {
+    pub(crate) fn shadow_root_id(&self) -> Option<NodeId> {
+        self.shadow_root_slot()
+            .map(|slot| self.arenas().at(slot).id())
+    }
+
+    #[must_use]
+    pub(crate) fn assigned_slot_slot(&self) -> Option<NodeSlot> {
         self.shadow.as_deref()?.assigned_slot
     }
 
     #[must_use]
-    pub(crate) fn assigned_node_ids(&self) -> &[NodeId] {
+    pub(crate) fn assigned_slot_id(&self) -> Option<NodeId> {
+        self.assigned_slot_slot()
+            .map(|slot| self.arenas().at(slot).id())
+    }
+
+    #[must_use]
+    pub(crate) fn assigned_node_slots(&self) -> &[NodeSlot] {
         self.shadow
             .as_deref()
             .map_or(&[][..], |links| &links.assigned_nodes)
+    }
+
+    pub(crate) fn assigned_node_ids(&self) -> impl ExactSizeIterator<Item = NodeId> + '_ {
+        let arenas = self.arenas();
+        self.assigned_node_slots()
+            .iter()
+            .map(move |&slot| arenas.at(slot).id())
     }
 
     #[must_use]
     pub(crate) fn containing_shadow_root(&self) -> Option<&Node<T>> {
         let tree = self.arenas();
         let mut current = self.parent;
-        while let Some(id) = current {
-            let node = tree.get(id).expect("internal tree links always resolve");
+        while let Some(slot) = current {
+            let node = tree.at(slot);
             if node.is_shadow_root() {
                 return Some(node);
             }
@@ -239,11 +253,13 @@ impl<T> Document<T> {
             self.get(host).and_then(Node::shadow_root_id).is_none(),
             "Document::attach_shadow: the host already hosts a shadow root"
         );
-        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id| {
-            Node::new_shadow_root(owner, id, ShadowRootData::new(host, mode))
+        let host_slot = self.live_slot(host);
+        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id, slot| {
+            Node::new_shadow_root(owner, id, slot, ShadowRootData::new(host_slot, mode))
         });
-        self.live_node_mut(root).parent = Some(host);
-        self.live_node_mut(host).links_mut().shadow_root = Some(root);
+        let root_slot = self.live_slot(root);
+        self.live_node_mut(root).parent = Some(host_slot);
+        self.live_node_mut(host).links_mut().shadow_root = Some(root_slot);
         self.note_shadow_root_added();
         self.assign_slots(root);
         self.mark_subtree_dirty(host);
@@ -277,8 +293,10 @@ impl<T> Document<T> {
     /// The nodes a slot renders, in the host's child order. Empty when the
     /// slot shows its fallback content instead.
     #[must_use]
-    pub fn assigned_nodes(&self, slot: NodeId) -> &[NodeId] {
-        self.get(slot).map_or(&[][..], Node::assigned_node_ids)
+    pub fn assigned_nodes(&self, slot: NodeId) -> Vec<NodeId> {
+        self.get(slot)
+            .map(|node| node.assigned_node_ids().collect())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -343,15 +361,16 @@ impl<T> Document<T> {
     }
 
     fn subtree_contains_slot(&self, id: NodeId) -> bool {
-        let mut stack = vec![id];
+        let Some(root) = self.slot(id) else {
+            return false;
+        };
+        let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(node) = self.get(current) else {
-                continue;
-            };
+            let node = self.arenas().at(current);
             if node.is_slot() {
                 return true;
             }
-            stack.extend_from_slice(node.child_ids());
+            stack.extend_from_slice(node.child_slots());
         }
         false
     }
@@ -367,11 +386,13 @@ impl<T> Document<T> {
         let Some(slot) = self.matching_slot(shadow_root, child) else {
             return;
         };
+        let slot_slot = self.live_slot(slot);
+        let child_slot = self.live_slot(child);
         self.live_node_mut(slot)
             .links_mut()
             .assigned_nodes
-            .push(child);
-        self.live_node_mut(child).links_mut().assigned_slot = Some(slot);
+            .push(child_slot);
+        self.live_node_mut(child).links_mut().assigned_slot = Some(slot_slot);
         self.mark_ancestors_dirty_descendants(child);
     }
 
@@ -380,11 +401,12 @@ impl<T> Document<T> {
             return;
         };
         self.mark_ancestors_dirty_descendants(child);
+        let child_slot = self.live_slot(child);
         if let Some(links) = self.live_node_mut(slot).shadow.as_deref_mut()
             && let Some(index) = links
                 .assigned_nodes
                 .iter()
-                .position(|&assigned| assigned == child)
+                .position(|&assigned| assigned == child_slot)
         {
             links.assigned_nodes.remove(index);
         }
@@ -402,19 +424,19 @@ impl<T> Document<T> {
 
     fn collect_slots(&self, shadow_root: NodeId) -> Vec<NodeId> {
         let mut slots = Vec::new();
-        let mut stack: Vec<NodeId> = self
+        let mut stack: Vec<NodeSlot> = self
             .live(shadow_root)
-            .child_ids()
+            .child_slots()
             .iter()
             .rev()
             .copied()
             .collect();
-        while let Some(id) = stack.pop() {
-            let node = self.live(id);
+        while let Some(slot) = stack.pop() {
+            let node = self.arenas().at(slot);
             if node.is_slot() {
-                slots.push(id);
+                slots.push(node.id());
             }
-            stack.extend(node.child_ids().iter().rev().copied());
+            stack.extend(node.child_slots().iter().rev().copied());
         }
         slots
     }
@@ -488,7 +510,7 @@ impl<T> Document<T> {
             })
             .collect();
 
-        let light = self.live(host).child_ids().to_vec();
+        let light: Vec<NodeId> = self.live(host).child_ids().collect();
         let mut assignments: Vec<(NodeId, Option<NodeId>)> = Vec::with_capacity(light.len());
         for child in light {
             let node = self.live(child);
@@ -509,15 +531,17 @@ impl<T> Document<T> {
 
         let mut changed = false;
         for (child, slot) in assignments {
+            let slot = slot.map(|id| self.live_slot(id));
             let node = self.live_node_mut(child);
-            if node.assigned_slot_id() != slot {
+            if node.assigned_slot_slot() != slot {
                 node.links_mut().assigned_slot = slot;
                 changed = true;
             }
         }
         for (slot, _, nodes) in slots {
+            let nodes: Vec<NodeSlot> = nodes.iter().map(|&id| self.live_slot(id)).collect();
             let node = self.live_node_mut(slot);
-            if node.assigned_node_ids() != nodes.as_slice() {
+            if node.assigned_node_slots() != nodes.as_slice() {
                 node.links_mut().assigned_nodes = nodes;
                 changed = true;
             }

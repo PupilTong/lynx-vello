@@ -84,7 +84,7 @@ impl<T> Document<T> {
         let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            let children = parent_node.child_ids().to_vec();
+            let children: Vec<NodeId> = parent_node.child_ids().collect();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
             }
@@ -139,12 +139,15 @@ impl<T> Document<T> {
             let tree = self.arenas();
             tree.get(id)
                 .and_then(|node| {
-                    let siblings = tree
-                        .get(node.parent_id()?)
-                        .expect("internal tree links always resolve")
-                        .child_ids();
-                    let pos = siblings.iter().position(|&c| c == id)?;
-                    Some(siblings[pos + 1..].to_vec())
+                    let self_slot = tree.slot(id)?;
+                    let siblings = tree.at(node.parent_slot()?).child_slots();
+                    let pos = siblings.iter().position(|&c| c == self_slot)?;
+                    Some(
+                        siblings[pos + 1..]
+                            .iter()
+                            .map(|&slot| tree.at(slot).id())
+                            .collect::<Vec<_>>(),
+                    )
                 })
                 .unwrap_or_default()
         };

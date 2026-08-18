@@ -105,7 +105,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
 
-use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId};
+use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
 
@@ -228,14 +228,18 @@ impl<T> Document<T> {
         if self.custom_elements.pinned.is_empty() {
             return;
         }
+        // The walk stays in slot space: the tree's own links are slots, so
+        // descending costs one load per child instead of a table hop, and the
+        // id is only recovered where the pin set is consulted.
+        let Some(root) = self.slot(root) else {
+            return;
+        };
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(node) = self.get(current) else {
-                continue;
-            };
-            self.assert_not_pinned(current);
-            stack.extend_from_slice(node.child_ids());
-            if let Some(shadow_root) = node.shadow_root_id() {
+            let node = self.arenas().at(current);
+            self.assert_not_pinned(node.id());
+            stack.extend_from_slice(node.child_slots());
+            if let Some(shadow_root) = node.shadow_root_slot() {
                 stack.push(shadow_root);
             }
         }
@@ -606,20 +610,18 @@ impl<T> Document<T> {
         if !self.live(root).custom_subtree_may_contain() {
             return;
         }
-        let mut stack: SmallVec<[NodeId; 8]> = SmallVec::new();
-        stack.push(root);
+        let mut stack: SmallVec<[NodeSlot; 8]> = SmallVec::new();
+        stack.push(self.live_slot(root));
         while let Some(current) = stack.pop() {
-            let Some(node) = self.get(current) else {
-                continue;
-            };
+            let node = self.arenas().at(current);
             if !node.custom_subtree_may_contain() {
                 continue;
             }
             if node.custom_state == CustomElementState::Custom {
-                out.push(current);
+                out.push(node.id());
             }
-            stack.extend(node.child_ids().iter().rev().copied());
-            if let Some(shadow_root) = node.shadow_root_id() {
+            stack.extend(node.child_slots().iter().rev().copied());
+            if let Some(shadow_root) = node.shadow_root_slot() {
                 stack.push(shadow_root);
             }
         }

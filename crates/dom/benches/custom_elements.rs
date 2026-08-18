@@ -242,7 +242,7 @@ fn remove_page(bencher: divan::Bencher, registry: Registry) {
                 .get(root)
                 .expect("the root is live")
                 .child_ids()
-                .to_vec();
+                .collect();
             for row in rows {
                 doc.drop_subtree(row);
             }

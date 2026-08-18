@@ -129,9 +129,13 @@ impl<T> TreeArenas<T> {
     pub(crate) fn reserve_zero(&mut self) {
         debug_assert!(self.slots.is_empty(), "zero is reserved before any node");
         let owner = std::ptr::from_mut::<Self>(self);
+        let placeholder = NodeSlot {
+            key: NonZeroU32::new(1).expect("one is non-zero"),
+            generation: 0,
+        };
         assert_eq!(
             self.nodes
-                .insert(Node::new_text(owner, RESERVED, String::new())),
+                .insert(Node::new_text(owner, RESERVED, placeholder, String::new())),
             RESERVED
         );
         assert_eq!(self.payloads.insert(PayloadSlot::Reserved), RESERVED);
@@ -271,7 +275,7 @@ impl<T> TreeArenas<T> {
     pub(crate) fn insert_node(
         &mut self,
         payload: PayloadSlot<T>,
-        make: impl FnOnce(*mut Self, NodeId) -> Node<T>,
+        make: impl FnOnce(*mut Self, NodeId, NodeSlot) -> Node<T>,
     ) -> (NodeId, NodeSlot) {
         let owner = std::ptr::from_mut::<Self>(self);
         let arena_key = self.nodes.vacant_key();
@@ -291,7 +295,7 @@ impl<T> TreeArenas<T> {
         // out of either insert leaves an unissued id rather than a live one
         // pointing at an empty slot.
         let id = self.slots.len();
-        let node = make(owner, id);
+        let node = make(owner, id, slot);
         assert_eq!(self.nodes.insert(node), arena_key);
         assert_eq!(self.payloads.vacant_key(), arena_key);
         assert_eq!(self.payloads.insert(payload), arena_key);
@@ -427,8 +431,8 @@ mod tests {
         let mut layout = DocumentLayoutState::new();
         let mut issued = Vec::new();
         for payload in 0..4 {
-            let (id, slot) = arenas.insert_node(PayloadSlot::Node(payload), |owner, id| {
-                Node::new_text(owner, id, String::new())
+            let (id, slot) = arenas.insert_node(PayloadSlot::Node(payload), |owner, id, slot| {
+                Node::new_text(owner, id, slot, String::new())
             });
             layout.insert(slot);
             assert_eq!(arenas.nodes.len(), arenas.payloads.len());
@@ -443,8 +447,8 @@ mod tests {
         assert_eq!(arenas.nodes.len(), arenas.payloads.len());
         assert_eq!(arenas.slot(freed_id), None);
 
-        let (next_id, next_slot) = arenas.insert_node(PayloadSlot::Node(9), |owner, id| {
-            Node::new_text(owner, id, String::new())
+        let (next_id, next_slot) = arenas.insert_node(PayloadSlot::Node(9), |owner, id, slot| {
+            Node::new_text(owner, id, slot, String::new())
         });
         layout.insert(next_slot);
         assert_eq!(
@@ -466,8 +470,8 @@ mod tests {
     fn an_id_that_was_never_issued_resolves_to_nothing() {
         let mut arenas: TreeArenas<()> = TreeArenas::new();
         arenas.reserve_zero();
-        let (id, _) = arenas.insert_node(PayloadSlot::Node(()), |owner, id| {
-            Node::new_text(owner, id, String::new())
+        let (id, _) = arenas.insert_node(PayloadSlot::Node(()), |owner, id, slot| {
+            Node::new_text(owner, id, slot, String::new())
         });
         assert_eq!(id, 1, "zero is reserved, so the first issued id is one");
 
@@ -493,8 +497,8 @@ mod tests {
     fn a_slot_held_across_its_nodes_free_is_refused_even_once_reused() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
         arenas.reserve_zero();
-        let (doomed, held) = arenas.insert_node(PayloadSlot::Node(1), |owner, id| {
-            Node::new_text(owner, id, String::new())
+        let (doomed, held) = arenas.insert_node(PayloadSlot::Node(1), |owner, id, slot| {
+            Node::new_text(owner, id, slot, String::new())
         });
         assert!(arenas.slot_is_current(held));
         assert!(arenas.try_at(held).is_some());
@@ -506,8 +510,8 @@ mod tests {
         );
         assert!(arenas.try_at(held).is_none());
 
-        let (_, reused) = arenas.insert_node(PayloadSlot::Node(2), |owner, id| {
-            Node::new_text(owner, id, String::new())
+        let (_, reused) = arenas.insert_node(PayloadSlot::Node(2), |owner, id, slot| {
+            Node::new_text(owner, id, slot, String::new())
         });
         assert_eq!(
             reused.arena_key(),

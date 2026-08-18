@@ -227,8 +227,7 @@ mod tests {
             .get(page)
             .expect("the page is live")
             .child_ids()
-            .get(1)
-            .copied()
+            .nth(1)
             .expect("two children were inserted");
         let layout = document.rounded_layout(second).expect("laid out");
         assert!((layout.size.width - 42.0).abs() < f32::EPSILON);

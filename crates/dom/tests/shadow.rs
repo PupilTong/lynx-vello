@@ -89,7 +89,7 @@ fn the_shadow_root_is_reachable_only_through_its_host() {
         Some(ShadowRootMode::Open)
     );
     assert!(
-        dom.get(harness.host).unwrap().child_ids().is_empty(),
+        dom.get(harness.host).unwrap().child_ids().len() == 0,
         "a shadow root is not one of its host's children"
     );
     assert!(
@@ -687,7 +687,7 @@ fn appending_a_long_child_list_agrees_with_a_full_reassignment() {
     let (_, slot, rows) = component(&mut doc, root, 512);
     doc.flush();
 
-    let incremental = doc.dom.assigned_nodes(slot).to_vec();
+    let incremental = doc.dom.assigned_nodes(slot);
     assert_eq!(incremental, rows, "appends keep the host's child order");
 
     doc.set_attr(slot, "name", "");
@@ -759,7 +759,7 @@ fn hundreds_of_scoped_stylesheets_stay_scoped_to_their_own_tree() {
             .dom
             .shadow_root(*host)
             .and_then(|shadow| doc.dom.get(shadow))
-            .and_then(|shadow| shadow.child_ids().first().copied())
+            .and_then(|shadow| shadow.child_ids().next())
             .expect("each shadow tree has its frame");
         assert_eq!(doc.value(frame, "width"), format!("{}px", index + 1));
     }

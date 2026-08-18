@@ -568,7 +568,7 @@ fn drop_element_delivers_disconnect_while_the_children_are_still_attached() {
         Probe::new("x-item", &log).on_disconnected(Box::new(move |document, element| {
             let children = document
                 .get(element)
-                .map(|node| node.child_ids().to_vec())
+                .map(|node| node.child_ids().collect::<Vec<_>>())
                 .unwrap_or_default();
             recorded.lock().unwrap().push((element, children));
         })),
@@ -641,7 +641,7 @@ fn a_constructor_that_attaches_a_shadow_root_and_a_stylesheet_renders() {
     let frame = doc
         .dom
         .get(shadow)
-        .and_then(|node| node.child_ids().first().copied())
+        .and_then(|node| node.child_ids().next())
         .expect("the constructor built its template");
     let layout = doc
         .dom
@@ -743,7 +743,7 @@ fn insert_before_a_reference_node_delivers_the_same_reactions() {
 
     assert_eq!(take(&log), vec![format!("x-item:connected#{inserted}")]);
     assert_eq!(
-        doc.dom.get(root).unwrap().child_ids(),
+        doc.dom.get(root).unwrap().child_ids().collect::<Vec<_>>(),
         &[inserted, anchor],
         "and it landed in front of the reference node"
     );

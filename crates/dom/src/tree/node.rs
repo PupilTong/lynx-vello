@@ -21,7 +21,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::tree::custom::{CustomElementState, DefinitionId};
-use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
+use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, PayloadSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
@@ -69,12 +69,20 @@ enum NodeContent {
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
     owner: AtomicPtr<TreeArenas<T>>,
+    /// This node's identity, and its own storage position.
+    ///
+    /// Links are held in slot space, not id space: a walk that follows
+    /// `parent`/`children` indexes the arena directly instead of resolving an
+    /// id through the table first, which is the difference between one load
+    /// per step and two *dependent* loads per step. Identity is what leaves
+    /// the crate; storage is what the walk uses.
     id: NodeId,
+    slot: NodeSlot,
     data: NodeData,
     payload: PhantomData<T>,
 
-    pub(crate) parent: Option<NodeId>,
-    pub(crate) children: Vec<NodeId>,
+    pub(crate) parent: Option<NodeSlot>,
+    pub(crate) children: Vec<NodeSlot>,
     pub(crate) local_name: Option<LocalName>,
     pub(crate) classes: SmallVec<[Atom; 2]>,
     pub(crate) id_attribute: Option<Atom>,
@@ -100,12 +108,14 @@ pub struct Node<T> {
 impl<T> Node<T> {
     pub(crate) fn new_document(
         owner: *mut TreeArenas<T>,
+        slot: NodeSlot,
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
     ) -> Self {
         Self::new(
             owner,
             DOCUMENT_NODE_ID,
+            slot,
             NodeData::Document(Box::new(DocumentNodeData {
                 lock,
                 url_data,
@@ -119,28 +129,50 @@ impl<T> Node<T> {
     pub(crate) fn new_element(
         owner: *mut TreeArenas<T>,
         id: NodeId,
+        slot: NodeSlot,
         local_name: LocalName,
     ) -> Self {
-        let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
+        let mut node = Self::new(
+            owner,
+            id,
+            slot,
+            NodeData::Element(None),
+            Some(local_name),
+            None,
+        );
         node.element_state = ElementState::DEFINED;
         node
     }
 
-    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
-        Self::new(owner, id, NodeData::Text, None, Some(text))
+    pub(crate) fn new_text(
+        owner: *mut TreeArenas<T>,
+        id: NodeId,
+        slot: NodeSlot,
+        text: String,
+    ) -> Self {
+        Self::new(owner, id, slot, NodeData::Text, None, Some(text))
     }
 
     pub(crate) fn new_shadow_root(
         owner: *mut TreeArenas<T>,
         id: NodeId,
+        slot: NodeSlot,
         data: ShadowRootData,
     ) -> Self {
-        Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
+        Self::new(
+            owner,
+            id,
+            slot,
+            NodeData::ShadowRoot(Box::new(data)),
+            None,
+            None,
+        )
     }
 
     fn new(
         owner: *mut TreeArenas<T>,
         id: NodeId,
+        slot: NodeSlot,
         data: NodeData,
         local_name: Option<LocalName>,
         text: Option<String>,
@@ -148,6 +180,7 @@ impl<T> Node<T> {
         Self {
             owner: AtomicPtr::new(owner),
             id,
+            slot,
             data,
             payload: PhantomData,
             parent: None,
@@ -253,11 +286,17 @@ impl<T> Node<T> {
     }
 
     #[must_use]
-    pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
+    pub(crate) fn shadow_host_slot(&self) -> Option<NodeSlot> {
         match &self.data {
             NodeData::ShadowRoot(shadow) => Some(shadow.host),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
+        self.shadow_host_slot()
+            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
@@ -282,14 +321,39 @@ impl<T> Node<T> {
         }
     }
 
+    /// This node's own storage position, for a walk that is already in slot
+    /// space.
     #[must_use]
-    pub fn parent_id(&self) -> Option<NodeId> {
+    #[inline]
+    pub(crate) const fn slot(&self) -> NodeSlot {
+        self.slot
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) const fn parent_slot(&self) -> Option<NodeSlot> {
         self.parent
     }
 
     #[must_use]
-    pub fn child_ids(&self) -> &[NodeId] {
+    #[inline]
+    pub(crate) fn child_slots(&self) -> &[NodeSlot] {
         &self.children
+    }
+
+    /// The parent's identity. Links are stored in slot space, so this reads
+    /// the parent to recover its id — a walk that only needs to *reach* the
+    /// parent should use [`Node::parent`] and pay one load, not two.
+    #[must_use]
+    pub fn parent_id(&self) -> Option<NodeId> {
+        self.parent.map(|slot| self.arenas().at(slot).id())
+    }
+
+    /// The children's identities, derived from the stored slots. Iterating
+    /// the nodes themselves ([`Node::children`]) is cheaper.
+    pub fn child_ids(&self) -> impl ExactSizeIterator<Item = NodeId> + DoubleEndedIterator + '_ {
+        let arenas = self.arenas();
+        self.children.iter().map(move |&slot| arenas.at(slot).id())
     }
 
     #[must_use]
@@ -565,11 +629,8 @@ impl<T> Node<T> {
     pub(crate) fn is_empty_element(&self) -> bool {
         debug_assert!(self.is_element(), "`:empty` is only defined for elements");
         self.text().is_none_or(str::is_empty)
-            && self.children.iter().all(|&id| {
-                let child = self
-                    .arenas()
-                    .get(id)
-                    .expect("internal tree links always resolve");
+            && self.children.iter().all(|&slot| {
+                let child = self.arenas().at(slot);
                 !child.is_element()
                     && (!child.is_text_node() || child.text().is_none_or(str::is_empty))
             })
@@ -579,29 +640,17 @@ impl<T> Node<T> {
 impl<T> Node<T> {
     #[must_use]
     pub fn parent(&self) -> Option<&Node<T>> {
-        self.parent.map(|id| {
-            self.arenas()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.parent.map(|slot| self.arenas().at(slot))
     }
 
     #[must_use]
     pub fn first_child(&self) -> Option<&Node<T>> {
-        self.children.first().map(|&id| {
-            self.arenas()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.children.first().map(|&slot| self.arenas().at(slot))
     }
 
     #[must_use]
     pub fn last_child(&self) -> Option<&Node<T>> {
-        self.children.last().map(|&id| {
-            self.arenas()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.children.last().map(|&slot| self.arenas().at(slot))
     }
 
     #[must_use]
@@ -619,19 +668,13 @@ impl<T> Node<T> {
             return None;
         }
         let tree = self.arenas();
-        let siblings = &tree
-            .get(self.parent?)
-            .expect("internal tree links always resolve")
-            .children;
+        let siblings = &tree.at(self.parent?).children;
         let pos = siblings
             .iter()
-            .position(|&c| c == self.id)
+            .position(|&c| c == self.slot)
             .expect("node must appear in its parent's child list");
         let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
-        Some(
-            tree.get(sibling)
-                .expect("internal tree links always resolve"),
-        )
+        Some(tree.at(sibling))
     }
 
     #[must_use]
@@ -706,7 +749,7 @@ impl<T> std::hash::Hash for Node<T> {
 #[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
     tree: &'a TreeArenas<T>,
-    children: &'a [NodeId],
+    children: &'a [NodeSlot],
     index: usize,
 }
 
@@ -723,13 +766,9 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
     type Item = &'a Node<T>;
 
     fn next(&mut self) -> Option<&'a Node<T>> {
-        let id = *self.children.get(self.index)?;
+        let slot = *self.children.get(self.index)?;
         self.index += 1;
-        Some(
-            self.tree
-                .get(id)
-                .expect("internal tree links always resolve"),
-        )
+        Some(self.tree.at(slot))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

@@ -72,8 +72,8 @@ impl<T> Document<T> {
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
         tree.reserve_zero();
-        let (root, slot) = tree.insert_node(PayloadSlot::Document, |owner, _| {
-            Node::new_document(owner, lock, url_data)
+        let (root, slot) = tree.insert_node(PayloadSlot::Document, |owner, _, slot| {
+            Node::new_document(owner, slot, lock, url_data)
         });
         assert_eq!(
             root, DOCUMENT_NODE_ID,
@@ -102,8 +102,13 @@ impl<T> Document<T> {
             root, DOCUMENT_ELEMENT_NODE_ID,
             "the document element must take the second id the document ever issues"
         );
-        document.live_node_mut(DOCUMENT_NODE_ID).children.push(root);
-        document.live_node_mut(root).parent = Some(DOCUMENT_NODE_ID);
+        let document_slot = document.live_slot(DOCUMENT_NODE_ID);
+        let root_slot = document.live_slot(root);
+        document
+            .live_node_mut(DOCUMENT_NODE_ID)
+            .children
+            .push(root_slot);
+        document.live_node_mut(root).parent = Some(document_slot);
         document.mark_subtree_dirty(root);
         document.invalidate_layout(root);
         document
@@ -187,7 +192,6 @@ impl<T> Document<T> {
         self.tree.slot(id)
     }
 
-    #[cfg(test)]
     #[inline]
     pub(crate) fn live_slot(&self, id: NodeId) -> NodeSlot {
         self.tree.live_slot(id)
@@ -266,7 +270,7 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         let id = self.allocate_node(PayloadSlot::Node(payload), {
             let local_name = local_name.clone();
-            |owner, id| Node::new_element(owner, id, local_name)
+            |owner, id, slot| Node::new_element(owner, id, slot, local_name)
         });
         self.pin_node(id);
         self.note_custom_element_created(id, &local_name);
@@ -277,8 +281,8 @@ impl<T> Document<T> {
 
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
-            Node::new_text(owner, id, text)
+        self.allocate_node(PayloadSlot::Node(payload), |owner, id, slot| {
+            Node::new_text(owner, id, slot, text)
         })
     }
 
@@ -286,7 +290,7 @@ impl<T> Document<T> {
     pub(crate) fn allocate_node(
         &mut self,
         payload: PayloadSlot<T>,
-        make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
+        make: impl FnOnce(*mut TreeArenas<T>, NodeId, NodeSlot) -> Node<T>,
     ) -> NodeId {
         let (id, slot) = self.tree.insert_node(payload, make);
         self.layout.insert(slot);
@@ -331,8 +335,9 @@ impl<T> Document<T> {
 
     #[must_use]
     pub(crate) fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
+        let child = self.slot(child)?;
         self.get(parent)?
-            .child_ids()
+            .child_slots()
             .iter()
             .position(|&candidate| candidate == child)
     }
@@ -381,15 +386,19 @@ impl<T> Document<T> {
             None => self
                 .get(parent)
                 .expect("stale NodeId passed to Document::insert_before")
-                .child_ids()
+                .child_slots()
                 .len(),
             Some(reference) => self
                 .child_position(parent, reference)
                 .expect("insert_before reference must be a child of parent"),
         };
 
-        self.live_node_mut(parent).children.insert(index, child);
-        self.live_node_mut(child).parent = Some(parent);
+        let parent_slot = self.live_slot(parent);
+        let child_slot = self.live_slot(child);
+        self.live_node_mut(parent)
+            .children
+            .insert(index, child_slot);
+        self.live_node_mut(child).parent = Some(parent_slot);
         let appended = index + 1 == self.live_node_mut(parent).children.len();
         let contains_custom_elements = self.note_custom_subtree_inserted(child);
 
@@ -416,15 +425,17 @@ impl<T> Document<T> {
                 .expect("swap_element: stale NodeId")
                 .parent_id()
                 .expect("swap_element: both operands must be attached");
-            let siblings = document
-                .get(parent)
-                .expect("a child's parent is live")
-                .child_ids();
+            let node_slot = document.live_slot(node);
+            let parent_node = document.get(parent).expect("a child's parent is live");
+            let siblings = parent_node.child_slots();
             let index = siblings
                 .iter()
-                .position(|&sibling| sibling == node)
+                .position(|&sibling| sibling == node_slot)
                 .expect("a child appears in its parent's child list");
-            (parent, siblings.get(index + 1).copied())
+            let next = siblings
+                .get(index + 1)
+                .map(|&slot| document.arenas().at(slot).id());
+            (parent, next)
         };
         let (parent_a, next_a) = position(self, a);
         let (parent_b, next_b) = position(self, b);
@@ -468,6 +479,7 @@ impl<T> Document<T> {
 
         self.invalidate_layout(child);
 
+        let child_slot = self.live_slot(child);
         let removed_index = {
             let parent_node = self
                 .tree
@@ -476,7 +488,7 @@ impl<T> Document<T> {
             let index = parent_node
                 .children
                 .iter()
-                .position(|&candidate| candidate == child)
+                .position(|&candidate| candidate == child_slot)
                 .expect("child must appear in its parent's child list");
             parent_node.children.remove(index);
             index
@@ -517,7 +529,8 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.drain_reactions(base);
-        for child in self.live(id).child_ids().to_vec() {
+        let children: Vec<NodeId> = self.live(id).child_ids().collect();
+        for child in children {
             self.unlink_from_parent(child);
         }
         self.note_visual_mutation();
@@ -553,7 +566,13 @@ impl<T> Document<T> {
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let (node, payload) = self.free_node(current);
-            stack.extend_from_slice(&node.children);
+            // The node is already out of the arenas, so its child links have
+            // to be turned back into ids before the walk can follow them.
+            stack.extend(
+                node.child_slots()
+                    .iter()
+                    .map(|&slot| self.tree.at(slot).id()),
+            );
             if let Some(root) = node.shadow_root_id() {
                 stack.push(root);
             }
@@ -678,7 +697,12 @@ impl<T> Document<T> {
                         .tree
                         .get(current)
                         .expect("the node was live one statement ago");
-                    stack.extend_from_slice(node.flat_children());
+                    let arenas = &self.tree;
+                    stack.extend(
+                        node.flat_children()
+                            .iter()
+                            .map(|&slot| arenas.at(slot).id()),
+                    );
                 }
                 harvested
             };
@@ -690,10 +714,8 @@ impl<T> Document<T> {
                     let text_children: Vec<NodeSlot> = element
                         .flat_children()
                         .iter()
-                        .filter_map(|&child_id| {
-                            let slot = self.tree.slot(child_id)?;
-                            self.tree.at(slot).is_text_node().then_some(slot)
-                        })
+                        .copied()
+                        .filter(|&slot| self.tree.at(slot).is_text_node())
                         .collect();
                     for slot in text_children {
                         self.layout.clear_layout_cache(slot);
@@ -812,16 +834,31 @@ pub(crate) mod tests {
         document.insert_before(c, inner, None);
 
         document.swap_element(a, b);
-        assert_eq!(document.get(page).unwrap().child_ids(), [b, a, c]);
+        assert_eq!(
+            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
+            [b, a, c]
+        );
         document.swap_element(a, b);
-        assert_eq!(document.get(page).unwrap().child_ids(), [a, b, c]);
+        assert_eq!(
+            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
+            [a, b, c]
+        );
 
         document.swap_element(a, c);
-        assert_eq!(document.get(page).unwrap().child_ids(), [c, b, a]);
+        assert_eq!(
+            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
+            [c, b, a]
+        );
 
         document.swap_element(b, inner);
-        assert_eq!(document.get(page).unwrap().child_ids(), [c, inner, a]);
-        assert_eq!(document.get(c).unwrap().child_ids(), [b]);
+        assert_eq!(
+            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
+            [c, inner, a]
+        );
+        assert_eq!(
+            document.get(c).unwrap().child_ids().collect::<Vec<_>>(),
+            [b]
+        );
     }
 
     #[test]
