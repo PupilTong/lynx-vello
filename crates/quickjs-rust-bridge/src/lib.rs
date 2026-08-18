@@ -39,12 +39,12 @@ mod implementation {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[cfg(not(target_arch = "wasm32"))]
     use std::time::Instant;
     use std::{fmt, mem};
 
     use smallvec::SmallVec;
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    #[cfg(target_arch = "wasm32")]
     use web_time::Instant;
 
     use super::ffi;
@@ -1479,11 +1479,11 @@ mod implementation {
     #[cfg(test)]
     mod tests {
         use std::sync::mpsc;
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        #[cfg(not(target_arch = "wasm32"))]
         use std::time::Instant;
         use std::{panic, thread};
 
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        #[cfg(target_arch = "wasm32")]
         use web_time::Instant;
 
         use super::*;

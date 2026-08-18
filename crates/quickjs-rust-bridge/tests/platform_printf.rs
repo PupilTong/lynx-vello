@@ -1,4 +1,4 @@
-#![cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#![cfg(not(target_arch = "wasm32"))]
 #![allow(
     unsafe_code,
     reason = "these tests exercise the private C variadic formatter ABI directly"

@@ -33,7 +33,7 @@ pub mod input {
     pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{
     EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, NoWindow, Screenshot,

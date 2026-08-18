@@ -51,17 +51,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
 use dom::FontBlob;
 use dom::input::InputEvent;
 use dom::render::gpu::Headless;
 use dom::vello::peniko::Color;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
 use self::graphics::WindowGraphics;
@@ -79,11 +79,11 @@ pub struct FrameSize {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 static WASM_STYLE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(1);
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 static WASM_SCRIPT_OWNER_CLAIMED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
@@ -127,7 +127,7 @@ pub enum EngineError {
 /// remain private to the engine. `style_thread_count` must be at least two:
 /// index zero is the entry-task owner and at least one managed Rayon worker
 /// must remain after that synchronous task exits.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 pub fn configure_wasm_workers(
     worker_script_url: String,
     style_thread_count: usize,
@@ -800,7 +800,7 @@ impl<'window, W: Window> Engine<'window, W> {
         factory: Arc<dyn crate::script::ScriptEngineFactory>,
     ) -> Result<(), EngineError> {
         let elements = self.take_script_tree()?;
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        #[cfg(target_arch = "wasm32")]
         if WASM_SCRIPT_OWNER_CLAIMED.swap(true, Ordering::AcqRel) {
             self.script_owner_available = true;
             return Err(EngineError::Thread {
@@ -821,7 +821,7 @@ impl<'window, W: Window> Engine<'window, W> {
                 let on_flush = Arc::clone(&frame_requesters);
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     (|| {
-                        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+                        #[cfg(target_arch = "wasm32")]
                         prepare_script_thread()?;
                         let mut runtime = crate::runtime::MainThreadRuntime::new(
                             factory.as_ref(),
@@ -851,7 +851,7 @@ impl<'window, W: Window> Engine<'window, W> {
             });
         if let Err(error) = spawn {
             self.script_owner_available = true;
-            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            #[cfg(target_arch = "wasm32")]
             WASM_SCRIPT_OWNER_CLAIMED.store(false, Ordering::Release);
             return Err(EngineError::Thread {
                 name: "script",
@@ -910,7 +910,7 @@ fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 fn prepare_script_thread() -> Result<(), ScriptRunError> {
     WASM_STYLE_POOL
         .get_or_init(|| {
