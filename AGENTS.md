@@ -410,8 +410,9 @@ useful signal for currently-compatible versions of those libraries.
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
   nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
   there with `wasm_thread` as its browser thread spawner, leaving the vendored
-  Stylo sources unchanged. The public `ScriptEngineFactory` creates the
-  owner-thread-bound browser JavaScript VM inside that Worker; Element-PAPI
+  Stylo sources unchanged. A thin lifecycle `ScriptEngineFactory` decorates
+  `quickjs_engine_factory()` and creates the owner-thread-bound QuickJS realm
+  inside that Worker; Element-PAPI
   batches, Stylo/Rayon, layout, and
   render hand-off then synchronize through Rust channels, mutexes, atomics,
   and the shared Wasm memory exactly as in a native embedder. JavaScript
@@ -422,9 +423,10 @@ useful signal for currently-compatible versions of those libraries.
   are serialized, and a lost-wake-safe `EventSignal` Promise wakes script
   completion independently of Worker rAF, so a hidden page may pause drawing
   without stranding the `executeScript` Promise. Startup has a ten-second
-  watchdog until the nested VM Worker begins; after that the browser VM
-  deliberately has no execution timeout or safe interrupt, so recovery from
-  an infinite script requires disposing and recreating the canvas/Worker.
+  watchdog until the nested VM Worker creates its QuickJS realm. QuickJS then
+  applies Bobcat's five-second execution timeout and drains its owned pending
+  jobs synchronously at each execution checkpoint; there is no browser
+  microtask-completion protocol.
   One Wasm instance owns one view and
   its Stylo pool; every public `BobcatCanvas` gets a separate Render Worker and
   Wasm instance. The pool minimum is two threads so one managed Rayon worker
@@ -437,8 +439,8 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
-  The module depends on `bobcat-core` with QuickJS disabled and injects a
-  `js_sys` browser `ScriptEngine`. Browser `fetch` remains outside Wasm: the
+  The module enables `bobcat-core`'s `quickjs` feature and uses its opaque
+  QuickJS factory. Browser `fetch` remains outside Wasm: the
   Render Worker registers raw fetched bytes in its `ResourceFetcher`, core
   performs strict UTF-8 validation, and the worker calls `execute_script(url)`.
   The facade exposes no create/append/drop/flush,

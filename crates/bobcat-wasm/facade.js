@@ -297,9 +297,8 @@ export class BobcatCanvas {
    * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
    * VM initialization, or evaluation failure. Relative URLs are resolved
    * against this document's base URL before they cross the Worker boundary.
-   * The browser VM has no execution interrupt: a non-terminating script leaves
-   * this Promise pending. Dispose this canvas and create a replacement to
-   * recover; native QuickJS embedders may provide different timeout policy.
+   * The embedded QuickJS realm applies Bobcat's five-second execution limit;
+   * exceeding it rejects this Promise with a sanitized script error.
    */
   async executeScript(url) {
     await this.#request('executeScript', { url: documentUrl(url) })

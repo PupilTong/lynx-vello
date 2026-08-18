@@ -1,6 +1,5 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,18 +15,14 @@ use bobcat_core::resource::{
     ResourceLocality, ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
-use bobcat_core::script::{
-    HostCallback, HostValue, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind,
-    ScriptErrorPhase, ScriptSourceLocation,
-};
+use bobcat_core::script::{ScriptEngine, ScriptEngineFactory, ScriptError};
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
-    WindowTarget, configure_wasm_workers,
+    WindowTarget, configure_wasm_workers, quickjs_engine_factory,
 };
 use http::HeaderMap;
-use js_sys::{Array, Function, JsString, Object, Promise, Reflect};
+use js_sys::Promise;
 use url::Url;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
@@ -122,7 +117,6 @@ impl Future for EventWait {
 #[derive(Debug)]
 struct BrowserScriptLifecycle {
     started: AtomicBool,
-    checkpoint_done: AtomicBool,
     events: Arc<EventSignal>,
 }
 
@@ -130,18 +124,12 @@ impl BrowserScriptLifecycle {
     fn new(events: Arc<EventSignal>) -> Self {
         Self {
             started: AtomicBool::new(false),
-            checkpoint_done: AtomicBool::new(false),
             events,
         }
     }
 
     fn mark_started(&self) {
         self.started.store(true, Ordering::Release);
-        self.events.request_event();
-    }
-
-    fn mark_checkpoint_done(&self) {
-        self.checkpoint_done.store(true, Ordering::Release);
         self.events.request_event();
     }
 }
@@ -166,10 +154,12 @@ impl Window for BrowserWindow {
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
+type BrowserResourceRegistry = Mutex<HashMap<String, Arc<[u8]>>>;
+
 #[derive(Debug, Default)]
 struct BrowserResources {
-    scripts: Mutex<HashMap<String, Arc<[u8]>>>,
-    style_sheets: Mutex<HashMap<String, Arc<[u8]>>>,
+    scripts: BrowserResourceRegistry,
+    style_sheets: BrowserResourceRegistry,
 }
 
 impl BrowserResources {
@@ -182,7 +172,7 @@ impl BrowserResources {
     }
 
     fn register(
-        registry: &Mutex<HashMap<String, Arc<[u8]>>>,
+        registry: &BrowserResourceRegistry,
         kind: &str,
         url: &str,
         bytes: Vec<u8>,
@@ -214,7 +204,7 @@ impl BrowserResources {
     }
 
     /// The registry a request of this kind is answered from.
-    fn registry(&self, kind: &ResourceKind) -> Option<&Mutex<HashMap<String, Arc<[u8]>>>> {
+    fn registry(&self, kind: &ResourceKind) -> Option<&BrowserResourceRegistry> {
         match kind {
             ResourceKind::ExternalJs => Some(&self.scripts),
             ResourceKind::StyleSheet => Some(&self.style_sheets),
@@ -427,225 +417,16 @@ impl ResourceFetcher for BrowserResources {
 }
 
 #[derive(Debug)]
-struct BrowserScriptEngineFactory {
+struct LifecycleScriptEngineFactory {
+    inner: Arc<dyn ScriptEngineFactory>,
     lifecycle: Arc<BrowserScriptLifecycle>,
 }
 
-impl ScriptEngineFactory for BrowserScriptEngineFactory {
+impl ScriptEngineFactory for LifecycleScriptEngineFactory {
     fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError> {
-        let engine = BrowserScriptEngine {
-            dispatchers: Vec::new(),
-            lifecycle: Arc::clone(&self.lifecycle),
-        };
+        let engine = self.inner.create()?;
         self.lifecycle.mark_started();
-        Ok(Box::new(engine))
-    }
-}
-
-type HostDispatcher = Closure<dyn FnMut(Array) -> Array>;
-
-struct BrowserScriptEngine {
-    dispatchers: Vec<HostDispatcher>,
-    lifecycle: Arc<BrowserScriptLifecycle>,
-}
-
-struct BrowserScriptCompletion {
-    dispatchers: Vec<HostDispatcher>,
-    lifecycle: Arc<BrowserScriptLifecycle>,
-}
-
-thread_local! {
-    /// Host callbacks retained on the VM Worker until its completion task.
-    /// Keeping this Worker-local avoids making owner-thread JS closures Send.
-    static BROWSER_SCRIPT_COMPLETION: RefCell<Option<BrowserScriptCompletion>> = const {
-        RefCell::new(None)
-    };
-}
-
-impl fmt::Debug for BrowserScriptEngine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("BrowserScriptEngine")
-            .field("host_function_count", &self.dispatchers.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for BrowserScriptEngine {
-    fn drop(&mut self) {
-        let completion = BrowserScriptCompletion {
-            dispatchers: mem::take(&mut self.dispatchers),
-            lifecycle: Arc::clone(&self.lifecycle),
-        };
-        BROWSER_SCRIPT_COMPLETION.with(|slot| {
-            assert!(
-                slot.borrow().is_none(),
-                "the browser VM Worker already has a pending completion"
-            );
-            *slot.borrow_mut() = Some(completion);
-        });
-    }
-}
-
-/// Release browser host callbacks immediately before the VM Worker reports
-/// `ThreadComplete` and closes. The Worker bootstrap calls this from a timer
-/// task, after the entry task's microtask checkpoint. `FinalizationRegistry`
-/// cleanup either runs before this task while callbacks are live, or is
-/// discarded by the close performed in the same task.
-#[wasm_bindgen(js_name = finishBrowserScriptCheckpoint)]
-pub fn finish_browser_script_checkpoint() {
-    BROWSER_SCRIPT_COMPLETION.with(|slot| {
-        let Some(completion) = slot.borrow_mut().take() else {
-            // This worker ran a non-script wasm_thread task (for example a
-            // Stylo worker), so it has no browser VM callbacks to release.
-            return;
-        };
-        drop(completion.dispatchers);
-        completion.lifecycle.mark_checkpoint_done();
-    });
-}
-
-impl ScriptEngine for BrowserScriptEngine {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "namespace setup, exact-arity wrapper creation, and callback retention form one atomic VM operation"
-    )]
-    fn register_host_function(
-        &mut self,
-        namespace: &str,
-        name: &str,
-        arity: u8,
-        mut callback: HostCallback,
-    ) -> Result<(), ScriptError> {
-        let global = js_sys::global();
-        let namespace_key = JsValue::from_str(namespace);
-        let namespace_object = match Reflect::get(&global, &namespace_key)
-            .map_err(|error| script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error))?
-        {
-            value if value.is_undefined() => {
-                let object = Object::new();
-                let installed =
-                    Reflect::set(&global, &namespace_key, &object).map_err(|error| {
-                        script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error)
-                    })?;
-                if !installed {
-                    return Err(script_error(
-                        ScriptErrorKind::EvaluationDenied,
-                        ScriptErrorPhase::RegisterHostFunction,
-                        format!("globalThis.{namespace} is not writable"),
-                    ));
-                }
-                object.into()
-            }
-            value if value.is_object() => value,
-            _ => {
-                return Err(script_error(
-                    ScriptErrorKind::InvalidBoundaryValue,
-                    ScriptErrorPhase::RegisterHostFunction,
-                    format!("globalThis.{namespace} exists but is not an object"),
-                ));
-            }
-        };
-
-        let dispatcher = Closure::wrap(Box::new(move |arguments: Array| -> Array {
-            let response = Array::new();
-            let result = arguments
-                .iter()
-                .map(|value| host_value_from_js(&value))
-                .collect::<Result<Vec<_>, _>>()
-                .and_then(|arguments| callback(&arguments))
-                .and_then(host_value_to_js);
-            match result {
-                Ok(value) => {
-                    response.push(&JsValue::TRUE);
-                    response.push(&value);
-                }
-                Err(message) => {
-                    response.push(&JsValue::FALSE);
-                    response.push(&JsValue::from_str(&message));
-                }
-            }
-            response
-        }) as Box<dyn FnMut(Array) -> Array>);
-
-        let parameters = (0..arity)
-            .map(|index| format!("arg{index}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let body = format!(
-            "\"use strict\"; let active = false; return function({parameters}) {{ \
-             if (active) throw new Error('a Bobcat host function cannot be invoked re-entrantly'); \
-             active = true; try {{ \
-               const result = dispatch(Array.from(arguments)); \
-               if (!result[0]) throw new Error(result[1]); \
-               return result[1]; \
-             }} finally {{ active = false; }} }};"
-        );
-        let function_constructor = Reflect::get(&global, &JsValue::from_str("Function"))
-            .and_then(|value| {
-                value
-                    .dyn_into::<Function>()
-                    .map_err(|_| JsValue::from_str("global Function is not callable"))
-            })
-            .map_err(|error| {
-                script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error)
-            })?;
-        let constructor_arguments = Array::new();
-        constructor_arguments.push(&JsValue::from_str("dispatch"));
-        constructor_arguments.push(&JsValue::from_str(&body));
-        let factory = Reflect::construct(&function_constructor, &constructor_arguments)
-            .map_err(|error| script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error))?
-            .dyn_into::<Function>()
-            .map_err(|_| {
-                script_error(
-                    ScriptErrorKind::Other,
-                    ScriptErrorPhase::RegisterHostFunction,
-                    "the Function constructor did not return a function",
-                )
-            })?;
-        let member = factory
-            .call1(&JsValue::UNDEFINED, dispatcher.as_ref())
-            .map_err(|error| {
-                script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error)
-            })?;
-        let installed = Reflect::set(&namespace_object, &JsValue::from_str(name), &member)
-            .map_err(|error| {
-                script_error_from_js(ScriptErrorPhase::RegisterHostFunction, &error)
-            })?;
-        if !installed {
-            return Err(script_error(
-                ScriptErrorKind::EvaluationDenied,
-                ScriptErrorPhase::RegisterHostFunction,
-                format!("{namespace}.{name} is not writable"),
-            ));
-        }
-        self.dispatchers.push(dispatcher);
-        Ok(())
-    }
-
-    fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
-        let source_name = source_name.replace(['\n', '\r'], "");
-        let source = format!("{source}\n//# sourceURL={source_name}\n");
-        js_sys::eval(&source).map(|_| ()).map_err(|error| {
-            let mut error = script_error_from_js(ScriptErrorPhase::Execute, &error);
-            match &mut error.location {
-                Some(location) => location.source = Some(Arc::from(source_name)),
-                None => {
-                    error.location = Some(ScriptSourceLocation {
-                        source: Some(Arc::from(source_name)),
-                        line: None,
-                        column: None,
-                    });
-                }
-            }
-            error
-        })
-    }
-
-    fn collect_garbage(&mut self) -> Result<(), ScriptError> {
-        // Browsers do not expose a synchronous GC hook. This synchronous
-        // entry-script adapter therefore has no explicit collection operation.
-        Ok(())
+        Ok(engine)
     }
 }
 
@@ -714,7 +495,8 @@ impl BobcatRenderer {
             let events = Arc::new(EventSignal::default());
             let script_lifecycle = Arc::new(BrowserScriptLifecycle::new(Arc::clone(&events)));
             let script_engine: Arc<dyn ScriptEngineFactory> =
-                Arc::new(BrowserScriptEngineFactory {
+                Arc::new(LifecycleScriptEngineFactory {
+                    inner: quickjs_engine_factory(),
                     lifecycle: Arc::clone(&script_lifecycle),
                 });
             let config = PageConfig {
@@ -830,21 +612,16 @@ impl BobcatRenderer {
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
-        if !self.events.take() {
-            return Ok(false);
-        }
-        for event in self.view.pump() {
-            match event {
-                EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
-                EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
-                _ => {}
+        if !self.script_finished && self.events.take() {
+            for event in self.view.pump() {
+                match event {
+                    EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
+                    EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
+                    _ => {}
+                }
             }
         }
-        Ok(self.script_finished
-            && self
-                .script_lifecycle
-                .checkpoint_done
-                .load(Ordering::Acquire))
+        Ok(self.script_finished)
     }
 
     /// Present a requested frame without exposing the engine or document to
@@ -891,108 +668,6 @@ impl BobcatRenderer {
         } else {
             Ok(())
         }
-    }
-}
-
-fn host_value_from_js(value: &JsValue) -> Result<HostValue, String> {
-    if value.is_undefined() {
-        Ok(HostValue::Undefined)
-    } else if value.is_null() {
-        Ok(HostValue::Null)
-    } else if let Some(value) = value.as_bool() {
-        Ok(HostValue::Boolean(value))
-    } else if let Some(value) = value.as_f64() {
-        Ok(HostValue::Number(value))
-    } else if value.is_string() {
-        let string = value.unchecked_ref::<JsString>();
-        if !string.is_valid_utf16() {
-            return Err("ill-formed UTF-16 cannot cross Bobcat's host boundary".to_owned());
-        }
-        Ok(HostValue::String(Arc::from(
-            value
-                .as_string()
-                .expect("a valid JavaScript string converts to Rust"),
-        )))
-    } else {
-        Err("this JavaScript value cannot cross Bobcat's host boundary".to_owned())
-    }
-}
-
-fn host_value_to_js(value: HostValue) -> Result<JsValue, String> {
-    Ok(match value {
-        HostValue::Undefined => JsValue::UNDEFINED,
-        HostValue::Null => JsValue::NULL,
-        HostValue::Boolean(value) => JsValue::from_bool(value),
-        HostValue::Number(value) => JsValue::from_f64(value),
-        HostValue::String(value) => JsValue::from_str(&value),
-        _ => return Err("this Bobcat host value cannot cross into JavaScript".to_owned()),
-    })
-}
-
-fn script_error_from_js(phase: ScriptErrorPhase, error: &JsValue) -> ScriptError {
-    let name = Reflect::get(error, &JsValue::from_str("name"))
-        .ok()
-        .and_then(|value| value.as_string());
-    let kind = match name.as_deref() {
-        Some("SyntaxError") => ScriptErrorKind::Syntax,
-        Some("EvalError") => ScriptErrorKind::EvaluationDenied,
-        _ => ScriptErrorKind::Exception,
-    };
-    let line = numeric_error_property(error, "lineNumber");
-    let column = numeric_error_property(error, "columnNumber");
-    ScriptError {
-        kind,
-        phase,
-        message: Arc::from(js_exception_message(error)),
-        location: (line.is_some() || column.is_some()).then_some(ScriptSourceLocation {
-            source: None,
-            line,
-            column,
-        }),
-    }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the preceding bounds check makes the browser's line number fit u32"
-)]
-fn numeric_error_property(error: &JsValue, name: &str) -> Option<u32> {
-    Reflect::get(error, &JsValue::from_str(name))
-        .ok()
-        .and_then(|value| value.as_f64())
-        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= f64::from(u32::MAX))
-        .map(|value| value as u32)
-}
-
-fn script_error(
-    kind: ScriptErrorKind,
-    phase: ScriptErrorPhase,
-    message: impl Into<Arc<str>>,
-) -> ScriptError {
-    ScriptError {
-        kind,
-        phase,
-        message: message.into(),
-        location: None,
-    }
-}
-
-fn js_exception_message(error: &JsValue) -> String {
-    if let Some(message) = error.as_string() {
-        return message;
-    }
-    let name = Reflect::get(error, &JsValue::from_str("name"))
-        .ok()
-        .and_then(|value| value.as_string());
-    let message = Reflect::get(error, &JsValue::from_str("message"))
-        .ok()
-        .and_then(|value| value.as_string());
-    match (name, message) {
-        (Some(name), Some(message)) if !message.is_empty() => format!("{name}: {message}"),
-        (Some(name), _) => name,
-        (_, Some(message)) => message,
-        _ => "the browser JavaScript VM threw an opaque value".to_owned(),
     }
 }
 

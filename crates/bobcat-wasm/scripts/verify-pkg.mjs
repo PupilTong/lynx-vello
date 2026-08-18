@@ -23,7 +23,6 @@ if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
 }
 for (const requiredExport of [
   'export class BobcatRenderer',
-  'export function finishBrowserScriptCheckpoint',
   'export function wasm_thread_entry_point',
 ]) {
   if (!glue.includes(requiredExport)) {
@@ -49,6 +48,7 @@ if (!glue.includes('passArray8ToWasm0(bytes')) {
 }
 for (const removedExport of [
   'createBrowserSession',
+  'finishBrowserScriptCheckpoint',
   'initThreadPool',
   'parallelChecksum',
   'pollDomCommand',
@@ -112,8 +112,22 @@ if (renderWorker.includes('setTimeout(resolve, 1)')) {
 if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
   throw new Error('Render Worker must await core engine events')
 }
-if (!domWorker.includes('finishBrowserScriptCheckpoint()')) {
-  throw new Error('DOM Worker must release browser host callbacks before closing')
+if (
+  !domWorker.includes('wasm_thread_entry_point(work)') ||
+  !domWorker.includes('self.close()')
+) {
+  throw new Error('DOM Worker must run the wasm_thread entry point and close')
+}
+for (const removedCheckpointProtocol of [
+  'finishBrowserScriptCheckpoint',
+  'nativePostMessage',
+  'setTimeout(',
+]) {
+  if (domWorker.includes(removedCheckpointProtocol)) {
+    throw new Error(
+      `DOM Worker still contains browser checkpoint protocol ${removedCheckpointProtocol}`,
+    )
+  }
 }
 if (!facade.includes('document.baseURI')) {
   throw new Error('browser facade must resolve relative URLs against document.baseURI')
@@ -146,6 +160,13 @@ for (const forbiddenDomApi of [
 
 const wasmBytes = await readFile(wasmPath)
 if (
+  !wasmBytes.includes(
+    Buffer.from('QuickJS execution exceeded its configured timeout', 'utf8'),
+  )
+) {
+  throw new Error('release Wasm does not contain the configured QuickJS runtime')
+}
+if (
   wasmBytes.includes(
     Buffer.from('Parking not supported on this platform', 'utf8'),
   )
@@ -155,11 +176,38 @@ if (
   )
 }
 const module = new WebAssembly.Module(wasmBytes)
-if (!WebAssembly.Module.imports(module).some(({ kind }) => kind === 'memory')) {
+const imports = WebAssembly.Module.imports(module)
+if (!imports.some(({ kind }) => kind === 'memory')) {
   throw new Error('WebAssembly memory is not imported')
 }
 if (!WebAssembly.Module.exports(module).some(({ kind }) => kind === 'memory')) {
   throw new Error('WebAssembly memory is not exported')
+}
+const forbiddenCImports = new Set([
+  'atanh',
+  'calloc',
+  'fprintf',
+  'free',
+  'lrint',
+  'malloc',
+  'memchr',
+  'printf',
+  'realloc',
+  'snprintf',
+  'strchr',
+  'strcmp',
+  'strrchr',
+  'vsnprintf',
+])
+const forbiddenImports = imports.filter(
+  ({ module: importModule, name }) =>
+    importModule.startsWith('wasi_') ||
+    (importModule === 'env' && forbiddenCImports.has(name)),
+)
+if (forbiddenImports.length !== 0) {
+  throw new Error(
+    `QuickJS Wasm has forbidden platform imports: ${JSON.stringify(forbiddenImports)}`,
+  )
 }
 
 const pack = JSON.parse(

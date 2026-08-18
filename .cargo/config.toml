@@ -1,4 +1,8 @@
 [target.wasm32-unknown-unknown]
+# This section configures Rust and rust-lld. QuickJS's C objects are compiled
+# separately by cc-rs; `crates/bobcat-wasm/scripts/build.mjs` probes and exports
+# its target-specific Clang/llvm-ar pair. Direct Cargo invocations that enable
+# QuickJS must set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown.
 rustflags = [
     "-C",
     # Chrome 135 is the browser floor. Enable every LLVM/Rust WebAssembly
