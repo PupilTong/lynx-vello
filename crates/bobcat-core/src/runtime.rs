@@ -572,7 +572,7 @@ mod tests {
             )
             .expect("boot");
 
-        assert!(elements.tree().get(2).is_some());
+        assert!(elements.tree().get(3).is_some());
     }
 
     #[test]
@@ -628,9 +628,9 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   let doomed = __CreateView(0);
                   __AppendElement(page, doomed);
-                  if (__GetElementUniqueID(doomed) !== 2) {
+                  if (__GetElementUniqueID(doomed) !== 3) {
                     throw new Error(
-                      'the first element is node 2, got ' + __GetElementUniqueID(doomed),
+                      'the first element is node 3, got ' + __GetElementUniqueID(doomed),
                     );
                   }
                   __RemoveElement(page, doomed);
@@ -641,13 +641,13 @@ mod tests {
             )
             .expect("main-thread script");
         assert!(
-            elements.tree().get(2).is_some(),
+            elements.tree().get(3).is_some(),
             "the detached element is still allocated while script could reach it"
         );
 
         runtime.collect_garbage().expect("collection");
         assert!(
-            elements.tree().get(2).is_none(),
+            elements.tree().get(3).is_none(),
             "a swept handle drops its element through the finalization registry"
         );
 
@@ -658,7 +658,7 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   const replacement = __CreateView(0);
                   __AppendElement(page, replacement);
-                  if (__GetElementUniqueID(replacement) === 2) {
+                  if (__GetElementUniqueID(replacement) === 3) {
                     throw new Error('a retired unique id was handed to a new element');
                   }
                 };
@@ -667,7 +667,7 @@ mod tests {
             )
             .expect("main-thread script");
         assert!(
-            elements.tree().get(2).is_none(),
+            elements.tree().get(3).is_none(),
             "and the retired id keeps naming nothing"
         );
     }
@@ -691,8 +691,8 @@ mod tests {
                   if (__GetTag(view) !== 'view' || __GetTag(page) !== 'page') {
                     throw new Error('__GetTag must report the Lynx tag');
                   }
-                  if (__GetElementUniqueID(page) !== 1) {
-                    throw new Error('the page is node 1, got ' + __GetElementUniqueID(page));
+                  if (__GetElementUniqueID(page) !== 2) {
+                    throw new Error('the page is node 2, got ' + __GetElementUniqueID(page));
                   }
                 };
                 ",
@@ -701,7 +701,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(3).expect("the view is live");
         assert_eq!(view.classes().collect::<Vec<_>>(), ["row", "bold"]);
         assert_eq!(view.id_attribute(), Some("header"));
         assert_eq!(view.attribute("flex-grow"), Some("1"));
@@ -734,7 +734,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(3).expect("the view is live");
         assert_eq!(view.classes().len(), 0);
         assert_eq!(view.id_attribute(), None);
         assert_eq!(view.attribute("text"), None);
@@ -761,7 +761,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        for (id, expected) in [(2, 10.0_f32), (3, 20.0_f32)] {
+        for (id, expected) in [(3, 10.0_f32), (4, 20.0_f32)] {
             let layout = elements
                 .rounded_layout(id)
                 .expect("the styled view is laid out");
@@ -793,7 +793,7 @@ mod tests {
         let elements = elements.tree();
         assert_eq!(
             elements
-                .get(2)
+                .get(3)
                 .expect("the view is live")
                 .attribute("style"),
             Some("padding-left:4px;")
@@ -819,9 +819,9 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(3).expect("the view is live");
         assert_eq!(view.attribute("style"), None);
-        let layout = elements.rounded_layout(2).expect("the view is laid out");
+        let layout = elements.rounded_layout(3).expect("the view is laid out");
         assert!(
             (layout.size.width - 393.0).abs() < f32::EPSILON,
             "the cleared width falls back to the page's, got {}",
@@ -860,7 +860,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(3).expect("the view is live");
         assert_eq!(
             view.attributes().len(),
             0,

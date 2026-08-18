@@ -378,7 +378,7 @@ impl<T> Node<T> {
                 let arenas = self.arenas();
                 match arenas.payload_at(arenas.live_slot(self.id)) {
                     PayloadSlot::Node(payload) => payload,
-                    PayloadSlot::Document | PayloadSlot::ShadowRoot => {
+                    PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
                         unreachable!("payload-less sentinels belong to non-element nodes")
                     }
                 }

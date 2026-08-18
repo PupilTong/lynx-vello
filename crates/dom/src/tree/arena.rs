@@ -19,6 +19,9 @@ use crate::tree::node::Node;
 /// A node's permanent identity: the Lynx element `unique_id`, which is also
 /// the index of its entry in [`TreeArenas::slots`].
 ///
+/// Zero is never issued — it is the reserved "no node" value, and index zero
+/// of the table stays empty for the life of the document.
+///
 /// Handed out by a counter that only ever increases — the index of a freed
 /// node is never given to another node, for the lifetime of the document.
 /// An id therefore names one node forever, so a stale id can only ever
@@ -38,30 +41,39 @@ pub type NodeId = usize;
 /// the next node, while its [`NodeId`] retires. It is private on purpose —
 /// nothing outside this crate may hold one, and no `NodeId` may be used as
 /// one without going through [`TreeArenas::slot`].
+///
+/// It holds the arena key directly. Key zero is permanently occupied by the
+/// reservation [`TreeArenas::reserve_zero`] makes, so no live node ever sits
+/// there and [`NonZeroU32`] is the key's own type rather than an encoding —
+/// which is what gives `Option<NodeSlot>` its four-byte width, the whole
+/// per-node cost of never reusing an id.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct NodeSlot(NonZeroU32);
 
 impl NodeSlot {
-    /// Stored biased by one so `Option<NodeSlot>` fits in four bytes — the
-    /// table has one entry per node ever created, so its width is the whole
-    /// cost of never reusing an id.
     #[inline]
     fn from_arena_key(key: usize) -> Self {
-        let biased = u32::try_from(key + 1).expect("a document holds fewer than u32::MAX nodes");
-        Self(NonZeroU32::new(biased).expect("the bias makes the key non-zero"))
+        let key = u32::try_from(key).expect("a document holds fewer than u32::MAX nodes");
+        Self(NonZeroU32::new(key).expect("arena key zero is reserved and never allocated"))
     }
 
     #[inline]
     const fn arena_key(self) -> usize {
-        self.0.get() as usize - 1
+        self.0.get() as usize
     }
 }
 
-pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
-pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 1;
+/// The reserved id and arena key. Nothing lives here: it keeps zero out of
+/// both spaces so it can mean "no node" in each.
+const RESERVED: NodeId = 0;
+
+pub(crate) const DOCUMENT_NODE_ID: NodeId = 1;
+pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 2;
 const INITIAL_NODE_CAPACITY: usize = 8;
 
 pub(crate) enum PayloadSlot<T> {
+    /// Arena key zero's placeholder. Unreachable: no id resolves to it.
+    Reserved,
     Document,
     ShadowRoot,
     Node(T),
@@ -88,6 +100,26 @@ impl<T> TreeArenas<T> {
             payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
             slots: Vec::with_capacity(INITIAL_NODE_CAPACITY),
         }
+    }
+
+    /// Takes id zero and arena key zero out of circulation, before any node
+    /// is filed.
+    ///
+    /// Called once, on the boxed arena set, so the placeholder's owner
+    /// backpointer is the address every later node will also carry. Nothing
+    /// resolves to the placeholder — `slots[0]` stays `None` — so it exists
+    /// only to keep the key off the slab's free list, which is what lets
+    /// [`NodeSlot`] be a plain [`NonZeroU32`].
+    pub(crate) fn reserve_zero(&mut self) {
+        debug_assert!(self.slots.is_empty(), "zero is reserved before any node");
+        let owner = std::ptr::from_mut::<Self>(self);
+        assert_eq!(
+            self.nodes
+                .insert(Node::new_text(owner, RESERVED, String::new())),
+            RESERVED
+        );
+        assert_eq!(self.payloads.insert(PayloadSlot::Reserved), RESERVED);
+        self.slots.push(None);
     }
 
     /// The arena slot a live node occupies, or `None` for an id that was
@@ -238,8 +270,11 @@ pub(crate) struct DocumentLayoutState {
 
 impl DocumentLayoutState {
     pub(crate) fn new() -> Self {
+        let mut nodes = Slab::with_capacity(INITIAL_NODE_CAPACITY);
+        // Key zero is reserved in every arena, so all three stay aligned.
+        assert_eq!(nodes.insert(NodeLayoutState::default()), RESERVED);
         Self {
-            nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
+            nodes,
             text_context: None,
         }
     }
@@ -320,6 +355,7 @@ mod tests {
     #[test]
     fn the_tree_arenas_stay_key_aligned_across_reuse() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
+        arenas.reserve_zero();
         let mut layout = DocumentLayoutState::new();
         let mut issued = Vec::new();
         for payload in 0..4 {
@@ -357,11 +393,13 @@ mod tests {
     #[test]
     fn an_id_that_was_never_issued_resolves_to_nothing() {
         let mut arenas: TreeArenas<()> = TreeArenas::new();
+        arenas.reserve_zero();
         let (id, _) = arenas.insert_node(PayloadSlot::Node(()), |owner, id| {
             Node::new_text(owner, id, String::new())
         });
+        assert_eq!(id, 1, "zero is reserved, so the first issued id is one");
 
-        for never_issued in [id + 1, id + 2, 999_999, usize::MAX] {
+        for never_issued in [RESERVED, id + 1, id + 2, 999_999, usize::MAX] {
             assert_eq!(arenas.slot(never_issued), None);
             assert!(arenas.get(never_issued).is_none());
             assert!(!arenas.contains(never_issued));

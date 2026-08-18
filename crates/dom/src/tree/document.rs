@@ -71,6 +71,7 @@ impl<T> Document<T> {
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
+        tree.reserve_zero();
         let (root, slot) = tree.insert_node(PayloadSlot::Document, |owner, _| {
             Node::new_document(owner, lock, url_data)
         });
@@ -526,6 +527,7 @@ impl<T> Document<T> {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
+            PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
         }
     }
 
@@ -559,6 +561,7 @@ impl<T> Document<T> {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
+                PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
             }
         }
         self.prune_relayout_roots();
@@ -886,8 +889,8 @@ pub(crate) mod tests {
         let root = document.document_element().id();
         assert_eq!(
             (DOCUMENT_NODE_ID, root),
-            (0, 1),
-            "the document node and element take the first two ids"
+            (1, 2),
+            "zero is reserved, so the document node and element take the next two ids"
         );
 
         let mut highest = root;
