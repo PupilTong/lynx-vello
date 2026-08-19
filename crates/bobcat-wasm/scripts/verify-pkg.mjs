@@ -36,7 +36,6 @@ for (const requiredMethod of [
   'loadStyleSheet(',
   'pollScript(',
   'registerFonts(',
-  'scriptStarted(',
   'waitForEngineEvent(',
 ]) {
   if (!glue.includes(requiredMethod)) {
@@ -53,6 +52,7 @@ for (const removedExport of [
   'parallelChecksum',
   'pollDomCommand',
   'pollResponse',
+  'scriptStarted',
   'waitForResponse',
   'wasmMemory',
 ]) {
@@ -113,6 +113,12 @@ if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
   throw new Error('Render Worker must await core engine events')
 }
 if (
+  renderWorker.includes('SCRIPT_START_TIMEOUT_MS') ||
+  renderWorker.includes('renderer.scriptStarted()')
+) {
+  throw new Error('Render Worker still applies a VM startup deadline')
+}
+if (
   !domWorker.includes('wasm_thread_entry_point(work)') ||
   !domWorker.includes('self.close()')
 ) {
@@ -131,6 +137,9 @@ for (const removedCheckpointProtocol of [
 }
 if (!facade.includes('document.baseURI')) {
   throw new Error('browser facade must resolve relative URLs against document.baseURI')
+}
+if (facade.includes('REQUEST_TIMEOUT_MS')) {
+  throw new Error('browser facade still applies a Render Worker readiness deadline')
 }
 if (renderWorker.includes('self.location.href')) {
   throw new Error('Render Worker must not resolve resource URLs against its own package URL')
@@ -161,10 +170,10 @@ for (const forbiddenDomApi of [
 const wasmBytes = await readFile(wasmPath)
 if (
   !wasmBytes.includes(
-    Buffer.from('QuickJS execution exceeded its configured timeout', 'utf8'),
+    Buffer.from('QuickJS could not allocate a runtime', 'utf8'),
   )
 ) {
-  throw new Error('release Wasm does not contain the configured QuickJS runtime')
+  throw new Error('release Wasm does not contain the built-in QuickJS runtime')
 }
 if (
   wasmBytes.includes(
@@ -176,6 +185,12 @@ if (
   )
 }
 const module = new WebAssembly.Module(wasmBytes)
+if (WebAssembly.Module.customSections(module, 'name').length !== 0) {
+  throw new Error('release Wasm still contains a debugging name section')
+}
+if (WebAssembly.Module.customSections(module, 'target_features').length === 0) {
+  throw new Error('release Wasm lost its target_features custom section')
+}
 const imports = WebAssembly.Module.imports(module)
 if (!imports.some(({ kind }) => kind === 'memory')) {
   throw new Error('WebAssembly memory is not imported')

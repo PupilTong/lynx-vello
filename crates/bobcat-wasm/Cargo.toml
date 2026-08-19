@@ -22,7 +22,22 @@ wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = ["OffscreenCanvas"] }
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+wasm-opt = [
+    "-Oz",
+    "--strip-debug",
+    "--enable-threads",
+    "--enable-bulk-memory",
+    "--enable-bulk-memory-opt",
+    "--enable-extended-const",
+    "--enable-multivalue",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-simd",
+    "--enable-relaxed-simd",
+    "--enable-sign-ext",
+    "--enable-tail-call",
+]
 
 [lints]
 workspace = true

@@ -24,8 +24,8 @@ export declare class BobcatCanvas {
    * Fetches and runs the main-thread entry script. This resolves after the
    * script boot sequence finishes and rejects on loading or evaluation error.
    * Relative URLs use the embedding document's base URL. The embedded QuickJS
-   * realm applies Bobcat's five-second execution limit; exceeding it rejects
-   * this Promise with a sanitized script error.
+   * realm and the browser facade do not impose a loading, startup, or execution
+   * deadline.
    */
   executeScript(url: string | URL): Promise<void>
 

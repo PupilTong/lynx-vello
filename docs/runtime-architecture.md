@@ -111,8 +111,9 @@ The default `quickjs` feature contributes only
 `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
 configuration, values, and runtime entry points remain private. With default
 features disabled, an embedder supplies another factory. The browser embedder
-enables QuickJS explicitly and uses a thin factory wrapper solely to signal
-successful realm creation to its startup watchdog.
+enables QuickJS explicitly and passes this factory directly to `LynxView`.
+The built-in factory has no execution deadline; the underlying bridge retains
+an opt-in timeout for its direct users and tests.
 
 ## Document and rendering ownership
 

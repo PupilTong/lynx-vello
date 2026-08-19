@@ -1,5 +1,4 @@
 const MAX_THREADS = 6
-const REQUEST_TIMEOUT_MS = 30_000
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
 const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
 
@@ -49,21 +48,8 @@ class RenderWorkerClient {
   constructor(worker) {
     this.#worker = worker
     this.#ready = new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.#fail(
-          new Error(
-            `Bobcat Render Worker did not initialize within ${String(REQUEST_TIMEOUT_MS)} ms`,
-          ),
-        )
-      }, REQUEST_TIMEOUT_MS)
-      this.#resolveReady = () => {
-        clearTimeout(timeout)
-        resolve()
-      }
-      this.#rejectReady = (error) => {
-        clearTimeout(timeout)
-        reject(error)
-      }
+      this.#resolveReady = resolve
+      this.#rejectReady = reject
     })
 
     worker.addEventListener('message', this.#onMessage)
@@ -297,8 +283,7 @@ export class BobcatCanvas {
    * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
    * VM initialization, or evaluation failure. Relative URLs are resolved
    * against this document's base URL before they cross the Worker boundary.
-   * The embedded QuickJS realm applies Bobcat's five-second execution limit;
-   * exceeding it rejects this Promise with a sanitized script error.
+   * Loading, VM startup, and execution have no facade-imposed deadline.
    */
   async executeScript(url) {
     await this.#request('executeScript', { url: documentUrl(url) })

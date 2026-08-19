@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
@@ -15,7 +16,6 @@ use crate::script::{
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
-const DEFAULT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
@@ -38,7 +38,7 @@ impl Default for QuickJsConfig {
             realm_options: quickjs::RealmOptions {
                 memory_limit: None,
                 max_stack_size: None,
-                execution_timeout: Some(DEFAULT_EXECUTION_TIMEOUT),
+                execution_timeout: None,
             },
             max_jobs_per_checkpoint: DEFAULT_MAX_JOBS_PER_CHECKPOINT,
         }
@@ -336,18 +336,15 @@ mod tests {
     }
 
     #[test]
-    fn execution_timeout_policy_is_configurable() {
+    fn execution_timeout_policy_is_opt_in() {
         let default = QuickJsConfig::default();
-        assert_eq!(
-            default.realm_options.execution_timeout,
-            Some(DEFAULT_EXECUTION_TIMEOUT)
-        );
+        assert_eq!(default.realm_options.execution_timeout, None);
         assert_eq!(
             default
-                .with_execution_timeout(None)
+                .with_execution_timeout(Some(Duration::from_millis(20)))
                 .realm_options
                 .execution_timeout,
-            None
+            Some(Duration::from_millis(20))
         );
     }
 

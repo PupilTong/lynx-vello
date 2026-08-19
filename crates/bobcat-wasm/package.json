@@ -20,6 +20,9 @@
       "default": "./facade.js"
     }
   },
+  "devDependencies": {
+    "binaryen": "132.0.0"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "verify": "node --test scripts/wasm-target-features.test.mjs && node scripts/verify-pkg.mjs"

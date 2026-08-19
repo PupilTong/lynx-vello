@@ -150,21 +150,10 @@ function waitForController(): Promise<void> {
     return Promise.resolve();
   }
 
-  return new Promise((resolve, reject) => {
-    const controllerChanged = (): void => {
-      window.clearTimeout(timeout);
-      resolve();
-    };
-    const timeout = window.setTimeout(() => {
-      navigator.serviceWorker.removeEventListener(
-        'controllerchange',
-        controllerChanged,
-      );
-      reject(new Error('The COOP/COEP Service Worker did not take control'));
-    }, 15_000);
+  return new Promise((resolve) => {
     navigator.serviceWorker.addEventListener(
       'controllerchange',
-      controllerChanged,
+      () => resolve(),
       { once: true },
     );
   });
@@ -215,9 +204,52 @@ async function ensureCrossOriginIsolation(shell: Shell): Promise<void> {
 const DEMO_SCRIPT = `
   globalThis.renderPage = function () {
     const page = __CreatePage('github-pages-demo', 0);
-    const text = __CreateText(0);
-    __AppendElement(text, __CreateRawText('Bobcat WebAssembly VM is running'));
-    __AppendElement(page, text);
+    __SetInlineStyles(
+      page,
+      'background-color:#0b1020;position:relative;overflow:hidden',
+    );
+
+    const panel = __CreateView(0);
+    __SetInlineStyles(
+      panel,
+      'position:absolute;left:6%;top:9%;width:88%;height:82%;background-color:#151d2f;border-radius:32px',
+    );
+    __AppendElement(page, panel);
+
+    const rail = __CreateView(0);
+    __SetInlineStyles(
+      rail,
+      'position:absolute;left:5%;top:8%;width:38%;height:12px;background-color:#b7f34a;border-radius:6px',
+    );
+    __AppendElement(panel, rail);
+
+    const primary = __CreateView(0);
+    __SetInlineStyles(
+      primary,
+      'position:absolute;left:5%;top:18%;width:54%;height:68%;background-color:#7357ff;border-radius:24px',
+    );
+    __AppendElement(panel, primary);
+
+    const cutout = __CreateView(0);
+    __SetInlineStyles(
+      cutout,
+      'position:absolute;left:11%;top:31%;width:32%;height:42%;background-color:#0b1020;border-radius:18px',
+    );
+    __AppendElement(primary, cutout);
+
+    const upper = __CreateView(0);
+    __SetInlineStyles(
+      upper,
+      'position:absolute;right:5%;top:18%;width:31%;height:31%;background-color:#27d6c2;border-radius:24px',
+    );
+    __AppendElement(panel, upper);
+
+    const lower = __CreateView(0);
+    __SetInlineStyles(
+      lower,
+      'position:absolute;right:5%;bottom:14%;width:31%;height:27%;background-color:#ffb84d;border-radius:24px',
+    );
+    __AppendElement(panel, lower);
   };
 `;
 
