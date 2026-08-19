@@ -43,6 +43,10 @@ interface BobcatNative {
   /**
    * Assigned by this runtime, called by the host once per node per pass.
    * Not native: it is the one member that travels the other way.
+   *
+   * `eventId` is the same for every call of one dispatch, and `isLastCall`
+   * says whether another follows, which is what lets one event object serve
+   * the whole walk.
    */
   event_listener_callback?: (
     nodeId: number,
@@ -50,6 +54,8 @@ interface BobcatNative {
     phaseId: number,
     eventName: string,
     detailJson: string,
+    eventId: number,
+    isLastCall: boolean,
   ) => void;
 }
 

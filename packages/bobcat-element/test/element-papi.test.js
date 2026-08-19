@@ -749,7 +749,9 @@ describe("event listeners", () => {
     return { page, outer, inner };
   }
 
-  /** Delivers one node's turn, the way the host does. */
+  let nextEventId = 0;
+
+  /** Delivers one node's turn as the only call of its own dispatch. */
   function deliver(
     /** @type {object} */ node,
     /** @type {object} */ target,
@@ -757,13 +759,31 @@ describe("event listeners", () => {
     /** @type {string} */ name,
     /** @type {string} */ detailJson = "",
   ) {
-    mock.event_listener_callback?.(
-      __GetElementUniqueID(node),
-      __GetElementUniqueID(target),
-      phase,
-      name,
-      detailJson,
-    );
+    walk([{ node, target, phase }], name, detailJson);
+  }
+
+  /**
+   * Delivers a whole path under one event id, the way the host does: one id
+   * for the walk, `isLastCall` only on the final step.
+   */
+  function walk(
+    /** @type {{ node: object, target: object, phase: number }[]} */ steps,
+    /** @type {string} */ name,
+    /** @type {string} */ detailJson = "",
+  ) {
+    const eventId = nextEventId;
+    nextEventId += 1;
+    steps.forEach((step, index) => {
+      mock.event_listener_callback?.(
+        __GetElementUniqueID(step.node),
+        __GetElementUniqueID(step.target),
+        step.phase,
+        name,
+        detailJson,
+        eventId,
+        index === steps.length - 1,
+      );
+    });
   }
 
   const BUBBLE = 0;
@@ -923,6 +943,121 @@ describe("event listeners", () => {
     expect(phases).toEqual([CAPTURE, 2, 2]);
   });
 
+  it("one event object serves the whole walk, so a listener can write to it", () => {
+    const { page, outer, inner } = tree();
+    /** @type {unknown[]} */
+    const seen = [];
+    __AddEventListener(page, "tap", (/** @type {any} */ event) => {
+      event.marker = "from page";
+      seen.push(event);
+    }, { capture: true });
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      seen.push(event, event.marker);
+    }, {});
+    __AddEventListener(outer, "tap", (/** @type {any} */ event) => {
+      seen.push(event);
+    }, {});
+
+    walk([
+      { node: page, target: inner, phase: CAPTURE },
+      { node: inner, target: inner, phase: BUBBLE },
+      { node: outer, target: inner, phase: BUBBLE },
+    ], "tap");
+
+    const [first, second, marker, third] = seen;
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+    expect(marker).toBe("from page");
+  });
+
+  it("drops the event on the last call, so the next walk starts clean", () => {
+    const { inner } = tree();
+    /** @type {unknown[]} */
+    const seen = [];
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      seen.push(event, event.marker);
+      event.marker = "written";
+    }, {});
+    const uid = __GetElementUniqueID(inner);
+
+    // The same id twice, which the host never does — that is the point. If
+    // the last call did not drop the object, the second walk would find it.
+    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 66, true);
+    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 66, true);
+
+    const [first, firstMarker, second, secondMarker] = seen;
+    expect(firstMarker).toBeUndefined();
+    expect(secondMarker).toBeUndefined();
+    expect(second).not.toBe(first);
+  });
+
+  it("drops the event when a listener throws, since the host ends the walk", () => {
+    const { inner } = tree();
+    /** @type {unknown[]} */
+    const seen = [];
+    let shouldThrow = true;
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      seen.push(event.marker);
+      event.marker = "written";
+      if (shouldThrow) {
+        throw new Error("listener failed");
+      }
+    }, {});
+    const uid = __GetElementUniqueID(inner);
+
+    // The host aborts on the throw, so no call ever carries `isLastCall` for
+    // this id. Reusing the id is how a retained object would show itself.
+    expect(() =>
+      mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 77, false)
+    ).toThrow("listener failed");
+    shouldThrow = false;
+    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 77, true);
+
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  it("drops the event when a listener stops propagation mid-walk", () => {
+    const { inner } = tree();
+    /** @type {unknown[]} */
+    const seen = [];
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      seen.push(event.marker);
+      event.marker = "written";
+      event.stopPropagation();
+    }, {});
+    const uid = __GetElementUniqueID(inner);
+
+    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 88, false);
+    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 88, true);
+
+    expect(seen).toEqual([undefined, undefined]);
+  });
+
+  it("keeps one target object across a walk, and swaps it only on retargeting", () => {
+    const { page, outer, inner } = tree();
+    /** @type {unknown[]} */
+    const targets = [];
+    for (const node of [inner, outer, page]) {
+      __AddEventListener(node, "tap", (/** @type {any} */ event) => {
+        targets.push(event.target);
+      }, {});
+    }
+
+    walk([
+      { node: inner, target: inner, phase: BUBBLE },
+      { node: outer, target: inner, phase: BUBBLE },
+      // What crossing a shadow boundary looks like from here: the host hands
+      // the same walk a different target.
+      { node: page, target: outer, phase: BUBBLE },
+    ], "tap");
+
+    expect(targets[1]).toBe(targets[0]);
+    expect(targets[2]).not.toBe(targets[0]);
+    expect(/** @type {any} */ (targets[2]).uid).toBe(
+      __GetElementUniqueID(outer),
+    );
+  });
+
   it("ends the walk through the host when a listener stops propagation", () => {
     const { inner } = tree();
     __AddEventListener(inner, "tap", (/** @type {any} */ event) => event.stopPropagation(), {});
@@ -1017,8 +1152,9 @@ describe("event listeners", () => {
 
   it("delivers nothing for a node id no handle names", () => {
     tree();
-    expect(() => mock.event_listener_callback?.(9999, 9999, BUBBLE, "tap", ""))
-      .not.toThrow();
+    expect(() =>
+      mock.event_listener_callback?.(9999, 9999, BUBBLE, "tap", "", 9000, true)
+    ).not.toThrow();
   });
 
   it("listeners are scoped to their own element", () => {

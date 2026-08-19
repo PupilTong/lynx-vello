@@ -291,10 +291,13 @@ useful signal for currently-compatible versions of those libraries.
   host walks and calls back into `bobcat.event_listener_callback` — published
   by the realm onto the host's own namespace, and reached through
   `ScriptEngine::call_host_member`, the one Rust-to-JS path in the tree — once
-  per node per pass. `stopImmediatePropagation` never leaves the realm, since
-  it only skips the rest of one node's listeners; `stopPropagation` calls
-  `bobcat.stopPropagation`, which is a pure flag write because re-entering the
-  realm from a host function would nest a `QuickJS` execution guard.
+  per node per pass, carrying an id naming the dispatch and whether the call is
+  its last. Those two let the realm keep one event object for the whole walk,
+  so a property one listener writes is there for the next, while the host
+  retains nothing of the realm's. `stopImmediatePropagation` never leaves the
+  realm, since it only skips the rest of one node's listeners; `stopPropagation`
+  calls `bobcat.stopPropagation`, which is a pure flag write because re-entering
+  the realm from a host function would nest a `QuickJS` execution guard.
   `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
   scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
   into **scoped** author rules there is nothing to validate an encoding against

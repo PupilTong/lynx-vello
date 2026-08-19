@@ -72,11 +72,21 @@
 // Dispatch is the host's walk and this file's per-node work. The host
 // computes the whole event path while it holds the document, releases it, and
 // then calls `bobcat.event_listener_callback(node, target, phase, name,
-// detail)` once per node per pass. Releasing first is what lets a callback
-// mutate the tree. `phase` is the *pass* (`0` bubble, `1` capture), not the
-// standard's `eventPhase`. They are different numbers, and at the target they
-// do not even correspond, since both passes visit it; the event object's
-// `eventPhase` is derived here, where the event object is.
+// detail, eventId, isLastCall)` once per node per pass. Releasing first is
+// what lets a callback mutate the tree. `phase` is the *pass* (`0` bubble, `1`
+// capture), not the standard's `eventPhase`. They are different numbers, and
+// at the target they do not even correspond, since both passes visit it; the
+// event object's `eventPhase` is derived here, where the event object is.
+//
+// `eventId` names the dispatch and `isLastCall` says whether another call
+// carries that id, which is what lets one event object live for the whole
+// walk instead of one per node. A listener that writes a property onto the
+// event is seen by the next listener, as a real `Event` gives. The host
+// retains nothing of it: the object is held here, keyed by the id, and dropped
+// on whichever of the walk's three endings comes first — the last call, a
+// listener stopping propagation, or a listener throwing. The latter two are
+// visible here as they happen, which is why the host only has to signal the
+// first.
 //
 // Propagation splits along the same line. Both stop methods call
 // `bobcat.stopPropagation`, since the standard's `stopImmediatePropagation`
@@ -178,6 +188,7 @@
    * correspond, since both passes visit it. Deriving one from the other is
    * this file's job because the event object is this file's.
    */
+  const NONE = 0;
   const CAPTURING_PHASE = 1;
   const AT_TARGET = 2;
   const BUBBLING_PHASE = 3;
@@ -778,6 +789,80 @@
   }
 
   /**
+   * The event objects of the dispatches currently walking, by host event id.
+   *
+   * One entry, minted at a dispatch's first delivery and dropped at its last,
+   * so every listener on a path sees the same object — a property one writes
+   * is there for the next, which is what an `Event` instance is for. The host
+   * cannot nest dispatches, so this holds at most one entry at a time; it is a
+   * `Map` rather than a single slot only because the id is what identifies an
+   * entry, and dropping the wrong one would be silent.
+   *
+   * @typedef {{
+   *   type: string,
+   *   eventPhase: number,
+   *   target: object,
+   *   currentTarget: object | undefined,
+   *   detail: unknown,
+   *   stopPropagation: () => void,
+   *   stopImmediatePropagation: () => void,
+   * }} DispatchedEvent
+   *
+   * @typedef {{
+   *   event: DispatchedEvent,
+   *   targetNodeId: number,
+   *   immediate: boolean,
+   *   stopped: boolean,
+   * }} Dispatch
+   *
+   * @type {Map<number, Dispatch>}
+   */
+  const dispatches = new Map();
+
+  /**
+   * The entry for one dispatch, created on its first delivery.
+   *
+   * `detail` is parsed once here rather than once per node, and the two stop
+   * methods close over the entry, so they keep working from a later delivery
+   * of the same event.
+   *
+   * @param {number} eventId
+   * @param {string} name
+   * @param {number} targetNodeId
+   * @param {unknown} detailJson
+   * @returns {Dispatch}
+   */
+  function dispatchEntry(eventId, name, targetNodeId, detailJson) {
+    const existing = dispatches.get(eventId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const entry = /** @type {Dispatch} */ ({
+      targetNodeId,
+      immediate: false,
+      stopped: false,
+    });
+    entry.event = {
+      type: name,
+      eventPhase: NONE,
+      target: targetInfo(targetNodeId),
+      currentTarget: undefined,
+      detail: detailJson ? JSON.parse(String(detailJson)) : {},
+      stopPropagation: () => {
+        entry.stopped = true;
+        native.stopPropagation();
+      },
+      stopImmediatePropagation: () => {
+        entry.immediate = true;
+        entry.stopped = true;
+        native.stopPropagation();
+      },
+    };
+    dispatches.set(eventId, entry);
+    return entry;
+  }
+
+  /**
    * The standard's `eventPhase` for one step.
    *
    * A step whose target is itself is at-target — crossing a shadow boundary
@@ -817,6 +902,8 @@
    * @param {unknown} phaseId `CAPTURE` or `BUBBLE`, the pass being run
    * @param {unknown} eventName
    * @param {unknown} detailJson the event's device facts, or an empty string
+   * @param {unknown} eventId names this dispatch, the same for all its calls
+   * @param {unknown} isLastCall whether the host will call again for this id
    * @returns {undefined}
    */
   function eventListenerCallback(
@@ -825,34 +912,69 @@
     phaseId,
     eventName,
     detailJson,
+    eventId,
+    isLastCall,
   ) {
-    const node = /** @type {number} */ (nodeId);
+    const id = Number(eventId);
+    let entry;
+    try {
+      entry = deliverEvent(
+        id,
+        /** @type {number} */ (nodeId),
+        /** @type {number} */ (targetNodeId),
+        phaseId === CAPTURE ? CAPTURE : BUBBLE,
+        String(eventName).toLowerCase(),
+        detailJson,
+      );
+    } catch (error) {
+      // A listener threw. The host aborts the walk on it, so no further call
+      // carries this id and nothing else would ever drop the entry.
+      dispatches.delete(id);
+      throw error;
+    }
+    if (isLastCall || entry === undefined || entry.stopped) {
+      dispatches.delete(id);
+    }
+    return undefined;
+  }
+
+  /**
+   * One node's listeners for one dispatch.
+   *
+   * Returns the dispatch's entry, or `undefined` when this node contributed
+   * nothing and none was needed.
+   *
+   * @param {number} id
+   * @param {number} node
+   * @param {number} targetNodeId
+   * @param {number} phase
+   * @param {string} name
+   * @param {unknown} detailJson
+   * @returns {Dispatch | undefined}
+   */
+  function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
     const handle = handleOf(node);
     if (handle === undefined) {
-      return undefined;
+      return dispatches.get(id);
     }
-    const name = String(eventName).toLowerCase();
-    const phase = phaseId === CAPTURE ? CAPTURE : BUBBLE;
     const list = listeners.get(handle)?.get(name)?.[phase];
     if (list === undefined || list.length === 0) {
-      return undefined;
+      return dispatches.get(id);
     }
 
-    let immediate = false;
-    const event = {
-      type: name,
-      eventPhase: eventPhaseOf(node, targetNodeId, phase),
-      target: targetInfo(/** @type {number} */ (targetNodeId)),
-      currentTarget: targetInfo(node),
-      detail: detailJson ? JSON.parse(String(detailJson)) : {},
-      stopPropagation: () => {
-        native.stopPropagation();
-      },
-      stopImmediatePropagation: () => {
-        immediate = true;
-        native.stopPropagation();
-      },
-    };
+    const entry = dispatchEntry(id, name, targetNodeId, detailJson);
+    const event = entry.event;
+    entry.immediate = false;
+    event.eventPhase = eventPhaseOf(node, targetNodeId, phase);
+    event.currentTarget = targetInfo(node);
+    // Only across a shadow boundary, where retargeting hands this node a
+    // different target than the last one saw. Rebuilding unconditionally would
+    // spend a host call per node and break `event.target === event.target`
+    // across steps.
+    if (targetNodeId !== entry.targetNodeId) {
+      entry.targetNodeId = targetNodeId;
+      event.target = targetInfo(targetNodeId);
+    }
 
     // A copy, so a callback that adds or removes listeners for this same node
     // and name changes what the *next* event sees, not this one — the
@@ -867,11 +989,11 @@
         });
       }
       registration.callback(event);
-      if (immediate) {
-        return undefined;
+      if (entry.immediate) {
+        break;
       }
     }
-    return undefined;
+    return entry;
   }
 
   /**

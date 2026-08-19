@@ -139,6 +139,11 @@ pub(crate) struct MainThreadRuntime {
     engine: Box<dyn ScriptEngine>,
     tree: Rc<RefCell<TreeHandle>>,
     events: Rc<EventState>,
+    /// Names one dispatch, so the realm can keep one event object alive across
+    /// the whole walk instead of minting one per node. Not shared with the
+    /// host functions: only [`Self::dispatch_event`] reads or advances it, and
+    /// it holds `&mut self` while it does.
+    next_event_id: u32,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -170,6 +175,7 @@ impl MainThreadRuntime {
             engine,
             tree,
             events,
+            next_event_id: 0,
         })
     }
 
@@ -185,6 +191,12 @@ impl MainThreadRuntime {
     /// for the life of the document — freeing retires it — so a step whose
     /// node was freed since the path was built resolves to no handle and
     /// reaches no one, which is exactly what should happen.
+    ///
+    /// Each walk carries an id naming it, and each call says whether it is the
+    /// last. Together they let the realm hold one event object for the whole
+    /// dispatch — which is what makes a property a listener writes visible to
+    /// the next one, as a real `Event` does — without the host retaining
+    /// anything of the realm's.
     ///
     /// Returns whether anything was delivered.
     pub(crate) fn dispatch_event(
@@ -207,13 +219,29 @@ impl MainThreadRuntime {
         };
 
         self.events.stopped.set(false);
+
+        // Fresh per dispatch, and never reused by a live one: dispatch takes
+        // `&mut self`, so a listener cannot start a second walk from inside
+        // this one, and the realm drops its entry before this call returns.
+        // The wrap is therefore unreachable rather than merely unlikely.
+        let event_id = self.next_event_id;
+        self.next_event_id = self.next_event_id.wrapping_add(1);
+
+        // Filtered ahead of the walk so each call can say whether another
+        // follows it. That is the realm's cue to drop the event object, and
+        // the only one the host can give: the walk's other two endings — a
+        // listener stopping propagation, a listener throwing — are both
+        // visible to the realm itself as they happen.
+        let mut deliverable = steps
+            .steps()
+            .iter()
+            .filter(|step| nodes.contains(&(step.node, step.capture)))
+            .peekable();
+
         let mut delivered = false;
-        for step in steps.steps() {
+        while let Some(step) = deliverable.next() {
             if self.events.stopped.get() {
                 break;
-            }
-            if !nodes.contains(&(step.node, step.capture)) {
-                continue;
             }
             let arguments = [
                 node_id_value(step.node),
@@ -221,6 +249,8 @@ impl MainThreadRuntime {
                 HostValue::Number(f64::from(u8::from(step.capture))),
                 HostValue::String(Arc::clone(&name)),
                 HostValue::String(Arc::from(detail_json)),
+                HostValue::Number(f64::from(event_id)),
+                HostValue::Boolean(deliverable.peek().is_none()),
             ];
             let called =
                 self.engine
@@ -1122,6 +1152,69 @@ mod tests {
                 r"
                 if (seen.join('|') !== 'page-capture:2:1|inner:4:2') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+    }
+
+    #[test]
+    fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  globalThis.held = [page, outer, inner];
+                  __AddEventListener(page, 'tap', () => {}, { capture: true });
+                  __AddEventListener(inner, 'tap', () => {}, {});
+                };
+                ",
+                "app:///listeners.js",
+            )
+            .expect("main-thread script");
+
+        // Replacing the realm's own callback is how the host's half of the
+        // contract becomes observable: what the realm does with these numbers
+        // is its business, but the numbers themselves are the host's.
+        runtime
+            .evaluate(
+                r"
+                globalThis.calls = [];
+                bobcat.event_listener_callback = (node, target, phase, name,
+                                                  detail, eventId, isLastCall) => {
+                  calls.push([node, eventId, isLastCall]);
+                };
+                ",
+                "app:///record.js",
+                "installing the recorder",
+            )
+            .expect("recorder");
+
+        for _ in 0..2 {
+            assert!(
+                runtime
+                    .dispatch_event(&steps(&elements, 4), "tap", "")
+                    .expect("dispatch")
+            );
+        }
+
+        runtime
+            .evaluate(
+                r"
+                const shape = calls.map((call) => call.join(':')).join('|');
+                // Two deliveries per walk: `outer` registered nothing, so the
+                // flag has to land on the last *delivered* step, not on the
+                // last step of the path.
+                if (shape !== '2:0:false|4:0:true|2:1:false|4:1:true') {
+                  throw new Error('unexpected walk shape: ' + shape);
                 }
                 ",
                 "app:///verify.js",
