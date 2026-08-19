@@ -15,7 +15,6 @@ use bobcat_core::resource::{
     ResourceLocality, ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
-use bobcat_core::script::{ScriptEngine, ScriptEngineFactory, ScriptError};
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
     WindowTarget, configure_wasm_workers, quickjs_engine_factory,
@@ -111,26 +110,6 @@ impl Future for EventWait {
             wakers.push(context.waker().clone());
         }
         Poll::Pending
-    }
-}
-
-#[derive(Debug)]
-struct BrowserScriptLifecycle {
-    started: AtomicBool,
-    events: Arc<EventSignal>,
-}
-
-impl BrowserScriptLifecycle {
-    fn new(events: Arc<EventSignal>) -> Self {
-        Self {
-            started: AtomicBool::new(false),
-            events,
-        }
-    }
-
-    fn mark_started(&self) {
-        self.started.store(true, Ordering::Release);
-        self.events.request_event();
     }
 }
 
@@ -416,20 +395,6 @@ impl ResourceFetcher for BrowserResources {
     }
 }
 
-#[derive(Debug)]
-struct LifecycleScriptEngineFactory {
-    inner: Arc<dyn ScriptEngineFactory>,
-    lifecycle: Arc<BrowserScriptLifecycle>,
-}
-
-impl ScriptEngineFactory for LifecycleScriptEngineFactory {
-    fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError> {
-        let engine = self.inner.create()?;
-        self.lifecycle.mark_started();
-        Ok(engine)
-    }
-}
-
 /// A complete browser embedder, permanently owned by the explicit Render
 /// Worker that constructs it. The document, element tree, VM, and engine stay
 /// behind the opaque `LynxView` facade.
@@ -440,7 +405,6 @@ pub struct BobcatRenderer {
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
-    script_lifecycle: Arc<BrowserScriptLifecycle>,
     script_finished: bool,
     disposed: bool,
 }
@@ -493,12 +457,6 @@ impl BobcatRenderer {
             let resources = Arc::new(BrowserResources::default());
             let resource_fetcher: Arc<dyn ResourceFetcher> = resources.clone();
             let events = Arc::new(EventSignal::default());
-            let script_lifecycle = Arc::new(BrowserScriptLifecycle::new(Arc::clone(&events)));
-            let script_engine: Arc<dyn ScriptEngineFactory> =
-                Arc::new(LifecycleScriptEngineFactory {
-                    inner: quickjs_engine_factory(),
-                    lifecycle: Arc::clone(&script_lifecycle),
-                });
             let config = PageConfig {
                 default_display_linear,
                 default_overflow_visible,
@@ -507,7 +465,7 @@ impl BobcatRenderer {
             let mut view: LynxView<'static, BrowserWindow> = LynxView::new(
                 config,
                 resource_fetcher,
-                script_engine,
+                quickjs_engine_factory(),
                 events.clone(),
                 width,
                 height,
@@ -528,7 +486,6 @@ impl BobcatRenderer {
                 canvas,
                 frames,
                 events,
-                script_lifecycle,
                 script_finished: false,
                 disposed: false,
             })
@@ -590,14 +547,7 @@ impl BobcatRenderer {
         self.view.register_fonts(bytes).map_err(js_error)
     }
 
-    /// Internal Render-Worker seam used to apply the startup-only watchdog.
-    #[wasm_bindgen(js_name = scriptStarted)]
-    pub fn script_started(&self) -> Result<bool, JsValue> {
-        self.ensure_running()?;
-        Ok(self.script_lifecycle.started.load(Ordering::Acquire))
-    }
-
-    /// Await the next durable engine/lifecycle wakeup without timer polling.
+    /// Await the next durable engine wakeup without timer polling.
     #[wasm_bindgen(js_name = waitForEngineEvent)]
     pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
         self.ensure_running()?;
@@ -608,7 +558,7 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Drain the script lifecycle channel independently of animation frames.
+    /// Drain script engine events independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;

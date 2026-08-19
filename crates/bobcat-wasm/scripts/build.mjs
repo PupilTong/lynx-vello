@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { cargoClangTargetFeatureFlags } from './wasm-target-features.mjs'
@@ -10,6 +10,12 @@ const packageDirectory = fileURLToPath(new URL('..', import.meta.url))
 const wasmTarget = 'wasm32-unknown-unknown'
 const ccEnvironmentName = 'CC_wasm32_unknown_unknown'
 const arEnvironmentName = 'AR_wasm32_unknown_unknown'
+const expectedWasmOptVersion = '132'
+const wasmOptBinDirectory = resolve(packageDirectory, 'node_modules/.bin')
+const wasmOptExecutable = resolve(
+  wasmOptBinDirectory,
+  process.platform === 'win32' ? 'wasm-opt.cmd' : 'wasm-opt',
+)
 const wasmClangTargetFeatureFlags = cargoClangTargetFeatureFlags({
   cargo: process.env.CARGO ?? 'cargo',
   cwd: packageDirectory,
@@ -37,6 +43,27 @@ function run(executable, args, options = {}) {
 function formatFailure(result) {
   if (result.error) return result.error.message
   return (result.stderr || result.stdout || `exit status ${result.status}`).trim()
+}
+
+function verifyWasmOpt() {
+  const result = run(wasmOptExecutable, ['--version'])
+  if (result.status !== 0) {
+    throw new Error(
+      [
+        `Could not run the pinned Binaryen wasm-opt at '${wasmOptExecutable}':`,
+        formatFailure(result),
+        'Run `pnpm install` from the workspace root.',
+      ].join('\n'),
+    )
+  }
+
+  const version = `${result.stdout}\n${result.stderr}`.trim()
+  if (!new RegExp(`\\bversion ${expectedWasmOptVersion}\\b`).test(version)) {
+    throw new Error(
+      `Expected Binaryen wasm-opt version ${expectedWasmOptVersion}, got '${version}'`,
+    )
+  }
+  return version
 }
 
 function clangCandidates() {
@@ -130,6 +157,9 @@ function selectWasmCToolchain() {
   )
 }
 
+const wasmOptVersion = verifyWasmOpt()
+console.log(`Wasm optimizer: ${wasmOptVersion}`)
+
 const { clang, llvmAr } = selectWasmCToolchain()
 console.log(`QuickJS Wasm C toolchain: ${clang} + ${llvmAr}`)
 
@@ -155,6 +185,7 @@ execFileSync(
     cwd: packageDirectory,
     env: {
       ...process.env,
+      PATH: [wasmOptBinDirectory, process.env.PATH].filter(Boolean).join(delimiter),
       [ccEnvironmentName]: clang,
       [arEnvironmentName]: llvmAr,
     },

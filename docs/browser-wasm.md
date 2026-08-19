@@ -53,15 +53,11 @@ embedding document's `document.baseURI` before crossing the Worker boundary.
 The Render Worker accepts only absolute URLs: resolving there against
 `self.location` would incorrectly use the npm package/Worker URL as the base.
 
-The browser's transferable `ScriptEngineFactory` is a thin lifecycle wrapper
-around `quickjs_engine_factory()`. It retains only the opaque inner factory,
-shared lifecycle atomics, and the engine-event signal, never a realm, tree, or
-document. Core moves it into the Lynx main Worker and calls `create` there;
-only after QuickJS realm creation succeeds does the wrapper mark the VM Worker
-as started for the startup watchdog. The resulting realm is owner-thread-bound
-and uses Bobcat's primitive-only host callbacks. Raw QuickJS values, realm
-handles, numeric DOM ids, and host callbacks are not surfaced by the npm
-facade.
+The browser passes `quickjs_engine_factory()` directly to `LynxView`. Core
+moves the transferable factory into the Lynx main Worker and calls `create`
+there, so the resulting realm remains owner-thread-bound and uses Bobcat's
+primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
+ids, and host callbacks are not surfaced by the npm facade.
 
 Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
 each execution checkpoint before returning to core, so script completion is
@@ -94,13 +90,13 @@ open batch therefore cannot expose partial mutation or stall the last retained
 frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
 Worker to the Render Worker, whose animation loop calls `renderIfRequested`.
 A separate lost-wake-safe event signal wakes a Promise whenever core queues an
-engine event or QuickJS realm creation completes. Script completion therefore
-does not poll and does not depend on rAF, so a hidden page cannot strand an
-`executeScript` Promise merely by suspending drawing. The startup handshake has
-a ten-second deadline until the nested VM Worker creates its realm. After that,
-the built-in QuickJS adapter applies a five-second timeout to synchronous
-execution and pending-job drains; a non-terminating script is interrupted and
-reported through `ScriptFinished` as a sanitized script error.
+engine event. Script completion therefore does not poll and does not depend on
+rAF, so a hidden page cannot strand an `executeScript` Promise merely by
+suspending drawing. The UI facade, nested VM Worker startup, and built-in
+QuickJS adapter impose no wall-clock deadline on loading or execution. Fetch,
+VM initialization, and script errors are still reported normally; work that
+never completes remains pending until the worker fails or the view is
+disposed.
 
 The release Wasm build uses `panic=abort`. Script-visible node IDs and mutation
 preconditions are checked before entering the DOM, producing JavaScript errors
@@ -134,10 +130,18 @@ the standard Homebrew locations automatically. Set `BOBCAT_WASM_LLVM_BIN` to
 another LLVM `bin` directory, or set `CC_wasm32_unknown_unknown` and
 `AR_wasm32_unknown_unknown` to override the compiler and archiver explicitly.
 
-The package invokes `wasm-pack` for the `web` target. Generated glue and Wasm
-live under `crates/bobcat-wasm/pkg/` and are not checked in. The verification
-script checks shared imported/exported memory, the Worker-only Wasm import,
-the URL execution methods, and the absence of the removed direct DOM API.
+The package invokes `wasm-pack` for the `web` target. Release builds use the
+workspace-pinned Binaryen 132 `wasm-opt` with `-Oz`; the build rejects any
+other version rather than falling back to wasm-pack's older downloaded copy.
+Every Rust/LLVM feature in `.cargo/config.toml` has an explicit Binaryen
+counterpart, including threads, bulk memory, extended const, multivalue,
+nontrapping float-to-int, reference types, SIMD, relaxed SIMD, sign extension,
+and tail calls. Generated glue and Wasm live under
+`crates/bobcat-wasm/pkg/` and are not checked in. The verification script
+checks that optimization removed the debugging name section while preserving
+`target_features`, shared imported/exported memory, the Worker-only Wasm
+import, the URL execution methods, and the absence of the removed direct DOM
+API.
 
 The browser target enables `parking_lot_core/nightly`; with Wasm atomics this
 selects atomic wait/notify instead of the generic Wasm parker that panics on

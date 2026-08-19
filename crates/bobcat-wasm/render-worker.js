@@ -7,7 +7,6 @@ let executeQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
-const SCRIPT_START_TIMEOUT_MS = 10_000
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
@@ -154,30 +153,8 @@ async function readBoundedBytes(response, limit) {
 }
 
 async function waitForScriptCompletion() {
-  let startupTimeout
-  let startupDeadline
-  try {
-    while (running && renderer !== undefined && !renderer.pollScript()) {
-      if (renderer.scriptStarted()) {
-        clearTimeout(startupTimeout)
-        // QuickJS owns its synchronous execution deadline and wakes this
-        // Render Worker through the ordinary ScriptFinished engine event.
-        await renderer.waitForEngineEvent()
-      } else {
-        startupDeadline ??= new Promise((_, reject) => {
-          startupTimeout = setTimeout(() => {
-            reject(
-              new Error(
-                `Bobcat script Worker did not start within ${String(SCRIPT_START_TIMEOUT_MS)} ms`,
-              ),
-            )
-          }, SCRIPT_START_TIMEOUT_MS)
-        })
-        await Promise.race([renderer.waitForEngineEvent(), startupDeadline])
-      }
-    }
-  } finally {
-    clearTimeout(startupTimeout)
+  while (running && renderer !== undefined && !renderer.pollScript()) {
+    await renderer.waitForEngineEvent()
   }
   if (!running || renderer === undefined) {
     throw new Error('Bobcat was disposed before the script completed')

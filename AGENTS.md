@@ -410,23 +410,24 @@ useful signal for currently-compatible versions of those libraries.
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
   nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
   there with `wasm_thread` as its browser thread spawner, leaving the vendored
-  Stylo sources unchanged. A thin lifecycle `ScriptEngineFactory` decorates
-  `quickjs_engine_factory()` and creates the owner-thread-bound QuickJS realm
-  inside that Worker; Element-PAPI
+  Stylo sources unchanged. The embedder passes `quickjs_engine_factory()`
+  directly to core, which creates the owner-thread-bound QuickJS realm inside
+  that Worker; Element-PAPI
   batches, Stylo/Rayon, layout, and
   render hand-off then synchronize through Rust channels, mutexes, atomics,
   and the shared Wasm memory exactly as in a native embedder. JavaScript
   `postMessage` is only the browser host boundary (initial Canvas transfer,
   URL-based script requests/results, resize/input/lifecycle) or a library's
   Worker bootstrap control plane; it is not a DOM/render reconciliation
-  protocol. A shared atomic startup handshake gates readiness. URL requests
-  are serialized, and a lost-wake-safe `EventSignal` Promise wakes script
+  protocol. URL requests are serialized, and a lost-wake-safe `EventSignal`
+  Promise wakes script
   completion independently of Worker rAF, so a hidden page may pause drawing
-  without stranding the `executeScript` Promise. Startup has a ten-second
-  watchdog until the nested VM Worker creates its QuickJS realm. QuickJS then
-  applies Bobcat's five-second execution timeout and drains its owned pending
-  jobs synchronously at each execution checkpoint; there is no browser
-  microtask-completion protocol.
+  without stranding the `executeScript` Promise. The UI facade, nested VM
+  Worker startup, and built-in QuickJS configuration impose no wall-clock
+  deadline on loading or execution. QuickJS drains its owned pending jobs
+  synchronously at each execution checkpoint; there is no browser
+  microtask-completion protocol. The underlying QuickJS bridge retains an
+  opt-in execution timeout for its direct users and tests.
   One Wasm instance owns one view and
   its Stylo pool; every public `BobcatCanvas` gets a separate Render Worker and
   Wasm instance. The pool minimum is two threads so one managed Rayon worker
@@ -435,6 +436,12 @@ useful signal for currently-compatible versions of those libraries.
   The browser target enables `parking_lot_core/nightly` so transitive
   Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
   non-atomic Wasm backend that panics on contention.
+  Release packaging pins Binaryen 132 through the JavaScript workspace and
+  runs `wasm-opt -Oz` after wasm-bindgen with an explicit mirror of every
+  enabled Rust/LLVM Wasm feature; the build rejects a different optimizer
+  version instead of accepting wasm-pack's older fallback. Package
+  verification requires the optimized module to omit its debugging `name`
+  section while retaining `target_features`.
   `wasm_thread` is pinned to the upstream
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker
