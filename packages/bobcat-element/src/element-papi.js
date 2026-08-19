@@ -86,7 +86,9 @@
 // on whichever of the walk's three endings comes first — the last call, a
 // listener stopping propagation, or a listener throwing. The latter two are
 // visible here as they happen, which is why the host only has to signal the
-// first.
+// first. Dropping runs the standard's last dispatch step first — `eventPhase`
+// back to `NONE`, `currentTarget` to null — so an event a listener kept past
+// the walk does not go on naming the node the walk stopped on.
 //
 // Propagation splits along the same line. Both stop methods call
 // `bobcat.stopPropagation`, since the standard's `stopImmediatePropagation`
@@ -802,7 +804,7 @@
    *   type: string,
    *   eventPhase: number,
    *   target: object,
-   *   currentTarget: object | undefined,
+   *   currentTarget: object | null,
    *   detail: unknown,
    *   stopPropagation: () => void,
    *   stopImmediatePropagation: () => void,
@@ -846,7 +848,7 @@
       type: name,
       eventPhase: NONE,
       target: targetInfo(targetNodeId),
-      currentTarget: undefined,
+      currentTarget: null,
       detail: detailJson ? JSON.parse(String(detailJson)) : {},
       stopPropagation: () => {
         entry.stopped = true;
@@ -928,11 +930,34 @@
       );
     } catch (error) {
       // A listener threw. The host aborts the walk on it, so no further call
-      // carries this id and nothing else would ever drop the entry.
-      dispatches.delete(id);
+      // carries this id and nothing else would ever end the dispatch.
+      endDispatch(id);
       throw error;
     }
     if (isLastCall || entry === undefined || entry.stopped) {
+      endDispatch(id);
+    }
+    return undefined;
+  }
+
+  /**
+   * Ends one dispatch, on whichever of its three endings came first.
+   *
+   * The clean-up before the drop is the standard's own last dispatch step:
+   * `eventPhase` back to `NONE` and `currentTarget` to null. It is observable,
+   * because a listener may keep the event past the walk — a worklet closing
+   * over it, an author stashing it — and without this the object it kept would
+   * still name whichever node the walk happened to stop on. Only `target`
+   * survives, as the standard leaves it.
+   *
+   * @param {number} id
+   * @returns {undefined}
+   */
+  function endDispatch(id) {
+    const entry = dispatches.get(id);
+    if (entry !== undefined) {
+      entry.event.eventPhase = NONE;
+      entry.event.currentTarget = null;
       dispatches.delete(id);
     }
     return undefined;

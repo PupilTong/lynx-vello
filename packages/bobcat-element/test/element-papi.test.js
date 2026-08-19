@@ -912,8 +912,14 @@ describe("event listeners", () => {
     __SetID(outer, "current-id");
     /** @type {any} */
     let received;
+    /** @type {any} */
+    let currentTarget;
     __AddEventListener(outer, "tap", (/** @type {any} */ event) => {
       received = event;
+      // Read here rather than after: the standard clears `currentTarget` when
+      // the dispatch ends, so inside the listener is the only place it means
+      // anything.
+      currentTarget = event.currentTarget;
     }, {});
 
     deliver(outer, inner, BUBBLE, "tap", JSON.stringify({ x: 12, y: 30 }));
@@ -921,9 +927,9 @@ describe("event listeners", () => {
     expect(received.type).toBe("tap");
     expect(received.detail).toEqual({ x: 12, y: 30 });
     expect(received.target.uid).toBe(__GetElementUniqueID(inner));
-    expect(received.currentTarget.uid).toBe(__GetElementUniqueID(outer));
+    expect(currentTarget.uid).toBe(__GetElementUniqueID(outer));
     expect(received.target.id).toBe("target-id");
-    expect(received.currentTarget.elementRefptr).toBe(outer);
+    expect(currentTarget.elementRefptr).toBe(outer);
   });
 
   it("reports the standard's at-target phase where the passes meet", () => {
@@ -1031,6 +1037,28 @@ describe("event listeners", () => {
     mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 88, true);
 
     expect(seen).toEqual([undefined, undefined]);
+  });
+
+  it("leaves a retained event reporting no current target once the walk ends", () => {
+    const { page, inner } = tree();
+    /** @type {any} */
+    let retained;
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      retained = event;
+    }, {});
+    __AddEventListener(page, "tap", () => {}, {});
+
+    walk([
+      { node: inner, target: inner, phase: BUBBLE },
+      { node: page, target: inner, phase: BUBBLE },
+    ], "tap");
+
+    // The standard's last dispatch step. Without it the object a listener kept
+    // would still name `page`, the node the walk happened to stop on.
+    expect(retained.currentTarget).toBeNull();
+    expect(retained.eventPhase).toBe(0);
+    // `target` outlives the walk, which the standard does not clear.
+    expect(retained.target.uid).toBe(__GetElementUniqueID(inner));
   });
 
   it("keeps one target object across a walk, and swaps it only on retargeting", () => {
