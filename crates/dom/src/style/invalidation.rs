@@ -359,6 +359,29 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
+    /// Sets one property in an element's inline declaration block.
+    ///
+    /// This has the mutation semantics of
+    /// [`CSSStyleDeclaration.setProperty`](https://drafts.csswg.org/cssom/#dom-cssstyledeclaration-setproperty):
+    /// an empty value removes that property, while an unknown property or an
+    /// invalid value leaves the declaration block unchanged. The property name
+    /// is CSS syntax (for example `background-color` or `--theme-color`), not a
+    /// Rust or wire-format property id.
+    pub fn set_inline_style_property(&mut self, id: NodeId, property: &str, value: &str) {
+        let existing = self.live_element(id).parsed_inline_style.clone();
+        let Some((block, css)) =
+            self.style_engine()
+                .update_inline_style_property(existing.as_ref(), property, value)
+        else {
+            return;
+        };
+
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &STYLE, Some(&css));
+        self.apply_inline_style_block(id, block, Some(css));
+        self.drain_reactions(base);
+    }
+
     fn apply_inline_style_block(
         &mut self,
         id: NodeId,

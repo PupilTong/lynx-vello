@@ -323,12 +323,14 @@ fn install_bobcat_object(
     Ok(())
 }
 
-/// Installs the DOM-attribute portion of the host namespace.
+/// Installs the DOM-attribute and inline-style portion of the host namespace.
 ///
 /// `id`, `class`, and `style` deliberately travel through the same narrow
 /// string boundary as every other attribute. [`LynxDocument`] owns their
-/// specialized DOM/style invalidation paths; neither the Element PAPI nor an
-/// injected VM receives a document handle.
+/// specialized DOM/style invalidation paths. `set_node_property` is the one
+/// narrower CSSOM-like primitive: exactly one name/value pair per call, with
+/// JavaScript retaining responsibility for fanning out a style record. Neither
+/// the Element PAPI nor an injected VM receives a document handle.
 fn install_attribute_members(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
@@ -342,6 +344,23 @@ fn install_attribute_members(
         let document = tree.tree();
         validate_live_element(document, "bobcat.setAttribute", node)?;
         document.set_attribute(node, name, value);
+        Ok(HostValue::Undefined)
+    })?;
+
+    // Deliberately name-based: this PAPI receives record keys, custom
+    // properties have no numeric id, and Stylo's internal PropertyId is not a
+    // stable script ABI. A future numeric-key `__AddInlineStyle` can translate
+    // its bundle id in JavaScript/the decoder-owned layer before reaching this
+    // one primitive.
+    let tree = Rc::clone(handle);
+    install(engine, "set_node_property", 3, move |arguments| {
+        let node = node_id_argument("bobcat.set_node_property", arguments, 0)?;
+        let name = string_argument("bobcat.set_node_property", arguments, 1)?;
+        let value = string_argument("bobcat.set_node_property", arguments, 2)?;
+        let mut tree = borrow_tree("bobcat.set_node_property", &tree)?;
+        let document = tree.tree();
+        validate_live_element(document, "bobcat.set_node_property", node)?;
+        document.set_inline_style_property(node, name, value);
         Ok(HostValue::Undefined)
     })?;
 
@@ -791,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn record_inline_styles_are_hyphenated_before_reaching_stylo() {
+    fn record_inline_styles_are_fanned_out_by_name_before_reaching_stylo() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -800,21 +819,65 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   const view = __CreateView(0);
                   __AppendElement(page, view);
-                  __SetInlineStyles(view, { paddingLeft: '4px', color: null });
+                  __SetInlineStyles(view, {
+                    paddingLeft: '4px',
+                    '--accentColor': 'tomato',
+                    color: null,
+                    width: undefined,
+                    definitelyNotAProperty: 'value',
+                    height: 'not-a-length',
+                  });
                 };
                 ",
                 "app:///record-style.js",
             )
             .expect("main-thread script");
+        let elements = elements.tree();
+        let style = elements
+            .get(node_id(3))
+            .expect("the view is live")
+            .attribute("style")
+            .expect("valid single-property updates create an inline style");
+        assert!(style.contains("padding-left: 4px"), "{style}");
+        assert!(style.contains("--accentColor: tomato"), "{style}");
+        assert!(!style.contains("definitely"), "{style}");
+        assert!(!style.contains("height"), "{style}");
+        assert!(
+            !style
+                .split(';')
+                .any(|declaration| declaration.trim_start().starts_with("color:")),
+            "{style}"
+        );
+    }
+
+    #[test]
+    fn a_later_inline_style_record_replaces_the_complete_declaration_block() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  __SetInlineStyles(view, { width: '10px', height: '20px' });
+                  __SetInlineStyles(view, { height: '30px' });
+                };
+                ",
+                "app:///replace-record-style.js",
+            )
+            .expect("main-thread script");
 
         let elements = elements.tree();
-        assert_eq!(
-            elements
-                .get(node_id(3))
-                .expect("the view is live")
-                .attribute("style"),
-            Some("padding-left:4px;")
-        );
+        let view = elements.get(node_id(3)).expect("the view is live");
+        let style = view.attribute("style").expect("height remains inline");
+        assert!(!style.contains("width"), "{style}");
+        assert!(style.contains("height: 30px"), "{style}");
+        let layout = elements
+            .rounded_layout(node_id(3))
+            .expect("the view is laid out");
+        assert!((layout.size.width - 393.0).abs() < f32::EPSILON);
+        assert!((layout.size.height - 30.0).abs() < f32::EPSILON);
     }
 
     #[test]

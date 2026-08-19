@@ -7,7 +7,7 @@
 
 mod common;
 
-use dom::{Document, Node, NodeId};
+use dom::{Document, Node, NodeId, StylesheetOrigin};
 
 fn test_document() -> Document<()> {
     Document::new(common::device(800.0, 600.0), "page", ())
@@ -320,6 +320,137 @@ fn inline_style_setter_parses_replaces_and_clears_observable_style() {
     doc.layout();
     assert_eq!(doc.get(view).unwrap().attribute("style"), Some(""));
     assert_ne!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
+}
+
+#[test]
+fn inline_style_property_updates_merge_remove_and_reject_invalid_values() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    let view = node(&mut doc, "div");
+    doc.append_child(root, view);
+
+    doc.set_inline_style(view, "color: red; width: 10px !important");
+    doc.set_inline_style_property(view, "color", "blue");
+    doc.set_inline_style_property(view, "width", "20px");
+    doc.layout();
+
+    let style = doc.get(view).unwrap().attribute("style").unwrap();
+    assert!(style.contains("color: blue"));
+    assert!(style.contains("width: 20px"));
+    assert!(!style.contains("important"));
+    assert_eq!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
+
+    let unchanged = style.to_owned();
+    doc.set_inline_style_property(view, "definitely-not-a-property", "1");
+    doc.set_inline_style_property(view, "color", "green !important");
+    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(&*unchanged));
+
+    doc.set_inline_style_property(view, "color", "");
+    doc.layout();
+    let style = doc.get(view).unwrap().attribute("style").unwrap();
+    assert!(!style.contains("color"));
+    assert!(style.contains("width: 20px"));
+    assert_ne!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
+
+    doc.set_inline_style_property(view, "width", "");
+    assert_eq!(doc.get(view).unwrap().attribute("style"), Some(""));
+}
+
+#[test]
+fn inline_style_property_updates_custom_properties_and_descendant_cascade() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    let child = node(&mut doc, "div");
+    doc.append_child(root, child);
+    doc.set_inline_style(child, "color: var(--theme-color)");
+
+    doc.set_inline_style_property(root, "--theme-color", "red");
+    doc.layout();
+    assert_eq!(
+        doc.get(child)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(255, 0, 0),
+    );
+
+    doc.set_inline_style_property(root, "--theme-color", "blue");
+    doc.layout();
+    assert_eq!(
+        doc.get(child)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
+}
+
+#[test]
+fn inline_style_property_updates_expand_and_remove_shorthands() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    let view = node(&mut doc, "div");
+    doc.append_child(root, view);
+    doc.set_inline_style(view, "color: red; margin-left: 1px");
+
+    doc.set_inline_style_property(view, "margin", "2px 3px 4px 5px");
+    let style = doc.get(view).unwrap().attribute("style").unwrap();
+    assert!(style.contains("color: red"));
+    assert!(style.contains("margin: 2px 3px 4px 5px"));
+
+    doc.set_inline_style_property(view, "margin", "");
+    let style = doc.get(view).unwrap().attribute("style").unwrap();
+    assert!(style.contains("color: red"));
+    assert!(!style.contains("margin"));
+}
+
+#[test]
+fn inline_style_property_update_invalidates_style_attribute_selectors() {
+    let mut doc = test_document();
+    doc.add_stylesheet(
+        r#"[style*="width: 20px"] { color: blue; }"#,
+        StylesheetOrigin::Author,
+    );
+    let root = doc.document_element().id();
+    let view = node(&mut doc, "div");
+    doc.append_child(root, view);
+    doc.set_inline_style(view, "width: 10px");
+    doc.layout();
+    assert_ne!(
+        doc.get(view)
+            .unwrap()
+            .computed_style()
+            .unwrap()
+            .clone_color(),
+        common::rgb(0, 0, 255),
+    );
+
+    doc.set_inline_style_property(view, "width", "20px");
+    doc.layout();
+    assert_eq!(
         doc.get(view)
             .unwrap()
             .computed_style()

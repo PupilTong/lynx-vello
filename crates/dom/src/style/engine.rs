@@ -15,10 +15,11 @@ use stylo::parser::{Parse, ParserContext};
 use stylo::properties::declaration_block::parse_one_declaration_into;
 use stylo::properties::{
     Importance, PropertyDeclarationBlock, PropertyId, SourcePropertyDeclaration,
+    SourcePropertyDeclarationUpdate,
 };
 use stylo::selector_parser::SelectorParser;
 use stylo::servo_arc::Arc;
-use stylo::shared_lock::{SharedRwLock, StylesheetGuards};
+use stylo::shared_lock::{Locked, SharedRwLock, StylesheetGuards};
 pub use stylo::stylesheets::Origin as StylesheetOrigin;
 use stylo::stylesheets::keyframes_rule::{Keyframe, KeyframeSelectors, KeyframesRule};
 use stylo::stylesheets::{
@@ -121,6 +122,58 @@ impl StyleEngine {
 
     pub(crate) fn shared_lock(&self) -> &SharedRwLock {
         &self.lock
+    }
+
+    /// Applies one CSSOM-style property update to an inline declaration block.
+    ///
+    /// Returning `None` means that the property name or value was invalid, or
+    /// that the requested update would not change the declaration block. An
+    /// empty value removes the property, matching
+    /// `CSSStyleDeclaration.setProperty`.
+    pub(crate) fn update_inline_style_property(
+        &self,
+        existing: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
+        property: &str,
+        value: &str,
+    ) -> Option<(Option<Arc<Locked<PropertyDeclarationBlock>>>, String)> {
+        let context = self.parser_context(CssRuleType::Style);
+        let property = PropertyId::parse(property, &context).ok()?;
+        let mut block = existing.map_or_else(PropertyDeclarationBlock::new, |existing| {
+            let guard = self.lock.read();
+            existing.read_with(&guard).clone()
+        });
+
+        if value.is_empty() {
+            let first = block.first_declaration_to_remove(&property)?;
+            block.remove_property(&property, first);
+        } else {
+            let mut source = SourcePropertyDeclaration::default();
+            parse_one_declaration_into(
+                &mut source,
+                property,
+                value,
+                Origin::Author,
+                &self.url_data,
+                None,
+                ParsingMode::DEFAULT,
+                QuirksMode::NoQuirks,
+                CssRuleType::Style,
+            )
+            .ok()?;
+
+            let mut updates = SourcePropertyDeclarationUpdate::default();
+            if !block.prepare_for_update(&source, Importance::Normal, &mut updates) {
+                return None;
+            }
+            block.update(source.drain(), Importance::Normal, &mut updates);
+        }
+
+        let mut css = String::new();
+        block
+            .to_css(&mut css)
+            .expect("serializing a declaration block into a String cannot fail");
+        let block = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
+        Some((block, css))
     }
 
     #[must_use]

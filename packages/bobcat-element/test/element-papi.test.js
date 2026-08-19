@@ -93,6 +93,18 @@ function createMockBobcat(issuedIds) {
     /**
      * @param {unknown} node
      * @param {string} name
+     * @param {string} value
+     */
+    set_node_property: (node, name, value) => {
+      const id = nodeId("set_node_property", node);
+      if (typeof name !== "string" || typeof value !== "string") {
+        throw new TypeError("set_node_property expects string name and value");
+      }
+      calls.push(["set_node_property", id, name, value]);
+    },
+    /**
+     * @param {unknown} node
+     * @param {string} name
      */
     removeAttribute: (node, name) => {
       const id = nodeId("removeAttribute", node);
@@ -565,7 +577,7 @@ describe("__SetInlineStyles", () => {
     ]);
   });
 
-  it("hyphenates a record and skips null and undefined values", () => {
+  it("fans a record out into ordered single-property updates", () => {
     const view = __CreateView(0);
     mock.calls.length = 0;
 
@@ -575,12 +587,58 @@ describe("__SetInlineStyles", () => {
       color: undefined,
       width: null,
     });
-    expect(mock.calls).toEqual([[
-      "setAttribute",
-      3,
-      "style",
-      "background-color:red;border-top-left-radius:4;",
-    ]]);
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "style", ""],
+      ["set_node_property", 3, "background-color", "red"],
+      ["set_node_property", 3, "border-top-left-radius", "4"],
+    ]);
+  });
+
+  it("resets the complete declaration block before applying a record", () => {
+    const view = __CreateView(0);
+    __SetInlineStyles(view, "width:10px;color:red");
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, { height: "20px" });
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "style", ""],
+      ["set_node_property", 3, "height", "20px"],
+    ]);
+  });
+
+  it("preserves the case-sensitive name of a custom property", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, { "--accentColor": "tomato" });
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "style", ""],
+      ["set_node_property", 3, "--accentColor", "tomato"],
+    ]);
+  });
+
+  it("skips nullish declarations but forwards invalid names for CSS to reject", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, {
+      color: null,
+      width: undefined,
+      definitelyNotAProperty: "value",
+    });
+    expect(mock.calls).toEqual([
+      ["setAttribute", 3, "style", ""],
+      ["set_node_property", 3, "definitely-not-a-property", "value"],
+    ]);
+  });
+
+  it("keeps an empty style attribute for an empty or all-nullish record", () => {
+    const view = __CreateView(0);
+    for (const styles of [{}, { color: null, width: undefined }]) {
+      mock.calls.length = 0;
+      __SetInlineStyles(view, styles);
+      expect(mock.calls).toEqual([["setAttribute", 3, "style", ""]]);
+    }
   });
 
   it("removes the attribute for every falsy value", () => {
