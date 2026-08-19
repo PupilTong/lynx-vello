@@ -32,7 +32,7 @@
 // | `__GetID(element)` | `bobcat.getAttribute` |
 // | `__GetTag(element)` | `bobcat.tagName` |
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
-// | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
+// | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` / `bobcat.set_node_property` |
 // | `__SetAttribute(element, name, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
 // | `__AddEvent(element, eventType, eventName, handler)` | this runtime's own store |
 // | `__GetEvent(element, eventName, eventType)` | this runtime's own store |
@@ -105,6 +105,7 @@
     createPage: bobcat.createPage,
     createElement: bobcat.createElement,
     setAttribute: bobcat.setAttribute,
+    setNodeProperty: bobcat.set_node_property,
     removeAttribute: bobcat.removeAttribute,
     getAttribute: bobcat.getAttribute,
     tagName: bobcat.tagName,
@@ -400,14 +401,18 @@
   }
 
   /**
-   * web-core's `hyphenate_style_name`: an uppercase letter becomes `-` plus
-   * its lowercase form, so a React-shaped `backgroundColor` key reaches CSS as
-   * `background-color`. ASCII only, because CSS property names are.
+   * For an ordinary React-shaped property name, an uppercase letter becomes
+   * `-` plus its lowercase form, so `backgroundColor` reaches CSS as
+   * `background-color`. Custom-property names are case-sensitive CSS idents,
+   * so an authored `--accentColor` must pass through unchanged.
    *
    * @param {string} name
    * @returns {string}
    */
   function hyphenate(name) {
+    if (name.startsWith("--")) {
+      return name;
+    }
     return name.replace(
       /[A-Z]/g,
       (character) => `-${character.toLowerCase()}`,
@@ -488,11 +493,15 @@
   }
 
   /**
-   * A string is set verbatim; a record is hyphenated and joined into one
-   * declaration list, skipping null and undefined values, exactly as
-   * web-core's `set_inline_styles_in_key_value_vec` does. A falsy value
-   * removes the attribute. The `rpx`/`vw`/`vh`/`rem` token rewriting
-   * web-core performs on the way through has no owner here yet, so
+   * A string is one complete style-attribute payload and is set verbatim. A
+   * record is still a complete replacement, but the JavaScript side owns the
+   * fan-out: it clears the old declaration block, hyphenates each key, and
+   * sends one CSSOM-like `setProperty` operation per non-null value. Keeping
+   * the fan-out here leaves the native boundary as one-property-only and
+   * avoids inventing an object/array wire representation for `HostValue`.
+   *
+   * A falsy value removes the attribute. The `rpx`/`vw`/`vh`/`rem` token
+   * rewriting web-core performs on the way through has no owner here yet, so
    * declarations reach stylo as authored.
    *
    * @param {unknown} element
@@ -509,14 +518,23 @@
       native.setAttribute(nodeId, "style", value);
       return undefined;
     }
-    let css = "";
+    // `__SetInlineStyles` replaces the whole inline declaration block. Start
+    // from an explicitly empty attribute (rather than merely mutating the
+    // properties mentioned by this record), then replay the new declarations
+    // in object enumeration order so shorthand/longhand precedence is kept.
+    // Keeping the empty attribute is observable for `{}` / all-nullish records
+    // and matches web-core's complete-record setter.
+    native.setAttribute(nodeId, "style", "");
     for (const [key, declaration] of Object.entries(value)) {
       if (declaration === null || declaration === undefined) {
         continue;
       }
-      css += `${hyphenate(key)}:${String(declaration)};`;
+      native.setNodeProperty(
+        nodeId,
+        hyphenate(key),
+        String(declaration),
+      );
     }
-    native.setAttribute(nodeId, "style", css);
     return undefined;
   }
 

@@ -266,7 +266,8 @@ and §D.16 with what the wire format actually permits.)*
     there is no `CssPropertyId` variant, so the `.web.bundle` wire format
     cannot carry it and no real bundle emits it. It therefore does not fit the
     wire-format subset framing of §A; it is a deliberate, user-directed W3C
-    extension, arriving only via **inline styles** (`set_inline_style`) and
+    extension, arriving only via **inline styles** (`set_inline_style` or the
+    CSSOM-like `set_inline_style_property`) and
     any future ingest path. In the vendored stylo fork, `contain` itself was
     already seeded in the lynx grammar (`lynx_properties.txt`); fork PR #9
     (squash-merged into the `lynx` branch) completed the css-contain-2 family

@@ -54,7 +54,8 @@ CSS supplied as text.
   stylesheets, rule objects, or locks accidentally.
 - **Mutation carries invalidation.** Matching-relevant setters such as
   `set_classes`, `set_attribute`, `add_element_state`,
-  `remove_element_state`, `set_inline_style`, `insert_before`,
+  `remove_element_state`, `set_inline_style`, `set_inline_style_property`,
+  `insert_before`,
   `remove_element`, `drop_element`, and `drop_subtree` record their own
   pre-mutation snapshots or scoped restyle hints before changing the tree.
   Stylesheet and device operations schedule the document root in the same call.
@@ -178,7 +179,10 @@ What that covers, and what it does not:
   read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
   `__GetEvents`). Classes, ids, attributes, and inline styles reach stylo
   through the ordinary `Document` setters, so they cascade and lay out on the
-  next flush;
+  next flush. A string-valued inline style uses the whole-attribute setter;
+  a record is cleared and fanned out in JavaScript into name-based
+  `set_inline_style_property` calls. This is the name/value subset of CSSOM
+  `setProperty` (no priority argument), with no numeric style-id ABI;
 - VM-neutral Element-PAPI boot: embedders inject the public
   `ScriptEngineFactory` / `ScriptEngine` host-function protocol; the private
   `MainThreadRuntime` installs the callbacks and performs the same boot for

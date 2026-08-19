@@ -10,6 +10,8 @@ interface BobcatNative {
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
   setAttribute(nodeId: number, name: string, value: string): void;
+  /** CSSOM-like single-property update; an empty value removes the property. */
+  set_node_property(nodeId: number, name: string, value: string): void;
   removeAttribute(nodeId: number, name: string): void;
   /** The attribute's value, or null when the element does not carry it. */
   getAttribute(nodeId: number, name: string): string | null;

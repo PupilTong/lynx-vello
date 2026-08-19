@@ -230,7 +230,8 @@ useful signal for currently-compatible versions of those libraries.
   adapter are all crate-private.
   The private `MainThreadRuntime`
   installs the global `bobcat` object (one Rust host function per member —
-  `createPage`, `createElement`, `setAttribute`, `removeAttribute`,
+  `createPage`, `createElement`, `setAttribute`, `set_node_property`,
+  `removeAttribute`,
   `getAttribute`, `tagName`, `insertBefore`,
   `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
   speaking DOM vocabulary over numeric `NodeId`s), evaluates the embedded
@@ -248,6 +249,17 @@ useful signal for currently-compatible versions of those libraries.
   `__SetInlineStyles`, `__AddEvent`) with the queries that read it back
   (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
   `__GetEvents`), and `__FlushElementTree`;
+  `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
+  one `style` attribute write, while a record first replaces the attribute
+  with an empty declaration block and then fans out, in enumeration order,
+  into one name-based `bobcat.set_node_property` call per non-null value.
+  Ordinary camelCase keys are hyphenated, while case-sensitive `--*` custom
+  property names pass through unchanged.
+  The host operation implements the name/value subset of CSSOM
+  `style.setProperty` (there is no priority argument, so an embedded
+  `!important` is invalid) and intentionally has no numeric-style-id variant:
+  numeric Lynx property ids belong to the
+  separate, still-unimplemented `__AddInlineStyle` surface, not this PAPI;
   unsupported globals remain precise `ReferenceError`s, including
   `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
