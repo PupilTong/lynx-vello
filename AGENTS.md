@@ -1016,6 +1016,30 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
 
+### Restricted-environment troubleshooting
+
+Some agent runners and automation environments may restrict GPU interfaces,
+Git metadata, or network access. Treat that as a hypothesis to test, not as the
+default explanation for a failure:
+
+- If a GPU-backed command reports that no adapter is available on a host that
+  is expected to expose one, retry the exact command outside the restricted
+  environment or with a narrowly scoped sandbox escalation, when available. A
+  successful retry identifies an environment limitation; if the retry still
+  fails, continue diagnosing the renderer, driver, and adapter selection.
+- If a Git operation needed to prepare or publish a pull request — such as
+  branch creation, staging, committing, or pushing — fails with a permission,
+  network, or authentication-like error, check whether the worktree's Git
+  metadata or required network access sits outside the current sandbox. Retry
+  only the failing operation with narrowly scoped escalation, when available;
+  if it still fails, diagnose the repository, credentials, or network itself.
+
+After a branch is pushed, create pull requests only through the installed
+GitHub plugin/app connector. Never use the GitHub CLI (`gh`) to create, submit,
+publish, or otherwise open a pull request. If the connector is unavailable or
+cannot create the pull request, stop and ask the user for direction instead of
+falling back to `gh`.
+
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
