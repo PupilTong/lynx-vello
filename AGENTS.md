@@ -1016,6 +1016,20 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
 
+### Codex GPU sandbox
+
+On macOS, Codex's `workspace-write` Seatbelt sandbox cannot enumerate Metal
+adapters even when the host has a usable GPU. Any command that initializes
+Metal, wgpu, or Vello — including GPU-backed tests, screenshot tests, headed or
+headless runners, and render benchmarks — must therefore be run outside the
+sandbox with an explicit sandbox escalation. Codex agents must request that
+escalation before the first attempt and keep reusable approvals scoped to the
+exact GPU command prefix. A `GpuError::NoAdapter` or equivalent adapter failure
+from inside the sandbox is an environment failure, not a product failure; rerun
+the same command with escalation before diagnosing the renderer. Compilation,
+formatting, linting, and CPU-only tests remain in the normal sandbox unless they
+independently require broader access.
+
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
