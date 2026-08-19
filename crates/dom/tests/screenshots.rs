@@ -104,7 +104,7 @@ fn object_fit_matrix_matches_reference() {
         );
         doc.dom
             .images_mut()
-            .insert_node(node, image_data(*width, *height, rgba.clone()));
+            .insert_node(node.to_bits(), image_data(*width, *height, rgba.clone()));
     }
 
     let actual =

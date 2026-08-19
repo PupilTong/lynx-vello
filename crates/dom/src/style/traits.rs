@@ -105,11 +105,11 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(Node::id(self))
+        OpaqueNode(Node::id(self).arena_key())
     }
 
     fn debug_id(self) -> usize {
-        Node::id(self)
+        Node::id(self).arena_key()
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {
@@ -152,7 +152,7 @@ impl<'a, T: Sync> TShadowRoot for &'a Node<T> {
         let host = self
             .shadow_host_id()
             .expect("TShadowRoot methods are only called on shadow roots");
-        self.tree()
+        self.arenas()
             .get(host)
             .expect("a shadow root never outlives its host")
     }
@@ -361,7 +361,7 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     fn shadow_root(&self) -> Option<&'a Node<T>> {
         let root = self.shadow_root_id()?;
         Some(
-            self.tree()
+            self.arenas()
                 .get(root)
                 .expect("a host's shadow root outlives the host"),
         )
@@ -562,7 +562,7 @@ impl<T: Sync> Element for &Node<T> {
     fn assigned_slot(&self) -> Option<Self> {
         let slot = self.assigned_slot_id()?;
         Some(
-            self.tree()
+            self.arenas()
                 .get(slot)
                 .expect("an assignment is cleared before its slot is removed"),
         )

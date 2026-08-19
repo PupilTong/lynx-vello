@@ -12,9 +12,13 @@
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
 /**
+ * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
+ *   Defaults to the real boundary's shape (2, 3, 4, ...); a test that needs to
+ *   prove the runtime carries native's number through rather than numbering
+ *   handles itself passes a sequence no counter would produce.
  * @returns {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }}
  */
-function createMockBobcat() {
+function createMockBobcat(issuedIds) {
   /** @type {unknown[][]} */
   const calls = [];
   /** @param {string} name */
@@ -30,24 +34,40 @@ function createMockBobcat() {
     }
     return value;
   };
-  let nextNodeId = 2;
+  // Mirrors the real boundary: the DOM reserves id 0, takes 1 for the
+  // document node, and hands the page 2, so the first created element is 3.
+  let nextNodeId = 3;
+  let issued = 0;
+  /** @returns {number} */
+  const issueNodeId = () => {
+    if (issuedIds !== undefined) {
+      const id = issuedIds[issued];
+      issued += 1;
+      if (id === undefined) {
+        throw new Error("the mock ran out of ids to issue");
+      }
+      return id;
+    }
+    const id = nextNodeId;
+    nextNodeId += 1;
+    return id;
+  };
   /** @type {Map<number, number>} */
   const parents = new Map();
   /** @type {Map<number, Map<string, string>>} */
   const attributes = new Map();
   /** @type {Map<number, string>} */
-  const tags = new Map([[1, "page"]]);
+  const tags = new Map([[2, "page"]]);
   return {
     calls,
     named,
     createPage: () => {
       calls.push(["createPage"]);
-      return 1;
+      return 2;
     },
     /** @param {string} tag */
     createElement: (tag) => {
-      const node = nextNodeId;
-      nextNodeId += 1;
+      const node = issueNodeId();
       tags.set(node, tag);
       calls.push(["createElement", tag]);
       return node;
@@ -289,8 +309,8 @@ describe("constructors", () => {
     __AppendElement(page, first);
     __AppendElement(page, second);
     expect(mock.named("insertBefore")).toEqual([
-      ["insertBefore", 1, 2, null],
-      ["insertBefore", 1, 3, null],
+      ["insertBefore", 2, 3, null],
+      ["insertBefore", 2, 4, null],
     ]);
   });
 
@@ -303,7 +323,7 @@ describe("constructors", () => {
   it("store raw text through setAttribute", () => {
     __CreateRawText("Hello, Lynx");
     expect(mock.named("setAttribute")).toEqual([
-      ["setAttribute", 2, "text", "Hello, Lynx"],
+      ["setAttribute", 3, "text", "Hello, Lynx"],
     ]);
   });
 });
@@ -320,13 +340,13 @@ describe("tree mutations", () => {
     expect(__RemoveElement(page, first)).toBe(first);
     expect(__ReplaceElement(second, first)).toBeUndefined();
     expect(mock.named("insertBefore")).toEqual([
-      ["insertBefore", 1, 2, null],
-      ["insertBefore", 1, 3, 2],
-      ["insertBefore", 1, 3, null],
-      ["insertBefore", 1, 3, null],
+      ["insertBefore", 2, 3, null],
+      ["insertBefore", 2, 4, 3],
+      ["insertBefore", 2, 4, null],
+      ["insertBefore", 2, 4, null],
     ]);
-    expect(mock.named("removeElement")).toEqual([["removeElement", 2]]);
-    expect(mock.named("replaceElement")).toEqual([["replaceElement", 3, 2]]);
+    expect(mock.named("removeElement")).toEqual([["removeElement", 3]]);
+    expect(mock.named("replaceElement")).toEqual([["replaceElement", 4, 3]]);
   });
 
   it("crash on foreign, primitive, or nullish handles", () => {
@@ -349,10 +369,10 @@ describe("__ReplaceElements", () => {
     __ReplaceElements(page, first, null);
     __ReplaceElements(page, first, []);
     expect(mock.named("insertBefore")).toEqual([
-      ["insertBefore", 1, 2, null],
-      ["insertBefore", 1, 3, null],
-      ["insertBefore", 1, 2, null],
-      ["insertBefore", 1, 2, null],
+      ["insertBefore", 2, 3, null],
+      ["insertBefore", 2, 4, null],
+      ["insertBefore", 2, 3, null],
+      ["insertBefore", 2, 3, null],
     ]);
   });
 
@@ -368,11 +388,11 @@ describe("__ReplaceElements", () => {
 
     __ReplaceElements(page, [newA, newB], [oldA, oldB]);
     expect(mock.calls).toEqual([
+      ["removeElement", 4],
+      ["parentNode", 3],
+      ["insertBefore", 2, 5, 3],
+      ["insertBefore", 2, 6, 3],
       ["removeElement", 3],
-      ["parentNode", 2],
-      ["insertBefore", 1, 4, 2],
-      ["insertBefore", 1, 5, 2],
-      ["removeElement", 2],
     ]);
   });
 
@@ -384,7 +404,7 @@ describe("__ReplaceElements", () => {
     mock.calls.length = 0;
 
     __ReplaceElements(page, replacement, detached);
-    expect(mock.calls).toEqual([["parentNode", 2]]);
+    expect(mock.calls).toEqual([["parentNode", 3]]);
   });
 });
 
@@ -399,9 +419,9 @@ describe("__SwapElement", () => {
 
     __SwapElement(a, b);
     expect(mock.calls).toEqual([
-      ["parentNode", 2],
       ["parentNode", 3],
-      ["swapElement", 2, 3],
+      ["parentNode", 4],
+      ["swapElement", 3, 4],
     ]);
   });
 
@@ -418,9 +438,9 @@ describe("__SwapElement", () => {
 
     __SwapElement(attached, detachedA);
     expect(mock.calls).toEqual([
-      ["parentNode", 2],
       ["parentNode", 3],
-      ["replaceElement", 3, 2],
+      ["parentNode", 4],
+      ["replaceElement", 4, 3],
     ]);
     mock.calls.length = 0;
 
@@ -428,16 +448,16 @@ describe("__SwapElement", () => {
     // the roles flip: the attached operand is replaced again.
     __SwapElement(detachedA, attached);
     expect(mock.calls).toEqual([
+      ["parentNode", 4],
       ["parentNode", 3],
-      ["parentNode", 2],
-      ["replaceElement", 2, 3],
+      ["replaceElement", 3, 4],
     ]);
     mock.calls.length = 0;
 
     __SwapElement(detachedA, detachedB);
     expect(mock.calls).toEqual([
-      ["parentNode", 3],
       ["parentNode", 4],
+      ["parentNode", 5],
     ]);
   });
 });
@@ -448,7 +468,7 @@ describe("__SetClasses", () => {
     mock.calls.length = 0;
 
     __SetClasses(view, "row bold");
-    expect(mock.calls).toEqual([["setAttribute", 2, "class", "row bold"]]);
+    expect(mock.calls).toEqual([["setAttribute", 3, "class", "row bold"]]);
   });
 
   it("removes the attribute for every falsy class list", () => {
@@ -457,7 +477,7 @@ describe("__SetClasses", () => {
       mock.calls.length = 0;
       __SetClasses(view, empty);
       expect(mock.calls, String(empty)).toEqual([
-        ["removeAttribute", 2, "class"],
+        ["removeAttribute", 3, "class"],
       ]);
     }
   });
@@ -481,7 +501,7 @@ describe("id", () => {
     mock.calls.length = 0;
 
     __SetID(view, "");
-    expect(mock.calls).toEqual([["removeAttribute", 2, "id"]]);
+    expect(mock.calls).toEqual([["removeAttribute", 3, "id"]]);
   });
 });
 
@@ -501,11 +521,30 @@ describe("__GetTag", () => {
 });
 
 describe("__GetElementUniqueID", () => {
-  it("reports the handle's node id", () => {
+  it("reports the handle's node id, which is the id native issued", () => {
     const page = __CreatePage("card", 0);
     const view = __CreateView(0);
-    expect(__GetElementUniqueID(page)).toBe(1);
-    expect(__GetElementUniqueID(view)).toBe(2);
+    expect(__GetElementUniqueID(page)).toBe(2);
+    expect(__GetElementUniqueID(view)).toBe(3);
+    expect(mock.named("createElement")).toHaveLength(1);
+  });
+
+  it("mints no id of its own: it reports back exactly what native issued", async () => {
+    // Ids no counter on this side could produce: out of order, with gaps.
+    // Anything the runtime derived itself would disagree with this sequence.
+    const issued = [41, 7, 900];
+    rstest.resetModules();
+    globalThis.bobcat = createMockBobcat(issued);
+    await import("../src/element-papi.js");
+
+    const created = [
+      __CreateView(0),
+      __CreateText(0),
+      __CreateElement("custom-widget", 0),
+    ];
+
+    expect(created.map((element) => __GetElementUniqueID(element)))
+      .toStrictEqual(issued);
   });
 
   it("reports -1 for a falsy or foreign element instead of throwing", () => {
@@ -522,7 +561,7 @@ describe("__SetInlineStyles", () => {
 
     __SetInlineStyles(view, "color:red;width:10px");
     expect(mock.calls).toEqual([
-      ["setAttribute", 2, "style", "color:red;width:10px"],
+      ["setAttribute", 3, "style", "color:red;width:10px"],
     ]);
   });
 
@@ -538,7 +577,7 @@ describe("__SetInlineStyles", () => {
     });
     expect(mock.calls).toEqual([[
       "setAttribute",
-      2,
+      3,
       "style",
       "background-color:red;border-top-left-radius:4;",
     ]]);
@@ -550,7 +589,7 @@ describe("__SetInlineStyles", () => {
       mock.calls.length = 0;
       __SetInlineStyles(view, empty);
       expect(mock.calls, String(empty)).toEqual([
-        ["removeAttribute", 2, "style"],
+        ["removeAttribute", 3, "style"],
       ]);
     }
   });
@@ -565,9 +604,9 @@ describe("__SetAttribute", () => {
     __SetAttribute(view, "flex-grow", 1);
     __SetAttribute(view, "clip-radius", true);
     expect(mock.calls).toEqual([
-      ["setAttribute", 2, "text", "hello"],
-      ["setAttribute", 2, "flex-grow", "1"],
-      ["setAttribute", 2, "clip-radius", "true"],
+      ["setAttribute", 3, "text", "hello"],
+      ["setAttribute", 3, "flex-grow", "1"],
+      ["setAttribute", 3, "clip-radius", "true"],
     ]);
   });
 
@@ -577,7 +616,7 @@ describe("__SetAttribute", () => {
       mock.calls.length = 0;
       __SetAttribute(view, "text", absent);
       expect(mock.calls, String(absent)).toEqual([
-        ["removeAttribute", 2, "text"],
+        ["removeAttribute", 3, "text"],
       ]);
     }
   });
@@ -590,9 +629,9 @@ describe("__SetAttribute", () => {
     __SetAttribute(view, "class", "row");
     __SetAttribute(view, "style", "color:red");
     expect(mock.calls).toEqual([
-      ["setAttribute", 2, "id", "header"],
-      ["setAttribute", 2, "class", "row"],
-      ["setAttribute", 2, "style", "color:red"],
+      ["setAttribute", 3, "id", "header"],
+      ["setAttribute", 3, "class", "row"],
+      ["setAttribute", 3, "style", "color:red"],
     ]);
   });
 

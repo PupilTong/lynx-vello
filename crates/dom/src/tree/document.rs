@@ -6,10 +6,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hughie::geometry::Size;
-use hughie::text::{TextContext, TextLayoutStore};
-use hughie::tree::{LayoutInput, LayoutSlot};
+use hughie::tree::LayoutInput;
 use rustc_hash::FxHashSet;
-use slab::Slab;
 use stylo::LocalName;
 use stylo::dom::OpaqueNode;
 use stylo::selector_parser::SnapshotMap;
@@ -17,119 +15,13 @@ use stylo::stylesheets::UrlExtraData;
 
 use crate::style::damage::StyleDamage;
 use crate::style::engine::StyleEngine;
+pub use crate::tree::arena::NodeId;
+pub(crate) use crate::tree::arena::{
+    DOCUMENT_ELEMENT_NODE_ID, DOCUMENT_NODE_ID, DocumentLayoutState, NodeLayoutState, NodeSlot,
+    PayloadSlot, TreeArenas,
+};
 use crate::tree::custom::CustomElementRegistry;
 use crate::tree::node::Node;
-
-pub type NodeId = usize;
-
-pub(crate) const DOCUMENT_NODE_ID: NodeId = 0;
-pub(crate) const DOCUMENT_ELEMENT_NODE_ID: NodeId = 1;
-const INITIAL_NODE_CAPACITY: usize = 8;
-
-pub(crate) enum PayloadSlot<T> {
-    Document,
-    ShadowRoot,
-    Node(T),
-}
-
-#[inline]
-pub(crate) fn slab_get_for_live_node<V>(slab: &Slab<V>, id: NodeId) -> &V {
-    slab.get(id)
-        .expect("live primary node must have matching arena state")
-}
-
-/// The fixed-address, document-owned arena set. `nodes` selects each `NodeId`;
-/// the payload slab inserts/removes in exactly the same order and asserts that
-/// its own free list returns that same key.
-pub(crate) struct TreeArenas<T> {
-    pub(crate) nodes: Slab<Node<T>>,
-    pub(crate) payloads: Slab<PayloadSlot<T>>,
-}
-
-impl<T> TreeArenas<T> {
-    fn new() -> Self {
-        Self {
-            nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-            payloads: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-        }
-    }
-
-    #[expect(
-        clippy::inline_always,
-        reason = "keep the synchronized slab inserts in the node-allocation hot path"
-    )]
-    #[inline(always)]
-    fn insert_side_state(&mut self, id: NodeId, payload: PayloadSlot<T>) {
-        assert_eq!(self.payloads.vacant_key(), id);
-        assert_eq!(self.payloads.insert(payload), id);
-    }
-
-    fn remove_side_state(&mut self, id: NodeId) -> PayloadSlot<T> {
-        self.payloads
-            .try_remove(id)
-            .expect("removed element/text node must have payload-arena state")
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct NodeLayoutState {
-    pub(crate) slot: LayoutSlot,
-    pub(crate) text: Option<Box<TextLayoutStore>>,
-    pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
-}
-
-pub(crate) struct DocumentLayoutState {
-    pub(crate) nodes: Slab<NodeLayoutState>,
-    pub(crate) text_context: Option<Box<TextContext>>,
-}
-
-impl DocumentLayoutState {
-    fn new() -> Self {
-        Self {
-            nodes: Slab::with_capacity(INITIAL_NODE_CAPACITY),
-            text_context: None,
-        }
-    }
-
-    fn insert(&mut self, id: NodeId) {
-        assert_eq!(self.nodes.vacant_key(), id);
-        assert_eq!(self.nodes.insert(NodeLayoutState::default()), id);
-    }
-
-    fn remove(&mut self, id: NodeId) {
-        self.nodes
-            .try_remove(id)
-            .expect("removed node must have layout-arena state");
-    }
-
-    pub(crate) fn text_parts(&mut self, id: NodeId) -> (&mut TextContext, &mut TextLayoutStore) {
-        let Self {
-            nodes,
-            text_context,
-        } = self;
-        let context = text_context
-            .get_or_insert_with(|| Box::new(TextContext::new()))
-            .as_mut();
-        let artifacts = nodes
-            .get_mut(id)
-            .expect("live node must have layout-arena state")
-            .text
-            .get_or_insert_with(|| Box::new(TextLayoutStore::default()))
-            .as_mut();
-        (context, artifacts)
-    }
-
-    pub(crate) fn clear_layout_cache(&mut self, id: NodeId) {
-        let node = self
-            .nodes
-            .get_mut(id)
-            .expect("live node must have layout-arena state");
-        node.slot.clear_layout_cache();
-        if let Some(artifacts) = node.text.as_deref_mut() {
-            artifacts.invalidate();
-        }
-    }
-}
 
 pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
@@ -154,7 +46,6 @@ pub struct Document<T> {
     relayout_root_ids: FxHashSet<NodeId>,
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
-    node_removal_epoch: u64,
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -167,7 +58,7 @@ impl<T: fmt::Debug> fmt::Debug for Document<T> {
         f.debug_struct("Document")
             .field("document_element", &self.document_element().id())
             .field("style_engine", &self.style_engine)
-            .field("nodes", &self.tree.nodes)
+            .field("nodes", &self.tree.nodes())
             .finish_non_exhaustive()
     }
 }
@@ -180,15 +71,17 @@ impl<T> Document<T> {
         let lock = style_engine.lock();
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
-        let owner = std::ptr::from_mut::<TreeArenas<T>>(tree.as_mut());
-        let root = tree.nodes.insert(Node::new_document(owner, lock, url_data));
+        tree.reserve_zero();
+        let root = tree.insert_node(PayloadSlot::Document, |owner, id| {
+            Node::new_document(owner, id, lock, url_data)
+        });
+        let slot = root;
         assert_eq!(
             root, DOCUMENT_NODE_ID,
-            "the DOM document node must occupy slab slot zero"
+            "the DOM document node must take the first id the document ever issues"
         );
-        tree.insert_side_state(root, PayloadSlot::Document);
         let mut layout = DocumentLayoutState::new();
-        layout.insert(root);
+        layout.insert(slot);
         let mut document = Self {
             style_engine,
             tree,
@@ -199,7 +92,6 @@ impl<T> Document<T> {
             relayout_root_ids: FxHashSet::default(),
             shadow_roots: 0,
             custom_elements: CustomElementRegistry::default(),
-            node_removal_epoch: 0,
             visual_epoch: 0,
             layout_dirty: false,
             layout_root_dirty: false,
@@ -209,13 +101,22 @@ impl<T> Document<T> {
         let root = document.create_element(root_tag, root_payload);
         assert_eq!(
             root, DOCUMENT_ELEMENT_NODE_ID,
-            "the document element must occupy slab slot one"
+            "the document element must take the second id the document ever issues"
         );
-        document.live_node_mut(DOCUMENT_NODE_ID).children.push(root);
-        document.live_node_mut(root).parent = Some(DOCUMENT_NODE_ID);
+        let document_slot = document.live_slot(DOCUMENT_NODE_ID);
+        let root_slot = document.live_slot(root);
+        document
+            .live_node_mut(DOCUMENT_NODE_ID)
+            .children
+            .push(root_slot);
+        document.live_node_mut(root).parent = Some(document_slot);
         document.mark_subtree_dirty(root);
         document.invalidate_layout(root);
         document
+    }
+
+    pub(crate) const fn input_state(&self) -> &crate::input::InputState {
+        &self.input
     }
 
     pub(crate) fn input_state_mut(&mut self) -> &mut crate::input::InputState {
@@ -230,8 +131,8 @@ impl<T> Document<T> {
         &mut self.style_engine
     }
 
-    pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut Slab<Node<T>>) {
-        (&mut self.style_engine, &mut self.tree.nodes)
+    pub(crate) const fn style_and_tree_parts(&mut self) -> (&mut StyleEngine, &mut TreeArenas<T>) {
+        (&mut self.style_engine, &mut self.tree)
     }
 
     pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
@@ -271,19 +172,30 @@ impl<T> Document<T> {
         self.layout_root_dirty |= reached_root;
     }
 
-    pub(crate) fn tree(&self) -> &Slab<Node<T>> {
-        &self.tree.nodes
+    pub(crate) fn arenas(&self) -> &TreeArenas<T> {
+        &self.tree
     }
 
-    pub(crate) fn tree_mut(&mut self) -> &mut Slab<Node<T>> {
-        &mut self.tree.nodes
+    pub(crate) fn arenas_mut(&mut self) -> &mut TreeArenas<T> {
+        &mut self.tree
     }
 
     pub(crate) fn live_node_mut(&mut self, id: NodeId) -> &mut Node<T> {
         self.tree
-            .nodes
             .get_mut(id)
             .expect("stale NodeId passed to a Document mutation method")
+    }
+
+    /// Resolves a node to its arena slot, for the state that lives outside
+    /// [`TreeArenas`].
+    #[inline]
+    pub(crate) fn slot(&self, id: NodeId) -> Option<NodeSlot> {
+        self.tree.slot(id)
+    }
+
+    #[inline]
+    pub(crate) fn live_slot(&self, id: NodeId) -> NodeSlot {
+        self.tree.live_slot(id)
     }
 
     pub(crate) fn layout_state(&self) -> &DocumentLayoutState {
@@ -305,11 +217,6 @@ impl<T> Document<T> {
     }
 
     #[must_use]
-    pub(crate) fn node_removal_epoch(&self) -> u64 {
-        self.node_removal_epoch
-    }
-
-    #[must_use]
     pub(crate) fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
@@ -318,20 +225,21 @@ impl<T> Document<T> {
         self.visual_epoch += 1;
     }
 
+    /// Every live node's layout state, in arena order. The keys are arena
+    /// slots, not ids: this walks storage, not identity.
     pub(crate) fn layout_data_mut(
         &mut self,
-    ) -> impl Iterator<Item = (NodeId, &mut NodeLayoutState)> {
-        self.layout.nodes.iter_mut()
+    ) -> impl Iterator<Item = (usize, &mut NodeLayoutState)> {
+        self.layout.iter_mut()
     }
 
-    pub(crate) fn snapshot_storage(&mut self) -> (&Slab<Node<T>>, &mut SnapshotMap) {
-        (&self.tree.nodes, &mut self.pending_snapshots)
+    pub(crate) fn snapshot_storage(&mut self) -> (&TreeArenas<T>, &mut SnapshotMap) {
+        (&self.tree, &mut self.pending_snapshots)
     }
 
     #[must_use]
     pub fn root_node(&self) -> &Node<T> {
         self.tree
-            .nodes
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
     }
@@ -342,7 +250,6 @@ impl<T> Document<T> {
     #[must_use]
     pub fn document_element(&self) -> &Node<T> {
         self.tree
-            .nodes
             .get(DOCUMENT_ELEMENT_NODE_ID)
             .expect("the document element is never removed")
     }
@@ -380,16 +287,13 @@ impl<T> Document<T> {
         })
     }
 
+    /// Files a node in all three arenas under one freshly issued id.
     pub(crate) fn allocate_node(
         &mut self,
         payload: PayloadSlot<T>,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let owner = std::ptr::from_mut::<TreeArenas<T>>(self.tree.as_mut());
-        let entry = self.tree.nodes.vacant_entry();
-        let id = entry.key();
-        entry.insert(make(owner, id));
-        self.tree.insert_side_state(id, payload);
+        let id = self.tree.insert_node(payload, make);
         self.layout.insert(id);
         id
     }
@@ -405,12 +309,12 @@ impl<T> Document<T> {
 
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&Node<T>> {
-        self.tree.nodes.get(id)
+        self.tree.get(id)
     }
 
     #[must_use]
     pub(crate) fn contains_node(&self, id: NodeId) -> bool {
-        self.tree.nodes.contains(id)
+        self.tree.contains(id)
     }
 
     #[must_use]
@@ -432,8 +336,9 @@ impl<T> Document<T> {
 
     #[must_use]
     pub(crate) fn child_position(&self, parent: NodeId, child: NodeId) -> Option<usize> {
+        let child = self.slot(child)?;
         self.get(parent)?
-            .child_ids()
+            .child_slots()
             .iter()
             .position(|&candidate| candidate == child)
     }
@@ -482,15 +387,19 @@ impl<T> Document<T> {
             None => self
                 .get(parent)
                 .expect("stale NodeId passed to Document::insert_before")
-                .child_ids()
+                .child_slots()
                 .len(),
             Some(reference) => self
                 .child_position(parent, reference)
                 .expect("insert_before reference must be a child of parent"),
         };
 
-        self.live_node_mut(parent).children.insert(index, child);
-        self.live_node_mut(child).parent = Some(parent);
+        let parent_slot = self.live_slot(parent);
+        let child_slot = self.live_slot(child);
+        self.live_node_mut(parent)
+            .children
+            .insert(index, child_slot);
+        self.live_node_mut(child).parent = Some(parent_slot);
         let appended = index + 1 == self.live_node_mut(parent).children.len();
         let contains_custom_elements = self.note_custom_subtree_inserted(child);
 
@@ -517,15 +426,17 @@ impl<T> Document<T> {
                 .expect("swap_element: stale NodeId")
                 .parent_id()
                 .expect("swap_element: both operands must be attached");
-            let siblings = document
-                .get(parent)
-                .expect("a child's parent is live")
-                .child_ids();
+            let node_slot = document.live_slot(node);
+            let parent_node = document.get(parent).expect("a child's parent is live");
+            let siblings = parent_node.child_slots();
             let index = siblings
                 .iter()
-                .position(|&sibling| sibling == node)
+                .position(|&sibling| sibling == node_slot)
                 .expect("a child appears in its parent's child list");
-            (parent, siblings.get(index + 1).copied())
+            let next = siblings
+                .get(index + 1)
+                .map(|&slot| document.arenas().at(slot).id());
+            (parent, next)
         };
         let (parent_a, next_a) = position(self, a);
         let (parent_b, next_b) = position(self, b);
@@ -569,16 +480,16 @@ impl<T> Document<T> {
 
         self.invalidate_layout(child);
 
+        let child_slot = self.live_slot(child);
         let removed_index = {
             let parent_node = self
                 .tree
-                .nodes
                 .get_mut(parent)
                 .expect("internal tree link must resolve to a live node");
             let index = parent_node
                 .children
                 .iter()
-                .position(|&candidate| candidate == child)
+                .position(|&candidate| candidate == child_slot)
                 .expect("child must appear in its parent's child list");
             parent_node.children.remove(index);
             index
@@ -619,10 +530,10 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.drain_reactions(base);
-        for child in self.live(id).child_ids().to_vec() {
+        let children: Vec<NodeId> = self.live(id).child_ids().to_vec();
+        for child in children {
             self.unlink_from_parent(child);
         }
-        self.node_removal_epoch += 1;
         self.note_visual_mutation();
         let (_, payload) = self.free_node(id);
         self.prune_relayout_roots();
@@ -630,6 +541,7 @@ impl<T> Document<T> {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
+            PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
         }
     }
 
@@ -650,13 +562,18 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.drain_reactions(base);
-        self.node_removal_epoch += 1;
         self.note_visual_mutation();
         let mut removed = Vec::new();
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let (node, payload) = self.free_node(current);
-            stack.extend_from_slice(&node.children);
+            // The node is already out of the arenas, so its child links have
+            // to be turned back into ids before the walk can follow them.
+            stack.extend(
+                node.child_slots()
+                    .iter()
+                    .map(|&slot| self.tree.at(slot).id()),
+            );
             if let Some(root) = node.shadow_root_id() {
                 stack.push(root);
             }
@@ -664,19 +581,21 @@ impl<T> Document<T> {
                 PayloadSlot::Node(payload) => removed.push(payload),
                 PayloadSlot::ShadowRoot => {}
                 PayloadSlot::Document => unreachable!("the document node cannot be removed"),
+                PayloadSlot::Reserved => unreachable!("no id resolves to the reservation"),
             }
         }
         self.prune_relayout_roots();
         removed
     }
 
+    /// Empties all three arenas of one node and retires its id.
     fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
-        let removed_snapshot = self.pending_snapshots.remove(&OpaqueNode(id)).is_some();
-        let node = self
-            .tree
-            .nodes
-            .try_remove(id)
-            .expect("subtree links always resolve while removing");
+        let removed_snapshot = self
+            .pending_snapshots
+            .remove(&OpaqueNode(id.arena_key()))
+            .is_some();
+        let (node, payload) = self.tree.remove_node(id);
+        let slot = id;
         debug_assert_eq!(
             removed_snapshot,
             node.snapshot_present(),
@@ -685,17 +604,17 @@ impl<T> Document<T> {
         if node.is_shadow_root() {
             self.shadow_roots -= 1;
         }
-        self.layout.remove(id);
+        self.layout.remove(slot);
         self.forget_reactions(id);
-        (node, self.tree.remove_side_state(id))
+        (node, payload)
     }
 
     fn prune_relayout_roots(&mut self) {
-        let nodes = &self.tree.nodes;
+        let tree = &self.tree;
         self.relayout_roots
-            .retain(|pending| nodes.contains(pending.node_id));
+            .retain(|pending| tree.contains(pending.node_id));
         self.relayout_root_ids
-            .retain(|&parked_id| nodes.contains(parked_id));
+            .retain(|&parked_id| tree.contains(parked_id));
     }
 
     pub(crate) fn take_snapshot_map(&mut self) -> SnapshotMap {
@@ -703,8 +622,8 @@ impl<T> Document<T> {
         for opaque in self.pending_snapshots.keys() {
             let node = self
                 .tree
-                .nodes
-                .get(opaque.0)
+                .id_at_arena_key(opaque.0)
+                .and_then(|id| self.tree.get(id))
                 .expect("queued snapshot must belong to a live node");
             debug_assert!(node.is_element(), "only elements can own Stylo snapshots");
             debug_assert_eq!(
@@ -737,7 +656,10 @@ impl<T> Document<T> {
 
     fn retain_unhandled_snapshots(&self, snapshots: &mut SnapshotMap) {
         snapshots.retain(|opaque, _| {
-            let node = self.tree.nodes.get(opaque.0);
+            let node = self
+                .tree
+                .id_at_arena_key(opaque.0)
+                .and_then(|id| self.tree.get(id));
             debug_assert!(node.is_some(), "queued snapshot outlived its node");
             let Some(node) = node else {
                 return false;
@@ -764,7 +686,7 @@ impl<T> Document<T> {
         while let Some(current) = stack.pop() {
             let harvested = {
                 let (harvested, descend) = {
-                    let Some(node) = self.tree.nodes.get_mut(current) else {
+                    let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
                     let mut refreshed = None;
@@ -782,10 +704,14 @@ impl<T> Document<T> {
                 if descend {
                     let node = self
                         .tree
-                        .nodes
                         .get(current)
                         .expect("the node was live one statement ago");
-                    stack.extend_from_slice(node.flat_children());
+                    let arenas = &self.tree;
+                    stack.extend(
+                        node.flat_children()
+                            .iter()
+                            .map(|&slot| arenas.at(slot).id()),
+                    );
                 }
                 harvested
             };
@@ -793,16 +719,15 @@ impl<T> Document<T> {
                 continue;
             };
             if damage.needs_relayout() {
-                if let Some(element) = self.tree.nodes.get(current) {
-                    for &child_id in element.flat_children() {
-                        if self
-                            .tree
-                            .nodes
-                            .get(child_id)
-                            .is_some_and(Node::is_text_node)
-                        {
-                            self.layout.clear_layout_cache(child_id);
-                        }
+                if let Some(element) = self.tree.get(current) {
+                    let text_children: Vec<NodeSlot> = element
+                        .flat_children()
+                        .iter()
+                        .copied()
+                        .filter(|&slot| self.tree.at(slot).is_text_node())
+                        .collect();
+                    for slot in text_children {
+                        self.layout.clear_layout_cache(slot);
                     }
                 }
                 self.invalidate_layout(current);
@@ -941,33 +866,41 @@ pub(crate) mod tests {
         document.swap_element(attached, detached);
     }
 
+    /// The three arenas rise and fall together, the freed *storage* comes
+    /// back, and the freed *id* never does.
     #[test]
-    fn slabs_follow_primary_node_lifetime_and_id_reuse() {
+    fn arena_storage_is_reused_while_the_id_that_named_it_retires() {
         let mut document: Document<u32> = Document::new(device(), "page", 1);
         let id = document.create_element("view", 7);
+        let slot = document.live_slot(id);
 
-        assert!(document.tree.nodes.contains(id));
+        assert!(document.contains_node(id));
         assert!(matches!(
-            document.tree.payloads.get(id),
-            Some(PayloadSlot::Node(7))
+            document.arenas().payload_at(slot),
+            PayloadSlot::Node(7)
         ));
-        assert!(document.layout.nodes.get(id).is_some());
+        assert!(document.layout_cache_is_empty(id).is_some());
 
         assert_eq!(document.drop_subtree(id), vec![7]);
-        assert!(!document.tree.nodes.contains(id));
-        assert!(document.tree.payloads.get(id).is_none());
-        assert!(document.layout.nodes.get(id).is_none());
-        assert_eq!(document.tree.nodes.vacant_key(), id);
-        assert_eq!(document.tree.payloads.vacant_key(), id);
-        assert_eq!(document.layout.nodes.vacant_key(), id);
+        assert!(!document.contains_node(id));
+        assert!(
+            document.get(id).is_none(),
+            "a retired id resolves to nothing, forever"
+        );
+        assert!(document.layout_cache_is_empty(id).is_none());
 
-        let reused = document.create_text_node("replacement", 11);
-        assert_eq!(reused, id, "the primary slab should reuse its vacant ID");
-        assert_eq!(document.get(reused).unwrap().payload(), &11);
-        assert_eq!(document.layout_cache_is_empty(reused), Some(true));
+        let next = document.create_text_node("replacement", 11);
+        assert_ne!(next, id, "a retired id is never handed out again");
+        assert_eq!(
+            document.live_slot(next).arena_key(),
+            slot.arena_key(),
+            "the freed storage is handed to the next node"
+        );
+        assert_eq!(document.get(next).unwrap().payload(), &11);
+        assert_eq!(document.layout_cache_is_empty(next), Some(true));
         assert_eq!(
             document
-                .get(reused)
+                .get(next)
                 .unwrap()
                 .styling_data()
                 .snapshot_flags
@@ -975,6 +908,42 @@ pub(crate) mod tests {
             0
         );
         assert!(document.pending_snapshots.is_empty());
+        assert!(
+            document.get(id).is_none(),
+            "reusing the storage must not resurrect the id that named it"
+        );
+    }
+
+    /// A handle names one node for that node's whole life and is refused
+    /// afterwards, however many nodes reuse its storage. That is the guarantee
+    /// the deleted id table used to buy with a monotonic counter, and the
+    /// generation buys it without one.
+    #[test]
+    fn a_handle_never_names_a_later_occupant_of_its_storage() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let root = document.document_element().id();
+        assert_eq!(
+            (DOCUMENT_NODE_ID.arena_key(), root.arena_key()),
+            (1, 2),
+            "arena key zero is reserved, so the document node and element take the next two"
+        );
+
+        let mut retired = Vec::new();
+        for _ in 0..8 {
+            let id = document.create_element("view", ());
+            assert!(
+                document.get(id).is_some(),
+                "a fresh handle names its own node"
+            );
+            document.drop_subtree(id);
+            retired.push(id);
+            for &dead in &retired {
+                assert!(
+                    document.get(dead).is_none(),
+                    "every retired handle stays refused as its storage is reused"
+                );
+            }
+        }
     }
 
     #[test]
@@ -986,10 +955,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn drop_subtree_prunes_the_parked_id_set_so_a_reused_slot_is_not_stale() {
+    fn drop_subtree_prunes_the_parked_id_set_so_reused_storage_is_not_stale() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let a = document.document_element().id();
         let b = document.create_element("view", ());
+        let slot = document.live_slot(b);
         document.append_child(a, b);
 
         document.record_relayout_root(b, LayoutInput::default());
@@ -1001,11 +971,15 @@ pub(crate) mod tests {
             "the removed id must not remain in the parked set",
         );
 
-        let reused = document.create_element("view", ());
-        assert_eq!(reused, b, "the freed slab slot is reused");
+        let next = document.create_element("view", ());
+        assert_eq!(
+            document.live_slot(next).arena_key(),
+            slot.arena_key(),
+            "the freed storage is handed to the next node",
+        );
         assert!(
-            !document.relayout_root_ids.contains(&reused),
-            "a reused slab id must not inherit stale parked state",
+            !document.relayout_root_ids.contains(&next),
+            "a node reusing freed storage must not inherit stale parked state",
         );
     }
 
@@ -1031,13 +1005,13 @@ pub(crate) mod tests {
         assert!(
             document
                 .pending_snapshots
-                .contains_key(&OpaqueNode(detached)),
+                .contains_key(&OpaqueNode(detached.arena_key())),
             "a snapshot outside the traversed document tree must stay pending"
         );
         assert!(
             !document
                 .pending_snapshots
-                .contains_key(&OpaqueNode(connected)),
+                .contains_key(&OpaqueNode(connected.arena_key())),
             "the handled connected snapshot must be retired"
         );
         assert_eq!(
@@ -1053,11 +1027,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn snapshot_queue_coalesces_and_subtree_removal_purges_reusable_ids() {
+    fn snapshot_queue_coalesces_and_subtree_removal_purges_queued_snapshots() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let root = document.document_element().id();
         let removed = document.create_element("view", ());
         let descendant = document.create_element("view", ());
+        let removed_slot = document.live_slot(removed);
+        let descendant_slot = document.live_slot(descendant);
         document.append_child(removed, descendant);
         document.append_child(root, removed);
         document.flush_styles_with_damage_sink(&mut |_, _| {});
@@ -1072,7 +1048,7 @@ pub(crate) mod tests {
         let snapshot = document
             .pending_snapshots
             .iter()
-            .find_map(|(opaque, snapshot)| (opaque.0 == removed).then_some(snapshot))
+            .find_map(|(opaque, snapshot)| (opaque.0 == removed.arena_key()).then_some(snapshot))
             .unwrap();
         assert!(snapshot.class_changed);
         assert!(snapshot.id_changed);
@@ -1085,15 +1061,16 @@ pub(crate) mod tests {
             "removing a subtree must purge every queued snapshot"
         );
 
-        let reused = document.create_element("replacement", ());
+        let next = document.create_element("replacement", ());
         assert!(
-            [removed, descendant].contains(&reused),
-            "the primary slab should reuse an ID from the removed subtree"
+            [removed_slot.arena_key(), descendant_slot.arena_key()]
+                .contains(&document.live_slot(next).arena_key()),
+            "the next node should take storage freed by the removed subtree"
         );
         assert_eq!(
-            snapshot_flags(&document, reused),
+            snapshot_flags(&document, next),
             0,
-            "a reused ID must not inherit snapshot lifecycle flags"
+            "reused storage must not carry snapshot lifecycle flags into its new node"
         );
     }
 }

@@ -483,19 +483,32 @@ fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
     arguments.get(index).unwrap_or(&HostValue::Undefined)
 }
 
+/// The largest integer an `f64` represents exactly. A packed `NodeId` is built
+/// to stay under it, so a handle survives the script boundary unchanged.
+const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
+
+/// A `NodeId` crossing into script *is* the element's Lynx `unique_id`: the DOM
+/// issues it, and `__GetElementUniqueID` hands back the same number the
+/// creating PAPI returned.
+///
+/// The handle carries both the arena key and the generation that key was at, so
+/// it crosses packed into one integer. The generation is what makes a stale
+/// handle safe: script holds these for as long as it likes, and the collector
+/// hands one back to `dropElement` after the element is gone, so an id that has
+/// outlived its element must resolve to nothing rather than to whatever took
+/// its place.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "slab indices stay far below f64's exact-integer range"
+    reason = "a packed handle is built to stay inside f64's exact-integer range"
 )]
 fn node_id_value(node: dom::NodeId) -> HostValue {
-    HostValue::Number(node as f64)
+    HostValue::Number(node.to_bits() as f64)
 }
 
 #[allow(
-    clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "the bounds and integer checks make the accepted value a representable NodeId"
+    reason = "the bounds and integer checks above make the value a representable handle"
 )]
 fn node_id_argument(
     function: &str,
@@ -505,12 +518,13 @@ fn node_id_argument(
     let HostValue::Number(value) = *argument(arguments, index) else {
         return Err(format!("{function} expects a number for argument {index}"));
     };
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > usize::MAX as f64 {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= MAX_EXACT_INTEGER {
         return Err(format!(
             "{function} expects a non-negative integer node id for argument {index}"
         ));
     }
-    Ok(value as dom::NodeId)
+    dom::NodeId::from_bits(value as u64)
+        .ok_or_else(|| format!("{function} got a number that is no element id: {value}"))
 }
 
 fn optional_node_id_argument(
@@ -541,6 +555,14 @@ mod tests {
     use super::*;
     use crate::tree::{PageConfig, Viewport, new_document};
 
+    /// The handle a packed id names. A handle carries a generation as well as
+    /// an arena key, so a test spells one the way script sees it — and for a
+    /// document that has freed nothing the generation is zero, which is why
+    /// these read as the small integers the PAPI hands out.
+    fn node_id(bits: u64) -> dom::NodeId {
+        dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
+    }
+
     fn runtime() -> (MainThreadRuntime, SharedTree) {
         let elements = SharedTree::new(new_document(
             Viewport::new(393.0, 727.0),
@@ -567,7 +589,7 @@ mod tests {
             )
             .expect("boot");
 
-        assert!(elements.tree().get(2).is_some());
+        assert!(elements.tree().get(node_id(3)).is_some());
     }
 
     #[test]
@@ -608,6 +630,65 @@ mod tests {
         );
     }
 
+    /// The number script holds *is* the DOM's `NodeId` and the element's
+    /// Lynx `unique_id` — one identity, issued by native — and dropping an
+    /// element retires it. The element built afterwards reuses the freed
+    /// node's storage but reports a different `unique_id`, so a handle that
+    /// outlived its element can only ever name nothing.
+    #[test]
+    fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  let doomed = __CreateView(0);
+                  __AppendElement(page, doomed);
+                  if (__GetElementUniqueID(doomed) !== 3) {
+                    throw new Error(
+                      'the first element is node 3, got ' + __GetElementUniqueID(doomed),
+                    );
+                  }
+                  __RemoveElement(page, doomed);
+                  doomed = undefined;
+                };
+                ",
+                "app:///collected.js",
+            )
+            .expect("main-thread script");
+        assert!(
+            elements.tree().get(node_id(3)).is_some(),
+            "the detached element is still allocated while script could reach it"
+        );
+
+        runtime.collect_garbage().expect("collection");
+        assert!(
+            elements.tree().get(node_id(3)).is_none(),
+            "a swept handle drops its element through the finalization registry"
+        );
+
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const replacement = __CreateView(0);
+                  __AppendElement(page, replacement);
+                  if (__GetElementUniqueID(replacement) === 3) {
+                    throw new Error('a retired unique id was handed to a new element');
+                  }
+                };
+                ",
+                "app:///replacement.js",
+            )
+            .expect("main-thread script");
+        assert!(
+            elements.tree().get(node_id(3)).is_none(),
+            "and the retired id keeps naming nothing"
+        );
+    }
+
     #[test]
     fn classes_attributes_and_identity_queries_reach_the_private_document() {
         let (mut runtime, elements) = runtime();
@@ -627,8 +708,8 @@ mod tests {
                   if (__GetTag(view) !== 'view' || __GetTag(page) !== 'page') {
                     throw new Error('__GetTag must report the Lynx tag');
                   }
-                  if (__GetElementUniqueID(page) !== 1) {
-                    throw new Error('the page is node 1, got ' + __GetElementUniqueID(page));
+                  if (__GetElementUniqueID(page) !== 2) {
+                    throw new Error('the page is node 2, got ' + __GetElementUniqueID(page));
                   }
                 };
                 ",
@@ -637,7 +718,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(node_id(3)).expect("the view is live");
         assert_eq!(view.classes().collect::<Vec<_>>(), ["row", "bold"]);
         assert_eq!(view.id_attribute(), Some("header"));
         assert_eq!(view.attribute("flex-grow"), Some("1"));
@@ -670,7 +751,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(node_id(3)).expect("the view is live");
         assert_eq!(view.classes().len(), 0);
         assert_eq!(view.id_attribute(), None);
         assert_eq!(view.attribute("text"), None);
@@ -697,7 +778,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        for (id, expected) in [(2, 10.0_f32), (3, 20.0_f32)] {
+        for (id, expected) in [(node_id(3), 10.0_f32), (node_id(4), 20.0_f32)] {
             let layout = elements
                 .rounded_layout(id)
                 .expect("the styled view is laid out");
@@ -729,7 +810,7 @@ mod tests {
         let elements = elements.tree();
         assert_eq!(
             elements
-                .get(2)
+                .get(node_id(3))
                 .expect("the view is live")
                 .attribute("style"),
             Some("padding-left:4px;")
@@ -755,9 +836,11 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(node_id(3)).expect("the view is live");
         assert_eq!(view.attribute("style"), None);
-        let layout = elements.rounded_layout(2).expect("the view is laid out");
+        let layout = elements
+            .rounded_layout(node_id(3))
+            .expect("the view is laid out");
         assert!(
             (layout.size.width - 393.0).abs() < f32::EPSILON,
             "the cleared width falls back to the page's, got {}",
@@ -796,7 +879,7 @@ mod tests {
             .expect("main-thread script");
 
         let elements = elements.tree();
-        let view = elements.get(2).expect("the view is live");
+        let view = elements.get(node_id(3)).expect("the view is live");
         assert_eq!(
             view.attributes().len(),
             0,

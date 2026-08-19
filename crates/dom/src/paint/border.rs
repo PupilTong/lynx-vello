@@ -596,7 +596,7 @@ mod tests {
         };
         let padding_box = Rect::new(9.0, 6.0, 54.0, 37.0);
         let fragment = BoxFragment {
-            node: 0,
+            node: crate::tree::document::DOCUMENT_NODE_ID,
             transform: crate::vello::kurbo::Affine::IDENTITY,
             border_box: Rect::new(0.0, 0.0, 60.0, 40.0),
             padding_box,

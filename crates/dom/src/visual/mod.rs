@@ -9,10 +9,11 @@
 //! that retained frame backwards as pure reads — hit testing never re-runs
 //! the pipeline. Neither the frame nor the painter crosses the document API
 //! boundary.
-//! A frame is pinned to the document's node-removal epoch: after any
-//! `drop_subtree` a freed id can be recycled by a later creation, so the
-//! hit queries fail closed on a stale frame — they answer nothing until the
-//! next render — rather than returning a recycled node for old geometry.
+//! The hit queries answer from the retained frame however stale it is,
+//! skipping only the items whose node has since been freed. That is safe
+//! because a [`crate::NodeId`] is retired on free and never reissued: an id
+//! the frame still names resolves either to the node it was drawn for or to
+//! nothing, never to a different node that took its place.
 //! Painting is pinned harder — to the document's private visual-mutation
 //! epoch via its freshness assertion, let-it-crash — because it resolves the
 //! frame against live styles/layouts/text, which any visual mutation
@@ -96,7 +97,6 @@ pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
-    epoch: u64,
     visual_epoch: u64,
 }
 
@@ -209,33 +209,33 @@ impl<T> Document<T> {
     /// Returns rendered elements under a point from front to back.
     #[must_use]
     pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
-        self.with_rendered_frame(|frame| frame.elements_at(point))
+        self.with_rendered_frame(|frame| frame.elements_at(self, point))
             .unwrap_or_default()
     }
 
     /// [`Self::elements_from_point`] for a batch of points answered from one
     /// frame read; results are index-parallel with `points`. Same pure-read
-    /// contract: with no trustworthy rendered frame every answer is empty.
+    /// contract: before the first render every answer is empty.
     #[must_use]
     pub fn elements_from_points(&self, points: &[Point2D<f32>]) -> Vec<Vec<NodeId>> {
         self.with_rendered_frame(|frame| {
             points
                 .iter()
-                .map(|point| frame.elements_at(*point))
+                .map(|point| frame.elements_at(self, *point))
                 .collect()
         })
         .unwrap_or_else(|| vec![Vec::new(); points.len()])
     }
 
     pub(crate) fn rendered_element_at(&self, point: Point2D<f32>) -> Option<NodeId> {
-        self.with_rendered_frame(|frame| frame.first_element_at(point))
+        self.with_rendered_frame(|frame| frame.first_element_at(self, point))
             .flatten()
     }
 
     fn with_rendered_frame<R>(&self, read: impl FnOnce(&PaintOrder) -> R) -> Option<R> {
         let painter = self.painter.borrow();
         let frame = painter.frame()?;
-        frame.names_live_nodes(self).then(|| read(frame))
+        Some(read(frame))
     }
 }
 

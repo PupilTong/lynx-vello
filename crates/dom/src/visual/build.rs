@@ -43,7 +43,7 @@ use crate::layout::{
     establishes_fixed_containing_block, skips_contents,
 };
 use crate::scroll::ScrollAxes;
-use crate::tree::document::{Document, DocumentLayoutState, TreeArenas, slab_get_for_live_node};
+use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 use crate::{NodeId, scroll};
 
@@ -59,7 +59,6 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         layers: Vec::new(),
         current_layer: None,
     };
-    let epoch = document.node_removal_epoch();
     let visual_epoch = document.visual_epoch();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
@@ -79,7 +78,6 @@ pub(crate) fn build<T>(document: &Document<T>) -> PaintOrder {
         items: builder.items,
         clips: builder.clips,
         layers: builder.layers,
-        epoch,
         visual_epoch,
     }
 }
@@ -144,15 +142,22 @@ struct Builder<'doc, T> {
 
 impl<'doc, T> Builder<'doc, T> {
     fn node(&self, id: NodeId) -> &'doc Node<T> {
-        slab_get_for_live_node(&self.tree.nodes, id)
+        self.tree.live(id)
     }
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
-        &slab_get_for_live_node(&self.state.nodes, id).slot.rounded
+        &self.state.at(self.tree.live_slot(id)).slot.rounded
+    }
+
+    /// The rounded layout of a node the walk already holds a slot for. The
+    /// paint walk descends through [`hughie::tree::LayoutTree`], which runs
+    /// in slot space, so its children arrive resolved.
+    fn rounded_at(&self, slot: NodeSlot) -> &'doc Layout {
+        &self.state.at(slot).slot.rounded
     }
 
     fn scroll_translation(&self, id: NodeId, style: &ComputedValues) -> Vector2D<f32> {
-        let state = slab_get_for_live_node(&self.state.nodes, id);
+        let state = self.state.at(self.tree.live_slot(id));
         let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
         else {
             return Vector2D::zero();
@@ -278,16 +283,17 @@ impl<'doc, T> Builder<'doc, T> {
         stream: &mut Vec<ItemRecord>,
         seq: &mut u32,
     ) {
-        let mut children: Vec<(u32, usize, NodeId)> = self
+        let mut children: Vec<(u32, usize, NodeSlot)> = self
             .tree
-            .flattened_children(node)
+            .flattened_children(self.tree.live_slot(node))
             .enumerate()
-            .map(|(index, (child, _, _))| (self.rounded(child).order, index, child))
+            .map(|(index, (child, _, _))| (self.rounded_at(child).order, index, child))
             .collect();
         children.sort_unstable_by_key(|&(order, index, _)| (order, index));
 
-        for (_, _, child) in children {
-            let child_node = self.node(child);
+        for (_, _, child_slot) in children {
+            let child_node = self.tree.at(child_slot);
+            let child = child_node.id();
             if child_node.is_text_node() {
                 if let Some(record) = self.text_record(child_node, node_offset, ctx) {
                     stream.push(record);

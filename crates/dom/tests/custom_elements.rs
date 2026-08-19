@@ -869,7 +869,7 @@ fn removing_a_later_sibling_from_a_callback_drains_that_siblings_whole_queue() {
 }
 
 #[test]
-fn a_freed_id_recycled_by_a_later_creation_receives_no_stale_reaction() {
+fn a_node_taking_freed_storage_receives_no_stale_reaction() {
     let log = log();
     let mut doc = Doc::new();
     let root = doc.root;
@@ -878,13 +878,20 @@ fn a_freed_id_recycled_by_a_later_creation_receives_no_stale_reaction() {
     doc.dom.drop_subtree(element);
     let _ = take(&log);
 
-    let recycled = doc.dom.create_element("plain", ());
-    assert_eq!(recycled, element, "the arena reuses the freed slot");
-    doc.dom.append_child(root, recycled);
+    let replacement = doc.dom.create_element("plain", ());
+    assert_ne!(
+        replacement, element,
+        "the freed id is retired, so the replacement gets a new one"
+    );
+    doc.dom.append_child(root, replacement);
 
     assert!(
         take(&log).is_empty(),
-        "the recycled id inherits nothing from its previous occupant"
+        "the node that took the freed storage inherits nothing from its predecessor"
+    );
+    assert!(
+        doc.dom.get(element).is_none(),
+        "and the freed id still names nothing"
     );
 }
 
@@ -930,7 +937,7 @@ fn a_caught_pin_panic_leaves_the_subtree_intact() {
 
 #[test]
 #[should_panic(expected = "freeing it is not")]
-fn a_constructor_that_frees_and_recycles_its_own_id_panics() {
+fn a_constructor_that_frees_its_own_id_and_creates_a_replacement_panics() {
     let log = log();
     let mut doc = Doc::new();
     define(

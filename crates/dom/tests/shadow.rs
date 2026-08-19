@@ -577,6 +577,60 @@ fn a_slotted_text_node_lays_out_under_its_slot() {
     );
 }
 
+/// A slot that is detached but kept alive must let go of what it was
+/// assigning. Its links name arena storage that the assigned nodes can be
+/// freed out of while the detached slot is still readable, and an unassigned
+/// slot renders fallback content anyway — so the empty list is both the safe
+/// answer and the correct one.
+#[test]
+fn a_detached_slot_drops_its_assignments_and_survives_their_removal() {
+    let mut harness = Harness::new();
+    let slot = harness.shadow_el(harness.shadow, "slot");
+    let slottable = harness.doc.el(harness.host, "a");
+    harness.doc.flush();
+    assert_eq!(harness.doc.dom.assigned_slot(slottable), Some(slot));
+    assert_eq!(harness.doc.dom.assigned_nodes(slot), [slottable]);
+
+    // Detach the slot without freeing it: `assign_slots` can no longer reach
+    // it, so nothing else will rewrite what it holds.
+    harness.doc.dom.remove_element(slot);
+    assert!(
+        harness.doc.dom.assigned_nodes(slot).is_empty(),
+        "a slot outside the shadow tree assigns nothing"
+    );
+    assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
+
+    // Freeing what it used to hold must leave the detached slot readable.
+    harness.doc.dom.drop_element(slottable);
+    assert!(harness.doc.dom.get(slottable).is_none());
+    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+
+    // And it must still be usable as an ordinary element afterwards.
+    harness.doc.dom.append_child(harness.doc.root, slot);
+    harness.doc.flush();
+    assert!(harness.doc.dom.get(slot).is_some());
+}
+
+/// The same hazard one level down: the slot leaves inside a detached
+/// container rather than on its own.
+#[test]
+fn a_slot_detached_inside_a_container_also_drops_its_assignments() {
+    let mut harness = Harness::new();
+    let container = harness.shadow_el(harness.shadow, "div");
+    let slot = harness.shadow_el(container, "slot");
+    let slottable = harness.doc.el(harness.host, "a");
+    harness.doc.flush();
+    assert_eq!(harness.doc.dom.assigned_nodes(slot), [slottable]);
+
+    harness.doc.dom.remove_element(container);
+    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+    assert_eq!(harness.doc.dom.assigned_slot(slottable), None);
+
+    harness.doc.dom.drop_element(slottable);
+    assert!(harness.doc.dom.assigned_nodes(slot).is_empty());
+    harness.doc.flush();
+}
+
 #[test]
 fn removing_a_slot_stops_rendering_what_it_held() {
     let mut harness = Harness::new();
@@ -696,7 +750,7 @@ fn appending_a_long_child_list_agrees_with_a_full_reassignment() {
 
     assert_eq!(
         doc.dom.assigned_nodes(slot),
-        incremental.as_slice(),
+        incremental,
         "a full reassignment reproduces what the appends built"
     );
 }

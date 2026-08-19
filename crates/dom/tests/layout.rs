@@ -895,8 +895,13 @@ fn style_width_change_relayouts_without_manual_invalidation() {
     assert_eq!(h.rect(b).2, 160.0);
 }
 
+/// A parked relayout root names a containment boundary that may be gone by
+/// the time the next pass runs. Its id can never come back attached to a
+/// different node, so the pruning is no longer an aliasing defense — but a
+/// replacement built on the freed node's storage must still not inherit the
+/// parked pass, and must obey the skipped-contents subtree it is placed in.
 #[test]
-fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
+fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
     let mut h = Harness::new("page { display: flex; width: 300px; height: 100px; }");
     let root = h.doc.root;
     let outer = h.doc.el(root, "view");
@@ -928,28 +933,36 @@ fn removed_boundary_is_not_replayed_after_its_node_id_is_reused() {
 
     assert_eq!(h.doc.dom.drop_subtree(old_boundary).len(), 2);
 
-    let first_reused = h.doc.dom.create_element("view", ());
-    let second_reused = h.doc.dom.create_element("view", ());
-    let reused_boundary = if first_reused == old_boundary {
-        first_reused
-    } else {
-        assert_eq!(second_reused, old_boundary, "the freed slot is reused");
-        second_reused
-    };
-    let reused_child = h.doc.dom.create_element("view", ());
-    h.doc.dom.append_child(reused_boundary, reused_child);
-    h.doc.dom.append_child(hidden, reused_boundary);
+    // Both freed slots go back on the arena free list, so these two land on
+    // the storage the removed boundary and its child were using.
+    let replacement_boundary = h.doc.dom.create_element("view", ());
+    let replacement_child = h.doc.dom.create_element("view", ());
+    assert!(
+        [replacement_boundary, replacement_child]
+            .iter()
+            .all(|&id| id != old_boundary && id != old_child),
+        "the removed ids are retired, so the replacements get fresh ones",
+    );
+    h.doc
+        .dom
+        .append_child(replacement_boundary, replacement_child);
+    h.doc.dom.append_child(hidden, replacement_boundary);
     h.doc.set_inline(
-        reused_boundary,
+        replacement_boundary,
         "display: flex; contain: strict; width: 80px; height: 40px",
     );
-    h.doc.set_inline(reused_child, "width: 10px; height: 10px");
+    h.doc
+        .set_inline(replacement_child, "width: 10px; height: 10px");
 
     h.layout();
     assert_eq!(
-        h.rect(reused_child),
+        h.rect(replacement_child),
         (0.0, 0.0, 0.0, 0.0),
         "a stale parked root must not lay out a replacement node under skipped contents",
+    );
+    assert!(
+        h.doc.dom.get(old_boundary).is_none() && h.doc.dom.get(old_child).is_none(),
+        "and the removed ids still name nothing",
     );
 }
 

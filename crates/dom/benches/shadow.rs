@@ -136,7 +136,8 @@ fn plain_page(hosts: usize, rows: usize) -> (Document<()>, NodeId) {
             .and_then(|node| {
                 node.child_ids()
                     .first()
-                    .and_then(|&frame| doc.get(frame))
+                    .copied()
+                    .and_then(|frame| doc.get(frame))
                     .and_then(|frame| frame.child_ids().first().copied())
             })
             .and_then(|slot| {

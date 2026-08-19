@@ -60,7 +60,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn mark_ancestors_dirty_descendants(&mut self, id: NodeId) {
-        let tree = self.tree();
+        let tree = self.arenas();
         let mut next = tree.get(id).and_then(Node::flat_parent_id);
         while let Some(pid) = next {
             if pid == DOCUMENT_NODE_ID {
@@ -84,7 +84,7 @@ impl<T> Document<T> {
         let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            let children = parent_node.child_ids().to_vec();
+            let children: Vec<NodeId> = parent_node.child_ids().to_vec();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
             }
@@ -136,15 +136,18 @@ impl<T> Document<T> {
     fn note_emptiness_change(&mut self, id: NodeId) {
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
         let later_siblings: Vec<NodeId> = {
-            let tree = self.tree();
+            let tree = self.arenas();
             tree.get(id)
                 .and_then(|node| {
-                    let siblings = tree
-                        .get(node.parent_id()?)
-                        .expect("internal tree links always resolve")
-                        .child_ids();
-                    let pos = siblings.iter().position(|&c| c == id)?;
-                    Some(siblings[pos + 1..].to_vec())
+                    let self_slot = tree.slot(id)?;
+                    let siblings = tree.at(node.parent_slot()?).child_slots();
+                    let pos = siblings.iter().position(|&c| c == self_slot)?;
+                    Some(
+                        siblings[pos + 1..]
+                            .iter()
+                            .map(|&slot| tree.at(slot).id())
+                            .collect::<Vec<_>>(),
+                    )
                 })
                 .unwrap_or_default()
         };
@@ -404,7 +407,7 @@ impl<T> Document<T> {
         if !self.live_element(id).has_style_data() {
             return None;
         }
-        let opaque = OpaqueNode(id);
+        let opaque = OpaqueNode(id.arena_key());
         let (nodes, pending_snapshots) = self.snapshot_storage();
         match pending_snapshots.entry(opaque) {
             Entry::Occupied(entry) => Some(entry.into_mut()),

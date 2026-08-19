@@ -87,9 +87,10 @@
 //! - **A callback may detach any node, but may not free one its caller is still holding.**
 //!   [`Document::create_element`] and the constructor call pin the id they will still be naming
 //!   once the drain returns, and [`Document::drop_element`]/[`Document::drop_subtree`] refuse to
-//!   free a pinned node. Not a convenience limit: a [`NodeId`] is a slab key the arena recycles on
-//!   free, so without the pin a callback that frees the node and creates a replacement hands its
-//!   caller a live id naming a *different* node — and every liveness check passes while it happens.
+//!   free a pinned node. Not a convenience limit: freeing retires the id permanently, so without
+//!   the pin a callback that frees the node under construction hands its caller a dead id — an
+//!   element the mutation is about to link into the tree and return, that already resolves to
+//!   nothing.
 //! - **A panicking callback leaves the document unspecified but not wedged.** The depth token
 //!   balances its counter on the unwinding path and records that the frame was abandoned, so the
 //!   next mutation discards the leftovers silently rather than blaming itself, while a scope in
@@ -104,7 +105,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stylo::LocalName;
 
-use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId};
+use crate::tree::document::{DOCUMENT_ELEMENT_NODE_ID, Document, NodeId, NodeSlot};
 
 const MAX_REACTION_DEPTH: usize = 64;
 
@@ -227,14 +228,18 @@ impl<T> Document<T> {
         if self.custom_elements.pinned.is_empty() {
             return;
         }
+        // The walk stays in slot space: the tree's own links are slots, so
+        // descending costs one load per child instead of a table hop, and the
+        // id is only recovered where the pin set is consulted.
+        let Some(root) = self.slot(root) else {
+            return;
+        };
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
-            let Some(node) = self.get(current) else {
-                continue;
-            };
-            self.assert_not_pinned(current);
-            stack.extend_from_slice(node.child_ids());
-            if let Some(shadow_root) = node.shadow_root_id() {
+            let node = self.arenas().at(current);
+            self.assert_not_pinned(node.id());
+            stack.extend_from_slice(node.child_slots());
+            if let Some(shadow_root) = node.shadow_root_slot() {
                 stack.push(shadow_root);
             }
         }
@@ -244,8 +249,8 @@ impl<T> Document<T> {
         assert!(
             !self.custom_elements.pinned.contains(&element),
             "a custom element lifecycle callback destroyed a node the mutation that called it is \
-             still holding: detaching it is allowed, freeing it is not, because the arena would \
-             recycle its id"
+             still holding: detaching it is allowed, freeing it is not, because freeing retires \
+             the id and the mutation would return one that names nothing"
         );
     }
 }
@@ -314,13 +319,10 @@ impl<T> Document<T> {
             .by_name
             .insert(name.clone(), definition);
 
-        let existing = self
-            .tree()
-            .iter()
-            .find(|(id, node)| {
-                *id != DOCUMENT_ELEMENT_NODE_ID && node.local_name.as_ref() == Some(&name)
-            })
-            .map(|(id, _)| id);
+        let arenas = self.arenas();
+        let existing = arenas.ids().find(|&id| {
+            id != DOCUMENT_ELEMENT_NODE_ID && arenas.live(id).local_name.as_ref() == Some(&name)
+        });
         assert!(
             existing.is_none(),
             "Document::define: `{local_name}` already has elements, and a definition never \
@@ -608,20 +610,18 @@ impl<T> Document<T> {
         if !self.live(root).custom_subtree_may_contain() {
             return;
         }
-        let mut stack: SmallVec<[NodeId; 8]> = SmallVec::new();
-        stack.push(root);
+        let mut stack: SmallVec<[NodeSlot; 8]> = SmallVec::new();
+        stack.push(self.live_slot(root));
         while let Some(current) = stack.pop() {
-            let Some(node) = self.get(current) else {
-                continue;
-            };
+            let node = self.arenas().at(current);
             if !node.custom_subtree_may_contain() {
                 continue;
             }
             if node.custom_state == CustomElementState::Custom {
-                out.push(current);
+                out.push(node.id());
             }
-            stack.extend(node.child_ids().iter().rev().copied());
-            if let Some(shadow_root) = node.shadow_root_id() {
+            stack.extend(node.child_slots().iter().rev().copied());
+            if let Some(shadow_root) = node.shadow_root_slot() {
                 stack.push(shadow_root);
             }
         }

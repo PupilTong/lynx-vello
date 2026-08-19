@@ -190,7 +190,7 @@ pub(crate) fn paint_replaced_content(
     images: &ImageStore,
     natural: NaturalSize,
 ) {
-    let Some(image) = images.node(fragment.node) else {
+    let Some(image) = images.node(fragment.node.to_bits()) else {
         return;
     };
     if image.width == 0 || image.height == 0 {

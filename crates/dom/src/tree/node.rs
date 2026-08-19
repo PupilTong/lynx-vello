@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsiz
 use hughie::compute::LeafMetrics;
 use hughie::compute::NaturalSize;
 use selectors::matching::ElementSelectorFlags;
-use slab::Slab;
 use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
@@ -22,7 +21,7 @@ use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
 use crate::tree::custom::{CustomElementState, DefinitionId};
-use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, PayloadSlot, TreeArenas};
+use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, PayloadSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
 
 pub(crate) const SNAPSHOT_PRESENT: u8 = 1 << 0;
@@ -70,12 +69,16 @@ enum NodeContent {
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
     owner: AtomicPtr<TreeArenas<T>>,
+    /// This node's handle: both its identity and the arena position it
+    /// occupies, because those are now one thing. A walk that follows
+    /// `parent`/`children` indexes the arena directly — there is no id table
+    /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
     data: NodeData,
     payload: PhantomData<T>,
 
-    pub(crate) parent: Option<NodeId>,
-    pub(crate) children: Vec<NodeId>,
+    pub(crate) parent: Option<NodeSlot>,
+    pub(crate) children: Vec<NodeSlot>,
     pub(crate) local_name: Option<LocalName>,
     pub(crate) classes: SmallVec<[Atom; 2]>,
     pub(crate) id_attribute: Option<Atom>,
@@ -101,12 +104,14 @@ pub struct Node<T> {
 impl<T> Node<T> {
     pub(crate) fn new_document(
         owner: *mut TreeArenas<T>,
+        id: NodeId,
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
     ) -> Self {
+        debug_assert_eq!(id, DOCUMENT_NODE_ID, "the document node is the first node");
         Self::new(
             owner,
-            DOCUMENT_NODE_ID,
+            id,
             NodeData::Document(Box::new(DocumentNodeData {
                 lock,
                 url_data,
@@ -177,10 +182,6 @@ impl<T> Node<T> {
         }
     }
 
-    pub(crate) fn tree(&self) -> &slab::Slab<Node<T>> {
-        &self.arenas().nodes
-    }
-
     #[inline]
     pub(crate) fn styling_data(&self) -> &StylingData {
         &self.styling
@@ -198,7 +199,7 @@ impl<T> Node<T> {
     }
 
     pub(crate) fn owner_document(&self) -> &Node<T> {
-        self.tree()
+        self.arenas()
             .get(DOCUMENT_NODE_ID)
             .expect("the document node is never removed")
     }
@@ -258,11 +259,17 @@ impl<T> Node<T> {
     }
 
     #[must_use]
-    pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
+    pub(crate) fn shadow_host_slot(&self) -> Option<NodeSlot> {
         match &self.data {
             NodeData::ShadowRoot(shadow) => Some(shadow.host),
             _ => None,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn shadow_host_id(&self) -> Option<NodeId> {
+        self.shadow_host_slot()
+            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
@@ -285,6 +292,26 @@ impl<T> Node<T> {
             NodeData::ShadowRoot(shadow) => Some(shadow),
             _ => None,
         }
+    }
+
+    /// This node's own storage position, for a walk that is already in slot
+    /// space.
+    #[must_use]
+    #[inline]
+    pub(crate) const fn slot(&self) -> NodeSlot {
+        self.id
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) const fn parent_slot(&self) -> Option<NodeSlot> {
+        self.parent
+    }
+
+    #[must_use]
+    #[inline]
+    pub(crate) fn child_slots(&self) -> &[NodeSlot] {
+        &self.children
     }
 
     #[must_use]
@@ -380,14 +407,10 @@ impl<T> Node<T> {
     pub fn payload(&self) -> &T {
         match &self.data {
             NodeData::Element(_) | NodeData::Text => {
-                let slot = self
-                    .arenas()
-                    .payloads
-                    .get(self.id)
-                    .expect("live node must have payload-arena state");
-                match slot {
+                let arenas = self.arenas();
+                match arenas.payload_at(arenas.live_slot(self.id)) {
                     PayloadSlot::Node(payload) => payload,
-                    PayloadSlot::Document | PayloadSlot::ShadowRoot => {
+                    PayloadSlot::Document | PayloadSlot::ShadowRoot | PayloadSlot::Reserved => {
                         unreachable!("payload-less sentinels belong to non-element nodes")
                     }
                 }
@@ -574,11 +597,8 @@ impl<T> Node<T> {
     pub(crate) fn is_empty_element(&self) -> bool {
         debug_assert!(self.is_element(), "`:empty` is only defined for elements");
         self.text().is_none_or(str::is_empty)
-            && self.children.iter().all(|&id| {
-                let child = self
-                    .tree()
-                    .get(id)
-                    .expect("internal tree links always resolve");
+            && self.children.iter().all(|&slot| {
+                let child = self.arenas().at(slot);
                 !child.is_element()
                     && (!child.is_text_node() || child.text().is_none_or(str::is_empty))
             })
@@ -588,29 +608,17 @@ impl<T> Node<T> {
 impl<T> Node<T> {
     #[must_use]
     pub fn parent(&self) -> Option<&Node<T>> {
-        self.parent.map(|id| {
-            self.tree()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.parent.map(|slot| self.arenas().at(slot))
     }
 
     #[must_use]
     pub fn first_child(&self) -> Option<&Node<T>> {
-        self.children.first().map(|&id| {
-            self.tree()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.children.first().map(|&slot| self.arenas().at(slot))
     }
 
     #[must_use]
     pub fn last_child(&self) -> Option<&Node<T>> {
-        self.children.last().map(|&id| {
-            self.tree()
-                .get(id)
-                .expect("internal tree links always resolve")
-        })
+        self.children.last().map(|&slot| self.arenas().at(slot))
     }
 
     #[must_use]
@@ -627,20 +635,14 @@ impl<T> Node<T> {
         if self.is_shadow_root() {
             return None;
         }
-        let tree = self.tree();
-        let siblings = &tree
-            .get(self.parent?)
-            .expect("internal tree links always resolve")
-            .children;
+        let tree = self.arenas();
+        let siblings = &tree.at(self.parent?).children;
         let pos = siblings
             .iter()
             .position(|&c| c == self.id)
             .expect("node must appear in its parent's child list");
         let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
-        Some(
-            tree.get(sibling)
-                .expect("internal tree links always resolve"),
-        )
+        Some(tree.at(sibling))
     }
 
     #[must_use]
@@ -650,7 +652,7 @@ impl<T> Node<T> {
 
     pub(crate) fn children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
-            tree: self.tree(),
+            tree: self.arenas(),
             children: &self.children,
             index: 0,
         }
@@ -658,7 +660,7 @@ impl<T> Node<T> {
 
     pub(crate) fn flat_children_iter(&self) -> ChildrenIter<'_, T> {
         ChildrenIter {
-            tree: self.tree(),
+            tree: self.arenas(),
             children: self.flat_children(),
             index: 0,
         }
@@ -714,8 +716,8 @@ impl<T> std::hash::Hash for Node<T> {
 /// traversal walks.
 #[doc(hidden)]
 pub struct ChildrenIter<'a, T> {
-    tree: &'a Slab<Node<T>>,
-    children: &'a [NodeId],
+    tree: &'a TreeArenas<T>,
+    children: &'a [NodeSlot],
     index: usize,
 }
 
@@ -732,13 +734,9 @@ impl<'a, T> Iterator for ChildrenIter<'a, T> {
     type Item = &'a Node<T>;
 
     fn next(&mut self) -> Option<&'a Node<T>> {
-        let id = *self.children.get(self.index)?;
+        let slot = *self.children.get(self.index)?;
         self.index += 1;
-        Some(
-            self.tree
-                .get(id)
-                .expect("internal tree links always resolve"),
-        )
+        Some(self.tree.at(slot))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -765,9 +763,12 @@ mod tests {
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
+        // A handle is identity and storage position in one 8-byte value, and
+        // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
+        // parent link costs 8 bytes rather than 16.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 232 } else { 224 }
+            if cfg!(debug_assertions) { 224 } else { 216 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
@@ -889,35 +890,20 @@ mod tests {
         assert!(document.get(element).unwrap().content.is_none());
 
         let text_id = document.create_text_node("hello", ());
+        let text_slot = document.live_slot(text_id);
         let text = document.get(text_id).unwrap();
         let Some(NodeContent::Text(_)) = text.content.as_deref() else {
             unreachable!("text nodes carry literal-text content")
         };
-        assert!(
-            document
-                .layout_state()
-                .nodes
-                .get(text_id)
-                .expect("text node has aligned layout state")
-                .text
-                .is_none()
-        );
+        assert!(document.layout_state().at(text_slot).text.is_none());
 
         let first = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_id);
+            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
             std::ptr::from_mut(artifacts)
         };
-        assert!(
-            document
-                .layout_state()
-                .nodes
-                .get(text_id)
-                .expect("text node has aligned layout state")
-                .text
-                .is_some()
-        );
+        assert!(document.layout_state().at(text_slot).text.is_some());
         let second = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_id);
+            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
             std::ptr::from_mut(artifacts)
         };
         assert_eq!(first, second);

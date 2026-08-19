@@ -1143,10 +1143,19 @@ mod tests {
         finished.expect("the script must boot");
 
         let elements = engine.elements();
-        assert!(elements.is_connected(2), "the first view is attached");
-        assert!(elements.is_connected(3), "the second view is attached");
+        let page = elements.document_element().id();
+        let views = elements
+            .get(page)
+            .expect("the page is live")
+            .child_ids()
+            .to_vec();
+        assert_eq!(views.len(), 2, "the boot script appends two views");
         assert!(
-            elements.rounded_layout(1).is_some(),
+            views.iter().all(|&view| elements.is_connected(view)),
+            "both views are attached"
+        );
+        assert!(
+            elements.rounded_layout(page).is_some(),
             "the boot's final flush laid the page out"
         );
     }
