@@ -1079,3 +1079,20 @@ here) and Codex (reads this file directly). Division of labor between them is
 **not yet decided** beyond Codex's existing rescue / second-opinion / review
 role (`codex:codex-rescue`, `/codex:review`) — don't assume Codex owns any
 particular crate or subsystem unless a task explicitly says so.
+
+### Git and pull requests under the Codex sandbox
+
+Codex worktrees keep their Git metadata outside the writable worktree through
+the `.git` indirection. Commands that mutate that metadata — including branch
+creation, staging, and committing — and networked Git commands such as `push`
+must therefore request an explicit sandbox escalation before the first attempt.
+Keep reusable approvals scoped to the exact Git subcommand rather than granting
+general shell access, and do not diagnose a sandbox denial as repository
+corruption or an authentication failure.
+
+After the branch is pushed with local `git`, create pull requests only through
+the installed GitHub plugin/app connector. Never use the GitHub CLI (`gh`) to
+create, submit, publish, or otherwise open a pull request. If the connector is
+unavailable or cannot create the pull request, stop and ask the user for
+direction instead of falling back to `gh`; local `gh` authentication is not a
+substitute for connector authorization.
