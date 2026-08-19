@@ -442,6 +442,11 @@ useful signal for currently-compatible versions of those libraries.
   version instead of accepting wasm-pack's older fallback. Package
   verification requires the optimized module to omit its debugging `name`
   section while retaining `target_features`.
+  Browser builds disable Parley's `complex-scripts` feature to avoid embedding
+  ICU's multi-megabyte CJK and Southeast Asian dictionaries; native targets
+  retain it. Grapheme segmentation, shaping, and ordinary Unicode line
+  breaking remain available, while Thai, Khmer, Lao, and Myanmar text may use
+  cluster-level emergency breaks and report a larger intrinsic minimum width.
   `wasm_thread` is pinned to the upstream
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker

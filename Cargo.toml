@@ -46,7 +46,6 @@ markup5ever_rcdom = "0.39"
 parley = { version = "0.11", default-features = false, features = [
     "std",
     "system",
-    "complex-scripts",
 ] }
 parking_lot_core = { version = "0.9", features = ["nightly"] }
 pollster = "1"

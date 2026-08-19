@@ -14,7 +14,6 @@ layout-test-utils = ["hughie/layout-test-utils"]
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
-parley = { workspace = true }
 pollster = { workspace = true }
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 
@@ -31,7 +30,11 @@ euclid = { workspace = true }
 url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+parley = { workspace = true }
 rayon = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+parley = { workspace = true, features = ["complex-scripts"] }
 
 [dev-dependencies]
 divan = { workspace = true }

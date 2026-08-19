@@ -143,6 +143,14 @@ checks that optimization removed the debugging name section while preserving
 import, the URL execution methods, and the absence of the removed direct DOM
 API.
 
+The `wasm32` target disables Parley's `complex-scripts` feature, while native
+targets retain it. This keeps grapheme segmentation, shaping, and ordinary
+Unicode line breaking, but omits ICU's CJK and Southeast Asian segmentation
+dictionaries from the browser binary. Chinese and Japanese ordinary line
+breaking remains available; Thai, Khmer, Lao, and Myanmar text can instead
+fall back to cluster-level emergency breaks in constrained boxes, and their
+intrinsic minimum width can be larger than with dictionary segmentation.
+
 The browser target enables `parking_lot_core/nightly`; with Wasm atomics this
 selects atomic wait/notify instead of the generic Wasm parker that panics on
 contention. The workspace's pinned nightly and `.cargo/config.toml` rebuild
