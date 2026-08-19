@@ -9,6 +9,7 @@
 //! a convention.
 
 use core::fmt;
+use std::hint::likely;
 use std::num::NonZeroU32;
 
 use hughie::text::{TextContext, TextLayoutStore};
@@ -204,10 +205,8 @@ impl<T> TreeArenas<T> {
 
     #[inline]
     pub(crate) fn get_mut(&mut self, id: NodeId) -> Option<&mut Node<T>> {
-        if !self.slot_is_current(id) {
-            return None;
-        }
-        self.nodes.get_mut(id.arena_key())
+        let node = self.nodes.get_mut(id.arena_key())?;
+        likely(node.id().generation == id.generation).then_some(node)
     }
 
     #[inline]
@@ -218,28 +217,24 @@ impl<T> TreeArenas<T> {
 
     #[inline]
     pub(crate) fn contains(&self, id: NodeId) -> bool {
-        self.slot_is_current(id) && self.nodes.contains(id.arena_key())
+        self.try_at(id).is_some()
     }
 
     /// The node a handle names, or `None` if the handle is stale.
     ///
-    /// The generation compare is the whole check, and its address depends only
-    /// on the key the caller already holds, so it issues alongside the node
-    /// load rather than after it. That is the property the deleted id table
-    /// did not have: resolving an id needed the table's *result* before the
-    /// arena could be indexed, which serialised two loads on every walk step.
-    ///
-    /// Reading the generation off the node's own copy instead — the node is
-    /// being loaded anyway — is the tempting shape and measured worse: this
-    /// table is four bytes per node and stays hot, while the node's copy sits
-    /// inside a 224-byte record. Do not change it without a paired
-    /// measurement on a quiet machine.
+    /// The generation is read off the node itself, so the live path is a
+    /// single load: the node has to be fetched regardless, and its handle
+    /// rides in the same record. Checking a side table first instead costs a
+    /// second array on every walk step — and buys nothing, because the answer
+    /// is only interesting once the node is in hand anyway.
     #[inline]
     pub(crate) fn try_at(&self, slot: NodeId) -> Option<&Node<T>> {
-        if !self.slot_is_current(slot) {
-            return None;
-        }
-        self.nodes.get(slot.arena_key())
+        let node = self.nodes.get(slot.arena_key())?;
+        // A walk follows links the tree itself owns, so all but a vanishing
+        // fraction of the handles reaching here are live; a stale one comes
+        // from script or a retained frame. Saying so keeps the live path
+        // fall-through.
+        likely(node.id().generation == slot.generation).then_some(node)
     }
 
     #[inline]

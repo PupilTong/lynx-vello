@@ -1,4 +1,8 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// `hint::likely` is still unstable, on the newest nightly as much as the
+// pinned one. It marks the branch every tree walk runs into — the staleness
+// check in `TreeArenas` — so the live path stays fall-through.
+#![feature(likely_unlikely)]
 #![deny(unreachable_pub)]
 
 //! `dom` — a generic, stylo-integrated W3C-DOM-subset document tree.
