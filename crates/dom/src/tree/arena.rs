@@ -10,7 +10,7 @@
 
 use core::fmt;
 use std::hint::likely;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use hughie::text::{TextContext, TextLayoutStore};
 use hughie::tree::LayoutSlot;
@@ -36,10 +36,7 @@ use crate::tree::node::Node;
 /// encoding — which is what lets `Option<NodeId>` stay four bytes wide for the
 /// tree's own links.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct NodeId {
-    key: NonZeroU32,
-    generation: u32,
-}
+pub struct NodeId(NonZeroU64);
 
 /// A handle *is* its storage position now, so the two names are one type.
 /// Kept so the tree can still say "slot" where it means "where this lives".
@@ -50,49 +47,58 @@ pub(crate) type NodeSlot = NodeId;
 /// exactly, and the key already claims 32 of those bits.
 const GENERATION_BITS: u32 = 21;
 
+/// Where the key stops and the generation starts inside the handle.
+const KEY_BITS: u32 = 32;
+const KEY_MASK: u64 = (1 << KEY_BITS) - 1;
+
 impl NodeId {
-    /// The arena index, with the generation dropped. Only for asking "is this
-    /// the same physical slot" and for indexing inside this module — nothing
-    /// accepts a bare key back as a handle.
+    /// The arena index, with the generation masked off. Only for asking "is
+    /// this the same physical slot" and for indexing inside this module —
+    /// nothing accepts a bare key back as a handle.
+    // Neither cast below can lose anything, and clippy can see it: the key is
+    // masked to `KEY_BITS`, and the generation is what is left after shifting
+    // that many bits off a `u64`. No `expect` — it would go unfulfilled.
     #[inline]
     pub(crate) const fn arena_key(self) -> usize {
-        self.key.get() as usize
+        (self.0.get() & KEY_MASK) as usize
+    }
+
+    #[inline]
+    const fn generation(self) -> u32 {
+        (self.0.get() >> KEY_BITS) as u32
     }
 
     /// The handle as one integer, for the places that can only carry a number:
     /// script's `unique_id`, Stylo's `OpaqueNode`, the image registry's owner
     /// key. Round-trips through [`NodeId::from_bits`].
+    ///
+    /// Free: the handle *is* that integer.
     #[must_use]
     pub const fn to_bits(self) -> u64 {
-        debug_assert!(
-            self.generation >> GENERATION_BITS == 0,
-            "generation outgrew the bits the script boundary can carry"
-        );
-        (self.generation as u64) << 32 | self.key.get() as u64
+        self.0.get()
     }
 
     /// The handle an integer names, or `None` if it names no handle shape at
     /// all. A live-node check still has to go through the arena: this only
     /// rejects integers that could never have been a handle.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the halves are masked out of the packed form on purpose"
-    )]
     pub const fn from_bits(bits: u64) -> Option<Self> {
-        let Some(key) = NonZeroU32::new(bits as u32) else {
-            return None;
-        };
-        let generation = (bits >> 32) as u32;
-        if generation >> GENERATION_BITS != 0 {
+        if bits & KEY_MASK == 0 || (bits >> KEY_BITS) >> GENERATION_BITS != 0 {
             return None;
         }
-        Some(Self { key, generation })
+        match NonZeroU64::new(bits) {
+            Some(bits) => Some(Self(bits)),
+            None => None,
+        }
     }
 
     #[inline]
     const fn at_key(key: NonZeroU32, generation: u32) -> Self {
-        Self { key, generation }
+        let bits = ((generation as u64) << KEY_BITS) | key.get() as u64;
+        match NonZeroU64::new(bits) {
+            Some(bits) => Self(bits),
+            None => unreachable!(),
+        }
     }
 }
 
@@ -182,7 +188,7 @@ impl<T> TreeArenas<T> {
     pub(crate) fn slot_is_current(&self, slot: NodeId) -> bool {
         self.generations
             .get(slot.arena_key())
-            .is_some_and(|generation| *generation == slot.generation)
+            .is_some_and(|generation| *generation == slot.generation())
     }
 
     /// The handle, if it still names a live node. Identity plus a liveness
@@ -206,7 +212,7 @@ impl<T> TreeArenas<T> {
     #[inline]
     pub(crate) fn get_mut(&mut self, id: NodeId) -> Option<&mut Node<T>> {
         let node = self.nodes.get_mut(id.arena_key())?;
-        likely(node.id().generation == id.generation).then_some(node)
+        likely(node.id() == id).then_some(node)
     }
 
     #[inline]
@@ -234,7 +240,7 @@ impl<T> TreeArenas<T> {
         // fraction of the handles reaching here are live; a stale one comes
         // from script or a retained frame. Saying so keeps the live path
         // fall-through.
-        likely(node.id().generation == slot.generation).then_some(node)
+        likely(node.id() == slot).then_some(node)
     }
 
     #[inline]
