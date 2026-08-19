@@ -7,9 +7,10 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | Component | Purpose |
 | --- | --- |
 | [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining engine-neutral resource/script/view protocols with the optional QuickJS adapter and main-thread host globals. It does not expose a renderer façade or re-export DOM/GPU internals. |
-| [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
-| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas`; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The UI is a JavaScript-only asynchronous host boundary. |
+| [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles or Lynx XML source cards, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
+| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas`; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The URL facade loads JavaScript, CSS, or a complete Lynx XML source card while the UI remains a JavaScript-only asynchronous host boundary. |
 | [`crates/lynx-template-decoder`](crates/lynx-template-decoder) | Native Rust decoder for the Lynx **web** binary template (`.web.bundle`), a port of `@lynx-js/web-core`'s `decodeTemplate` incl. the rkyv `StyleInfo` model. |
+| [`crates/lynx-xml`](crates/lynx-xml) | Zero-copy parser for the restricted single-file Lynx XML source envelope. Embedders map its stylesheet and script sections onto their existing resource boundaries; it is not another binary-template encoding. |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`packages/bobcat-element`](packages/bobcat-element) | The Element PAPI runtime: a single classic-script JavaScript file evaluated inside the QuickJS realm (embedded into `bobcat-core` with `include_str!`). It owns the `__*` PAPI members, Lynx tag vocabulary, auto-incrementing unique ids, and element-handle lifecycle over `WeakRef`/`FinalizationRegistry`. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
@@ -47,6 +48,13 @@ cargo run -p bobcat-cli --bin bobcat -- \
   -i file:///absolute/path/to/card.web.bundle
 ```
 
+The same entry point content-sniffs and runs a raw Lynx XML card:
+
+```sh
+cargo run -p bobcat-cli --bin bobcat -- \
+  -i file:///absolute/path/to/card.xml
+```
+
 Headless mode has a configurable synthetic vsync clock:
 
 ```sh
@@ -63,16 +71,17 @@ renderer, and render/readback allocations are reused across frames; pixel
 readback occurs only for screenshots.
 
 The executable deliberately preserves the runtime's current compatibility
-boundary: a real bundle that reaches an unimplemented main-thread global or
-Element PAPI member exits with that precise runtime error. Decoded `StyleInfo`
-author rules are not ingested yet; if a runnable bundle contains them, the CLI
-prints an explicit warning that author styles are omitted.
+boundary: an input that reaches an unimplemented main-thread global or Element
+PAPI member exits with that precise runtime error. Bundle `StyleInfo` is
+lowered through the pre-parsed stylesheet contract, while a Lynx XML `<style>`
+body uses the raw CSS-text arm. The background-thread runtime is not implemented
+yet; an XML background section is retained but reported as not executed.
 
 ## Running the browser embedder
 
 The `github-pages` pnpm package builds the shared-memory `bobcat-wasm` module,
-installs a COOP/COEP service worker, and renders a small Element-PAPI scene
-through a complete Worker-owned embedder into its `OffscreenCanvas`. That
+installs a COOP/COEP service worker, and loads a small Lynx XML card through a
+complete Worker-owned embedder into its `OffscreenCanvas`. That
 embedder starts the DOM owner as a nested `wasm_thread` Worker and synchronizes
 the two Rust sides through shared memory:
 

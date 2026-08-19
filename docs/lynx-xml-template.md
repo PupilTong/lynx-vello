@@ -528,9 +528,10 @@ These are observed gaps rather than rules to guess around:
 
 ## Implications for lynx-vello
 
-lynx-vello's current artifact boundary is the ordinary `.web.bundle`. A Lynx
-XML card compiled with `encodeLynxXML()` already fits that boundary and needs no
-new decoder format.
+lynx-vello accepts the ordinary `.web.bundle` and the Lynx XML source envelope
+at its reference-embedder boundaries. A Lynx XML card compiled with
+`encodeLynxXML()` still fits the binary boundary and needs no new decoder
+format; raw XML instead takes the explicit source-front-end path below.
 
 `crates/lynx-xml` implements the separate source-parsing front end: it validates
 the restricted grammar and returns borrowed style, main-thread script, and
@@ -542,13 +543,19 @@ encode a bundle, or launch a runtime. Rust `&str` cannot represent the lone
 UTF-16 surrogates that a JavaScript string can contain; this does not affect the
 raw UTF-8/TextDecoder ingestion path.
 
-Accepting raw XML in a product still requires the fixed template mapping,
-JavaScript source registration, and a raw stylesheet channel that today's
-bundle ingestion does not have. Once such source CSS is admitted, standard
-at-rules fall under this repo's W3C-correctness policy and should be evaluated
-by Stylo; traversal of their contents must also specify where Lynx-only
-selector, unit, and declaration rewrites apply. That integration must remain an
-explicit embedder/source-front-end path. It must not be hidden inside
+`bobcat-cli` and `bobcat-wasm` implement the fixed mapping as explicit
+embedder/source-front-end work. They register the main-thread body as a script,
+mount a present `<style>` body through `StyleSheetPayload::Text` before starting
+that script, and construct the XML page with the fixed `false`/`false`/`true`
+display/overflow/selector defaults unless the browser host deliberately
+overrides them. They preserve and warn about a present background body, but do
+not execute it: Bobcat's background-thread realm and cross-realm protocol are
+still pending.
+
+Raw source CSS is evaluated by Stylo, so standard at-rules fall under this
+repo's W3C-correctness policy. Lynx-only selector, unit, and declaration
+rewrites are not synthesized for raw fragments. This integration remains an
+explicit embedder/source-front-end path and is not hidden inside
 `lynx-template-decoder` as another binary encoding.
 
 ## Primary evidence

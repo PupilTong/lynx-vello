@@ -39,16 +39,26 @@ cannot reach them through a running view.
 
 ## Startup boundary
 
-Bundle IO is embedder work. `bobcat-core` does not fetch, decode, or interpret
-`.web.bundle` containers and has no public bundle-decoder types.
+Source/container IO is embedder work. `bobcat-core` does not fetch, decode, or
+interpret `.web.bundle` containers or Lynx XML envelopes and has no public
+decoder/parser types for either format.
 
 For the native product, `bobcat-cli`:
 
-1. reads and decodes the bundle with `lynx-template-decoder`;
-2. parses its configuration into `PageConfig`;
-3. retains `lepusCode.root` in its own `ResourceFetcher` under a URL;
+1. reads the local input and content-sniffs Lynx XML versus a web bundle;
+2. decodes a bundle with `lynx-template-decoder`, or parses XML with
+   `lynx-xml`, then produces the corresponding `PageConfig`;
+3. retains `lepusCode.root` or the XML main-thread body in its own
+   `ResourceFetcher` under a URL;
 4. constructs `LynxView` with the `PageConfig` and injected capabilities;
-5. calls `LynxView::execute_script(url)`.
+5. mounts bundle `StyleInfo` through the pre-parsed stylesheet arm or XML
+   `<style>` through the CSS-text arm, then calls
+   `LynxView::execute_script(url)`.
+
+The browser reference embedder performs the same XML section mapping inside
+its Render Worker after fetching one XML URL. Neither embedder executes the
+optional background section yet because `bobcat-core` does not yet provide a
+background-thread realm; both report that limitation explicitly.
 
 `execute_script` resolves and fetches UTF-8 JavaScript through the injected
 resource contract, then starts the engine-owned Lynx main thread. Script

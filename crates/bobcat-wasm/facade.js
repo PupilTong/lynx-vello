@@ -4,6 +4,13 @@ const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
 
 let initialization
 
+/** web-core raw-loader defaults; callers may spread this object to override. */
+export const LYNX_XML_PAGE_CONFIG = Object.freeze({
+  defaultDisplayLinear: false,
+  defaultOverflowVisible: false,
+  enableCSSSelector: true,
+})
+
 function preferredThreadCount() {
   const hardwareThreads = Math.max(
     1,
@@ -283,18 +290,31 @@ export class BobcatCanvas {
    * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
    * VM initialization, or evaluation failure. Relative URLs are resolved
    * against this document's base URL before they cross the Worker boundary.
-   * Loading, VM startup, and execution have no facade-imposed deadline.
+   * A Canvas accepts exactly one entry-script operation. Loading, VM startup,
+   * and execution have no facade-imposed deadline.
    */
   async executeScript(url) {
     await this.#request('executeScript', { url: documentUrl(url) })
   }
 
-  /**
-   * Reserved URL entry point; currently rejects as unsupported. Relative URLs
-   * are resolved against this document's base URL.
-   */
+  /** Fetch and mount an author stylesheet at `url`. */
   async loadStyleSheet(url) {
     await this.#request('loadStyleSheet', { url: documentUrl(url) })
+  }
+
+  /**
+   * Fetch, parse, and run a single-file Lynx XML source envelope.
+   *
+   * A present stylesheet is mounted before its main-thread script starts. A
+   * background-thread section is retained, but currently produces a console
+   * warning because Bobcat does not execute it yet. Page configuration remains
+   * the host's `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies
+   * web-core's raw-loader defaults when the host does not need overrides. This
+   * is a one-shot entry-script operation; a repeated call rejects before fetch
+   * or stylesheet mounting.
+   */
+  async loadLynxXml(url) {
+    await this.#request('loadLynxXml', { url: documentUrl(url) })
   }
 
   /** Register one or more font faces from an OpenType font container. */

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE lynx>
+<lynx version="5.4.2">
+  <style><![CDATA[
+    .demo-page {
+      display: linear;
+      position: relative;
+      overflow: hidden;
+      background-color: #0b1020;
+    }
+    .demo-panel {
+      position: absolute;
+      left: 6%;
+      top: 9%;
+      width: 88%;
+      height: 82%;
+      border-radius: 32px;
+      background-color: #151d2f;
+    }
+    .demo-rail {
+      position: absolute;
+      left: 5%;
+      top: 8%;
+      width: 38%;
+      height: 12px;
+      border-radius: 6px;
+      background-color: #b7f34a;
+    }
+    .demo-primary {
+      position: absolute;
+      left: 5%;
+      top: 18%;
+      width: 54%;
+      height: 68%;
+      border-radius: 24px;
+      background-color: #7357ff;
+    }
+    .demo-cutout {
+      position: absolute;
+      left: 11%;
+      top: 31%;
+      width: 32%;
+      height: 42%;
+      border-radius: 18px;
+      background-color: #0b1020;
+    }
+    .demo-upper {
+      position: absolute;
+      right: 5%;
+      top: 18%;
+      width: 31%;
+      height: 31%;
+      border-radius: 24px;
+      background-color: #27d6c2;
+    }
+    .demo-lower {
+      position: absolute;
+      right: 5%;
+      bottom: 14%;
+      width: 31%;
+      height: 27%;
+      border-radius: 24px;
+      background-color: #ffb84d;
+    }
+  ]]></style>
+  <script main-thread><![CDATA[
+    globalThis.renderPage = function () {
+      const page = __CreatePage('github-pages-demo', 0);
+      __SetClasses(page, 'demo-page');
+
+      const panel = __CreateView(0);
+      __SetClasses(panel, 'demo-panel');
+      __AppendElement(page, panel);
+
+      const rail = __CreateView(0);
+      __SetClasses(rail, 'demo-rail');
+      __AppendElement(panel, rail);
+
+      const primary = __CreateView(0);
+      __SetClasses(primary, 'demo-primary');
+      __AppendElement(panel, primary);
+
+      const cutout = __CreateView(0);
+      __SetClasses(cutout, 'demo-cutout');
+      __AppendElement(primary, cutout);
+
+      const upper = __CreateView(0);
+      __SetClasses(upper, 'demo-upper');
+      __AppendElement(panel, upper);
+
+      const lower = __CreateView(0);
+      __SetClasses(lower, 'demo-lower');
+      __AppendElement(panel, lower);
+    };
+  ]]></script>
+</lynx>

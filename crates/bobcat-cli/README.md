@@ -1,7 +1,8 @@
 # bobcat-cli
 
-`bobcat-cli` builds the `bobcat` executable. It accepts a local Lynx web bundle
-as a `file:///` URL and privately composes `bobcat-core/quickjs` →
+`bobcat-cli` builds the `bobcat` executable. It accepts either a local Lynx
+`.web.bundle` or a raw Lynx XML source document as a `file:///` URL and
+privately composes `bobcat-core/quickjs` →
 `dom`/`hughie`. The CLI is an independent product;
 its renderer is not exported from `bobcat-core` as an embedder façade.
 
@@ -11,7 +12,18 @@ bobcat -i file:///absolute/path/to/card.web.bundle
 
 # Paced headless session (optionally at a HiDPI scale)
 bobcat -i file:///absolute/path/to/card.web.bundle --headless --vsync 60 --dpr 2
+
+# Raw Lynx XML uses the same renderer and prompt
+bobcat -i file:///absolute/path/to/card.lynx.xml --headless
 ```
+
+Input selection is content-based rather than extension-based. After leading
+ASCII whitespace and UTF-8 byte-order marks are skipped for sniffing, a `<`
+selects Lynx XML; every other input goes through the web-bundle decoder. XML is
+then decoded as strict UTF-8 and parsed with the restricted Lynx XML grammar.
+Its optional `<style>` body is mounted as author CSS before the required
+main-thread script runs. XML uses `defaultDisplayLinear = false`,
+`defaultOverflowVisible = false`, and `enableCSSSelector = true`.
 
 Both modes expose a small debugger-style prompt. Screenshots are captured from
 the live session rather than by a one-shot startup option:
@@ -40,5 +52,8 @@ outpaces the GPU cannot pile up work.
 
 Current `bobcat-core` QuickJS limits still apply. In particular, most real
 ReactLynx bundles currently stop at an unimplemented main-thread global before
-rendering, and decoded `StyleInfo` rules are not yet lowered into author CSS.
-The CLI reports the former as an error and the latter as an explicit warning.
+rendering. Component-scoped bundle CSS is currently mounted globally and is
+reported as a warning. A present XML background-thread section is retained at
+the conventional `/app-service.js` URL (including a present empty section),
+but background-thread JavaScript is not executed yet; the CLI warns explicitly
+when such a section is present.

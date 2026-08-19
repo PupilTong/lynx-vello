@@ -32,6 +32,7 @@ for (const requiredExport of [
 for (const requiredMethod of [
   'registerScript(',
   'registerStyleSheet(',
+  'registerLynxXml(',
   'executeScript(',
   'loadStyleSheet(',
   'pollScript(',
@@ -74,13 +75,36 @@ if (facade.includes('./pkg/bobcat_wasm.js')) {
 }
 for (const requiredDeclaration of [
   'pageConfig: PageConfig',
+  'LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>',
   'executeScript(url: string | URL)',
   'loadStyleSheet(url: string | URL)',
+  'loadLynxXml(url: string | URL)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
   }
+}
+const lynxXmlConfigStart = facade.indexOf('export const LYNX_XML_PAGE_CONFIG')
+const lynxXmlConfigEnd = facade.indexOf('function preferredThreadCount')
+if (lynxXmlConfigStart === -1 || lynxXmlConfigEnd === -1) {
+  throw new Error('browser facade is missing LYNX_XML_PAGE_CONFIG')
+}
+const lynxXmlConfig = facade.slice(lynxXmlConfigStart, lynxXmlConfigEnd)
+for (const requiredConfigValue of [
+  'defaultDisplayLinear: false',
+  'defaultOverflowVisible: false',
+  'enableCSSSelector: true',
+]) {
+  if (!lynxXmlConfig.includes(requiredConfigValue)) {
+    throw new Error(`LYNX_XML_PAGE_CONFIG is missing ${requiredConfigValue}`)
+  }
+}
+if (
+  !facade.includes('async loadLynxXml(url)') ||
+  !facade.includes("this.#request('loadLynxXml'")
+) {
+  throw new Error('browser facade does not dispatch loadLynxXml')
 }
 
 const renderWorker = await readFile(
@@ -101,9 +125,85 @@ if (renderWorker.includes('initThreadPool')) {
 if (!renderWorker.includes('await renderer.executeScript(registeredUrl)')) {
   throw new Error('Render Worker must route fetched URLs through executeScript')
 }
+if (
+  !renderWorker.includes('function ensureEntryScriptNotStarted()') ||
+  !renderWorker.includes('if (entryScriptStarted)')
+) {
+  throw new Error('Render Worker is missing its one-shot entry-script guard')
+}
+const executeScriptDispatch = renderWorker.slice(
+  renderWorker.indexOf("case 'executeScript':"),
+  renderWorker.indexOf("case 'loadStyleSheet':"),
+)
+for (const requiredEntryGuardStep of [
+  'ensureEntryScriptNotStarted()',
+  'entryScriptStarted = true',
+]) {
+  if (!executeScriptDispatch.includes(requiredEntryGuardStep)) {
+    throw new Error(
+      `Render Worker script dispatch is missing ${requiredEntryGuardStep}`,
+    )
+  }
+}
 if (!renderWorker.includes('await renderer.loadStyleSheet(registeredUrl)')) {
   throw new Error(
     'Render Worker must register fetched stylesheet bytes before loading them',
+  )
+}
+const lynxXmlDispatchStart = renderWorker.indexOf("case 'loadLynxXml':")
+const lynxXmlDispatchEnd = renderWorker.indexOf("case 'registerFonts':")
+if (lynxXmlDispatchStart === -1 || lynxXmlDispatchEnd === -1) {
+  throw new Error('Render Worker is missing the Lynx XML dispatch case')
+}
+const lynxXmlDispatch = renderWorker.slice(
+  lynxXmlDispatchStart,
+  lynxXmlDispatchEnd,
+)
+for (const requiredLynxXmlLoaderStep of [
+  'response.status !== 200',
+  'await readBoundedBytes(response, MAX_LYNX_XML_BYTES)',
+  'new TextDecoder().decode(bytes)',
+  'url: response.url || requestedUrl',
+]) {
+  if (!renderWorker.includes(requiredLynxXmlLoaderStep)) {
+    throw new Error(
+      `Render Worker Lynx XML loader is missing ${requiredLynxXmlLoaderStep}`,
+    )
+  }
+}
+for (const requiredLynxXmlDispatchStep of [
+  'ensureEntryScriptNotStarted()',
+  'renderer.registerLynxXml(url, source)',
+  'await renderer.loadStyleSheet(styleSheetUrl)',
+  'console.warn(',
+  'await renderer.executeScript(mainThreadScriptUrl)',
+  'entryScriptStarted = true',
+  'waitForScriptCompletion()',
+]) {
+  if (!lynxXmlDispatch.includes(requiredLynxXmlDispatchStep)) {
+    throw new Error(
+      `Render Worker Lynx XML dispatch is missing ${requiredLynxXmlDispatchStep}`,
+    )
+  }
+}
+if (
+  lynxXmlDispatch.indexOf('ensureEntryScriptNotStarted()') >
+  lynxXmlDispatch.indexOf('await fetchLynxXml(message.url)')
+) {
+  throw new Error('Render Worker must reject repeated Lynx XML loads before fetch')
+}
+if (
+  lynxXmlDispatch.indexOf('await renderer.loadStyleSheet(styleSheetUrl)') >
+  lynxXmlDispatch.indexOf('await renderer.executeScript(mainThreadScriptUrl)')
+) {
+  throw new Error('Render Worker must load Lynx XML styles before its main script')
+}
+if (renderWorker.includes('DOMParser')) {
+  throw new Error('Render Worker must leave Lynx XML parsing to Rust')
+}
+if (!renderWorker.includes("message.operation === 'loadLynxXml'")) {
+  throw new Error(
+    'Render Worker must serialize Lynx XML loads with other source entry points',
   )
 }
 if (renderWorker.includes('setTimeout(resolve, 1)')) {
