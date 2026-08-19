@@ -1,6 +1,6 @@
 [package]
 name = "bobcat-cli"
-description = "Native command-line runner and renderer for Bobcat web bundles"
+description = "Native command-line runner and renderer for Bobcat web bundles and Lynx XML"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ bobcat-core = { workspace = true, features = ["quickjs"] }
 fast_image_resize = { workspace = true }
 http = { workspace = true }
 lynx-template-decoder = { workspace = true }
+lynx-xml = { workspace = true }
 png = { workspace = true }
 pollster = { workspace = true }
 thiserror = { workspace = true }

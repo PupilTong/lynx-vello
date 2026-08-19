@@ -140,6 +140,93 @@ fn author_css_from_the_style_info_section_renders() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// Raw XML bypasses `StyleInfo`: its UTF-8 `<style>` body must still mount
+/// before the main-thread program creates the classed element.
+#[test]
+fn author_css_from_raw_lynx_xml_renders() {
+    let gpu = flashbulb::headless("author_css_from_raw_lynx_xml_renders");
+    drop(gpu);
+
+    let root = std::env::temp_dir().join(format!(
+        "bobcat-cli-e2e-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let xml_path = root.join("styled.lynx.xml");
+    let screenshot_path = root.join("xml-styled.png");
+    std::fs::write(&xml_path, styled_lynx_xml()).unwrap();
+    let input = url::Url::from_file_path(&xml_path)
+        .expect("absolute temporary path")
+        .to_string();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_bobcat"))
+        .args(["-i", &input, "--headless", "--viewport", "32x24"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start interactive bobcat");
+    write!(
+        child.stdin.take().expect("piped stdin"),
+        "screenshot {}\nquit\n",
+        screenshot_path.display()
+    )
+    .unwrap();
+    let output = child
+        .wait_with_output()
+        .expect("wait for interactive bobcat");
+    assert!(
+        output.status.success(),
+        "interactive bobcat failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("background-thread JavaScript is retained but not executed")
+            && stderr.contains("/app-service.js"),
+        "the present-empty background section must be retained and warned about:\n{stderr}"
+    );
+
+    let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
+    assert_eq!((image.width(), image.height()), (32, 24));
+    let red = image
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| *pixel == [255, 0, 0, 255])
+        .count();
+    assert_eq!(
+        red,
+        16 * 12,
+        "the 16x12 box sized and coloured by raw XML CSS must be painted"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn styled_lynx_xml() -> String {
+    concat!(
+        "\u{feff}\n",
+        "<lynx version=\"5.4.2\">\n",
+        "<style><![CDATA[\n",
+        "page { display: linear; }\n",
+        ".xml-styled { width: 16px; height: 12px; background-color: #ff0000; }\n",
+        "]]></style>\n",
+        "<script main-thread><![CDATA[\n",
+        "globalThis.renderPage = function renderPage() {\n",
+        "  const page = __CreatePage('card', 0);\n",
+        "  const view = __CreateView(0);\n",
+        "  __SetClasses(view, 'xml-styled');\n",
+        "  __AppendElement(page, view);\n",
+        "};\n",
+        "]]></script>\n",
+        "<script background><![CDATA[]]></script>\n",
+        "</lynx>\n",
+    )
+    .to_owned()
+}
+
 /// A bundle whose `.styled` class comes only from its `StyleInfo` section.
 fn styled_bundle() -> Vec<u8> {
     use lynx_template_decoder::style_info::{

@@ -3,10 +3,12 @@ import initWasm, { BobcatRenderer } from './pkg/bobcat_wasm.js'
 let renderer
 let running = false
 let initialized = false
+let entryScriptStarted = false
 let executeQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
+const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
@@ -109,6 +111,24 @@ function fetchStyleSheet(url) {
   )
 }
 
+// Fetch the complete source once, then use the platform default decoder:
+// UTF-8 with replacement for malformed byte sequences, matching web-core's
+// raw Lynx XML loader. Parsing and section extraction remain in Rust.
+async function fetchLynxXml(url) {
+  const requestedUrl = absoluteUrl(url)
+  const response = await fetch(requestedUrl)
+  if (response.status !== 200) {
+    throw new Error(
+      `Could not fetch Lynx XML ${response.url || url}: expected HTTP status 200, received ${String(response.status)} ${response.statusText}`,
+    )
+  }
+  const bytes = await readBoundedBytes(response, MAX_LYNX_XML_BYTES)
+  return {
+    source: new TextDecoder().decode(bytes),
+    url: response.url || requestedUrl,
+  }
+}
+
 async function readBoundedBytes(response, limit) {
   const declaredLength = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredLength) && declaredLength > limit) {
@@ -161,6 +181,12 @@ async function waitForScriptCompletion() {
   }
 }
 
+function ensureEntryScriptNotStarted() {
+  if (entryScriptStarted) {
+    throw new Error('This Bobcat Canvas has already started its entry script')
+  }
+}
+
 async function dispatchRequest(message) {
   if (renderer === undefined) {
     throw new Error('Bobcat Render Worker is not initialized')
@@ -169,8 +195,10 @@ async function dispatchRequest(message) {
   const { operation, request } = message
   switch (operation) {
     case 'executeScript': {
+      ensureEntryScriptNotStarted()
       const registeredUrl = await fetchScript(message.url)
       await renderer.executeScript(registeredUrl)
+      entryScriptStarted = true
       void waitForScriptCompletion().then(
         () => postResponse(request, true),
         (error) => postResponse(request, false, error),
@@ -181,6 +209,30 @@ async function dispatchRequest(message) {
       const registeredUrl = await fetchStyleSheet(message.url)
       await renderer.loadStyleSheet(registeredUrl)
       postResponse(request, true)
+      break
+    }
+    case 'loadLynxXml': {
+      // Core accepts exactly one entry script. Reject before fetching or
+      // mounting the XML stylesheet so a failed repeated load is side-effect
+      // free for the page that is already running.
+      ensureEntryScriptNotStarted()
+      const { source, url } = await fetchLynxXml(message.url)
+      const [mainThreadScriptUrl, styleSheetUrl, backgroundThreadScriptUrl] =
+        renderer.registerLynxXml(url, source)
+      if (styleSheetUrl !== null) {
+        await renderer.loadStyleSheet(styleSheetUrl)
+      }
+      if (backgroundThreadScriptUrl !== null) {
+        console.warn(
+          `Bobcat preserved the Lynx XML background-thread script at ${backgroundThreadScriptUrl}, but background-thread execution is not implemented`,
+        )
+      }
+      await renderer.executeScript(mainThreadScriptUrl)
+      entryScriptStarted = true
+      void waitForScriptCompletion().then(
+        () => postResponse(request, true),
+        (error) => postResponse(request, false, error),
+      )
       break
     }
     case 'registerFonts':
@@ -225,12 +277,13 @@ self.addEventListener('message', (event) => {
         postResponse(message.request, false, error)
       }
     }
-    // `executeScript` and `loadStyleSheet` both reach engine state the script
-    // thread can be holding, and stylesheets cascade in load order, so they
-    // share one queue rather than dispatching as their fetches complete.
+    // Script and stylesheet loads reach engine state the script thread can be
+    // holding, and stylesheets cascade in load order, so all source entry
+    // points share one queue rather than dispatching as their fetches complete.
     if (
       message.operation === 'executeScript' ||
-      message.operation === 'loadStyleSheet'
+      message.operation === 'loadStyleSheet' ||
+      message.operation === 'loadLynxXml'
     ) {
       executeQueue = executeQueue.then(dispatch)
     } else {

@@ -124,7 +124,8 @@ useful signal for currently-compatible versions of those libraries.
   Rust-native UTF-8 byte offset. Scope: source grammar and section extraction
   only — no input sniffing, I/O, configuration mapping, CSS parsing, bundle
   encoding, or runtime launch. It is a sibling of the binary template decoder,
-  never another format inside it.
+  never another format inside it. The CLI and browser reference embedders own
+  those omitted integration steps and consume this crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec
@@ -344,14 +345,16 @@ useful signal for currently-compatible versions of those libraries.
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
-  `bobcat-core` and the sibling `lynx-template-decoder` utility; the
+  `bobcat-core`, the sibling `lynx-template-decoder` utility, and the
+  `lynx-xml` source parser; the
   per-OS codec crates it consumes are target-scoped, for `image_decoders`
   below.
-  `bobcat -i file:///…` decodes and boots one web bundle; other URL schemes
-  remain rejected at the boundary. The CLI is an **embedder** of the opaque
-  `bobcat_core::LynxView`: it owns argument parsing, bundle bytes, decoding,
-  `PageConfig` parsing, an in-memory `ResourceFetcher` for the decoded root
-  script URL, the winit window and event loop, device metrics, input
+  `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
+  raw Lynx XML source card; other URL schemes remain rejected at the boundary.
+  The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
+  argument parsing, input bytes, bundle decoding or XML parsing, `PageConfig`
+  mapping, an in-memory `ResourceFetcher` for extracted scripts/styles, the
+  winit window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
@@ -402,6 +405,11 @@ useful signal for currently-compatible versions of those libraries.
   importing — and registers it in the fetcher so both runners load it before
   the first script batch. A bundle carrying non-zero fragment ids warns that
   per-component scoping is not implemented rather than claiming compatibility.
+  For XML, a present `<style>` body instead uses the fetcher's raw CSS-text arm
+  and the fixed page configuration is `false`/`false`/`true` for default
+  linear display, visible overflow, and selector support. A present background
+  section is retained under `/app-service.js` and warned about, but not
+  executed until Bobcat has a background-thread realm.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
@@ -457,9 +465,19 @@ useful signal for currently-compatible versions of those libraries.
   QuickJS factory. Browser `fetch` remains outside Wasm: the
   Render Worker registers raw fetched bytes in its `ResourceFetcher`, core
   performs strict UTF-8 validation, and the worker calls `execute_script(url)`.
+  `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
+  loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, mounts
+  a present raw stylesheet, and starts its main-thread body through the same
+  URL-shaped contracts. Like `executeScript`, it is a one-shot entry operation;
+  a repeated call is rejected before fetching or mounting XML CSS. The
+  exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
+  a host may still deliberately override them.
+  The optional background body is retained and reported as not executed,
+  matching the runtime limitation above.
   The facade exposes no create/append/drop/flush,
   document, tree, or engine API. It does not decode `.web.bundle` containers;
-  callers supply `PageConfig` and executable script URLs. Synchronous GPU
+  callers supply `PageConfig` and either executable script URLs or a raw Lynx
+  XML URL. Synchronous GPU
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the Element PAPI runtime, a single

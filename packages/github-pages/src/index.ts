@@ -201,60 +201,8 @@ async function ensureCrossOriginIsolation(shell: Shell): Promise<void> {
   await reloadForIsolation();
 }
 
-const DEMO_SCRIPT = `
-  globalThis.renderPage = function () {
-    const page = __CreatePage('github-pages-demo', 0);
-    __SetInlineStyles(
-      page,
-      'background-color:#0b1020;position:relative;overflow:hidden',
-    );
-
-    const panel = __CreateView(0);
-    __SetInlineStyles(
-      panel,
-      'position:absolute;left:6%;top:9%;width:88%;height:82%;background-color:#151d2f;border-radius:32px',
-    );
-    __AppendElement(page, panel);
-
-    const rail = __CreateView(0);
-    __SetInlineStyles(
-      rail,
-      'position:absolute;left:5%;top:8%;width:38%;height:12px;background-color:#b7f34a;border-radius:6px',
-    );
-    __AppendElement(panel, rail);
-
-    const primary = __CreateView(0);
-    __SetInlineStyles(
-      primary,
-      'position:absolute;left:5%;top:18%;width:54%;height:68%;background-color:#7357ff;border-radius:24px',
-    );
-    __AppendElement(panel, primary);
-
-    const cutout = __CreateView(0);
-    __SetInlineStyles(
-      cutout,
-      'position:absolute;left:11%;top:31%;width:32%;height:42%;background-color:#0b1020;border-radius:18px',
-    );
-    __AppendElement(primary, cutout);
-
-    const upper = __CreateView(0);
-    __SetInlineStyles(
-      upper,
-      'position:absolute;right:5%;top:18%;width:31%;height:31%;background-color:#27d6c2;border-radius:24px',
-    );
-    __AppendElement(panel, upper);
-
-    const lower = __CreateView(0);
-    __SetInlineStyles(
-      lower,
-      'position:absolute;right:5%;bottom:14%;width:31%;height:27%;background-color:#ffb84d;border-radius:24px',
-    );
-    __AppendElement(panel, lower);
-  };
-`;
-
-async function executeDemoScript(canvas: {
-  executeScript(url: string | URL): Promise<void>;
+async function loadDemoLynxXml(canvas: {
+  loadLynxXml(url: string | URL): Promise<void>;
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>;
 }): Promise<void> {
   const fontUrl = new URL('Roboto-Regular.ttf', document.baseURI);
@@ -269,13 +217,7 @@ async function executeDemoScript(canvas: {
     throw new Error('The demo font container did not contain a usable font face');
   }
 
-  const script = new Blob([DEMO_SCRIPT], { type: 'text/javascript' });
-  const url = URL.createObjectURL(script);
-  try {
-    await canvas.executeScript(url);
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  await canvas.loadLynxXml(new URL('demo.lynx.xml', document.baseURI));
 }
 
 function canvasMetrics(canvas: HTMLCanvasElement): {
@@ -310,7 +252,7 @@ async function start(shell: Shell): Promise<void> {
     'bobcat-wasm/facade.js',
     document.baseURI,
   ).href;
-  const { BobcatCanvas, default: init } = (await import(
+  const { BobcatCanvas, LYNX_XML_PAGE_CONFIG, default: init } = (await import(
     /* webpackIgnore: true */ bobcatModuleUrl
   )) as typeof import('bobcat-wasm');
 
@@ -325,18 +267,14 @@ async function start(shell: Shell): Promise<void> {
     initial.width,
     initial.height,
     initial.dpr,
-    {
-      defaultDisplayLinear: true,
-      defaultOverflowVisible: true,
-      enableCSSSelector: true,
-    },
+    LYNX_XML_PAGE_CONFIG,
   );
   bobcat.onerror = (error): void => {
     setIndicator(shell.renderer, 'Failed', 'error');
     shell.message.textContent = error.message;
   };
   setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
-  await executeDemoScript(bobcat);
+  await loadDemoLynxXml(bobcat);
 
   let lastWidth = initial.width;
   let lastHeight = initial.height;

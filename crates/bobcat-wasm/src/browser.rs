@@ -20,7 +20,7 @@ use bobcat_core::{
     WindowTarget, configure_wasm_workers, quickjs_engine_factory,
 };
 use http::HeaderMap;
-use js_sys::Promise;
+use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -507,6 +507,61 @@ impl BobcatRenderer {
     pub fn register_script(&self, url: String, bytes: Vec<u8>) -> Result<String, JsValue> {
         self.ensure_running()?;
         self.resources.register_script(&url, bytes)
+    }
+
+    /// Parse one browser-decoded Lynx XML source envelope and register its
+    /// logical template sections as fixed fragments of the final response URL.
+    ///
+    /// The returned array is `[main, styleOrNull, backgroundOrNull]`. The
+    /// Render Worker loads a present stylesheet before executing `main` and
+    /// retains a present background script without executing it until Bobcat
+    /// implements the background-thread runtime.
+    #[wasm_bindgen(js_name = registerLynxXml)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen owns JavaScript string arguments"
+    )]
+    pub fn register_lynx_xml(&self, source_url: String, source: String) -> Result<Array, JsValue> {
+        self.ensure_running()?;
+        let parsed = lynx_xml::parse(&source).map_err(js_error)?;
+
+        let section_url = |fragment: &str| {
+            let mut url = Url::parse(&source_url).map_err(|error| {
+                js_error(format!(
+                    "the Lynx XML response URL `{source_url}` is invalid: {error}"
+                ))
+            })?;
+            url.set_fragment(Some(fragment));
+            Ok::<_, JsValue>(url.to_string())
+        };
+        let main_section_url = section_url("main-thread")?;
+        let style_section_url = section_url("style")?;
+        let background_section_url = section_url("background-thread")?;
+
+        let main_url = self.resources.register_script(
+            &main_section_url,
+            parsed.main_thread_script.as_bytes().to_vec(),
+        )?;
+        let style_url = parsed
+            .style
+            .map(|style| {
+                self.resources
+                    .register_style_sheet(&style_section_url, style.as_bytes().to_vec())
+            })
+            .transpose()?;
+        let background_url = parsed
+            .background_thread_script
+            .map(|script| {
+                self.resources
+                    .register_script(&background_section_url, script.as_bytes().to_vec())
+            })
+            .transpose()?;
+
+        let registration = Array::new();
+        registration.push(&JsValue::from(main_url));
+        registration.push(&style_url.map_or(JsValue::NULL, JsValue::from));
+        registration.push(&background_url.map_or(JsValue::NULL, JsValue::from));
+        Ok(registration)
     }
 
     /// Start the registered main-thread script through `LynxView`'s resource

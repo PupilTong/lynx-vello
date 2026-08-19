@@ -20,7 +20,7 @@ use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
-    program.warn_about_unscoped_author_styles();
+    program.warn_about_compatibility_limits();
     let (sender, receiver) = mpsc::channel();
     let event_sender = sender.clone();
     let event_requester: std::sync::Arc<dyn EventRequester> = std::sync::Arc::new(move || {
@@ -37,8 +37,8 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         options.device_pixel_ratio,
     )?;
     view.attach_offscreen()?;
-    // The bundle's author CSS mounts before the script builds its tree, so
-    // the first commit is already styled.
+    // Author CSS mounts before the script builds its tree, so the first
+    // commit is already styled.
     if let Some(url) = style_sheet_url.as_ref() {
         pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
             CliError::LoadStyleSheet {

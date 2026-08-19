@@ -28,10 +28,10 @@ pub use screenshot::ScreenshotError;
 
 pub const USAGE: &str = "\
 Usage:
-  bobcat -i <file:///absolute/path/to/card.web.bundle> [OPTIONS]
+  bobcat -i <file:///absolute/path/to/input> [OPTIONS]
 
 Options:
-  -i, --input URL       local web-bundle URL (only file:/// is supported)
+  -i, --input URL       local web bundle or Lynx XML URL (file:/// only)
       --headless        render without opening a window
       --vsync FPS       headless frame-clock rate, 1..1000 (default: 60)
       --viewport WxH    initial CSS-pixel viewport (default: 393x727)
@@ -62,21 +62,33 @@ pub enum CliError {
         #[source]
         source: lynx_template_decoder::DecodeError,
     },
+    #[error("Lynx XML `{input}` is not valid UTF-8: {source}")]
+    InvalidLynxXmlEncoding {
+        input: String,
+        #[source]
+        source: std::str::Utf8Error,
+    },
+    #[error("could not parse Lynx XML `{input}`: {source}")]
+    ParseLynxXml {
+        input: String,
+        #[source]
+        source: lynx_xml::ParseError,
+    },
     #[error("web bundle `{0}` has no `lepusCode.root` entry")]
     MissingRoot(String),
-    #[error("could not run web bundle `{input}`: {source}")]
+    #[error("could not run input `{input}`: {source}")]
     Script {
         input: String,
         #[source]
         source: bobcat_core::ScriptRunError,
     },
-    #[error("could not load the author stylesheet of web bundle `{input}`: {source}")]
+    #[error("could not load the author stylesheet of input `{input}`: {source}")]
     LoadStyleSheet {
         input: String,
         #[source]
         source: bobcat_core::LynxViewError,
     },
-    #[error("could not start web bundle `{input}`: {source}")]
+    #[error("could not start input `{input}`: {source}")]
     StartScript {
         input: String,
         #[source]

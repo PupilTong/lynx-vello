@@ -26,8 +26,8 @@ Render Worker
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
-limited to view creation with `PageConfig`, URL-based script and stylesheet
-requests, font registration, resize, error observation, and disposal.
+limited to view creation with `PageConfig`, URL-based script, stylesheet, and
+Lynx XML requests, font registration, resize, error observation, and disposal.
 
 The Render Worker constructs `LynxView`, attaches the transferred canvas, and
 calls `configure_wasm_workers`. That core API configures the worker bootstrap
@@ -48,8 +48,27 @@ the opaque Rust view's `execute_script(url)`. The view resolves and reads the
 bytes through `ResourceFetcher` and performs strict UTF-8 validation; it never
 receives a bundle decoder.
 
-The UI facade resolves relative script and stylesheet URLs against the
-embedding document's `document.baseURI` before crossing the Worker boundary.
+`loadLynxXml(url)` similarly fetches the source envelope once and decodes it
+with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
+raw XML loader. Rust's `lynx-xml` parser validates and extracts the sections in
+the Render Worker. A present stylesheet is registered as CSS text and mounted
+before the main-thread section is started; the returned Promise uses the same
+engine-event completion path as `executeScript`. The exported
+`LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
+`false`/`false`/`true` display/overflow/selector defaults, while callers may
+still pass an intentional host override to `BobcatCanvas.create`.
+
+Like `executeScript`, `loadLynxXml` is a one-shot entry-script operation for a
+Canvas. Once either entry point has started a script, another call rejects
+before fetching or mounting XML CSS, so a failed repeated load cannot mutate
+the running page's cascade.
+
+The optional XML background section is retained under a URL derived from the
+final XML response URL but is not executed. Bobcat does not yet have a
+background-thread realm, so the browser reports this limitation explicitly.
+
+The UI facade resolves relative script, stylesheet, and Lynx XML URLs against
+the embedding document's `document.baseURI` before crossing the Worker boundary.
 The Render Worker accepts only absolute URLs: resolving there against
 `self.location` would incorrectly use the npm package/Worker URL as the base.
 
@@ -77,10 +96,10 @@ has a second arm for a host that already parsed its CSS, but a browser host
 never does, so this embedder always takes the text arm.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
-may execute suitable JavaScript by URL; bundle retrieval, decode, `PageConfig`
-parsing, and `StyleInfo` lowering remain external work, exactly as in the
-native CLI — where the CLI does perform them and hands core the pre-parsed
-arm.
+may execute suitable JavaScript by URL or load a raw Lynx XML source card;
+bundle retrieval, decode, `PageConfig` parsing, and `StyleInfo` lowering remain
+external work, exactly as in the native CLI — where the CLI does perform them
+and hands core the pre-parsed arm.
 
 ## Synchronization and rendering
 
@@ -140,8 +159,8 @@ and tail calls. Generated glue and Wasm live under
 `crates/bobcat-wasm/pkg/` and are not checked in. The verification script
 checks that optimization removed the debugging name section while preserving
 `target_features`, shared imported/exported memory, the Worker-only Wasm
-import, the URL execution methods, and the absence of the removed direct DOM
-API.
+import, the URL execution/XML methods, and the absence of the removed direct
+DOM API.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary

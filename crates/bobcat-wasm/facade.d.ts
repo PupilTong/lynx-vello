@@ -4,6 +4,9 @@ export interface PageConfig {
   enableCSSSelector: boolean
 }
 
+/** web-core raw-loader defaults; spread this object to override individual values. */
+export declare const LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>
+
 export declare class BobcatCanvas {
   private constructor()
 
@@ -25,7 +28,7 @@ export declare class BobcatCanvas {
    * script boot sequence finishes and rejects on loading or evaluation error.
    * Relative URLs use the embedding document's base URL. The embedded QuickJS
    * realm and the browser facade do not impose a loading, startup, or execution
-   * deadline.
+   * deadline. A Canvas accepts exactly one entry-script operation.
    */
   executeScript(url: string | URL): Promise<void>
 
@@ -35,6 +38,16 @@ export declare class BobcatCanvas {
    * URL.
    */
   loadStyleSheet(url: string | URL): Promise<void>
+
+  /**
+   * Fetches and parses a Lynx XML source envelope, mounts its optional
+   * stylesheet, and then runs its main-thread script. The Promise resolves
+   * after the script boot sequence finishes. A background-thread script is
+   * retained but not executed and produces a console warning. This is a
+   * one-shot entry-script operation; a repeated call rejects before fetch or
+   * stylesheet mounting.
+   */
+  loadLynxXml(url: string | URL): Promise<void>
 
   /** Registers all font faces in an OpenType font container. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>
