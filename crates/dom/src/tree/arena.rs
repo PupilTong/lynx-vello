@@ -55,20 +55,15 @@ impl NodeId {
     /// The arena index, with the generation masked off. Only for asking "is
     /// this the same physical slot" and for indexing inside this module —
     /// nothing accepts a bare key back as a handle.
+    // Neither cast below can lose anything, and clippy can see it: the key is
+    // masked to `KEY_BITS`, and the generation is what is left after shifting
+    // that many bits off a `u64`. No `expect` — it would go unfulfilled.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the key is masked out of the packed form on purpose"
-    )]
     pub(crate) const fn arena_key(self) -> usize {
         (self.0.get() & KEY_MASK) as usize
     }
 
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the generation is shifted out of the packed form on purpose"
-    )]
     const fn generation(self) -> u32 {
         (self.0.get() >> KEY_BITS) as u32
     }
