@@ -72,9 +72,10 @@ impl<T> Document<T> {
         let url_data = style_engine.url_data();
         let mut tree = Box::new(TreeArenas::new());
         tree.reserve_zero();
-        let (root, slot) = tree.insert_node(PayloadSlot::Document, |owner, _, slot| {
-            Node::new_document(owner, slot, lock, url_data)
+        let root = tree.insert_node(PayloadSlot::Document, |owner, id| {
+            Node::new_document(owner, id, lock, url_data)
         });
+        let slot = root;
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must take the first id the document ever issues"
@@ -270,7 +271,7 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         let id = self.allocate_node(PayloadSlot::Node(payload), {
             let local_name = local_name.clone();
-            |owner, id, slot| Node::new_element(owner, id, slot, local_name)
+            |owner, id| Node::new_element(owner, id, local_name)
         });
         self.pin_node(id);
         self.note_custom_element_created(id, &local_name);
@@ -281,8 +282,8 @@ impl<T> Document<T> {
 
     pub fn create_text_node(&mut self, text: impl Into<String>, payload: T) -> NodeId {
         let text = text.into();
-        self.allocate_node(PayloadSlot::Node(payload), |owner, id, slot| {
-            Node::new_text(owner, id, slot, text)
+        self.allocate_node(PayloadSlot::Node(payload), |owner, id| {
+            Node::new_text(owner, id, text)
         })
     }
 
@@ -290,10 +291,10 @@ impl<T> Document<T> {
     pub(crate) fn allocate_node(
         &mut self,
         payload: PayloadSlot<T>,
-        make: impl FnOnce(*mut TreeArenas<T>, NodeId, NodeSlot) -> Node<T>,
+        make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let (id, slot) = self.tree.insert_node(payload, make);
-        self.layout.insert(slot);
+        let id = self.tree.insert_node(payload, make);
+        self.layout.insert(id);
         id
     }
 
@@ -529,7 +530,7 @@ impl<T> Document<T> {
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.drain_reactions(base);
-        let children: Vec<NodeId> = self.live(id).child_ids().collect();
+        let children: Vec<NodeId> = self.live(id).child_ids().to_vec();
         for child in children {
             self.unlink_from_parent(child);
         }
@@ -589,8 +590,12 @@ impl<T> Document<T> {
 
     /// Empties all three arenas of one node and retires its id.
     fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
-        let removed_snapshot = self.pending_snapshots.remove(&OpaqueNode(id)).is_some();
-        let (slot, node, payload) = self.tree.remove_node(id);
+        let removed_snapshot = self
+            .pending_snapshots
+            .remove(&OpaqueNode(id.arena_key()))
+            .is_some();
+        let (node, payload) = self.tree.remove_node(id);
+        let slot = id;
         debug_assert_eq!(
             removed_snapshot,
             node.snapshot_present(),
@@ -617,7 +622,8 @@ impl<T> Document<T> {
         for opaque in self.pending_snapshots.keys() {
             let node = self
                 .tree
-                .get(opaque.0)
+                .id_at_arena_key(opaque.0)
+                .and_then(|id| self.tree.get(id))
                 .expect("queued snapshot must belong to a live node");
             debug_assert!(node.is_element(), "only elements can own Stylo snapshots");
             debug_assert_eq!(
@@ -650,7 +656,10 @@ impl<T> Document<T> {
 
     fn retain_unhandled_snapshots(&self, snapshots: &mut SnapshotMap) {
         snapshots.retain(|opaque, _| {
-            let node = self.tree.get(opaque.0);
+            let node = self
+                .tree
+                .id_at_arena_key(opaque.0)
+                .and_then(|id| self.tree.get(id));
             debug_assert!(node.is_some(), "queued snapshot outlived its node");
             let Some(node) = node else {
                 return false;
@@ -834,31 +843,16 @@ pub(crate) mod tests {
         document.insert_before(c, inner, None);
 
         document.swap_element(a, b);
-        assert_eq!(
-            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
-            [b, a, c]
-        );
+        assert_eq!(document.get(page).unwrap().child_ids(), [b, a, c]);
         document.swap_element(a, b);
-        assert_eq!(
-            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
-            [a, b, c]
-        );
+        assert_eq!(document.get(page).unwrap().child_ids(), [a, b, c]);
 
         document.swap_element(a, c);
-        assert_eq!(
-            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
-            [c, b, a]
-        );
+        assert_eq!(document.get(page).unwrap().child_ids(), [c, b, a]);
 
         document.swap_element(b, inner);
-        assert_eq!(
-            document.get(page).unwrap().child_ids().collect::<Vec<_>>(),
-            [c, inner, a]
-        );
-        assert_eq!(
-            document.get(c).unwrap().child_ids().collect::<Vec<_>>(),
-            [b]
-        );
+        assert_eq!(document.get(page).unwrap().child_ids(), [c, inner, a]);
+        assert_eq!(document.get(c).unwrap().child_ids(), [b]);
     }
 
     #[test]
@@ -920,22 +914,35 @@ pub(crate) mod tests {
         );
     }
 
+    /// A handle names one node for that node's whole life and is refused
+    /// afterwards, however many nodes reuse its storage. That is the guarantee
+    /// the deleted id table used to buy with a monotonic counter, and the
+    /// generation buys it without one.
     #[test]
-    fn ids_only_ever_count_upward() {
+    fn a_handle_never_names_a_later_occupant_of_its_storage() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let root = document.document_element().id();
         assert_eq!(
-            (DOCUMENT_NODE_ID, root),
+            (DOCUMENT_NODE_ID.arena_key(), root.arena_key()),
             (1, 2),
-            "zero is reserved, so the document node and element take the next two ids"
+            "arena key zero is reserved, so the document node and element take the next two"
         );
 
-        let mut highest = root;
+        let mut retired = Vec::new();
         for _ in 0..8 {
             let id = document.create_element("view", ());
-            assert!(id > highest, "each new id exceeds every id issued before");
-            highest = id;
+            assert!(
+                document.get(id).is_some(),
+                "a fresh handle names its own node"
+            );
             document.drop_subtree(id);
+            retired.push(id);
+            for &dead in &retired {
+                assert!(
+                    document.get(dead).is_none(),
+                    "every retired handle stays refused as its storage is reused"
+                );
+            }
         }
     }
 
@@ -998,13 +1005,13 @@ pub(crate) mod tests {
         assert!(
             document
                 .pending_snapshots
-                .contains_key(&OpaqueNode(detached)),
+                .contains_key(&OpaqueNode(detached.arena_key())),
             "a snapshot outside the traversed document tree must stay pending"
         );
         assert!(
             !document
                 .pending_snapshots
-                .contains_key(&OpaqueNode(connected)),
+                .contains_key(&OpaqueNode(connected.arena_key())),
             "the handled connected snapshot must be retired"
         );
         assert_eq!(
@@ -1041,7 +1048,7 @@ pub(crate) mod tests {
         let snapshot = document
             .pending_snapshots
             .iter()
-            .find_map(|(opaque, snapshot)| (opaque.0 == removed).then_some(snapshot))
+            .find_map(|(opaque, snapshot)| (opaque.0 == removed.arena_key()).then_some(snapshot))
             .unwrap();
         assert!(snapshot.class_changed);
         assert!(snapshot.id_changed);

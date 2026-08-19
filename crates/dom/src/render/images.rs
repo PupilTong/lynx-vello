@@ -19,7 +19,7 @@ use vello::peniko::ImageData;
 #[derive(Debug, Default)]
 pub struct ImageStore {
     by_url: FxHashMap<String, ImageData>,
-    by_node: FxHashMap<usize, ImageData>,
+    by_node: FxHashMap<u64, ImageData>,
 }
 
 impl ImageStore {
@@ -36,7 +36,7 @@ impl ImageStore {
 
     /// Registers the decoded content of a replaced element, replacing any
     /// previous entry.
-    pub fn insert_node(&mut self, node: usize, image: ImageData) {
+    pub fn insert_node(&mut self, node: u64, image: ImageData) {
         self.by_node.insert(node, image);
     }
 
@@ -44,7 +44,7 @@ impl ImageStore {
         self.by_url.remove(url)
     }
 
-    pub fn remove_node(&mut self, node: usize) -> Option<ImageData> {
+    pub fn remove_node(&mut self, node: u64) -> Option<ImageData> {
         self.by_node.remove(&node)
     }
 
@@ -54,7 +54,7 @@ impl ImageStore {
     }
 
     #[must_use]
-    pub fn node(&self, node: usize) -> Option<&ImageData> {
+    pub fn node(&self, node: u64) -> Option<&ImageData> {
         self.by_node.get(&node)
     }
 }

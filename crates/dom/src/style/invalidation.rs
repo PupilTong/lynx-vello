@@ -84,7 +84,7 @@ impl<T> Document<T> {
         let parent_node = self.live(parent);
         let flags = parent_node.selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            let children: Vec<NodeId> = parent_node.child_ids().collect();
+            let children: Vec<NodeId> = parent_node.child_ids().to_vec();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
             }
@@ -407,7 +407,7 @@ impl<T> Document<T> {
         if !self.live_element(id).has_style_data() {
             return None;
         }
-        let opaque = OpaqueNode(id);
+        let opaque = OpaqueNode(id.arena_key());
         let (nodes, pending_snapshots) = self.snapshot_storage();
         match pending_snapshots.entry(opaque) {
             Entry::Occupied(entry) => Some(entry.into_mut()),

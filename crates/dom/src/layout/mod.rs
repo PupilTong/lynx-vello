@@ -244,7 +244,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 640, 656, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 640, 656, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

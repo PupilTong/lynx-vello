@@ -67,7 +67,7 @@ impl Harness {
         let natural = NaturalSize::from_size(Size::new(info.width as f32, info.height as f32));
         self.doc.dom.set_natural_size(node, natural);
         self.doc.dom.images_mut().insert_node(
-            node,
+            node.to_bits(),
             ImageData {
                 data: Blob::from(rgba),
                 format: ImageFormat::Rgba8,

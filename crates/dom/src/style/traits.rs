@@ -105,11 +105,11 @@ impl<'a, T: Sync> TNode for &'a Node<T> {
     }
 
     fn opaque(&self) -> OpaqueNode {
-        OpaqueNode(Node::id(self))
+        OpaqueNode(Node::id(self).arena_key())
     }
 
     fn debug_id(self) -> usize {
-        Node::id(self)
+        Node::id(self).arena_key()
     }
 
     fn traversal_parent(&self) -> Option<Self::ConcreteElement> {

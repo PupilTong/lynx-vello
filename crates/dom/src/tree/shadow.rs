@@ -122,7 +122,6 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn flat_parent_id(&self) -> Option<NodeId> {
         self.flat_parent_slot()
-            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
@@ -138,7 +137,6 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn shadow_root_id(&self) -> Option<NodeId> {
         self.shadow_root_slot()
-            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
@@ -149,7 +147,6 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn assigned_slot_id(&self) -> Option<NodeId> {
         self.assigned_slot_slot()
-            .map(|slot| self.arenas().at(slot).id())
     }
 
     #[must_use]
@@ -159,11 +156,9 @@ impl<T> Node<T> {
             .map_or(&[][..], |links| &links.assigned_nodes)
     }
 
-    pub(crate) fn assigned_node_ids(&self) -> impl ExactSizeIterator<Item = NodeId> + '_ {
-        let arenas = self.arenas();
+    #[must_use]
+    pub(crate) fn assigned_node_ids(&self) -> &[NodeId] {
         self.assigned_node_slots()
-            .iter()
-            .map(move |&slot| arenas.at(slot).id())
     }
 
     #[must_use]
@@ -254,8 +249,8 @@ impl<T> Document<T> {
             "Document::attach_shadow: the host already hosts a shadow root"
         );
         let host_slot = self.live_slot(host);
-        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id, slot| {
-            Node::new_shadow_root(owner, id, slot, ShadowRootData::new(host_slot, mode))
+        let root = self.allocate_node(PayloadSlot::ShadowRoot, |owner, id| {
+            Node::new_shadow_root(owner, id, ShadowRootData::new(host_slot, mode))
         });
         let root_slot = self.live_slot(root);
         self.live_node_mut(root).parent = Some(host_slot);
@@ -293,10 +288,8 @@ impl<T> Document<T> {
     /// The nodes a slot renders, in the host's child order. Empty when the
     /// slot shows its fallback content instead.
     #[must_use]
-    pub fn assigned_nodes(&self, slot: NodeId) -> Vec<NodeId> {
-        self.get(slot)
-            .map(|node| node.assigned_node_ids().collect())
-            .unwrap_or_default()
+    pub fn assigned_nodes(&self, slot: NodeId) -> &[NodeId] {
+        self.get(slot).map_or(&[][..], Node::assigned_node_ids)
     }
 
     #[must_use]
@@ -346,40 +339,48 @@ impl<T> Document<T> {
         if self.get(parent).and_then(Node::shadow_root_id).is_some() {
             self.unassign_slottable(child);
         }
-        self.clear_departing_slot_assignments(child);
-        self.note_slot_set_change(parent, child);
-    }
-
-    /// Drops the assignments held by any slot in a subtree that just left the
-    /// tree it was assigning for.
-    ///
-    /// [`Document::assign_slots`] only rewrites the slots it can still reach
-    /// from the shadow root, so a detached slot keeps whatever it was holding.
-    /// Those entries name nodes that can be freed while the detached slot is
-    /// still alive, which leaves it pointing at storage that has moved on —
-    /// and an unassigned slot renders its fallback content anyway, so the
-    /// empty list is also the right answer.
-    fn clear_departing_slot_assignments(&mut self, root: NodeId) {
-        let Some(root_slot) = self.slot(root) else {
+        let Some(root) = self.shadow_root_of(parent) else {
             return;
         };
-        let mut departing: Vec<NodeId> = Vec::new();
-        let mut stack = vec![root_slot];
-        while let Some(current) = stack.pop() {
-            let node = self.arenas().at(current);
-            if node.is_slot() && !node.assigned_node_slots().is_empty() {
-                departing.push(node.id());
-            }
-            stack.extend_from_slice(node.child_slots());
+        // One walk answers both questions this removal has: which slots left
+        // (they must drop what they were assigning), and whether any left at
+        // all (only then does the shadow root need reassigning).
+        let departed = self.slots_in_subtree(child);
+        if departed.is_empty() {
+            return;
         }
-        for slot in departing {
-            let assigned: Vec<NodeId> = self.live(slot).assigned_node_ids().collect();
+        // `assign_slots` only rewrites the slots it can still reach from the
+        // shadow root, so a departed slot would otherwise keep whatever it was
+        // holding — entries naming nodes that can be freed while the detached
+        // slot is still alive and readable. An unassigned slot renders its
+        // fallback content anyway, so empty is also the right answer.
+        for slot in departed {
+            let assigned: Vec<NodeId> = self.live(slot).assigned_node_ids().to_vec();
             for node in assigned {
                 self.live_node_mut(node).clear_assigned_slot();
             }
             self.live_node_mut(slot).links_mut().assigned_nodes.clear();
             self.mark_subtree_dirty(slot);
         }
+        self.invalidate_slot_cache(root);
+        self.assign_slots(root);
+    }
+
+    /// Every slot element in a subtree, in the walk's order.
+    fn slots_in_subtree(&self, root: NodeId) -> Vec<NodeId> {
+        let Some(root_slot) = self.slot(root) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        let mut stack = vec![root_slot];
+        while let Some(current) = stack.pop() {
+            let node = self.arenas().at(current);
+            if node.is_slot() {
+                found.push(node.id());
+            }
+            stack.extend_from_slice(node.child_slots());
+        }
+        found
     }
 
     fn note_slot_set_change(&mut self, parent: NodeId, child: NodeId) {
@@ -543,7 +544,7 @@ impl<T> Document<T> {
             })
             .collect();
 
-        let light: Vec<NodeId> = self.live(host).child_ids().collect();
+        let light: Vec<NodeId> = self.live(host).child_ids().to_vec();
         let mut assignments: Vec<(NodeId, Option<NodeId>)> = Vec::with_capacity(light.len());
         for child in light {
             let node = self.live(child);

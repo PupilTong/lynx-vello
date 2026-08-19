@@ -486,7 +486,7 @@ mod tests {
 
         let row = document
             .get(scroller)
-            .and_then(|node| node.child_ids().next())
+            .and_then(|node| node.child_ids().first().copied())
             .expect("the scroller has rows");
         assert_eq!(
             document.nearest_user_scrollable(row, ScrollAxes::BOTH),
@@ -524,7 +524,7 @@ mod tests {
         let (mut document, _outer, inner) = nested_scrollers();
         let content = document
             .get(inner)
-            .and_then(|node| node.child_ids().next())
+            .and_then(|node| node.child_ids().first().copied())
             .expect("inner has its content child");
 
         let (consumer, _) = document

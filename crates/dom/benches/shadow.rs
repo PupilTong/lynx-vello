@@ -135,11 +135,15 @@ fn plain_page(hosts: usize, rows: usize) -> (Document<()>, NodeId) {
             .get(host)
             .and_then(|node| {
                 node.child_ids()
-                    .next()
+                    .first()
+                    .copied()
                     .and_then(|frame| doc.get(frame))
-                    .and_then(|frame| frame.child_ids().next())
+                    .and_then(|frame| frame.child_ids().first().copied())
             })
-            .and_then(|slot| doc.get(slot).and_then(|slot| slot.child_ids().next()))
+            .and_then(|slot| {
+                doc.get(slot)
+                    .and_then(|slot| slot.child_ids().first().copied())
+            })
             .unwrap_or(probe);
     }
     (doc, probe)
@@ -153,7 +157,7 @@ fn shadow_page(hosts: usize, rows: usize) -> (Document<()>, NodeId) {
         let host = shadow_host(&mut doc, root, rows);
         probe = doc
             .get(host)
-            .and_then(|node| node.child_ids().next())
+            .and_then(|node| node.child_ids().first().copied())
             .unwrap_or(probe);
     }
     (doc, probe)

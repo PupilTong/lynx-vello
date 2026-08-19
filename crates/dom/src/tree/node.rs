@@ -69,15 +69,11 @@ enum NodeContent {
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
     owner: AtomicPtr<TreeArenas<T>>,
-    /// This node's identity, and its own storage position.
-    ///
-    /// Links are held in slot space, not id space: a walk that follows
-    /// `parent`/`children` indexes the arena directly instead of resolving an
-    /// id through the table first, which is the difference between one load
-    /// per step and two *dependent* loads per step. Identity is what leaves
-    /// the crate; storage is what the walk uses.
+    /// This node's handle: both its identity and the arena position it
+    /// occupies, because those are now one thing. A walk that follows
+    /// `parent`/`children` indexes the arena directly — there is no id table
+    /// to resolve through, which is what keeps a walk step to one load.
     id: NodeId,
-    slot: NodeSlot,
     data: NodeData,
     payload: PhantomData<T>,
 
@@ -108,14 +104,14 @@ pub struct Node<T> {
 impl<T> Node<T> {
     pub(crate) fn new_document(
         owner: *mut TreeArenas<T>,
-        slot: NodeSlot,
+        id: NodeId,
         lock: StdArc<SharedRwLock>,
         url_data: UrlExtraData,
     ) -> Self {
+        debug_assert_eq!(id, DOCUMENT_NODE_ID, "the document node is the first node");
         Self::new(
             owner,
-            DOCUMENT_NODE_ID,
-            slot,
+            id,
             NodeData::Document(Box::new(DocumentNodeData {
                 lock,
                 url_data,
@@ -129,50 +125,28 @@ impl<T> Node<T> {
     pub(crate) fn new_element(
         owner: *mut TreeArenas<T>,
         id: NodeId,
-        slot: NodeSlot,
         local_name: LocalName,
     ) -> Self {
-        let mut node = Self::new(
-            owner,
-            id,
-            slot,
-            NodeData::Element(None),
-            Some(local_name),
-            None,
-        );
+        let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
         node.element_state = ElementState::DEFINED;
         node
     }
 
-    pub(crate) fn new_text(
-        owner: *mut TreeArenas<T>,
-        id: NodeId,
-        slot: NodeSlot,
-        text: String,
-    ) -> Self {
-        Self::new(owner, id, slot, NodeData::Text, None, Some(text))
+    pub(crate) fn new_text(owner: *mut TreeArenas<T>, id: NodeId, text: String) -> Self {
+        Self::new(owner, id, NodeData::Text, None, Some(text))
     }
 
     pub(crate) fn new_shadow_root(
         owner: *mut TreeArenas<T>,
         id: NodeId,
-        slot: NodeSlot,
         data: ShadowRootData,
     ) -> Self {
-        Self::new(
-            owner,
-            id,
-            slot,
-            NodeData::ShadowRoot(Box::new(data)),
-            None,
-            None,
-        )
+        Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
     }
 
     fn new(
         owner: *mut TreeArenas<T>,
         id: NodeId,
-        slot: NodeSlot,
         data: NodeData,
         local_name: Option<LocalName>,
         text: Option<String>,
@@ -180,7 +154,6 @@ impl<T> Node<T> {
         Self {
             owner: AtomicPtr::new(owner),
             id,
-            slot,
             data,
             payload: PhantomData,
             parent: None,
@@ -326,7 +299,7 @@ impl<T> Node<T> {
     #[must_use]
     #[inline]
     pub(crate) const fn slot(&self) -> NodeSlot {
-        self.slot
+        self.id
     }
 
     #[must_use]
@@ -341,19 +314,14 @@ impl<T> Node<T> {
         &self.children
     }
 
-    /// The parent's identity. Links are stored in slot space, so this reads
-    /// the parent to recover its id — a walk that only needs to *reach* the
-    /// parent should use [`Node::parent`] and pay one load, not two.
     #[must_use]
     pub fn parent_id(&self) -> Option<NodeId> {
-        self.parent.map(|slot| self.arenas().at(slot).id())
+        self.parent
     }
 
-    /// The children's identities, derived from the stored slots. Iterating
-    /// the nodes themselves ([`Node::children`]) is cheaper.
-    pub fn child_ids(&self) -> impl ExactSizeIterator<Item = NodeId> + DoubleEndedIterator + '_ {
-        let arenas = self.arenas();
-        self.children.iter().map(move |&slot| arenas.at(slot).id())
+    #[must_use]
+    pub fn child_ids(&self) -> &[NodeId] {
+        &self.children
     }
 
     #[must_use]
@@ -671,7 +639,7 @@ impl<T> Node<T> {
         let siblings = &tree.at(self.parent?).children;
         let pos = siblings
             .iter()
-            .position(|&c| c == self.slot)
+            .position(|&c| c == self.id)
             .expect("node must appear in its parent's child list");
         let sibling = *siblings.get(pos.checked_add_signed(offset)?)?;
         Some(tree.at(sibling))
@@ -795,9 +763,12 @@ mod tests {
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
+        // A handle is identity and storage position in one 8-byte value, and
+        // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
+        // parent link costs 8 bytes rather than 16.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 232 } else { 224 }
+            if cfg!(debug_assertions) { 224 } else { 216 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,
