@@ -317,12 +317,16 @@ useful signal for currently-compatible versions of those libraries.
   runtime; each carries its DOM `NodeId` under a realm-local symbol and is
   registered with a `FinalizationRegistry` whose cleanup calls
   `bobcat.dropElement`, freeing only that element — its descendants remain
-  live but detached until their own handles are collected. Cleanup runs as
+  live but detached until their own handles are collected, except the text
+  node a `raw-text` reflects, which is freed with its carrier because no
+  handle could ever name it. Cleanup runs as
   a pending job at the job checkpoints (a collection comes from allocation
   pressure or its private garbage-collection checkpoint), and pending jobs never
   run at realm teardown, which preserves the last committed tree.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
-  `Viewport`/stylo `Device` construction, and the Lynx UA cascade defaults;
+  `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
+  the components the engine defines (`tree::raw_text`, one file per
+  component, each owning its own UA rules and tests);
   the `bobcat` host functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
   `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
@@ -333,6 +337,24 @@ useful signal for currently-compatible versions of those libraries.
   exception (unexpected internal panics remain fatal on abort-only Wasm). An unflushed batch may
   present once its evaluation ends — web-core's visibility model, where
   the browser paints the live DOM regardless of `__FlushElementTree`.
+  **Text** reaches the engine as an attribute and leaves it as a W3C text
+  node, and `raw-text` is the join. Script writes a run with
+  `__CreateRawText(value)` — a `raw-text` element carrying `text` — while
+  everything downstream (Parley shaping, line breaking, the glyph painter)
+  speaks the text node. So `tree::raw_text` defines a `dom::CustomElement`
+  observing `text`, reflecting its current value into one text node the way web-core's
+  `RawTextAttributes` does, updating that node in place rather than replacing
+  it (a run keeps its retained Parley layout under its own id), and carrying
+  no node at all for an empty value. The UA sheet carries the other half,
+  again from `web-elements`: `text` is a flex container whatever
+  `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
+  `raw-text` dissolves into the `text` it is written inside
+  (`display: none` anywhere else) with
+  `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
+  newline. **Not implemented**: an inline formatting context, so sibling runs
+  in one `text` are separate flex items rather than one wrapped paragraph, a
+  nested `text` is a flex item rather than an inline box, and `text-maxline`
+  truncation is still absent.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -990,9 +1012,12 @@ useful signal for currently-compatible versions of those libraries.
   (see above). Still L3 work in the runtime adapter: the remaining Element-PAPI
   surface, `rpx`-aware view/device policy, per-component css-id scoping,
   sticky lowering,
-  component-specific staggered layout, and Lynx-specific text
-  attribute/raw-text/truncation policy. Generic W3C text style, document
-  context, and artifact storage already live in `dom`.
+  component-specific staggered layout, and the rest of the Lynx text policy —
+  `text-maxline`/`text-maxlength` truncation, `tail-color-convert`, and the
+  inline formatting context sibling runs in one `text` would need. The
+  `raw-text` attribute-to-text-node reflection and its UA display/newline
+  policy have landed in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C
+  text style, document context, and artifact storage already live in `dom`.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =
   false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a

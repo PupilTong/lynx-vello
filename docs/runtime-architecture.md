@@ -139,6 +139,18 @@ an opt-in timeout for its direct users and tests.
 Vello scene, and image store. In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
+It also defines the one component the engine owns, `raw-text`, in its own
+module (`tree::raw_text`, which owns the component, its UA rules, and its
+tests together). Lynx writes a
+text run as an attribute (`__CreateRawText(value)` sets `text` on a `raw-text`
+element) while everything downstream — Parley shaping, line breaking, the
+glyph painter — speaks the W3C text node, so the component observes `text` and
+reflects its value into one text node, updating that node in place and
+carrying none at all for an empty value. The UA sheet supplies the display
+policy the reflection needs: `text` is a flex container, `wrapper` is
+`display: contents`, and a `raw-text` dissolves into the `text` it is written
+inside and generates no box anywhere else.
+
 ```text
 private Document<()>
   ├── DOM + Stylo arenas
