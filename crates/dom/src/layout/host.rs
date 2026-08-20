@@ -76,7 +76,10 @@ impl<T> LayoutTree for TreeArenas<T> {
         input: LayoutInput,
     ) -> LayoutOutput {
         let node_ref = self.at(node);
-        let display = if node_ref.is_text_node() {
+        let is_leaf = node_ref.is_text_node();
+        #[cfg(feature = "layout-test-utils")]
+        let is_leaf = is_leaf || node_ref.test_leaf_metrics().is_some();
+        let display = if is_leaf {
             DisplayMode::Leaf
         } else {
             let view = self.style(node);

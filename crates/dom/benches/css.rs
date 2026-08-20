@@ -70,6 +70,22 @@ const INHERITANCE_BATCH: usize = 32;
 const VAR_CHAIN_BATCH: usize = 8;
 const MEDIA_BATCH: usize = 2;
 
+// These cases measure Stylo parsing, cascade, and invalidation through the
+// production `Document::layout` commit API. Keep descendant box layout out of
+// the sample: layout algorithms have dedicated Hughie benchmarks, and making
+// Lynx's initial display `flex` must not turn a CSS benchmark into a deep
+// intrinsic Flexbox workload. Style traversal still reaches the skipped
+// contents before the layout host observes `content-visibility: hidden`.
+const CSS_COMMIT_ROOT_STYLE: &str =
+    "display:flex; content-visibility:hidden; width:800px; height:600px";
+
+fn css_commit_document() -> Document<()> {
+    let mut doc = Document::new(device(800.0, 600.0), "page", ());
+    let root = doc.document_element().id();
+    doc.set_inline_style(root, CSS_COMMIT_ROOT_STYLE);
+    doc
+}
+
 fn author_sheet() -> String {
     let mut css = String::with_capacity(64 * 1024);
     for i in 0..CLASS_RULES {
@@ -106,7 +122,7 @@ fn author_sheet() -> String {
 }
 
 fn document_with_author_sheet() -> Document<()> {
-    let mut doc = Document::new(device(800.0, 600.0), "page", ());
+    let mut doc = css_commit_document();
     doc.add_stylesheet(&author_sheet(), StylesheetOrigin::Author);
     doc
 }
@@ -295,7 +311,7 @@ fn inheritance_deep_chain(bencher: divan::Bencher) {
         .with_inputs(|| {
             (0..INHERITANCE_BATCH)
                 .map(|_| {
-                    let mut doc: Document<()> = Document::new(device(800.0, 600.0), "page", ());
+                    let mut doc = css_commit_document();
                     doc.add_stylesheet(
                         "page { color: rgb(120, 30, 40); font-size: 18px; }",
                         StylesheetOrigin::Author,
@@ -331,7 +347,7 @@ fn var_chain_cascade(bencher: divan::Bencher) {
         .with_inputs(|| {
             (0..VAR_CHAIN_BATCH)
                 .map(|_| {
-                    let mut doc = Document::new(device(800.0, 600.0), "page", ());
+                    let mut doc = css_commit_document();
                     doc.add_stylesheet(&css, StylesheetOrigin::Author);
                     let probe = build_tree(&mut doc);
                     (doc, probe)
