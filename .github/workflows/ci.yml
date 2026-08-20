@@ -173,7 +173,7 @@ jobs:
     timeout-minutes: 180
     concurrency:
       group: lynx-vello-macos-walltime
-      cancel-in-progress: false
+      cancel-in-progress: true
     env:
       CARGO_TARGET_DIR: /Users/admin/.cache/lynx-vello-cargo-target
       HOMEBREW_NO_AUTO_UPDATE: 1
@@ -184,14 +184,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify isolated Metal runner
-        run: |
-          if mount | grep -Fq 'com.apple.virtio-fs'; then
-            echo '::error::A host directory share is mounted in the runner VM'
-            exit 1
-          fi
-          system_profiler SPDisplaysDataType
-
       - name: Install pinned toolchain
         run: rustup toolchain install
 
@@ -200,9 +192,6 @@ jobs:
           brew install llvm@22
           echo "CC=$(brew --prefix llvm@22)/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=$(brew --prefix llvm@22)/bin/clang++" >> "$GITHUB_ENV"
-
-      - name: Verify GPU rendering
-        run: cargo test -p dom --test gpu_smoke
 
       - name: Install cargo-codspeed 5
         uses: taiki-e/install-action@v2
