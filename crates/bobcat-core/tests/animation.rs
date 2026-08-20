@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    EngineEvent, ManualClock, OffscreenLynxView, PageConfig, PreparsedDeclaration,
-    PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, ScriptRunError, quickjs_engine_factory,
+    AnimationClock, EngineEvent, LynxView, ManualClock, NoWindow, OffscreenLynxView, PageConfig,
+    PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, ScriptRunError,
+    quickjs_engine_factory,
 };
 use support::FetcherDouble;
 
@@ -68,15 +69,19 @@ fn slider_sheet() -> PreparsedStyleSheet {
     }
 }
 
-async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
+fn resources(sheet: Option<PreparsedStyleSheet>) -> Arc<dyn ResourceFetcher> {
     let mut double = FetcherDouble::new(SLIDER_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL);
     if let Some(sheet) = sheet {
         double = double.with_preparsed_style_sheet(sheet);
     }
-    let resources: Arc<dyn ResourceFetcher> = Arc::new(double);
-    let mut view = OffscreenLynxView::new(
+    Arc::new(double)
+}
+
+/// A view built the ordinary way, so its timeline is whatever `new` chooses.
+async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
+    let view = OffscreenLynxView::new(
         PageConfig::default(),
-        resources,
+        resources(sheet),
         quickjs_engine_factory(),
         Arc::new(|| {}),
         32.0,
@@ -84,7 +89,29 @@ async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
         1.0,
     )
     .expect("view");
+    run(view).await
+}
 
+/// A view whose timeline the test names and drives.
+async fn booted_on<C: AnimationClock>(
+    sheet: Option<PreparsedStyleSheet>,
+    clock: C,
+) -> OffscreenLynxView<C> {
+    let view = LynxView::<'static, NoWindow, C>::with_animation_clock(
+        PageConfig::default(),
+        resources(sheet),
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        32.0,
+        24.0,
+        1.0,
+        clock,
+    )
+    .expect("view");
+    run(view).await
+}
+
+async fn run<C: AnimationClock>(mut view: OffscreenLynxView<C>) -> OffscreenLynxView<C> {
     view.load_style_sheet(STYLE_URL)
         .await
         .expect("the pre-parsed sheet mounts");
@@ -97,7 +124,9 @@ async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
     view
 }
 
-async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunError> {
+async fn wait_for_script<C: AnimationClock>(
+    view: &mut OffscreenLynxView<C>,
+) -> Result<(), ScriptRunError> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Some(result) = view.pump().into_iter().find_map(|event| match event {
@@ -112,7 +141,7 @@ async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunEr
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(view: &mut OffscreenLynxView) -> usize {
+fn red_left_edge<C: AnimationClock>(view: &mut OffscreenLynxView<C>) -> usize {
     let shot = view.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
@@ -126,9 +155,8 @@ fn red_left_edge(view: &mut OffscreenLynxView) -> usize {
 
 #[tokio::test]
 async fn a_keyframes_animation_moves_the_committed_frame_on_the_hosts_clock() {
-    let mut view = booted(Some(slider_sheet())).await;
     let clock = Arc::new(ManualClock::new());
-    view.set_animation_clock(clock.clone());
+    let mut view = booted_on(Some(slider_sheet()), clock.clone()).await;
 
     clock.set(0.0);
     view.tick(true).expect("render the first frame");
@@ -154,9 +182,8 @@ async fn a_keyframes_animation_moves_the_committed_frame_on_the_hosts_clock() {
 /// realm is parked on its command channel for the whole sequence above.
 #[tokio::test]
 async fn animation_frames_need_no_script_thread_work() {
-    let mut view = booted(Some(slider_sheet())).await;
     let clock = Arc::new(ManualClock::new());
-    view.set_animation_clock(clock.clone());
+    let mut view = booted_on(Some(slider_sheet()), clock.clone()).await;
 
     clock.set(0.0);
     view.tick(true).expect("first frame");
@@ -193,23 +220,25 @@ async fn a_view_animates_without_the_host_installing_a_clock() {
         "the default clock keeps the animation asking for frames"
     );
 
-    // A quarter of the 1s travel is 4px, far enough above the 1px the
-    // assertion needs that ordinary scheduling noise cannot reach it.
+    // A quarter of the 1s travel is 4px. The square is *not* asserted to have
+    // moved right: the animation is infinite, boot takes an unknown slice of
+    // the first second, and a sample near 16px wraps back to 0. Only that it
+    // moved at all, which no phase can fake at a quarter of a period.
     tokio::time::sleep(Duration::from_millis(250)).await;
     view.tick(true).expect("later frame");
+    let later = red_left_edge(&mut view);
 
-    assert!(
-        red_left_edge(&mut view) > first,
-        "and it advances on its own, with no `set_animation_clock` call"
+    assert_ne!(
+        later, first,
+        "the animation advances on its own, with the host naming no clock at all"
     );
 }
 
-/// Installing a clock replaces the default rather than enabling animation.
+/// Naming a clock replaces the default rather than enabling animation.
 #[tokio::test]
-async fn an_installed_clock_replaces_the_default_timeline() {
-    let mut view = booted(Some(slider_sheet())).await;
+async fn a_named_clock_replaces_the_default_timeline() {
     let clock = Arc::new(ManualClock::new());
-    view.set_animation_clock(clock.clone());
+    let mut view = booted_on(Some(slider_sheet()), clock.clone()).await;
 
     clock.set(0.5);
     view.tick(true).expect("frame on the manual clock");

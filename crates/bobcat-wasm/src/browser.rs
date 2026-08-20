@@ -400,14 +400,15 @@ impl ResourceFetcher for BrowserResources {
 /// behind the opaque `LynxView` facade.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: LynxView<'static, BrowserWindow>,
+    view: LynxView<'static, BrowserWindow, Arc<ManualClock>>,
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
-    /// The animation timeline, stepped from `requestAnimationFrame`'s
-    /// timestamp. A Worker has no monotonic clock Rust can read on
-    /// `wasm32-unknown-unknown`, so the host's frame time is the reading.
+    /// The same clock the view reads. A Worker could read a monotonic clock
+    /// of its own, but `requestAnimationFrame` hands over the instant the
+    /// frame is *for*, which is the better reading and the one browsers
+    /// animate against.
     clock: Arc<ManualClock>,
     script_finished: bool,
     disposed: bool,
@@ -466,16 +467,23 @@ impl BobcatRenderer {
                 default_overflow_visible,
                 enable_css_selector,
             };
-            let mut view: LynxView<'static, BrowserWindow> = LynxView::new(
-                config,
-                resource_fetcher,
-                quickjs_engine_factory(),
-                events.clone(),
-                width,
-                height,
-                device_pixel_ratio,
-            )
-            .map_err(js_error)?;
+            // The animation timeline is `requestAnimationFrame`'s timestamp,
+            // written into this clock by `render_if_requested`. Naming it here
+            // makes it part of the view's type; the handle below is the same
+            // clock, since a shared clock is itself a clock.
+            let clock = Arc::new(ManualClock::new());
+            let mut view: LynxView<'static, BrowserWindow, Arc<ManualClock>> =
+                LynxView::with_animation_clock(
+                    config,
+                    resource_fetcher,
+                    quickjs_engine_factory(),
+                    events.clone(),
+                    width,
+                    height,
+                    device_pixel_ratio,
+                    clock.clone(),
+                )
+                .map_err(js_error)?;
             set_canvas_size(&canvas, view.frame_size());
 
             let frames = FrameSignal::default();
@@ -483,9 +491,6 @@ impl BobcatRenderer {
             view.attach_target(target, frames.clone(), view.frame_size())
                 .await
                 .map_err(js_error)?;
-
-            let clock = Arc::new(ManualClock::new());
-            view.set_animation_clock(clock.clone());
 
             Ok(Self {
                 view,

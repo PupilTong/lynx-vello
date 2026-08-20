@@ -1,20 +1,24 @@
 //! The animation timeline.
 //!
-//! Every view has one. [`SystemClock`] is the default and reads the platform's
-//! monotonic clock, so animations run without the host arranging anything.
+//! A view is generic over its clock and names one at construction, so every
+//! reading is a direct call — a timeline is a type, not a trait object.
+//! [`SystemClock`] is the default and reads the platform's monotonic clock, so
+//! `LynxView::new` needs nothing from the host.
 //!
-//! A host can still install its own, and two cases want to. A browser gets a
-//! better reading than it could take itself: `requestAnimationFrame` hands over
-//! the frame's timestamp, which is the instant the frame is *for*, where
-//! reading a clock partway through producing the frame drifts and jitters —
-//! browsers standardised on the former for exactly that reason. And a test or a
-//! scripted capture wants [`ManualClock`], so the same script plus the same
-//! sample times give the same pixels on every machine.
+//! Two hosts name their own. A browser has a better reading than it could take
+//! itself: `requestAnimationFrame` hands over the frame's timestamp, the
+//! instant the frame is *for*, where reading a clock partway through producing
+//! the frame drifts and jitters — browsers standardised on the former for
+//! exactly that reason. And a test or a scripted capture wants [`ManualClock`],
+//! so the same script plus the same sample times give the same pixels on every
+//! machine. Both drive the clock from outside the view, which is what the
+//! [`AnimationClock`] implementation on `Arc` is for.
 //!
 //! Whichever is installed, the engine samples it once per frame on the
 //! presenting side and hands that one value to the document, so every animation
 //! in a frame is sampled at the same instant.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -30,6 +34,16 @@ use web_time::Instant;
 /// reads it on the presenting thread, once per frame.
 pub trait AnimationClock: Send + Sync + 'static {
     fn now_seconds(&self) -> f64;
+}
+
+/// A shared clock is a clock, so a host can keep a handle to the one its view
+/// reads and write the frame's time into it. This is the whole reason the
+/// timeline needs no runtime replacement: the type is fixed at construction
+/// and the *reading* is what moves.
+impl<T: AnimationClock + ?Sized> AnimationClock for Arc<T> {
+    fn now_seconds(&self) -> f64 {
+        (**self).now_seconds()
+    }
 }
 
 /// The platform's monotonic clock — the timeline a view uses unless its host

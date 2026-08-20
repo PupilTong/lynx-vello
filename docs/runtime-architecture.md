@@ -9,7 +9,7 @@ capabilities and OS facts:
 - a transferable `ScriptEngineFactory`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
-- optionally an `AnimationClock`, when the host has a better reading of a
+- optionally an `AnimationClock` type, when the host has a better reading of a
   frame's time than the platform clock, or wants a reproducible one;
 - owned font bytes or already-decoded image pixels when those resources are
   registered explicitly;
@@ -38,17 +38,26 @@ bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 
 ## Animation timeline
 
-Every view has one, and by default it is `SystemClock` — the platform's
-monotonic clock, `std::time::Instant` natively and `web_time::Instant` on Wasm,
-the same split `quickjs-rust-bridge` already uses. A host that arranges nothing
-therefore gets running animations; `bobcat-cli` installs no clock at all.
+A view is generic over its timeline and names one at construction, the same way
+it is generic over its `Window`: `LynxView<'window, W, C>`, where `C` is an
+`AnimationClock`. Every reading is a direct call, there is no trait object, and
+no timeline can be swapped in after the view exists.
 
-`LynxView::set_animation_clock` replaces that timeline, which two cases want. A
-browser has a better reading than it could take itself: `requestAnimationFrame`
-hands over the frame's timestamp, the instant the frame is *for*, where reading
-a clock partway through producing the frame drifts and jitters — so the Render
-Worker relays that `DOMHighResTimeStamp`. And `ManualClock` makes a frame
-sequence reproducible, which is what tests and scripted offscreen capture use.
+`LynxView::new` names `SystemClock` — the platform's monotonic clock,
+`std::time::Instant` natively and `web_time::Instant` on Wasm, the same split
+`quickjs-rust-bridge` already uses. A host that arranges nothing therefore gets
+running animations, and `bobcat-cli` names no clock at all.
+
+`LynxView::with_animation_clock` is the constructor for a host that names its
+own, and two do. A browser has a better reading than it could take itself:
+`requestAnimationFrame` hands over the frame's timestamp, the instant the frame
+is *for*, where reading a clock partway through producing the frame drifts and
+jitters — so the Render Worker builds its view on an `Arc<ManualClock>` and
+writes that `DOMHighResTimeStamp` into it each frame. Tests and scripted
+offscreen capture do the same with their own `ManualClock`, for a reproducible
+sequence. Both work because a shared clock is itself a clock: `AnimationClock`
+is implemented for `Arc<T>`, so the host keeps a handle to the very clock its
+view reads without the view holding a trait object.
 
 Whichever is installed, the engine samples it once per frame on the presenting
 side and hands that one value to the document, so every animation in a frame is

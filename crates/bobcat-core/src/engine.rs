@@ -67,6 +67,7 @@ use wasm_thread::Builder as ThreadBuilder;
 
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+use crate::clock::{AnimationClock, SystemClock};
 use crate::image::DecodedImage;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -302,7 +303,7 @@ impl FrameRequester for NoWindow {
 }
 
 #[cfg(test)]
-pub(crate) type OffscreenEngine = Engine<'static, NoWindow>;
+pub(crate) type OffscreenEngine<C = SystemClock> = Engine<'static, NoWindow, C>;
 
 /// The hand-off slot for the one document.
 #[derive(Clone)]
@@ -472,7 +473,7 @@ enum ScriptCommand {
 /// [`crate::OffscreenLynxView`].
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
-pub(crate) struct Engine<'window, W: Window> {
+pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     elements: SharedTree,
     script_owner_available: bool,
     viewport: Viewport,
@@ -486,9 +487,10 @@ pub(crate) struct Engine<'window, W: Window> {
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
-    /// The animation timeline. Defaults to the platform's monotonic clock, so
-    /// a page animates whether or not the host arranges anything.
-    clock: Arc<dyn crate::clock::AnimationClock>,
+    /// The animation timeline, named by the host at construction. Every
+    /// reading is a direct call; there is no trait object and no way to swap
+    /// one in after the fact.
+    clock: C,
     /// Whether the last frame left an animation running. Read without the
     /// document, because the frame request has to be made whether or not the
     /// slot was free this frame.
@@ -500,7 +502,7 @@ pub(crate) struct Engine<'window, W: Window> {
     thread_bound: PhantomData<Rc<()>>,
 }
 
-impl<W: Window> fmt::Debug for Engine<'_, W> {
+impl<W: Window, C: AnimationClock> fmt::Debug for Engine<'_, W, C> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Engine")
@@ -511,14 +513,16 @@ impl<W: Window> fmt::Debug for Engine<'_, W> {
     }
 }
 
-impl<'window, W: Window> Engine<'window, W> {
-    /// Builds the engine and its element tree at the given CSS viewport.
+impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
+    /// Builds the engine and its element tree at the given CSS viewport, on
+    /// the supplied animation timeline.
     pub(crate) fn new(
         config: PageConfig,
         event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
+        clock: C,
     ) -> Result<Self, EngineError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
@@ -538,7 +542,7 @@ impl<'window, W: Window> Engine<'window, W> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
-            clock: Arc::new(crate::clock::SystemClock::new()),
+            clock,
             animating: false,
             script_commands: None,
             thread_bound: PhantomData,
@@ -562,13 +566,6 @@ impl<'window, W: Window> Engine<'window, W> {
         Ok(self.elements.clone())
     }
 
-    /// Replaces the animation timeline, for a host with a better reading than
-    /// the platform clock or one that needs a reproducible sequence.
-    pub(crate) fn set_animation_clock(&mut self, clock: Arc<dyn crate::clock::AnimationClock>) {
-        self.clock = clock;
-        self.refresh();
-    }
-
     /// Whether the last produced frame left an animation running, and so owes
     /// the timeline another frame.
     #[must_use]
@@ -586,10 +583,7 @@ impl<'window, W: Window> Engine<'window, W> {
     ///
     /// Takes the clock rather than `&self` so it can run while the attached
     /// output is mutably borrowed.
-    fn advance_animations(
-        clock: &dyn crate::clock::AnimationClock,
-        tree: &mut LynxDocument,
-    ) -> bool {
+    fn advance_animations(clock: &C, tree: &mut LynxDocument) -> bool {
         tree.advance_animations(clock.now_seconds())
             .needs_next_frame
     }
@@ -852,7 +846,7 @@ impl<'window, W: Window> Engine<'window, W> {
                 // an animation compose in one defined order under one truth;
                 // then render, so an animation that just ended relayouts in
                 // the same frame it ended.
-                self.animating = Self::advance_animations(self.clock.as_ref(), &mut tree);
+                self.animating = Self::advance_animations(&self.clock, &mut tree);
                 let produced = tree.render();
                 if produced || !graphics.rendered_at(size) {
                     graphics.render_to_target(&tree.scene(), size)?;
@@ -891,7 +885,7 @@ impl<'window, W: Window> Engine<'window, W> {
             &mut tree,
             self.script_commands.as_ref(),
         );
-        self.animating = Self::advance_animations(self.clock.as_ref(), &mut tree);
+        self.animating = Self::advance_animations(&self.clock, &mut tree);
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
@@ -1204,6 +1198,7 @@ mod tests {
             393.0,
             727.0,
             1.0,
+            crate::clock::SystemClock::new(),
         )
         .expect("engine")
     }
@@ -1395,6 +1390,7 @@ mod event_loop_tests {
             393.0,
             727.0,
             1.0,
+            crate::clock::SystemClock::new(),
         )
         .expect("engine");
         engine
