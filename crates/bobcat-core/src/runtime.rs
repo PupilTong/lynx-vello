@@ -859,8 +859,9 @@ mod tests {
                 if (typeof globDynamicComponentEntry !== 'undefined') {
                   throw new Error('the dynamic-chunk entry must not leak into the card realm');
                 }
-                if (typeof __SetCSSId !== 'undefined') {
-                  throw new Error('the runtime shell must not hide the pending scoped-style PAPI');
+                if (typeof __SetCSSId !== 'function' ||
+                    __SetCSSId([], 0, 'entry') !== undefined) {
+                  throw new Error('the scoped-style PAPI must accept its call and record nothing');
                 }
 
                 const core = lynx.getCoreContext();
@@ -1261,6 +1262,123 @@ mod tests {
                 "verifying",
             )
             .expect("verification");
+    }
+
+    #[test]
+    fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.seen = [];
+                // A card's own worklet runtime installs this; `__AddEvent`
+                // reaches for it per delivery, since a worklet is the only
+                // handler kind that runs in this realm.
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  globalThis.held = [page, outer, inner];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: {
+                      body: (event) =>
+                        seen.push(label + ':' + event.currentTarget.uid),
+                    },
+                  });
+                  // A catch form on the target, a plain bind on its ancestor:
+                  // the second must never be reached, and only the host can
+                  // decide that, from the `stopPropagation` the catch causes.
+                  __AddEvent(inner, 'catchEvent', 'tap', note('inner-catch'));
+                  __AddEvent(outer, 'bindEvent', 'tap', note('outer-bind'));
+                  // The same node, same name, other pass: a separate index
+                  // entry, and one the bubble walk must not reach.
+                  __AddEvent(page, 'capture-bind', 'tap', note('page-capture'));
+                };
+                ",
+                "app:///handlers.js",
+            )
+            .expect("main-thread script");
+
+        assert!(
+            runtime
+                .dispatch_event(&steps(&elements, 4), "tap", "")
+                .expect("dispatch")
+        );
+
+        runtime
+            .evaluate(
+                r"
+                if (seen.join('|') !== 'page-capture:2|inner-catch:4') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+    }
+
+    #[test]
+    fn a_replaced_add_event_handler_moves_its_node_between_passes() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.seen = [];
+                globalThis.runWorklet = (value, params) => value.body(params[0]);
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const inner = __CreateView(0);
+                  __AppendElement(page, inner);
+                  globalThis.held = [page, inner];
+                  const note = (label) => ({
+                    type: 'worklet',
+                    value: { body: () => seen.push(label) },
+                  });
+                  // One name, one entry: the second call replaces the first
+                  // outright, which also moves the node's index entry from the
+                  // bubble pass to the capture one.
+                  __AddEvent(inner, 'bindEvent', 'tap', note('bubble'));
+                  __AddEvent(inner, 'capture-bind', 'tap', note('capture'));
+                };
+                ",
+                "app:///handlers.js",
+            )
+            .expect("main-thread script");
+
+        assert!(
+            runtime
+                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .expect("dispatch")
+        );
+
+        runtime
+            .evaluate(
+                r"
+                if (seen.join('|') !== 'capture') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                if (__GetEvent(held[1], 'tap', 'bindEvent') !== undefined) {
+                  throw new Error('the replaced form must not still answer');
+                }
+                // Removing it leaves the node out of the index entirely, so a
+                // further dispatch reaches nobody at all.
+                __AddEvent(held[1], 'capture-bind', 'tap', undefined);
+                ",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+
+        assert!(
+            !runtime
+                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .expect("dispatch")
+        );
     }
 
     #[test]

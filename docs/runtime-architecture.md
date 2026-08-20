@@ -118,7 +118,7 @@ the fetched main-thread source, then runs
 Those sinks retain and deliver nothing. They make compiled main-thread chunks
 installable before Bobcat has the corresponding runtime subsystems; they do
 not create a background `lynxCoreInject` realm or hide missing Element PAPI
-members such as `__SetCSSId`.
+members such as `__AddClass`.
 
 Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
 each checkpoint before returning, including jobs queued by the entry script

@@ -7,10 +7,10 @@
 // bootstrap surface.  They intentionally keep no listeners, deliver no
 // messages, expose no native modules, and report no lifecycle events.
 //
-// This is not an Element PAPI implementation.  In particular, scoped-style
-// operations such as `__SetCSSId` remain absent and fail precisely until the
-// style ingestion side can consume them.  Background-thread-only globals such
-// as `lynxCoreInject` also do not belong in this realm.
+// This is not an Element PAPI implementation.  Every `__*` element member,
+// including the scoped-style sink `__SetCSSId`, belongs to element-papi.js,
+// which the host evaluates next.  Background-thread-only globals such as
+// `lynxCoreInject` also do not belong in this realm.
 
 (function () {
   "use strict";

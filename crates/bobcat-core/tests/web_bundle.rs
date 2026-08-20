@@ -73,45 +73,32 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
     }
 }
 
-#[tokio::test]
-async fn decoded_script_reaches_the_first_deliberately_missing_element_papi() {
-    for (name, bytes) in FIXTURES {
-        let template = lynx_template_decoder::decode(bytes).expect("decode");
-        let root = template
-            .lepus_code
-            .get("root")
-            .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
-        let url = format!("app:///{name}/main-thread.js");
-        let error = run(page_config(&template), root, &url)
-            .await
-            .expect_err("scoped CSS remains a precise unsupported Element PAPI");
-        let message = error.to_string();
-        assert!(
-            message.contains("'__SetCSSId' is not defined"),
-            "{name}: {message}"
-        );
-        assert!(message.contains(&url), "{name}: {message}");
-    }
+/// The card's own reporter, made fatal.
+///
+/// `ReactLynx` installs an error boundary around the render it drives, so a
+/// missing PAPI surfaces as a call to `_ReportError` rather than as a thrown
+/// exception. The realm's shim swallows that call by design; rethrowing is what
+/// makes the boundary's report reach `ScriptFinished`, and what keeps this test
+/// from passing on a card that failed quietly.
+fn with_fatal_reporter(root: &str) -> String {
+    format!("globalThis._ReportError = function (error) {{ throw error; }};\n{root}")
 }
 
 #[tokio::test]
-async fn runtime_global_shims_let_real_bundles_finish_with_known_papi_test_doubles() {
+async fn decoded_scripts_boot_through_the_element_papi_alone() {
     for (name, bytes) in FIXTURES {
         let template = lynx_template_decoder::decode(bytes).expect("decode");
         let root = template
             .lepus_code
             .get("root")
             .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
-        let source = format!(
-            "globalThis.__SetCSSId = function () {{}};\n\
-             globalThis.__AddEvent = function () {{}};\n\
-             globalThis._ReportError = function (error) {{ throw error; }};\n\
-             {root}"
-        );
-        let url = format!("app:///{name}/main-thread-with-css-scope-test-double.js");
-        run(page_config(&template), &source, &url)
-            .await
-            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        run(
+            page_config(&template),
+            &with_fatal_reporter(root),
+            &format!("app:///{name}/main-thread.js"),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name} needs a PAPI test double: {error}"));
     }
 }
 
