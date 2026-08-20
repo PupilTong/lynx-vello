@@ -227,6 +227,40 @@ impl ScriptEngine for QuickJsScriptEngine {
         )
     }
 
+    fn call_host_member(
+        &mut self,
+        namespace: &str,
+        name: &str,
+        arguments: &[HostValue],
+    ) -> Result<bool, ScriptError> {
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallHostMember;
+        self.resume_incomplete_checkpoint(PHASE)?;
+        let namespace = self.namespace(namespace)?;
+        let member = self
+            .realm
+            .property(&namespace, name)
+            .map_err(|error| map_quickjs_error(error, PHASE))?;
+        if member.kind() != quickjs::ValueKind::Function {
+            // The realm published nothing here. Not an error: a bundle with no
+            // listener runtime simply has no member to call.
+            return Ok(false);
+        }
+        let arguments = arguments
+            .iter()
+            .map(|argument| host_value_into_quickjs(&self.realm, argument))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_quickjs_error(error, PHASE))?;
+        // The checkpoint runs through `finish_operation`, never inline: an
+        // execution guard is alive for the whole call, and QuickJS refuses to
+        // nest one — draining jobs here would begin a second.
+        let result = self
+            .realm
+            .call(&member, None, &arguments)
+            .map(|_| true)
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        self.finish_operation(result, PHASE)
+    }
+
     fn collect_garbage(&mut self) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::CollectGarbage)?;
         self.realm.run_gc();
@@ -247,6 +281,21 @@ fn host_value_from_quickjs(
         _ => Err(quickjs::HostFunctionError::new(
             "this QuickJS value cannot cross Bobcat's host boundary",
         )),
+    }
+}
+
+/// The outbound twin of [`host_value_from_quickjs`]: a primitive becomes a
+/// realm value so it can be an argument.
+fn host_value_into_quickjs(
+    realm: &quickjs::Realm,
+    value: &HostValue,
+) -> Result<quickjs::Value, quickjs::Error> {
+    match value {
+        HostValue::Undefined => realm.undefined(),
+        HostValue::Null => realm.null(),
+        HostValue::Boolean(value) => realm.boolean(*value),
+        HostValue::Number(value) => realm.number(*value),
+        HostValue::String(value) => realm.string(value),
     }
 }
 

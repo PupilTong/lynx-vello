@@ -178,6 +178,12 @@ fn check_script(view: &mut OffscreenLynxView, input: &str) -> Result<bool, CliEr
                     source,
                 });
             }
+            // Not fatal: the walk went on and the realm is still usable, so
+            // this is reported the way a browser console reports one rather
+            // than by stopping the run.
+            EngineEvent::ListenerFailed(error) => {
+                eprintln!("event listener failed: {}", error.message);
+            }
             _ => {}
         }
     }

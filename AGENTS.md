@@ -187,6 +187,10 @@ useful signal for currently-compatible versions of those libraries.
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
+  `ScriptFinished` reports the entry script and `ListenerFailed` reports a
+  listener that threw during event delivery — separate because the second is
+  not fatal: the walk continues, the realm stays usable, and later events are
+  delivered as normal;
   drawing is scheduled through the public `Window` capability borrowed at
   attach time (`target`, `frames`).
   The private `Engine` is generic over that trait; the draw target is a GAT,
@@ -238,7 +242,7 @@ useful signal for currently-compatible versions of those libraries.
   Element PAPI runtime (`packages/bobcat-element`), then evaluates a
   `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
   `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
-  assigns the twenty-six Element PAPI globals: every ReactLynx Snapshot
+  assigns the twenty-seven Element PAPI globals: every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
   `__CreateScrollView`, `__CreateRawText`, `__CreateList`), all six tree
@@ -246,9 +250,10 @@ useful signal for currently-compatible versions of those libraries.
   `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
   `__SwapElement`), the property surface a Snapshot's `create`/`update`
   functions write through (`__SetClasses`, `__SetID`, `__SetAttribute`,
-  `__SetInlineStyles`, `__AddEvent`) with the queries that read it back
-  (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
-  `__GetEvents`), and `__FlushElementTree`;
+  `__SetInlineStyles`) with the queries that read it back
+  (`__GetID`, `__GetTag`, `__GetElementUniqueID`), the listener surface
+  (`__AddEventListener`, `__RemoveEventListener`, `__StopPropagation`,
+  `__StopImmediatePropagation`), and `__FlushElementTree`;
   `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
   one `style` attribute write, while a record first replaces the attribute
   with an empty declaration block and then fans out, in enumeration order,
@@ -267,10 +272,32 @@ useful signal for currently-compatible versions of those libraries.
   and `__SetAttribute` throws for `update-list-info` — the one name that is a
   list command rather than an attribute — instead of writing a stringified
   command object onto the element.
-  `__AddEvent` is recorded but unconsumed, deliberately: it stores handlers in
-  the realm (web-core's two slots per event type and name, a background-thread
-  handler name and a main-thread worklet, cleared together by a null handler)
-  and nothing dispatches to them.
+  An element handle is an `EventTarget`. `__AddEventListener` /
+  `__RemoveEventListener` keep the standard's registration identity
+  (element, name, callback, capture) with its idempotence, `once`, and
+  case-insensitive names; listener closures live only in the realm and die
+  with their handle, so a registration cannot keep an element alive and
+  nothing about a handler ever crosses into Rust. `__AddEvent`, `__GetEvent`
+  and `__GetEvents` are **gone**: they stored a background-thread handler name
+  and a worklet per (type, name) with overwrite semantics, and cross-thread
+  event delivery is out of scope, so neither was deliverable. So are the parts
+  of `__AddEventListener` that depend on them — `closure_type` selecting a
+  handler string, and `bind_type` selecting Lynx's `catch` forms, which an
+  author writes as a listener that calls `__StopPropagation` first.
+  The realm tells the host which nodes are worth visiting: a listener list
+  going empty-to-occupied calls `bobcat.enableEventListener(node, capture,
+  name)` and back calls `disableEventListener`, keyed by a weak
+  `NodeId`→handle index cleared by the same sweep that drops the element. The
+  host walks and calls back into `bobcat.event_listener_callback` — published
+  by the realm onto the host's own namespace, and reached through
+  `ScriptEngine::call_host_member`, the one Rust-to-JS path in the tree — once
+  per node per pass, carrying an id naming the dispatch and whether the call is
+  its last. Those two let the realm keep one event object for the whole walk,
+  so a property one listener writes is there for the next, while the host
+  retains nothing of the realm's. `stopImmediatePropagation` never leaves the
+  realm, since it only skips the rest of one node's listeners; `stopPropagation`
+  calls `bobcat.stopPropagation`, which is a pure flag write because re-entering
+  the realm from a host function would nest a `QuickJS` execution guard.
   `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
   scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
   into **scoped** author rules there is nothing to validate an encoding against
@@ -496,14 +523,17 @@ useful signal for currently-compatible versions of those libraries.
   dependency-free classic-script JavaScript file (`src/element-papi.js`) that
   `bobcat-core` embeds with `include_str!` and evaluates into the injected
   script-engine realm before any bundle code; its Rstest suite runs the same
-  bytes. It owns the twenty-six `__*` PAPI members and their web-core arities,
+  bytes. It owns the twenty-seven `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
   `list`). It also owns the value coercions web-core gets from the HTML DOM for
   free: truthiness-not-null clearing for classes, ids, and inline styles,
   `String(value)` for every attribute, and camelCase-to-kebab hyphenation of a
-  record-shaped inline style. Event registrations live here too, in a WeakMap
-  keyed by the handle, so a registration can never keep its element alive.
+  record-shaped inline style. It also owns the event half: a handle is an `EventTarget`, its
+  listeners are closures held in a `WeakMap` keyed by the handle — so a
+  registration can never keep its element alive — and the per-node dispatch,
+  the standard's `eventPhase`, and `once` are all resolved here, with only
+  enable/disable and `stopPropagation` crossing to the host.
   An element handle is a plain object carrying its DOM `NodeId`
   under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
   object per element for its whole life, so every PAPI return of an element
@@ -843,14 +873,37 @@ useful signal for currently-compatible versions of those libraries.
   (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
   test literal all produce equally, and `Document::handle_input(InputEvent)`
   builds its private visual frame, routes the event, and performs the UA default action, reporting both
-  in an `InputResponse`. Dispatch to listeners is *not* here — this crate has
-  no `EventTarget` — so `InputEvent::default_prevented` is the
-  `preventDefault()` seam a runtime layer hands back after its own
-  capture/bubble walk or gesture arbitration; a runtime wanting different
+  in an `InputResponse`. `InputEvent::default_prevented` is the
+  `preventDefault()` seam a runtime layer hands back after its own gesture
+  arbitration; a runtime wanting different
   scroll physics (Lynx `parent-first` nesting, rubber-band, fling) prevents
   the default and drives `scroll_by`/`scroll_chain` itself. The drag
   recognizer is deliberately minimal (touch/pen only, one slop threshold,
   boundary chaining, no momentum — this crate owns no clock).
+  Its `event` module is the other half, and it does **not** dispatch:
+  `Document::event_steps(target, bubbles, composed)` returns the ordered node
+  visits one event resolves to — the capture pass root-inward, the bubble pass
+  target-outward, the target in both — as plain `Copy` `EventStep`s owning no
+  borrow. Path construction is the standard's, including its shadow rules: a
+  slotted node's event parent is its assigned slot, a shadow root's is its
+  host, `composed` gates the crossing, and crossing retargets so every step
+  from the host outward reports the host. The shadow-crossing test is a single
+  comparison rather than the standard's per-step ancestor walk, and the
+  equivalence is argued in `event_path`'s doc comment and pinned by a
+  differential test.
+  Dispatch itself belongs to `bobcat-core`, split across its two threads
+  because the realm cannot move and scrolling must stay responsive: the
+  presenting thread routes the input, performs the user-agent default action,
+  and builds the path (`handle_input` already returns the node it routed to,
+  so this costs no second hit test and no second borrow), then sends the path
+  to the script thread, which delivers it with the document handed back — that
+  order is what lets a listener mutate the tree. Nothing guards the window in
+  between: a `NodeId` names one node for the life of the document, so a step
+  that outlived its node resolves to no handle and reaches no one, and no later
+  element can take its place. There is no `preventDefault` and no
+  cancelable event anywhere on this path — Lynx dispatches none — so
+  suppressing a user-agent default action stays gesture arbitration's job,
+  arriving on the separate `InputEvent::default_prevented` seam.
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
   text node's layout-state entry lazily boxes its probe/commit
   `TextLayoutStore` and reads inherited font/text values from its parent.

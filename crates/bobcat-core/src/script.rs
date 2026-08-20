@@ -50,6 +50,25 @@ pub trait ScriptEngine: fmt::Debug {
 
     fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError>;
 
+    /// Calls a function the realm published on the host namespace, if it
+    /// published one.
+    ///
+    /// `Ok(false)` means the realm installed no such member — a bundle with no
+    /// listener runtime, not a failure. `Ok(true)` means it ran and returned.
+    ///
+    /// The arguments are [`HostValue`]s for the same reason a host callback's
+    /// are: element identity crosses as a number and nothing else crosses at
+    /// all. There is no return value, because the one thing a callee needs to
+    /// tell the host — that a walk should end — is a host call of its own, and
+    /// making it a return value would mean the host could only hear it once
+    /// the callee finished.
+    fn call_host_member(
+        &mut self,
+        namespace: &str,
+        name: &str,
+        arguments: &[HostValue],
+    ) -> Result<bool, ScriptError>;
+
     fn collect_garbage(&mut self) -> Result<(), ScriptError>;
 }
 
@@ -106,6 +125,8 @@ pub enum ScriptErrorPhase {
     Initialize,
     RegisterHostFunction,
     Execute,
+    /// Calling a member the realm published back to the host.
+    CallHostMember,
     CollectGarbage,
 }
 

@@ -34,9 +34,10 @@
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
 // | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` / `bobcat.set_node_property` |
 // | `__SetAttribute(element, name, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
-// | `__AddEvent(element, eventType, eventName, handler)` | this runtime's own store |
-// | `__GetEvent(element, eventName, eventType)` | this runtime's own store |
-// | `__GetEvents(element)` | this runtime's own store |
+// | `__AddEventListener(element, name, callback, options?)` | this runtime's own store |
+// | `__RemoveEventListener(element, name, callback, options?)` | this runtime's own store |
+// | `__StopPropagation(event)` | `bobcat.stopPropagation` |
+// | `__StopImmediatePropagation(event)` | `bobcat.stopPropagation` + this runtime's own store |
 // | `__FlushElementTree()` | `bobcat.flushElementTree` |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
@@ -53,13 +54,65 @@
 // css_id on the element) would be a design guess with nothing to validate it.
 // It lands with the ingestion side that reads it.
 //
-// # What the recorded state does not yet reach
+// # Events
 //
-// `__AddEvent` records handlers and nothing dispatches to them: routing an
-// input event to a handler (hit testing, Lynx's bind/catch phase walk, the
-// gesture arena) belongs to a layer that does not exist yet. The registration
-// a bundle makes is answered and kept; the subsystem behind it is absent
-// rather than faked.
+// An element handle is an `EventTarget`. Listeners are JavaScript closures
+// held here, keyed by the handle, and they die with it — nothing about a
+// handler ever crosses into Rust.
+//
+// Registration is the standard's: identity is (element, name, callback,
+// capture), a second add of those four is ignored outright, and `once` and
+// capture behave as `addEventListener`'s do. What is not the standard's is
+// that the host has to be told a node is worth visiting. A list going from
+// empty to occupied calls `bobcat.enableEventListener(node, capture, name)`
+// and back to empty calls `bobcat.disableEventListener(...)`, so the host
+// keeps an index and skips every node that has nothing registered — the walk
+// crosses the boundary only where a listener actually is.
+//
+// Dispatch is the host's walk and this file's per-node work. The host
+// computes the whole event path while it holds the document, releases it, and
+// then calls `bobcat.event_listener_callback(node, target, phase, name,
+// detail, eventId, isLastCall)` once per node per pass. Releasing first is
+// what lets a callback mutate the tree. `phase` is the *pass* (`0` bubble, `1`
+// capture), not the standard's `eventPhase`. They are different numbers, and
+// at the target they do not even correspond, since both passes visit it; the
+// event object's `eventPhase` is derived here, where the event object is.
+//
+// `eventId` names the dispatch and `isLastCall` says whether another call
+// carries that id, which is what lets one event object live for the whole
+// walk instead of one per node. A listener that writes a property onto the
+// event is seen by the next listener, as a real `Event` gives. The host
+// retains nothing of it: the object is held here, keyed by the id, and dropped
+// on whichever of the walk's three endings comes first — the last call, a
+// listener stopping propagation, or a listener throwing. The latter two are
+// visible here as they happen, which is why the host only has to signal the
+// first. Dropping runs the standard's last dispatch step first — `eventPhase`
+// back to `NONE`, `currentTarget` to null — so an event a listener kept past
+// the walk does not go on naming the node the walk stopped on.
+//
+// Propagation splits along the same line. Both stop methods call
+// `bobcat.stopPropagation`, since the standard's `stopImmediatePropagation`
+// implies `stopPropagation` and ending the walk is the host's. What stays
+// here is the immediate half — skipping the rest of *this* node's listeners —
+// because one delivery covers a whole node and the host has no finer step.
+//
+// # What is deliberately absent
+//
+// `__AddEvent`, `__GetEvent` and `__GetEvents` are gone. They stored a
+// background-thread handler *name* and a worklet per (type, name) with
+// overwrite semantics, and neither is deliverable here: cross-thread event
+// delivery is out of scope, and a listener is now a plain callable. A bundle
+// reaching for them fails at the missing global rather than registering into
+// a store nothing reads.
+//
+// So are the pieces of `__AddEventListener` that depend on them: `closure_type`
+// selecting a background handler string, and `bind_type` selecting Lynx's
+// `catch` forms. A `catch` registration is a listener that calls
+// `stopPropagation` first, which an author writes directly.
+//
+// There is no `preventDefault` and no `cancelable`: Lynx dispatches no
+// cancelable event, and suppressing a built-in behavior goes through gesture
+// arbitration, on the separate `InputEvent::default_prevented` seam.
 //
 // # Identity and lifecycle
 //
@@ -116,42 +169,62 @@
     swapElement: bobcat.swapElement,
     dropElement: bobcat.dropElement,
     flushElementTree: bobcat.flushElementTree,
+    enableEventListener: bobcat.enableEventListener,
+    disableEventListener: bobcat.disableEventListener,
+    stopPropagation: bobcat.stopPropagation,
   };
 
   const nodeIdSymbol = Symbol("nodeId");
 
-  const EVENT_KEY_SEPARATOR = ":";
+  /**
+   * Which listener list a registration belongs to; also the `type_id` the
+   * native index is keyed by, so a node with only bubble listeners is skipped
+   * entirely during the capture pass.
+   */
+  const BUBBLE = 0;
+  const CAPTURE = 1;
 
   /**
-   * The two handler slots web-core keeps per (event type, event name): a
-   * background-thread handler name and a main-thread worklet.
+   * The standard's `Event.eventPhase` values. The host sends the *pass*, not
+   * these: the two are not the same number, and at the target they do not even
+   * correspond, since both passes visit it. Deriving one from the other is
+   * this file's job because the event object is this file's.
+   */
+  const NONE = 0;
+  const CAPTURING_PHASE = 1;
+  const AT_TARGET = 2;
+  const BUBBLING_PHASE = 3;
+
+  /**
+   * One element's listeners, weak by handle so a registration can never keep
+   * its element alive: the entry dies with the handle, which keeps collection
+   * the only release path.
    *
-   * @typedef {{ crossThread: unknown, worklet: unknown }} EventSlots
-   */
-
-  /**
-   * Registered event handlers per element handle. Weak by the handle, so a
-   * registration can never keep its element alive: the entry dies with the
-   * handle, which keeps collection the only release path even for a worklet
-   * handler that refers back to the element it is bound to.
+   * Each element maps an event name to a pair of lists indexed by [`BUBBLE`,
+   * `CAPTURE`]. A list holds `{ callback, once }` in registration order, which
+   * is firing order.
    *
-   * @type {WeakMap<object, Map<string, EventSlots>>}
+   * @typedef {{ callback: Function, once: boolean, removed: boolean }} Registration
+   * @type {WeakMap<object, Map<string, [Registration[], Registration[]]>>}
    */
-  const eventHandlers = new WeakMap();
+  const listeners = new WeakMap();
 
   /**
-   * @param {unknown} eventType
-   * @param {unknown} eventName
-   * @returns {string}
+   * The reverse of a handle's `nodeIdSymbol`: dispatch arrives from the host
+   * naming a `NodeId`, and the handler store is keyed by handle.
+   *
+   * Held weakly, and cleared in the same sweep that drops the element, so this
+   * index cannot become the reference that keeps a handle — and through it an
+   * element — alive. That is the same rule the handler store follows, and for
+   * the same reason: collection stays the only release path.
+   *
+   * @type {Map<number, WeakRef<object>>}
    */
-  function eventKey(eventType, eventName) {
-    return `${String(eventType).toLowerCase()}${EVENT_KEY_SEPARATOR}${
-      String(eventName).toLowerCase()
-    }`;
-  }
+  const handlesByNodeId = new Map();
 
   const registry = new FinalizationRegistry(
     (/** @type {number} */ nodeId) => {
+      handlesByNodeId.delete(nodeId);
       native.dropElement(nodeId);
     },
   );
@@ -165,7 +238,30 @@
    */
   function createHandle(nodeId) {
     const handle = { [nodeIdSymbol]: nodeId };
+    handlesByNodeId.set(nodeId, new WeakRef(handle));
     registry.register(handle, nodeId, handle);
+    return handle;
+  }
+
+  /**
+   * The live handle for a node id, or undefined once its handle is gone.
+   *
+   * A swept-but-not-yet-finalized handle leaves a dead `WeakRef` behind, so
+   * the entry is dropped on the way past rather than waiting for the cleanup
+   * job that will drop the element too.
+   *
+   * @param {number} nodeId
+   * @returns {object | undefined}
+   */
+  function handleOf(nodeId) {
+    const reference = handlesByNodeId.get(nodeId);
+    if (reference === undefined) {
+      return undefined;
+    }
+    const handle = reference.deref();
+    if (handle === undefined) {
+      handlesByNodeId.delete(nodeId);
+    }
     return handle;
   }
 
@@ -190,8 +286,10 @@
     const nodeId = native.createPage();
     if (pageHandle === undefined) {
       // The page handle is permanent and exempt from the collection
-      // backstop: the page can never be dropped.
+      // backstop: the page can never be dropped. It is still indexed, because
+      // an event whose path reaches the page has to find it.
       pageHandle = { [nodeIdSymbol]: nodeId };
+      handlesByNodeId.set(nodeId, new WeakRef(pageHandle));
     }
     return pageHandle;
   }
@@ -569,97 +667,413 @@
   }
 
   /**
-   * Registration only: a handler is recorded against its element, and nothing
-   * dispatches to it — the routing half (hit testing, Lynx's bind/catch phase
-   * walk, the gesture arena) belongs to a layer that does not exist yet.
+   * The listener lists for one element and event name, created on demand.
    *
-   * web-core's slot model, which this keeps: a string names a background-thread
-   * handler, an object is a main-thread worklet, and the two occupy separate
-   * slots for one (type, name) pair, so `bindtap` and `main-thread:bindtap` on
-   * the same element do not evict each other. `null`/`undefined` clears both.
-   * Both the type and the name are lowercased, as web-core lowercases them
-   * before they reach its store.
+   * @param {object} handle
+   * @param {string} name
+   * @returns {[Registration[], Registration[]]}
+   */
+  function listsFor(handle, name) {
+    let byName = listeners.get(handle);
+    if (byName === undefined) {
+      byName = new Map();
+      listeners.set(handle, byName);
+    }
+    let lists = byName.get(name);
+    if (lists === undefined) {
+      lists = [[], []];
+      byName.set(name, lists);
+    }
+    return lists;
+  }
+
+  /**
+   * `addEventListener`, with the standard's registration identity:
+   * (element, name, callback, capture). A second add of the same four is
+   * ignored outright — including its options, so re-adding with `once` neither
+   * files a second listener nor changes the first.
    *
-   * @param {unknown} element
-   * @param {unknown} eventType
+   * A list going from empty to occupied is what tells the host this node is
+   * worth visiting for this name in this pass; until then the host skips it
+   * and no cross-boundary call happens at all.
+   *
+   * @param {object} handle
    * @param {unknown} eventName
-   * @param {unknown} handler
+   * @param {unknown} callback
+   * @param {unknown} options
    * @returns {undefined}
    */
-  function __AddEvent(element, eventType, eventName, handler) {
-    const key = eventKey(eventType, eventName);
-    if (handler === null || handler === undefined) {
-      const registrations = eventHandlers.get(/** @type {object} */ (element));
-      if (registrations !== undefined) {
-        registrations.delete(key);
-      }
+  function addListener(handle, eventName, callback, options) {
+    if (typeof callback !== "function") {
+      // web-core ignores a non-callable under the default closure type; a
+      // string handler is a background-thread name, which is not delivered
+      // here at all.
       return undefined;
     }
-    /** @type {keyof EventSlots | undefined} */
-    let slot;
-    if (typeof handler === "string") {
-      slot = "crossThread";
-    } else if (typeof handler === "object") {
-      slot = "worklet";
-    }
-    if (slot === undefined) {
-      // web-core's chain covers strings, objects, and null; every other
-      // handler shape falls through it unrecorded.
+    const name = String(eventName).toLowerCase();
+    const settings = /** @type {Record<string, unknown> | undefined} */ (
+      options ?? undefined
+    );
+    const phase = settings?.["capture"] ? CAPTURE : BUBBLE;
+    const list = listsFor(handle, name)[phase];
+    if (list.some((registration) => registration.callback === callback)) {
       return undefined;
     }
-    let registrations = eventHandlers.get(/** @type {object} */ (element));
-    if (registrations === undefined) {
-      registrations = new Map();
-      eventHandlers.set(/** @type {object} */ (element), registrations);
+    list.push({
+      callback,
+      once: Boolean(settings?.["once"]),
+      removed: false,
+    });
+    if (list.length === 1) {
+      native.enableEventListener(nodeIdOf(handle), phase, name);
     }
-    const slots = registrations.get(key) ??
-      { crossThread: undefined, worklet: undefined };
-    slots[slot] = handler;
-    registrations.set(key, slots);
     return undefined;
   }
 
   /**
-   * The background-thread handler alone, as web-core's `get_event` reads only
-   * that slot. Note the argument order: name before type, the reverse of
-   * `__AddEvent`.
+   * `removeEventListener`. Capture is part of the identity, so a bubble-phase
+   * removal leaves a capture registration of the same callback alone.
    *
-   * @param {unknown} element
+   * @param {object} handle
    * @param {unknown} eventName
-   * @param {unknown} eventType
-   * @returns {unknown}
+   * @param {unknown} callback
+   * @param {unknown} options
+   * @returns {undefined}
    */
-  function __GetEvent(element, eventName, eventType) {
-    const registrations = eventHandlers.get(/** @type {object} */ (element));
-    return registrations?.get(eventKey(eventType, eventName))?.crossThread;
+  function removeListener(handle, eventName, callback, options) {
+    const name = String(eventName).toLowerCase();
+    const byName = listeners.get(handle);
+    const lists = byName?.get(name);
+    if (lists === undefined) {
+      return undefined;
+    }
+    const settings = /** @type {Record<string, unknown> | undefined} */ (
+      options ?? undefined
+    );
+    const phase = settings?.["capture"] ? CAPTURE : BUBBLE;
+    const list = lists[phase];
+    const index = list.findIndex(
+      (registration) => registration.callback === callback,
+    );
+    if (index === -1) {
+      return undefined;
+    }
+    // Marked as well as spliced, because a dispatch in progress iterates a
+    // copy: the standard says a listener removed by an earlier one must not
+    // run, and the copy alone cannot know that.
+    const [removed] = list.splice(index, 1);
+    if (removed !== undefined) {
+      removed.removed = true;
+    }
+    if (list.length === 0) {
+      native.disableEventListener(nodeIdOf(handle), phase, name);
+    }
+    return undefined;
   }
 
   /**
-   * Every recorded handler for one element, one entry per occupied slot, in
-   * registration order.
+   * The identity half of an event's `target`/`currentTarget`.
    *
-   * @param {unknown} element
-   * @returns {{ type: string, name: string, function: unknown }[]}
+   * `elementRefptr` is the handle itself, which a main-thread callback is
+   * entitled to — it is in the same realm and already holds one. `dataset` is
+   * absent: it is every `data-*` attribute, and the native boundary reads one
+   * named attribute at a time with no way to enumerate.
+   *
+   * @param {number} nodeId
+   * @returns {object}
    */
-  function __GetEvents(element) {
-    /** @type {{ type: string, name: string, function: unknown }[]} */
-    const events = [];
-    const registrations = eventHandlers.get(/** @type {object} */ (element));
-    if (registrations === undefined) {
-      return events;
+  function targetInfo(nodeId) {
+    return {
+      id: native.getAttribute(nodeId, "id"),
+      uid: nodeId,
+      elementRefptr: handleOf(nodeId),
+    };
+  }
+
+  /**
+   * The event objects of the dispatches currently walking, by host event id.
+   *
+   * One entry, minted at a dispatch's first delivery and dropped at its last,
+   * so every listener on a path sees the same object — a property one writes
+   * is there for the next, which is what an `Event` instance is for. The host
+   * cannot nest dispatches, so this holds at most one entry at a time; it is a
+   * `Map` rather than a single slot only because the id is what identifies an
+   * entry, and dropping the wrong one would be silent.
+   *
+   * @typedef {{
+   *   type: string,
+   *   eventPhase: number,
+   *   target: object,
+   *   currentTarget: object | null,
+   *   detail: unknown,
+   *   stopPropagation: () => void,
+   *   stopImmediatePropagation: () => void,
+   * }} DispatchedEvent
+   *
+   * @typedef {{
+   *   event: DispatchedEvent,
+   *   targetNodeId: number,
+   *   immediate: boolean,
+   *   stopped: boolean,
+   * }} Dispatch
+   *
+   * @type {Map<number, Dispatch>}
+   */
+  const dispatches = new Map();
+
+  /**
+   * The entry for one dispatch, created on its first delivery.
+   *
+   * `detail` is parsed once here rather than once per node, and the two stop
+   * methods close over the entry, so they keep working from a later delivery
+   * of the same event.
+   *
+   * @param {number} eventId
+   * @param {string} name
+   * @param {number} targetNodeId
+   * @param {unknown} detailJson
+   * @returns {Dispatch}
+   */
+  function dispatchEntry(eventId, name, targetNodeId, detailJson) {
+    const existing = dispatches.get(eventId);
+    if (existing !== undefined) {
+      return existing;
     }
-    for (const [key, slots] of registrations) {
-      const separator = key.indexOf(EVENT_KEY_SEPARATOR);
-      const type = key.slice(0, separator);
-      const name = key.slice(separator + 1);
-      if (slots.crossThread !== undefined) {
-        events.push({ type, name, function: slots.crossThread });
+    const entry = /** @type {Dispatch} */ ({
+      targetNodeId,
+      immediate: false,
+      stopped: false,
+    });
+    entry.event = {
+      type: name,
+      eventPhase: NONE,
+      target: targetInfo(targetNodeId),
+      currentTarget: null,
+      detail: detailJson ? JSON.parse(String(detailJson)) : {},
+      stopPropagation: () => {
+        entry.stopped = true;
+        native.stopPropagation();
+      },
+      stopImmediatePropagation: () => {
+        entry.immediate = true;
+        entry.stopped = true;
+        native.stopPropagation();
+      },
+    };
+    dispatches.set(eventId, entry);
+    return entry;
+  }
+
+  /**
+   * The standard's `eventPhase` for one step.
+   *
+   * A step whose target is itself is at-target — crossing a shadow boundary
+   * sets the target to the node it crossed to, and nothing else makes the two
+   * equal — and both passes visit it. Every other step takes its phase from
+   * the pass it belongs to.
+   *
+   * @param {number} node
+   * @param {unknown} target
+   * @param {number} phase
+   * @returns {number}
+   */
+  function eventPhaseOf(node, target, phase) {
+    if (node === target) {
+      return AT_TARGET;
+    }
+    return phase === CAPTURE ? CAPTURING_PHASE : BUBBLING_PHASE;
+  }
+
+  /**
+   * One node's turn at one event, called by the host once per node per pass.
+   *
+   * The host owns the walk. It computes the whole event path while it holds
+   * the document, releases it, and only then calls in here — so a callback is
+   * free to mutate the tree, which is the reason for that order. What this
+   * function owns is one node's listeners: which list the pass selects, their
+   * order, `once`, and stopping the rest of them.
+   *
+   * Both stop methods reach `native.stopPropagation`, because the standard's
+   * `stopImmediatePropagation` implies `stopPropagation` and ending the walk
+   * is the host's to do. What does *not* leave is the immediate half — the
+   * skipping of this node's remaining listeners — because one delivery covers
+   * the whole node and the host has no finer step to withhold.
+   *
+   * @param {unknown} nodeId
+   * @param {unknown} targetNodeId
+   * @param {unknown} phaseId `CAPTURE` or `BUBBLE`, the pass being run
+   * @param {unknown} eventName
+   * @param {unknown} detailJson the event's device facts, or an empty string
+   * @param {unknown} eventId names this dispatch, the same for all its calls
+   * @param {unknown} isLastCall whether the host will call again for this id
+   * @returns {undefined}
+   */
+  function eventListenerCallback(
+    nodeId,
+    targetNodeId,
+    phaseId,
+    eventName,
+    detailJson,
+    eventId,
+    isLastCall,
+  ) {
+    const id = Number(eventId);
+    let entry;
+    try {
+      entry = deliverEvent(
+        id,
+        /** @type {number} */ (nodeId),
+        /** @type {number} */ (targetNodeId),
+        phaseId === CAPTURE ? CAPTURE : BUBBLE,
+        String(eventName).toLowerCase(),
+        detailJson,
+      );
+    } catch (error) {
+      // A listener threw. The host aborts the walk on it, so no further call
+      // carries this id and nothing else would ever end the dispatch.
+      endDispatch(id);
+      throw error;
+    }
+    if (isLastCall || entry === undefined || entry.stopped) {
+      endDispatch(id);
+    }
+    return undefined;
+  }
+
+  /**
+   * Ends one dispatch, on whichever of its three endings came first.
+   *
+   * The clean-up before the drop is the standard's own last dispatch step:
+   * `eventPhase` back to `NONE` and `currentTarget` to null. It is observable,
+   * because a listener may keep the event past the walk — a worklet closing
+   * over it, an author stashing it — and without this the object it kept would
+   * still name whichever node the walk happened to stop on. Only `target`
+   * survives, as the standard leaves it.
+   *
+   * @param {number} id
+   * @returns {undefined}
+   */
+  function endDispatch(id) {
+    const entry = dispatches.get(id);
+    if (entry !== undefined) {
+      entry.event.eventPhase = NONE;
+      entry.event.currentTarget = null;
+      dispatches.delete(id);
+    }
+    return undefined;
+  }
+
+  /**
+   * One node's listeners for one dispatch.
+   *
+   * Returns the dispatch's entry, or `undefined` when this node contributed
+   * nothing and none was needed.
+   *
+   * @param {number} id
+   * @param {number} node
+   * @param {number} targetNodeId
+   * @param {number} phase
+   * @param {string} name
+   * @param {unknown} detailJson
+   * @returns {Dispatch | undefined}
+   */
+  function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
+    const handle = handleOf(node);
+    if (handle === undefined) {
+      return dispatches.get(id);
+    }
+    const list = listeners.get(handle)?.get(name)?.[phase];
+    if (list === undefined || list.length === 0) {
+      return dispatches.get(id);
+    }
+
+    const entry = dispatchEntry(id, name, targetNodeId, detailJson);
+    const event = entry.event;
+    entry.immediate = false;
+    event.eventPhase = eventPhaseOf(node, targetNodeId, phase);
+    event.currentTarget = targetInfo(node);
+    // Only across a shadow boundary, where retargeting hands this node a
+    // different target than the last one saw. Rebuilding unconditionally would
+    // spend a host call per node and break `event.target === event.target`
+    // across steps.
+    if (targetNodeId !== entry.targetNodeId) {
+      entry.targetNodeId = targetNodeId;
+      event.target = targetInfo(targetNodeId);
+    }
+
+    // A copy, so a callback that adds or removes listeners for this same node
+    // and name changes what the *next* event sees, not this one — the
+    // standard's rule, one level down from the path the host froze.
+    for (const registration of list.slice()) {
+      if (registration.removed) {
+        continue;
       }
-      if (slots.worklet !== undefined) {
-        events.push({ type, name, function: slots.worklet });
+      if (registration.once) {
+        removeListener(handle, name, registration.callback, {
+          capture: phase === CAPTURE,
+        });
+      }
+      registration.callback(event);
+      if (entry.immediate) {
+        break;
       }
     }
-    return events;
+    return entry;
+  }
+
+  /**
+   * @param {unknown} element
+   * @param {unknown} eventName
+   * @param {unknown} callback
+   * @param {unknown} options
+   * @returns {undefined}
+   */
+  function __AddEventListener(element, eventName, callback, options) {
+    return addListener(
+      /** @type {object} */ (element),
+      eventName,
+      callback,
+      options,
+    );
+  }
+
+  /**
+   * @param {unknown} element
+   * @param {unknown} eventName
+   * @param {unknown} callback
+   * @param {unknown} options
+   * @returns {undefined}
+   */
+  function __RemoveEventListener(element, eventName, callback, options) {
+    return removeListener(
+      /** @type {object} */ (element),
+      eventName,
+      callback,
+      options,
+    );
+  }
+
+  /**
+   * Native Lynx takes the event object here, and so does this: the object is
+   * minted per delivery and carries the methods, so the PAPI form is the same
+   * call by another name.
+   *
+   * @param {unknown} event
+   * @returns {undefined}
+   */
+  function __StopPropagation(event) {
+    /** @type {{ stopPropagation?: () => void }} */ (event)?.stopPropagation?.();
+    return undefined;
+  }
+
+  /**
+   * @param {unknown} event
+   * @returns {undefined}
+   */
+  function __StopImmediatePropagation(event) {
+    /** @type {{ stopImmediatePropagation?: () => void }} */ (event)
+      ?.stopImmediatePropagation?.();
+    return undefined;
   }
 
   /** @returns {undefined} */
@@ -667,6 +1081,11 @@
     native.flushElementTree();
     return undefined;
   }
+
+  // The host reads this back off the object it installed and calls it per
+  // node per pass. Published rather than captured, which is the one direction
+  // that has to travel this way: everything else on `bobcat` is native.
+  bobcat.event_listener_callback = eventListenerCallback;
 
   Object.assign(globalThis, {
     __CreatePage,
@@ -691,9 +1110,10 @@
     __GetElementUniqueID,
     __SetInlineStyles,
     __SetAttribute,
-    __AddEvent,
-    __GetEvent,
-    __GetEvents,
+    __AddEventListener,
+    __RemoveEventListener,
+    __StopPropagation,
+    __StopImmediatePropagation,
     __FlushElementTree,
   });
 })();
