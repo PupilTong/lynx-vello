@@ -25,6 +25,7 @@ bobcat-wasm ─┘          │              ├─▶ vendor/stylo
                              [feature = "quickjs"; native adapter]
 
 main-thread JavaScript
+  ├──▶ main-thread-globals.js (shape-only runtime compatibility sinks)
   └──▶ element-papi.js (packages/bobcat-element, embedded by bobcat-core)
         └──▶ private bobcat host callbacks
               └──▶ private dom::Document<()> tree
@@ -108,9 +109,16 @@ there. The VM itself is intentionally not `Send`.
 
 The callback boundary carries only `HostValue` primitives. Objects, symbols,
 functions, raw VM values, and DOM handles cannot cross it. Bobcat installs
-the private `bobcat.*` callbacks, evaluates the embedded Element PAPI, wraps
+the private `bobcat.*` callbacks, evaluates a core-owned classic script with
+shape-only `lynx` and `SystemInfo` stubs, props, context/module, error,
+performance, and lifecycle sinks, evaluates the embedded Element PAPI, wraps
 the fetched main-thread source, then runs
 `processData → renderPage → __FlushElementTree`.
+
+Those sinks retain and deliver nothing. They make compiled main-thread chunks
+installable before Bobcat has the corresponding runtime subsystems; they do
+not create a background `lynxCoreInject` realm or hide missing Element PAPI
+members such as `__SetCSSId`.
 
 Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
 each checkpoint before returning, including jobs queued by the entry script
