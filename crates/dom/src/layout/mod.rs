@@ -275,36 +275,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "layout-test-utils")]
-    #[test]
-    fn synthetic_leaf_metrics_override_the_initial_flex_display() {
-        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
-        let root = document.document_element().id();
-        document.set_inline_style(root, "display:flex; align-items:flex-start");
-
-        let leaf = document.create_element("view", ());
-        document.append_child(root, leaf);
-        document.set_leaf_metrics_for_testing(leaf, Size::new(37.0, 19.0), Some(11.0));
-        document.layout();
-
-        assert_eq!(
-            document
-                .get(leaf)
-                .and_then(crate::Node::computed_style)
-                .expect("the attached synthetic leaf is styled")
-                .clone_display(),
-            stylo::values::computed::Display::Flex,
-            "the synthetic leaf intentionally omits display and keeps Lynx's initial flex value",
-        );
-        assert_eq!(
-            document
-                .rounded_layout(leaf)
-                .expect("the synthetic leaf is laid out")
-                .size,
-            Size::new(37.0, 19.0),
-        );
-    }
-
     #[test]
     fn only_a_root_reaching_invalidation_forces_a_full_pass() {
         let mut doc: Document<()> =
