@@ -9,7 +9,7 @@ use hughie::style::{
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
-use stylo::values::specified::box_::{DisplayInside, DisplayOutside, WillChangeBits};
+use stylo::values::specified::box_::WillChangeBits;
 
 use crate::tree::node::Node;
 
@@ -25,19 +25,20 @@ pub(crate) enum DisplayMode {
 }
 
 pub(crate) fn display_mode(display: Display) -> DisplayMode {
-    if display.is_contents() {
-        return DisplayMode::Contents;
-    }
-    if display.outside() == DisplayOutside::None {
-        return DisplayMode::None;
-    }
-    match display.inside() {
-        DisplayInside::None => DisplayMode::None,
-        DisplayInside::Flex => DisplayMode::Flex,
-        DisplayInside::Grid => DisplayMode::Grid,
-        DisplayInside::LynxLinear => DisplayMode::Linear,
-        DisplayInside::LynxRelative => DisplayMode::Relative,
-        DisplayInside::Contents | DisplayInside::Flow => DisplayMode::Leaf,
+    match display {
+        Display::None => DisplayMode::None,
+        Display::Contents => DisplayMode::Contents,
+        Display::Flex => DisplayMode::Flex,
+        Display::Grid => DisplayMode::Grid,
+        Display::Linear => DisplayMode::Linear,
+        Display::LynxRelative => DisplayMode::Relative,
+        unsupported => panic!(
+            "Bobcat does not support Stylo computed display {unsupported:?} \
+             (raw={:#06x}, outside={:?}, inside={:?})",
+            unsupported.to_u16(),
+            unsupported.outside(),
+            unsupported.inside(),
+        ),
     }
 }
 
@@ -241,7 +242,31 @@ impl TextRunStyle for TextStyleView<'_> {
 mod tests {
     use core::mem::size_of;
 
-    use super::{StyleView, TextStyleView};
+    use hughie::style::Display;
+    use stylo::values::specified::box_::DisplayInside;
+
+    use super::{DisplayMode, StyleView, TextStyleView, display_mode};
+
+    #[test]
+    fn supported_lynx_displays_map_to_layout_modes() {
+        assert_eq!(display_mode(Display::None), DisplayMode::None);
+        assert_eq!(display_mode(Display::Contents), DisplayMode::Contents);
+        assert_eq!(display_mode(Display::Flex), DisplayMode::Flex);
+        assert_eq!(display_mode(Display::Grid), DisplayMode::Grid);
+        assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
+        assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
+    }
+
+    #[test]
+    #[should_panic(expected = "Bobcat does not support Stylo computed display")]
+    fn unsupported_stylo_display_panics_instead_of_becoming_a_leaf() {
+        // Stylo's root `display: contents` fixup creates its private block-flow
+        // encoding, giving this test a real computed value that Lynx cannot lay out.
+        let unsupported = Display::Contents.equivalent_block_display(true);
+        assert_eq!(unsupported.inside(), DisplayInside::Flow);
+
+        let _ = display_mode(unsupported);
+    }
 
     #[test]
     fn post_flush_style_views_stay_within_their_expected_footprint() {

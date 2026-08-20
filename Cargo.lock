@@ -2816,7 +2816,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "selectors"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "bitflags 2.13.0",
  "cssparser",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "stylo"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "app_units",
  "arrayvec",
@@ -3120,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_atoms"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "string_cache",
  "string_cache_codegen",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_derive"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_dom"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bitflags 2.13.0",
  "stylo_malloc_size_of",
@@ -3147,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "stylo_malloc_size_of"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "app_units",
  "cssparser",
@@ -3163,14 +3163,14 @@ dependencies = [
 
 [[package]]
 name = "stylo_static_prefs"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "toml",
 ]
 
 [[package]]
 name = "stylo_traits"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "app_units",
  "bitflags 2.13.0",
