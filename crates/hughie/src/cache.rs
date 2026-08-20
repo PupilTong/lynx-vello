@@ -7,7 +7,19 @@ use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
+/// Inline measurement slots every node carries without allocating.
 pub const MEASURE_CACHE_SLOTS: usize = 8;
+
+/// The hard ceiling on live measurements for one node.
+///
+/// Flex, Linear and Relative containers ask a child for at most a handful of
+/// distinct constraints, so they never leave the inline slots. Grid's two-axis
+/// track sizing asks for far more — a single-child `display: grid` chain needs
+/// thirteen live entries per node — and evicting one of those turns every later
+/// re-request into a full subtree recomputation, which is quadratic in the
+/// number of grid levels. Spilling to the heap past the inline slots keeps that
+/// cost linear and is paid only by the nodes that need it.
+const MEASURE_CACHE_LIMIT: usize = 32;
 
 const KNOWN_WIDTH_PRESENT: u16 = 1 << 0;
 const KNOWN_HEIGHT_PRESENT: u16 = 1 << 1;
@@ -303,6 +315,11 @@ impl Cache {
         match input.goal {
             LayoutGoal::Commit => self.committed = Some(slot),
             LayoutGoal::Measure(_) => {
+                // Retiring a live same-shape measurement while the cache still
+                // has room costs a whole subtree recomputation the next time
+                // its constraint comes back, so a replacement target is only
+                // worth looking for once there is nowhere left to grow.
+                let full = self.measurements.len() >= MEASURE_CACHE_LIMIT;
                 let mut exact = None;
                 let mut same_shape = None;
                 for (index, cached) in self.measurements.iter().enumerate() {
@@ -310,16 +327,19 @@ impl Cache {
                         exact = Some(index);
                         break;
                     }
-                    if same_shape.is_none()
+                    if full
+                        && same_shape.is_none()
                         && packed_same_constraint_shape(cached.input, slot.input)
                     {
                         same_shape = Some(index);
                     }
                 }
-                if let Some(target) = exact.or(same_shape) {
+                if let Some(target) = exact {
                     self.measurements[target] = slot;
-                } else if self.measurements.len() < MEASURE_CACHE_SLOTS {
+                } else if !full {
                     self.measurements.push(slot);
+                } else if let Some(target) = same_shape {
+                    self.measurements[target] = slot;
                 } else {
                     self.measurements[packed_constraint_shape_hash(slot.input)] = slot;
                 }
@@ -926,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_remains_bounded_and_preserves_shape_replacement() {
+    fn cache_grows_to_its_limit_before_retiring_a_live_measurement() {
         let first = measurement(
             Size::NONE,
             Size::new(AvailableSpace::Definite(10.0), AvailableSpace::MinContent),
@@ -939,33 +959,47 @@ mod tests {
         assert!(same_constraint_shape(first, same_shape));
         assert!(!same_constraint_shape(first, different_shape));
 
-        let shape_values = [
-            AvailableSpace::Definite(10.0),
-            AvailableSpace::MinContent,
-            AvailableSpace::MaxContent,
-        ];
-        let mut inputs = Vec::new();
-        for width in shape_values {
-            for height in shape_values {
-                inputs.push(measurement(Size::NONE, Size::new(width, height)));
+        let filled = |count: usize| {
+            let mut cache = Cache::new();
+            for index in 0..count {
+                let width = u8::try_from(index).expect("the cache limit fits a byte");
+                cache.store(
+                    measurement(
+                        Size::NONE,
+                        Size::new(
+                            AvailableSpace::Definite(100.0 + f32::from(width)),
+                            AvailableSpace::MinContent,
+                        ),
+                    ),
+                    LayoutOutput::new(Size::ZERO, Size::ZERO),
+                );
             }
-        }
+            cache
+        };
 
-        let mut cache = Cache::new();
-        for input in inputs.iter().copied().take(MEASURE_CACHE_SLOTS) {
-            cache.store(input, LayoutOutput::new(Size::ZERO, Size::ZERO));
-        }
-        assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
-        assert!(!cache.measurements.spilled());
+        // Distinct constraints of one shape accumulate instead of replacing
+        // each other, first through the inline slots and then on the heap.
+        let inline = filled(MEASURE_CACHE_SLOTS);
+        assert_eq!(inline.measurements.len(), MEASURE_CACHE_SLOTS);
+        assert!(!inline.measurements.spilled());
+        let spilled = filled(MEASURE_CACHE_SLOTS + 1);
+        assert_eq!(spilled.measurements.len(), MEASURE_CACHE_SLOTS + 1);
+        assert!(spilled.measurements.spilled());
 
-        let replacement = inputs[MEASURE_CACHE_SLOTS];
-        let target = constraint_shape_hash(replacement);
-        cache.store(
-            replacement,
-            LayoutOutput::new(Size::new(99.0, 0.0), Size::new(99.0, 0.0)),
-        );
-        assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
-        assert_input_bits_eq(cache.measurements[target].input.unpack(), replacement);
+        // At the limit the cache stops growing and retires the first entry of
+        // the incoming constraint's shape.
+        let mut cache = filled(MEASURE_CACHE_LIMIT);
+        assert_eq!(cache.measurements.len(), MEASURE_CACHE_LIMIT);
+        cache.store(same_shape, LayoutOutput::new(Size::ZERO, Size::ZERO));
+        assert_eq!(cache.measurements.len(), MEASURE_CACHE_LIMIT);
+        assert_input_bits_eq(cache.measurements[0].input.unpack(), same_shape);
+
+        // A shape nothing in the cache shares falls back to the hashed slot.
+        let mut cache = filled(MEASURE_CACHE_LIMIT);
+        let target = constraint_shape_hash(different_shape);
+        cache.store(different_shape, LayoutOutput::new(Size::ZERO, Size::ZERO));
+        assert_eq!(cache.measurements.len(), MEASURE_CACHE_LIMIT);
+        assert_input_bits_eq(cache.measurements[target].input.unpack(), different_shape);
     }
 
     #[cfg(target_pointer_width = "64")]

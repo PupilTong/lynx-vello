@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "hughie_flex"
 harness = false
+
+[[bench]]
+name = "deep_nesting"
+harness = false
