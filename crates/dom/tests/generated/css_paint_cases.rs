@@ -6326,7 +6326,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text-decor/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:30px;width:112px;height:68px;flex-direction:column;font-family:Ahem;font-size:22px;line-height:30px;color:#1d4ed8;text-decoration-line:line-through;text-decoration-style:solid;text-decoration-color:#e11d48;text-decoration-thickness:3px">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"stylo-lynx-text-decoration-thickness-grammar" },
+        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"pulsar-text-decoration-thickness" },
     },
     CssPaintCase {
         name: r"text-decoration-004",
@@ -6354,7 +6354,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text-decor/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:30px;width:112px;height:68px;flex-direction:column;font-family:Ahem;font-size:22px;line-height:30px;color:#1d4ed8;text-decoration-line:line-through;text-decoration-style:double;text-decoration-color:#e11d48;text-decoration-thickness:3px">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"stylo-lynx-text-decoration-thickness-grammar" },
+        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"pulsar-text-decoration-thickness" },
     },
     CssPaintCase {
         name: r"text-decoration-008",
@@ -6382,7 +6382,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text-decor/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:30px;width:112px;height:68px;flex-direction:column;font-family:Ahem;font-size:22px;line-height:30px;color:#1d4ed8;text-decoration-line:line-through;text-decoration-style:dotted;text-decoration-color:#e11d48;text-decoration-thickness:3px">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"stylo-lynx-text-decoration-thickness-grammar" },
+        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"pulsar-text-decoration-thickness" },
     },
     CssPaintCase {
         name: r"text-decoration-012",
@@ -6410,7 +6410,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text-decor/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:30px;width:112px;height:68px;flex-direction:column;font-family:Ahem;font-size:22px;line-height:30px;color:#1d4ed8;text-decoration-line:line-through;text-decoration-style:dashed;text-decoration-color:#e11d48;text-decoration-thickness:3px">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"stylo-lynx-text-decoration-thickness-grammar" },
+        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"pulsar-text-decoration-thickness" },
     },
     CssPaintCase {
         name: r"text-decoration-016",
@@ -6438,7 +6438,7 @@ pub(super) static CASES: [CssPaintCase; 1000] = [
         category: r"text",
         source: r"wpt/css/css-text-decor/",
         fragment: r#"<div style="position:relative;display:flex;width:128px;height:128px;overflow:hidden;background:#ffffff;box-sizing:border-box;"><div style="display:flex;position:absolute;left:8px;top:30px;width:112px;height:68px;flex-direction:column;font-family:Ahem;font-size:22px;line-height:30px;color:#1d4ed8;text-decoration-line:line-through;text-decoration-style:wavy;text-decoration-color:#e11d48;text-decoration-thickness:3px">XXXX</div></div>"#,
-        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"stylo-lynx-text-decoration-thickness-grammar" },
+        expectation: Expectation::Skip { kind: DifferenceKind::W3cGap, issue: r"pulsar-text-decoration-thickness" },
     },
     CssPaintCase {
         name: r"text-shadow-000",
@@ -7960,11 +7960,11 @@ css_paint_case_tests! {
         839 => css_mask_multiple_019, r"w3c-gap: pulsar-mask-multiple-layer-composite";
         858 => css_text_size_color_018, r"w3c-gap: text-overflow-wrap-break-word-policy";
         859 => css_text_size_color_019, r"w3c-gap: text-overflow-wrap-break-word-policy";
-        903 => css_text_decoration_003, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
-        907 => css_text_decoration_007, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
-        911 => css_text_decoration_011, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
-        915 => css_text_decoration_015, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
-        919 => css_text_decoration_019, r"w3c-gap: stylo-lynx-text-decoration-thickness-grammar";
+        903 => css_text_decoration_003, r"w3c-gap: pulsar-text-decoration-thickness";
+        907 => css_text_decoration_007, r"w3c-gap: pulsar-text-decoration-thickness";
+        911 => css_text_decoration_011, r"w3c-gap: pulsar-text-decoration-thickness";
+        915 => css_text_decoration_015, r"w3c-gap: pulsar-text-decoration-thickness";
+        919 => css_text_decoration_019, r"w3c-gap: pulsar-text-decoration-thickness";
         926 => css_text_shadow_006, r"w3c-gap: stylo-lynx-text-shadow-list-grammar";
         927 => css_text_shadow_007, r"w3c-gap: stylo-lynx-text-shadow-list-grammar";
         928 => css_text_shadow_008, r"w3c-gap: stylo-lynx-text-shadow-list-grammar";

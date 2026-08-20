@@ -195,7 +195,7 @@ and nested-overflow cases, 20/20 opacity groups, 20/20 clip ellipses, 10/10
 | `stylo-lynx-text-shadow-list-grammar` | W3C gap | 4 | Lynx Stylo declares `text-shadow` as `single_item`, so standard comma-separated shadow lists never reach the painter. |
 | `pulsar-text-shadow-blur` | W3C gap | 10 | Text-shadow offset and color paint, but the parsed blur radius is ignored. |
 | `css-text-decoration-auto-thickness-ua-choice` | W3C-correct: UA choice | 5 | `text-decoration-{002,006,010,014,018}` use `line-through` with `text-decoration-thickness: auto`; CSS leaves the resulting font/UA metric and exact line geometry to the UA. |
-| `stylo-lynx-text-decoration-thickness-grammar` | W3C gap | 5 | `text-decoration-{003,007,011,015,019}` explicitly request `3px`, but the Lynx build omits that authorable longhand and the painter always uses font metrics. |
+| `pulsar-text-decoration-thickness` | W3C gap | 5 | `text-decoration-{003,007,011,015,019}` explicitly request `3px`; Stylo parses and computes the authorable longhand, but `crates/dom/src/paint/text.rs` does not read it and always derives decoration thickness from font metrics. |
 | `pulsar-text-stroke-join-geometry` | Non-W3C compatibility | 19 | Every `text-stroke-000..019` case except matching control `006`: `text-stroke`/`-webkit-text-stroke` is a WebKit/Lynx extension, not a W3C CSS property. Kurbo's default join differs from Chromium's glyph-stroke join and unhinted Vello coverage contributes remaining pixels. |
 | `css-text-subpixel-rasterization` | W3C-correct: raster/sample | 28 | Ordinary Ahem glyph/baseline coverage differs at subpixel edges with Vello glyph hinting disabled. The text is present and standards behavior is not missing. |
 

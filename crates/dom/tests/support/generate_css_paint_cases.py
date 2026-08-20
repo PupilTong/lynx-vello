@@ -82,7 +82,7 @@ W3C_GAP_ISSUES = {
     "stylo-lynx-repeating-gradient-grammar-scope",
     "stylo-lynx-text-shadow-list-grammar",
     "pulsar-text-shadow-blur",
-    "stylo-lynx-text-decoration-thickness-grammar",
+    "pulsar-text-decoration-thickness",
 }
 
 def stage(content: str, extra: str = "") -> str:
