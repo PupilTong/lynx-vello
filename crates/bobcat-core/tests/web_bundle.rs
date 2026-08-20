@@ -74,7 +74,7 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
 }
 
 #[tokio::test]
-async fn decoded_script_is_passed_to_the_public_view_without_moving_decode_into_core() {
+async fn decoded_script_reaches_the_first_deliberately_missing_element_papi() {
     for (name, bytes) in FIXTURES {
         let template = lynx_template_decoder::decode(bytes).expect("decode");
         let root = template
@@ -84,13 +84,34 @@ async fn decoded_script_is_passed_to_the_public_view_without_moving_decode_into_
         let url = format!("app:///{name}/main-thread.js");
         let error = run(page_config(&template), root, &url)
             .await
-            .expect_err("the pending lynx global must remain a precise error");
+            .expect_err("scoped CSS remains a precise unsupported Element PAPI");
         let message = error.to_string();
         assert!(
-            message.contains("'lynx' is not defined"),
+            message.contains("'__SetCSSId' is not defined"),
             "{name}: {message}"
         );
         assert!(message.contains(&url), "{name}: {message}");
+    }
+}
+
+#[tokio::test]
+async fn runtime_global_shims_let_real_bundles_finish_with_known_papi_test_doubles() {
+    for (name, bytes) in FIXTURES {
+        let template = lynx_template_decoder::decode(bytes).expect("decode");
+        let root = template
+            .lepus_code
+            .get("root")
+            .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
+        let source = format!(
+            "globalThis.__SetCSSId = function () {{}};\n\
+             globalThis.__AddEvent = function () {{}};\n\
+             globalThis._ReportError = function (error) {{ throw error; }};\n\
+             {root}"
+        );
+        let url = format!("app:///{name}/main-thread-with-css-scope-test-double.js");
+        run(page_config(&template), &source, &url)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
 }
 

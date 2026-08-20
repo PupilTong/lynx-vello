@@ -14,9 +14,11 @@ use crate::tree::LynxDocument;
 
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
 const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
+const MAIN_THREAD_GLOBALS_SOURCE_NAME: &str = "main-thread-globals.js";
 
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.js");
+const MAIN_THREAD_GLOBALS_SOURCE: &str = include_str!("main-thread-globals.js");
 
 const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
                               const navigator=void 0,postMessage=void 0,window=void 0; ";
@@ -333,6 +335,11 @@ fn install_bobcat(
 
     install_bobcat_object(engine, &handle, on_flush, events)?;
     install_event_members(engine, events)?;
+    engine
+        .execute_script(MAIN_THREAD_GLOBALS_SOURCE, MAIN_THREAD_GLOBALS_SOURCE_NAME)
+        .map_err(|error| {
+            MainThreadError::from_engine("installing the main-thread globals", error)
+        })?;
     engine
         .execute_script(ELEMENT_PAPI_SOURCE, ELEMENT_PAPI_SOURCE_NAME)
         .map_err(|error| MainThreadError::from_engine("installing the Element PAPI", error))?;
@@ -811,6 +818,87 @@ mod tests {
             .expect("boot");
 
         assert!(elements.tree().get(node_id(3)).is_some());
+    }
+
+    #[test]
+    fn main_thread_globals_supply_shape_only_runtime_bridges() {
+        let (mut runtime, _elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                if (lynx.SystemInfo !== SystemInfo || !Object.isFrozen(SystemInfo)) {
+                  throw new Error('SystemInfo must be one frozen shared snapshot');
+                }
+                if (lynx.__globalProps !== __globalProps) {
+                  throw new Error('the bare and lynx global props must share identity');
+                }
+                if (lynx.__initData === null || typeof lynx.__initData !== 'object') {
+                  throw new Error('init data must start as an empty object');
+                }
+                if (!('NativeModules' in globalThis) || NativeModules !== undefined) {
+                  throw new Error('the main-thread native-module sentinel must be undefined');
+                }
+                if (typeof lynxCoreInject !== 'undefined') {
+                  throw new Error('the background-thread injection must not leak into this realm');
+                }
+                if (typeof globDynamicComponentEntry !== 'undefined') {
+                  throw new Error('the dynamic-chunk entry must not leak into the card realm');
+                }
+                if (typeof __SetCSSId !== 'undefined') {
+                  throw new Error('the runtime shell must not hide the pending scoped-style PAPI');
+                }
+
+                const core = lynx.getCoreContext();
+                const js = lynx.getJSContext();
+                const native = lynx.getNative();
+                if (core === js || core === native || js === native) {
+                  throw new Error('the three context directions must remain distinct');
+                }
+                for (const [name, context, again] of [
+                  ['core', core, lynx.getCoreContext()],
+                  ['js', js, lynx.getJSContext()],
+                  ['native', native, lynx.getNative()]
+                ]) {
+                  if (context !== again) {
+                    throw new Error(name + ' context identity must be stable');
+                  }
+                  context.postMessage({});
+                  context.addEventListener('ignored', function () {});
+                  context.removeEventListener('ignored', function () {});
+                  if (context.dispatchEvent({ type: 'ignored', data: {} }) !== 3) {
+                    throw new Error(name + ' context must report a suppressed event');
+                  }
+                }
+
+                const emitter = lynx.getJSModule('GlobalEventEmitter');
+                if (emitter !== lynx.getJSModule('GlobalEventEmitter') ||
+                    lynx.getJSModule('missing') !== undefined) {
+                  throw new Error('only the stable empty global-event module is exposed');
+                }
+                for (const method of [
+                  'addListener', 'removeListener', 'removeAllListeners',
+                  'emit', 'trigger', 'toggle'
+                ]) {
+                  emitter[method]('ignored', function () {});
+                }
+
+                if (lynx.performance.isProfileRecording() !== false ||
+                    lynx.performance.profileFlowId() !== 0 ||
+                    lynx.performance._generatePipelineOptions() !== undefined) {
+                  throw new Error('the performance shell must stay inert');
+                }
+                _AddEventListener('ignored', function () {});
+                _ReportError(new Error('ignored'));
+                _SetSourceMapRelease({ release: 'ignored' });
+                __OnLifecycleEvent(['ignored', {}]);
+
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                };
+                ",
+                "app:///runtime-globals.js",
+            )
+            .expect("shape-only main-thread globals");
     }
 
     #[test]

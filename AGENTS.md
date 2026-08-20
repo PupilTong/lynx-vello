@@ -238,10 +238,18 @@ useful signal for currently-compatible versions of those libraries.
   `removeAttribute`,
   `getAttribute`, `tagName`, `insertBefore`,
   `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
-  speaking DOM vocabulary over numeric `NodeId`s), evaluates the embedded
-  Element PAPI runtime (`packages/bobcat-element`), then evaluates a
+  speaking DOM vocabulary over numeric `NodeId`s), evaluates the core-owned
+  `main-thread-globals.js` compatibility shell, then the embedded Element PAPI
+  runtime (`packages/bobcat-element`), and finally evaluates a
   `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
-  `processData` → `renderPage` → `__FlushElementTree`. The PAPI runtime
+  `processData` → `renderPage` → `__FlushElementTree`. The globals shell is
+  deliberately shape-only: it supplies a stub `lynx` object, an empty
+  `SystemInfo` snapshot, init/global props, context sinks, the native-module
+  sentinel and empty JS event module,
+  performance/error hooks, and
+  `__OnLifecycleEvent`; it retains no listener, delivers no message or
+  lifecycle event, and does not invent the background-only `lynxCoreInject`
+  realm. The PAPI runtime
   assigns the twenty-seven Element PAPI globals: every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
