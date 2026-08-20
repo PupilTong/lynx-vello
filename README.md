@@ -81,9 +81,11 @@ yet; an XML background section is retained but reported as not executed.
 
 The `github-pages` pnpm package builds the shared-memory `bobcat-wasm` module,
 installs a COOP/COEP service worker, and loads a small Lynx XML card through a
-complete Worker-owned embedder into its `OffscreenCanvas`. That
-embedder starts the DOM owner as a nested `wasm_thread` Worker and synchronizes
-the two Rust sides through shared memory:
+complete Worker-owned embedder into its `OffscreenCanvas`. Its query-routed
+`?tab=lynx-xml` workspace exposes the demo source in an editor and renders each
+submission into the adjacent preview. That embedder starts the DOM owner as a
+nested `wasm_thread` Worker and synchronizes the two Rust sides through shared
+memory:
 
 ```sh
 pnpm install --frozen-lockfile

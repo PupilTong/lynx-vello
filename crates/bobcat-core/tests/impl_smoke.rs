@@ -5,7 +5,8 @@ use std::sync::Arc;
 use bobcat_core::image::{AlphaType, DecodedImage, ImageFormat};
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::script::{
-    HostCallback, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind, ScriptErrorPhase,
+    HostCallback, HostValue, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind,
+    ScriptErrorPhase,
 };
 use bobcat_core::{LynxView, NoWindow, PageConfig};
 use support::FetcherDouble;
@@ -31,6 +32,16 @@ impl ScriptEngine for InjectedVm {
         _callback: HostCallback,
     ) -> Result<(), ScriptError> {
         Ok(())
+    }
+
+    fn call_host_member(
+        &mut self,
+        _namespace: &str,
+        _name: &str,
+        _arguments: &[HostValue],
+    ) -> Result<bool, ScriptError> {
+        // A VM that publishes nothing back reports exactly that.
+        Ok(false)
     }
 
     fn execute_script(&mut self, _source: &str, source_name: &str) -> Result<(), ScriptError> {

@@ -123,3 +123,77 @@ async fn a_view_accepts_only_one_entry_script() {
         LynxViewError::Engine(EngineError::ScriptAlreadyStarted)
     ));
 }
+
+/// The realm's `EventTarget` half, end to end against the real element tree:
+/// registration identity, the index the host is told to keep, and the
+/// stop-propagation seam. Delivery itself is driven by the engine's script
+/// thread, which is exercised where that loop lives.
+#[tokio::test]
+async fn the_realm_registers_listeners_against_real_node_ids() {
+    run(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const outer = __CreateView(0);
+          const inner = __CreateView(0);
+          __AppendElement(page, outer);
+          __AppendElement(outer, inner);
+          globalThis.held = [page, outer, inner];
+
+          const handler = () => {};
+          __AddEventListener(inner, 'tap', handler, {});
+          __AddEventListener(inner, 'tap', handler, {});
+          __AddEventListener(inner, 'tap', handler, { capture: true });
+
+          // Removing the bubble registration must leave the capture one, and
+          // an unrelated callback must remove nothing.
+          __RemoveEventListener(inner, 'tap', () => {}, {});
+          __RemoveEventListener(inner, 'tap', handler, {});
+
+          if (__GetElementUniqueID(inner) !== 4) {
+            throw new Error('the tree shape this test assumes has changed');
+          }
+          if (typeof __AddEvent !== 'undefined') {
+            throw new Error('__AddEvent must be gone, not merely unused');
+          }
+        };
+        ",
+        "app:///listeners.js",
+    )
+    .await
+    .expect("main-thread boot");
+}
+
+/// A registration is keyed by handle and indexed by node id, and neither is
+/// disturbed by the tree mutations a re-render performs.
+#[tokio::test]
+async fn registrations_survive_the_tree_mutations_a_rerender_makes() {
+    run(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const first = __CreateView(0);
+          const second = __CreateView(0);
+          const box = __CreateView(0);
+          __AppendElement(page, first);
+          __AppendElement(page, second);
+          __AppendElement(page, box);
+          globalThis.held = [page, first, second, box];
+
+          const id = __GetElementUniqueID(first);
+          __AddEventListener(first, 'tap', () => {}, {});
+
+          __AppendElement(box, first);
+          __SwapElement(first, second);
+          __ReplaceElement(second, first);
+
+          if (__GetElementUniqueID(first) !== id) {
+            throw new Error('a handle must keep its node id across re-parenting');
+          }
+        };
+        ",
+        "app:///registration-stability.js",
+    )
+    .await
+    .expect("main-thread boot");
+}

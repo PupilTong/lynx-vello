@@ -58,7 +58,8 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::thread::Builder as ThreadBuilder;
 
 use dom::FontBlob;
-use dom::input::InputEvent;
+use dom::event::EventSteps;
+use dom::input::{InputEvent, InputKind, PointerPhase};
 use dom::render::gpu::Headless;
 use dom::vello::peniko::Color;
 #[cfg(target_arch = "wasm32")]
@@ -67,6 +68,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
 use crate::image::DecodedImage;
+use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
@@ -173,12 +175,23 @@ pub enum ScriptRunError {
 enum EngineMessage {
     /// The main-thread script ran to completion (or failed) on its thread.
     ScriptDone(Result<(), ScriptRunError>),
+    /// A listener failed while an event was being delivered.
+    ListenerFailed(ScriptError),
 }
 
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
     ScriptFinished(Result<(), ScriptRunError>),
+    /// A listener threw while an event was being delivered to it.
+    ///
+    /// Reported rather than swallowed, and separate from
+    /// [`Self::ScriptFinished`] because it is not fatal: the walk goes on, the
+    /// realm stays usable, and every later event is delivered as normal. An
+    /// embedder that logs it gets the same visibility over its own handlers
+    /// that it has over its entry script; one that ignores it loses nothing
+    /// but the message.
+    ListenerFailed(ScriptError),
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at `size`.
@@ -397,6 +410,59 @@ enum Output<'window> {
     Window(Box<WindowGraphics<'window>>),
 }
 
+/// The event one routed input becomes.
+///
+/// Deliberately the W3C pointer names rather than Lynx's `tap`/`longpress`:
+/// those are *synthesized* from a pointer sequence by a gesture layer that
+/// does not exist yet, and naming a single `pointerup` `tap` would be a guess
+/// at the synthesis rather than an implementation of it.
+fn event_name(event: &InputEvent) -> Option<&'static str> {
+    match event.kind {
+        InputKind::Pointer { phase, .. } => match phase {
+            PointerPhase::Down => Some("pointerdown"),
+            PointerPhase::Move => Some("pointermove"),
+            PointerPhase::Up => Some("pointerup"),
+            PointerPhase::Cancel => Some("pointercancel"),
+            // `InputKind` and its enums are `#[non_exhaustive]` so keyboard
+            // and focus can arrive without a break; an unnamed one dispatches
+            // nothing rather than guessing at a name.
+            _ => None,
+        },
+        InputKind::Wheel { .. } => Some("wheel"),
+        _ => None,
+    }
+}
+
+/// The device facts the realm turns into a Lynx event object's `detail`.
+///
+/// Viewport CSS px, which in this engine is also document space: there is no
+/// document scrolling area, so the standard's `clientX`/`pageX` pair has one
+/// value here.
+fn event_detail(event: &InputEvent) -> String {
+    let position = event.position;
+    match event.kind {
+        InputKind::Wheel { delta, .. } => format!(
+            r#"{{"x":{},"y":{},"deltaX":{},"deltaY":{}}}"#,
+            position.x, position.y, delta.x, delta.y
+        ),
+        _ => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
+    }
+}
+
+/// What the presenting side asks the script thread to do after the entry
+/// script has finished.
+///
+/// Only plain data crosses: node ids, an event name, a JSON payload. The realm
+/// and the document both stay where they are.
+enum ScriptCommand {
+    /// Deliver one already-computed event path to the realm's listeners.
+    DispatchEvent {
+        steps: EventSteps,
+        name: Arc<str>,
+        detail: Arc<str>,
+    },
+}
+
 /// The engine half of a Lynx view: the shared element tree, input routing,
 /// frame production, presentation, and the engine-owned script thread.
 ///
@@ -420,6 +486,10 @@ pub(crate) struct Engine<'window, W: Window> {
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
+    /// The only `Sender`. It must never be cloned anywhere the script thread
+    /// can reach: the channel closing is what ends that thread's loop, and a
+    /// surviving clone would leave it parked with a live realm forever.
+    script_commands: Option<mpsc::Sender<ScriptCommand>>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -461,6 +531,7 @@ impl<'window, W: Window> Engine<'window, W> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
+            script_commands: None,
             thread_bound: PhantomData,
         })
     }
@@ -550,13 +621,33 @@ impl<'window, W: Window> Engine<'window, W> {
         pending_resize: &mut Option<(f32, f32, f32)>,
         pending_input: &mut VecDeque<InputEvent>,
         tree: &mut LynxDocument,
+        commands: Option<&mpsc::Sender<ScriptCommand>>,
     ) {
         if let Some((width, height, ratio)) = pending_resize.take() {
             tree.set_viewport(width, height);
             tree.set_device_pixel_ratio(ratio);
         }
         while let Some(event) = pending_input.pop_front() {
-            tree.handle_input(event);
+            // Routing performs the user-agent default action, and reports the
+            // node it routed to — so the event path costs no second hit test.
+            // The default action runs first and unconditionally: no listener
+            // can suppress one, because Lynx has no cancelable event.
+            let response = tree.handle_input(event);
+            let (Some(commands), Some(target)) = (commands, response.target) else {
+                continue;
+            };
+            let Some(name) = event_name(&event) else {
+                continue;
+            };
+            // Built here, where the document is already borrowed, so the
+            // thread that owns the realm never has to take it to find out who
+            // an event reaches.
+            let steps = tree.event_steps(target, true, true);
+            let _ = commands.send(ScriptCommand::DispatchEvent {
+                steps,
+                name: Arc::from(name),
+                detail: Arc::from(event_detail(&event)),
+            });
         }
     }
 
@@ -565,7 +656,12 @@ impl<'window, W: Window> Engine<'window, W> {
         self.pending_input.push_back(event);
         let needs_frame = match self.elements.try_tree() {
             Some(mut tree) => {
-                Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+                Self::drain_deferred(
+                    &mut self.pending_resize,
+                    &mut self.pending_input,
+                    &mut tree,
+                    self.script_commands.as_ref(),
+                );
                 tree.needs_render()
             }
             None => false,
@@ -626,6 +722,9 @@ impl<'window, W: Window> Engine<'window, W> {
         let mut events = Vec::new();
         while let Ok(message) = self.messages.try_recv() {
             match message {
+                EngineMessage::ListenerFailed(error) => {
+                    events.push(EngineEvent::ListenerFailed(error));
+                }
                 EngineMessage::ScriptDone(result) => {
                     events.push(EngineEvent::ScriptFinished(result));
                 }
@@ -702,7 +801,12 @@ impl<'window, W: Window> Engine<'window, W> {
         let size = self.frame_size;
         let tree_was_busy = match self.elements.try_tree() {
             Some(mut tree) => {
-                Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+                Self::drain_deferred(
+                    &mut self.pending_resize,
+                    &mut self.pending_input,
+                    &mut tree,
+                    self.script_commands.as_ref(),
+                );
                 let produced = tree.render();
                 if produced || !graphics.rendered_at(size) {
                     graphics.render_to_target(&tree.scene(), size)?;
@@ -735,7 +839,12 @@ impl<'window, W: Window> Engine<'window, W> {
         let Some(mut tree) = self.elements.try_tree() else {
             return Ok(false);
         };
-        Self::drain_deferred(&mut self.pending_resize, &mut self.pending_input, &mut tree);
+        Self::drain_deferred(
+            &mut self.pending_resize,
+            &mut self.pending_input,
+            &mut tree,
+            self.script_commands.as_ref(),
+        );
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
@@ -811,6 +920,7 @@ impl<'window, W: Window> Engine<'window, W> {
         }
         let events = self.event_sender.clone();
         let frame_requesters = Arc::clone(&self.frames);
+        let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
         let spawn = ThreadBuilder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
@@ -835,7 +945,8 @@ impl<'window, W: Window> Engine<'window, W> {
                         })?;
                         runtime
                             .run_main_thread_script(&source, &source_name)
-                            .map_err(|error| ScriptRunError::Script(error.into_script_error()))
+                            .map_err(|error| ScriptRunError::Script(error.into_script_error()))?;
+                        Ok(runtime)
                     })()
                 }))
                 .unwrap_or_else(|payload| {
@@ -844,10 +955,61 @@ impl<'window, W: Window> Engine<'window, W> {
                         panic_payload(payload.as_ref())
                     )))
                 });
+                let runtime = match result {
+                    Ok(runtime) => {
+                        events.send(EngineMessage::ScriptDone(Ok(())));
+                        Some(runtime)
+                    }
+                    Err(error) => {
+                        events.send(EngineMessage::ScriptDone(Err(error)));
+                        None
+                    }
+                };
+                request_current_frame(&frame_requesters);
+
+                // The realm now outlives its entry script. `recv` returns
+                // `Err` when the engine drops its `Sender`, which is the only
+                // shutdown signal this thread needs or gets.
+                if let Some(mut runtime) = runtime {
+                    while let Ok(command) = commands.recv() {
+                        match command {
+                            ScriptCommand::DispatchEvent {
+                                steps,
+                                name,
+                                detail,
+                            } => {
+                                // A panicking listener must not take the realm
+                                // with it: the next event still has to arrive.
+                                let delivered = catch_unwind(AssertUnwindSafe(|| {
+                                    runtime.dispatch_event(&steps, &name, &detail)
+                                }));
+                                match delivered {
+                                    Ok(Ok(true)) => {
+                                        // A listener may have changed the tree
+                                        // without flushing, and the presenting
+                                        // thread asked `needs_render` before
+                                        // any of them ran — so nothing else
+                                        // will notice.
+                                        request_current_frame(&frame_requesters);
+                                    }
+                                    Ok(Err(error)) => {
+                                        events.send(EngineMessage::ListenerFailed(
+                                            error.into_script_error(),
+                                        ));
+                                    }
+                                    // A panic is already the crate's
+                                    // unspecified-state contract, and the
+                                    // unwind carries no `ScriptError` to
+                                    // report; the realm survives it, which is
+                                    // what the `catch_unwind` is for.
+                                    Ok(Ok(false)) | Err(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
                 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                 set_script_panic_reporter(None);
-                events.send(EngineMessage::ScriptDone(result));
-                request_current_frame(&frame_requesters);
             });
         if let Err(error) = spawn {
             self.script_owner_available = true;
@@ -858,6 +1020,7 @@ impl<'window, W: Window> Engine<'window, W> {
                 message: error.to_string(),
             });
         }
+        self.script_commands = Some(command_sender);
         Ok(())
     }
 }
@@ -1135,10 +1298,10 @@ mod tests {
         let finished = engine
             .pump()
             .into_iter()
-            .map(|event| match event {
-                EngineEvent::ScriptFinished(result) => result,
+            .find_map(|event| match event {
+                EngineEvent::ScriptFinished(result) => Some(result),
+                EngineEvent::ListenerFailed(_) => None,
             })
-            .next()
             .expect("the event must be enqueued before the wakeup");
         finished.expect("the script must boot");
 
@@ -1157,6 +1320,219 @@ mod tests {
         assert!(
             elements.rounded_layout(page).is_some(),
             "the boot's final flush laid the page out"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "quickjs"))]
+mod event_loop_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use dom::Point2D;
+    use dom::input::{InputEvent, PointerKind, PointerPhase};
+
+    use super::OffscreenEngine;
+
+    /// The handle a packed id names, the way script spells one.
+    fn node_id(bits: u64) -> dom::NodeId {
+        dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
+    }
+
+    /// Boots a script and waits for it to finish, leaving the script thread
+    /// parked on its command channel.
+    fn booted(source: &str) -> OffscreenEngine {
+        let mut engine = OffscreenEngine::new(
+            crate::tree::PageConfig::default(),
+            Arc::new(|| {}),
+            393.0,
+            727.0,
+            1.0,
+        )
+        .expect("engine");
+        engine
+            .spawn_script(
+                source.to_owned(),
+                "app:///main.js".to_owned(),
+                crate::quickjs::engine_factory(),
+            )
+            .expect("spawn");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if engine.pump().into_iter().any(|event| {
+                matches!(event, crate::EngineEvent::ScriptFinished(result) if result.is_ok())
+            }) {
+                return engine;
+            }
+            assert!(Instant::now() < deadline, "the entry script did not finish");
+            std::thread::yield_now();
+        }
+    }
+
+    /// The whole loop: input arrives on this thread, is routed and given its
+    /// default action here, and its path is delivered to a listener on the
+    /// thread that owns the realm.
+    #[test]
+    fn a_host_input_event_reaches_a_listener_in_the_realm() {
+        let mut engine = booted(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              __SetInlineStyles(view, 'width:200px;height:200px');
+              __AddEventListener(view, 'pointerdown', (event) => {
+                // Observable from the presenting side, and proof the document
+                // was free while a listener ran.
+                __SetAttribute(view, 'seen', event.type + ':' + event.detail.x);
+              }, {});
+              __FlushElementTree();
+            };
+            ",
+        );
+
+        // Routing reads the rendered frame, so one has to exist first.
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(10.0, 10.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+
+        // Delivery is asynchronous by construction: this thread queued a path
+        // and moved on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // Non-blocking, like the presenting side's own borrow: an empty
+            // slot means the script thread is mid-delivery, not an error.
+            let seen = engine.elements.try_tree().and_then(|tree| {
+                tree.get(node_id(3))
+                    .and_then(|node| node.attribute("seen").map(str::to_owned))
+            });
+            if seen.as_deref() == Some("pointerdown:10") {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the listener never ran, attribute was {seen:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A listener that throws must not take the document with it. Building the
+    /// event object alone takes it — the realm reads two ids to fill in
+    /// `target` and `currentTarget` — so a bare `throw` used to strand it in
+    /// the hand-off slot with nothing able to put it back.
+    #[test]
+    fn a_throwing_listener_leaves_the_document_where_the_presenter_can_find_it() {
+        let mut engine = booted(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              __SetInlineStyles(view, 'width:200px;height:200px');
+              __AddEventListener(view, 'pointerdown', () => {
+                __SetAttribute(view, 'seen', 'yes');
+                throw new Error('a listener may fail');
+              }, {});
+              __FlushElementTree();
+            };
+            ",
+        );
+
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(10.0, 10.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+
+        // The listener ran, threw, and the document still came back — and the
+        // failure is reported rather than swallowed, which is the only way an
+        // embedder can see its own handler fail.
+        let mut reported = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            reported |= engine.pump().into_iter().any(|event| {
+                matches!(event, crate::EngineEvent::ListenerFailed(error)
+                    if error.message.contains("a listener may fail"))
+            });
+            let seen = engine.elements.try_tree().and_then(|tree| {
+                tree.get(node_id(3))
+                    .and_then(|node| node.attribute("seen").map(str::to_owned))
+            });
+            if seen.as_deref() == Some("yes") && reported {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "listener ran: {seen:?}, failure reported: {reported}"
+            );
+            std::thread::yield_now();
+        }
+
+        // And the view still works: a second event routes and is delivered.
+        engine
+            .elements
+            .try_tree()
+            .expect("a thrown listener must not wedge the view")
+            .render();
+    }
+
+    /// A node with no registration must not cost a trip into the realm, and a
+    /// script that registered nothing must not keep the loop from working.
+    #[test]
+    fn an_event_with_no_listener_changes_nothing() {
+        let mut engine = booted(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              __SetInlineStyles(view, 'width:200px;height:200px');
+              __FlushElementTree();
+            };
+            ",
+        );
+
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(10.0, 10.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            engine
+                .elements
+                .try_tree()
+                .expect("nothing was delivered, so the slot is free")
+                .get(node_id(3))
+                .expect("the view is live")
+                .attribute("seen")
+                .is_none()
         );
     }
 }

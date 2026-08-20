@@ -186,6 +186,14 @@ Cross-Origin-Embedder-Policy: require-corp
 for the demo. With `require-corp`, remote scripts and future image/font/bundle
 resources must satisfy CORS or a compatible Cross-Origin-Resource-Policy.
 
+The Pages shell exposes its Canvas and Lynx XML workspace views through the
+`tab` query parameter. The XML view loads `demo.lynx.xml` into a text editor and
+submits edits through a same-origin Blob URL. Because a view accepts one entry
+script and transferring an `HTMLCanvasElement` is irreversible, every submit
+disposes the prior `BobcatCanvas`, replaces the DOM canvas, creates a new
+Worker-owned view, re-registers the cached font bytes, and then loads the new
+source. The Blob URL is revoked only after `loadLynxXml` settles.
+
 Synchronous GPU readback remains absent because browser WebGPU map completion
 is Promise-driven; native capture blocks on device polling. Browser capture
 requires a separate asynchronous facade API.

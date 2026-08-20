@@ -95,7 +95,7 @@ async fn decoded_script_reaches_the_first_deliberately_missing_element_papi() {
 }
 
 #[tokio::test]
-async fn runtime_global_shims_let_real_bundles_finish_after_the_known_css_scope_gap() {
+async fn runtime_global_shims_let_real_bundles_finish_with_known_papi_test_doubles() {
     for (name, bytes) in FIXTURES {
         let template = lynx_template_decoder::decode(bytes).expect("decode");
         let root = template
@@ -104,6 +104,7 @@ async fn runtime_global_shims_let_real_bundles_finish_after_the_known_css_scope_
             .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
         let source = format!(
             "globalThis.__SetCSSId = function () {{}};\n\
+             globalThis.__AddEvent = function () {{}};\n\
              globalThis._ReportError = function (error) {{ throw error; }};\n\
              {root}"
         );

@@ -154,9 +154,14 @@ consequential choice about whether to follow the spec or the quirk.
 - **No `preventDefault()`/`cancelable`** — Lynx's touch/tap/longpress events
   cannot be canceled by app code; built-in behavior suppression (e.g. scroll
   panning) goes through a separate gesture-arbitration API instead.
-  **Decision: expose standard `preventDefault()`** on our synthetic events
-  for web-platform-code compatibility, but keep our own recognizers keyed off
-  the gesture arbitration API, not `preventDefault()`.
+  **Decision (2026-08-17, superseding an earlier one): do not expose
+  `preventDefault()` at all.** It was implemented on 2026-08-16 and removed
+  the next day. Nothing on the dispatch path can produce a cancel — the
+  Element PAPI cannot, because the worklet runtime has neither the method nor
+  a bit for it — so the earlier "expose it for web-platform-code
+  compatibility" decision bought a boundary with no producer. Recognizers stay
+  keyed off the gesture arbitration API, which is also what will drive the
+  one surviving suppression seam, `InputEvent::default_prevented`.
 - **`tap` suppressed by `longpress`** — Lynx hardcodes "tap doesn't fire if
   longpress was consumed earlier in the same touch sequence," a global rule
   with no DOM equivalent. **Decision: derive this from gesture-recognizer
