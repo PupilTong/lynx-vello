@@ -1154,6 +1154,23 @@ default explanation for a failure:
   metadata or required network access sits outside the current sandbox. Retry
   only the failing operation with narrowly scoped escalation, when available;
   if it still fails, diagnose the repository, credentials, or network itself.
+- If a `--target wasm32-unknown-unknown` build fails in `quickjs-rust-bridge`'s
+  build script with `No available targets are compatible with triple
+  "wasm32-unknown-unknown"`, that is toolchain *selection*, not a missing
+  capability: Apple's clang has no wasm32 target, and the build script invokes
+  whatever `CC` names. Point it at the same LLVM the CI jobs install and the
+  build succeeds, with no effect on host builds:
+
+  ```sh
+  export CC="$(brew --prefix llvm@22)/bin/clang"
+  export CXX="$(brew --prefix llvm@22)/bin/clang++"
+  ```
+
+  Reach for this before reporting the Wasm target as unbuildable, because
+  `crates/bobcat-wasm/src/browser.rs` is `#[cfg(target_arch = "wasm32")]`:
+  `cargo check --workspace --all-targets`, `cargo clippy`, and the test suite
+  never type-check it, so anything touching the browser embedder — or any
+  `#[cfg]`-gated import it depends on — is unverified until that target builds.
 
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
