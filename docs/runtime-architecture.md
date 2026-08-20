@@ -9,7 +9,8 @@ capabilities and OS facts:
 - a transferable `ScriptEngineFactory`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
-- an `AnimationClock` when the page should animate;
+- optionally an `AnimationClock`, when the host has a better reading of a
+  frame's time than the platform clock, or wants a reproducible one;
 - owned font bytes or already-decoded image pixels when those resources are
   registered explicitly;
 - viewport/device metrics and normalized input events;
@@ -37,16 +38,23 @@ bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 
 ## Animation timeline
 
-`bobcat-core` interpolates animations but reads no clock. `AnimationClock` is
-the host's reading of one — seconds on a monotonic timescale whose epoch the
-host chooses — installed with `LynxView::set_animation_clock` and sampled once
-per frame on the presenting side, so every animation in a frame is sampled at
-the same instant. A view with no clock installed renders `@keyframes` at their
-start values and never advances: OS time is an embedder capability like input
-and the draw target, and `wasm32-unknown-unknown` has no monotonic clock Rust
-can read at all. `bobcat-cli` reads `std::time::Instant`; the browser Render
-Worker relays `requestAnimationFrame`'s `DOMHighResTimeStamp`; `ManualClock`,
-which core does own, is the deterministic one tests and scripted capture use.
+Every view has one, and by default it is `SystemClock` — the platform's
+monotonic clock, `std::time::Instant` natively and `web_time::Instant` on Wasm,
+the same split `quickjs-rust-bridge` already uses. A host that arranges nothing
+therefore gets running animations; `bobcat-cli` installs no clock at all.
+
+`LynxView::set_animation_clock` replaces that timeline, which two cases want. A
+browser has a better reading than it could take itself: `requestAnimationFrame`
+hands over the frame's timestamp, the instant the frame is *for*, where reading
+a clock partway through producing the frame drifts and jitters — so the Render
+Worker relays that `DOMHighResTimeStamp`. And `ManualClock` makes a frame
+sequence reproducible, which is what tests and scripted offscreen capture use.
+
+Whichever is installed, the engine samples it once per frame on the presenting
+side and hands that one value to the document, so every animation in a frame is
+sampled at the same instant. `dom` itself still reads no clock — `now` is a
+parameter to `Document::advance_animations`, which is what keeps the timeline
+substitutable at all.
 
 Advancing an animation never crosses to the Lynx main thread. The presenting
 side already holds the document between frames, and the tick is a Stylo

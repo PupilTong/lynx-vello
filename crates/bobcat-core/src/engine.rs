@@ -486,9 +486,9 @@ pub(crate) struct Engine<'window, W: Window> {
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
-    /// The host's animation timeline. Absent until an embedder installs one,
-    /// and a view without one never animates.
-    clock: Option<Arc<dyn crate::clock::AnimationClock>>,
+    /// The animation timeline. Defaults to the platform's monotonic clock, so
+    /// a page animates whether or not the host arranges anything.
+    clock: Arc<dyn crate::clock::AnimationClock>,
     /// Whether the last frame left an animation running. Read without the
     /// document, because the frame request has to be made whether or not the
     /// slot was free this frame.
@@ -538,7 +538,7 @@ impl<'window, W: Window> Engine<'window, W> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
-            clock: None,
+            clock: Arc::new(crate::clock::SystemClock::new()),
             animating: false,
             script_commands: None,
             thread_bound: PhantomData,
@@ -562,10 +562,10 @@ impl<'window, W: Window> Engine<'window, W> {
         Ok(self.elements.clone())
     }
 
-    /// Installs the host's animation timeline. Without one, `@keyframes` and
-    /// transitions resolve to their start values and never advance.
+    /// Replaces the animation timeline, for a host with a better reading than
+    /// the platform clock or one that needs a reproducible sequence.
     pub(crate) fn set_animation_clock(&mut self, clock: Arc<dyn crate::clock::AnimationClock>) {
-        self.clock = Some(clock);
+        self.clock = clock;
         self.refresh();
     }
 
@@ -587,12 +587,9 @@ impl<'window, W: Window> Engine<'window, W> {
     /// Takes the clock rather than `&self` so it can run while the attached
     /// output is mutably borrowed.
     fn advance_animations(
-        clock: Option<&Arc<dyn crate::clock::AnimationClock>>,
+        clock: &dyn crate::clock::AnimationClock,
         tree: &mut LynxDocument,
     ) -> bool {
-        let Some(clock) = clock else {
-            return false;
-        };
         tree.advance_animations(clock.now_seconds())
             .needs_next_frame
     }

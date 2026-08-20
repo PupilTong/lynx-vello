@@ -178,19 +178,51 @@ async fn animation_frames_need_no_script_thread_work() {
     );
 }
 
+/// A host that arranges nothing still gets a running animation: the view's
+/// default timeline is the platform's monotonic clock. Installing one is for
+/// hosts with a better reading of the frame's time, or for tests that want a
+/// reproducible sequence.
 #[tokio::test]
-async fn a_view_with_no_clock_renders_the_start_of_the_animation_and_stays_there() {
+async fn a_view_animates_without_the_host_installing_a_clock() {
     let mut view = booted(Some(slider_sheet())).await;
 
     view.tick(true).expect("first frame");
     let first = red_left_edge(&mut view);
-    view.tick(true).expect("second frame");
-    let second = red_left_edge(&mut view);
-
-    assert_eq!(first, 0, "with no timeline the animation holds at t=0");
-    assert_eq!(second, first, "and never advances");
     assert!(
-        !view.is_animating(),
-        "a clockless view must not spin the frame loop"
+        view.is_animating(),
+        "the default clock keeps the animation asking for frames"
+    );
+
+    // A quarter of the 1s travel is 4px, far enough above the 1px the
+    // assertion needs that ordinary scheduling noise cannot reach it.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    view.tick(true).expect("later frame");
+
+    assert!(
+        red_left_edge(&mut view) > first,
+        "and it advances on its own, with no `set_animation_clock` call"
+    );
+}
+
+/// Installing a clock replaces the default rather than enabling animation.
+#[tokio::test]
+async fn an_installed_clock_replaces_the_default_timeline() {
+    let mut view = booted(Some(slider_sheet())).await;
+    let clock = Arc::new(ManualClock::new());
+    view.set_animation_clock(clock.clone());
+
+    clock.set(0.5);
+    view.tick(true).expect("frame on the manual clock");
+    let held = red_left_edge(&mut view);
+
+    // Real time passes; the manual clock does not, so neither does the frame.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    view.tick(true).expect("another frame on the same instant");
+
+    assert_eq!(held, 8, "the manual clock decides where the square is");
+    assert_eq!(
+        red_left_edge(&mut view),
+        held,
+        "and wall time cannot move it behind the host's back"
     );
 }

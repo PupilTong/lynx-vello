@@ -1,26 +1,68 @@
-//! The animation timeline capability.
+//! The animation timeline.
 //!
-//! Bobcat interpolates animations but does not read a clock: a native host
-//! has `std::time`, a browser Worker has `requestAnimationFrame`'s timestamp,
-//! and a test wants neither. The host supplies the reading; the engine samples
-//! it once per frame on the presenting side and hands that one value to the
-//! document, so every animation in a frame is sampled at the same instant.
+//! Every view has one. [`SystemClock`] is the default and reads the platform's
+//! monotonic clock, so animations run without the host arranging anything.
 //!
-//! A view with no clock installed never animates. There is no wall-clock
-//! fallback: OS time is an embedder capability like input and the draw target
-//! (see `docs/runtime-architecture.md`), and a silent fallback would make the
-//! timeline untestable and unavailable on Wasm anyway.
+//! A host can still install its own, and two cases want to. A browser gets a
+//! better reading than it could take itself: `requestAnimationFrame` hands over
+//! the frame's timestamp, which is the instant the frame is *for*, where
+//! reading a clock partway through producing the frame drifts and jitters —
+//! browsers standardised on the former for exactly that reason. And a test or a
+//! scripted capture wants [`ManualClock`], so the same script plus the same
+//! sample times give the same pixels on every machine.
+//!
+//! Whichever is installed, the engine samples it once per frame on the
+//! presenting side and hands that one value to the document, so every animation
+//! in a frame is sampled at the same instant.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
-/// The host's animation timeline, in seconds on a monotonic timescale whose
-/// epoch is the host's choice.
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+/// An animation timeline, in seconds on a monotonic timescale whose epoch is
+/// the clock's own choice.
 ///
 /// Same contract as Stylo's `current_time_for_animations`, which is what
 /// `animation-duration` and `animation-delay` are measured against. The engine
 /// reads it on the presenting thread, once per frame.
 pub trait AnimationClock: Send + Sync + 'static {
     fn now_seconds(&self) -> f64;
+}
+
+/// The platform's monotonic clock — the timeline a view uses unless its host
+/// installs another.
+///
+/// `std::time::Instant` natively and `web_time::Instant` on Wasm, the same
+/// split `quickjs-rust-bridge` already uses for its own timings. The epoch is
+/// when the clock was made, which is view construction, so the numbers stay
+/// small and readable.
+#[derive(Debug)]
+pub struct SystemClock {
+    epoch: Instant,
+}
+
+impl SystemClock {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnimationClock for SystemClock {
+    fn now_seconds(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
+    }
 }
 
 /// A clock the host steps by hand, so a frame sequence is reproducible.
@@ -64,7 +106,16 @@ impl AnimationClock for ManualClock {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnimationClock, ManualClock};
+    use super::{AnimationClock, ManualClock, SystemClock};
+
+    #[test]
+    fn the_default_clock_starts_near_zero_and_never_goes_back() {
+        let clock = SystemClock::new();
+        let first = clock.now_seconds();
+        let second = clock.now_seconds();
+        assert!((0.0..1.0).contains(&first), "the epoch is clock creation");
+        assert!(second >= first, "and time only moves forward");
+    }
 
     #[test]
     fn a_manual_clock_starts_at_zero_and_steps_exactly() {

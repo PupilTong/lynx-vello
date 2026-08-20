@@ -34,7 +34,7 @@ pub mod input {
     pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use clock::{AnimationClock, ManualClock};
+pub use clock::{AnimationClock, ManualClock, SystemClock};
 #[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{

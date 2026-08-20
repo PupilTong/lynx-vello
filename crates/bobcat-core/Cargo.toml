@@ -29,6 +29,8 @@ url = { workspace = true }
 rayon = { workspace = true }
 wasm_thread = { workspace = true }
 
+web-time = { workspace = true }
+
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
