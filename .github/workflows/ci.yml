@@ -172,7 +172,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, lynx-vello-macos-gpu]
     timeout-minutes: 180
     concurrency:
-      group: lynx-vello-macos-walltime
+      group: lynx-vello-macos-walltime-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     env:
       CARGO_TARGET_DIR: /Users/admin/.cache/lynx-vello-cargo-target
