@@ -414,7 +414,10 @@ fn determine_flex_base_sizes<T>(
     flex_basis_percentage_basis: Option<f32>,
     container_main_is_definite: bool,
     needs_intrinsic_main_contributions: bool,
-    container_independent: Size<bool>,
+    // `Some` only on a commit-goal pass: the flags it derives are consumed
+    // exclusively by the in-flow commit, so measure passes skip the style
+    // inspection entirely.
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -570,39 +573,41 @@ fn determine_flex_base_sizes<T>(
         // itself content-independent. Only stable values may license an
         // in-place relayout, because an unstable one re-resolves differently
         // once the container re-sizes to changed content.
-        item.edges_stable = container_independent.width
-            || !edges_depend_on_inline_basis(&style.margin(), &style.padding());
-        let axis_values_stable = |axis: Axis| {
-            axis.size(container_independent)
-                || (!style_size_depends_on_basis(axis.size(raw_size))
-                    && !style_size_depends_on_basis(axis.size(raw_min_size))
-                    && !max_size_depends_on_basis(axis.size(raw_max_size)))
-        };
-        let flex_basis_stable = axes.main.size(container_independent)
-            || match raw_flex_basis {
-                FlexBasis::Content => true,
-                FlexBasis::Size(size) => !style_size_depends_on_basis(size),
+        if let Some(container_independent) = container_independent {
+            item.edges_stable = container_independent.width
+                || !edges_depend_on_inline_basis(&style.margin(), &style.padding());
+            let axis_values_stable = |axis: Axis| {
+                axis.size(container_independent)
+                    || (!style_size_depends_on_basis(axis.size(raw_size))
+                        && !style_size_depends_on_basis(axis.size(raw_min_size))
+                        && !max_size_depends_on_basis(axis.size(raw_max_size)))
             };
-        let mut main_values_stable = axis_values_stable(axes.main) && flex_basis_stable;
-        let mut cross_values_stable = axis_values_stable(axes.cross);
-        if item.aspect_ratio.is_some() {
-            // The ratio transfers sizes across axes, so either axis is only
-            // as stable as both.
-            let both = main_values_stable && cross_values_stable;
-            main_values_stable = both;
-            cross_values_stable = both;
+            let flex_basis_stable = axes.main.size(container_independent)
+                || match raw_flex_basis {
+                    FlexBasis::Content => true,
+                    FlexBasis::Size(size) => !style_size_depends_on_basis(size),
+                };
+            let mut main_values_stable = axis_values_stable(axes.main) && flex_basis_stable;
+            let mut cross_values_stable = axis_values_stable(axes.cross);
+            if item.aspect_ratio.is_some() {
+                // The ratio transfers sizes across axes, so either axis is
+                // only as stable as both.
+                let both = main_values_stable && cross_values_stable;
+                main_values_stable = both;
+                cross_values_stable = both;
+            }
+            item.cross_values_stable = cross_values_stable;
+            let min_is_content_free = explicit_min.is_some()
+                || item.overflow.x.is_scrollable()
+                || item.overflow.y.is_scrollable();
+            let main_independent = definite_basis.is_some()
+                && min_is_content_free
+                && !axis_has_intrinsic_style(item, axes.main)
+                && main_values_stable
+                && item.edges_stable;
+            axes.main
+                .set_size(&mut item.content_independent, main_independent);
         }
-        item.cross_values_stable = cross_values_stable;
-        let min_is_content_free = explicit_min.is_some()
-            || item.overflow.x.is_scrollable()
-            || item.overflow.y.is_scrollable();
-        let main_independent = definite_basis.is_some()
-            && min_is_content_free
-            && !axis_has_intrinsic_style(item, axes.main)
-            && main_values_stable
-            && item.edges_stable;
-        axes.main
-            .set_size(&mut item.content_independent, main_independent);
 
         item.hypothetical_main = clamp_axis(
             item.flex_basis,
@@ -1742,7 +1747,7 @@ where
             .flatten(),
         !main_percentage_basis_was_indefinite,
         axes.main.size(outer_size).is_none() && size_containment.is_none(),
-        container_independent,
+        (input.goal == LayoutGoal::Commit).then_some(container_independent),
     );
 
     let main_gap = axes.main.size(gap);
@@ -1857,7 +1862,7 @@ where
             },
             !main_percentage_basis_was_indefinite,
             false,
-            container_independent,
+            (input.goal == LayoutGoal::Commit).then_some(container_independent),
         );
         lines = collect_flex_lines(
             &items,
@@ -2312,7 +2317,7 @@ mod tests {
             Some(100.0),
             true,
             true,
-            Size::new(false, false),
+            None,
         );
 
         // A used flex basis of `content` puts the item's max-content main size

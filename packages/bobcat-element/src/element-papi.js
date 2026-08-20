@@ -407,49 +407,25 @@
   }
 
   /**
-   * @param {unknown} parentComponentUniqueID
-   * @returns {object}
+   * The fixed-tag Snapshot constructors share one shape: accept and ignore
+   * the parent-component id (kept as a named parameter so the reported arity
+   * stays web-core's one), create the tag, mint the handle.
+   *
+   * @param {string} tag
+   * @returns {(parentComponentUniqueID?: unknown) => object}
    */
-  function __CreateWrapperElement(parentComponentUniqueID) {
-    void parentComponentUniqueID;
-    return createHandle(native.createElement("wrapper"));
+  function tagCreator(tag) {
+    return function (parentComponentUniqueID) {
+      void parentComponentUniqueID;
+      return createHandle(native.createElement(tag));
+    };
   }
 
-  /**
-   * @param {unknown} parentComponentUniqueID
-   * @returns {object}
-   */
-  function __CreateText(parentComponentUniqueID) {
-    void parentComponentUniqueID;
-    return createHandle(native.createElement("text"));
-  }
-
-  /**
-   * @param {unknown} parentComponentUniqueID
-   * @returns {object}
-   */
-  function __CreateImage(parentComponentUniqueID) {
-    void parentComponentUniqueID;
-    return createHandle(native.createElement("image"));
-  }
-
-  /**
-   * @param {unknown} parentComponentUniqueID
-   * @returns {object}
-   */
-  function __CreateView(parentComponentUniqueID) {
-    void parentComponentUniqueID;
-    return createHandle(native.createElement("view"));
-  }
-
-  /**
-   * @param {unknown} parentComponentUniqueID
-   * @returns {object}
-   */
-  function __CreateScrollView(parentComponentUniqueID) {
-    void parentComponentUniqueID;
-    return createHandle(native.createElement("scroll-view"));
-  }
+  const __CreateWrapperElement = tagCreator("wrapper");
+  const __CreateText = tagCreator("text");
+  const __CreateImage = tagCreator("image");
+  const __CreateView = tagCreator("view");
+  const __CreateScrollView = tagCreator("scroll-view");
 
   /**
    * @param {unknown} text

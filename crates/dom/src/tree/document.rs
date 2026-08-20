@@ -88,13 +88,11 @@ impl<T> Document<T> {
         let root = tree.insert_node(PayloadSlot::Document, |owner, id| {
             Node::new_document(owner, id, lock, url_data)
         });
-        let slot = root;
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must take the first id the document ever issues"
         );
-        let mut layout = DocumentLayoutState::new();
-        layout.insert(slot);
+        let layout = DocumentLayoutState::new();
         let mut document = Self {
             style_engine,
             tree,
@@ -312,9 +310,7 @@ impl<T> Document<T> {
         payload: PayloadSlot<T>,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let id = self.tree.insert_node(payload, make);
-        self.layout.insert(id);
-        id
+        self.tree.insert_node(payload, make)
     }
 
     #[must_use]

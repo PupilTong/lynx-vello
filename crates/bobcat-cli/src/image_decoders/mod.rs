@@ -27,10 +27,7 @@ use bobcat_core::image::Decoder;
 mod resample;
 pub(crate) use resample::resample;
 
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "ios")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
 mod animation;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]

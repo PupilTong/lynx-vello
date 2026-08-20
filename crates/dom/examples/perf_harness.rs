@@ -27,12 +27,15 @@ const CSS: &str = r#"
 "#;
 
 const ROWS: usize = 1024;
-const NB: usize = 1;
+const NB: usize = 256;
 
 fn time<R>(label: &str, mut f: impl FnMut() -> R) -> R {
     let start = Instant::now();
     let r = f();
-    println!("{label:32} {:>10.3} ms", start.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "{label:32} {:>10.3} ms",
+        start.elapsed().as_secs_f64() * 1e3
+    );
     r
 }
 
@@ -43,6 +46,43 @@ fn commit(doc: &mut Document<()>) {
 
 fn main() {
     let mode = std::env::args().nth(2).unwrap_or_default();
+    if mode == "create" {
+        // Loop: build a fresh document and create/append elements, no layout.
+        let n: usize = std::env::args()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let create_start = Instant::now();
+        for _ in 0..n {
+            let device = Device::new(390.0, 844.0, 3.0);
+            let mut doc = Document::new(device, "page", ());
+            let root = doc.document_element().id();
+            for _ in 0..1024 {
+                let el = doc.create_element("view", ());
+                black_box(el);
+                doc.append_child(root, el);
+            }
+            black_box(&doc);
+        }
+        println!(
+            "create+append 1024 avg {:.3} us",
+            create_start.elapsed().as_secs_f64() * 1e6 / n as f64
+        );
+        let create_only = Instant::now();
+        for _ in 0..n {
+            let device = Device::new(390.0, 844.0, 3.0);
+            let mut doc = Document::new(device, "page", ());
+            for _ in 0..1024 {
+                black_box(doc.create_element("view", ()));
+            }
+            black_box(&doc);
+        }
+        println!(
+            "create only 1024 avg {:.3} us",
+            create_only.elapsed().as_secs_f64() * 1e6 / n as f64
+        );
+        return;
+    }
     if mode == "single" {
         // Loop: flip one row's height, commit. For profiler attribution.
         let device = Device::new(390.0, 844.0, 3.0);

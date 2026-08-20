@@ -449,15 +449,13 @@ useful signal for currently-compatible versions of those libraries.
   above every needed codec — WebP macOS 11/iOS 14, AVIF macOS 13/iOS 16 — so
   there is no runtime probe; JPEG EXIF orientation from the module's own
   byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
-  Windows WIC (PNG/JPEG inbox, WebP probed — Store extension); Android NDK
-  `AImageDecoder` via `dlopen` (API 30+; the `dlsym` result is the probe);
   Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
   `image-webp` taken directly rather than through the crates.io `image`
-  facade). On Windows/Android a failed probe leaves `platform_decoder()` =
-  `None` with **no fallback behind it** — and since the CLI's mandatory
-  QuickJS C sources do not cross-compile to those ABIs, the WIC and NDK
-  modules have **no CI type-check gate**: recorded reference material for
-  embedders that do not exist yet, not live code. Decoder-behaviour tests
+  facade). On any other target `platform_decoder()` = `None` with **no
+  fallback behind it**. The former Windows WIC and Android NDK reference
+  modules — which compiled on no supported target and had no CI gate — were
+  removed; recover `windows.rs`/`android.rs` from git history if such an
+  embedder materializes. Decoder-behaviour tests
   (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
   measured `ImageIO` API comparison that fixed the Apple decoder's choices
   (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG

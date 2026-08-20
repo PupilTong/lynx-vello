@@ -55,9 +55,7 @@ fn build(row_class: &str, text: &str, rows: usize) -> Page {
         let cell = page.doc.create_element("view", ());
         page.doc.set_classes(cell, "cell");
         let label = page.doc.create_element("text", ());
-        let run = page
-            .doc
-            .create_text_node(format!("{text} {i}"), ());
+        let run = page.doc.create_text_node(format!("{text} {i}"), ());
         page.doc.append_child(label, run);
         page.doc.append_child(cell, label);
         page.doc.append_child(row, fixed);
@@ -102,7 +100,10 @@ fn assert_same_geometry(mutated: &Page, fresh: &Page) {
             eprintln!("node {id_a} diverged:\n  incremental: {a}\n  fresh:       {b}");
         }
     }
-    assert_eq!(diverged, 0, "{diverged} nodes diverged after incremental relayout");
+    assert_eq!(
+        diverged, 0,
+        "{diverged} nodes diverged after incremental relayout"
+    );
 }
 
 #[test]
