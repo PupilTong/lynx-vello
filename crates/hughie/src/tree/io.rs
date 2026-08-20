@@ -90,6 +90,15 @@ pub struct LayoutInput {
     pub definite_dimensions: Size<bool>,
     pub parent_size: Size<Option<f32>>,
     pub available_space: Size<AvailableSpace>,
+    /// Per axis: this input's `known_dimensions`, `parent_size`, and
+    /// `available_space` cannot change when only the node's own subtree
+    /// content changes. Distinct from [`Self::definite_dimensions`], which is
+    /// CSS definiteness — a post-flexing size is *definite* even when it was
+    /// measured from the very content whose change is in question. Producers
+    /// that cannot prove stability leave it `false`; it never affects the
+    /// computed geometry, only whether a host may relayout the node in place
+    /// under a cached copy of this input.
+    pub content_independent: Size<bool>,
 }
 
 impl LayoutInput {
@@ -107,6 +116,7 @@ impl LayoutInput {
             definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
+            content_independent: Size::new(false, false),
         }
     }
 
@@ -125,6 +135,7 @@ impl LayoutInput {
             definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
+            content_independent: Size::new(false, false),
         }
     }
 }

@@ -12,9 +12,10 @@ use std::time::Instant;
 use dom::{Device, Document, StylesheetOrigin};
 
 const CSS: &str = r#"
-    page, view, text, image, scroll-view { overflow: hidden; }
-    page { display: flex; flex-direction: column; }
-    .list { display: flex; flex-direction: column; overflow-y: scroll; }
+    page, view, text, image, scroll-view { overflow: hidden; box-sizing: border-box; }
+    page { display: flex; flex-direction: column; width: 100%; height: 100%; }
+    .list { display: flex; flex-direction: column; overflow-y: scroll;
+            flex-grow: 1; flex-basis: 0px; }
     .row { display: flex; flex-direction: row; padding: 8px; margin: 2px; }
     .row.selected { background-color: rgb(200, 220, 255); }
     .avatar { width: 40px; height: 40px; border-radius: 20px; background-color: rgb(180, 180, 180); }

@@ -150,12 +150,15 @@ impl<T> Document<T> {
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
                 let node_state = &state.at(node_slot).slot;
-                if node_state.layout_cache_is_empty() {
+                if node_state.layout_cache_is_empty() && node.flat_parent_id().is_some() {
                     // Nothing above needs clearing: either an earlier
                     // invalidation already walked past here (whatever it
                     // recorded still stands), the node sits parked for a
                     // committed-input relayout (recording clears its cache),
-                    // or it was never laid out (detached or hidden).
+                    // or it was never laid out (detached or hidden). The
+                    // parentless document node is exempt — it never holds a
+                    // cache, and stopping there must still count as reaching
+                    // the root.
                     reached_root = false;
                     break;
                 }
@@ -168,7 +171,7 @@ impl<T> Document<T> {
                     node_state
                         .committed_input()
                         .map(|input| (node_id, input, RelayoutKind::Boundary))
-                } else if node.is_element() {
+                } else if node.is_element() && node_id != crate::tree::document::DOCUMENT_ELEMENT_NODE_ID {
                     // A committed input the parent imposed independently of
                     // this subtree's content survives the mutation, so the
                     // subtree can relayout in place under it; run_layout
@@ -263,7 +266,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 440, 456, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

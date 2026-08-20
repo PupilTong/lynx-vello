@@ -6,10 +6,15 @@
 
 use dom::{Device, Document, StylesheetOrigin};
 
+// Mirrors the Lynx UA sheet (`bobcat-core`): border-box, overflow hidden,
+// viewport-anchored page. That anchoring is what licenses the in-place
+// relayout path, so these tests exercise it rather than always falling back
+// to a whole-tree pass.
 const CSS: &str = "
-    page, view, text, image, scroll-view { overflow: hidden; }
-    page { display: flex; flex-direction: column; }
-    .list { display: flex; flex-direction: column; overflow-y: scroll; }
+    page, view, text, image, scroll-view { overflow: hidden; box-sizing: border-box; }
+    page { display: flex; flex-direction: column; width: 100%; height: 100%; }
+    .list { display: flex; flex-direction: column; overflow-y: scroll;
+            flex-grow: 1; flex-basis: 0px; }
     .row { display: flex; flex-direction: row; padding: 8px; margin: 2px; }
     .cell { display: flex; flex-direction: column; flex-grow: 1; }
     .fixed { width: 40px; height: 40px; }
@@ -221,4 +226,32 @@ fn a_second_noop_layout_changes_nothing() {
     a.doc.layout();
     let after = geometry(&a.doc);
     assert_eq!(before, after);
+}
+
+#[test]
+fn minimal_grow_repro() {
+    let mut a = build("row", "alpha", 2);
+    a.doc.layout();
+    eprintln!("== after initial layout ==");
+    for (id, l) in geometry(&a.doc) {
+        eprintln!("  {id}: {l}");
+    }
+    let grown = a.doc.create_element("view", ());
+    a.doc.set_classes(grown, "grown");
+    a.doc.append_child(a.cells[0], grown);
+    a.doc.layout();
+    eprintln!("== after grow+layout ==");
+    for (id, l) in geometry(&a.doc) {
+        eprintln!("  {id}: {l}");
+    }
+    let mut b = build("row", "alpha", 2);
+    let grown = b.doc.create_element("view", ());
+    b.doc.set_classes(grown, "grown");
+    b.doc.append_child(b.cells[0], grown);
+    b.doc.layout();
+    eprintln!("== fresh ==");
+    for (id, l) in geometry(&b.doc) {
+        eprintln!("  {id}: {l}");
+    }
+    assert_same_geometry(&a, &b);
 }

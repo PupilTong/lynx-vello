@@ -157,6 +157,7 @@ impl PackedLayoutInput {
                 unpack_available_space(self.values[4], self.flags, AVAILABLE_WIDTH_SHIFT),
                 unpack_available_space(self.values[5], self.flags, AVAILABLE_HEIGHT_SHIFT),
             ),
+            content_independent: Size::new(false, false),
         }
     }
 
@@ -274,9 +275,9 @@ impl MeasurementSlot {
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
-    /// Whether the committed input was imposed independently of this node's
-    /// own subtree content (see [`Cache::set_committed_content_independent`]).
-    committed_content_independent: bool,
+    /// The committed input's `content_independent` flags, carried beside the
+    /// packed slot (the packed key covers only geometry-relevant fields).
+    committed_content_independent: Size<bool>,
     measurements: SmallVec<[MeasurementSlot; MEASURE_CACHE_INLINE]>,
 }
 
@@ -285,7 +286,7 @@ impl Cache {
     pub const fn new() -> Self {
         Self {
             committed: None,
-            committed_content_independent: false,
+            committed_content_independent: Size::new(false, false),
             measurements: SmallVec::new_const(),
         }
     }
@@ -297,28 +298,24 @@ impl Cache {
 
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
-        self.committed.map(|slot| slot.input.unpack())
+        self.committed.map(|slot| {
+            let mut input = slot.input.unpack();
+            input.content_independent = self.committed_content_independent;
+            input
+        })
     }
 
-    /// Records whether the committed entry's input can change when only this
-    /// node's subtree content changes: independent means every value the
-    /// parent's algorithm read from this node while producing it was
-    /// style-imposed, never measured. Only the committing parent algorithm can
-    /// know this, so it writes the verdict right after each commit call; the
-    /// flag dies with the committed entry.
-    pub fn set_committed_content_independent(&mut self, independent: bool) {
-        self.committed_content_independent = independent && self.committed.is_some();
-    }
-
-    /// Returns the committed input/output pair when
-    /// [`Self::set_committed_content_independent`] vouched for it.
+    /// Returns the committed input/output pair when the committing parent
+    /// marked the input content-independent on both axes — the license for a
+    /// host to relayout this subtree in place under the stored input.
     #[must_use]
     pub fn committed_independent(&self) -> Option<(LayoutInput, LayoutOutput)> {
-        if !self.committed_content_independent {
+        if !(self.committed_content_independent.width && self.committed_content_independent.height)
+        {
             return None;
         }
-        self.committed
-            .map(|slot| (slot.input.unpack(), slot.unpack_output()))
+        self.committed_input()
+            .zip(self.committed.map(MeasurementSlot::unpack_output))
     }
 
     /// Returns a cached output.
@@ -346,7 +343,7 @@ impl Cache {
         match input.goal {
             LayoutGoal::Commit => {
                 self.committed = Some(slot);
-                self.committed_content_independent = false;
+                self.committed_content_independent = input.content_independent;
             }
             LayoutGoal::Measure(_) => {
                 // Retiring a live same-shape measurement while the cache still
@@ -383,7 +380,7 @@ impl Cache {
 
     pub fn clear(&mut self) {
         self.committed = None;
-        self.committed_content_independent = false;
+        self.committed_content_independent = Size::new(false, false);
         self.measurements.clear();
     }
 }
@@ -661,6 +658,7 @@ mod tests {
                                     ),
                                     parent_size: Size::new(option(2), option(3)),
                                     available_space: Size::new(available_width, available_height),
+                                    content_independent: Size::new(false, false),
                                 };
                                 assert_input_bits_eq(input, PackedLayoutInput::new(input).unpack());
                             }
@@ -731,6 +729,7 @@ mod tests {
                                                         stored_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    content_independent: Size::new(false, false),
                                                 };
                                                 let requested = LayoutInput {
                                                     goal: requested_goal,
@@ -748,6 +747,7 @@ mod tests {
                                                         requested_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    content_independent: Size::new(false, false),
                                                 };
                                                 assert_packed_match_agrees_with_oracle(
                                                     stored, requested,
