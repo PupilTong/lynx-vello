@@ -1155,12 +1155,6 @@ default explanation for a failure:
   only the failing operation with narrowly scoped escalation, when available;
   if it still fails, diagnose the repository, credentials, or network itself.
 
-After a branch is pushed, create pull requests only through the installed
-GitHub plugin/app connector. Never use the GitHub CLI (`gh`) to create, submit,
-publish, or otherwise open a pull request. If the connector is unavailable or
-cannot create the pull request, stop and ask the user for direction instead of
-falling back to `gh`.
-
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
