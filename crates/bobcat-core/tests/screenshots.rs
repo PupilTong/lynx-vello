@@ -45,6 +45,40 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
+/// The `raw-text` carrier written by `__CreateRawText`, painted: a plain run,
+/// an inline-styled one, one reached through a wrapper, one whose value
+/// carries a literal newline, and one long enough to wrap.
+const TEXT_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(
+    page,
+    'background-color:#ffffff;padding:24px;font-family:Roboto;color:#111827',
+  );
+  function line(styles, value, throughWrapper) {
+    const text = __CreateText(0);
+    __SetInlineStyles(text, styles);
+    if (throughWrapper) {
+      const wrapper = __CreateWrapperElement(0);
+      __AppendElement(wrapper, __CreateRawText(value));
+      __AppendElement(text, wrapper);
+    } else {
+      __AppendElement(text, __CreateRawText(value));
+    }
+    __AppendElement(page, text);
+  }
+  line('font-size:22px', 'Sphinx of black quartz');
+  line('font-size:30px;color:#dc2626', 'Judge my vow');
+  line('font-size:18px', 'reached through a wrapper', true);
+  line('font-size:18px', 'first line\nsecond line');
+  line(
+    'font-size:16px;color:#374151',
+    'A run long enough to need more than one line wraps inside the text '
+      + 'element that carries it, at the width layout gives that element.',
+  );
+};
+";
+
 const IMAGE_URL: &str = "https://example.test/retained-checker.png";
 const IMAGE_SCRIPT: &str = r#"
 globalThis.renderPage = function renderPage() {
@@ -206,6 +240,31 @@ async fn decoded_image_url_reaches_the_private_painter() {
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["retained-image-store"], &image);
+}
+
+/// Requirement: text written the only way Lynx can write it — a `raw-text`
+/// element carrying its run in an attribute — reaches the painter as glyphs.
+#[tokio::test]
+async fn raw_text_reaches_the_private_painter_as_glyphs() {
+    const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
+
+    let mut view = view(TEXT_SCRIPT.as_bytes());
+    assert_eq!(
+        view.register_fonts(ROBOTO).expect("an idle document"),
+        1,
+        "the vendored Roboto fixture must register exactly one face"
+    );
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
+
+    let shot = view.capture().expect("capture the committed page");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["raw-text-runs"], &image);
 }
 
 /// Requirement: a class change made by script must restyle against author

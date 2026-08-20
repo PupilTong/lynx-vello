@@ -11,6 +11,7 @@ use dom::event::EventSteps;
 use crate::engine::SharedTree;
 use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
 use crate::tree::LynxDocument;
+use crate::tree::raw_text::drop_element_and_owned_text;
 
 const BOOT_SOURCE_NAME: &str = "<lynx boot>";
 const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
@@ -451,7 +452,7 @@ fn install_bobcat_object(
         let mut tree = borrow_tree("bobcat.dropElement", &tree)?;
         let document = tree.tree();
         validate_removable(document, "bobcat.dropElement", node)?;
-        document.drop_element(node);
+        drop_element_and_owned_text(document, node);
         state.listeners.borrow_mut().retain(|_, nodes| {
             nodes.retain(|(id, _)| *id != node);
             !nodes.is_empty()
@@ -792,10 +793,24 @@ mod tests {
     }
 
     fn runtime() -> (MainThreadRuntime, SharedTree) {
-        let elements = SharedTree::new(new_document(
+        runtime_over(new_document(
             Viewport::new(393.0, 727.0),
             PageConfig::default(),
-        ));
+        ))
+    }
+
+    /// The same runtime over a document that can shape text: Ahem's solid em
+    /// squares make a run's box its glyph count times its font size.
+    fn text_runtime() -> (MainThreadRuntime, SharedTree) {
+        const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+
+        let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        runtime_over(document)
+    }
+
+    fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, SharedTree) {
+        let elements = SharedTree::new(document);
         let factory = crate::quickjs::engine_factory();
         let runtime = MainThreadRuntime::new(factory.as_ref(), elements.clone(), || {})
             .expect("main-thread runtime");
@@ -1447,6 +1462,122 @@ mod tests {
                 .dispatch_event(&steps(&elements, 3), "tap", "")
                 .expect("dispatch"),
             "with an empty listener index the walk crosses the boundary zero times"
+        );
+    }
+
+    #[test]
+    fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
+        let (mut runtime, elements) = text_runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const text = __CreateText(0);
+                  __SetInlineStyles(text, 'font-family:Ahem;font-size:20px');
+                  __AppendElement(text, __CreateRawText('hello'));
+                  __AppendElement(page, text);
+                };
+                ",
+                "app:///raw-text.js",
+            )
+            .expect("main-thread script");
+
+        let tree = elements.tree();
+        let carrier = tree.get(node_id(4)).expect("the raw-text is live");
+        assert_eq!(carrier.tag_name(), Some("raw-text"));
+        assert_eq!(carrier.attribute("text"), Some("hello"));
+        let run = carrier.first_child().expect("the reflected run").id();
+        assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hello"));
+
+        let layout = tree.rounded_layout(run).expect("the run is laid out");
+        assert!(
+            (layout.size.width - 100.0).abs() < f32::EPSILON
+                && (layout.size.height - 20.0).abs() < f32::EPSILON,
+            "five Ahem em squares at 20px, got {:?}",
+            layout.size
+        );
+        assert!(
+            tree.rounded_layout(node_id(3))
+                .is_some_and(|text| (text.size.height - 20.0).abs() < f32::EPSILON),
+            "and the text element is sized by the run it contains"
+        );
+    }
+
+    #[test]
+    fn rewriting_the_text_attribute_relays_out_the_same_run() {
+        let (mut runtime, elements) = text_runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const text = __CreateText(0);
+                  __SetInlineStyles(text, 'font-family:Ahem;font-size:20px');
+                  const raw = __CreateRawText('hello');
+                  __AppendElement(text, raw);
+                  __AppendElement(page, text);
+                  __SetAttribute(raw, 'text', 'hi');
+                };
+                ",
+                "app:///update-raw-text.js",
+            )
+            .expect("main-thread script");
+
+        let tree = elements.tree();
+        let run = tree
+            .get(node_id(4))
+            .and_then(dom::Node::first_child)
+            .expect("the reflected run")
+            .id();
+        assert_eq!(
+            run,
+            node_id(5),
+            "the update re-points the run it already had"
+        );
+        assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hi"));
+        assert!(
+            tree.rounded_layout(run)
+                .is_some_and(|layout| (layout.size.width - 40.0).abs() < f32::EPSILON),
+            "the shorter run is re-measured, not left at its old width"
+        );
+    }
+
+    #[test]
+    fn a_collected_raw_text_takes_its_run_with_it() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const text = __CreateText(0);
+                  __AppendElement(page, text);
+                  let raw = __CreateRawText('hello');
+                  __AppendElement(text, raw);
+                  __RemoveElement(text, raw);
+                  raw = undefined;
+                };
+                ",
+                "app:///collected-raw-text.js",
+            )
+            .expect("main-thread script");
+        assert!(
+            elements
+                .tree()
+                .get(node_id(4))
+                .and_then(dom::Node::first_child)
+                .is_some(),
+            "the detached carrier still holds its run"
+        );
+
+        runtime.collect_garbage().expect("collection");
+
+        let tree = elements.tree();
+        assert!(tree.get(node_id(4)).is_none(), "the carrier is freed");
+        assert!(
+            tree.get(node_id(5)).is_none(),
+            "and so is the run's node, which no handle could ever have named"
         );
     }
 

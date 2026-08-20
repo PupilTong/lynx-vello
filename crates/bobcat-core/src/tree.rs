@@ -1,5 +1,6 @@
 //! Lynx page policy over the generic document: the `page` root tag, the UA
-//! cascade defaults, and view metrics. Everything else the runtime does goes
+//! cascade defaults, the components the engine defines, and view metrics.
+//! Everything else the runtime does goes
 //! straight to [`dom::Document`] — element identity is the DOM [`NodeId`],
 //! which is also the element's Lynx `unique_id`: one number, issued by the
 //! DOM, never reissued after the element is freed. Script therefore cannot
@@ -9,6 +10,8 @@
 //! JavaScript error.
 //!
 //! [`NodeId`]: dom::NodeId
+
+pub(crate) mod raw_text;
 
 use dom::{Document, StylesheetOrigin};
 
@@ -39,6 +42,11 @@ impl Default for PageConfig {
 }
 
 /// The Lynx UA stylesheet: embedder cascade policy `dom` must not know.
+///
+/// `text` is a flex container whatever `defaultDisplayLinear` says, and
+/// `wrapper` generates no box — both from `web-elements`' own sheet, where
+/// the linear toggle covers container tags only. Where the runs a `text`
+/// carries lay out is [`raw_text::UA_RULES`].
 #[must_use]
 fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
@@ -53,7 +61,11 @@ fn ua_stylesheet(config: PageConfig) -> String {
     };
     format!(
         "page, view {{ box-sizing: border-box; {display} {overflow} }}\n\
-         page {{ width: 100%; height: 100%; }}\n"
+         page {{ width: 100%; height: 100%; }}\n\
+         wrapper {{ display: contents; }}\n\
+         text {{ box-sizing: border-box; display: flex; }}\n\
+         {rules}",
+        rules = raw_text::UA_RULES,
     )
 }
 
@@ -91,10 +103,12 @@ impl Viewport {
     }
 }
 
-/// Creates the document with its permanent `page` element and UA cascade.
+/// Creates the document with its permanent `page` element, the components the
+/// engine defines, and the UA cascade.
 #[must_use]
 pub(crate) fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
+    raw_text::define(&mut document);
     document.add_stylesheet(&ua_stylesheet(config), StylesheetOrigin::UserAgent);
     document
 }
