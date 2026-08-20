@@ -3,10 +3,9 @@
 
 //! Compatibility tests for the restricted Lynx XML source-container grammar.
 //!
-//! This is a Rust port of lynx-stack's Apache-2.0-licensed
-//! `parseLynxXML.spec.ts` suite at pull request #3390. Keep the acceptance and
-//! rejection corpus aligned with that reference parser; Lynx XML deliberately
-//! is not general-purpose XML.
+//! Lynx XML deliberately is not general-purpose XML. These tests retain the
+//! format's established envelope and extraction behavior while exercising its
+//! current `engine-version` and `thread` attribute spellings.
 
 use lynx_xml::{LynxXml, parse};
 
@@ -46,14 +45,15 @@ fn parses_a_full_document_with_declaration_doctype_and_cdata() {
     let source = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE lynx>\n\
-         <lynx version=\"5.4.2\">\n\
+         <lynx engine-version=\"4.2\">\n\
          <style><![CDATA[{style}]]></style>\n\
-         <script main-thread=\"true\"><![CDATA[{main_thread_script}]]></script>\n\
-         <script background=\"true\"><![CDATA[{background_thread_script}]]></script>\n\
+         <script thread=\"main\"><![CDATA[{main_thread_script}]]></script>\n\
+         <script thread=\"background\"><![CDATA[{background_thread_script}]]></script>\n\
          </lynx>"
     );
     let result = expect_success(&source);
 
+    assert_eq!(result.engine_version, "4.2");
     assert_eq!(result.style, Some(style));
     assert_eq!(result.main_thread_script, main_thread_script);
     assert_eq!(
@@ -64,8 +64,10 @@ fn parses_a_full_document_with_declaration_doctype_and_cdata() {
 
 #[test]
 fn parses_the_minimal_legal_document() {
-    let result = expect_success("<lynx version=\"5.4.2\"><script main-thread>main</script></lynx>");
+    let result =
+        expect_success("<lynx engine-version=\"4.2\"><script thread=\"main\">main</script></lynx>");
 
+    assert_eq!(result.engine_version, "4.2");
     assert_eq!(result.style, None);
     assert_eq!(result.main_thread_script, "main");
     assert_eq!(result.background_thread_script, None);
@@ -74,9 +76,9 @@ fn parses_the_minimal_legal_document() {
 #[test]
 fn keeps_bare_content_verbatim_whitespace_included() {
     let result = expect_success(concat!(
-        "<lynx version=\"5.4.2\">\n",
+        "<lynx engine-version=\"4.2\">\n",
         "<style>\n.card { width: 1px; }\n</style>\n",
-        "<script main-thread>\nmain\n</script>\n",
+        "<script thread=\"main\">\nmain\n</script>\n",
         "</lynx>",
     ));
 
@@ -88,7 +90,7 @@ fn keeps_bare_content_verbatim_whitespace_included() {
 fn allows_cdata_content_that_contains_a_closing_tag() {
     let main_thread_script = "\nconst closingTag = \"</script>\";\n";
     let source = format!(
-        "<lynx version=\"5.4.2\"><script main-thread=\"true\"><![CDATA[{main_thread_script}]]></script></lynx>"
+        "<lynx engine-version=\"4.2\"><script thread=\"main\"><![CDATA[{main_thread_script}]]></script></lynx>"
     );
     let result = expect_success(&source);
 
@@ -96,15 +98,16 @@ fn allows_cdata_content_that_contains_a_closing_tag() {
 }
 
 #[test]
-fn accepts_the_three_boolean_attribute_spellings() {
-    for attribute in ["main-thread", "main-thread=\"true\"", "main-thread='true'"] {
-        let source = format!("<lynx version=\"5.4.2\"><script {attribute}>main</script></lynx>");
+fn accepts_both_quote_styles_for_the_thread_attribute() {
+    for attribute in ["thread=\"main\"", "thread='main'"] {
+        let source =
+            format!("<lynx engine-version=\"4.2\"><script {attribute}>main</script></lynx>");
         assert_eq!(expect_success(&source).main_thread_script, "main");
     }
 
-    for attribute in ["background", "background=\"true\"", "background='true'"] {
+    for attribute in ["thread=\"background\"", "thread='background'"] {
         let source = format!(
-            "<lynx version=\"5.4.2\"><script main-thread>main</script><script {attribute}>bg</script></lynx>"
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script><script {attribute}>bg</script></lynx>"
         );
         assert_eq!(expect_success(&source).background_thread_script, Some("bg"));
     }
@@ -118,16 +121,19 @@ fn accepts_doctype_casing_variants() {
         "<!DoCtYpE LyNx>",
         "<!DOCTYPE   lynx  >",
     ] {
-        let source =
-            format!("{doctype}<lynx version=\"5.4.2\"><script main-thread>main</script></lynx>");
+        let source = format!(
+            "{doctype}<lynx engine-version=\"4.2\"><script thread=\"main\">main</script></lynx>"
+        );
         assert_eq!(expect_success(&source).main_thread_script, "main");
     }
 }
 
 #[test]
-fn accepts_a_single_quoted_version_attribute() {
-    let result = expect_success("<lynx version='5.4.2'><script main-thread>main</script></lynx>");
+fn accepts_a_single_quoted_engine_version_attribute() {
+    let result =
+        expect_success("<lynx engine-version='4.2'><script thread=\"main\">main</script></lynx>");
 
+    assert_eq!(result.engine_version, "4.2");
     assert_eq!(result.main_thread_script, "main");
 }
 
@@ -139,11 +145,11 @@ fn skips_comments_in_every_ignorable_position() {
         "<!-- between declaration and doctype -->\n",
         "<!DOCTYPE lynx>\n",
         "<!-- before root -->\n",
-        "<lynx version=\"5.4.2\">\n",
+        "<lynx engine-version=\"4.2\">\n",
         "<!-- inside root -->\n",
-        "<script main-thread>main</script>\n",
+        "<script thread=\"main\">main</script>\n",
         "<!-- between sections -->\n",
-        "<script background>bg</script>\n",
+        "<script thread=\"background\">bg</script>\n",
         "</lynx>\n",
         "<!-- after root -->\n",
     ));
@@ -155,9 +161,9 @@ fn skips_comments_in_every_ignorable_position() {
 #[test]
 fn accepts_optional_sections_in_any_order_and_a_leading_bom() {
     let result = expect_success(concat!(
-        "\u{feff}<lynx version=\"5.4.2\">\n",
-        "<script background>background-code</script>\n",
-        "<script main-thread>main-code</script>\n",
+        "\u{feff}<lynx engine-version=\"4.2\">\n",
+        "<script thread=\"background\">background-code</script>\n",
+        "<script thread=\"main\">main-code</script>\n",
         "</lynx>",
     ));
 
@@ -169,9 +175,9 @@ fn accepts_optional_sections_in_any_order_and_a_leading_bom() {
 #[test]
 fn parses_a_document_without_a_style_section() {
     let result = expect_success(concat!(
-        "<lynx version=\"5.4.2\">",
-        "<script main-thread>main</script>",
-        "<script background>bg</script>",
+        "<lynx engine-version=\"4.2\">",
+        "<script thread=\"main\">main</script>",
+        "<script thread=\"background\">bg</script>",
         "</lynx>",
     ));
 
@@ -182,9 +188,9 @@ fn parses_a_document_without_a_style_section() {
 #[test]
 fn parses_a_document_without_a_background_script_section() {
     let result = expect_success(concat!(
-        "<lynx version=\"5.4.2\">",
+        "<lynx engine-version=\"4.2\">",
         "<style>.a { width: 1px; }</style>",
-        "<script main-thread>main</script>",
+        "<script thread=\"main\">main</script>",
         "</lynx>",
     ));
 
@@ -195,8 +201,8 @@ fn parses_a_document_without_a_background_script_section() {
 #[test]
 fn keeps_an_empty_style_section_as_an_empty_string() {
     let result = expect_success(concat!(
-        "<lynx version=\"5.4.2\"><style></style>",
-        "<script main-thread>main</script></lynx>",
+        "<lynx engine-version=\"4.2\"><style></style>",
+        "<script thread=\"main\">main</script></lynx>",
     ));
 
     assert_eq!(result.style, Some(""));
@@ -205,9 +211,9 @@ fn keeps_an_empty_style_section_as_an_empty_string() {
 #[test]
 fn accepts_extra_whitespace_around_attributes() {
     for source in [
-        "<lynx  version = \"5.4.2\" ><script main-thread>m</script></lynx>",
-        "<lynx version=\"5.4.2\" ><script main-thread>m</script></lynx>",
-        "<lynx version=\"5.4.2\"><script  main-thread  =  \"true\" >m</script></lynx>",
+        "<lynx  engine-version = \"4.2\" ><script thread=\"main\">m</script></lynx>",
+        "<lynx engine-version=\"4.2\" ><script thread=\"main\">m</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script  thread  =  \"main\" >m</script></lynx>",
     ] {
         assert_eq!(expect_success(source).main_thread_script, "m");
     }
@@ -216,8 +222,8 @@ fn accepts_extra_whitespace_around_attributes() {
 #[test]
 fn keeps_an_empty_cdata_section_as_an_empty_string() {
     let result = expect_success(concat!(
-        "<lynx version=\"5.4.2\">",
-        "<script main-thread><![CDATA[]]></script></lynx>",
+        "<lynx engine-version=\"4.2\">",
+        "<script thread=\"main\"><![CDATA[]]></script></lynx>",
     ));
 
     assert_eq!(result.main_thread_script, "");
@@ -225,23 +231,24 @@ fn keeps_an_empty_cdata_section_as_an_empty_string() {
 
 #[test]
 fn tolerates_trailing_whitespace_after_the_root_closing_tag() {
-    let result =
-        expect_success("<lynx version=\"5.4.2\"><script main-thread>main</script></lynx>\n\n");
+    let result = expect_success(
+        "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script></lynx>\n\n",
+    );
 
     assert_eq!(result.main_thread_script, "main");
 }
 
 #[test]
 fn rejects_a_missing_root_element() {
-    assert!(expect_failure("<script main-thread>main</script>").contains("root element"));
+    assert!(expect_failure("<script thread=\"main\">main</script>").contains("root element"));
 }
 
 #[test]
 fn rejects_a_non_lynx_doctype() {
     assert_eq!(
         expect_failure(concat!(
-            "<!doctype html><lynx version=\"5.4.2\">",
-            "<script main-thread>main</script></lynx>",
+            "<!doctype html><lynx engine-version=\"4.2\">",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "expected '<!doctype lynx>'"
     );
@@ -256,33 +263,41 @@ fn rejects_an_unterminated_doctype_declaration() {
 }
 
 #[test]
-fn rejects_a_missing_version_attribute() {
+fn rejects_a_missing_engine_version_attribute() {
     assert!(
-        expect_failure("<lynx><script main-thread>main</script></lynx>")
-            .contains("'version' attribute")
+        expect_failure("<lynx><script thread=\"main\">main</script></lynx>")
+            .contains("'engine-version' attribute")
     );
 }
 
 #[test]
-fn rejects_an_empty_version_attribute() {
+fn rejects_an_empty_engine_version_attribute() {
     assert!(
-        expect_failure("<lynx version=\"\"><script main-thread>main</script></lynx>")
-            .contains("'version' attribute")
+        expect_failure("<lynx engine-version=\"\"><script thread=\"main\">main</script></lynx>")
+            .contains("'engine-version' attribute")
     );
 }
 
 #[test]
 fn rejects_an_unrelated_root_attribute() {
     assert!(
-        expect_failure("<lynx lang=\"en\"><script main-thread>main</script></lynx>")
-            .contains("'version' attribute")
+        expect_failure("<lynx lang=\"en\"><script thread=\"main\">main</script></lynx>")
+            .contains("'engine-version' attribute")
+    );
+}
+
+#[test]
+fn rejects_the_legacy_root_version_attribute() {
+    assert!(
+        expect_failure("<lynx version=\"5.4.2\"><script thread=\"main\">main</script></lynx>")
+            .contains("'engine-version' attribute")
     );
 }
 
 #[test]
 fn rejects_an_unterminated_root_opening_tag() {
     assert_eq!(
-        expect_failure("<lynx version=\"5.4.2\""),
+        expect_failure("<lynx engine-version=\"4.2\""),
         "unterminated '<lynx>' opening tag"
     );
 }
@@ -291,10 +306,10 @@ fn rejects_an_unterminated_root_opening_tag() {
 fn rejects_a_missing_main_thread_script() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\">",
-            "<script background>background</script></lynx>",
+            "<lynx engine-version=\"4.2\">",
+            "<script thread=\"background\">background</script></lynx>",
         )),
-        "missing '<script main-thread>' section"
+        "missing '<script thread=\"main\">' section"
     );
 }
 
@@ -302,10 +317,10 @@ fn rejects_a_missing_main_thread_script() {
 fn rejects_a_document_with_only_a_style_section() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><style>.a { width: 1px; }</style>",
+            "<lynx engine-version=\"4.2\"><style>.a { width: 1px; }</style>",
             "</lynx>",
         )),
-        "missing '<script main-thread>' section"
+        "missing '<script thread=\"main\">' section"
     );
 }
 
@@ -313,15 +328,15 @@ fn rejects_a_document_with_only_a_style_section() {
 fn rejects_duplicate_script_sections() {
     assert!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><script main-thread>main</script>",
-            "<script main-thread>duplicate</script></lynx>",
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
+            "<script thread=\"main\">duplicate</script></lynx>",
         ))
         .contains("duplicate")
     );
     assert!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><script main-thread>main</script>",
-            "<script background>a</script><script background>b</script></lynx>",
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
+            "<script thread=\"background\">a</script><script thread=\"background\">b</script></lynx>",
         ))
         .contains("duplicate")
     );
@@ -331,8 +346,8 @@ fn rejects_duplicate_script_sections() {
 fn rejects_duplicate_style_sections() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><style>a</style><style>b</style>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"><style>a</style><style>b</style>",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "duplicate '<style>' section"
     );
@@ -342,26 +357,34 @@ fn rejects_duplicate_style_sections() {
 fn rejects_attributes_on_the_style_section() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><style scoped>.a { width: 1px; }</style>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"><style scoped>.a { width: 1px; }</style>",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "'<style>' does not accept attributes"
     );
 }
 
 #[test]
-fn rejects_a_script_without_main_thread_or_background() {
+fn rejects_a_script_without_exactly_one_supported_thread_attribute() {
     for opening_tag in [
         "<script>",
         "<script worker>",
+        "<script thread>",
+        "<script thread=main>",
+        "<script thread=\"\">",
+        "<script thread=\"worker\">",
+        "<script thread=\"Main\">",
+        "<script thread=\"main\" defer>",
+        "<script main-thread>",
+        "<script background>",
         "<script main-thread=\"false\">",
         "<script background=\"false\">",
         "<script main-thread background>",
     ] {
-        let source = format!("<lynx version=\"5.4.2\">{opening_tag}main</script></lynx>");
+        let source = format!("<lynx engine-version=\"4.2\">{opening_tag}main</script></lynx>");
         assert_eq!(
             expect_failure(&source),
-            "'<script>' requires exactly one of 'main-thread' or 'background'"
+            "'<script>' requires exactly one 'thread' attribute with value 'main' or 'background'"
         );
     }
 }
@@ -370,8 +393,8 @@ fn rejects_a_script_without_main_thread_or_background() {
 fn rejects_unknown_top_level_tags_naming_the_tag() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><view></view>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"><view></view>",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "unsupported top-level tag '<view>'"
     );
@@ -381,8 +404,8 @@ fn rejects_unknown_top_level_tags_naming_the_tag() {
 fn rejects_an_unexpected_closing_tag_at_the_top_level() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"></style>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"></style>",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "unexpected closing tag"
     );
@@ -391,7 +414,7 @@ fn rejects_an_unexpected_closing_tag_at_the_top_level() {
 #[test]
 fn rejects_an_unterminated_section_opening_tag() {
     assert_eq!(
-        expect_failure("<lynx version=\"5.4.2\"><script main-thread"),
+        expect_failure("<lynx engine-version=\"4.2\"><script thread=\"main\""),
         "unterminated opening tag"
     );
 }
@@ -400,8 +423,8 @@ fn rejects_an_unterminated_section_opening_tag() {
 fn rejects_an_unterminated_cdata_section() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\">",
-            "<script main-thread=\"true\"><![CDATA[main</script></lynx>",
+            "<lynx engine-version=\"4.2\">",
+            "<script thread=\"main\"><![CDATA[main</script></lynx>",
         )),
         "unterminated CDATA section"
     );
@@ -411,8 +434,8 @@ fn rejects_an_unterminated_cdata_section() {
 fn rejects_content_after_the_cdata_section() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\">",
-            "<script main-thread><![CDATA[a]]>trailing]]></script></lynx>",
+            "<lynx engine-version=\"4.2\">",
+            "<script thread=\"main\"><![CDATA[a]]>trailing]]></script></lynx>",
         )),
         "unexpected content after the CDATA section"
     );
@@ -421,7 +444,7 @@ fn rejects_content_after_the_cdata_section() {
 #[test]
 fn rejects_an_unterminated_comment() {
     assert_eq!(
-        expect_failure("<lynx version=\"5.4.2\"><!-- unterminated"),
+        expect_failure("<lynx engine-version=\"4.2\"><!-- unterminated"),
         "unterminated comment"
     );
 }
@@ -429,7 +452,7 @@ fn rejects_an_unterminated_comment() {
 #[test]
 fn rejects_a_missing_section_closing_tag() {
     assert_eq!(
-        expect_failure("<lynx version=\"5.4.2\"><script main-thread>main"),
+        expect_failure("<lynx engine-version=\"4.2\"><script thread=\"main\">main"),
         "missing closing tag '</script>'"
     );
 }
@@ -437,7 +460,7 @@ fn rejects_a_missing_section_closing_tag() {
 #[test]
 fn rejects_a_missing_root_closing_tag() {
     assert_eq!(
-        expect_failure("<lynx version=\"5.4.2\"><script main-thread=\"true\">main</script>"),
+        expect_failure("<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>"),
         "missing closing tag '</lynx>'"
     );
 }
@@ -446,7 +469,7 @@ fn rejects_a_missing_root_closing_tag() {
 fn rejects_content_after_the_root_closing_tag() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\"><script main-thread>main</script>",
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
             "</lynx>trailing",
         )),
         "unexpected content after '</lynx>'"
@@ -457,8 +480,8 @@ fn rejects_content_after_the_root_closing_tag() {
 fn rejects_an_unterminated_xml_declaration() {
     assert_eq!(
         expect_failure(concat!(
-            "<?xml version=\"1.0\"<lynx version=\"5.4.2\">",
-            "<script main-thread>main</script></lynx>",
+            "<?xml version=\"1.0\"<lynx engine-version=\"4.2\">",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "unterminated XML declaration"
     );
@@ -473,8 +496,8 @@ fn rejects_an_empty_document() {
 fn rejects_bare_text_between_sections() {
     assert_eq!(
         expect_failure(concat!(
-            "<lynx version=\"5.4.2\">garbage",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\">garbage",
+            "<script thread=\"main\">main</script></lynx>",
         )),
         "unexpected content outside a section"
     );
@@ -489,13 +512,13 @@ fn never_panics_whatever_the_input_is() {
         "<!-",
         "<?xml",
         "<lynx",
-        "<lynx version",
-        "<lynx version=",
-        "<lynx version=\"",
+        "<lynx engine-version",
+        "<lynx engine-version=",
+        "<lynx engine-version=\"",
         "</lynx>",
         "<![CDATA[",
         "\u{feff}",
-        "\u{feff}<lynx version=\"1\">",
+        "\u{feff}<lynx engine-version=\"1\">",
     ] {
         let result = std::panic::catch_unwind(|| parse(source));
         assert!(result.is_ok(), "parser panicked for {source:?}");
@@ -508,8 +531,8 @@ fn never_panics_whatever_the_input_is() {
 
 #[test]
 fn reports_the_offset_of_the_failing_section_not_of_the_document() {
-    let prefix = "<lynx version=\"5.4.2\">\n";
-    let source = format!("{prefix}<view></view><script main-thread>main</script></lynx>");
+    let prefix = "<lynx engine-version=\"4.2\">\n";
+    let source = format!("{prefix}<view></view><script thread=\"main\">main</script></lynx>");
     let Err(error) = parse(&source) else {
         panic!("expected the unsupported top-level tag to fail");
     };
@@ -519,7 +542,7 @@ fn reports_the_offset_of_the_failing_section_not_of_the_document() {
 
 #[test]
 fn reports_web_and_rust_offsets_after_non_ascii_text() {
-    let prefix = "<!-- é😀 -->\n<lynx version=\"1\">";
+    let prefix = "<!-- é😀 -->\n<lynx engine-version=\"1\">";
     let source = format!("{prefix}<view></view></lynx>");
     let error = parse(&source).expect_err("the unsupported top-level tag must fail");
 
@@ -537,18 +560,18 @@ fn reports_web_and_rust_offsets_after_non_ascii_text() {
 #[test]
 fn uses_the_reference_ascii_whitespace_set() {
     let accepted = concat!(
-        "\u{000c}<lynx version=\"1\">\u{000c}",
-        "<script main-thread>main</script>\u{000c}</lynx>\u{000c}",
+        "\u{000c}<lynx engine-version=\"1\">\u{000c}",
+        "<script thread=\"main\">main</script>\u{000c}</lynx>\u{000c}",
     );
     assert_eq!(expect_success(accepted).main_thread_script, "main");
 
     for rejected in [
-        "\u{000b}<lynx version=\"1\"><script main-thread>main</script></lynx>",
-        "\u{00a0}<lynx version=\"1\"><script main-thread>main</script></lynx>",
+        "\u{000b}<lynx engine-version=\"1\"><script thread=\"main\">main</script></lynx>",
+        "\u{00a0}<lynx engine-version=\"1\"><script thread=\"main\">main</script></lynx>",
     ] {
         assert_eq!(
             expect_failure(rejected),
-            "expected '<lynx version=\"...\">' root element"
+            "expected '<lynx engine-version=\"...\">' root element"
         );
     }
 }
@@ -557,7 +580,7 @@ fn uses_the_reference_ascii_whitespace_set() {
 fn treats_the_xml_declaration_as_an_unvalidated_prefix_slot() {
     let result = expect_success(concat!(
         "<?xml-stylesheet?>",
-        "<lynx version=\"opaque\"><script main-thread>main</script></lynx>",
+        "<lynx engine-version=\"opaque\"><script thread=\"main\">main</script></lynx>",
     ));
     assert_eq!(result.main_thread_script, "main");
 }
@@ -565,7 +588,7 @@ fn treats_the_xml_declaration_as_an_unvalidated_prefix_slot() {
 #[test]
 fn preserves_comments_inside_section_bodies_as_payload() {
     let result = expect_success(concat!(
-        "<lynx version=\"1\"><script main-thread>",
+        "<lynx engine-version=\"1\"><script thread=\"main\">",
         "<!-- this is JavaScript payload here -->",
         "</script></lynx>",
     ));
@@ -579,7 +602,7 @@ fn preserves_comments_inside_section_bodies_as_payload() {
 fn distinguishes_the_two_unterminated_root_prefixes() {
     assert_eq!(
         expect_failure("<lynx"),
-        "expected '<lynx version=\"...\">' root element"
+        "expected '<lynx engine-version=\"...\">' root element"
     );
     assert_eq!(
         expect_failure("<lynx "),
@@ -588,60 +611,75 @@ fn distinguishes_the_two_unterminated_root_prefixes() {
 }
 
 #[test]
-fn parses_markup_card_into_three_non_empty_sections() {
-    let result = expect_success(MARKUP_CARD_XML);
+fn parses_the_counter_card_from_the_current_standard() {
+    let result = expect_success(COUNTER_CARD_XML);
 
+    assert_eq!(result.engine_version, "4.2");
     let style = result.style.expect("fixture has a style section");
-    assert!(!style.is_empty());
-    assert!(style.contains(".page"));
-    assert!(!result.main_thread_script.is_empty());
-    assert!(result.main_thread_script.contains("__CreatePage"));
-    let background = result
-        .background_thread_script
-        .expect("fixture has a background script");
-    assert!(!background.is_empty());
-    assert!(background.contains("lynx.getCoreContext"));
-
-    for section in [style, result.main_thread_script, background] {
-        assert!(!section.contains("<![CDATA["));
-        assert!(!section.contains("]]>"));
-    }
+    assert!(style.contains(".button\\:active"));
+    assert!(result.main_thread_script.contains("lynx.getEngine()"));
+    assert!(result.main_thread_script.contains("__ReplaceElements"));
+    assert_eq!(result.background_thread_script, None);
 }
 
 #[test]
-fn rejects_every_document_the_reference_parser_rejects() {
+fn parses_the_github_pages_demo() {
+    let source = include_str!("../../../packages/github-pages/public/demo.lynx.xml");
+    let result = expect_success(source);
+
+    assert_eq!(result.engine_version, "4.2");
+    assert!(result.style.is_some_and(|style| style.contains(".counter")));
+    assert!(result.main_thread_script.contains("__AddEventListener"));
+}
+
+#[test]
+fn parses_cdata_main_and_background_sections() {
+    let result = expect_success(MARKUP_CARD_XML);
+
+    assert_eq!(result.engine_version, "4.2");
+    assert!(result.style.is_some_and(|style| style.contains(".page")));
+    assert!(result.main_thread_script.contains("__CreatePage"));
+    assert!(
+        result
+            .background_thread_script
+            .is_some_and(|script| script.contains("lynx.getCoreContext"))
+    );
+}
+
+#[test]
+fn rejects_the_structural_error_corpus() {
     let sources = [
-        "<script main-thread>main</script>",
+        "<script thread=\"main\">main</script>",
         concat!(
-            "<!doctype html><lynx version=\"5.4.2\">",
-            "<script main-thread>main</script></lynx>",
+            "<!doctype html><lynx engine-version=\"4.2\">",
+            "<script thread=\"main\">main</script></lynx>",
         ),
         concat!(
-            "<lynx version=\"5.4.2\"><style scoped>.a { width: 1px; }</style>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"><style scoped>.a { width: 1px; }</style>",
+            "<script thread=\"main\">main</script></lynx>",
         ),
-        "<lynx version=\"5.4.2\"><script>main</script></lynx>",
-        "<lynx version=\"5.4.2\"><script worker>main</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script>main</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script worker>main</script></lynx>",
         concat!(
-            "<lynx version=\"5.4.2\"><script main-thread>main</script>",
-            "<script main-thread>duplicate</script></lynx>",
+            "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
+            "<script thread=\"main\">duplicate</script></lynx>",
         ),
-        "<lynx version=\"5.4.2\"><script background>background</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script thread=\"background\">background</script></lynx>",
         concat!(
-            "<lynx version=\"5.4.2\"><view></view>",
-            "<script main-thread>main</script></lynx>",
+            "<lynx engine-version=\"4.2\"><view></view>",
+            "<script thread=\"main\">main</script></lynx>",
         ),
-        "<lynx version=\"5.4.2\"><script main-thread>main",
-        "<lynx version=\"5.4.2\"><!-- unterminated",
-        "<lynx><script main-thread>main</script></lynx>",
-        "<lynx version=\"\"><script main-thread>main</script></lynx>",
-        "<lynx lang=\"en\"><script main-thread>main</script></lynx>",
-        "<lynx version=\"5.4.2\"><script main-thread=\"false\">main</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script thread=\"main\">main",
+        "<lynx engine-version=\"4.2\"><!-- unterminated",
+        "<lynx><script thread=\"main\">main</script></lynx>",
+        "<lynx engine-version=\"\"><script thread=\"main\">main</script></lynx>",
+        "<lynx lang=\"en\"><script thread=\"main\">main</script></lynx>",
+        "<lynx engine-version=\"4.2\"><script main-thread>main</script></lynx>",
         concat!(
-            "<lynx version=\"5.4.2\">",
-            "<script main-thread=\"true\"><![CDATA[main</script></lynx>",
+            "<lynx engine-version=\"4.2\">",
+            "<script thread=\"main\"><![CDATA[main</script></lynx>",
         ),
-        "<lynx version=\"5.4.2\"><script main-thread=\"true\">main</script>",
+        "<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
     ];
 
     for source in sources {
@@ -650,14 +688,14 @@ fn rejects_every_document_the_reference_parser_rejects() {
 }
 
 #[test]
-fn extracts_the_same_sections_as_the_reference_parser() {
+fn extracts_bare_sections_without_rewriting_their_contents() {
     let full = expect_success(concat!(
         "<?xml version=\"1.0\"?>\n",
         "<!-- A Lynx single-file bundle. -->\n",
-        "<lynx version=\"5.4.2\">\n",
+        "<lynx engine-version=\"4.2\">\n",
         "<style>\n.card { width: 100px; }\n</style>\n",
-        "<script main-thread>\nmain\n</script>\n",
-        "<script background>\nbackground\n</script>\n",
+        "<script thread=\"main\">\nmain\n</script>\n",
+        "<script thread=\"background\">\nbackground\n</script>\n",
         "</lynx>",
     ));
     assert_eq!(full.style, Some("\n.card { width: 100px; }\n"));
@@ -665,9 +703,9 @@ fn extracts_the_same_sections_as_the_reference_parser() {
     assert_eq!(full.background_thread_script, Some("\nbackground\n"));
 
     let any_order = expect_success(concat!(
-        "\u{feff}<lynx version=\"5.4.2\">\n",
-        "<script background>background-code</script>\n",
-        "<script main-thread>main-code</script>\n",
+        "\u{feff}<lynx engine-version=\"4.2\">\n",
+        "<script thread=\"background\">background-code</script>\n",
+        "<script thread=\"main\">main-code</script>\n",
         "</lynx>",
     ));
     assert_eq!(any_order.style, None);
@@ -679,7 +717,7 @@ fn extracts_the_same_sections_as_the_reference_parser() {
 // exercising a substantial, production-shaped card from lynx-stack.
 const MARKUP_CARD_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE lynx>
-<lynx version="5.4.2">
+<lynx engine-version="4.2">
 <style><![CDATA[
   /* A representative buildless card stylesheet. */
   .page {
@@ -712,7 +750,7 @@ const MARKUP_CARD_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   }
 ]]></style>
 
-<script main-thread="true"><![CDATA[
+<script thread="main"><![CDATA[
   const days = [
     { tab: 'Day 1', title: 'Lakeside', detail: 'Walk at sunrise.' },
     { tab: 'Day 2', title: 'Tea hills', detail: 'Climb the tea rows.' },
@@ -745,7 +783,7 @@ const MARKUP_CARD_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   engine.addEventListener('__RenderPage', onRenderPage);
 ]]></script>
 
-<script background="true"><![CDATA[
+<script thread="background"><![CDATA[
   const mainThread = lynx.getCoreContext();
 
   function cleanupBackground() {
@@ -754,5 +792,123 @@ const MARKUP_CARD_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
   mainThread.addEventListener('__DestroyLifetime', cleanupBackground);
 ]]></script>
+</lynx>
+"#;
+
+const COUNTER_CARD_XML: &str = r#"<!doctype lynx>
+<lynx engine-version="4.2">
+<style>
+.page {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f3f5f7;
+}
+
+.counter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  border-radius: 16px;
+  background-color: #ffffff;
+}
+
+.count {
+  color: #111827;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.button {
+  margin-top: 16px;
+  padding: 12px 20px;
+  border-radius: 10px;
+  background-color: #2563eb;
+}
+
+.button\:active {
+  opacity: 0.8;
+}
+
+.button-text {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 700;
+}
+</style>
+<script thread="main">
+const engine = lynx.getEngine();
+const page = __CreatePage("0", 0);
+const pageId = __GetElementUniqueID(page);
+const tapOptions = {};
+const renderPageEventName = "__RenderPage";
+const destroyLifetimeEventName = "__DestroyLifetime";
+
+let count = 0;
+let countText;
+let button;
+let rendered = false;
+
+__SetClasses(page, "page");
+
+Object.assign(globalThis, {
+  processData(data) {
+    return data;
+  },
+});
+
+function createText(className, value) {
+  const text = __CreateText(pageId);
+  __SetClasses(text, className);
+  __AppendElement(text, __CreateRawText(value));
+  return text;
+}
+
+function increment() {
+  count += 1;
+  __ReplaceElements(
+    countText,
+    [__CreateRawText(String(count))],
+    __GetChildren(countText),
+  );
+  __FlushElementTree();
+}
+
+function renderPage() {
+  if (rendered) return;
+  rendered = true;
+
+  const counter = __CreateView(pageId);
+  __SetClasses(counter, "counter");
+
+  countText = createText("count", String(count));
+  __AppendElement(counter, countText);
+
+  button = __CreateView(pageId);
+  __SetClasses(button, "button");
+  __SetAttribute(button, "aria-label", "Increment counter");
+  __AppendElement(button, createText("button-text", "Add one"));
+  __AddEventListener(button, "tap", increment, tapOptions);
+  __AppendElement(counter, button);
+
+  __AppendElement(page, counter);
+}
+
+function cleanup() {
+  if (button) {
+    __RemoveEventListener(button, "tap", increment, tapOptions);
+  }
+  engine.removeEventListener(renderPageEventName, renderPage);
+  engine.removeEventListener(destroyLifetimeEventName, cleanup);
+  countText = undefined;
+  button = undefined;
+}
+
+engine.addEventListener(renderPageEventName, renderPage);
+engine.addEventListener(destroyLifetimeEventName, cleanup);
+</script>
 </lynx>
 "#;

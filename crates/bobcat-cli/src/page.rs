@@ -543,7 +543,7 @@ mod tests {
     fn xml_preserves_present_empty_style_and_background_sections() {
         let program = Program::from_bytes(
             &input_url(),
-            b"<lynx version=\"5.4.2\"><style></style><script main-thread>main</script><script background></script></lynx>",
+            b"<lynx engine-version=\"4.2\"><style></style><script thread=\"main\">main</script><script thread=\"background\"></script></lynx>",
         )
         .expect("valid XML program");
 
@@ -572,7 +572,7 @@ mod tests {
     fn xml_without_optional_sections_keeps_them_absent() {
         let program = Program::from_bytes(
             &input_url(),
-            b"<lynx version=\"5.4.2\"><script main-thread>main</script></lynx>",
+            b"<lynx engine-version=\"4.2\"><script thread=\"main\">main</script></lynx>",
         )
         .expect("valid XML program");
 
@@ -584,7 +584,7 @@ mod tests {
     fn sniffed_xml_rejects_invalid_utf8_before_parsing() {
         let error = Program::from_bytes(
             &input_url(),
-            b"<lynx version=\"5.4.2\"><script main-thread>\xff</script></lynx>",
+            b"<lynx engine-version=\"4.2\"><script thread=\"main\">\xff</script></lynx>",
         )
         .expect_err("invalid UTF-8 must fail");
 
@@ -595,7 +595,7 @@ mod tests {
     fn malformed_sniffed_xml_reports_an_xml_parse_error() {
         let error = Program::from_bytes(
             &input_url(),
-            b"<lynx version=\"5.4.2\"><script main-thread>main</script>",
+            b"<lynx engine-version=\"4.2\"><script thread=\"main\">main</script>",
         )
         .expect_err("malformed XML must fail");
 

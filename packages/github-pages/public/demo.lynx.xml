@@ -1,96 +1,105 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE lynx>
-<lynx version="5.4.2">
-  <style><![CDATA[
-    .demo-page {
-      display: linear;
-      position: relative;
-      overflow: hidden;
-      background-color: #0b1020;
-    }
-    .demo-panel {
-      position: absolute;
-      left: 6%;
-      top: 9%;
-      width: 88%;
-      height: 82%;
-      border-radius: 32px;
-      background-color: #151d2f;
-    }
-    .demo-rail {
-      position: absolute;
-      left: 5%;
-      top: 8%;
-      width: 38%;
-      height: 12px;
-      border-radius: 6px;
-      background-color: #b7f34a;
-    }
-    .demo-primary {
-      position: absolute;
-      left: 5%;
-      top: 18%;
-      width: 54%;
-      height: 68%;
-      border-radius: 24px;
-      background-color: #7357ff;
-    }
-    .demo-cutout {
-      position: absolute;
-      left: 11%;
-      top: 31%;
-      width: 32%;
-      height: 42%;
-      border-radius: 18px;
-      background-color: #0b1020;
-    }
-    .demo-upper {
-      position: absolute;
-      right: 5%;
-      top: 18%;
-      width: 31%;
-      height: 31%;
-      border-radius: 24px;
-      background-color: #27d6c2;
-    }
-    .demo-lower {
-      position: absolute;
-      right: 5%;
-      bottom: 14%;
-      width: 31%;
-      height: 27%;
-      border-radius: 24px;
-      background-color: #ffb84d;
-    }
-  ]]></style>
-  <script main-thread><![CDATA[
-    globalThis.renderPage = function () {
-      const page = __CreatePage('github-pages-demo', 0);
-      __SetClasses(page, 'demo-page');
+<!doctype lynx>
+<lynx engine-version="4.2">
+<style>
+.page {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #f3f5f7;
+}
 
-      const panel = __CreateView(0);
-      __SetClasses(panel, 'demo-panel');
-      __AppendElement(page, panel);
+.counter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  border-radius: 16px;
+  background-color: #ffffff;
+}
 
-      const rail = __CreateView(0);
-      __SetClasses(rail, 'demo-rail');
-      __AppendElement(panel, rail);
+.count {
+  color: #111827;
+  font-size: 32px;
+  font-weight: 700;
+}
 
-      const primary = __CreateView(0);
-      __SetClasses(primary, 'demo-primary');
-      __AppendElement(panel, primary);
+.button {
+  margin-top: 16px;
+  padding: 12px 20px;
+  border-radius: 10px;
+  background-color: #2563eb;
+}
 
-      const cutout = __CreateView(0);
-      __SetClasses(cutout, 'demo-cutout');
-      __AppendElement(primary, cutout);
+.button\:active {
+  opacity: 0.8;
+}
 
-      const upper = __CreateView(0);
-      __SetClasses(upper, 'demo-upper');
-      __AppendElement(panel, upper);
+.button-text {
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 700;
+}
+</style>
+<script thread="main">
+const tapOptions = {};
 
-      const lower = __CreateView(0);
-      __SetClasses(lower, 'demo-lower');
-      __AppendElement(panel, lower);
-    };
-  ]]></script>
+let count = 0;
+let countText;
+let countRawText;
+let button;
+
+function createText(parentComponentId, className, value) {
+  const text = __CreateText(parentComponentId);
+  const rawText = __CreateRawText(value);
+  __SetClasses(text, className);
+  __AppendElement(text, rawText);
+  return { text, rawText };
+}
+
+function increment() {
+  count += 1;
+  const nextRawText = __CreateRawText(String(count));
+  __ReplaceElements(
+    countText,
+    [nextRawText],
+    [countRawText],
+  );
+  countRawText = nextRawText;
+  __FlushElementTree();
+}
+
+Object.assign(globalThis, {
+  processData(data) {
+    return data;
+  },
+
+  renderPage() {
+    const page = __CreatePage("0", 0);
+    const pageId = __GetElementUniqueID(page);
+    __SetClasses(page, "page");
+
+    const counter = __CreateView(pageId);
+    __SetClasses(counter, "counter");
+
+    const countNode = createText(pageId, "count", String(count));
+    countText = countNode.text;
+    countRawText = countNode.rawText;
+    __AppendElement(counter, countText);
+
+    button = __CreateView(pageId);
+    __SetClasses(button, "button");
+    __SetAttribute(button, "aria-label", "Increment counter");
+    __AppendElement(
+      button,
+      createText(pageId, "button-text", "Add one").text,
+    );
+    __AddEventListener(button, "tap", increment, tapOptions);
+    __AppendElement(counter, button);
+
+    __AppendElement(page, counter);
+  },
+});
+</script>
 </lynx>

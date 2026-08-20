@@ -3,11 +3,11 @@
 
 //! Parser for the restricted single-file Lynx XML markup source format.
 //!
-//! Lynx XML is a source envelope for one required main-thread JavaScript
-//! program, one optional background-thread program, and one optional
-//! stylesheet. It is not a general-purpose XML dialect and does not describe
-//! an element tree. The main-thread program creates that tree through the Lynx
-//! Element PAPI.
+//! Lynx XML is a source envelope carrying an engine-version requirement, one
+//! required main-thread JavaScript program, one optional background-thread
+//! program, and one optional stylesheet. It is not a general-purpose XML
+//! dialect and does not describe an element tree. The main-thread program
+//! creates that tree through the Lynx Element PAPI.
 //!
 //! This source format is not an encoding of either Lynx binary template
 //! container. The crate neither decodes nor produces `.web.bundle` or
@@ -24,7 +24,7 @@ const CDATA_END: &str = "]]>";
 const LYNX_ROOT_CLOSING_TAG: &str = "</lynx>";
 const BYTE_ORDER_MARK: char = '\u{feff}';
 
-/// The three source sections extracted from one valid Lynx XML document.
+/// The metadata and source sections extracted from one valid Lynx XML document.
 ///
 /// Missing optional sections are `None`; present but empty sections are
 /// `Some("")`. The required main-thread section may itself be empty because
@@ -32,11 +32,13 @@ const BYTE_ORDER_MARK: char = '\u{feff}';
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct LynxXml<'source> {
+    /// The non-empty `<lynx engine-version="...">` attribute value.
+    pub engine_version: &'source str,
     /// The optional `<style>` body.
     pub style: Option<&'source str>,
-    /// The required `<script main-thread>` body.
+    /// The required `<script thread="main">` body.
     pub main_thread_script: &'source str,
-    /// The optional `<script background>` body.
+    /// The optional `<script thread="background">` body.
     pub background_thread_script: Option<&'source str>,
 }
 
@@ -104,11 +106,12 @@ impl std::error::Error for ParseError {}
 /// # Example
 ///
 /// ```
-/// let source = r#"<lynx version="5.4.2">
+/// let source = r#"<lynx engine-version="4.2">
 ///   <style>.title { color: red; }</style>
-///   <script main-thread><![CDATA[globalThis.renderPage = () => {};]]></script>
+///   <script thread="main"><![CDATA[globalThis.renderPage = () => {};]]></script>
 /// </lynx>"#;
 /// let parsed = lynx_xml::parse(source)?;
+/// assert_eq!(parsed.engine_version, "4.2");
 /// assert_eq!(parsed.style, Some(".title { color: red; }"));
 /// assert!(parsed.main_thread_script.contains("renderPage"));
 /// # Ok::<(), lynx_xml::ParseError>(())
@@ -172,10 +175,10 @@ impl<'source> Parser<'source> {
             return Err(ParseError::at(
                 self.source,
                 self.position,
-                "expected '<lynx version=\"...\">' root element",
+                "expected '<lynx engine-version=\"...\">' root element",
             ));
         }
-        self.consume_root_start()?;
+        let engine_version = self.consume_root_start()?;
 
         let root_closed = loop {
             self.consume_ignorable()?;
@@ -208,11 +211,12 @@ impl<'source> Parser<'source> {
             return Err(ParseError::at(
                 self.source,
                 self.position,
-                "missing '<script main-thread>' section",
+                "missing '<script thread=\"main\">' section",
             ));
         };
 
         Ok(LynxXml {
+            engine_version,
             style: self.style,
             main_thread_script,
             background_thread_script: self.background_thread_script,
@@ -283,7 +287,7 @@ impl<'source> Parser<'source> {
         Ok(())
     }
 
-    fn consume_root_start(&mut self) -> Result<(), ParseError> {
+    fn consume_root_start(&mut self) -> Result<&'source str, ParseError> {
         let root_start = self.position;
         let search_start = root_start + 1;
         let Some(relative_end) = self.source[search_start..].find('>') else {
@@ -298,16 +302,23 @@ impl<'source> Parser<'source> {
         let attributes = find_first_ascii_whitespace(opening_tag).map_or("", |tag_name_end| {
             trim_ascii_whitespace(&opening_tag[tag_name_end..])
         });
-        if !is_version_attribute(attributes) {
+        let Some(engine_version) = quoted_attribute_value(attributes, "engine-version") else {
             return Err(ParseError::at(
                 self.source,
                 root_start,
-                "'<lynx>' requires exactly one non-empty 'version' attribute",
+                "'<lynx>' requires exactly one non-empty 'engine-version' attribute",
+            ));
+        };
+        if engine_version.is_empty() {
+            return Err(ParseError::at(
+                self.source,
+                root_start,
+                "'<lynx>' requires exactly one non-empty 'engine-version' attribute",
             ));
         }
 
         self.position = opening_tag_end + 1;
-        Ok(())
+        Ok(engine_version)
     }
 
     fn consume_section(&mut self) -> Result<(), ParseError> {
@@ -414,19 +425,15 @@ impl<'source> Parser<'source> {
                 }
                 Ok(("</style>", SectionSlot::Style))
             }
-            "script" => {
-                if is_boolean_attribute(attributes, "main-thread") {
-                    Ok(("</script>", SectionSlot::MainThread))
-                } else if is_boolean_attribute(attributes, "background") {
-                    Ok(("</script>", SectionSlot::BackgroundThread))
-                } else {
-                    Err(ParseError::at(
-                        self.source,
-                        section_start,
-                        "'<script>' requires exactly one of 'main-thread' or 'background'",
-                    ))
-                }
-            }
+            "script" => match quoted_attribute_value(attributes, "thread") {
+                Some("main") => Ok(("</script>", SectionSlot::MainThread)),
+                Some("background") => Ok(("</script>", SectionSlot::BackgroundThread)),
+                _ => Err(ParseError::at(
+                    self.source,
+                    section_start,
+                    "'<script>' requires exactly one 'thread' attribute with value 'main' or 'background'",
+                )),
+            },
             _ => Err(ParseError::at(
                 self.source,
                 section_start,
@@ -516,39 +523,21 @@ fn is_opening_tag(source: &str, position: usize, tag_name: &str) -> bool {
         .is_some_and(|byte| *byte == b'>' || is_ascii_whitespace(*byte))
 }
 
-fn is_boolean_attribute(attributes: &str, attribute_name: &str) -> bool {
-    if attributes == attribute_name {
-        return true;
+fn quoted_attribute_value<'attributes>(
+    attributes: &'attributes str,
+    attribute_name: &str,
+) -> Option<&'attributes str> {
+    let rest = attributes.strip_prefix(attribute_name)?;
+    let rest = trim_ascii_whitespace(rest);
+    let rest = rest.strip_prefix('=')?;
+    let rest = trim_ascii_whitespace(rest);
+    let &quote = rest.as_bytes().first()?;
+    if rest.len() < 2 || !matches!(quote, b'\'' | b'"') {
+        return None;
     }
-    let Some(rest) = attributes.strip_prefix(attribute_name) else {
-        return false;
-    };
-    let rest = trim_ascii_whitespace(rest);
-    let Some(rest) = rest.strip_prefix('=') else {
-        return false;
-    };
-    matches!(trim_ascii_whitespace(rest), "\"true\"" | "'true'")
-}
-
-fn is_version_attribute(attributes: &str) -> bool {
-    let Some(rest) = attributes.strip_prefix("version") else {
-        return false;
-    };
-    let rest = trim_ascii_whitespace(rest);
-    let Some(rest) = rest.strip_prefix('=') else {
-        return false;
-    };
-    let rest = trim_ascii_whitespace(rest);
-    let Some(&quote) = rest.as_bytes().first() else {
-        return false;
-    };
-    if rest.len() < 3 || !matches!(quote, b'\'' | b'"') {
-        return false;
-    }
-    let Some(relative_closing_quote) = rest.as_bytes()[1..].iter().position(|byte| *byte == quote)
-    else {
-        return false;
-    };
+    let relative_closing_quote = rest.as_bytes()[1..]
+        .iter()
+        .position(|byte| *byte == quote)?;
     let closing_quote = relative_closing_quote + 1;
-    closing_quote == rest.len() - 1 && closing_quote > 1
+    (closing_quote == rest.len() - 1).then_some(&rest[1..closing_quote])
 }

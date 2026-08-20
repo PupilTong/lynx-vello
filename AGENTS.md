@@ -118,14 +118,19 @@ useful signal for currently-compatible versions of those libraries.
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
   template parsing only, no JS runtime, no CSS engine (yet).
 - `crates/lynx-xml` — zero-dependency, zero-copy parser for the restricted
-  single-file Lynx XML source envelope. It extracts borrowed optional style,
-  required main-thread script, and optional background-thread script sections,
-  and reports the reference web parser's UTF-16 error offset together with a
-  Rust-native UTF-8 byte offset. Scope: source grammar and section extraction
-  only — no input sniffing, I/O, configuration mapping, CSS parsing, bundle
-  encoding, or runtime launch. It is a sibling of the binary template decoder,
-  never another format inside it. The CLI and browser reference embedders own
-  those omitted integration steps and consume this crate directly.
+  single-file Lynx XML source envelope. The current breaking grammar uses
+  `<lynx engine-version="...">` plus `<script thread="main">` or
+  `<script thread="background">`; the former `version` / `main-thread` /
+  `background` spellings are
+  rejected. It extracts the borrowed engine version, optional style, required
+  main-thread script, and optional background-thread script, and reports the
+  reference web parser's UTF-16 error offset together with a Rust-native UTF-8
+  byte offset. Scope: source grammar and section extraction only — no input
+  sniffing, I/O, configuration mapping, CSS parsing, bundle encoding, engine
+  version negotiation, or runtime launch. It is a sibling of the binary
+  template decoder, never another format inside it. The CLI and browser
+  reference embedders own those omitted integration steps and consume this
+  crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec

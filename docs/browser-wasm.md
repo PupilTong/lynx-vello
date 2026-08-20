@@ -51,10 +51,12 @@ receives a bundle decoder.
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
 raw XML loader. Rust's `lynx-xml` parser validates and extracts the sections in
-the Render Worker. A present stylesheet is registered as CSS text and mounted
-before the main-thread section is started; the returned Promise uses the same
-engine-event completion path as `executeScript`. The exported
-`LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
+the Render Worker. The source uses `<lynx engine-version="...">` and
+`<script thread="main">` / `<script thread="background">`; legacy
+attribute spellings are rejected. A present stylesheet is registered as CSS
+text and mounted before the main-thread section is started; the returned
+Promise uses the same engine-event completion path as `executeScript`. The
+exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
 `false`/`false`/`true` display/overflow/selector defaults, while callers may
 still pass an intentional host override to `BobcatCanvas.create`.
 
