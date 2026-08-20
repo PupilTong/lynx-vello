@@ -9,7 +9,7 @@ use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
     clamp_axis, own_scrollable_overflow, relative_offset, resolve_container_box, resolve_intrinsic,
     resolve_item_geometry_with_bases, resolve_length_percentage, sort_and_assign_layout_order,
-    subtract_available_space,
+    store_committed_child, subtract_available_space,
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
@@ -1201,21 +1201,15 @@ where
             content_origin.y + vertical.start + item.margin.top + offset.y,
         );
 
-        let mut layout = Layout::with_order(item.key.layout_order);
-        layout.location = location;
-        layout.size = output.size;
-        layout.content_size = output.content_size;
-        layout.border = item.border;
-        layout.padding = item.padding;
-        layout.margin = item.margin;
-        tree.set_unrounded_layout(state, item.key.node, layout);
-
-        accumulate_scrollable_overflow(
-            &mut scrollable_size,
+        store_committed_child(
+            tree,
+            state,
+            item.key.node,
+            item.key.layout_order,
             location,
-            output.size,
-            output.content_size,
-            item.overflow,
+            output,
+            item,
+            &mut scrollable_size,
         );
     }
     scrollable_size

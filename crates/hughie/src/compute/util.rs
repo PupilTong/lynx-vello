@@ -678,6 +678,37 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     }
 }
 
+/// Stores one committed child's durable layout and folds its box into the
+/// container's scrollable overflow — the common tail of every algorithm's
+/// in-flow commit loop.
+#[inline]
+pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    order: u32,
+    location: Point<f32>,
+    output: crate::tree::LayoutOutput,
+    geometry: &ItemGeometry,
+    scrollable: &mut Size<f32>,
+) {
+    let mut layout = crate::tree::Layout::with_order(order);
+    layout.location = location;
+    layout.size = output.size;
+    layout.content_size = output.content_size;
+    layout.border = geometry.border;
+    layout.padding = geometry.padding;
+    layout.margin = geometry.margin;
+    tree.set_unrounded_layout(state, node, layout);
+    accumulate_scrollable_overflow(
+        scrollable,
+        location,
+        output.size,
+        output.content_size,
+        geometry.overflow,
+    );
+}
+
 /// Whether the sizing value resolves against a percentage basis, making it
 /// track the basis rather than stand on its own.
 #[inline]

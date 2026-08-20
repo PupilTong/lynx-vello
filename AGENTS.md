@@ -593,7 +593,12 @@ useful signal for currently-compatible versions of those libraries.
   zero is the real DOM Document node and carries its node-visible style
   context; later slots are element/text nodes) plus a slot-aligned payload
   slab. A separate inline
-  `DocumentLayoutState` owns the third slot-aligned slab, for layout.
+  `DocumentLayoutState` owns slot-aligned layout state — a lazily sized
+  vector rather than a third lockstep slab: creating a node costs nothing
+  there, a node that is never laid out never allocates layout state,
+  `Document::layout`/`render` size it to the arena's slot bound in one
+  resize, and an absent entry reads as "never laid out" (an empty layout
+  cache) everywhere else.
   Identity and storage are deliberately split (`tree/arena.rs`): a `NodeId`
   is an index into `TreeArenas::slots`, a `Vec<Option<NodeSlot>>` whose entry
   holds the arena slot the node's state actually occupies. Ids only count
@@ -609,11 +614,12 @@ useful signal for currently-compatible versions of those libraries.
   and its traversal/invalidation flags live inline on `Node` (bench-defended
   2026-08-03: the paired A/B showed no traversal regression and a measurably
   faster no-op-commit fast path). The
-  primary slab selects each raw-`usize` ID; the side slabs allocate/remove
-  in lockstep and assert they received that same key (the payload slab reserves
-  a payload-less sentinel at document slot zero). Node removal drops all three
-  entries before the ID can be reused (ONE TREE policy: nodes are created and
-  mutated only through `Document` methods). The **document element is
+  primary slab selects each raw-`usize` ID; the payload slab allocates and
+  removes in lockstep with it and asserts it received that same key (it
+  reserves a payload-less sentinel at document slot zero), while the layout
+  vector resets a freed key's entry so the key's next occupant starts clean
+  (ONE TREE policy: nodes are created and mutated only through `Document`
+  methods). The **document element is
   permanent and pre-created**: `Document::new(device, root_tag, root_payload)`
   builds it at slot one (tag injected — the core still owns no tag
   vocabulary), `document_element()` returns it non-optionally, and it can
@@ -798,7 +804,26 @@ useful signal for currently-compatible versions of those libraries.
   cache invalidation, so no external damage report is needed to preserve
   layout work; the module also owns the
   `effective_containment` fold (`contain` + `content-visibility` → effect
-  bits).
+  bits). Layout invalidation stops early at the deepest ancestor whose
+  committed input hughie marked **content-independent** — the committing
+  parent proved the input's known dimensions, parent size, and available
+  space cannot move when only that subtree's content changes (pure-length
+  sizing, stable percentage bases, imposed stretch, content-free automatic
+  minimums, chained from the viewport-anchored root input; distinct from CSS
+  *definiteness*, which admits content-measured sizes). `run_layout` relays
+  such a subtree in place under the stored input and accepts the result only
+  when the output reproduces bit for bit — anything else escalates to the
+  whole-tree pass, which reuses the caches the attempt just filled. This is
+  what makes the ReactLynx steady state (text/attribute updates inside
+  fixed-size rows under the `page { width/height: 100% }` UA anchor) cost a
+  subtree instead of the document; `contain: strict` boundaries keep their
+  parked-relayout path as the containment-guaranteed special case of the
+  same machinery. Second and later invalidations in a batch stop at the
+  first already-cleared ancestor, so a burst of mutations pays one spine
+  walk, not one per mutation. Equivalence tests
+  (`tests/incremental_relayout.rs`) pin every path — in-place, escalated,
+  and root-reaching — to the geometry of a fresh document built directly in
+  the final state.
   Its `layout` module is the concrete `hughie` host:
   `Document::layout` flushes styles then lays out with
   the single `LayoutTree` trait implemented on `TreeArenas<T>`. Plain
@@ -1004,7 +1029,15 @@ useful signal for currently-compatible versions of those libraries.
   `compute_skipped_contents_layout`, and the `invalidate` module
   (`is_relayout_boundary`, `invalidate_for_relayout`) — the
   containment-bounded, damage-driven cache-invalidation host workflow
-  (single-axis / container queries out of scope). Read
+  (single-axis / container queries out of scope). `LayoutInput` additionally
+  carries per-axis `content_independent` flags — input *stability* under
+  subtree content change, proven by the committing algorithm (flexbox sets
+  them; the root input is viewport-stable by construction; other algorithms
+  conservatively leave them false) and stored beside the committed cache
+  entry, so a host can relayout a subtree in place under its stored input
+  and verify by output comparison. The per-node measurement cache keeps its
+  eight-slot budget but inlines only two slots, spilling to the heap for the
+  nodes whose containers probe many constraint shapes. Read
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/runtime types,
   resolved device-unit policy, or paint order.

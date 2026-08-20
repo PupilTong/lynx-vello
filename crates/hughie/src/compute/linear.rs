@@ -18,7 +18,7 @@ use super::util::{
     ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
     clamp_axis, mirror_ratio_definiteness, own_scrollable_overflow, relative_offset,
     resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
-    resolve_margins, resolve_padding, sort_and_assign_layout_order,
+    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
 };
 use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -1147,21 +1147,15 @@ where
         location.x += offset.x;
         location.y += offset.y;
 
-        let mut layout = Layout::with_order(item.key.layout_order);
-        layout.location = location;
-        layout.size = output.size;
-        layout.content_size = output.content_size;
-        layout.border = item.border;
-        layout.padding = item.padding;
-        layout.margin = item.margin;
-        tree.set_unrounded_layout(state, item.key.node, layout);
-
-        accumulate_scrollable_overflow(
-            &mut content_size,
+        store_committed_child(
+            tree,
+            state,
+            item.key.node,
+            item.key.layout_order,
             location,
-            output.size,
-            output.content_size,
-            item.overflow,
+            output,
+            item,
+            &mut content_size,
         );
     }
     content_size

@@ -20,7 +20,8 @@ use super::util::{
     normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
     relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
     resolve_item_geometry, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, style_size_behaves_auto, style_size_depends_on_basis,
+    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
+    style_size_depends_on_basis,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
@@ -1429,21 +1430,15 @@ where
             location.x += offset.x;
             location.y += offset.y;
 
-            let mut layout = Layout::with_order(item.key.layout_order);
-            layout.location = location;
-            layout.size = output.size;
-            layout.content_size = output.content_size;
-            layout.border = item.border;
-            layout.padding = item.padding;
-            layout.margin = item.margin;
-            tree.set_unrounded_layout(state, item.key.node, layout);
-
-            accumulate_scrollable_overflow(
-                &mut content_size,
+            store_committed_child(
+                tree,
+                state,
+                item.key.node,
+                item.key.layout_order,
                 location,
-                output.size,
-                output.content_size,
-                item.overflow,
+                output,
+                item,
+                &mut content_size,
             );
 
             if first_baseline.is_none()
