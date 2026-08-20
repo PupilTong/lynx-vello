@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 mod args;
+mod clock;
 mod command;
 mod headless;
 pub mod image_decoders;

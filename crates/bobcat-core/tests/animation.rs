@@ -1,0 +1,196 @@
+#![cfg(feature = "quickjs")]
+
+//! The `@keyframes` timeline, end to end: a host-decoded keyframes rule
+//! reaches Stylo, the presenting side advances it against the host's clock,
+//! and the committed frame moves.
+
+mod support;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::{
+    EngineEvent, ManualClock, OffscreenLynxView, PageConfig, PreparsedDeclaration,
+    PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, ScriptRunError, quickjs_engine_factory,
+};
+use support::FetcherDouble;
+
+const SCRIPT_URL: &str = "app:///main.js";
+const STYLE_URL: &str = "app:///author.css";
+
+/// One 8x8 red square, animated by an author `@keyframes` rule.
+const SLIDER_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  const slider = __CreateView(0);
+  __SetClasses(slider, 'slider');
+  __AppendElement(page, slider);
+};
+";
+
+fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
+    PreparsedDeclaration {
+        property: property.to_owned(),
+        value: value.to_owned(),
+        important: false,
+    }
+}
+
+/// `.slider` plus a `slide` keyframes rule that translates it 16px right over
+/// one second, linearly.
+fn slider_sheet() -> PreparsedStyleSheet {
+    PreparsedStyleSheet {
+        rules: vec![
+            PreparsedRule::Keyframes {
+                name: "slide".to_owned(),
+                keyframes: vec![
+                    PreparsedKeyframe {
+                        selector: "from".to_owned(),
+                        declarations: vec![declaration("transform", "translateX(0px)")],
+                    },
+                    PreparsedKeyframe {
+                        selector: "to".to_owned(),
+                        declarations: vec![declaration("transform", "translateX(16px)")],
+                    },
+                ],
+            },
+            PreparsedRule::Style {
+                selectors: ".slider".to_owned(),
+                declarations: vec![
+                    declaration("width", "8px"),
+                    declaration("height", "8px"),
+                    declaration("background-color", "#ff0000"),
+                    declaration("animation", "slide 1s linear infinite"),
+                ],
+            },
+        ],
+    }
+}
+
+async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
+    let mut double = FetcherDouble::new(SLIDER_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL);
+    if let Some(sheet) = sheet {
+        double = double.with_preparsed_style_sheet(sheet);
+    }
+    let resources: Arc<dyn ResourceFetcher> = Arc::new(double);
+    let mut view = OffscreenLynxView::new(
+        PageConfig::default(),
+        resources,
+        quickjs_engine_factory(),
+        Arc::new(|| {}),
+        32.0,
+        24.0,
+        1.0,
+    )
+    .expect("view");
+
+    view.load_style_sheet(STYLE_URL)
+        .await
+        .expect("the pre-parsed sheet mounts");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    view.execute_script(SCRIPT_URL)
+        .await
+        .expect("fetch and start script");
+    wait_for_script(&mut view).await.expect("script execution");
+    view
+}
+
+async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
+            EngineEvent::ScriptFinished(result) => Some(result),
+            _ => None,
+        }) {
+            return result;
+        }
+        assert!(Instant::now() < deadline, "script thread did not finish");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// The x of the leftmost red pixel in the committed frame.
+fn red_left_edge(view: &mut OffscreenLynxView) -> usize {
+    let shot = view.capture().expect("capture the committed frame");
+    let width = usize::try_from(shot.size.width).expect("the frame is addressable");
+    shot.pixels
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| *pixel == [255, 0, 0, 255])
+        .map(|(index, _)| index % width)
+        .min()
+        .expect("the animated square is painted")
+}
+
+#[tokio::test]
+async fn a_keyframes_animation_moves_the_committed_frame_on_the_hosts_clock() {
+    let mut view = booted(Some(slider_sheet())).await;
+    let clock = Arc::new(ManualClock::new());
+    view.set_animation_clock(clock.clone());
+
+    clock.set(0.0);
+    view.tick(true).expect("render the first frame");
+    let start = red_left_edge(&mut view);
+
+    clock.set(0.5);
+    view.tick(true).expect("render the half-way frame");
+    let middle = red_left_edge(&mut view);
+
+    assert_eq!(start, 0, "at t=0 the square sits at its `from` keyframe");
+    assert_eq!(
+        middle, 8,
+        "half a second into a linear 16px slide, the square has moved 8px"
+    );
+    assert!(
+        view.is_animating(),
+        "an infinite animation keeps asking for frames"
+    );
+}
+
+/// The point of the whole exercise: the frame moved without the script thread
+/// being asked for anything. `execute_script` has already finished, so the
+/// realm is parked on its command channel for the whole sequence above.
+#[tokio::test]
+async fn animation_frames_need_no_script_thread_work() {
+    let mut view = booted(Some(slider_sheet())).await;
+    let clock = Arc::new(ManualClock::new());
+    view.set_animation_clock(clock.clone());
+
+    clock.set(0.0);
+    view.tick(true).expect("first frame");
+    let mut edges = vec![red_left_edge(&mut view)];
+    for step in 1..=3 {
+        clock.set(f64::from(step) * 0.25);
+        view.tick(true).expect("animated frame");
+        edges.push(red_left_edge(&mut view));
+    }
+
+    assert_eq!(
+        edges,
+        vec![0, 4, 8, 12],
+        "each frame advanced the animation by a quarter of its 16px travel"
+    );
+    assert!(
+        view.pump().is_empty(),
+        "and none of it produced an engine event, so nothing crossed to script"
+    );
+}
+
+#[tokio::test]
+async fn a_view_with_no_clock_renders_the_start_of_the_animation_and_stays_there() {
+    let mut view = booted(Some(slider_sheet())).await;
+
+    view.tick(true).expect("first frame");
+    let first = red_left_edge(&mut view);
+    view.tick(true).expect("second frame");
+    let second = red_left_edge(&mut view);
+
+    assert_eq!(first, 0, "with no timeline the animation holds at t=0");
+    assert_eq!(second, first, "and never advances");
+    assert!(
+        !view.is_animating(),
+        "a clockless view must not spin the frame loop"
+    );
+}

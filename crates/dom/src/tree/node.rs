@@ -44,6 +44,15 @@ enum NodeData {
 pub(crate) struct StylingData {
     pub(crate) selector_flags: AtomicUsize,
     pub(crate) dirty_descendants: AtomicBool,
+    /// The animation-only counterpart of `dirty_descendants`. Stylo keeps the
+    /// two apart so an animation tick can descend to the animating elements
+    /// without consuming the dirty bits a pending normal restyle depends on.
+    pub(crate) animation_dirty_descendants: AtomicBool,
+    /// Whether this element owns any animation or transition state. Stylo
+    /// consults it before every `animation_declarations` call during selector
+    /// matching, so it has to answer without touching the document's animation
+    /// map.
+    pub(crate) may_have_animations: AtomicBool,
     pub(crate) snapshot_flags: AtomicU8,
     pub(crate) children_to_process: AtomicIsize,
 }
@@ -53,6 +62,8 @@ impl Default for StylingData {
         Self {
             selector_flags: AtomicUsize::new(0),
             dirty_descendants: AtomicBool::new(false),
+            animation_dirty_descendants: AtomicBool::new(false),
+            may_have_animations: AtomicBool::new(false),
             snapshot_flags: AtomicU8::new(0),
             children_to_process: AtomicIsize::new(0),
         }
@@ -546,6 +557,30 @@ impl<T> Node<T> {
             .store(dirty, Ordering::Relaxed);
     }
 
+    pub(crate) fn has_animation_dirty_descendants(&self) -> bool {
+        self.styling_data()
+            .animation_dirty_descendants
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_animation_dirty_descendants_bit(&self, dirty: bool) {
+        self.styling_data()
+            .animation_dirty_descendants
+            .store(dirty, Ordering::Relaxed);
+    }
+
+    pub(crate) fn may_have_animations(&self) -> bool {
+        self.styling_data()
+            .may_have_animations
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_may_have_animations(&self, may: bool) {
+        self.styling_data()
+            .may_have_animations
+            .store(may, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot_present(&self) -> bool {
         self.snapshot_flags() & SNAPSHOT_PRESENT != 0
     }
@@ -790,6 +825,8 @@ mod tests {
             snapshot: Option<Box<stylo::selector_parser::Snapshot>>,
             selector_flags: AtomicUsize,
             dirty_descendants: AtomicBool,
+            animation_dirty_descendants: AtomicBool,
+            may_have_animations: AtomicBool,
             snapshot_flags: AtomicU8,
             children_to_process: AtomicIsize,
         }

@@ -9,6 +9,7 @@ capabilities and OS facts:
 - a transferable `ScriptEngineFactory`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
+- an `AnimationClock` when the page should animate;
 - owned font bytes or already-decoded image pixels when those resources are
   registered explicitly;
 - viewport/device metrics and normalized input events;
@@ -33,6 +34,26 @@ main-thread JavaScript
 bobcat-cli ──▶ lynx-template-decoder + winit
 bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 ```
+
+## Animation timeline
+
+`bobcat-core` interpolates animations but reads no clock. `AnimationClock` is
+the host's reading of one — seconds on a monotonic timescale whose epoch the
+host chooses — installed with `LynxView::set_animation_clock` and sampled once
+per frame on the presenting side, so every animation in a frame is sampled at
+the same instant. A view with no clock installed renders `@keyframes` at their
+start values and never advances: OS time is an embedder capability like input
+and the draw target, and `wasm32-unknown-unknown` has no monotonic clock Rust
+can read at all. `bobcat-cli` reads `std::time::Instant`; the browser Render
+Worker relays `requestAnimationFrame`'s `DOMHighResTimeStamp`; `ManualClock`,
+which core does own, is the deterministic one tests and scripted capture use.
+
+Advancing an animation never crosses to the Lynx main thread. The presenting
+side already holds the document between frames, and the tick is a Stylo
+animation-only traversal of just the animating elements — no selector
+matching, no snapshots, and no layout unless an animated property actually
+moved a box. Starting and cancelling animations still belong to the main
+thread, and ride the style flush it already runs at `__FlushElementTree`.
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
 remain independently usable libraries, but an application embedding Bobcat
@@ -235,8 +256,13 @@ direct create/append/drop/flush DOM API is exposed to JavaScript.
    PAPI, evaluates the named source, and runs the boot sequence.
 4. `__FlushElementTree` performs style/layout commit, returns the document,
    and asks `FrameRequester` for a frame.
-5. The presenting side non-blockingly renders the retained document scene and
-   submits it to its attached target.
+5. The presenting side non-blockingly drains buffered input and resize, then
+   samples the installed `AnimationClock` once and advances every running
+   animation to that instant, then renders the retained document scene and
+   submits it to its attached target. An animation that is still running makes
+   the presenting side ask for the next frame itself, so the loop sustains
+   without waking the Lynx main thread; `LynxView::is_animating` reports the
+   same fact to an offscreen host that drives its own cadence.
 6. The task enqueues sanitized script completion and calls `EventRequester`;
    the awakened host observes it through `pump`. No realm or tree object
    crosses the boundary.

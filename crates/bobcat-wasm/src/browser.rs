@@ -16,8 +16,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
-    WindowTarget, configure_wasm_workers, quickjs_engine_factory,
+    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, ManualClock, PageConfig,
+    Window, WindowTarget, configure_wasm_workers, quickjs_engine_factory,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -405,6 +405,10 @@ pub struct BobcatRenderer {
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
+    /// The animation timeline, stepped from `requestAnimationFrame`'s
+    /// timestamp. A Worker has no monotonic clock Rust can read on
+    /// `wasm32-unknown-unknown`, so the host's frame time is the reading.
+    clock: Arc<ManualClock>,
     script_finished: bool,
     disposed: bool,
 }
@@ -480,12 +484,16 @@ impl BobcatRenderer {
                 .await
                 .map_err(js_error)?;
 
+            let clock = Arc::new(ManualClock::new());
+            view.set_animation_clock(clock.clone());
+
             Ok(Self {
                 view,
                 resources,
                 canvas,
                 frames,
                 events,
+                clock,
                 script_finished: false,
                 disposed: false,
             })
@@ -631,11 +639,18 @@ impl BobcatRenderer {
 
     /// Present a requested frame without exposing the engine or document to
     /// the browser host.
+    ///
+    /// `now_ms` is `requestAnimationFrame`'s `DOMHighResTimeStamp`, which is
+    /// also the animation timeline: every animation in the frame is sampled
+    /// at the instant the host says the frame is for.
     #[wasm_bindgen(js_name = renderIfRequested)]
-    pub fn render_if_requested(&mut self) -> Result<bool, JsValue> {
+    pub fn render_if_requested(&mut self, now_ms: f64) -> Result<bool, JsValue> {
         self.ensure_running()?;
         if !self.frames.take() {
             return Ok(false);
+        }
+        if now_ms.is_finite() {
+            self.clock.set(now_ms / 1000.0);
         }
         self.view.notify_redraw().map_err(js_error)?;
         Ok(true)

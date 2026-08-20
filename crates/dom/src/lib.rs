@@ -31,6 +31,7 @@ pub use stylo_dom::ElementState;
 pub use vello;
 
 pub use crate::render::images::ImageStore;
+pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;

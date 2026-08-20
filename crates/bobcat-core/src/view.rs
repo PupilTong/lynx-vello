@@ -385,6 +385,24 @@ impl<'window, W: Window> LynxView<'window, W> {
         self.engine.notify_redraw()
     }
 
+    /// Installs the host's animation timeline.
+    ///
+    /// Until one is installed, `@keyframes` and transitions resolve to their
+    /// start values and never advance: this runtime reads no OS clock of its
+    /// own. In window mode an active animation keeps requesting frames through
+    /// the installed [`crate::FrameRequester`]; offscreen hosts drive it themselves
+    /// and poll [`Self::is_animating`].
+    pub fn set_animation_clock(&mut self, clock: Arc<dyn crate::AnimationClock>) {
+        self.engine.set_animation_clock(clock);
+    }
+
+    /// Whether the last produced frame left an animation running, and so owes
+    /// the timeline another frame.
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
+        self.engine.is_animating()
+    }
+
     fn next_request_context(&mut self, cancellation: CancellationToken) -> RequestContext {
         let sequence = self.next_request_sequence;
         self.next_request_sequence = self

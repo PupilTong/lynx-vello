@@ -24,6 +24,7 @@ use stylo::data::{ElementDataMut, ElementDataRef, ElementDataWrapper};
 use stylo::dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot};
 use stylo::properties::PropertyDeclarationBlock;
 use stylo::selector_parser::{AttrValue, Lang, NonTSPseudoClass, PseudoElement, SelectorImpl};
+use stylo::servo::animation::AnimationSetKey;
 use stylo::servo_arc::{Arc, ArcBorrow};
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylist::CascadeData;
@@ -38,6 +39,29 @@ use crate::tree::node::{ChildrenIter, Node};
 fn empty_namespace() -> &'static <SelectorImpl as selectors::SelectorImpl>::BorrowedNamespaceUrl {
     static EMPTY: OnceLock<Namespace> = OnceLock::new();
     &EMPTY.get_or_init(Namespace::default).0
+}
+
+/// The key an element's animation state is filed under, or `None` when the
+/// element owns no animation state at all.
+///
+/// Every read of the document's animation map goes through here, and the node
+/// bit is the reason. Stylo asks `has_animations` for every element on every
+/// match-and-cascade, and twice more per candidate through the style-sharing
+/// cache; the map behind it is one document-wide `RwLock`, so an unguarded
+/// lookup puts every Rayon worker on one cache line. Measured on the `css`
+/// benches, that cost documents with no animations at all 3-10x. Keeping the
+/// map unreachable except through this function is what stops that coming
+/// back.
+///
+/// [`OpaqueNode`] carries the bare arena slot with the generation stripped, so
+/// the document drops a freed slot's animations before the slot is reissued
+/// (`Document::free_node`).
+fn animation_key<T: Sync>(
+    node: &Node<T>,
+    pseudo_element: Option<PseudoElement>,
+) -> Option<AnimationSetKey> {
+    node.may_have_animations()
+        .then(|| AnimationSetKey::new(OpaqueNode(node.id().arena_key()), pseudo_element))
 }
 
 impl<T: Sync> NodeInfo for &Node<T> {
@@ -199,16 +223,24 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
 
     fn animation_rule(
         &self,
-        _: &SharedStyleContext,
+        context: &SharedStyleContext,
     ) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
-        None
+        context.animations.get_animation_declarations(
+            &animation_key(self, None)?,
+            context.current_time_for_animations,
+            self.document_lock(),
+        )
     }
 
     fn transition_rule(
         &self,
-        _: &SharedStyleContext,
+        context: &SharedStyleContext,
     ) -> Option<Arc<Locked<PropertyDeclarationBlock>>> {
-        None
+        context.animations.get_transition_declarations(
+            &animation_key(self, None)?,
+            context.current_time_for_animations,
+            self.document_lock(),
+        )
     }
 
     fn state(&self) -> ElementState {
@@ -343,19 +375,49 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     }
 
     fn may_have_animations(&self) -> bool {
-        false
+        Node::may_have_animations(self)
     }
 
-    fn has_animations(&self, _: &SharedStyleContext) -> bool {
-        false
+    fn has_animations(&self, context: &SharedStyleContext) -> bool {
+        let Some(key) = animation_key(self, None) else {
+            return false;
+        };
+        context.animations.has_active_animations(&key)
+            || context.animations.has_active_transitions(&key)
     }
 
-    fn has_css_animations(&self, _: &SharedStyleContext, _: Option<PseudoElement>) -> bool {
-        false
+    fn has_css_animations(
+        &self,
+        context: &SharedStyleContext,
+        pseudo_element: Option<PseudoElement>,
+    ) -> bool {
+        let Some(key) = animation_key(self, pseudo_element) else {
+            return false;
+        };
+        context.animations.has_active_animations(&key)
     }
 
-    fn has_css_transitions(&self, _: &SharedStyleContext, _: Option<PseudoElement>) -> bool {
-        false
+    fn has_css_transitions(
+        &self,
+        context: &SharedStyleContext,
+        pseudo_element: Option<PseudoElement>,
+    ) -> bool {
+        let Some(key) = animation_key(self, pseudo_element) else {
+            return false;
+        };
+        context.animations.has_active_transitions(&key)
+    }
+
+    fn has_animation_only_dirty_descendants(&self) -> bool {
+        Node::has_animation_dirty_descendants(self)
+    }
+
+    unsafe fn set_animation_only_dirty_descendants(&self) {
+        self.set_animation_dirty_descendants_bit(true);
+    }
+
+    unsafe fn unset_animation_only_dirty_descendants(&self) {
+        self.set_animation_dirty_descendants_bit(false);
     }
 
     fn shadow_root(&self) -> Option<&'a Node<T>> {

@@ -37,6 +37,11 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         options.device_pixel_ratio,
     )?;
     view.attach_offscreen()?;
+    // Animations need a reading of OS time; without one the engine holds
+    // every `@keyframes` at its start value. The headless runner already
+    // paces itself off wall time through `FrameClock`, so the same source
+    // drives both.
+    view.set_animation_clock(std::sync::Arc::new(crate::clock::MonotonicClock::new()));
     // Author CSS mounts before the script builds its tree, so the first
     // commit is already styled.
     if let Some(url) = style_sheet_url.as_ref() {

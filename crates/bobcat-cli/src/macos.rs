@@ -197,6 +197,9 @@ impl<'window> MacApplication<'window> {
                 height: physical_size.height,
             },
         )?;
+        // Animations need a reading of OS time; without one the engine holds
+        // every `@keyframes` at its start value.
+        view.set_animation_clock(Arc::new(crate::clock::MonotonicClock::new()));
         // Author CSS mounts before the script builds its tree, so the first
         // commit is already styled.
         if let Some(url) = style_sheet_url.as_ref() {

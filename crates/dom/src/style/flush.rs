@@ -7,7 +7,6 @@ use stylo::context::{
 use stylo::dom::{TElement, TNode};
 use stylo::driver;
 use stylo::global_style_data::STYLE_THREAD_POOL;
-use stylo::servo::animation::DocumentAnimationSet;
 use stylo::shared_lock::StylesheetGuards;
 use stylo::thread_state::{self, ThreadState};
 use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
@@ -35,7 +34,7 @@ pub fn install_style_thread_pool(pool: rayon::ThreadPool) -> Result<(), rayon::T
 
 /// The CSS Paint API is unsupported: no speculative painters are registered.
 #[derive(Debug)]
-struct NoPainters;
+pub(super) struct NoPainters;
 
 impl RegisteredSpeculativePainters for NoPainters {
     fn get(&self, _name: &Atom) -> Option<&dyn RegisteredSpeculativePainter> {
@@ -43,18 +42,18 @@ impl RegisteredSpeculativePainters for NoPainters {
     }
 }
 
-static NO_PAINTERS: NoPainters = NoPainters;
+pub(super) static NO_PAINTERS: NoPainters = NoPainters;
 
 static STYLE_POOL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Balances [`thread_state::enter`] on unwind, so a panicking traversal does
 /// not leave the embedder's thread permanently flagged `LAYOUT`.
-struct LayoutThreadStateGuard {
+pub(super) struct LayoutThreadStateGuard {
     entered: bool,
 }
 
 impl LayoutThreadStateGuard {
-    fn enter() -> Self {
+    pub(super) fn enter() -> Self {
         let entered = !thread_state::get().is_layout();
         if entered {
             thread_state::enter(ThreadState::LAYOUT);
@@ -72,8 +71,18 @@ impl Drop for LayoutThreadStateGuard {
 }
 
 /// The restyle-only traversal: recalculate styles preorder, no postorder pass.
-struct RecalcStyle<'a> {
+pub(super) struct RecalcStyle<'a> {
     shared: SharedStyleContext<'a>,
+}
+
+impl<'a> RecalcStyle<'a> {
+    pub(super) const fn new(shared: SharedStyleContext<'a>) -> Self {
+        Self { shared }
+    }
+
+    pub(super) const fn shared(&self) -> &SharedStyleContext<'a> {
+        &self.shared
+    }
 }
 
 impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
@@ -139,10 +148,10 @@ impl<T: Sync> Document<T> {
                 visited_styles_enabled: false,
                 options: StyleSystemOptions::default(),
                 guards: StylesheetGuards::same(&guard),
-                current_time_for_animations: 0.0,
+                current_time_for_animations: self.animations().now(),
                 traversal_flags: TraversalFlags::empty(),
                 snapshot_map: &snapshots,
-                animations: DocumentAnimationSet::default(),
+                animations: self.animations().context_handle(),
                 registered_speculative_painters: &NO_PAINTERS,
             };
             let traversal = RecalcStyle { shared };
@@ -175,5 +184,8 @@ impl<T: Sync> Document<T> {
         };
         drop(phase);
         self.harvest_flush(harvest_root, snapshots, sink);
+        // The flush is where animations start and stop; the timeline has to
+        // learn what it now owns before the next frame asks whether to tick.
+        self.sync_animation_state();
     }
 }

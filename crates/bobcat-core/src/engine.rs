@@ -486,6 +486,13 @@ pub(crate) struct Engine<'window, W: Window> {
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
+    /// The host's animation timeline. Absent until an embedder installs one,
+    /// and a view without one never animates.
+    clock: Option<Arc<dyn crate::clock::AnimationClock>>,
+    /// Whether the last frame left an animation running. Read without the
+    /// document, because the frame request has to be made whether or not the
+    /// slot was free this frame.
+    animating: bool,
     /// The only `Sender`. It must never be cloned anywhere the script thread
     /// can reach: the channel closing is what ends that thread's loop, and a
     /// surviving clone would leave it parked with a live realm forever.
@@ -531,6 +538,8 @@ impl<'window, W: Window> Engine<'window, W> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
+            clock: None,
+            animating: false,
             script_commands: None,
             thread_bound: PhantomData,
         })
@@ -551,6 +560,41 @@ impl<'window, W: Window> Engine<'window, W> {
         }
         self.script_owner_available = false;
         Ok(self.elements.clone())
+    }
+
+    /// Installs the host's animation timeline. Without one, `@keyframes` and
+    /// transitions resolve to their start values and never advance.
+    pub(crate) fn set_animation_clock(&mut self, clock: Arc<dyn crate::clock::AnimationClock>) {
+        self.clock = Some(clock);
+        self.refresh();
+    }
+
+    /// Whether the last produced frame left an animation running, and so owes
+    /// the timeline another frame.
+    #[must_use]
+    pub(crate) const fn is_animating(&self) -> bool {
+        self.animating
+    }
+
+    /// Samples the clock once and advances the document's animations to it.
+    ///
+    /// Runs on the presenting thread, inside the borrow that is about to
+    /// produce the frame: no script, no DOM mutation, and no hand-off to the
+    /// Lynx main thread. An animation of a property that does not affect
+    /// geometry re-cascades only the elements it touches and never reaches
+    /// layout.
+    ///
+    /// Takes the clock rather than `&self` so it can run while the attached
+    /// output is mutably borrowed.
+    fn advance_animations(
+        clock: Option<&Arc<dyn crate::clock::AnimationClock>>,
+        tree: &mut LynxDocument,
+    ) -> bool {
+        let Some(clock) = clock else {
+            return false;
+        };
+        tree.advance_animations(clock.now_seconds())
+            .needs_next_frame
     }
 
     /// The current physical render-target size in device pixels.
@@ -807,6 +851,11 @@ impl<'window, W: Window> Engine<'window, W> {
                     &mut tree,
                     self.script_commands.as_ref(),
                 );
+                // Input and resize first, then the timeline, so a scroll and
+                // an animation compose in one defined order under one truth;
+                // then render, so an animation that just ended relayouts in
+                // the same frame it ended.
+                self.animating = Self::advance_animations(self.clock.as_ref(), &mut tree);
                 let produced = tree.render();
                 if produced || !graphics.rendered_at(size) {
                     graphics.render_to_target(&tree.scene(), size)?;
@@ -821,7 +870,7 @@ impl<'window, W: Window> Engine<'window, W> {
         // A script/DOM batch can take the slot after requesting this frame.
         // Keep the request alive so event-driven embedders retry instead of
         // losing the only wakeup while presenting the retained target.
-        if tree_was_busy {
+        if tree_was_busy || self.animating {
             frames.request_frame();
         }
         if graphics.rendered_at(size) {
@@ -845,6 +894,7 @@ impl<'window, W: Window> Engine<'window, W> {
             &mut tree,
             self.script_commands.as_ref(),
         );
+        self.animating = Self::advance_animations(self.clock.as_ref(), &mut tree);
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
