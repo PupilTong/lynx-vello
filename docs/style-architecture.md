@@ -172,8 +172,8 @@ What that covers, and what it does not:
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
   `__ReplaceElement`, `__ReplaceElements`, `__SwapElement`),
   `__FlushElementTree`, and web-core's
-  boot sequence. `__CreateList` creates the element but does not yet retain or
-  execute its JavaScript callbacks;
+  boot sequence. `__CreateList` creates the element and retains its JavaScript
+  callbacks, alongside `__UpdateListCallbacks`, but nothing executes them yet;
 - the property surface a Snapshot writes through — `__SetClasses`, `__SetID`,
   `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
   read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
@@ -202,14 +202,24 @@ What that covers, and what it does not:
 - per-component CSS scoping. `StyleInfo` ingestion lands without it: every
   fragment's rules mount globally, which is exactly web-core's own output for
   a bundle compiled with `enableRemoveCSSScope = true` (css id `0`), and the
-  CLI warns when a bundle carries non-zero fragment ids. `__SetCSSId` stays
-  absent from the PAPI surface until the guard synthesis
-  (`:where([l-css-id="N"])`) that gives it meaning exists, together with its
-  parent-component css-id inheritance;
+  CLI warns when a bundle carries non-zero fragment ids. `__SetCSSId` is
+  installed as a sink that records nothing — a card calls it while installing
+  its snapshot runtime, and failing there would block cards whose styles are
+  all global anyway. It starts recording once the guard synthesis
+  (`:where([l-css-id="N"])`) that gives the id meaning exists, together with
+  its parent-component css-id inheritance;
 - viewport-relative `rpx`/`ppx` units have no owner;
-- event *dispatch*, the consuming half of the one member that only records:
-  `__AddEvent` stores handlers in the realm with nothing routing input to them
-  (no phase walk, no gesture arena);
+- the undeliverable half of `__AddEvent`. Registration, the path walk, both
+  `catch` forms and worklet handlers all work; a handler given as a
+  background-thread *name* is filed and never called, because there is no
+  background realm to publish it to, and `global-bindEvent` is filed and never
+  indexed, because the host walks the event path and has no global pass. A
+  callable is ignored outright, as web-core ignores it, even though native
+  Lynx would file it as a Lepus handler. There is no gesture arena either;
+- list cell recycling. `__CreateList` and `__UpdateListCallbacks` file the
+  callbacks; their consumer, `__SetAttribute(…, "update-list-info", …)`,
+  throws, because reproducing it needs the child at an index and the native
+  boundary answers only `parentNode`;
 - the remaining PAPI members (`__AddClass`, `__AddInlineStyle`, the dataset,
   component-info, config, template-part, animation, and selector-query
   members) have no adapter;

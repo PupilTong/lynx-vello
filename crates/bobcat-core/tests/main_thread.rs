@@ -124,10 +124,10 @@ async fn a_view_accepts_only_one_entry_script() {
     ));
 }
 
-/// The realm's `EventTarget` half, end to end against the real element tree:
-/// registration identity, the index the host is told to keep, and the
-/// stop-propagation seam. Delivery itself is driven by the engine's script
-/// thread, which is exercised where that loop lives.
+/// Both registration forms, end to end against the real element tree:
+/// `__AddEventListener`'s standard identity and `__AddEvent`'s one-per-name
+/// filing, over real handles and real node ids. Delivery itself is driven by
+/// the engine's script thread, which is exercised where that loop lives.
 #[tokio::test]
 async fn the_realm_registers_listeners_against_real_node_ids() {
     run(
@@ -153,8 +153,15 @@ async fn the_realm_registers_listeners_against_real_node_ids() {
           if (__GetElementUniqueID(inner) !== 4) {
             throw new Error('the tree shape this test assumes has changed');
           }
-          if (typeof __AddEvent !== 'undefined') {
-            throw new Error('__AddEvent must be gone, not merely unused');
+          // `__AddEvent` files against the same handles, and answers for
+          // the dispatch form it was filed under and no other.
+          const worklet = { type: 'worklet', value: {} };
+          __AddEvent(inner, 'capture-bind', 'tap', worklet);
+          if (__GetEvent(inner, 'tap', 'capture-bind') !== worklet) {
+            throw new Error('a filed handler must read back on a real handle');
+          }
+          if (__GetEvent(inner, 'tap', 'bindEvent') !== undefined) {
+            throw new Error('a filed handler answers for its own form only');
           }
         };
         ",

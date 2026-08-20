@@ -61,6 +61,15 @@ interface BobcatNative {
 
 declare var bobcat: BobcatNative;
 
+/**
+ * Installed on this realm by the card's own bundled worklet runtime, and only
+ * once a card actually compiles a main-thread function. `__AddEvent` reads it
+ * per delivery rather than capturing it, because this file runs first.
+ */
+declare var runWorklet:
+  | ((worklet: unknown, params: unknown[]) => void)
+  | undefined;
+
 declare var __CreatePage: (
   componentID?: unknown,
   componentCSSID?: unknown,
@@ -81,6 +90,7 @@ declare var __CreateList: (
   parentComponentUniqueID?: unknown,
   componentAtIndex?: unknown,
   enqueueComponent?: unknown,
+  ...rest: unknown[]
 ) => object;
 declare var __AppendElement: (parent?: unknown, child?: unknown) => object;
 declare var __InsertElementBefore: (
@@ -111,11 +121,37 @@ declare var __SetInlineStyles: (
   element?: unknown,
   value?: unknown,
 ) => undefined;
+declare var __SetCSSId: (
+  elements?: unknown,
+  cssId?: unknown,
+  entryName?: unknown,
+) => undefined;
 declare var __SetAttribute: (
   element?: unknown,
   name?: unknown,
   value?: unknown,
 ) => undefined;
+declare var __UpdateListCallbacks: (
+  list?: unknown,
+  componentAtIndex?: unknown,
+  enqueueComponent?: unknown,
+  componentAtIndexes?: unknown,
+) => undefined;
+declare var __AddEvent: (
+  element?: unknown,
+  eventType?: unknown,
+  eventName?: unknown,
+  handler?: unknown,
+) => undefined;
+declare var __GetEvent: (
+  element?: unknown,
+  eventName?: unknown,
+  eventType?: unknown,
+) => unknown;
+declare var __GetEvents: (
+  element?: unknown,
+) => { type: string; name: string; function: unknown }[];
+declare var __SetEvents: (element?: unknown, events?: unknown) => undefined;
 declare var __AddEventListener: (
   element?: unknown,
   eventName?: unknown,

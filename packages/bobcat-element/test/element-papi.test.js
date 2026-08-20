@@ -231,11 +231,14 @@ beforeEach(async () => {
   rstest.resetModules();
   mock = createMockBobcat();
   globalThis.bobcat = mock;
+  // Installed by a card's own worklet runtime, never by this file; a test
+  // that wants one puts it here itself.
+  globalThis.runWorklet = undefined;
   await import("../src/element-papi.js");
 });
 
 describe("installation", () => {
-  it("assigns every PAPI global with web-core's arity", () => {
+  it("assigns every PAPI global with the arity its reference declares", () => {
     /** @type {[string, number][]} */
     const arities = [
       ["__CreatePage", 2],
@@ -259,7 +262,13 @@ describe("installation", () => {
       ["__GetTag", 1],
       ["__GetElementUniqueID", 1],
       ["__SetInlineStyles", 2],
+      ["__SetCSSId", 3],
       ["__SetAttribute", 3],
+      ["__UpdateListCallbacks", 4],
+      ["__AddEvent", 4],
+      ["__GetEvent", 3],
+      ["__GetEvents", 1],
+      ["__SetEvents", 2],
       ["__AddEventListener", 4],
       ["__RemoveEventListener", 4],
       ["__StopPropagation", 1],
@@ -277,8 +286,12 @@ describe("installation", () => {
     expect("__DropElement" in globalThis).toBe(false);
   });
 
-  it("does not install __SetCSSId: the scope it names has no consumer", () => {
-    expect("__SetCSSId" in globalThis).toBe(false);
+  it("accepts __SetCSSId and records nothing: the scope it names has no consumer", () => {
+    const element = __CreateView(0);
+    mock.calls.length = 0;
+    expect(__SetCSSId([element], 7, "entry")).toBeUndefined();
+    expect(__SetCSSId([element], null, undefined)).toBeUndefined();
+    expect(mock.calls).toEqual([]);
   });
 
   it("fails loudly when the native object is missing", async () => {
@@ -738,57 +751,57 @@ describe("__FlushElementTree", () => {
 });
 
 
+/** Builds `page > outer > inner` and returns the three handles. */
+function tree() {
+  const page = __CreatePage("card", 0);
+  const outer = __CreateView(0);
+  const inner = __CreateView(0);
+  __AppendElement(page, outer);
+  __AppendElement(outer, inner);
+  return { page, outer, inner };
+}
+
+let nextEventId = 0;
+
+/** Delivers one node's turn as the only call of its own dispatch. */
+function deliver(
+  /** @type {object} */ node,
+  /** @type {object} */ target,
+  /** @type {number} */ phase,
+  /** @type {string} */ name,
+  /** @type {string} */ detailJson = "",
+) {
+  walk([{ node, target, phase }], name, detailJson);
+}
+
+/**
+ * Delivers a whole path under one event id, the way the host does: one id
+ * for the walk, `isLastCall` only on the final step.
+ */
+function walk(
+  /** @type {{ node: object, target: object, phase: number }[]} */ steps,
+  /** @type {string} */ name,
+  /** @type {string} */ detailJson = "",
+) {
+  const eventId = nextEventId;
+  nextEventId += 1;
+  steps.forEach((step, index) => {
+    mock.event_listener_callback?.(
+      __GetElementUniqueID(step.node),
+      __GetElementUniqueID(step.target),
+      step.phase,
+      name,
+      detailJson,
+      eventId,
+      index === steps.length - 1,
+    );
+  });
+}
+
+const BUBBLE = 0;
+const CAPTURE = 1;
+
 describe("event listeners", () => {
-  /** Builds `page > outer > inner` and returns the three handles. */
-  function tree() {
-    const page = __CreatePage("card", 0);
-    const outer = __CreateView(0);
-    const inner = __CreateView(0);
-    __AppendElement(page, outer);
-    __AppendElement(outer, inner);
-    return { page, outer, inner };
-  }
-
-  let nextEventId = 0;
-
-  /** Delivers one node's turn as the only call of its own dispatch. */
-  function deliver(
-    /** @type {object} */ node,
-    /** @type {object} */ target,
-    /** @type {number} */ phase,
-    /** @type {string} */ name,
-    /** @type {string} */ detailJson = "",
-  ) {
-    walk([{ node, target, phase }], name, detailJson);
-  }
-
-  /**
-   * Delivers a whole path under one event id, the way the host does: one id
-   * for the walk, `isLastCall` only on the final step.
-   */
-  function walk(
-    /** @type {{ node: object, target: object, phase: number }[]} */ steps,
-    /** @type {string} */ name,
-    /** @type {string} */ detailJson = "",
-  ) {
-    const eventId = nextEventId;
-    nextEventId += 1;
-    steps.forEach((step, index) => {
-      mock.event_listener_callback?.(
-        __GetElementUniqueID(step.node),
-        __GetElementUniqueID(step.target),
-        step.phase,
-        name,
-        detailJson,
-        eventId,
-        index === steps.length - 1,
-      );
-    });
-  }
-
-  const BUBBLE = 0;
-  const CAPTURE = 1;
-
   it("tells the host the first listener arrived, and only the first", () => {
     const { inner } = tree();
     const uid = __GetElementUniqueID(inner);
@@ -1196,5 +1209,356 @@ describe("event listeners", () => {
     expect(runs).toBe(0);
     deliver(inner, inner, BUBBLE, "tap");
     expect(runs).toBe(1);
+  });
+});
+
+describe("__AddEvent", () => {
+  /**
+   * A worklet handler over a plain callback, plus the `runWorklet` a card's
+   * own worklet runtime would have installed to invoke it. This is the only
+   * handler kind that runs in this realm.
+   *
+   * @param {(event: any) => void} body
+   */
+  function worklet(body) {
+    globalThis.runWorklet = (value, params) => {
+      /** @type {any} */ (value).body(params[0]);
+    };
+    return { type: "worklet", value: { body } };
+  }
+
+  it("files one handler per name and replaces whatever that name held", () => {
+    const { inner } = tree();
+    const first = "3:0:bindtap";
+    const second = "3:1:catchtap";
+
+    __AddEvent(inner, "bindEvent", "tap", first);
+    __AddEvent(inner, "catchEvent", "tap", second);
+
+    // The map is keyed by name alone, so the second call did not add a
+    // registration beside the first: it took its place, type included.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+    expect(__GetEvent(inner, "tap", "catchEvent")).toBe(second);
+    expect(__GetEvents(inner)).toEqual([
+      { type: "catchevent", name: "tap", function: second },
+    ]);
+  });
+
+  it("lowercases both halves, so a card reads back what it wrote", () => {
+    const { inner } = tree();
+    const handler = "3:0:bindtap";
+
+    __AddEvent(inner, "bindEvent", "Tap", handler);
+
+    expect(__GetEvent(inner, "TAP", "BINDEVENT")).toBe(handler);
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: handler },
+    ]);
+  });
+
+  it("removes on a nullish handler", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+
+    __AddEvent(inner, "bindEvent", "tap", undefined);
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("indexes the pass its type selects, and moves when the type moves", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    const handler = "3:0:bindtap";
+
+    __AddEvent(inner, "bindEvent", "tap", handler);
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+    ]);
+
+    __AddEvent(inner, "capture-bind", "tap", handler);
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+      ["enableEventListener", uid, CAPTURE, "tap"],
+    ]);
+  });
+
+  it("shares the host index with __AddEventListener, and neither switches the other off", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    const callback = () => {};
+
+    __AddEventListener(inner, "tap", callback, {});
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    // One index entry covers both kinds, so the second registration says
+    // nothing new.
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+    ]);
+
+    __RemoveEventListener(inner, "tap", callback, {});
+    expect(mock.named("disableEventListener")).toEqual([]);
+
+    __AddEvent(inner, "bindEvent", "tap", null);
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("ignores a callable outright, filing nothing and clearing nothing", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+    mock.calls.length = 0;
+
+    __AddEvent(inner, "bindEvent", "tap", () => {});
+
+    // web-core's `__AddEvent` matches none of its branches on a callable, so
+    // the call does nothing at all — including not clearing the name.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(mock.calls).toEqual([]);
+  });
+
+  it("ignores a callable on an element that filed nothing", () => {
+    const { inner } = tree();
+
+    __AddEvent(inner, "bindEvent", "tap", () => {});
+
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(mock.named("enableEventListener")).toEqual([]);
+  });
+
+  it("runs a worklet handler through the realm's own runWorklet", () => {
+    const { inner } = tree();
+    /** @type {unknown[]} */
+    const runs = [];
+    const value = { _wkltId: "abc" };
+    // Read inside the call: the walk resets `currentTarget` when it ends, so
+    // an event kept past it no longer names the node it was delivered to.
+    globalThis.runWorklet = (worklet, params) => {
+      const event = /** @type {any} */ (params[0]);
+      runs.push(worklet, event.type, event.detail.x, event.currentTarget.uid);
+    };
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value });
+
+    deliver(inner, inner, BUBBLE, "tap", JSON.stringify({ x: 12 }));
+
+    // The worklet body reaches `runWorklet` unwrapped, as its `value`, with
+    // the event as the single positional parameter.
+    expect(runs).toEqual([value, "tap", 12, __GetElementUniqueID(inner)]);
+  });
+
+  it("does not fail a dispatch when no worklet runtime was installed", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value: {} });
+
+    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+  });
+
+  it("files a background-thread handler name and never calls it", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+
+    __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
+
+    // Filed and reported, because a card may read it back — and indexed,
+    // because the form still decides the walk.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+    ]);
+    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+  });
+
+  it("ends the walk for a catch form whose handler cannot run here", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "catchEvent", "tap", "3:0:catchtap");
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    // The form catches, not the handler: nothing ran and the walk still ends.
+    expect(mock.named("stopPropagation")).toHaveLength(1);
+  });
+
+  it("ends the walk for a catch form after its handler ran", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEvent(inner, "capture-catch", "tap", worklet(() => order.push("handler")));
+
+    deliver(inner, inner, CAPTURE, "tap");
+
+    expect(order).toEqual(["handler"]);
+    expect(mock.named("stopPropagation")).toHaveLength(1);
+  });
+
+  it("runs before the __AddEventListener closures on the same node", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", () => order.push("closure"), {});
+    __AddEvent(inner, "bindEvent", "tap", worklet(() => order.push("handler")));
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["handler", "closure"]);
+  });
+
+  it("skips the closures when the handler stops immediate propagation", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", () => order.push("closure"), {});
+    __AddEvent(
+      inner,
+      "bindEvent",
+      "tap",
+      worklet((/** @type {any} */ event) => {
+        order.push("handler");
+        event.stopImmediatePropagation();
+      }),
+    );
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["handler"]);
+  });
+
+  it("is scoped to its own element and pass", () => {
+    const { outer, inner } = tree();
+    let runs = 0;
+    __AddEvent(inner, "bindEvent", "tap", worklet(() => {
+      runs += 1;
+    }));
+
+    deliver(outer, outer, BUBBLE, "tap");
+    deliver(inner, inner, CAPTURE, "tap");
+    expect(runs).toBe(0);
+
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(runs).toBe(1);
+  });
+
+  it("files global-bindEvent apart, and never indexes it", () => {
+    const { inner } = tree();
+    let runs = 0;
+    const handler = worklet(() => {
+      runs += 1;
+    });
+
+    __AddEvent(inner, "global-bindEvent", "tap", handler);
+
+    expect(__GetEvent(inner, "tap", "global-bindEvent")).toBe(handler);
+    // Its own map: a global registration does not displace a path one.
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+    // The host walks the event path and nothing else, so indexing it would
+    // deliver a subset no reference implementation produces.
+    expect(mock.named("enableEventListener")).toEqual([]);
+
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(runs).toBe(0);
+  });
+});
+
+describe("__GetEvents and __SetEvents", () => {
+  it("reports nothing for an element that never filed a handler", () => {
+    const { inner } = tree();
+    expect(__GetEvents(inner)).toEqual([]);
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+  });
+
+  it("lists the path handlers before the global ones", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", "a");
+    __AddEvent(inner, "global-bindEvent", "scroll", "b");
+    __AddEvent(inner, "capture-catch", "longpress", "c");
+
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "a" },
+      { type: "capture-catch", name: "longpress", function: "c" },
+      { type: "global-bindevent", name: "scroll", function: "b" },
+    ]);
+  });
+
+  it("clears before it adds, so a name absent from the list is gone", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    __AddEvent(inner, "bindEvent", "tap", "old");
+
+    __SetEvents(inner, [
+      { type: "bindEvent", name: "longpress", function: "new" },
+    ]);
+
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBeUndefined();
+    expect(__GetEvent(inner, "longpress", "bindEvent")).toBe("new");
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("round-trips what __GetEvents reported", () => {
+    const { inner, outer } = tree();
+    __AddEvent(inner, "capture-bind", "tap", "a");
+    __AddEvent(inner, "global-bindEvent", "scroll", "b");
+
+    __SetEvents(outer, __GetEvents(inner));
+
+    expect(__GetEvents(outer)).toEqual(__GetEvents(inner));
+  });
+
+  it("skips an entry that names no event", () => {
+    const { inner } = tree();
+    __SetEvents(inner, [
+      { type: "bindEvent", function: "a" },
+      { name: "tap", function: "b" },
+      { type: 3, name: 4, function: "c" },
+      { type: "bindEvent", name: "tap", function: "d" },
+    ]);
+
+    expect(__GetEvents(inner)).toEqual([
+      { type: "bindevent", name: "tap", function: "d" },
+    ]);
+  });
+
+  it("clears and stops when handed no list at all", () => {
+    const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", "old");
+
+    __SetEvents(inner, undefined);
+
+    expect(__GetEvents(inner)).toEqual([]);
+  });
+});
+
+describe("list callbacks", () => {
+  it("files a list's callbacks without telling the host anything", () => {
+    const list = __CreateList(0, () => 0, () => {}, {}, () => []);
+    mock.calls.length = 0;
+
+    expect(__UpdateListCallbacks(list, () => 1, () => {}, () => [])).toBe(
+      undefined,
+    );
+    expect(__UpdateListCallbacks(list, null, null, null)).toBe(undefined);
+
+    // Storage only: their consumer needs the child at an index, which the
+    // native boundary cannot answer.
+    expect(mock.calls).toEqual([]);
+  });
+
+  it("still refuses update-list-info, naming what is missing", () => {
+    const list = __CreateList(0, () => 0, () => {});
+    __UpdateListCallbacks(list, () => 0, () => {}, () => []);
+
+    expect(() =>
+      __SetAttribute(list, "update-list-info", {
+        insertAction: [],
+        removeAction: [],
+      })
+    ).toThrow("indexed child access");
   });
 });
