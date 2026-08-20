@@ -1,11 +1,20 @@
 # Lynx XML markup template
 
-This document is an implementation-derived specification of Lynx's single-file
-XML markup template. It describes the parser shared by `lynx-stack`'s merged
-build-time encoder and its proposed buildless web loader, then records where
-those two ingestion paths intentionally differ.
+This document specifies the single-file Lynx XML source envelope accepted by
+lynx-vello. The current grammar uses `engine-version` on the root and a
+quoted `thread` selector on scripts:
 
-The evidence snapshot is **2026-08-16**:
+| Current syntax | Replaced legacy syntax |
+| --- | --- |
+| `<lynx engine-version="4.2">` | `<lynx version="5.4.2">` |
+| `<script thread="main">` | `<script main-thread>` |
+| `<script thread="background">` | `<script background>` |
+
+This is an intentional breaking grammar revision. The replaced spellings are
+rejected rather than treated as aliases.
+
+The inherited envelope and extraction behavior was derived from the upstream
+implementation at the **2026-08-16** evidence snapshot:
 
 - the parser and build-time encoder merged through
   [`lynx-stack#3402`](https://github.com/lynx-family/lynx-stack/pull/3402)
@@ -18,10 +27,10 @@ The evidence snapshot is **2026-08-16**:
   [`TemplateBundleBuilder`](https://github.com/lynx-family/lynx/blob/dbaff6aa072fcf09d627abd571c00fff7857de46/core/template_bundle/lynx_template_bundle.cc#L56-L103),
   but does not contain a public XML parser or a style input.
 
-Consequently, the syntax below is a de facto compatibility contract, not a
-published cross-platform Lynx standard. Statements about the raw-load path are
-draft behavior until #3390 lands. Uppercase requirement words describe what
-the referenced parser accepts, not a recommendation to extend general XML.
+Those references predate the attribute revision and therefore show the legacy
+spellings in their examples. They remain evidence for the restricted
+container, section extraction, and ingestion behavior, not for the current
+attribute names.
 
 The parser and its 45 tests no longer appear in #3390's current diff because
 the same files are already in that PR's base through #3402; their absence from
@@ -57,17 +66,17 @@ compiler backend are unrelated concepts.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE lynx>
-<lynx version="5.4.2">
+<lynx engine-version="4.2">
   <style><![CDATA[
     :root { background: white; }
     .title { color: #222; }
   ]]></style>
 
-  <script main-thread="true"><![CDATA[
+  <script thread="main"><![CDATA[
     // Create and update the page through the Lynx Element PAPI.
   ]]></script>
 
-  <script background="true"><![CDATA[
+  <script thread="background"><![CDATA[
     // Optional background-thread program.
   ]]></script>
 </lynx>
@@ -143,23 +152,23 @@ Doctype           ::= "<!" S* "DOCTYPE" S+ "lynx" S* ">"
 LynxRoot          ::= RootOpen Ignorable
                       (Section Ignorable)*
                       "</lynx>"
-RootOpen          ::= "<lynx" S+ VersionAttribute S* ">"
-VersionAttribute  ::= "version" S* "=" S* QuotedNonEmpty
+RootOpen          ::= "<lynx" S+ EngineVersionAttribute S* ">"
+EngineVersionAttribute
+                  ::= "engine-version" S* "=" S* QuotedNonEmpty
 
 Section           ::= Style | MainScript | BackgroundScript
 Style             ::= "<style" S* ">" Body "</style>"
-MainScript        ::= "<script" S+ MainAttribute S* ">"
+MainScript        ::= "<script" S+ MainThreadAttribute S* ">"
                       Body "</script>"
-BackgroundScript  ::= "<script" S+ BackgroundAttribute S* ">"
+BackgroundScript  ::= "<script" S+ BackgroundThreadAttribute S* ">"
                       Body "</script>"
 
-MainAttribute     ::= "main-thread"
-                    | "main-thread" S* "=" S* QuotedTrue
-BackgroundAttribute
-                   ::= "background"
-                    | "background" S* "=" S* QuotedTrue
+MainThreadAttribute
+                  ::= "thread" S* "=" S* ("\"main\"" | "'main'")
+BackgroundThreadAttribute
+                  ::= "thread" S* "=" S*
+                      ("\"background\"" | "'background'")
 
-QuotedTrue        ::= "\"true\"" | "'true'"
 QuotedNonEmpty    ::= "\"" DoubleQuotedCodeUnit+ "\""
                     | "'" SingleQuotedCodeUnit+ "'"
 DoubleQuotedCodeUnit
@@ -186,33 +195,33 @@ internal subsets are rejected.
 
 ## Root and section constraints
 
-The root opening tag accepts exactly one `version` attribute. Its value must be
-quoted and non-empty, but is otherwise opaque: it is neither validated as a
-version number nor returned to the caller, and it does not select parser or
-runtime behavior. An extra or duplicated attribute rejects the document.
+The root opening tag accepts exactly one `engine-version` attribute. Its value
+must be quoted and non-empty, but is otherwise opaque: the parser returns it as
+`engine_version` without interpreting or negotiating it. An extra or
+duplicated attribute rejects the document.
 
-Non-empty means at least one UTF-16 code unit, so `version=" "` is valid. There
-is no backslash or entity escape mechanism. The first quote matching the opener
-must also be the attribute's last character, and the opening-tag scanner stops
-at the first `>` even inside quotes; a value cannot contain its delimiting quote
-or a literal `>`. Characters such as `<` and `&gt;` are not XML-validated or
-decoded.
+Non-empty means at least one UTF-16 code unit, so `engine-version=" "` is
+valid. There is no backslash or entity escape mechanism. The first quote
+matching the opener must also be the attribute's last character, and the
+opening-tag scanner stops at the first `>` even inside quotes; a value cannot
+contain its delimiting quote or a literal `>`. Characters such as `<` and
+`&gt;` are not XML-validated or decoded.
 
-Four version-like values must not be conflated: the XML declaration body is
-ignored; the root `version` is required and then discarded; an encoded
-`.web.bundle` gets the encoder's independent container version; and #7796's
-native builder injects the current engine version as its target SDK.
+The XML declaration's `version`, the root `engine-version`, and a
+`.web.bundle` container version are distinct. The declaration body is ignored;
+the root value is returned as card metadata; and the binary container version
+belongs to the encoder.
 
 The three section slots have these cardinalities:
 
 | Section | Cardinality | Successful result field | Empty body |
 | --- | --- | --- | --- |
-| `<style>` | zero or one | `style?: string` | `""` |
-| `<script main-thread>` | exactly one | `mainThreadScript: string` | accepted as `""` |
-| `<script background>` | zero or one | `backgroundThreadScript?: string` | `""` |
+| `<style>` | zero or one | `style: Option<&str>` | `Some("")` |
+| `<script thread="main">` | exactly one | `main_thread_script: &str` | accepted as `""` |
+| `<script thread="background">` | zero or one | `background_thread_script: Option<&str>` | `Some("")` |
 
-A missing optional section produces `undefined`; a present but empty section
-produces an empty string. The distinction is preserved by both web translators.
+A missing optional section produces `None`; a present but empty section
+produces `Some("")`. The distinction is preserved through embedder mapping.
 An empty main section satisfies the web parser's structural requirement,
 although the native `TemplateBundleBuilder` in #7796 rejects an empty main
 program. Portable documents should therefore provide a non-empty one.
@@ -220,18 +229,15 @@ program. Portable documents should therefore provide a non-empty one.
 The only accepted script attributes are:
 
 ```xml
-<script main-thread>...</script>
-<script main-thread="true">...</script>
-<script main-thread='true'>...</script>
-<script background>...</script>
-<script background="true">...</script>
-<script background='true'>...</script>
+<script thread="main">...</script>
+<script thread='main'>...</script>
+<script thread="background">...</script>
+<script thread='background'>...</script>
 ```
 
-Whitespace around `=` is allowed. The selected attribute must be the only
-attribute. `false`, differently cased names or values, an unquoted value, both
-attributes together, and arbitrary additional attributes are rejected.
-`<style>` accepts no attributes.
+Whitespace around `=` is allowed. `thread` must be the only attribute.
+Missing, empty, unquoted, or differently cased values and arbitrary additional
+attributes are rejected. `<style>` accepts no attributes.
 
 Sections may be ordered arbitrarily, but a second section assigned to the same
 slot is an error. Unknown root-level tags, processing instructions, namespaces,
@@ -270,36 +276,28 @@ as bare text. Entity references inside CDATA also remain literal text.
 
 ## Parser API and failures
 
-`parseLynxXML(source)` returns a discriminated union and does not throw merely
-because the document is malformed:
+`lynx_xml::parse(source)` returns borrowed metadata and section bodies, or the
+first structural error:
 
-```ts
-type LynxXMLParseResult =
-  | {
-      success: true
-      style: string | undefined
-      mainThreadScript: string
-      backgroundThreadScript: string | undefined
-    }
-  | {
-      success: false
-      error: {
-        offset: number
-        message: string
-        formattedMessage: string
-      }
-    }
+```rust
+pub struct LynxXml<'source> {
+    pub engine_version: &'source str,
+    pub style: Option<&'source str>,
+    pub main_thread_script: &'source str,
+    pub background_thread_script: Option<&'source str>,
+}
 ```
 
-`formattedMessage` is always:
+`ParseError::offset()` counts UTF-16 code units and
+`ParseError::byte_offset()` reports the corresponding UTF-8 byte boundary.
+Its display form is always:
 
 ```text
 invalid TemplateBundle XML at offset <offset>: <message>
 ```
 
-The web offset counts JavaScript string indices, hence UTF-16 code units. The
-native reference cited by the source comments counts UTF-8 bytes. They agree
-for an ASCII prefix and may differ once non-ASCII text precedes the failure.
+The two offsets agree for an ASCII prefix and may differ once non-ASCII text
+precedes the failure.
 
 The parser emits the following messages. Dynamic spellings are shown in angle
 brackets in the table; the actual message includes the parsed tag text.
@@ -310,14 +308,14 @@ brackets in the table; the actual message includes the parsed tag text.
 | comment has no `-->` | `unterminated comment` | comment `<` |
 | `<!...` has no `>` | `unterminated doctype declaration` | declaration `<` |
 | doctype is not the restricted Lynx form | `expected '<!doctype lynx>'` | declaration `<` |
-| root is absent or misspelled | `expected '<lynx version="...">' root element` | expected root position |
+| root is absent or misspelled | `expected '<lynx engine-version="...">' root element` | expected root position |
 | a root prefix whose name boundary was recognized has no `>` | `unterminated '<lynx>' opening tag` | root `<` |
-| root attributes violate the contract | `'<lynx>' requires exactly one non-empty 'version' attribute` | root `<` |
+| root attributes violate the contract | `'<lynx>' requires exactly one non-empty 'engine-version' attribute` | root `<` |
 | bare non-ignorable text occurs between sections | `unexpected content outside a section` | first bad code unit |
 | a section opening tag has no `>` | `unterminated opening tag` | section `<` |
 | an empty or slash-prefixed opening tag appears where a section must begin | `unexpected closing tag` | tag `<` |
 | style has attributes | `'<style>' does not accept attributes` | style `<` |
-| script attributes do not select exactly one slot | `'<script>' requires exactly one of 'main-thread' or 'background'` | script `<` |
+| script attributes do not select exactly one slot | `'<script>' requires exactly one 'thread' attribute with value 'main' or 'background'` | script `<` |
 | another root-level tag is used | `unsupported top-level tag '<TAG>'` | tag `<` |
 | a slot is assigned twice | `duplicate '<OPENING_TAG>' section` | second section `<` |
 | a section closing tag is absent | `missing closing tag '</style>'` or `missing closing tag '</script>'` | index immediately after opening `>` |
@@ -326,16 +324,16 @@ brackets in the table; the actual message includes the parsed tag text.
 | text between the initial CDATA opener and final `]]>` contains an earlier `]]>` | `unexpected content after the CDATA section` | index immediately after opening `>` |
 | root closing tag is absent | `missing closing tag '</lynx>'` | EOF |
 | non-ignorable content follows the root | `unexpected content after '</lynx>'` | first trailing code unit |
-| no main section was seen | `missing '<script main-thread>' section` | EOF after trailing ignorable content |
+| no main section was seen | `missing '<script thread="main">' section` | EOF after trailing ignorable content |
 
 For a duplicate section, `<OPENING_TAG>` is the second opening tag's
-ASCII-trimmed text, for example `script main-thread="true"`.
+ASCII-trimmed text, for example `script thread="main"`.
 
 The implementation also contains a defensive `unknown error` fallback, but no
 normal parser branch reaches it.
 
 A bare `<lynx` at EOF does not pass the root-name boundary check and therefore
-uses the earlier `expected '<lynx version="...">' root element` error. The
+uses the earlier `expected '<lynx engine-version="...">' root element` error. The
 unterminated-root message applies after the name was followed by ASCII
 whitespace but no `>` was found.
 
@@ -345,6 +343,7 @@ Both web ingestion paths start with the same logical lowering:
 
 | XML source | Web template field |
 | --- | --- |
+| `<lynx engine-version="...">` | returned as source metadata; not currently applied to Bobcat runtime policy |
 | `<style>` | stylesheet under CSS id `"0"` |
 | main-thread script | `lepusCode.root` |
 | background script | `manifest["/app-service.js"]` |
@@ -495,7 +494,8 @@ for more than the merged web build path should:
 - prefer exactly one CDATA wrapper, and rewrite a payload that itself contains
   `]]>`;
 - restrict CSS to tokenizable ordinary rules, `@font-face`, and `@keyframes`;
-- treat the `version` value as required metadata, not feature negotiation;
+- treat the `engine-version` value as required metadata, not feature
+  negotiation;
 - not depend on diagnostic offsets matching after non-ASCII text.
 
 ## Known specification gaps
@@ -521,10 +521,9 @@ These are observed gaps rather than rules to guess around:
 6. **Conditional CSS.** The merged encoder drops conditional groups; the open
    raw web loader preserves them for the browser. There is no single result to
    promise across both paths.
-7. **Opaque version.** A version is syntactically mandatory but has no defined
-   validation, negotiation, or compatibility effect in the web parser. It is
-   not passed to #7796's builder, whose target SDK is instead the current engine
-   version.
+7. **Opaque engine version.** An engine version is syntactically mandatory and
+   returned by the parser, but Bobcat does not yet validate it against the host
+   engine or change runtime behavior based on it.
 
 ## Implications for lynx-vello
 
@@ -534,14 +533,15 @@ at its reference-embedder boundaries. A Lynx XML card compiled with
 format; raw XML instead takes the explicit source-front-end path below.
 
 `crates/lynx-xml` implements the separate source-parsing front end: it validates
-the restricted grammar and returns borrowed style, main-thread script, and
-background-thread script sections. Its primary error offset counts UTF-16 code
-units like the reference web parser, while `byte_offset()` exposes the same
-position as a UTF-8 byte boundary for Rust callers. The parser deliberately
-does not sniff inputs, perform I/O, apply the fixed template mapping, parse CSS,
-encode a bundle, or launch a runtime. Rust `&str` cannot represent the lone
-UTF-16 surrogates that a JavaScript string can contain; this does not affect the
-raw UTF-8/TextDecoder ingestion path.
+the restricted grammar and returns the borrowed engine version, style,
+main-thread script, and background-thread script. Its primary error offset
+counts UTF-16 code units like the reference web parser, while `byte_offset()`
+exposes the same position as a UTF-8 byte boundary for Rust callers. The parser
+deliberately does not sniff inputs, perform I/O, apply the fixed template
+mapping, parse CSS, encode a bundle, negotiate the engine version, or launch a
+runtime. Rust `&str` cannot represent the lone UTF-16 surrogates that a
+JavaScript string can contain; this does not affect the raw UTF-8/TextDecoder
+ingestion path.
 
 `bobcat-cli` and `bobcat-wasm` implement the fixed mapping as explicit
 embedder/source-front-end work. They register the main-thread body as a script,
@@ -558,7 +558,10 @@ rewrites are not synthesized for raw fragments. This integration remains an
 explicit embedder/source-front-end path and is not hidden inside
 `lynx-template-decoder` as another binary encoding.
 
-## Primary evidence
+## Historical upstream evidence
+
+These sources establish the inherited restricted-envelope behavior. They
+predate the current attribute spellings described at the top of this document.
 
 - [`parseLynxXML.ts` at #3390 head](https://github.com/lynx-family/lynx-stack/blob/cfaed8c5d5e320082aa8288fafbca4fe1d3b4ecb/packages/web-platform/web-core/ts/common/xml/parseLynxXML.ts)
   and its

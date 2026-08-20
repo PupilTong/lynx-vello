@@ -208,12 +208,12 @@ fn author_css_from_raw_lynx_xml_renders() {
 fn styled_lynx_xml() -> String {
     concat!(
         "\u{feff}\n",
-        "<lynx version=\"5.4.2\">\n",
+        "<lynx engine-version=\"4.2\">\n",
         "<style><![CDATA[\n",
         "page { display: linear; }\n",
         ".xml-styled { width: 16px; height: 12px; background-color: #ff0000; }\n",
         "]]></style>\n",
-        "<script main-thread><![CDATA[\n",
+        "<script thread=\"main\"><![CDATA[\n",
         "globalThis.renderPage = function renderPage() {\n",
         "  const page = __CreatePage('card', 0);\n",
         "  const view = __CreateView(0);\n",
@@ -221,7 +221,7 @@ fn styled_lynx_xml() -> String {
         "  __AppendElement(page, view);\n",
         "};\n",
         "]]></script>\n",
-        "<script background><![CDATA[]]></script>\n",
+        "<script thread=\"background\"><![CDATA[]]></script>\n",
         "</lynx>\n",
     )
     .to_owned()

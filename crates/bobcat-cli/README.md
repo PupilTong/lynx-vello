@@ -20,9 +20,11 @@ bobcat -i file:///absolute/path/to/card.lynx.xml --headless
 Input selection is content-based rather than extension-based. After leading
 ASCII whitespace and UTF-8 byte-order marks are skipped for sniffing, a `<`
 selects Lynx XML; every other input goes through the web-bundle decoder. XML is
-then decoded as strict UTF-8 and parsed with the restricted Lynx XML grammar.
-Its optional `<style>` body is mounted as author CSS before the required
-main-thread script runs. XML uses `defaultDisplayLinear = false`,
+then decoded as strict UTF-8 and parsed with the restricted Lynx XML grammar,
+including the required `engine-version` root attribute and
+`<script thread="main">` section. Its optional `<style>` body is mounted as
+author CSS before the required main-thread script runs. XML uses
+`defaultDisplayLinear = false`,
 `defaultOverflowVisible = false`, and `enableCSSSelector = true`.
 
 Both modes expose a small debugger-style prompt. Screenshots are captured from
