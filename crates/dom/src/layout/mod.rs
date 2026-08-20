@@ -24,7 +24,7 @@ pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::tree::document::{Document, NodeLayoutState};
+use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -135,7 +135,7 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
-        let (boundary, reached_root) = {
+        let (pending, reached_root) = {
             let (tree, state, parked) = self.layout_parts();
             let slot = tree
                 .slot(id)
@@ -143,38 +143,57 @@ impl<T> Document<T> {
             let start = tree.at(slot);
             state.clear_layout_cache(slot);
 
-            let mut boundary = None;
+            let mut pending = None;
             let mut reached_root = true;
             let mut current = start.flat_parent_id();
             while let Some(node_id) = current {
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
+                let node_state = &state.at(node_slot).slot;
+                if node_state.layout_cache_is_empty() {
+                    // Nothing above needs clearing: either an earlier
+                    // invalidation already walked past here (whatever it
+                    // recorded still stands), the node sits parked for a
+                    // committed-input relayout (recording clears its cache),
+                    // or it was never laid out (detached or hidden).
+                    reached_root = false;
+                    break;
+                }
                 let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;
                 }
-                let is_boundary = style_view.as_ref().is_some_and(is_relayout_boundary);
-                if is_boundary && parked.contains(&node_id) {
-                    reached_root = false;
-                    break;
-                }
-                let boundary_input = is_boundary
-                    .then(|| state.at(node_slot).slot.committed_input())
-                    .flatten();
+                let scheduled = if style_view.as_ref().is_some_and(is_relayout_boundary) {
+                    node_state
+                        .committed_input()
+                        .map(|input| (node_id, input, RelayoutKind::Boundary))
+                } else if node.is_element() {
+                    // A committed input the parent imposed independently of
+                    // this subtree's content survives the mutation, so the
+                    // subtree can relayout in place under it; run_layout
+                    // verifies the output stayed identical before trusting it.
+                    node_state
+                        .committed_independent()
+                        .map(|(input, previous)| {
+                            (node_id, input, RelayoutKind::InPlace { previous })
+                        })
+                } else {
+                    None
+                };
                 state.clear_layout_cache(node_slot);
-                if let Some(input) = boundary_input {
-                    boundary = Some((node_id, input));
+                if let Some(entry) = scheduled {
+                    pending = Some(entry);
                     reached_root = false;
                     break;
                 }
                 current = node.flat_parent_id();
             }
-            (boundary, reached_root)
+            (pending, reached_root)
         };
         self.mark_layout_dirty(reached_root);
-        if let Some((boundary_id, committed_input)) = boundary {
-            self.record_relayout_root(boundary_id, committed_input);
+        if let Some((root_id, committed_input, kind)) = pending {
+            self.record_relayout_root(root_id, committed_input, kind);
         }
     }
 
@@ -244,7 +263,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 640, 656, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 440, 456, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

@@ -102,6 +102,12 @@ struct FlexItem<N> {
     main_position: f32,
     cross_position: f32,
     main_size_is_definite: bool,
+    /// Per-axis: every value the container's algorithm reads from this item
+    /// (flex base, automatic minimum, hypothetical/used size) is style-imposed
+    /// rather than measured, so the item's committed input cannot change when
+    /// only its own subtree content changes. Feeds the committed-cache
+    /// content-independence mark consumed by in-place relayout hosts.
+    content_independent: Size<bool>,
 }
 super::util::impl_item_geometry!(FlexItem);
 
@@ -263,7 +269,17 @@ where
         main_position: 0.0,
         cross_position: 0.0,
         main_size_is_definite: false,
+        content_independent: Size::new(false, false),
     }
+}
+
+/// Whether any of the item's sizing properties on `axis` is an intrinsic
+/// keyword, making the resolved constraint a measurement of its content.
+#[inline]
+fn axis_has_intrinsic_style<N>(item: &FlexItem<N>, axis: Axis) -> bool {
+    item.intrinsic.preferred(axis).is_intrinsic()
+        || item.intrinsic.minimum(axis).is_intrinsic()
+        || item.intrinsic.maximum(axis).is_intrinsic()
 }
 
 /// Lazily memoized main-axis measurements for one flex base-size pass.
@@ -538,6 +554,15 @@ fn determine_flex_base_sizes<T>(
                 content_suggestion.min(axes.main.size(item.max_size).unwrap_or(f32::INFINITY));
             content_suggestion.max(main_floor)
         };
+
+        let min_is_content_free = explicit_min.is_some()
+            || item.overflow.x.is_scrollable()
+            || item.overflow.y.is_scrollable();
+        let main_independent = definite_basis.is_some()
+            && min_is_content_free
+            && !axis_has_intrinsic_style(item, axes.main);
+        axes.main
+            .set_size(&mut item.content_independent, main_independent);
 
         item.hypothetical_main = clamp_axis(
             item.flex_basis,
@@ -911,20 +936,27 @@ fn determine_hypothetical_cross_sizes<T>(
                         )
                     })
                 });
-            let cross_has_intrinsic_style = item.intrinsic.preferred(axes.cross).is_intrinsic()
-                || item.intrinsic.minimum(axes.cross).is_intrinsic()
-                || item.intrinsic.maximum(axes.cross).is_intrinsic();
+            let cross_has_intrinsic_style = axis_has_intrinsic_style(item, axes.cross);
 
             if !baseline_is_consumed
                 && !cross_has_intrinsic_style
                 && let Some(cross) = resolved_cross
             {
+                let imposed = if axes.cross.size(item.preferred_size).is_some() {
+                    axes.cross.size(item.preferred_definite)
+                } else {
+                    // `stretched_cross`: the single line spans a definite
+                    // container cross size, so the stretch target is imposed.
+                    true
+                };
+                axes.cross.set_size(&mut item.content_independent, imposed);
                 item.hypothetical_cross = cross;
                 item.target_cross = cross;
                 item.measured_baselines = Point::NONE;
                 item.baseline = cross;
                 continue;
             }
+            axes.cross.set_size(&mut item.content_independent, false);
 
             let mut known = Size::NONE;
             axes.main.set_size(&mut known, Some(item.target_main));
@@ -1052,7 +1084,12 @@ fn stretch_lines(
     }
 }
 
-fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes) {
+fn determine_used_cross_sizes<N>(
+    items: &mut [FlexItem<N>],
+    lines: &[FlexLine],
+    axes: Axes,
+    line_cross_imposed: bool,
+) {
     for line in lines {
         for item in &mut items[line.start..line.end] {
             let inset_size = item.box_floor();
@@ -1062,6 +1099,8 @@ fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], 
                 && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
                 && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
             item.target_cross = if should_stretch {
+                let imposed = line_cross_imposed && !axis_has_intrinsic_style(item, axes.cross);
+                axes.cross.set_size(&mut item.content_independent, imposed);
                 clamp_axis(
                     line.cross_size - axes.cross.sum(item.margin),
                     axes.cross.size(item.min_size),
@@ -1347,6 +1386,10 @@ where
             layout.padding = item.padding;
             layout.margin = item.margin;
             tree.set_unrounded_layout(state, item.key.node, layout);
+            tree.layout_mut(state, item.key.node)
+                .set_committed_content_independent(
+                    item.content_independent.width && item.content_independent.height,
+                );
 
             accumulate_scrollable_overflow(
                 &mut content_size,
@@ -1791,7 +1834,12 @@ where
         line.cross_size = inner_cross;
     }
     stretch_lines(&mut lines, flex_wrap, align_content, inner_cross, cross_gap);
-    determine_used_cross_sizes(&mut items, &lines, axes);
+    determine_used_cross_sizes(
+        &mut items,
+        &lines,
+        axes,
+        flex_wrap == flex_wrap::T::Nowrap && cross_was_definite,
+    );
     distribute_main_axis(
         &mut items,
         &lines,
@@ -2016,6 +2064,7 @@ mod tests {
             main_position: 0.0,
             cross_position: 0.0,
             main_size_is_definite: false,
+            content_independent: Size::new(false, false),
         }
     }
 
@@ -2326,7 +2375,7 @@ mod tests {
         );
         assert_eq!(items[0].measured_baselines.y, Some(5.0));
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::Nowrap, Some(40.0));
-        determine_used_cross_sizes(&mut items, &lines, axes);
+        determine_used_cross_sizes(&mut items, &lines, axes, true);
         assert_eq!(
             items.each_ref().map(|item| item.target_cross),
             [40.0, 30.0, 40.0]
