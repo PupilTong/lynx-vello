@@ -795,6 +795,26 @@ mod implementation {
             guard.finish(result, ErrorPhase::ConstructValue)
         }
 
+        /// Reads a named property, enforcing realm affinity and interrupts.
+        ///
+        /// An absent property is `undefined`, not an error: a host looking for
+        /// a callback the realm may not have installed asks for it and checks
+        /// what came back.
+        pub fn property(&mut self, target: &Value, name: &str) -> Result<Value, Error> {
+            self.reclaim();
+            self.ensure_affinity(target, ErrorPhase::ConstructValue)?;
+            let name = property_name(name)?;
+            let context = self.inner.context.as_ptr();
+            let guard = self.inner.interrupt.begin();
+            let raw =
+                unsafe { ffi::qjs_get_property(context, target.inner.raw.as_ptr(), name.as_ptr()) };
+            let result = match NonNull::new(raw) {
+                Some(raw) => Ok(Value::from_raw(Rc::clone(&self.inner), raw)),
+                None => Err(self.capture_exception(context, ErrorPhase::ConstructValue)),
+            };
+            guard.finish(result, ErrorPhase::ConstructValue)
+        }
+
         /// Creates a JavaScript callable backed by a Rust closure.
         pub fn function<F>(&mut self, name: &str, arity: u32, handler: F) -> Result<Value, Error>
         where

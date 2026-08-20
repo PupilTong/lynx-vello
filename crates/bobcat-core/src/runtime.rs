@@ -1,9 +1,12 @@
 //! Engine-owned Lynx main-thread runtime over an injected JavaScript VM.
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
+
+use dom::event::EventSteps;
 
 use crate::engine::SharedTree;
 use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
@@ -109,10 +112,33 @@ impl Drop for TreeHandle {
     }
 }
 
+/// The nodes a walk should visit for one event name: `(node, is capture pass)`.
+type ListenerNodes = HashSet<(dom::NodeId, bool)>;
+
+/// What the realm has told the host about listeners, and what it tells it
+/// during a walk.
+///
+/// Shared with the host functions that maintain it, so it is `Rc` rather than
+/// owned: `bobcat.enableEventListener` and the dispatch driver are different
+/// stack frames on the same thread.
+#[derive(Default)]
+struct EventState {
+    /// The nodes the realm has a listener on, per event name and pass. Keyed
+    /// by name first so a walk resolves it once and then tests each step
+    /// without touching the name again — and so an event no listener wants
+    /// costs one lookup for the whole walk.
+    listeners: RefCell<HashMap<Arc<str>, ListenerNodes>>,
+    /// Set by `bobcat.stopPropagation`. A pure flag write: the realm is inside
+    /// a `call_host_member` when it runs, and re-entering the realm from a
+    /// host function would nest an execution guard, which `QuickJS` refuses.
+    stopped: Cell<bool>,
+}
+
 /// The private main-thread runtime used by the engine pipeline.
 pub(crate) struct MainThreadRuntime {
     engine: Box<dyn ScriptEngine>,
     tree: Rc<RefCell<TreeHandle>>,
+    events: Rc<EventState>,
 }
 
 impl fmt::Debug for MainThreadRuntime {
@@ -138,8 +164,83 @@ impl MainThreadRuntime {
         let mut engine = factory
             .create()
             .map_err(|error| MainThreadError::from_engine("creating the script VM", error))?;
-        let tree = install_bobcat(engine.as_mut(), elements, on_flush)?;
-        Ok(Self { engine, tree })
+        let events = Rc::new(EventState::default());
+        let tree = install_bobcat(engine.as_mut(), elements, on_flush, &events)?;
+        Ok(Self {
+            engine,
+            tree,
+            events,
+        })
+    }
+
+    /// Delivers a path the presenting side already computed.
+    ///
+    /// The split is deliberate. The presenting thread holds the document when
+    /// it routes an input event, so building the path there costs it no extra
+    /// borrow, and it must stay responsive — a long task here cannot be
+    /// allowed to stop scrolling. This thread owns the realm, which cannot
+    /// move, so delivery has to happen here.
+    ///
+    /// Nothing has to guard the window in between. A `NodeId` names one node
+    /// for the life of the document — freeing retires it — so a step whose
+    /// node was freed since the path was built resolves to no handle and
+    /// reaches no one, which is exactly what should happen.
+    ///
+    /// Returns whether anything was delivered.
+    pub(crate) fn dispatch_event(
+        &mut self,
+        steps: &EventSteps,
+        name: &str,
+        detail_json: &str,
+    ) -> Result<bool, MainThreadError> {
+        let name: Arc<str> = Arc::from(name);
+
+        // One lookup for the whole walk, and the first thing done: an event no
+        // listener registered for never reaches the realm, never touches the
+        // name again, and never takes the document.
+        let nodes = {
+            let listeners = self.events.listeners.borrow();
+            match listeners.get(&name) {
+                Some(nodes) => nodes.clone(),
+                None => return Ok(false),
+            }
+        };
+
+        self.events.stopped.set(false);
+        let mut delivered = false;
+        for step in steps.steps() {
+            if self.events.stopped.get() {
+                break;
+            }
+            if !nodes.contains(&(step.node, step.capture)) {
+                continue;
+            }
+            let arguments = [
+                node_id_value(step.node),
+                node_id_value(step.target),
+                HostValue::Number(f64::from(u8::from(step.capture))),
+                HostValue::String(Arc::clone(&name)),
+                HostValue::String(Arc::from(detail_json)),
+            ];
+            let called =
+                self.engine
+                    .call_host_member("bobcat", "event_listener_callback", &arguments);
+            // Before anything else, including propagating a failure. Building
+            // the event object alone takes the document — it reads two ids —
+            // so a listener that merely throws would otherwise strand it in
+            // the hand-off slot, and nothing could ever put it back: the only
+            // code that releases needs a next dispatch, and a next dispatch is
+            // only built while the tree is held.
+            self.tree.borrow_mut().release();
+            if !called
+                .map_err(|error| MainThreadError::from_engine("delivering an event", error))?
+            {
+                // The realm published no callback; nothing on this path will.
+                break;
+            }
+            delivered = true;
+        }
+        Ok(delivered)
     }
 
     pub(crate) fn evaluate_main_thread_script(
@@ -193,13 +294,15 @@ fn install_bobcat(
     engine: &mut dyn ScriptEngine,
     elements: SharedTree,
     on_flush: impl Fn() + 'static,
+    events: &Rc<EventState>,
 ) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         slot: elements,
         taken: None,
     }));
 
-    install_bobcat_object(engine, &handle, on_flush)?;
+    install_bobcat_object(engine, &handle, on_flush, events)?;
+    install_event_members(engine, events)?;
     engine
         .execute_script(ELEMENT_PAPI_SOURCE, ELEMENT_PAPI_SOURCE_NAME)
         .map_err(|error| MainThreadError::from_engine("installing the Element PAPI", error))?;
@@ -222,6 +325,7 @@ fn install_bobcat_object(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
+    events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     let tree = Rc::clone(handle);
     install(engine, "createPage", 0, move |_arguments| {
@@ -304,12 +408,17 @@ fn install_bobcat_object(
     })?;
 
     let tree = Rc::clone(handle);
+    let state = Rc::clone(events);
     install(engine, "dropElement", 1, move |arguments| {
         let node = node_id_argument("bobcat.dropElement", arguments, 0)?;
         let mut tree = borrow_tree("bobcat.dropElement", &tree)?;
         let document = tree.tree();
         validate_removable(document, "bobcat.dropElement", node)?;
         document.drop_element(node);
+        state.listeners.borrow_mut().retain(|_, nodes| {
+            nodes.retain(|(id, _)| *id != node);
+            !nodes.is_empty()
+        });
         Ok(HostValue::Undefined)
     })?;
 
@@ -317,6 +426,55 @@ fn install_bobcat_object(
     install(engine, "flushElementTree", 0, move |_arguments| {
         borrow_tree("bobcat.flushElementTree", &tree)?.flush();
         on_flush();
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(())
+}
+
+/// Installs the three members the realm's `EventTarget` speaks to.
+///
+/// None of them touches the document. The first two only maintain an index —
+/// which nodes are worth visiting — and the third only sets a flag. That is
+/// not an optimization: `stopPropagation` runs while the host is inside a call
+/// into the realm, and re-entering the realm from a host function would nest
+/// an execution guard, which `QuickJS` refuses.
+fn install_event_members(
+    engine: &mut dyn ScriptEngine,
+    events: &Rc<EventState>,
+) -> Result<(), MainThreadError> {
+    let state = Rc::clone(events);
+    install(engine, "enableEventListener", 3, move |arguments| {
+        let node = node_id_argument("bobcat.enableEventListener", arguments, 0)?;
+        let capture = capture_argument("bobcat.enableEventListener", arguments, 1)?;
+        let name = string_argument("bobcat.enableEventListener", arguments, 2)?;
+        state
+            .listeners
+            .borrow_mut()
+            .entry(Arc::from(name))
+            .or_default()
+            .insert((node, capture));
+        Ok(HostValue::Undefined)
+    })?;
+
+    let state = Rc::clone(events);
+    install(engine, "disableEventListener", 3, move |arguments| {
+        let node = node_id_argument("bobcat.disableEventListener", arguments, 0)?;
+        let capture = capture_argument("bobcat.disableEventListener", arguments, 1)?;
+        let name = string_argument("bobcat.disableEventListener", arguments, 2)?;
+        let mut listeners = state.listeners.borrow_mut();
+        if let Some(nodes) = listeners.get_mut(name) {
+            nodes.remove(&(node, capture));
+            if nodes.is_empty() {
+                listeners.remove(name);
+            }
+        }
+        Ok(HostValue::Undefined)
+    })?;
+
+    let state = Rc::clone(events);
+    install(engine, "stopPropagation", 0, move |_arguments| {
+        state.stopped.set(true);
         Ok(HostValue::Undefined)
     })?;
 
@@ -557,6 +715,15 @@ fn optional_node_id_argument(
     }
 }
 
+/// The `type_id` the realm registers with: `0` bubble, `1` capture.
+fn capture_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+    match *argument(arguments, index) {
+        HostValue::Number(0.0) => Ok(false),
+        HostValue::Number(1.0) => Ok(true),
+        _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
+    }
+}
+
 fn string_argument<'a>(
     function: &str,
     arguments: &'a [HostValue],
@@ -580,6 +747,11 @@ mod tests {
     /// these read as the small integers the PAPI hands out.
     fn node_id(bits: u64) -> dom::NodeId {
         dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
+    }
+
+    /// The path the presenting side would compute for `target`.
+    fn steps(elements: &SharedTree, target: u64) -> EventSteps {
+        elements.tree().event_steps(node_id(target), true, true)
     }
 
     fn runtime() -> (MainThreadRuntime, SharedTree) {
@@ -912,7 +1084,54 @@ mod tests {
     }
 
     #[test]
-    fn event_registrations_stay_in_the_realm() {
+    fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const outer = __CreateView(0);
+                  const inner = __CreateView(0);
+                  __AppendElement(page, outer);
+                  __AppendElement(outer, inner);
+                  // A registration is weak by its handle, so an app that wants
+                  // its listeners to survive holds its elements. ReactLynx's
+                  // snapshot instances do; this stands in for them.
+                  globalThis.held = [page, outer, inner];
+                  const note = (label) => (event) =>
+                    seen.push(label + ':' + event.currentTarget.uid + ':' + event.eventPhase);
+                  __AddEventListener(page, 'tap', note('page-capture'), { capture: true });
+                  __AddEventListener(inner, 'tap', note('inner'), {});
+                  // `outer` registers nothing, so the walk must skip it.
+                };
+                ",
+                "app:///listeners.js",
+            )
+            .expect("main-thread script");
+
+        let target = 4;
+        let delivered = runtime
+            .dispatch_event(&steps(&elements, target), "tap", "{\"x\":1}")
+            .expect("dispatch");
+        assert!(delivered);
+
+        runtime
+            .evaluate(
+                r"
+                if (seen.join('|') !== 'page-capture:2:1|inner:4:2') {
+                  throw new Error('unexpected deliveries: ' + seen.join('|'));
+                }
+                ",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+    }
+
+    #[test]
+    fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -921,32 +1140,132 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   const view = __CreateView(0);
                   __AppendElement(page, view);
-                  const worklet = { type: 'worklet', value: { _wkltId: '1:2' } };
-                  __AddEvent(view, 'bindEvent', 'Tap', 'handler:1');
-                  __AddEvent(view, 'bindEvent', 'Tap', worklet);
-                  if (__GetEvent(view, 'tap', 'bindevent') !== 'handler:1') {
-                    throw new Error('the background slot must survive the worklet one');
-                  }
-                  const events = __GetEvents(view);
-                  if (events.length !== 2 || events[1].function !== worklet) {
-                    throw new Error('both slots must be reported, got ' + events.length);
-                  }
-                  __AddEvent(view, 'bindEvent', 'tap', null);
-                  if (__GetEvents(view).length !== 0) {
-                    throw new Error('a null handler must clear both slots');
-                  }
+                  globalThis.held = [page, view];
+                  __AddEventListener(view, 'tap', () => {
+                    // The document is back in its slot while this runs, which
+                    // is the whole reason the path is computed up front.
+                    __SetAttribute(view, 'tapped', 'yes');
+                  }, {});
                 };
                 ",
-                "app:///events.js",
+                "app:///mutate.js",
             )
             .expect("main-thread script");
 
-        let elements = elements.tree();
-        let view = elements.get(node_id(3)).expect("the view is live");
+        runtime
+            .dispatch_event(&steps(&elements, 3), "tap", "")
+            .expect("dispatch");
+
         assert_eq!(
-            view.attributes().len(),
-            0,
-            "registration is realm bookkeeping, not a DOM mutation"
+            elements
+                .tree()
+                .get(node_id(3))
+                .expect("the view is live")
+                .attribute("tapped"),
+            Some("yes")
+        );
+    }
+
+    #[test]
+    fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  // Deliberately unheld: this is the element a sweep collects.
+                  const doomed = __CreateView(0);
+                  __AppendElement(page, doomed);
+                  globalThis.doomed = __GetElementUniqueID(doomed);
+                  globalThis.held = [page, view];
+                  __AddEventListener(page, 'tap', () => seen.push('page'), { capture: true });
+                  __AddEventListener(view, 'tap', () => seen.push('view'), {});
+                };
+                ",
+                "app:///collect.js",
+            )
+            .expect("main-thread script");
+
+        let steps = steps(&elements, 3);
+        // Free the unrelated element the way a finalizer would, between the
+        // path being built and the walk running.
+        runtime
+            .evaluate("bobcat.dropElement(doomed);", "app:///sweep.js", "sweeping")
+            .expect("sweep");
+
+        runtime.dispatch_event(&steps, "tap", "").expect("dispatch");
+
+        // A collected handle is routine — a ReactLynx re-render drops them
+        // constantly — so it must not silently cost the rest of the walk.
+        runtime
+            .evaluate(
+                "if (seen.join('|') !== 'page|view') throw new Error('truncated: ' + seen.join('|'));",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+    }
+
+    #[test]
+    fn stopping_propagation_ends_the_walk() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                  __AddEventListener(page, 'tap', (event) => {
+                    seen.push('page');
+                    __StopPropagation(event);
+                  }, { capture: true });
+                  __AddEventListener(view, 'tap', () => seen.push('view'), {});
+                };
+                ",
+                "app:///stop.js",
+            )
+            .expect("main-thread script");
+
+        runtime
+            .dispatch_event(&steps(&elements, 3), "tap", "")
+            .expect("dispatch");
+
+        runtime
+            .evaluate(
+                "if (seen.join('|') !== 'page') throw new Error('got ' + seen.join('|'));",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
+    }
+
+    #[test]
+    fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  __AppendElement(page, __CreateView(0));
+                };
+                ",
+                "app:///quiet.js",
+            )
+            .expect("main-thread script");
+
+        assert!(
+            !runtime
+                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .expect("dispatch"),
+            "with an empty listener index the walk crosses the boundary zero times"
         );
     }
 

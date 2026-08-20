@@ -14,6 +14,7 @@ extern crate self as dom;
 #[path = "../tests/common/mod.rs"]
 mod test_common;
 
+pub mod event;
 pub mod input;
 pub mod layout;
 mod paint;

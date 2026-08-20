@@ -30,24 +30,41 @@
 //! **UA default action** the event resolves to — today, scrolling a scroll
 //! container. It reports both in an [`InputResponse`].
 //!
-//! It does *not* dispatch to listeners, because this crate has none: there is
-//! no `EventTarget`, no capture/bubble walk, no script. That belongs to the
-//! runtime layer above, along with everything Lynx-shaped — `bindEvent`/
-//! `catchEvent` phase encoding, gesture-arena arbitration, `hit-slop`,
+//! It does *not* dispatch, and no part of this crate does. [`crate::event`]
+//! works out which nodes an event visits and in what order; reaching a
+//! listener means leaving this thread, so that is the runtime layer's, along
+//! with naming the event, choosing which routed pointer phase becomes which
+//! event type, and everything Lynx-shaped — `bindEvent`/`catchEvent` phase
+//! encoding, gesture-arena arbitration, `hit-slop`,
 //! `user-interaction-enabled`, tap/long-press synthesis, fling momentum.
-//!
-//! The seam between the two halves is [`InputEvent::default_prevented`], which
-//! is `preventDefault()` by another name. A runtime layer with script in the
-//! loop routes first, dispatches, and then hands the event back saying whether
-//! anything claimed it:
 //!
 //! ```
 //! # use dom::input::InputEvent;
-//! # use dom::Point2D;
-//! # fn f<T: Sync>(document: &mut dom::Document<T>, event: InputEvent, position: Point2D<f32>) {
-//! # fn dispatch_to_script(_: Option<dom::NodeId>) -> bool { false }
-//! let hit = document.elements_from_point(position).first().copied();
-//! let claimed = dispatch_to_script(hit); // capture/bubble, gesture arena, ...
+//! # use dom::{Document, Point2D};
+//! # fn f(document: &mut Document<()>, event: InputEvent) {
+//! # fn deliver(_: &dom::event::EventStep) {}
+//! let Some(&hit) = document.elements_from_point(event.position).first() else {
+//!     return;
+//! };
+//! for step in document.event_steps(hit, true, false).steps() {
+//!     deliver(step);
+//! }
+//! document.handle_input(event);
+//! # }
+//! ```
+//!
+//! [`InputEvent::default_prevented`] is `preventDefault()` by another name,
+//! and nothing on the event path sets it. Lynx has no cancelable event: a
+//! handler that wants to suppress a built-in behavior goes through gesture
+//! arbitration (`consumeGesture`/`interceptGesture`), not through the event
+//! object. So this flag is the *gesture* layer's to set, and that layer does
+//! not exist yet — until it does, nothing routed through [`crate::event`]
+//! suppresses a scroll, and a host that needs to suppress one says so
+//! directly:
+//!
+//! ```
+//! # use dom::input::InputEvent;
+//! # fn f(document: &mut dom::Document<()>, event: InputEvent, claimed: bool) {
 //! document.handle_input(event.with_default_prevented(claimed));
 //! # }
 //! ```

@@ -369,6 +369,12 @@ impl<'window> MacApplication<'window> {
         };
         let error = view.pump().into_iter().find_map(|event| match event {
             EngineEvent::ScriptFinished(Err(source)) => Some(source),
+            // Not fatal — the realm survives it and later events are still
+            // delivered — so it is reported and the window stays up.
+            EngineEvent::ListenerFailed(error) => {
+                eprintln!("event listener failed: {}", error.message);
+                None
+            }
             _ => None,
         });
         if let Some(source) = error {

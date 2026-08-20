@@ -31,12 +31,30 @@ interface BobcatNative {
   dropElement(nodeId: number): void;
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
+  /**
+   * Records that `nodeId` has at least one listener for `eventName` in the
+   * given pass (`0` bubble, `1` capture), so the walk stops skipping it.
+   */
+  enableEventListener(nodeId: number, phase: number, eventName: string): void;
+  /** The reverse: the last listener for that pair went away. */
+  disableEventListener(nodeId: number, phase: number, eventName: string): void;
+  /** Ends the walk in progress after the current node. */
+  stopPropagation(): void;
+  /**
+   * Assigned by this runtime, called by the host once per node per pass.
+   * Not native: it is the one member that travels the other way.
+   */
+  event_listener_callback?: (
+    nodeId: number,
+    targetNodeId: number,
+    phaseId: number,
+    eventName: string,
+    detailJson: string,
+  ) => void;
 }
 
 declare var bobcat: BobcatNative;
 
-// The Element PAPI globals `element-papi.js` assigns. Handles are opaque
-// objects whose identity lives in the runtime's private WeakMap.
 declare var __CreatePage: (
   componentID?: unknown,
   componentCSSID?: unknown,
@@ -92,18 +110,18 @@ declare var __SetAttribute: (
   name?: unknown,
   value?: unknown,
 ) => undefined;
-declare var __AddEvent: (
+declare var __AddEventListener: (
   element?: unknown,
-  eventType?: unknown,
   eventName?: unknown,
-  handler?: unknown,
+  callback?: unknown,
+  options?: unknown,
 ) => undefined;
-declare var __GetEvent: (
+declare var __RemoveEventListener: (
   element?: unknown,
   eventName?: unknown,
-  eventType?: unknown,
-) => unknown;
-declare var __GetEvents: (
-  element?: unknown,
-) => { type: string; name: string; function: unknown }[];
+  callback?: unknown,
+  options?: unknown,
+) => undefined;
+declare var __StopPropagation: (event?: unknown) => undefined;
+declare var __StopImmediatePropagation: (event?: unknown) => undefined;
 declare var __FlushElementTree: () => undefined;

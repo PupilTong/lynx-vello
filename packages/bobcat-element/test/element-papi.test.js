@@ -58,7 +58,8 @@ function createMockBobcat(issuedIds) {
   const attributes = new Map();
   /** @type {Map<number, string>} */
   const tags = new Map([[2, "page"]]);
-  return {
+  /** @type {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }} */
+  const host = {
     calls,
     named,
     createPage: () => {
@@ -200,7 +201,27 @@ function createMockBobcat(issuedIds) {
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
     },
+    /**
+     * @param {unknown} node
+     * @param {unknown} phase
+     * @param {unknown} eventName
+     */
+    enableEventListener: (node, phase, eventName) => {
+      calls.push(["enableEventListener", node, phase, eventName]);
+    },
+    /**
+     * @param {unknown} node
+     * @param {unknown} phase
+     * @param {unknown} eventName
+     */
+    disableEventListener: (node, phase, eventName) => {
+      calls.push(["disableEventListener", node, phase, eventName]);
+    },
+    stopPropagation: () => {
+      calls.push(["stopPropagation"]);
+    },
   };
+  return host;
 }
 
 /** @type {ReturnType<typeof createMockBobcat>} */
@@ -239,9 +260,10 @@ describe("installation", () => {
       ["__GetElementUniqueID", 1],
       ["__SetInlineStyles", 2],
       ["__SetAttribute", 3],
-      ["__AddEvent", 4],
-      ["__GetEvent", 3],
-      ["__GetEvents", 1],
+      ["__AddEventListener", 4],
+      ["__RemoveEventListener", 4],
+      ["__StopPropagation", 1],
+      ["__StopImmediatePropagation", 1],
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
@@ -707,84 +729,308 @@ describe("__SetAttribute", () => {
   });
 });
 
-describe("events", () => {
-  it("records a background-thread handler name and reads it back", () => {
-    const view = __CreateView(0);
-    mock.calls.length = 0;
-
-    __AddEvent(view, "bindEvent", "tap", "handler:1");
-    expect(__GetEvent(view, "tap", "bindEvent")).toBe("handler:1");
-    expect(__GetEvents(view)).toEqual([
-      { type: "bindevent", name: "tap", function: "handler:1" },
-    ]);
-    // Registration is this runtime's own bookkeeping, not a DOM mutation.
-    expect(mock.calls).toEqual([]);
-  });
-
-  it("lowercases the event type and name", () => {
-    const view = __CreateView(0);
-    __AddEvent(view, "CATCHEvent", "TouchStart", "handler:1");
-    expect(__GetEvent(view, "touchstart", "catchevent")).toBe("handler:1");
-    expect(__GetEvents(view)).toEqual([
-      { type: "catchevent", name: "touchstart", function: "handler:1" },
-    ]);
-  });
-
-  it("keeps the worklet slot separate from the background one", () => {
-    const view = __CreateView(0);
-    const worklet = { type: "worklet", value: { _wkltId: "1:2" } };
-
-    __AddEvent(view, "bindEvent", "tap", worklet);
-    // __GetEvent reads the background slot alone, as web-core's does.
-    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
-    expect(__GetEvents(view)).toEqual([
-      { type: "bindevent", name: "tap", function: worklet },
-    ]);
-
-    __AddEvent(view, "bindEvent", "tap", "handler:1");
-    expect(__GetEvent(view, "tap", "bindEvent")).toBe("handler:1");
-    expect(__GetEvents(view)).toEqual([
-      { type: "bindevent", name: "tap", function: "handler:1" },
-      { type: "bindevent", name: "tap", function: worklet },
-    ]);
-  });
-
-  it("clears both slots for a null handler", () => {
-    const view = __CreateView(0);
-    __AddEvent(view, "bindEvent", "tap", "handler:1");
-    __AddEvent(view, "bindEvent", "tap", { type: "worklet", value: {} });
-
-    __AddEvent(view, "bindEvent", "tap", null);
-    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
-    expect(__GetEvents(view)).toEqual([]);
-  });
-
-  it("keeps one registration per element, type, and name", () => {
-    const first = __CreateView(0);
-    const second = __CreateView(0);
-    __AddEvent(first, "bindEvent", "tap", "handler:1");
-    __AddEvent(first, "catchEvent", "tap", "handler:2");
-    __AddEvent(second, "bindEvent", "tap", "handler:3");
-
-    expect(__GetEvents(first)).toEqual([
-      { type: "bindevent", name: "tap", function: "handler:1" },
-      { type: "catchevent", name: "tap", function: "handler:2" },
-    ]);
-    expect(__GetEvents(second)).toEqual([
-      { type: "bindevent", name: "tap", function: "handler:3" },
-    ]);
-  });
-
-  it("reports no events for an element that never registered one", () => {
-    const view = __CreateView(0);
-    expect(__GetEvents(view)).toEqual([]);
-    expect(__GetEvent(view, "tap", "bindEvent")).toBe(undefined);
-  });
-});
 
 describe("__FlushElementTree", () => {
   it("flushes through the native object", () => {
     __FlushElementTree();
     expect(mock.named("flushElementTree")).toHaveLength(1);
+  });
+});
+
+
+describe("event listeners", () => {
+  /** Builds `page > outer > inner` and returns the three handles. */
+  function tree() {
+    const page = __CreatePage("card", 0);
+    const outer = __CreateView(0);
+    const inner = __CreateView(0);
+    __AppendElement(page, outer);
+    __AppendElement(outer, inner);
+    return { page, outer, inner };
+  }
+
+  /** Delivers one node's turn, the way the host does. */
+  function deliver(
+    /** @type {object} */ node,
+    /** @type {object} */ target,
+    /** @type {number} */ phase,
+    /** @type {string} */ name,
+    /** @type {string} */ detailJson = "",
+  ) {
+    mock.event_listener_callback?.(
+      __GetElementUniqueID(node),
+      __GetElementUniqueID(target),
+      phase,
+      name,
+      detailJson,
+    );
+  }
+
+  const BUBBLE = 0;
+  const CAPTURE = 1;
+
+  it("tells the host the first listener arrived, and only the first", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+
+    __AddEventListener(inner, "tap", () => {}, {});
+    __AddEventListener(inner, "tap", () => {}, {});
+
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("tells the host the last listener left, and only the last", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    const a = () => {};
+    const b = () => {};
+    __AddEventListener(inner, "tap", a, {});
+    __AddEventListener(inner, "tap", b, {});
+
+    __RemoveEventListener(inner, "tap", a, {});
+    expect(mock.named("disableEventListener")).toEqual([]);
+
+    __RemoveEventListener(inner, "tap", b, {});
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("counts each pass separately, which is what the phase argument is for", () => {
+    const { inner } = tree();
+    const uid = __GetElementUniqueID(inner);
+    const handler = () => {};
+
+    __AddEventListener(inner, "tap", handler, {});
+    __AddEventListener(inner, "tap", handler, { capture: true });
+
+    expect(mock.named("enableEventListener")).toEqual([
+      ["enableEventListener", uid, BUBBLE, "tap"],
+      ["enableEventListener", uid, CAPTURE, "tap"],
+    ]);
+
+    // Capture is part of the identity, so a bubble removal leaves the capture
+    // registration — and the host still hears about this node.
+    __RemoveEventListener(inner, "tap", handler, {});
+    expect(mock.named("disableEventListener")).toEqual([
+      ["disableEventListener", uid, BUBBLE, "tap"],
+    ]);
+  });
+
+  it("runs the pass's own listeners in registration order", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", () => order.push("bubble-1"), {});
+    __AddEventListener(inner, "tap", () => order.push("bubble-2"), {});
+    __AddEventListener(inner, "tap", () => order.push("capture"), {
+      capture: true,
+    });
+
+    deliver(inner, inner, CAPTURE, "tap");
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["capture", "bubble-1", "bubble-2"]);
+  });
+
+  it("re-adding the same callback is ignored, options and all", () => {
+    const { inner } = tree();
+    let runs = 0;
+    const handler = () => {
+      runs += 1;
+    };
+    __AddEventListener(inner, "tap", handler, {});
+    __AddEventListener(inner, "tap", handler, { once: true });
+
+    deliver(inner, inner, BUBBLE, "tap");
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(runs).toBe(2);
+  });
+
+  it("removes a once listener before running it", () => {
+    const { inner } = tree();
+    let runs = 0;
+    __AddEventListener(inner, "tap", () => {
+      runs += 1;
+    }, { once: true });
+
+    deliver(inner, inner, BUBBLE, "tap");
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(runs).toBe(1);
+    expect(mock.named("disableEventListener")).toHaveLength(1);
+  });
+
+  it("matches the event name case-insensitively on both sides", () => {
+    const { inner } = tree();
+    let runs = 0;
+    const handler = () => {
+      runs += 1;
+    };
+    __AddEventListener(inner, "TAP", handler, {});
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(runs).toBe(1);
+
+    __RemoveEventListener(inner, "Tap", handler, {});
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(runs).toBe(1);
+  });
+
+  it("ignores a non-callable registration", () => {
+    const { inner } = tree();
+    __AddEventListener(inner, "tap", "handlerName", {});
+    expect(mock.named("enableEventListener")).toEqual([]);
+    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+  });
+
+  it("hands the callback an event carrying both identities and the detail", () => {
+    const { outer, inner } = tree();
+    __SetID(inner, "target-id");
+    __SetID(outer, "current-id");
+    /** @type {any} */
+    let received;
+    __AddEventListener(outer, "tap", (/** @type {any} */ event) => {
+      received = event;
+    }, {});
+
+    deliver(outer, inner, BUBBLE, "tap", JSON.stringify({ x: 12, y: 30 }));
+
+    expect(received.type).toBe("tap");
+    expect(received.detail).toEqual({ x: 12, y: 30 });
+    expect(received.target.uid).toBe(__GetElementUniqueID(inner));
+    expect(received.currentTarget.uid).toBe(__GetElementUniqueID(outer));
+    expect(received.target.id).toBe("target-id");
+    expect(received.currentTarget.elementRefptr).toBe(outer);
+  });
+
+  it("reports the standard's at-target phase where the passes meet", () => {
+    const { outer, inner } = tree();
+    /** @type {number[]} */
+    const phases = [];
+    const record = (/** @type {any} */ event) => phases.push(event.eventPhase);
+    __AddEventListener(inner, "tap", record, {});
+    __AddEventListener(inner, "tap", record, { capture: true });
+    __AddEventListener(outer, "tap", record, { capture: true });
+
+    deliver(outer, inner, CAPTURE, "tap");
+    deliver(inner, inner, CAPTURE, "tap");
+    deliver(inner, inner, BUBBLE, "tap");
+
+    // 1 capturing on the ancestor, 2 at the target in both passes.
+    expect(phases).toEqual([CAPTURE, 2, 2]);
+  });
+
+  it("ends the walk through the host when a listener stops propagation", () => {
+    const { inner } = tree();
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => event.stopPropagation(), {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(mock.named("stopPropagation")).toHaveLength(1);
+  });
+
+  it("keeps stopImmediatePropagation inside this node, and still ends the walk", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      order.push("first");
+      __StopImmediatePropagation(event);
+    }, {});
+    __AddEventListener(inner, "tap", () => order.push("second"), {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["first"]);
+    expect(mock.named("stopPropagation")).toHaveLength(1);
+  });
+
+  it("__StopPropagation does not skip the rest of this node", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      order.push("first");
+      __StopPropagation(event);
+    }, {});
+    __AddEventListener(inner, "tap", () => order.push("second"), {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["first", "second"]);
+  });
+
+  it("a listener added during dispatch does not run for this event", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    __AddEventListener(inner, "tap", () => {
+      order.push("first");
+      __AddEventListener(inner, "tap", () => order.push("late"), {});
+    }, {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(order).toEqual(["first"]);
+
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(order).toEqual(["first", "first", "late"]);
+  });
+
+  it("reports the standard's phase numbers, not the pass it was told", () => {
+    const { outer, inner } = tree();
+    /** @type {number[]} */
+    const phases = [];
+    const record = (/** @type {any} */ event) => phases.push(event.eventPhase);
+    __AddEventListener(outer, "tap", record, { capture: true });
+    __AddEventListener(inner, "tap", record, { capture: true });
+    __AddEventListener(inner, "tap", record, {});
+    __AddEventListener(outer, "tap", record, {});
+
+    deliver(outer, inner, CAPTURE, "tap");
+    deliver(inner, inner, CAPTURE, "tap");
+    deliver(inner, inner, BUBBLE, "tap");
+    deliver(outer, inner, BUBBLE, "tap");
+
+    // CAPTURING_PHASE, AT_TARGET twice, BUBBLING_PHASE. The bubbling one is
+    // the case the pass id gets wrong: `BUBBLE` is 0, which is `Event.NONE`.
+    expect(phases).toEqual([1, 2, 2, 3]);
+  });
+
+  it("does not run a listener an earlier one removed", () => {
+    const { inner } = tree();
+    /** @type {string[]} */
+    const order = [];
+    const second = () => order.push("second");
+    __AddEventListener(inner, "tap", () => {
+      order.push("first");
+      __RemoveEventListener(inner, "tap", second, {});
+    }, {});
+    __AddEventListener(inner, "tap", second, {});
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(order).toEqual(["first"]);
+  });
+
+  it("delivers nothing for a node id no handle names", () => {
+    tree();
+    expect(() => mock.event_listener_callback?.(9999, 9999, BUBBLE, "tap", ""))
+      .not.toThrow();
+  });
+
+  it("listeners are scoped to their own element", () => {
+    const { outer, inner } = tree();
+    let runs = 0;
+    __AddEventListener(inner, "tap", () => {
+      runs += 1;
+    }, {});
+
+    deliver(outer, outer, BUBBLE, "tap");
+    expect(runs).toBe(0);
+    deliver(inner, inner, BUBBLE, "tap");
+    expect(runs).toBe(1);
   });
 });
