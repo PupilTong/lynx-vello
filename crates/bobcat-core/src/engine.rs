@@ -758,12 +758,11 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         }
         let mut decisions = Vec::new();
         while let Some((event, at)) = pending_input.pop_front() {
-            // Routing only: the prevented copy makes `dom` perform no default
-            // action, because deciding the user-agent scroll now belongs to
-            // the router. The event the router sees keeps its original
-            // `default_prevented` — that bit is the embedder's suppression
-            // seam, and the router honors it by deciding no scroll.
-            let target = tree.handle_input(event.with_default_prevented(true)).target;
+            // Routing is a pure read; `dom` has no default-action machinery.
+            // Deciding the user-agent scroll belongs to the router, and the
+            // event's `default_prevented` — the embedder's suppression seam —
+            // is honored there by deciding no scroll.
+            let target = tree.route_input(event);
             gesture.on_input(
                 &event,
                 target,
@@ -1982,7 +1981,7 @@ mod event_loop_tests {
 
     /// A drag the user-agent scroll consumed is the claim that suppresses
     /// `tap` — end to end, through the real drag recognizer's
-    /// `DefaultAction::Scroll` rather than an injected flag. The drag travels
+    /// real consumption rather than an injected flag. The drag travels
     /// 30px: past `dom`'s 8px drag slop so it scrolls, inside the 50px tap
     /// slop so the claim is the only suppressor. The fence tap at another x
     /// pins that the suppressed one never crossed the channel.

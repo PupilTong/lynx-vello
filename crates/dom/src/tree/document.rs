@@ -64,7 +64,6 @@ pub struct Document<T> {
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
-    input: crate::input::InputState,
 }
 
 impl<T: fmt::Debug> fmt::Debug for Document<T> {
@@ -109,7 +108,6 @@ impl<T> Document<T> {
             layout_dirty: false,
             layout_root_dirty: false,
             last_layout_inputs: None,
-            input: crate::input::InputState::default(),
         };
         let root = document.create_element(root_tag, root_payload);
         assert_eq!(
@@ -126,14 +124,6 @@ impl<T> Document<T> {
         document.mark_subtree_dirty(root);
         document.invalidate_layout(root);
         document
-    }
-
-    pub(crate) const fn input_state(&self) -> &crate::input::InputState {
-        &self.input
-    }
-
-    pub(crate) fn input_state_mut(&mut self) -> &mut crate::input::InputState {
-        &mut self.input
     }
 
     pub(crate) const fn style_engine(&self) -> &StyleEngine {

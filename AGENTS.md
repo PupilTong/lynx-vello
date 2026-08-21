@@ -933,15 +933,15 @@ useful signal for currently-compatible versions of those libraries.
   leaves mixed; a one-axis clip is an infinite strip and carries no radii.
   Its `input` module is the host seam: `InputEvent` is plain `Copy` data
   (pointer + wheel, viewport CSS px) that a canvas, a native window, or a
-  test literal all produce equally, and `Document::handle_input(InputEvent)`
-  builds its private visual frame, routes the event, and performs the UA default action, reporting both
-  in an `InputResponse`. `InputEvent::default_prevented` is the
-  `preventDefault()` seam a runtime layer hands back after its own gesture
-  arbitration; a runtime wanting different
-  scroll physics (Lynx `parent-first` nesting, rubber-band, fling) prevents
-  the default and drives `scroll_by`/`scroll_chain` itself. The drag
-  recognizer is deliberately minimal (touch/pen only, one slop threshold,
-  boundary chaining, no momentum — this crate owns no clock).
+  test literal all produce equally, and `Document::route_input(InputEvent)`
+  is a pure read that reports the node the event hit through the rendered
+  frame. The crate has **no default-action machinery and no recognizer**:
+  deciding and driving the user-agent scroll belongs to `bobcat-core`'s
+  input router (`gesture.rs`), which calls `scroll_by`/`scroll_chain` —
+  whose unconsumed remainders exist for exactly that caller — and there is
+  no second dom consumer a duplicate would serve.
+  `InputEvent::default_prevented` is the `preventDefault()` seam an embedder
+  hands to that router after its own arbitration; this crate never reads it.
   Its `event` module is the other half, and it does **not** dispatch:
   `Document::event_steps(target, bubbles, composed)` returns the ordered node
   visits one event resolves to — the capture pass root-inward, the bubble pass
@@ -955,10 +955,11 @@ useful signal for currently-compatible versions of those libraries.
   differential test.
   Dispatch itself belongs to `bobcat-core`, split across its two threads
   because the realm cannot move and scrolling must stay responsive: the
-  presenting thread routes the input, performs the user-agent default action,
-  and builds the path (`handle_input` already returns the node it routed to,
-  so this costs no second hit test and no second borrow), then sends the path
-  to the script thread, which delivers it with the document handed back — that
+  presenting thread routes the input (`route_input`, one hit test), feeds it
+  to the input router — which decides the user-agent scroll and every event's
+  type and target in one place — executes those decisions in order, and
+  builds each emitted event's path, then sends the paths to the script
+  thread, which delivers them with the document handed back — that
   order is what lets a listener mutate the tree. Nothing guards the window in
   between: a `NodeId` names one node for the life of the document, so a step
   that outlived its node resolves to no handle and reaches no one, and no later
