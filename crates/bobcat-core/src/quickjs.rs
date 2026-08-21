@@ -254,7 +254,7 @@ impl ScriptEngine for QuickJsScriptEngine {
                         .map(host_value_from_quickjs)
                         .collect::<Result<Vec<_>, _>>()?;
                     callback(&arguments)
-                        .map(|value| host_value_to_quickjs(&value))
+                        .map(host_value_to_quickjs)
                         .map_err(quickjs::HostFunctionError::new)
                 },
             )
@@ -318,13 +318,14 @@ impl ScriptEngine for QuickJsScriptEngine {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
         self.resume_incomplete_checkpoint(PHASE)?;
         let (object, member) = self.module_export(module_specifier, export_name)?;
-        // One crossing carries the lookup and every argument. Nothing here
-        // allocates per argument: the primitives are described in place and
-        // a string is handed over as the `Arc<str>` bytes it already is.
+        // One crossing carries the lookup and every argument, and nothing
+        // here allocates: the primitives are described in place and
+        // a string is lent, not copied — the caller holds it for the whole
+        // walk, and the realm needs it only for the length of this call.
         let arguments = arguments
             .iter()
-            .map(host_value_to_quickjs)
-            .collect::<SmallVec<[quickjs::HostValue; INLINE_CALL_ARGUMENTS]>>();
+            .map(host_argument)
+            .collect::<SmallVec<[quickjs::HostArgument<'_>; INLINE_CALL_ARGUMENTS]>>();
         // The checkpoint runs through `finish_operation`, never inline: an
         // execution guard is alive for the whole call, and QuickJS refuses to
         // nest one — draining jobs here would begin a second.
@@ -357,25 +358,37 @@ fn host_value_from_quickjs(
         quickjs::HostValue::Null => Ok(HostValue::Null),
         quickjs::HostValue::Boolean(value) => Ok(HostValue::Boolean(*value)),
         quickjs::HostValue::Number(value) => Ok(HostValue::Number(*value)),
-        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::clone(value))),
+        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::from(value.as_str()))),
         _ => Err(quickjs::HostFunctionError::new(
             "this QuickJS value cannot cross Bobcat's host boundary",
         )),
     }
 }
 
-/// The outbound twin of [`host_value_from_quickjs`].
+/// The outbound twin of [`host_value_from_quickjs`], for an argument the
+/// runtime passes into the realm.
 ///
-/// Both boundaries carry the same primitives-only vocabulary and spell text
-/// as a reference-counted `str`, so text crosses as a refcount rather than as
-/// the copy an owned `String` would force.
-fn host_value_to_quickjs(value: &HostValue) -> quickjs::HostValue {
+/// Borrowing rather than owning is what makes a call copy-free: the runtime
+/// holds an event's name and detail as `Arc<str>` for the length of the whole
+/// walk, and the realm needs them only for the length of one call.
+fn host_argument(value: &HostValue) -> quickjs::HostArgument<'_> {
+    match value {
+        HostValue::Undefined => quickjs::HostArgument::Undefined,
+        HostValue::Null => quickjs::HostArgument::Null,
+        HostValue::Boolean(value) => quickjs::HostArgument::Boolean(*value),
+        HostValue::Number(value) => quickjs::HostArgument::Number(*value),
+        HostValue::String(value) => quickjs::HostArgument::String(value),
+    }
+}
+
+/// What a host callback returned, on its way back into the realm.
+fn host_value_to_quickjs(value: HostValue) -> quickjs::HostValue {
     match value {
         HostValue::Undefined => quickjs::HostValue::Undefined,
         HostValue::Null => quickjs::HostValue::Null,
-        HostValue::Boolean(value) => quickjs::HostValue::Boolean(*value),
-        HostValue::Number(value) => quickjs::HostValue::Number(*value),
-        HostValue::String(value) => quickjs::HostValue::String(Arc::clone(value)),
+        HostValue::Boolean(value) => quickjs::HostValue::Boolean(value),
+        HostValue::Number(value) => quickjs::HostValue::Number(value),
+        HostValue::String(value) => quickjs::HostValue::String(value.to_string()),
     }
 }
 

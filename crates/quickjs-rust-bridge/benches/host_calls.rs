@@ -12,9 +12,9 @@
 //! numbers), and a string-returning query. Element identity crosses the
 //! boundary as plain numbers; handle objects never leave JavaScript.
 
-use std::sync::Arc;
-
-use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, Value};
+use quickjs_rust_bridge::{
+    EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm, Value,
+};
 
 fn main() {
     divan::main();
@@ -114,7 +114,7 @@ fn string_return(bencher: divan::Bencher) {
     let (mut realm, run, undefined) = driver(
         |realm| {
             realm
-                .define_global_function("tag", 1, |_| Ok(HostValue::String(Arc::from("view"))))
+                .define_global_function("tag", 1, |_| Ok(HostValue::String("view".to_owned())))
                 .expect("install");
         },
         "tag(0).length",
@@ -145,7 +145,7 @@ fn member_driver(body: &str) -> (Realm, Value, quickjs_rust_bridge::Member) {
 fn drive_member(
     bencher: divan::Bencher,
     body: &str,
-    arguments: impl Fn() -> Vec<HostValue> + Sync,
+    arguments: impl Fn() -> Vec<HostArgument<'static>> + Sync,
 ) {
     let (mut realm, host, member) = member_driver(body);
     let arguments = arguments();
@@ -166,7 +166,7 @@ fn member_no_arguments(bencher: divan::Bencher) {
 #[divan::bench]
 fn member_two_number_arguments(bencher: divan::Bencher) {
     drive_member(bencher, "function (a, b) { host.sink += a + b; }", || {
-        vec![HostValue::Number(17.0), HostValue::Number(4.0)]
+        vec![HostArgument::Number(17.0), HostArgument::Number(4.0)]
     });
 }
 
@@ -180,13 +180,13 @@ fn member_event_arguments(bencher: divan::Bencher) {
            host.sink += node + target + capture + name.length + detail.length + id + last; }",
         || {
             vec![
-                HostValue::Number(4_294_967_298.0),
-                HostValue::Number(4_294_967_299.0),
-                HostValue::Number(0.0),
-                HostValue::String(Arc::from("pointermove")),
-                HostValue::String(Arc::from(r#"{"x":123.5,"y":456.25}"#)),
-                HostValue::Number(7.0),
-                HostValue::Boolean(true),
+                HostArgument::Number(4_294_967_298.0),
+                HostArgument::Number(4_294_967_299.0),
+                HostArgument::Number(0.0),
+                HostArgument::String("pointermove"),
+                HostArgument::String(r#"{"x":123.5,"y":456.25}"#),
+                HostArgument::Number(7.0),
+                HostArgument::Boolean(true),
             ]
         },
     );

@@ -7,12 +7,13 @@
 //! rather than as a silently growing process, which is what makes these
 //! assertions meaningful.
 
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
 use quickjs_rust_bridge::{
-    CallOutcome, EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, RealmOptions,
+    CallOutcome, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm,
+    RealmOptions,
 };
 
 fn tight_realm() -> Realm {
@@ -67,7 +68,7 @@ fn string_round_trip_does_not_leak() {
             let HostValue::String(value) = &arguments[0] else {
                 return Err(HostFunctionError::new("expected a string"));
             };
-            Ok(HostValue::String(Arc::from(value.repeat(4))))
+            Ok(HostValue::String(value.repeat(4)))
         })
         .unwrap();
     let value = realm
@@ -98,8 +99,8 @@ fn repeated_member_calls_do_not_leak() {
         )
         .unwrap();
     let take = realm.member("take").unwrap();
-    let name: Arc<str> = Arc::from("pointermove");
-    let detail: Arc<str> = Arc::from("y".repeat(300));
+    let name = "pointermove";
+    let detail = "y".repeat(300);
     let mut expected = 0.0f64;
     for index in 0..50_000u32 {
         expected += f64::from(index % 7)
@@ -112,10 +113,10 @@ fn repeated_member_calls_do_not_leak() {
                 &host,
                 &take,
                 &[
-                    HostValue::Number(f64::from(index % 7)),
-                    HostValue::String(Arc::clone(&name)),
-                    HostValue::String(Arc::clone(&detail)),
-                    HostValue::Boolean(index % 2 == 0),
+                    HostArgument::Number(f64::from(index % 7)),
+                    HostArgument::String(name),
+                    HostArgument::String(&detail),
+                    HostArgument::Boolean(index % 2 == 0),
                 ],
             )
             .unwrap();
@@ -139,10 +140,10 @@ fn a_throwing_member_call_does_not_leak() {
         )
         .unwrap();
     let boom = realm.member("boom").unwrap();
-    let text: Arc<str> = Arc::from("z".repeat(300));
+    let text = "z".repeat(300);
     for _ in 0..50_000 {
         realm
-            .call_member(&host, &boom, &[HostValue::String(Arc::clone(&text))])
+            .call_member(&host, &boom, &[HostArgument::String(&text)])
             .expect_err("the member throws every time");
     }
 }

@@ -440,11 +440,11 @@ mod implementation {
             ffi::HOST_ARG_STRING => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 if let Ok(text) = std::str::from_utf8(bytes) {
-                    return Ok(HostValue::String(Arc::from(text)));
+                    return Ok(HostValue::String(text.to_owned()));
                 }
                 let units = decode_cesu8(bytes).map_err(HostFunctionError::new)?;
                 String::from_utf16(&units)
-                    .map(|text| HostValue::String(Arc::from(text)))
+                    .map(HostValue::String)
                     .map_err(|_| {
                         HostFunctionError::new(
                             "an ill-formed UTF-16 string cannot cross the host-function boundary",
@@ -508,7 +508,7 @@ mod implementation {
             }
         };
 
-        table.write_result(&returned, unsafe { &mut *result });
+        table.write_result(returned, unsafe { &mut *result });
         0
     }
 
@@ -530,13 +530,15 @@ mod implementation {
         }
     }
 
-    /// A primitive crossing the host-function boundary in either direction.
+    /// A primitive a host function receives or returns.
     ///
-    /// Text is a reference-counted `str` rather than a `String` so that
-    /// handing the same string on — to the realm as a call argument, or back
-    /// to an adapter that owns its own `Arc<str>` — costs a refcount rather
-    /// than a copy. It is also always well-formed UTF-8, which is what lets
-    /// every outbound string take `JS_NewStringLen` directly.
+    /// Owned, because both are values the boundary has just produced: an
+    /// argument was decoded out of the realm, a return value was built by the
+    /// host. Text is always well-formed UTF-8, which is what lets an outbound
+    /// string take `JS_NewStringLen` directly.
+    ///
+    /// [`HostArgument`] is the borrowed counterpart, for the other direction:
+    /// text the host already owns and only lends for the length of a call.
     #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
@@ -544,15 +546,37 @@ mod implementation {
         Null,
         Boolean(bool),
         Number(f64),
-        String(Arc<str>),
+        String(String),
     }
 
-    impl HostValue {
+    /// A primitive the host passes into the realm, borrowing its text.
+    ///
+    /// Deliberately not [`HostValue`]. A caller of [`Realm::call_member`]
+    /// already owns the strings it is passing — an event's name and its JSON
+    /// detail, held for the whole walk — and needs them only for the length
+    /// of the call, so it lends them. Owning them here would mean a copy per
+    /// argument per call.
+    ///
+    /// The alternative was to make [`HostValue`] itself reference-counted so
+    /// both directions could share one type. Borrowing is strictly less work
+    /// than any refcount, and a refcount would ride on every argument of
+    /// every *inbound* call as well, where nothing is ever shared — a realm
+    /// is owner-thread-bound, so an atomic one buys nothing at all. Two types
+    /// is the honest shape: one direction owns what it just produced, the
+    /// other lends what it already had.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[non_exhaustive]
+    pub enum HostArgument<'a> {
+        Undefined,
+        Null,
+        Boolean(bool),
+        Number(f64),
+        String(&'a str),
+    }
+
+    impl HostArgument<'_> {
         /// Fills in one C-ABI argument descriptor borrowing this value.
-        ///
-        /// The descriptor borrows: a string points into this `HostValue`'s
-        /// own buffer, so the value must outlive the call it describes.
-        fn describe(&self, slot: &mut ffi::QjsHostArg) {
+        fn describe(self, slot: &mut ffi::QjsHostArg) {
             slot.number = 0.0;
             slot.text = ptr::null();
             slot.text_len = 0;
@@ -561,11 +585,11 @@ mod implementation {
                 Self::Null => slot.kind = ffi::HOST_ARG_NULL,
                 Self::Boolean(value) => {
                     slot.kind = ffi::HOST_ARG_BOOLEAN;
-                    slot.number = if *value { 1.0 } else { 0.0 };
+                    slot.number = if value { 1.0 } else { 0.0 };
                 }
                 Self::Number(value) => {
                     slot.kind = ffi::HOST_ARG_NUMBER;
-                    slot.number = *value;
+                    slot.number = value;
                 }
                 Self::String(value) => {
                     slot.kind = ffi::HOST_ARG_STRING;
@@ -623,10 +647,12 @@ mod implementation {
         /// Keeps a returned string alive across the ABI return.
         ///
         /// The descriptor the trampoline reads borrows the host function's
-        /// return value, which is dropped as soon as `host_dispatch` returns
-        /// — so the `Arc` is parked here instead, and the bytes C reads are
-        /// the string's own. Nothing is copied and nothing is re-encoded.
-        return_text: RefCell<Option<Arc<str>>>,
+        /// return value, which would otherwise be dropped the moment
+        /// `host_dispatch` returns — so the string is moved here instead, and
+        /// the bytes C reads are its own. Nothing is copied and nothing is
+        /// re-encoded; the previous return value, already consumed, is
+        /// released by the same write.
+        return_text: RefCell<Option<String>>,
     }
 
     impl HostTable {
@@ -638,15 +664,29 @@ mod implementation {
             }
         }
 
-        fn write_result(&self, value: &HostValue, out: &mut ffi::QjsHostResult) {
-            if let HostValue::String(text) = value {
-                // A clone shares the buffer the descriptor points at, so
-                // parking one here is exactly what keeps those bytes alive
-                // until the trampoline has read them. The previous return
-                // value, already consumed, is released by the same write.
-                *self.return_text.borrow_mut() = Some(Arc::clone(text));
+        fn write_result(&self, value: HostValue, out: &mut ffi::QjsHostResult) {
+            out.number = 0.0;
+            out.text = ptr::null();
+            out.text_len = 0;
+            match value {
+                HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
+                HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
+                HostValue::Boolean(value) => {
+                    out.kind = ffi::HOST_ARG_BOOLEAN;
+                    out.number = if value { 1.0 } else { 0.0 };
+                }
+                HostValue::Number(value) => {
+                    out.kind = ffi::HOST_ARG_NUMBER;
+                    out.number = value;
+                }
+                HostValue::String(text) => {
+                    let mut parked = self.return_text.borrow_mut();
+                    let text = parked.insert(text);
+                    out.kind = ffi::HOST_ARG_STRING;
+                    out.text = text.as_ptr();
+                    out.text_len = text.len();
+                }
             }
-            value.describe(out);
         }
 
         fn note_released(&self, slot: *mut HostSlot) {
@@ -1340,8 +1380,8 @@ mod implementation {
         ///
         /// The arguments become `JSValue`s in a stack array inside the ABI,
         /// so a call allocates nothing per argument — no rooted [`Value`], no
-        /// boxed `QuickJS` value, no UTF-16 buffer. Strings are handed over as
-        /// the `Arc<str>` bytes they already are.
+        /// boxed `QuickJS` value, no UTF-16 buffer, and no copy of text the
+        /// caller already holds.
         ///
         /// A target with no callable under that name is
         /// [`CallOutcome::MemberAbsent`], not an error: a realm that
@@ -1354,7 +1394,7 @@ mod implementation {
             &mut self,
             target: &Value,
             member: &Member,
-            arguments: &[HostValue],
+            arguments: &[HostArgument<'_>],
         ) -> Result<CallOutcome, Error> {
             self.reclaim();
             self.ensure_affinity(target, ErrorPhase::Call)?;
@@ -1377,6 +1417,7 @@ mod implementation {
                 argument.describe(&mut slot);
                 described.push(slot);
             }
+
             let context = self.inner.context.as_ptr();
             let guard = self.inner.interrupt.begin();
             let mut raw = ptr::null_mut();
@@ -2651,11 +2692,11 @@ mod implementation {
             realm
                 .define_global_function("describe", 1, |arguments| {
                     Ok(HostValue::String(match &arguments[0] {
-                        HostValue::Undefined => Arc::from("undefined"),
-                        HostValue::Null => Arc::from("null"),
-                        HostValue::Boolean(value) => Arc::from(format!("boolean:{value}")),
-                        HostValue::Number(value) => Arc::from(format!("number:{value}")),
-                        HostValue::String(value) => Arc::from(format!("string:{value}")),
+                        HostValue::Undefined => "undefined".to_owned(),
+                        HostValue::Null => "null".to_owned(),
+                        HostValue::Boolean(value) => format!("boolean:{value}"),
+                        HostValue::Number(value) => format!("number:{value}"),
+                        HostValue::String(value) => format!("string:{value}"),
                     }))
                 })
                 .unwrap();
@@ -2840,11 +2881,11 @@ mod implementation {
                     &host,
                     &take,
                     &[
-                        HostValue::Undefined,
-                        HostValue::Null,
-                        HostValue::Boolean(true),
-                        HostValue::Number(-2.5),
-                        HostValue::String(Arc::from("a\u{1f980}b")),
+                        HostArgument::Undefined,
+                        HostArgument::Null,
+                        HostArgument::Boolean(true),
+                        HostArgument::Number(-2.5),
+                        HostArgument::String("a\u{1f980}b"),
                     ],
                 )
                 .unwrap();
@@ -2870,8 +2911,9 @@ mod implementation {
                 )
                 .unwrap();
             let sum = realm.member("sum").unwrap();
-            let arguments: Vec<HostValue> =
-                (0..32).map(|i| HostValue::Number(f64::from(i))).collect();
+            let arguments: Vec<HostArgument<'_>> = (0..32)
+                .map(|i| HostArgument::Number(f64::from(i)))
+                .collect();
             let CallOutcome::Called(total) = realm.call_member(&host, &sum, &arguments).unwrap()
             else {
                 panic!("the member ran");
@@ -2960,7 +3002,7 @@ mod implementation {
 }
 
 pub use implementation::{
-    CallOutcome, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError,
-    HostValue, InterruptHandle, JobDrain, Member, Realm, RealmOptions, SourceLocation, SourceType,
-    Value, ValueKind,
+    CallOutcome, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
+    HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, Realm, RealmOptions,
+    SourceLocation, SourceType, Value, ValueKind,
 };
