@@ -187,5 +187,11 @@ impl<T: Sync> Document<T> {
         // The flush is where animations start and stop; the timeline has to
         // learn what it now owns before the next frame asks whether to tick.
         self.sync_animation_state();
+        // Every declaration block the flush retired — one per inline-style
+        // write — leaves its rule node on the tree's free list, and nothing
+        // else in the engine ever drains it. Servo runs the same collection
+        // after each reflow; the call is a counter check until 300 nodes have
+        // accumulated, so a flush that retires nothing pays nothing.
+        self.style_engine().stylist().rule_tree().maybe_gc();
     }
 }

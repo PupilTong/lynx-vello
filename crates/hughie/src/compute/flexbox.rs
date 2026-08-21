@@ -16,10 +16,10 @@ use super::single_axis::{
 };
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    clamp_axis, edges_depend_on_inline_basis, max_size_depends_on_basis,
-    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
-    relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
-    resolve_item_geometry, resolve_length_percentage, resolve_style_size,
+    axis_has_intrinsic_style, axis_sizing_is_stable, clamp_axis, container_content_independence,
+    edges_depend_on_inline_basis, normalize_content_alignment, normalize_item_alignment,
+    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis,
+    resolve_insets, resolve_item_geometry, resolve_length_percentage, resolve_style_size,
     sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
     style_size_depends_on_basis,
 };
@@ -284,15 +284,6 @@ where
         edges_stable: false,
         cross_values_stable: false,
     }
-}
-
-/// Whether any of the item's sizing properties on `axis` is an intrinsic
-/// keyword, making the resolved constraint a measurement of its content.
-#[inline]
-fn axis_has_intrinsic_style<N>(item: &FlexItem<N>, axis: Axis) -> bool {
-    item.intrinsic.preferred(axis).is_intrinsic()
-        || item.intrinsic.minimum(axis).is_intrinsic()
-        || item.intrinsic.maximum(axis).is_intrinsic()
 }
 
 /// Lazily memoized main-axis measurements for one flex base-size pass.
@@ -584,12 +575,8 @@ fn determine_flex_base_sizes<T>(
         if let Some(container_independent) = container_independent {
             item.edges_stable = container_independent.width
                 || !edges_depend_on_inline_basis(&style.margin(), &style.padding());
-            let axis_values_stable = |axis: Axis| {
-                axis.size(container_independent)
-                    || (!style_size_depends_on_basis(axis.size(raw_size))
-                        && !style_size_depends_on_basis(axis.size(raw_min_size))
-                        && !max_size_depends_on_basis(axis.size(raw_max_size)))
-            };
+            let axis_values_stable =
+                |axis: Axis| axis_sizing_is_stable(&style, axis, container_independent);
             let flex_basis_stable = axes.main.size(container_independent)
                 || match raw_flex_basis {
                     FlexBasis::Content => true,
@@ -1016,7 +1003,19 @@ fn determine_hypothetical_cross_sizes<T>(
                 item.baseline = cross;
                 continue;
             }
-            axes.cross.set_size(&mut item.content_independent, false);
+            // The item is measured from here on — its baseline is consumed, or
+            // an intrinsic keyword decides its cross size. A cross size the
+            // style pins survives that: the measurement is handed the same
+            // value and echoes it back. Anything else is content, and a
+            // stretch target is restored later, once the line's cross size is
+            // known.
+            let cross_from_style = !cross_has_intrinsic_style
+                && axes.cross.size(item.preferred_size).is_some()
+                && axes.cross.size(item.preferred_definite)
+                && item.cross_values_stable
+                && item.edges_stable;
+            axes.cross
+                .set_size(&mut item.content_independent, cross_from_style);
 
             let mut known = Size::NONE;
             axes.main.set_size(&mut known, Some(item.target_main));
@@ -1713,15 +1712,7 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    // The container's own size is content-independent per axis when its input
-    // is stable there and either the parent imposed the size or the style
-    // resolves one against that stable input.
-    let container_independent = Size::new(
-        input.content_independent.width
-            && (input.known_dimensions.width.is_some() || style_definite.width),
-        input.content_independent.height
-            && (input.known_dimensions.height.is_some() || style_definite.height),
-    );
+    let container_independent = container_content_independence(input, style_definite);
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();

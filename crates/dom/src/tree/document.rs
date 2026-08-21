@@ -184,7 +184,14 @@ impl<T> Document<T> {
     }
 
     pub(crate) fn layout_requires_full_pass(&self, viewport: Size<f32>, scale: f32) -> bool {
-        self.layout_root_dirty || self.last_layout_inputs != Some((viewport, scale))
+        self.layout_root_dirty || self.layout_inputs_changed(viewport, scale)
+    }
+
+    /// Whether the viewport or device scale moved since the last pass. Both
+    /// feed the rounding function itself, so nothing about the previous
+    /// rounding survives them — including for boxes no layout write touched.
+    pub(crate) fn layout_inputs_changed(&self, viewport: Size<f32>, scale: f32) -> bool {
+        self.last_layout_inputs != Some((viewport, scale))
     }
 
     pub(crate) fn mark_layout_complete(&mut self, viewport: Size<f32>, scale: f32) {
@@ -789,13 +796,14 @@ impl<T> Document<T> {
                         self.layout.clear_layout_cache(slot);
                     }
                 }
+                // Reconstruction damage needs no second walk from the parent:
+                // this one already cleared the parent's cache (or stopped
+                // because it was empty, or because the parent skips its
+                // contents and cannot see the change), and the ancestor it
+                // parked on relays the reconstructed box tree under its own
+                // algorithm. A second walk would restart above that park and
+                // clear past it.
                 self.invalidate_layout(current);
-                if damage.requires_reconstruction() {
-                    let parent = self.get(current).and_then(Node::parent_id);
-                    if let Some(parent) = parent {
-                        self.invalidate_layout(parent);
-                    }
-                }
             }
             sink(current, damage);
         }

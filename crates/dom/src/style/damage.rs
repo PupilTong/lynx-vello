@@ -30,11 +30,6 @@ impl StyleDamage {
     fn needs_repaint(self) -> bool {
         self.0.contains(ServoRestyleDamage::REPAINT)
     }
-
-    #[must_use]
-    pub(crate) fn requires_reconstruction(self) -> bool {
-        self.0.bits() == u16::MAX
-    }
 }
 
 impl From<ServoRestyleDamage> for StyleDamage {

@@ -16,9 +16,10 @@ use super::single_axis::{
 use super::util::{
     Axis, EdgeMask, ItemGeometry, ItemKey as LayoutItemKey, OrderedItem, PendingLayoutItem,
     ResolvedContainerBox, accumulate_scrollable_overflow, apply_aspect_ratio, auto_edges_to_zero,
-    clamp_axis, mirror_ratio_definiteness, own_scrollable_overflow, relative_offset,
-    resolve_container_box, resolve_insets, resolve_intrinsic, resolve_item_geometry,
-    resolve_margins, resolve_padding, sort_and_assign_layout_order, store_committed_child,
+    axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
+    mirror_ratio_definiteness, own_scrollable_overflow, relative_offset, resolve_container_box,
+    resolve_insets, resolve_intrinsic, resolve_item_geometry, resolve_margins, resolve_padding,
+    sort_and_assign_layout_order, store_committed_child,
 };
 use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
@@ -143,6 +144,17 @@ struct LinearItem<N> {
     cross_size_is_definite: bool,
     violation: f32,
     flags: LinearItemFlags,
+    /// Per physical axis: every value this item's committed input carries on
+    /// the axis is imposed — by the item's own style, or by the container —
+    /// rather than measured from the item, so the input survives any change
+    /// confined to the item's own subtree. Becomes the commit input's
+    /// `content_independent`.
+    content_independent: Size<bool>,
+    /// Per axis: the item's own size/min/max values are pure lengths, or
+    /// percentages of a container axis that is itself content-independent.
+    values_stable: Size<bool>,
+    /// No margin or padding percentage tracks a content-derived inline basis.
+    edges_stable: bool,
 }
 super::util::impl_item_geometry!(LinearItem);
 
@@ -287,6 +299,7 @@ fn initial_item_flags(
     LinearItemFlags(flags)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_item<N>(
     style: impl CoreStyle,
     key: OrderedItem<N>,
@@ -295,6 +308,7 @@ fn resolve_item<N>(
     align_items: ItemPlacement,
     axes: LinearAxes,
     nudges: bool,
+    container_independent: Option<Size<bool>>,
 ) -> LinearItem<N> {
     let weight = style.linear_weight().0;
     debug_assert!(
@@ -309,6 +323,16 @@ fn resolve_item<N>(
     } else {
         Point::ZERO
     };
+    // A value is *stable* when it is a pure length, or a percentage whose
+    // basis — the container's axis — is itself content-independent. Only
+    // stable values can license an in-place relayout: an unstable one
+    // re-resolves differently once the container re-sizes to changed content.
+    // Computed on commit passes only; a measurement pass commits nothing and
+    // would pay for an answer nobody reads.
+    let (values_stable, edges_stable) = container_independent
+        .map_or((Size::new(false, false), false), |container| {
+            item_value_stability(&style, geometry.aspect_ratio, container)
+        });
     LinearItem {
         geometry,
         key,
@@ -324,6 +348,9 @@ fn resolve_item<N>(
         cross_size_is_definite: false,
         violation: 0.0,
         flags,
+        content_independent: Size::new(false, false),
+        values_stable,
+        edges_stable,
     }
 }
 
@@ -600,6 +627,7 @@ fn measure_item<T>(
     available_space: Size<AvailableSpace>,
     forced_main: Option<f32>,
     needs_probe_baseline: bool,
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -671,6 +699,36 @@ fn measure_item<T>(
             )),
         );
         axes.cross.set_size(&mut known_definite, true);
+    }
+
+    if let Some(container) = container_independent {
+        // Every branch above has decided where each axis's used size comes
+        // from; record the ones the item's own content cannot move.
+        let axis_stable = |axis: Axis| {
+            item.edges_stable
+                && axis.size(item.values_stable)
+                && !axis_has_intrinsic_style(item, axis)
+        };
+        let main_independent = axis_stable(axes.main)
+            && if forced_main.is_some() {
+                // A weight distributed the container's free main space: the
+                // shares of the item's siblings are their own content's
+                // business, but not this item's.
+                axes.main.size(container)
+            } else {
+                axes.main.size(known).is_some()
+            };
+        let cross_independent = axis_stable(axes.cross)
+            && if should_stretch {
+                // The stretch target is the container's cross size, imposed
+                // only when that size is itself content-independent.
+                axes.cross.size(container)
+            } else if ratio_fixed_cross {
+                main_independent
+            } else {
+                axes.cross.size(known).is_some()
+            };
+        item.content_independent = axes.main.pack(main_independent, cross_independent);
     }
 
     if !needs_probe_baseline && known.width.is_some() && known.height.is_some() {
@@ -853,6 +911,7 @@ fn size_items<T>(
     available_space: Size<AvailableSpace>,
     weight_sum: f32,
     needs_probe_baseline: bool,
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -870,6 +929,7 @@ fn size_items<T>(
                 available_space,
                 None,
                 needs_probe_baseline,
+                container_independent,
             );
         }
     }
@@ -888,6 +948,7 @@ fn size_items<T>(
                 available_space,
                 Some(resolved_main),
                 needs_probe_baseline,
+                container_independent,
             );
         }
     }
@@ -1139,6 +1200,7 @@ where
         input.definite_dimensions = axes
             .main
             .pack(item.main_size_is_definite, item.cross_size_is_definite);
+        input.content_independent = item.content_independent;
         let output = tree.compute_layout(state, item.key.node, input);
         item.baseline = output.first_baselines.y;
 
@@ -1302,6 +1364,8 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
+    let container_independent =
+        commits_layout.then(|| container_content_independence(input, style_definite));
     mirror_ratio_definiteness(&mut outer_definite, container_aspect_ratio);
     if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let before_ratio = outer_size;
@@ -1431,6 +1495,7 @@ where
             align_items,
             axes,
             nudges,
+            container_independent,
         );
         has_box_basis_dependency |= item.flags.needs_box_refresh();
         has_relative_basis_dependency |= item.flags.needs_relative_offset_refresh();
@@ -1452,6 +1517,7 @@ where
         inner_available_space,
         weight_sum,
         !commits_layout && !layout_contained,
+        container_independent,
     );
     let (natural, used_main) = natural_content_size(&items, axes);
     let container_natural = match size_containment {

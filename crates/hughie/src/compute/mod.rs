@@ -138,18 +138,20 @@ where
     }
 
     let output = compute_uncached(tree, state, node, input);
-    tree.layout_mut(state, node)
-        .store_cached_layout(input, output);
+    let slot = tree.layout_mut(state, node);
+    slot.store_cached_layout(input, output);
+    if input.goal == LayoutGoal::Commit {
+        // A commit that ran is the one thing that rewrites descendant boxes;
+        // a measurement pass reads them and writes none. Marking here is what
+        // gives the rounding tail its spine: a commit only reaches a node
+        // through an unbroken chain of committing ancestors.
+        slot.mark_subtree_dirty();
+    }
     output
 }
 
 pub fn hide_subtree<T: LayoutTree>(tree: &T, state: &mut T::State, node: T::NodeId) {
-    tree.clear_layout_cache(state, node);
-    tree.set_unrounded_layout(state, node, Layout::with_order(0));
-
-    for child in tree.children(node) {
-        hide_subtree(tree, state, child);
-    }
+    hide_subtree_at_order(tree, state, node, 0);
 }
 
 /// Hides a `display: none` child's subtree while keeping its paint-order slot.
@@ -159,8 +161,28 @@ pub(super) fn hide_child_at_order<T: LayoutTree>(
     node: T::NodeId,
     order: u32,
 ) {
-    hide_subtree(tree, state, node);
+    hide_subtree_at_order(tree, state, node, order);
+}
+
+fn hide_subtree_at_order<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    order: u32,
+) {
+    if tree.layout(state, node).is_hidden() {
+        // The subtree below is already zeroed and stays that way; only the
+        // paint-order slot this box keeps among its siblings can still move.
+        tree.layout_mut(state, node).set_hidden_order(order);
+        return;
+    }
+    tree.clear_layout_cache(state, node);
     tree.set_unrounded_layout(state, node, Layout::with_order(order));
+    tree.layout_mut(state, node).mark_hidden();
+
+    for child in tree.children(node) {
+        hide_subtree_at_order(tree, state, child, 0);
+    }
 }
 
 pub fn compute_skipped_contents_layout<T: LayoutTree>(
@@ -308,7 +330,7 @@ where
             .height
             .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
     );
-    let child_input = match goal {
+    let mut child_input = match goal {
         LayoutGoal::Commit => LayoutInput::commit(known_dimensions, parent_size, available_space),
         LayoutGoal::Measure(requested_axis) => LayoutInput::measure(
             known_dimensions,
@@ -317,6 +339,12 @@ where
             requested_axis,
         ),
     };
+    // Every field above is a function of the containing block and the box's
+    // own style — an out-of-flow box is never measured to build its own input.
+    // And its content cannot move the containing block back: it contributes to
+    // no ancestor's used size, only to their scrollable overflow, which is an
+    // output the in-place path compares before it trusts anything.
+    child_input.content_independent = Size::new(true, true);
     let output = tree.compute_layout(state, node, child_input);
 
     let margin = resolve_absolute_margins(
@@ -494,12 +522,27 @@ pub fn round_layout_subtree<T: LayoutTree>(
     scale: f32,
     parent_position: Point<f32>,
 ) {
-    round_layout_subtree_with(tree, state, node, scale, parent_position, |_, _, _| false);
+    round_layout_subtree_with(
+        tree,
+        state,
+        node,
+        scale,
+        parent_position,
+        true,
+        |_, _, _| false,
+    );
 }
 
 /// Rounds a subtree after a statically dispatched preorder hook.
 /// Returning `false` prunes only later hook calls; rounding still visits descendants.
 /// The hook runs before the current unrounded layout is cloned.
+///
+/// `rescale` says the rounding function itself changed under the caller — a new
+/// device scale, or a viewport that moves boxes no layout write touched — and
+/// forces the whole subtree. Otherwise the walk descends only where a box was
+/// written since the last rounding: a changed node carries its whole subtree
+/// with it, because everything under it shifts with its origin and anything
+/// positioned against it resolves against its new size.
 #[doc(hidden)]
 pub fn round_layout_subtree_with<T: LayoutTree>(
     tree: &T,
@@ -507,6 +550,7 @@ pub fn round_layout_subtree_with<T: LayoutTree>(
     node: T::NodeId,
     scale: f32,
     parent_position: Point<f32>,
+    rescale: bool,
     mut pre_node: impl FnMut(&T, &mut T::State, T::NodeId) -> bool,
 ) {
     debug_assert!(
@@ -525,6 +569,7 @@ pub fn round_layout_subtree_with<T: LayoutTree>(
         parent_position,
         &mut pre_node,
         true,
+        rescale,
     );
 }
 
@@ -703,6 +748,11 @@ fn rounded_layout(
     (rounded, position)
 }
 
+#[allow(
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments,
+    reason = "the extra parameters are propagation state of one recursion, not an API surface"
+)]
 fn round_layout_inner<T: LayoutTree>(
     tree: &T,
     state: &mut T::State,
@@ -711,11 +761,23 @@ fn round_layout_inner<T: LayoutTree>(
     parent_position: Point<f32>,
     pre_node: &mut impl FnMut(&T, &mut T::State, T::NodeId) -> bool,
     visit_pre_node: bool,
+    ancestor_moved: bool,
 ) {
+    if !ancestor_moved && !tree.layout(state, node).needs_rounding() {
+        // Nothing under here was written since the last rounding, and it
+        // rounds from the same accumulated position, so every `rounded` box in
+        // this subtree already holds the value this walk would recompute.
+        return;
+    }
     let visit_pre_node = visit_pre_node && pre_node(tree, state, node);
     let (rounded, position) =
         rounded_layout(&tree.layout(state, node).unrounded, scale, parent_position);
-    tree.layout_mut(state, node).rounded = rounded;
+    let slot = tree.layout_mut(state, node);
+    // The hook writes the boxes of out-of-flow children here rather than
+    // during layout, so read the mark after it has run.
+    let moved = ancestor_moved || slot.box_changed();
+    slot.rounded = rounded;
+    slot.clear_rounding_marks();
 
     for child in tree.children(node) {
         round_layout_inner(
@@ -726,6 +788,7 @@ fn round_layout_inner<T: LayoutTree>(
             position,
             pre_node,
             visit_pre_node,
+            moved,
         );
     }
 }
@@ -810,6 +873,171 @@ mod tests {
         ) -> LayoutOutput {
             unreachable!("rounding does not compute box layouts")
         }
+    }
+
+    /// Two branches under one root, each with a leaf. The "algorithm" is a
+    /// commit that writes every child's box, so a pass over it leaves exactly
+    /// the marks a real one would.
+    struct BranchTree;
+
+    impl BranchTree {
+        const CHILDREN: [&'static [usize]; 5] = [&[1, 3], &[2], &[], &[4], &[]];
+
+        fn box_of(node: usize) -> Layout {
+            let mut layout = Layout::with_order(0);
+            #[allow(clippy::cast_precision_loss)]
+            let index = node as f32;
+            layout.location = Point::new(0.0, index * 10.0);
+            layout.size = Size::new(50.0, 20.0);
+            layout
+        }
+
+        fn commit_input() -> LayoutInput {
+            LayoutInput::commit(
+                Size::new(Some(50.0), Some(20.0)),
+                Size::NONE,
+                Size::new(
+                    AvailableSpace::Definite(50.0),
+                    AvailableSpace::Definite(20.0),
+                ),
+            )
+        }
+    }
+
+    impl LayoutTree for BranchTree {
+        type NodeId = usize;
+        type State = Vec<crate::tree::LayoutSlot>;
+        type Style<'tree> = &'static RoundingStyle;
+        type ChildIter<'tree> = core::iter::Copied<core::slice::Iter<'tree, usize>>;
+
+        fn children(&self, node: usize) -> Self::ChildIter<'_> {
+            Self::CHILDREN[node].iter().copied()
+        }
+
+        fn style(&self, _node: usize) -> Self::Style<'_> {
+            &RoundingStyle
+        }
+
+        fn layout<'state>(
+            &self,
+            state: &'state Self::State,
+            node: usize,
+        ) -> &'state crate::tree::LayoutSlot {
+            &state[node]
+        }
+
+        fn layout_mut<'state>(
+            &self,
+            state: &'state mut Self::State,
+            node: usize,
+        ) -> &'state mut crate::tree::LayoutSlot {
+            &mut state[node]
+        }
+
+        fn compute_layout(
+            &self,
+            state: &mut Self::State,
+            node: usize,
+            input: LayoutInput,
+        ) -> LayoutOutput {
+            compute_cached_layout(self, state, node, input, |tree, state, node, _input| {
+                for child in tree.children(node) {
+                    tree.compute_layout(state, child, Self::commit_input());
+                    tree.set_unrounded_layout(state, child, Self::box_of(child));
+                }
+                LayoutOutput::new(Size::new(50.0, 20.0), Size::new(50.0, 20.0))
+            })
+        }
+    }
+
+    fn run_branch_pass(tree: &BranchTree, state: &mut Vec<crate::tree::LayoutSlot>) {
+        tree.compute_layout(state, 0, BranchTree::commit_input());
+        tree.set_unrounded_layout(state, 0, BranchTree::box_of(0));
+    }
+
+    fn round_branches(tree: &BranchTree, state: &mut Vec<crate::tree::LayoutSlot>) -> Vec<usize> {
+        let mut visited = Vec::new();
+        round_layout_subtree_with(tree, state, 0, 1.0, Point::ZERO, false, |_, _, node| {
+            visited.push(node);
+            true
+        });
+        visited
+    }
+
+    #[test]
+    fn the_rounding_tail_visits_only_the_dirty_spine_and_what_moved() {
+        let tree = BranchTree;
+        let mut state = (0..5).map(|_| crate::tree::LayoutSlot::default()).collect();
+
+        run_branch_pass(&tree, &mut state);
+        assert_eq!(
+            round_branches(&tree, &mut state),
+            vec![0, 1, 2, 3, 4],
+            "the first pass writes every box, so the tail owes every node",
+        );
+
+        run_branch_pass(&tree, &mut state);
+        assert!(
+            round_branches(&tree, &mut state).is_empty(),
+            "a pass that rewrote nothing leaves the tail nothing to do",
+        );
+
+        // What a host's invalidation does: clear the mutated node and the
+        // spine above it, leaving the other branch's caches alone.
+        for node in [2, 1, 0] {
+            tree.clear_layout_cache(&mut state, node);
+        }
+        run_branch_pass(&tree, &mut state);
+        assert_eq!(
+            round_branches(&tree, &mut state),
+            vec![0, 1, 2],
+            "only the recomputed spine is walked; the untouched branch is skipped",
+        );
+
+        // A box that actually moved carries its whole subtree with it: every
+        // descendant rounds from a new accumulated position. Both marks come
+        // from the same place a pass would leave them — the parent ran, and
+        // wrote one child a different box.
+        let mut moved = BranchTree::box_of(3);
+        moved.location.y += 4.0;
+        tree.layout_mut(&mut state, 0).mark_subtree_dirty();
+        tree.set_unrounded_layout(&mut state, 3, moved);
+        assert_eq!(
+            round_branches(&tree, &mut state),
+            vec![0, 3, 4],
+            "the moved child pulls its subtree in; its unmoved sibling stays out",
+        );
+    }
+
+    #[test]
+    fn hiding_an_already_hidden_subtree_costs_nothing() {
+        let tree = BranchTree;
+        let mut state: Vec<crate::tree::LayoutSlot> =
+            (0..5).map(|_| crate::tree::LayoutSlot::default()).collect();
+        run_branch_pass(&tree, &mut state);
+        let _ = round_branches(&tree, &mut state);
+
+        // Hiding runs from the parent's own commit, which is what puts the
+        // spine mark on the parent.
+        tree.layout_mut(&mut state, 0).mark_subtree_dirty();
+        hide_subtree(&tree, &mut state, 1);
+        assert_eq!(
+            round_branches(&tree, &mut state),
+            vec![0, 1, 2],
+            "hiding zeroes the subtree's boxes, which the tail has to pick up",
+        );
+
+        tree.layout_mut(&mut state, 0).mark_subtree_dirty();
+        hide_subtree(&tree, &mut state, 1);
+        assert_eq!(
+            round_branches(&tree, &mut state),
+            vec![0],
+            "hiding an already-hidden subtree writes nothing the tail must chase",
+        );
+
+        // Laying the node out again takes the subtree back out of hiding.
+        tree.set_unrounded_layout(&mut state, 1, BranchTree::box_of(1));
+        assert!(!tree.layout(&state, 1).is_hidden());
     }
 
     #[test]

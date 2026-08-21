@@ -25,7 +25,8 @@ use types::{Axis, GridItem, TrackSet, TrackSizingFunction};
 
 use super::util::{
     IntrinsicTag, ItemKey, OrderedItem, PendingLayoutItem, ResolvedContainerBox,
-    accumulate_scrollable_overflow, apply_aspect_ratio, box_inset_size, clamp, clamp_axis,
+    accumulate_scrollable_overflow, apply_aspect_ratio, axis_has_intrinsic_style, box_inset_size,
+    clamp, clamp_axis, container_content_independence, item_value_stability,
     normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
     resolve_container_box, resolve_gap, resolve_insets, resolve_item_geometry,
     sort_and_assign_layout_order,
@@ -495,6 +496,30 @@ fn physical_area<N>(
     )
 }
 
+/// Whether every track the span covers is sized by its own function alone —
+/// no track that consults the items placed in it, and so no track this item's
+/// content can move.
+fn span_is_fixed(tracks: &TrackSet, span: crate::compute::grid::placement::TrackSpan) -> bool {
+    let indices = tracks.span_indices(span.start, span.end);
+    !tracks.tracks[indices]
+        .iter()
+        .any(|track| track.intrinsic_min || track.intrinsic_max || track.is_flexible())
+}
+
+/// Whether the item's contributions to its tracks are decided without ever
+/// measuring it: a size the style pins, a minimum that is not the automatic
+/// content-based one, and no baseline shim measured from its content.
+fn contribution_is_content_free<N>(item: &GridItem<N>, axis: Axis) -> bool {
+    let automatic_minimum_measures = axis.size(item.minimum_is_auto)
+        && axis.size(item.min_size).is_none()
+        && !axis.point(item.overflow).is_scrollable();
+    let baseline_shim_measures = axis == Axis::Vertical && item.align_self == AlignFlags::BASELINE;
+    axis.size(item.preferred_size).is_some()
+        && !axis.size(item.preferred_behaves_auto_or_depends)
+        && !automatic_minimum_measures
+        && !baseline_shim_measures
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn layout_in_flow_items<T>(
     tree: &T,
@@ -507,6 +532,7 @@ fn layout_in_flow_items<T>(
     outer_size: Size<f32>,
     goal: LayoutGoal,
     rtl: bool,
+    container_independent: Option<Size<bool>>,
 ) -> (Size<f32>, Point<Option<f32>>)
 where
     T: LayoutTree,
@@ -610,12 +636,40 @@ where
             },
         );
         let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
-        let input = match goal {
+        let mut input = match goal {
             LayoutGoal::Commit => LayoutInput::commit(known, parent_size, available),
             LayoutGoal::Measure(requested) => {
                 LayoutInput::measure(known, parent_size, available, requested)
             }
         };
+        if let Some(container) = container_independent {
+            // The item's grid area is what its percentages resolve against and
+            // what a stretch fills, so independence chains off the area rather
+            // than the container's own box. A fixed-function track cannot move
+            // at all; an intrinsic or flexible one moves only with the
+            // contributions it collects, which this item's content cannot
+            // touch as long as its own contributions are content-free.
+            let fixed_area = Size::new(
+                container.width && span_is_fixed(columns, item.area.column),
+                container.height && span_is_fixed(rows, item.area.row),
+            );
+            let style = tree.style(item.key.node);
+            let (values_stable, edges_stable) =
+                item_value_stability(&style, item.aspect_ratio, fixed_area);
+            let axis_independent = |axis: Axis| {
+                let area_stable = axis.size(fixed_area)
+                    || (axis.size(container) && contribution_is_content_free(item, axis));
+                edges_stable
+                    && axis.size(values_stable)
+                    && !axis_has_intrinsic_style(item, axis)
+                    && area_stable
+                    && axis.size(known).is_some()
+            };
+            input.content_independent = Size::new(
+                axis_independent(Axis::Horizontal),
+                axis_independent(Axis::Vertical),
+            );
+        }
         let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
@@ -1323,6 +1377,7 @@ where
         outer_size,
         input.goal,
         rtl,
+        commits_layout.then(|| container_content_independence(input, style_definite)),
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {

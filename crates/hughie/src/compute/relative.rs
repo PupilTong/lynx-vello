@@ -7,7 +7,8 @@ use stylo::values::computed::{PositionProperty, Size as StyleSize};
 use super::compute_absolute_layout;
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    clamp_axis, own_scrollable_overflow, relative_offset, resolve_container_box, resolve_intrinsic,
+    axis_has_intrinsic_style, clamp_axis, container_content_independence, item_value_stability,
+    own_scrollable_overflow, relative_offset, resolve_container_box, resolve_intrinsic,
     resolve_item_geometry_with_bases, resolve_length_percentage, sort_and_assign_layout_order,
     store_committed_child, subtract_available_space,
 };
@@ -120,6 +121,17 @@ struct RelativeItem<N> {
     last_measure: Option<LayoutInput>,
     size_is_definite: Size<bool>,
     reuse_fixed_measurement: bool,
+    /// Per physical axis: every value this item's committed input carries on
+    /// the axis is imposed — by the item's own style, or by anchors against a
+    /// container box that does not move — rather than measured from the item,
+    /// so the input survives any change confined to the item's own subtree.
+    /// Becomes the commit input's `content_independent`.
+    content_independent: Size<bool>,
+    /// Per axis: the item's own size/min/max values are pure lengths, or
+    /// percentages of a container axis that is itself content-independent.
+    values_stable: Size<bool>,
+    /// No margin or padding percentage tracks a content-derived inline basis.
+    edges_stable: bool,
 }
 super::util::impl_item_geometry!(RelativeItem);
 
@@ -152,6 +164,7 @@ fn resolve_item<T>(
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
+    container_independent: Option<Size<bool>>,
 ) -> RelativeItem<T::NodeId>
 where
     T: LayoutTree,
@@ -159,6 +172,12 @@ where
     let style = tree.style(key.node);
     let geometry =
         resolve_item_geometry_with_bases(&style, size_percentage_basis, edge_inline_basis);
+    // Computed on commit passes only: a measurement pass commits nothing and
+    // would pay for an answer nobody reads.
+    let (values_stable, edges_stable) = container_independent
+        .map_or((Size::new(false, false), false), |container| {
+            item_value_stability(&style, geometry.aspect_ratio, container)
+        });
     RelativeItem {
         geometry,
         key,
@@ -179,6 +198,9 @@ where
         last_measure: None,
         size_is_definite: Size::new(false, false),
         reuse_fixed_measurement: false,
+        content_independent: Size::new(false, false),
+        values_stable,
+        edges_stable,
     }
 }
 
@@ -896,7 +918,33 @@ fn position_axis<N>(
     bounds
 }
 
+/// Whether the size this measurement imposes on the axis is one the item's
+/// own content cannot move.
+fn axis_is_content_independent<N>(
+    item: &RelativeItem<N>,
+    axis: Axis,
+    constraints: Size<Line<Option<f32>>>,
+    input: LayoutInput,
+    container_independent: Size<bool>,
+) -> bool {
+    if axis.size(input.known_dimensions).is_none() {
+        // Nothing imposed a size on the axis, so the item's own measurement
+        // is what decides it.
+        return false;
+    }
+    if !item.edges_stable || !axis.size(item.values_stable) || axis_has_intrinsic_style(item, axis)
+    {
+        return false;
+    }
+    // A two-sided constraint sizes the item from the span between its anchors
+    // inside the container's content box, so it stands only while that box
+    // does. Sibling anchors are another subtree's business, not this one's.
+    constrained_border_size(axis.size(constraints), axis.sum(item.margin)).is_none()
+        || axis.size(container_independent)
+}
+
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn measure_one<T>(
     tree: &T,
     state: &mut T::State,
@@ -905,6 +953,7 @@ fn measure_one<T>(
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
     allow_item_references: bool,
+    container_independent: Option<Size<bool>>,
 ) -> Size<Line<Option<f32>>>
 where
     T: LayoutTree,
@@ -924,6 +973,24 @@ where
         parent_size,
         available_content,
     );
+    if let Some(container) = container_independent {
+        items[index].content_independent = Size::new(
+            axis_is_content_independent(
+                &items[index],
+                Axis::Horizontal,
+                constraints,
+                input,
+                container,
+            ),
+            axis_is_content_independent(
+                &items[index],
+                Axis::Vertical,
+                constraints,
+                input,
+                container,
+            ),
+        );
+    }
     measure_item(tree, state, &mut items[index], input);
     constraints
 }
@@ -935,6 +1002,7 @@ fn measure_all<T>(
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
     allow_item_references: bool,
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -947,6 +1015,7 @@ fn measure_all<T>(
             parent_size,
             available_content,
             allow_item_references,
+            container_independent,
         );
     }
 }
@@ -958,6 +1027,7 @@ fn one_pass_layout<T>(
     order: &[usize],
     parent_size: Size<Option<f32>>,
     available_content: Size<AvailableSpace>,
+    container_independent: Option<Size<bool>>,
 ) -> Size<Bounds>
 where
     T: LayoutTree,
@@ -976,6 +1046,7 @@ where
             parent_size,
             available_content,
             true,
+            container_independent,
         );
 
         for axis in Axis::ALL {
@@ -998,6 +1069,7 @@ fn refresh_item_bases<T>(
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -1008,9 +1080,11 @@ fn refresh_item_bases<T>(
             size_percentage_basis,
             edge_inline_basis,
             lookup,
+            container_independent,
         );
         refreshed.positions = item.positions;
         refreshed.output = item.output;
+        refreshed.content_independent = item.content_independent;
         if item.fixed_measurement_matches(&refreshed) {
             refreshed.intrinsic_preferred_size = item.intrinsic_preferred_size;
             refreshed.intrinsic_sizes_ready = item.intrinsic_sizes_ready;
@@ -1059,6 +1133,7 @@ fn two_pass_layout<T>(
     min_size: Size<Option<f32>>,
     max_size: Size<Option<f32>>,
     size_containment: Option<Size<Option<f32>>>,
+    container_independent: Option<Size<bool>>,
 ) -> Size<f32>
 where
     T: LayoutTree,
@@ -1070,6 +1145,7 @@ where
         initial_parent_size,
         available_content,
         false,
+        container_independent,
     );
     let _ = position_axis(
         items,
@@ -1086,6 +1162,7 @@ where
         initial_parent_size,
         available_content,
         true,
+        container_independent,
     );
     let horizontal_bounds = position_axis(
         items,
@@ -1118,6 +1195,7 @@ where
             resolved_parent_size,
             Some(content_width),
             lookup,
+            container_independent,
         );
         let _ = position_axis(
             items,
@@ -1132,6 +1210,7 @@ where
             resolved_parent_size,
             available_content,
             true,
+            container_independent,
         );
         let _ = position_axis(
             items,
@@ -1185,6 +1264,7 @@ where
         let mut input = LayoutInput::commit(item.output.size.map(Some), parent_size, available);
         input.definite_dimensions = item.size_is_definite;
         input.sizing_mode = SizingMode::IgnoreSizeStyles;
+        input.content_independent = item.content_independent;
         let output = tree.compute_layout(state, item.key.node, input);
         item.output = output;
 
@@ -1290,6 +1370,8 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
+    let container_independent = (input.goal == LayoutGoal::Commit)
+        .then(|| container_content_independence(input, style_definite));
 
     if matches!(input.goal, LayoutGoal::Measure(_))
         && (size_containment.is_some()
@@ -1382,6 +1464,7 @@ where
                 initial_parent_size,
                 edge_inline_basis,
                 &lookup,
+                container_independent,
             )
         })
         .collect::<Vec<_>>();
@@ -1395,6 +1478,7 @@ where
             &order,
             initial_parent_size,
             available_content,
+            container_independent,
         );
         Size::new(
             final_outer_axis(
@@ -1434,6 +1518,7 @@ where
             min_size,
             max_size,
             size_containment,
+            container_independent,
         )
     };
     let content_size = Size::new(

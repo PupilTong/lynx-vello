@@ -130,6 +130,53 @@ fn main() {
         );
         return;
     }
+    if mode == "tail" {
+        // Loop: flip the LAST row's height, commit. Nothing above or beside it
+        // moves, so this is what the positioning-and-rounding tail costs when
+        // a mutation changes one subtree out of a thousand.
+        let device = Device::new(390.0, 844.0, 3.0);
+        let mut doc = Document::new(device, "page", ());
+        doc.add_stylesheet(CSS, StylesheetOrigin::Author);
+        let root = doc.document_element().id();
+        let list = doc.create_element("scroll-view", ());
+        doc.set_classes(list, "list");
+        doc.append_child(root, list);
+        let mut rows = Vec::new();
+        for i in 0..ROWS {
+            let row = doc.create_element("view", ());
+            doc.set_classes(row, "row");
+            doc.set_inline_style(row, "height: 56px");
+            let avatar = doc.create_element("view", ());
+            doc.set_classes(avatar, "avatar");
+            doc.append_child(row, avatar);
+            let col = doc.create_element("view", ());
+            doc.set_classes(col, "col");
+            let t = doc.create_element("text", ());
+            doc.set_classes(t, "title");
+            let tt = doc.create_text_node(format!("Row title {i}"), ());
+            doc.append_child(t, tt);
+            doc.append_child(col, t);
+            doc.append_child(row, col);
+            doc.append_child(list, row);
+            rows.push(row);
+        }
+        commit(&mut doc);
+        let n: usize = std::env::args()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let start = Instant::now();
+        for k in 0..n {
+            let h = 56 + (k % 2);
+            doc.set_inline_style_property(rows[ROWS - 1], "height", &format!("{h}px"));
+            commit(&mut doc);
+        }
+        println!(
+            "last-row flip commit avg {:.3} ms",
+            start.elapsed().as_secs_f64() * 1e3 / n as f64
+        );
+        return;
+    }
     let iterations: usize = std::env::args()
         .nth(1)
         .and_then(|s| s.parse().ok())
