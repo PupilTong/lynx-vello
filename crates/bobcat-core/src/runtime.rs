@@ -35,7 +35,7 @@ const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
 const RUNTIME_MODULE_SOURCE: &str = include_str!("main-thread-runtime.mjs");
 
-const ENTRY_PREAMBLE: &str = r#"import {
+pub(crate) const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
   SystemInfo,
   __globalProps,
@@ -539,7 +539,7 @@ __FlushElementTree();
         result
     }
 
-    fn evaluate_module(
+    pub(crate) fn evaluate_module(
         &mut self,
         source: &str,
         name: &str,

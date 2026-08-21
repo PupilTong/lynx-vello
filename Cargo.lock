@@ -217,6 +217,7 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "codspeed-divan-compat",
  "data-url",
  "dom",
  "flashbulb",
