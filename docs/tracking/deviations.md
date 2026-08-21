@@ -187,6 +187,36 @@ consequential choice about whether to follow the spec or the quirk.
   arbitration** (a `waitFor` relationship between built-in `Tap`/`LongPress`
   recognizers) instead of a hardcoded cross-event rule, so apps that don't
   use the gesture API don't inherit an invisible suppression.
+- **`tap`/`longpress` synthesis semantics (user ruling 2026-08-21,
+  implemented in `crates/bobcat-core/src/gesture.rs`)** — `tap` fires at
+  release with the native movement-cancel rule; `longpress` fires at a press
+  held past 500ms (the native default on every platform). The recorded
+  deviations inside that ruling:
+  - **Slop shape is radial, 50px.** Lynx's Android implementation compares
+    per-axis and its own source comments name the radial comparison as the
+    intended behavior (iOS ships radial at 45pt); we implement the intent,
+    radially, at the Android/Harmony default of 50. The page-config knobs
+    (`tapSlop`, `longPressDuration`) are not wired yet — every view uses the
+    defaults.
+  - **The long-press "consumed" gate is name-level, not per-chain.** Lynx
+    suppresses `tap` when the `longpress` walk found a handler anywhere in
+    the response chain; this engine's presenting side only knows which names
+    have listeners somewhere in the document (`SharedListenerNames`), so a
+    `longpress` listener on an unrelated element also suppresses a
+    sequence's `tap`. Per-chain precision arrives with a presenting-side
+    per-node index.
+  - **Single-finger only, all pointer kinds.** A second concurrent pointer
+    cancels synthesis for the whole overlap (Lynx's single-finger `tap`
+    gate, with `enableMultiTouch` unimplemented); mouse and pen sequences
+    synthesize like touch, because this engine's embedders feed all three
+    through one seam and the web target's `tap` is the browser `click`,
+    which mice produce.
+  - **The web target's `tap` is the browser `click` renamed** (no slop rule,
+    no `longpress` at all, no gesture API — `web-core` limitations, not Lynx
+    semantics). This engine implements the native semantics; matching
+    web-core's degradations was rejected.
+  - **`click` is not synthesized** (Android and the fragment path emit it
+    beside `tap` with re-targeting at release); no consumer yet.
 - **`pointer-events: none` hit-test fall-through** — Lynx falls through to
   the *next sibling* under the point; W3C says the element (and normally its
   subtree) becomes fully transparent to hit-testing, continuing the search

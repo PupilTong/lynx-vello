@@ -43,7 +43,7 @@ mod graphics;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -59,7 +59,7 @@ use std::thread::Builder as ThreadBuilder;
 
 use dom::FontBlob;
 use dom::event::EventSteps;
-use dom::input::{InputEvent, InputKind, PointerPhase};
+use dom::input::{DefaultAction, InputEvent, InputKind, PointerPhase};
 use dom::render::gpu::Headless;
 use dom::vello::peniko::Color;
 #[cfg(target_arch = "wasm32")]
@@ -68,6 +68,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
 use crate::clock::{AnimationClock, SystemClock};
+use crate::gesture::{GestureRouter, LONG_PRESS_EVENT, SynthesizedEvent};
 use crate::image::DecodedImage;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -280,6 +281,60 @@ impl EngineEventSender {
     }
 }
 
+/// The event names the realm currently has listeners for, shared between the
+/// script thread that learns about registrations and the presenting thread
+/// that synthesizes gestures.
+///
+/// Maintained by `bobcat.enableEventListener`/`disableEventListener` — the
+/// realm already reports only empty↔occupied transitions, so the script side
+/// touches this on registration edges, never per event. The presenting side
+/// reads it when a long-press deadline resolves. Neither touch goes anywhere
+/// near the tree slot, so the locks-twice-per-batch law is untouched.
+///
+/// The set is name-level over the whole document. For gesture synthesis that
+/// is a recorded approximation: a `longpress` listener anywhere suppresses a
+/// sequence's `tap` even when the fired chain has none. Per-chain precision
+/// needs a presenting-side per-node index, which is future work shared with
+/// the event-path filtering.
+#[derive(Debug, Default)]
+pub(crate) struct SharedListenerNames {
+    counts: Mutex<HashMap<Arc<str>, usize>>,
+}
+
+impl SharedListenerNames {
+    fn lock(&self) -> MutexGuard<'_, HashMap<Arc<str>, usize>> {
+        self.counts
+            .lock()
+            .unwrap_or_else(|error| panic!("the listener-name table is poisoned: {error}"))
+    }
+
+    /// Records one new `(node, capture)` registration for `name`.
+    pub(crate) fn note_enabled(&self, name: &str) {
+        let mut counts = self.lock();
+        if let Some(count) = counts.get_mut(name) {
+            *count += 1;
+        } else {
+            counts.insert(Arc::from(name), 1);
+        }
+    }
+
+    /// Records one removed registration for `name`.
+    pub(crate) fn note_disabled(&self, name: &str) {
+        let mut counts = self.lock();
+        if let Some(count) = counts.get_mut(name) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(name);
+            }
+        }
+    }
+
+    /// Whether any listener for `name` exists anywhere in the document.
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.lock().contains_key(name)
+    }
+}
+
 #[derive(Debug)]
 pub enum NoWindow {}
 
@@ -414,9 +469,10 @@ enum Output<'window> {
 /// The event one routed input becomes.
 ///
 /// Deliberately the W3C pointer names rather than Lynx's `tap`/`longpress`:
-/// those are *synthesized* from a pointer sequence by a gesture layer that
-/// does not exist yet, and naming a single `pointerup` `tap` would be a guess
-/// at the synthesis rather than an implementation of it.
+/// those are *synthesized* from the whole pointer sequence by
+/// [`crate::gesture::GestureRouter`] and dispatched beside these raw events,
+/// so naming a single `pointerup` `tap` here would double-report the guess
+/// the router exists to replace.
 fn event_name(event: &InputEvent) -> Option<&'static str> {
     match event.kind {
         InputKind::Pointer { phase, .. } => match phase {
@@ -485,8 +541,17 @@ pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     /// thread always observes the currently attached target rather than a
     /// startup-time snapshot.
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
-    pending_input: VecDeque<InputEvent>,
+    /// Buffered input, each event stamped with the clock reading at arrival —
+    /// so a sequence drained late, behind a busy document, keeps its real
+    /// duration.
+    pending_input: VecDeque<(InputEvent, f64)>,
     pending_resize: Option<(f32, f32, f32)>,
+    /// The gesture recognizer: turns routed pointer sequences into Lynx's
+    /// `tap`/`longpress` beside the raw pointer events.
+    gesture: GestureRouter,
+    /// Which event names the realm has listeners for; written by the script
+    /// thread's registration members, read when gestures resolve.
+    listener_names: Arc<SharedListenerNames>,
     /// The animation timeline, named by the host at construction. Every
     /// reading is a direct call; there is no trait object and no way to swap
     /// one in after the fact.
@@ -542,6 +607,8 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
+            gesture: GestureRouter::default(),
+            listener_names: Arc::new(SharedListenerNames::default()),
             clock,
             animating: false,
             script_commands: None,
@@ -668,7 +735,9 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
 
     fn drain_deferred(
         pending_resize: &mut Option<(f32, f32, f32)>,
-        pending_input: &mut VecDeque<InputEvent>,
+        pending_input: &mut VecDeque<(InputEvent, f64)>,
+        gesture: &mut GestureRouter,
+        listener_names: &SharedListenerNames,
         tree: &mut LynxDocument,
         commands: Option<&mpsc::Sender<ScriptCommand>>,
     ) {
@@ -676,38 +745,102 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             tree.set_viewport(width, height);
             tree.set_device_pixel_ratio(ratio);
         }
-        while let Some(event) = pending_input.pop_front() {
+        let mut synthesized = Vec::new();
+        while let Some((event, at)) = pending_input.pop_front() {
             // Routing performs the user-agent default action, and reports the
             // node it routed to — so the event path costs no second hit test.
             // The default action runs first and unconditionally: no listener
             // can suppress one, because Lynx has no cancelable event.
             let response = tree.handle_input(event);
-            let (Some(commands), Some(target)) = (commands, response.target) else {
+            if let (Some(commands), Some(target)) = (commands, response.target)
+                && let Some(name) = event_name(&event)
+            {
+                // Built here, where the document is already borrowed, so the
+                // thread that owns the realm never has to take it to find out
+                // who an event reaches.
+                let steps = tree.event_steps(target, true, true);
+                let _ = commands.send(ScriptCommand::DispatchEvent {
+                    steps,
+                    name: Arc::from(name),
+                    detail: Arc::from(event_detail(&event)),
+                });
+            }
+            // After the raw event, so a synthesized `tap` follows its own
+            // `pointerup` the way Lynx's `tap` follows `touchend`. A scroll
+            // the default action performed is the sequence's claim signal.
+            let scrolled = matches!(response.default_action, DefaultAction::Scroll { .. });
+            gesture.on_pointer(
+                &event,
+                response.target,
+                scrolled,
+                at,
+                || listener_names.contains(LONG_PRESS_EVENT),
+                &mut synthesized,
+            );
+            Self::flush_synthesized(&mut synthesized, tree, commands);
+        }
+    }
+
+    /// Sends the router's synthesized events down the ordinary dispatch path.
+    ///
+    /// A target freed since its down resolves to nothing rather than a path —
+    /// the same non-guarantee raw events already have, just checked before
+    /// path construction because `event_steps` asserts liveness.
+    fn flush_synthesized(
+        synthesized: &mut Vec<SynthesizedEvent>,
+        tree: &mut LynxDocument,
+        commands: Option<&mpsc::Sender<ScriptCommand>>,
+    ) {
+        let Some(commands) = commands else {
+            synthesized.clear();
+            return;
+        };
+        for event in synthesized.drain(..) {
+            if tree.get(event.target).is_none() {
                 continue;
-            };
-            let Some(name) = event_name(&event) else {
-                continue;
-            };
-            // Built here, where the document is already borrowed, so the
-            // thread that owns the realm never has to take it to find out who
-            // an event reaches.
-            let steps = tree.event_steps(target, true, true);
+            }
+            let steps = tree.event_steps(event.target, true, true);
+            let detail = format!(r#"{{"x":{},"y":{}}}"#, event.position.x, event.position.y);
             let _ = commands.send(ScriptCommand::DispatchEvent {
                 steps,
-                name: Arc::from(name),
-                detail: Arc::from(event_detail(&event)),
+                name: Arc::from(event.name),
+                detail: Arc::from(detail),
             });
         }
     }
 
+    /// Resolves gesture deadlines against the frame clock — the per-frame
+    /// half of recognition, beside the per-event half in
+    /// [`Self::drain_deferred`]. While a deadline is armed the router's
+    /// [`GestureRouter::needs_frame`] keeps frames coming, the same
+    /// continuation contract running animations use.
+    fn service_gesture_clock(
+        gesture: &mut GestureRouter,
+        listener_names: &SharedListenerNames,
+        tree: &mut LynxDocument,
+        commands: Option<&mpsc::Sender<ScriptCommand>>,
+        now: f64,
+    ) {
+        let mut synthesized = Vec::new();
+        gesture.on_tick(
+            now,
+            || listener_names.contains(LONG_PRESS_EVENT),
+            &mut synthesized,
+        );
+        Self::flush_synthesized(&mut synthesized, tree, commands);
+    }
+
     /// Routes one host input event on the presenting side.
     pub(crate) fn dispatch_input(&mut self, event: InputEvent) {
-        self.pending_input.push_back(event);
+        let at = self.clock.now_seconds();
+        self.pending_input.push_back((event, at));
         let needs_frame = match self.elements.try_tree() {
             Some(mut tree) => {
                 Self::drain_deferred(
                     &mut self.pending_resize,
                     &mut self.pending_input,
+                    &mut self.gesture,
+                    &self.listener_names,
                     &mut tree,
                     self.script_commands.as_ref(),
                 );
@@ -715,7 +848,9 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             }
             None => false,
         };
-        if needs_frame {
+        // An armed long-press deadline needs the frame clock even when the
+        // document is visually clean — the frame is what resolves it.
+        if needs_frame || self.gesture.needs_frame() {
             self.refresh();
         }
     }
@@ -853,8 +988,17 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 Self::drain_deferred(
                     &mut self.pending_resize,
                     &mut self.pending_input,
+                    &mut self.gesture,
+                    &self.listener_names,
                     &mut tree,
                     self.script_commands.as_ref(),
+                );
+                Self::service_gesture_clock(
+                    &mut self.gesture,
+                    &self.listener_names,
+                    &mut tree,
+                    self.script_commands.as_ref(),
+                    self.clock.now_seconds(),
                 );
                 // Input and resize first, then the timeline, so a scroll and
                 // an animation compose in one defined order under one truth;
@@ -875,7 +1019,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         // A script/DOM batch can take the slot after requesting this frame.
         // Keep the request alive so event-driven embedders retry instead of
         // losing the only wakeup while presenting the retained target.
-        if tree_was_busy || self.animating {
+        if tree_was_busy || self.animating || self.gesture.needs_frame() {
             frames.request_frame();
         }
         if graphics.rendered_at(size) {
@@ -896,8 +1040,17 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         Self::drain_deferred(
             &mut self.pending_resize,
             &mut self.pending_input,
+            &mut self.gesture,
+            &self.listener_names,
             &mut tree,
             self.script_commands.as_ref(),
+        );
+        Self::service_gesture_clock(
+            &mut self.gesture,
+            &self.listener_names,
+            &mut tree,
+            self.script_commands.as_ref(),
+            self.clock.now_seconds(),
         );
         self.animating = Self::advance_animations(&self.clock, &mut tree);
         let changed = tree.render();
@@ -975,6 +1128,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         }
         let events = self.event_sender.clone();
         let frame_requesters = Arc::clone(&self.frames);
+        let listener_names = Arc::clone(&self.listener_names);
         let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
         let spawn = ThreadBuilder::new()
             .name("bobcat-main".to_owned())
@@ -991,6 +1145,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                         let mut runtime = crate::runtime::MainThreadRuntime::new(
                             factory.as_ref(),
                             elements,
+                            listener_names,
                             move || {
                                 request_current_frame(&on_flush);
                             },
@@ -1402,13 +1557,19 @@ mod event_loop_tests {
     /// Boots a script and waits for it to finish, leaving the script thread
     /// parked on its command channel.
     fn booted(source: &str) -> OffscreenEngine {
-        let mut engine = OffscreenEngine::new(
+        booted_with(source, crate::clock::SystemClock::new())
+    }
+
+    /// [`booted`], on a caller-supplied timeline — how the gesture tests hold
+    /// a [`crate::clock::ManualClock`] the engine also reads.
+    fn booted_with<C: crate::clock::AnimationClock>(source: &str, clock: C) -> OffscreenEngine<C> {
+        let mut engine = OffscreenEngine::<C>::new(
             crate::tree::PageConfig::default(),
             Arc::new(|| {}),
             393.0,
             727.0,
             1.0,
-            crate::clock::SystemClock::new(),
+            clock,
         )
         .expect("engine");
         engine
@@ -1595,5 +1756,144 @@ mod event_loop_tests {
                 .attribute("seen")
                 .is_none()
         );
+    }
+
+    /// The gesture suite's page: one 200×200 view whose listeners append
+    /// `type:x` to a `log` attribute. The placeholder line opts a variant
+    /// into a `longpress` registration.
+    const GESTURE_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          globalThis.entries = [];
+          __SetInlineStyles(view, 'width:200px;height:200px');
+          const note = (event) => {
+            entries.push(event.type + ':' + event.detail.x);
+            __SetAttribute(view, 'log', entries.join());
+          };
+          __AddEventListener(view, 'tap', note, {});
+          //LONGPRESS
+          __FlushElementTree();
+        };
+        ";
+
+    fn gesture_page(with_longpress: bool) -> String {
+        if with_longpress {
+            GESTURE_PAGE.replace(
+                "//LONGPRESS",
+                "__AddEventListener(view, 'longpress', note, {});",
+            )
+        } else {
+            GESTURE_PAGE.to_owned()
+        }
+    }
+
+    fn touch(id: u32, phase: PointerPhase, x: f32) -> InputEvent {
+        InputEvent::pointer(Point2D::new(x, 10.0), id, PointerKind::Touch, phase)
+    }
+
+    /// Polls until the view's `log` attribute equals `expected` — equality,
+    /// not containment, so an event that should have been suppressed fails
+    /// the wait by showing up in the actual value.
+    fn wait_for_log<W: super::Window, C: crate::clock::AnimationClock>(
+        engine: &mut super::Engine<'_, W, C>,
+        expected: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let log = engine.elements.try_tree().and_then(|tree| {
+                tree.get(node_id(3))
+                    .and_then(|node| node.attribute("log").map(str::to_owned))
+            });
+            if log.as_deref() == Some(expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "expected log {expected:?}, last saw {log:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A press released within the slop synthesizes `tap` at the release
+    /// point, delivered through the same path as the raw pointer events.
+    #[test]
+    fn a_quick_release_delivers_tap_to_the_realm() {
+        let mut engine = booted(&gesture_page(false));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
+        wait_for_log(&mut engine, "tap:12");
+    }
+
+    /// Travel beyond the 50px tap slop disqualifies the sequence; the later
+    /// fence tap proves the suppressed one was never sent, because the
+    /// command channel is ordered.
+    #[test]
+    fn travel_beyond_the_tap_slop_suppresses_the_tap() {
+        let mut engine = booted(&gesture_page(false));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        engine.dispatch_input(touch(1, PointerPhase::Move, 100.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
+        engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
+        wait_for_log(&mut engine, "tap:150");
+    }
+
+    /// Holding past the deadline delivers `longpress` on the engine's own
+    /// timeline, and the sequence's release is then not a tap — Lynx's
+    /// `long_press_consumed` rule. The fence tap pins the suppression.
+    #[test]
+    fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
+        let clock = Arc::new(crate::clock::ManualClock::new());
+        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        clock.set(0.6);
+        engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
+        wait_for_log(&mut engine, "longpress:10");
+
+        engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
+        engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
+        wait_for_log(&mut engine, "longpress:10,tap:30");
+    }
+
+    /// With no `longpress` listener anywhere, the deadline lapses silently
+    /// and a slow release is still a tap — the listener-presence gate read
+    /// through the shared name table.
+    #[test]
+    fn a_long_hold_without_longpress_listener_still_taps() {
+        let clock = Arc::new(crate::clock::ManualClock::new());
+        let mut engine = booted_with(&gesture_page(false), Arc::clone(&clock));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        clock.set(0.6);
+        engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
+        wait_for_log(&mut engine, "tap:10");
     }
 }
