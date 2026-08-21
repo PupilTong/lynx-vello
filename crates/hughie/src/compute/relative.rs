@@ -15,8 +15,7 @@ use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
-    SizingMode,
+    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
 #[inline]

@@ -27,8 +27,7 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
-    SizingMode,
+    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
 type Axes = FlowAxes<BaseReversals>;
@@ -2344,6 +2343,7 @@ mod tests {
                 Some(available),
                 true,
                 true,
+                None,
             );
 
             assert_eq!(
