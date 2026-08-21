@@ -249,22 +249,20 @@ the core then uses that same target-specific spawn path for the Lynx main
 Worker and for Stylo's Rayon Workers. Stylo pool creation belongs to the core,
 not the browser facade.
 
-The first Lynx-main Worker is the persistent owner at index zero of the Stylo
-pool. It survives for the Wasm session, while each view installs and later
-drops its own QuickJS realm, document, and event/frame endpoints on that
-Worker. One shared Wasm instance accepts one live view at a time and can accept
-a sequence of views without replacing any Worker. The npm facade creates a
-fresh Render Worker and Wasm instance for every `BobcatCanvas`, while
-`BobcatCanvas.reset()` keeps that outer session and replaces only native
-`LynxView`. The configured count remains a combined budget: the persistent
-Lynx-main owner plus at least one managed Stylo worker.
+Wasm follows the native ownership model: every `LynxView` spawns and owns one
+Lynx-main Worker, and dropping that view closes its command channel so the
+Worker drops its QuickJS realm and exits. Independent views are not a
+process-global singleton. The npm facade keeps one live view in each
+`BobcatRenderer`; `BobcatCanvas.reset()` waits for that view and Worker to stop,
+then constructs a replacement while retaining the Render Worker, transferred
+canvas, Wasm instance, and resource state.
 
-Because that owner is also Rayon index zero, the presenting side does not enter
-style traversal while a queued realm command is executing; it retains the
-previous target and retries the requested frame after the command completes.
-While the realm is idle, the owner cooperatively yields to traversal scopes
-started by the Render Worker. This avoids a lock cycle between a presenter
-holding the document and a startup script waiting to take it.
+Only the Stylo Rayon pool is process-wide. It adopts the persistent Render
+Worker as index zero rather than a view's transient Lynx-main Worker, and adds
+at least one managed style Worker. A traversal entered from a script owner is
+therefore transferred onto a managed pool worker, while presentation enters
+from its long-lived index-zero owner. The configured count describes that
+style pool; each live view's Lynx-main Worker is separate.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns

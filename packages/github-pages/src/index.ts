@@ -637,7 +637,7 @@ function installEditor(
       setSourceStatus(shell, `Rendered ${label}`, 'ok');
       setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
       shell.message.textContent =
-        'Render complete. The Worker, canvas, and Wasm instance stay warm for the next submission.';
+        'Render complete. The Render Worker, canvas, and Wasm instance stay warm for the next submission.';
     } catch (error) {
       const message = errorMessage(error);
       setSourceStatus(shell, `Render failed: ${message}`, 'error');

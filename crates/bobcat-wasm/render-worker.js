@@ -246,9 +246,9 @@ async function dispatchRequest(message) {
       break
     }
     case 'reset': {
-      // A reset is a native-view boundary, not a Worker boundary. Let a
-      // started entry evaluation publish its own response first, then drop
-      // and rebuild LynxView inside the existing Wasm instance and canvas.
+      // A reset replaces the native view and its Lynx-main Worker, not this
+      // Render Worker. Let a started entry evaluation publish its own response
+      // first, then rebuild LynxView inside the existing Wasm instance/canvas.
       if (scriptCompletion !== undefined) {
         try {
           await scriptCompletion

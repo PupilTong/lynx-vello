@@ -49,13 +49,8 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Condvar;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_arch = "wasm32")]
-use std::sync::atomic::{AtomicU32, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
@@ -65,10 +60,6 @@ use dom::event::EventSteps;
 use dom::input::{InputEvent, InputKind, PointerPhase};
 use dom::render::gpu::Headless;
 use dom::vello::peniko::Color;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue};
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -90,13 +81,7 @@ pub struct FrameSize {
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
 #[cfg(target_arch = "wasm32")]
-static WASM_STYLE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(1);
-#[cfg(target_arch = "wasm32")]
 static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
-#[cfg(target_arch = "wasm32")]
-static WASM_SCRIPT_OWNER_CLAIMED: AtomicBool = AtomicBool::new(false);
-#[cfg(target_arch = "wasm32")]
-static WASM_SCRIPT_COMMANDS: OnceLock<Arc<ScriptCommandQueue>> = OnceLock::new();
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
 
@@ -135,9 +120,10 @@ pub enum EngineError {
 /// thread and Stylo workers in a Wasm build.
 ///
 /// This is an OS bootstrap capability only; the spawned task and document
-/// remain private to the engine. `style_thread_count` is a combined budget and
-/// must be at least two: the persistent Lynx-main owner at index zero plus at
-/// least one managed Rayon worker.
+/// remain private to the engine. The caller becomes index zero of the
+/// process-wide Stylo pool and must outlive every view that uses it;
+/// `style_thread_count` must be at least two so the pool also has one managed
+/// Worker. Each view's separate Lynx-main Worker is outside this budget.
 #[cfg(target_arch = "wasm32")]
 pub fn configure_wasm_workers(
     worker_script_url: String,
@@ -162,11 +148,16 @@ pub fn configure_wasm_workers(
             message: "the style thread pool was already initialized".to_owned(),
         });
     }
-    WASM_STYLE_THREAD_COUNT.store(style_thread_count, Ordering::Release);
     wasm_thread::Builder::empty()
         .worker_script_url(worker_script_url)
         .set_default();
-    Ok(())
+    WASM_STYLE_POOL
+        .get_or_init(|| create_wasm_style_pool(style_thread_count))
+        .clone()
+        .map_err(|message| EngineError::Thread {
+            name: "wasm style pool",
+            message,
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -458,211 +449,52 @@ fn event_detail(event: &InputEvent) -> String {
     }
 }
 
-/// Work serialized onto the Lynx-main owner.
+/// What the presenting side asks one view's script thread to do after the
+/// entry script has finished.
 ///
-/// After startup, only plain event data crosses: node ids, a name, and a JSON
-/// payload. The realm and document remain on their owner until `DropView`.
+/// Only plain data crosses: node ids, an event name, and a JSON payload. The
+/// realm and document both stay where they are.
 enum ScriptCommand {
-    #[cfg(target_arch = "wasm32")]
-    StartView {
-        source: String,
-        source_name: String,
-        factory: Arc<dyn crate::script::ScriptEngineFactory>,
-        elements: SharedTree,
-        events: EngineEventSender,
-        request_frame: Arc<dyn Fn() + Send + Sync>,
-    },
     /// Deliver one already-computed event path to the realm's listeners.
     DispatchEvent {
-        steps: Box<EventSteps>,
+        steps: EventSteps,
         name: Arc<str>,
         detail: Arc<str>,
     },
-    #[cfg(target_arch = "wasm32")]
-    DropView,
 }
 
-struct ScriptCommandQueue {
-    commands: Mutex<VecDeque<ScriptCommand>>,
-    shutdown: AtomicBool,
-    #[cfg(not(target_arch = "wasm32"))]
-    ready: Condvar,
+struct ScriptThreadOwner {
+    commands: mpsc::Sender<ScriptCommand>,
     #[cfg(target_arch = "wasm32")]
-    wake: AtomicU32,
-    #[cfg(target_arch = "wasm32")]
-    executing: AtomicUsize,
+    stopped: tokio::sync::oneshot::Receiver<()>,
 }
 
-impl Default for ScriptCommandQueue {
-    fn default() -> Self {
-        Self {
-            commands: Mutex::new(VecDeque::new()),
-            shutdown: AtomicBool::new(false),
-            #[cfg(not(target_arch = "wasm32"))]
-            ready: Condvar::new(),
-            #[cfg(target_arch = "wasm32")]
-            wake: AtomicU32::new(0),
-            #[cfg(target_arch = "wasm32")]
-            executing: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl ScriptCommandQueue {
-    #[cfg(not(target_arch = "wasm32"))]
-    fn recv(&self) -> Option<ScriptCommand> {
-        let mut commands = self
-            .commands
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        loop {
-            if self.shutdown.load(Ordering::Acquire) {
-                return None;
-            }
-            if let Some(command) = commands.pop_front() {
-                return Some(command);
-            }
-            commands = self
-                .ready
-                .wait(commands)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[allow(
-        unsafe_code,
-        reason = "the Wasm atomic wait intrinsic is the browser's lock-free Worker wake primitive"
-    )]
-    fn recv(&self) -> Option<ScriptCommand> {
-        loop {
-            // This persistent Worker is also Rayon index zero. Cooperate with
-            // traversal scopes entered by the presenting Worker while no JS
-            // command is running; the bounded atomic wait avoids a busy loop.
-            let _ = rayon::yield_now();
-            let observed = self.wake.load(Ordering::Acquire);
-            if self.shutdown.load(Ordering::Acquire) {
-                return None;
-            }
-            if let Some(command) = self
-                .commands
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front()
-            {
-                return Some(command);
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                return None;
-            }
-            unsafe {
-                std::arch::wasm32::memory_atomic_wait32(
-                    (&raw const self.wake).cast::<i32>().cast_mut(),
-                    observed.cast_signed(),
-                    10_000_000,
-                );
-            }
-        }
-    }
-
-    fn send(&self, command: ScriptCommand) {
-        if self.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        let mut commands = self
-            .commands
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-        #[cfg(target_arch = "wasm32")]
-        if !matches!(command, ScriptCommand::DropView) {
-            self.executing.fetch_add(1, Ordering::AcqRel);
-        }
-        commands.push_back(command);
-        drop(commands);
-        self.notify();
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn finish_execution(&self) {
-        let previous = self.executing.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn is_executing(&self) -> bool {
-        self.executing.load(Ordering::Acquire) != 0
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn shutdown(&self) {
-        let mut commands = self
-            .commands
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.shutdown.store(true, Ordering::Release);
-        commands.clear();
-        drop(commands);
-        self.ready.notify_all();
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn notify(&self) {
-        self.ready.notify_one();
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[allow(
-        unsafe_code,
-        reason = "the Wasm atomic notify intrinsic wakes the nested Worker without taking its mutex"
-    )]
-    fn notify(&self) {
-        self.wake.fetch_add(1, Ordering::Release);
-        unsafe {
-            std::arch::wasm32::memory_atomic_notify(
-                (&raw const self.wake).cast::<i32>().cast_mut(),
-                u32::MAX,
-            );
-        }
-    }
-}
-
-struct ScriptCommandOwner {
-    queue: Arc<ScriptCommandQueue>,
-    view_active: bool,
-}
-
-impl Deref for ScriptCommandOwner {
-    type Target = ScriptCommandQueue;
+impl Deref for ScriptThreadOwner {
+    type Target = mpsc::Sender<ScriptCommand>;
 
     fn deref(&self) -> &Self::Target {
-        &self.queue
+        &self.commands
     }
 }
 
-impl ScriptCommandOwner {
-    #[cfg(target_arch = "wasm32")]
-    fn drop_view(&mut self) {
-        if self.view_active {
-            self.queue.send(ScriptCommand::DropView);
-            self.view_active = false;
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn drop_view(&mut self) {
-        if self.view_active {
-            self.queue.shutdown();
-            self.view_active = false;
-        }
+#[cfg(target_arch = "wasm32")]
+impl ScriptThreadOwner {
+    async fn stop(self) {
+        let Self { commands, stopped } = self;
+        drop(commands);
+        let _ = stopped.await;
     }
 }
 
-impl Drop for ScriptCommandOwner {
+#[cfg(target_arch = "wasm32")]
+struct ScriptThreadCompletion(Option<tokio::sync::oneshot::Sender<()>>);
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for ScriptThreadCompletion {
     fn drop(&mut self) {
-        self.drop_view();
+        if let Some(stopped) = self.0.take() {
+            let _ = stopped.send(());
+        }
     }
 }
 
@@ -676,15 +508,15 @@ impl Drop for ScriptCommandOwner {
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
-    /// Dropped first on native embedders so their detached script thread wakes;
-    /// on Wasm this is the current view's binding to the persistent owner.
-    script_commands: Option<ScriptCommandOwner>,
+    /// Dropped first so this view's detached script thread wakes and releases
+    /// its owner-thread-bound realm.
+    script_commands: Option<ScriptThreadOwner>,
     elements: SharedTree,
     script_owner_available: bool,
     viewport: Viewport,
     frame_size: FrameSize,
-    messages: Option<mpsc::Receiver<EngineMessage>>,
-    event_sender: Option<EngineEventSender>,
+    messages: mpsc::Receiver<EngineMessage>,
+    event_sender: EngineEventSender,
     output: Output<'window>,
     /// The window's frame-request handle, behind `Arc` so the Lynx main
     /// thread always observes the currently attached target rather than a
@@ -735,11 +567,11 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             elements,
             viewport,
             frame_size,
-            messages: Some(messages),
-            event_sender: Some(EngineEventSender {
+            messages,
+            event_sender: EngineEventSender {
                 sender: message_sender,
                 requester: event_requester,
-            }),
+            },
             output: Output::None,
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
@@ -797,9 +629,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
 
     /// Registers shared font data without exposing the document to the host.
     pub(crate) fn register_fonts(&mut self, data: FontBlob) -> Result<usize, EngineError> {
-        if self.script_is_executing() {
-            return Err(EngineError::ResourceUpdateBusy);
-        }
         let Some(mut tree) = self.elements.try_tree() else {
             return Err(EngineError::ResourceUpdateBusy);
         };
@@ -820,9 +649,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         &mut self,
         sheet: &PreparsedStyleSheet,
     ) -> Result<(), EngineError> {
-        if self.script_is_executing() {
-            return Err(EngineError::ResourceUpdateBusy);
-        }
         let Some(mut tree) = self.elements.try_tree() else {
             return Err(EngineError::ResourceUpdateBusy);
         };
@@ -834,9 +660,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
 
     /// Mounts an author stylesheet supplied as CSS text.
     pub(crate) fn add_style_sheet_text(&mut self, css: &str) -> Result<(), EngineError> {
-        if self.script_is_executing() {
-            return Err(EngineError::ResourceUpdateBusy);
-        }
         let Some(mut tree) = self.elements.try_tree() else {
             return Err(EngineError::ResourceUpdateBusy);
         };
@@ -853,9 +676,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         url: impl Into<String>,
         image: &DecodedImage,
     ) -> Result<(), EngineError> {
-        if self.script_is_executing() {
-            return Err(EngineError::ResourceUpdateBusy);
-        }
         let Some(mut tree) = self.elements.try_tree() else {
             return Err(EngineError::ResourceUpdateBusy);
         };
@@ -869,9 +689,8 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         pending_resize: &mut Option<(f32, f32, f32)>,
         pending_input: &mut VecDeque<InputEvent>,
         tree: &mut LynxDocument,
-        commands: Option<&ScriptCommandQueue>,
-    ) -> bool {
-        let mut dispatched_to_script = false;
+        commands: Option<&mpsc::Sender<ScriptCommand>>,
+    ) {
         if let Some((width, height, ratio)) = pending_resize.take() {
             tree.set_viewport(width, height);
             tree.set_device_pixel_ratio(ratio);
@@ -892,46 +711,28 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             // thread that owns the realm never has to take it to find out who
             // an event reaches.
             let steps = tree.event_steps(target, true, true);
-            commands.send(ScriptCommand::DispatchEvent {
-                steps: Box::new(steps),
+            let _ = commands.send(ScriptCommand::DispatchEvent {
+                steps,
                 name: Arc::from(name),
                 detail: Arc::from(event_detail(&event)),
             });
-            dispatched_to_script = true;
-        }
-        dispatched_to_script
-    }
-
-    const fn defer_render_after_script_dispatch(dispatched: bool) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        {
-            dispatched
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = dispatched;
-            false
         }
     }
 
     /// Routes one host input event on the presenting side.
     pub(crate) fn dispatch_input(&mut self, event: InputEvent) {
         self.pending_input.push_back(event);
-        let needs_frame = if self.script_is_executing() {
-            false
-        } else {
-            match self.elements.try_tree() {
-                Some(mut tree) => {
-                    let _ = Self::drain_deferred(
-                        &mut self.pending_resize,
-                        &mut self.pending_input,
-                        &mut tree,
-                        self.script_commands.as_deref(),
-                    );
-                    tree.needs_render()
-                }
-                None => false,
+        let needs_frame = match self.elements.try_tree() {
+            Some(mut tree) => {
+                Self::drain_deferred(
+                    &mut self.pending_resize,
+                    &mut self.pending_input,
+                    &mut tree,
+                    self.script_commands.as_deref(),
+                );
+                tree.needs_render()
             }
+            None => false,
         };
         if needs_frame {
             self.refresh();
@@ -953,20 +754,16 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         if !size_changed && !scale_changed {
             return Ok(());
         }
-        if self.script_is_executing() {
-            self.pending_resize = Some((width, height, device_pixel_ratio));
-        } else {
-            match self.elements.try_tree() {
-                Some(mut tree) => {
-                    if size_changed {
-                        tree.set_viewport(width, height);
-                    }
-                    if scale_changed {
-                        tree.set_device_pixel_ratio(device_pixel_ratio);
-                    }
+        match self.elements.try_tree() {
+            Some(mut tree) => {
+                if size_changed {
+                    tree.set_viewport(width, height);
                 }
-                None => self.pending_resize = Some((width, height, device_pixel_ratio)),
+                if scale_changed {
+                    tree.set_device_pixel_ratio(device_pixel_ratio);
+                }
             }
+            None => self.pending_resize = Some((width, height, device_pixel_ratio)),
         }
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
@@ -988,30 +785,10 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             .clone()
     }
 
-    #[allow(
-        clippy::unused_self,
-        reason = "native and Wasm call sites share one engine path; only Wasm needs the execution gate"
-    )]
-    fn script_is_executing(&self) -> bool {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.script_commands
-                .as_ref()
-                .is_some_and(|commands| commands.is_executing())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            false
-        }
-    }
-
     /// Drains lifecycle messages from engine-owned threads.
     pub(crate) fn pump(&mut self) -> Vec<EngineEvent> {
         let mut events = Vec::new();
-        let Some(messages) = self.messages.as_ref() else {
-            return events;
-        };
-        while let Ok(message) = messages.try_recv() {
+        while let Ok(message) = self.messages.try_recv() {
             match message {
                 EngineMessage::ListenerFailed(error) => {
                     events.push(EngineEvent::ListenerFailed(error));
@@ -1086,39 +863,30 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
     /// Relays the OS's "the window wants a frame" fact.
     pub(crate) fn notify_redraw(&mut self) -> Result<(), EngineError> {
         let frames = self.frame_requester();
-        let script_is_executing = self.script_is_executing();
         let Output::Window(graphics) = &mut self.output else {
             return Ok(());
         };
         let size = self.frame_size;
-        let tree_was_busy = if script_is_executing {
-            true
-        } else {
-            match self.elements.try_tree() {
-                Some(mut tree) => {
-                    let dispatched = Self::drain_deferred(
-                        &mut self.pending_resize,
-                        &mut self.pending_input,
-                        &mut tree,
-                        self.script_commands.as_deref(),
-                    );
-                    if Self::defer_render_after_script_dispatch(dispatched) {
-                        true
-                    } else {
-                        // Input and resize first, then the timeline, so a scroll and
-                        // an animation compose in one defined order under one truth;
-                        // then render, so an animation that just ended relayouts in
-                        // the same frame it ended.
-                        self.animating = Self::advance_animations(&self.clock, &mut tree);
-                        let produced = tree.render();
-                        if produced || !graphics.rendered_at(size) {
-                            graphics.render_to_target(&tree.scene(), size)?;
-                        }
-                        false
-                    }
+        let tree_was_busy = match self.elements.try_tree() {
+            Some(mut tree) => {
+                Self::drain_deferred(
+                    &mut self.pending_resize,
+                    &mut self.pending_input,
+                    &mut tree,
+                    self.script_commands.as_deref(),
+                );
+                // Input and resize first, then the timeline, so a scroll and
+                // an animation compose in one defined order under one truth;
+                // then render, so an animation that just ended relayouts in
+                // the same frame it ended.
+                self.animating = Self::advance_animations(&self.clock, &mut tree);
+                let produced = tree.render();
+                if produced || !graphics.rendered_at(size) {
+                    graphics.render_to_target(&tree.scene(), size)?;
                 }
-                None => true,
+                false
             }
+            None => true,
         };
         let frames = frames
             .as_deref()
@@ -1138,24 +906,18 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
     /// Renders one frame to the offscreen target if the document changed (or unconditionally with
     /// `force`), returning whether a frame was submitted.
     pub(crate) fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
-        if self.script_is_executing() {
-            return Ok(false);
-        }
         let Output::Offscreen(gpu) = &mut self.output else {
             return Err(EngineError::NoDrawTarget);
         };
         let Some(mut tree) = self.elements.try_tree() else {
             return Ok(false);
         };
-        let dispatched = Self::drain_deferred(
+        Self::drain_deferred(
             &mut self.pending_resize,
             &mut self.pending_input,
             &mut tree,
             self.script_commands.as_deref(),
         );
-        if Self::defer_render_after_script_dispatch(dispatched) {
-            return Ok(false);
-        }
         self.animating = Self::advance_animations(&self.clock, &mut tree);
         let changed = tree.render();
         if !changed && !force {
@@ -1220,35 +982,21 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         source_name: String,
         factory: Arc<dyn crate::script::ScriptEngineFactory>,
     ) -> Result<(), EngineError> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.spawn_wasm_script(source, source_name, factory)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.spawn_native_script(source, source_name, factory)
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn spawn_native_script(
-        &mut self,
-        source: String,
-        source_name: String,
-        factory: Arc<dyn crate::script::ScriptEngineFactory>,
-    ) -> Result<(), EngineError> {
         let elements = self.take_script_tree()?;
-        let events = self
-            .event_sender
-            .as_ref()
-            .expect("a running engine retains its event sender")
-            .clone();
+        let events = self.event_sender.clone();
         let frame_requesters = Arc::clone(&self.frames);
-        let commands = Arc::new(ScriptCommandQueue::default());
-        let worker_commands = Arc::clone(&commands);
+        let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
+        #[cfg(target_arch = "wasm32")]
+        let (worker_stopped, stopped) = tokio::sync::oneshot::channel();
         let spawn = ThreadBuilder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
+                #[cfg(target_arch = "wasm32")]
+                let _completion = ScriptThreadCompletion(Some(worker_stopped));
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                install_script_panic_hook();
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                set_script_panic_reporter(Some(events.clone()));
                 let on_flush = Arc::clone(&frame_requesters);
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     (|| {
@@ -1286,10 +1034,11 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 };
                 request_current_frame(&frame_requesters);
 
-                // The realm now outlives its entry script. The engine wakes
-                // this queue explicitly when its view is shut down.
+                // The realm now outlives its entry script. Dropping this
+                // view's sender closes the receiver and releases the realm on
+                // its owner thread.
                 if let Some(mut runtime) = runtime {
-                    while let Some(command) = worker_commands.recv() {
+                    while let Ok(command) = commands.recv() {
                         match command {
                             ScriptCommand::DispatchEvent {
                                 steps,
@@ -1326,76 +1075,21 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                         }
                     }
                 }
+                #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+                set_script_panic_reporter(None);
             });
         let script_thread = spawn.map_err(|error| self.script_spawn_error(&error))?;
-        self.script_commands = Some(ScriptCommandOwner {
-            queue: commands,
-            view_active: true,
+        self.script_commands = Some(ScriptThreadOwner {
+            commands: command_sender,
+            #[cfg(target_arch = "wasm32")]
+            stopped,
         });
         drop(script_thread);
         Ok(())
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn spawn_wasm_script(
-        &mut self,
-        source: String,
-        source_name: String,
-        factory: Arc<dyn crate::script::ScriptEngineFactory>,
-    ) -> Result<(), EngineError> {
-        let elements = self.take_script_tree()?;
-        if WASM_SCRIPT_OWNER_CLAIMED.swap(true, Ordering::AcqRel) {
-            self.script_owner_available = true;
-            return Err(EngineError::Thread {
-                name: "script",
-                message: "this Wasm instance still owns a live Lynx view".to_owned(),
-            });
-        }
-
-        let commands = if let Some(commands) = WASM_SCRIPT_COMMANDS.get() {
-            Arc::clone(commands)
-        } else {
-            let commands = Arc::new(ScriptCommandQueue::default());
-            let worker_commands = Arc::clone(&commands);
-            let worker = ThreadBuilder::new()
-                .name("bobcat-main".to_owned())
-                .spawn(move || run_wasm_script_session(&worker_commands))
-                .map_err(|error| self.script_spawn_error(&error))?;
-            drop(worker);
-            assert!(
-                WASM_SCRIPT_COMMANDS.set(Arc::clone(&commands)).is_ok(),
-                "the single Wasm renderer initialized its script session twice"
-            );
-            commands
-        };
-
-        let events = self
-            .event_sender
-            .as_ref()
-            .expect("a running engine retains its event sender")
-            .clone();
-        let frame_requesters = Arc::clone(&self.frames);
-        let request_frame: Arc<dyn Fn() + Send + Sync> =
-            Arc::new(move || request_current_frame(&frame_requesters));
-        commands.send(ScriptCommand::StartView {
-            source,
-            source_name,
-            factory,
-            elements,
-            events,
-            request_frame,
-        });
-        self.script_commands = Some(ScriptCommandOwner {
-            queue: commands,
-            view_active: true,
-        });
-        Ok(())
-    }
-
     fn script_spawn_error(&mut self, error: &std::io::Error) -> EngineError {
         self.script_owner_available = true;
-        #[cfg(target_arch = "wasm32")]
-        WASM_SCRIPT_OWNER_CLAIMED.store(false, Ordering::Release);
         EngineError::Thread {
             name: "script",
             message: error.to_string(),
@@ -1404,174 +1098,13 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
 
     #[cfg(target_arch = "wasm32")]
     pub(crate) async fn shutdown(mut self) {
-        self.request_script_shutdown();
-        while WASM_SCRIPT_OWNER_CLAIMED.load(Ordering::Acquire) {
-            yield_browser_task().await;
+        if let Some(owner) = self.script_commands.take() {
+            owner.stop().await;
         }
-
-        // Release Wasm-backed fields explicitly after the owner Worker has
-        // dropped its realm and returned the document. Keeping this sequence
-        // outside async drop glue also makes the view boundary unambiguous.
-        let document = self.elements.lock().take();
-        drop(document);
-        let output = std::mem::replace(&mut self.output, Output::None);
-        drop(output);
-        let event_sender = self.event_sender.take();
-        drop(event_sender);
-        let messages = self.messages.take();
-        drop(messages);
-        let Self {
-            script_commands,
-            elements,
-            messages,
-            event_sender,
-            output,
-            frames,
-            pending_input,
-            pending_resize,
-            clock,
-            ..
-        } = self;
-        drop(script_commands);
-        drop(elements);
-        drop(messages);
-        drop(event_sender);
-        drop(output);
-        drop(frames);
-        drop(pending_input);
-        let _ = pending_resize;
-        drop(clock);
+        // `self` now drops normally. The worker has already released its realm
+        // and returned the document; the process-wide Stylo pool is independent
+        // and remains available to replacement views.
     }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_script_shutdown(&mut self) {
-        if let Some(mut commands) = self.script_commands.take() {
-            commands.drop_view();
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn run_wasm_script_session(commands: &ScriptCommandQueue) {
-    #[cfg(panic = "abort")]
-    install_script_panic_hook();
-
-    let mut runtime: Option<crate::runtime::MainThreadRuntime> = None;
-    let mut active_events: Option<EngineEventSender> = None;
-    let mut active_frame_request: Option<Arc<dyn Fn() + Send + Sync>> = None;
-
-    while let Some(command) = commands.recv() {
-        match command {
-            ScriptCommand::StartView {
-                source,
-                source_name,
-                factory,
-                elements,
-                events,
-                request_frame,
-            } => {
-                debug_assert!(runtime.is_none());
-                debug_assert!(active_events.is_none());
-                #[cfg(panic = "abort")]
-                set_script_panic_reporter(Some(events.clone()));
-
-                let on_flush = Arc::clone(&request_frame);
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    (|| {
-                        prepare_script_thread()?;
-                        let mut next = crate::runtime::MainThreadRuntime::new(
-                            factory.as_ref(),
-                            elements,
-                            move || on_flush(),
-                        )
-                        .map_err(|error| {
-                            ScriptRunError::Initialization(error.into_script_error())
-                        })?;
-                        next.run_main_thread_script(&source, &source_name)
-                            .map_err(|error| ScriptRunError::Script(error.into_script_error()))?;
-                        Ok(next)
-                    })()
-                }))
-                .unwrap_or_else(|payload| {
-                    Err(ScriptRunError::Platform(format!(
-                        "the injected VM panicked: {}",
-                        panic_payload(payload.as_ref())
-                    )))
-                });
-                runtime = match result {
-                    Ok(next) => {
-                        events.send(EngineMessage::ScriptDone(Ok(())));
-                        Some(next)
-                    }
-                    Err(error) => {
-                        events.send(EngineMessage::ScriptDone(Err(error)));
-                        None
-                    }
-                };
-                commands.finish_execution();
-                request_frame();
-                active_events = Some(events);
-                active_frame_request = Some(request_frame);
-            }
-            ScriptCommand::DispatchEvent {
-                steps,
-                name,
-                detail,
-            } => {
-                let (Some(runtime), Some(events), Some(request_frame)) = (
-                    runtime.as_mut(),
-                    active_events.as_ref(),
-                    active_frame_request.as_ref(),
-                ) else {
-                    commands.finish_execution();
-                    continue;
-                };
-                let delivered = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.dispatch_event(&steps, &name, &detail)
-                }));
-                match delivered {
-                    Ok(Ok(true)) => request_frame(),
-                    Ok(Err(error)) => {
-                        events.send(EngineMessage::ListenerFailed(error.into_script_error()));
-                    }
-                    Ok(Ok(false)) | Err(_) => {}
-                }
-                commands.finish_execution();
-            }
-            ScriptCommand::DropView => {
-                drop(runtime.take());
-                #[cfg(panic = "abort")]
-                set_script_panic_reporter(None);
-                active_events = None;
-                active_frame_request = None;
-                WASM_SCRIPT_OWNER_CLAIMED.store(false, Ordering::Release);
-            }
-        }
-    }
-}
-
-/// Yield to the Render Worker's task queue while the persistent script Worker
-/// drops the current view.
-///
-/// A same-Worker zero-delay task lets cross-thread atomic progress continue
-/// without blocking the JavaScript turn that owns the renderer.
-#[cfg(target_arch = "wasm32")]
-async fn yield_browser_task() {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let scheduled = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .ok()
-            .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
-            .is_some_and(|set_timeout| {
-                set_timeout
-                    .call2(&global, &resolve, &JsValue::from_f64(0.0))
-                    .is_ok()
-            });
-        if !scheduled {
-            let _ = resolve.call0(&JsValue::UNDEFINED);
-        }
-    });
-    let _ = JsFuture::from(promise).await;
 }
 
 fn request_current_frame<F: FrameRequester>(frames: &Mutex<Option<Arc<F>>>) {
@@ -1623,36 +1156,31 @@ fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn prepare_script_thread() -> Result<(), ScriptRunError> {
-    WASM_STYLE_POOL
-        .get_or_init(|| {
-            let thread_count = WASM_STYLE_THREAD_COUNT.load(Ordering::Acquire);
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(thread_count)
-                .use_current_thread()
-                .thread_name(|index| format!("StyleThread#{index}"))
-                .start_handler(|_| {
-                    dom::stylo::thread_state::initialize_layout_worker_thread();
-                })
-                .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
-                .spawn_handler(|thread| {
-                    let mut builder = wasm_thread::Builder::new();
-                    if let Some(name) = thread.name() {
-                        builder = builder.name(name.to_owned());
-                    }
-                    if let Some(stack_size) = thread.stack_size() {
-                        builder = builder.stack_size(stack_size);
-                    }
-                    builder.spawn(move || thread.run()).map(|_| ())
-                })
-                .build()
-                .map_err(|error| error.to_string())?;
-            dom::install_style_thread_pool(pool)
-                .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())?;
-            Ok(())
+fn create_wasm_style_pool(thread_count: usize) -> Result<(), String> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        // The persistent presenting Worker is index zero; every LynxView's
+        // owner-thread-bound VM runs on a separate, transient Worker.
+        .num_threads(thread_count)
+        .use_current_thread()
+        .thread_name(|index| format!("StyleThread#{index}"))
+        .start_handler(|_| {
+            dom::stylo::thread_state::initialize_layout_worker_thread();
         })
-        .clone()
-        .map_err(ScriptRunError::Platform)
+        .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
+        .spawn_handler(|thread| {
+            let mut builder = wasm_thread::Builder::new();
+            if let Some(name) = thread.name() {
+                builder = builder.name(name.to_owned());
+            }
+            if let Some(stack_size) = thread.stack_size() {
+                builder = builder.stack_size(stack_size);
+            }
+            builder.spawn(move || thread.run()).map(|_| ())
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
+    dom::install_style_thread_pool(pool)
+        .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())
 }
 
 fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameSize, EngineError> {
@@ -1918,6 +1446,28 @@ mod event_loop_tests {
             }
             assert!(Instant::now() < deadline, "the entry script did not finish");
             std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn independent_views_can_own_live_script_threads_in_one_process() {
+        let source = r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              __AppendElement(page, __CreateView(0));
+              __FlushElementTree();
+            };
+        ";
+
+        let first = booted(source);
+        let second = booted(source);
+
+        for engine in [&first, &second] {
+            let tree = engine
+                .elements
+                .try_tree()
+                .expect("each live view retains its own document");
+            assert_eq!(tree.document_element().child_ids().len(), 1);
         }
     }
 

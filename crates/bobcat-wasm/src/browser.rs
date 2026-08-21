@@ -539,9 +539,9 @@ impl BobcatRenderer {
     pub async fn reset(&mut self) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Drop this view's realm and document on the persistent Lynx-main
-        // Worker. Awaiting the hand-off keeps the Render Worker's JavaScript
-        // event loop available before the replacement is installed.
+        // Drop this view's realm, document, and Lynx-main Worker. Awaiting the
+        // hand-off keeps the Render Worker's JavaScript event loop available
+        // before the replacement view starts its own Worker.
         if let Some(view) = self.view.take() {
             view.shutdown().await;
         }

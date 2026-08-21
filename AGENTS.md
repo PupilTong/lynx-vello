@@ -512,19 +512,20 @@ useful signal for currently-compatible versions of those libraries.
   synchronously at each execution checkpoint; there is no browser
   microtask-completion protocol. The underlying QuickJS bridge retains an
   opt-in execution timeout for its direct users and tests.
-  One Wasm instance owns one live view at a time and its Stylo pool; every
-  public `BobcatCanvas` gets a separate Render Worker and Wasm instance, while
-  `BobcatCanvas.reset()` drops the current native `LynxView` state before
-  constructing its replacement in that same warm session. The transferred
-  OffscreenCanvas, module instance, configuration, latest metrics, resource
-  provider, and registered font containers survive; reset clears the old
-  page's transient registered script and stylesheet bytes. The first
-  Lynx-main Worker persists for the Wasm session as Stylo's index-zero owner;
-  each view installs and drops only its QuickJS realm, document, and endpoints
-  there. While a realm command is executing, presentation retains the prior
-  frame instead of starting an outside-pool Stylo traversal that could wait on
-  the same index-zero owner. The combined thread-budget minimum is two, leaving
-  one managed Rayon worker beside that persistent owner. The UI never
+  A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
+  its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
+  native view does. Every public `BobcatCanvas` gets a separate Render Worker
+  and Wasm instance; `BobcatCanvas.reset()` waits for the current native
+  `LynxView` and its Lynx-main Worker to drop before constructing a replacement
+  in that same warm session. The transferred OffscreenCanvas, module instance,
+  configuration, latest metrics, resource provider, registered font
+  containers, and Stylo pool survive; reset clears the old page's transient
+  registered script and stylesheet bytes. The persistent Render Worker is
+  Stylo's Rayon index-zero owner; the pool also contains managed style Workers.
+  A per-view script owner enters traversal from outside that pool, and Stylo
+  transfers its root closure onto a managed worker. The configured style-pool
+  minimum is two: the Render Worker plus at least one managed Stylo Worker;
+  each live view's Lynx-main Worker is separate. The UI never
   blocks, while Worker-side Rust may block wherever the native runtime does.
   The browser target enables `parking_lot_core/nightly` so transitive
   Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the

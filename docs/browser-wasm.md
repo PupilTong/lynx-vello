@@ -35,19 +35,19 @@ bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
 pool, while that renderer may own a sequence of non-overlapping native views.
-`BobcatCanvas.reset()` drops the current view's realm and document on the
-persistent Lynx-main Worker before constructing its replacement. That Worker
-also remains index zero of the Stylo pool for the whole Wasm session, so the
-pool stays valid across resets. The configured count is a combined budget: the
-persistent Lynx-main owner plus at least one managed Stylo worker. The public
+`BobcatCanvas.reset()` waits for the current view's realm, document, and
+per-view Lynx-main Worker to drop before constructing its replacement. The
+process-wide pool adopts the persistent Render Worker as index zero and remains
+valid across resets. The configured count covers that owner plus at least one
+managed Stylo Worker; each live view's Lynx-main Worker is separate. The public
 facade still creates one fresh Render Worker and Wasm instance per
 `BobcatCanvas`, not per reset.
 
-The persistent owner cooperatively services Stylo work initiated by the Render
-Worker while it is idle. Conversely, while a realm command is running, frame
-production retains the last target rather than starting an outside-pool style
-traversal that could wait for index zero. Completion requests the deferred
-frame, so this gate neither loses a render nor exposes a half-started view.
+The transient Lynx-main Worker invokes Stylo from outside its Rayon pool, so
+Stylo transfers that traversal's root closure onto a managed worker. The Render
+Worker enters from its stable index-zero slot. This keeps view lifetime
+independent from the shared pool without requiring an idle script Worker to
+service style work.
 
 ## Resource and script boundaries
 
@@ -77,9 +77,10 @@ call rejects before fetching or mounting XML CSS, so a failed repeated load
 cannot mutate the running page's cascade. A caller that wants a new page first
 calls `reset()`, which preserves the outer Worker, OffscreenCanvas, initialized
 Wasm module, page configuration, latest device metrics, resource provider, and
-registered font containers while replacing the private view/VM/document. The
-provider clears the old page's transient script and stylesheet bytes during
-reset so repeated Blob-URL submissions do not accumulate stale sources.
+registered font containers while replacing the private view, Lynx-main Worker,
+VM, and document. The provider clears the old page's transient script and
+stylesheet bytes during reset so repeated Blob-URL submissions do not
+accumulate stale sources.
 
 The optional XML background section is retained under a URL derived from the
 final XML response URL but is not executed. Bobcat does not yet have a
