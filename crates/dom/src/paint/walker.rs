@@ -418,12 +418,15 @@ fn compute_layer_bounds<T>(scratch: &mut Scratch, document: &Document<T>, frame:
         return;
     }
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
-    let device_viewport = document.device().viewport_size();
+    // CSS px, not device px: `Device::viewport_size` is `Size2D<f32, CSSPixel>`, and the paint
+    // order this is intersected against carries CSS-px transforms — the device scale is applied
+    // once, separately, as the root `scale` affine.
+    let viewport_size = document.device().viewport_size();
     let viewport = Rect::new(
         0.0,
         0.0,
-        f64::from(device_viewport.width),
-        f64::from(device_viewport.height),
+        f64::from(viewport_size.width),
+        f64::from(viewport_size.height),
     );
     scratch.bounds_acc.clear();
     scratch.bounds_acc.resize(layers.len(), None);

@@ -3,8 +3,8 @@
 //!
 //! [`Document::render`] builds the private `PaintOrder`: a flat item list in
 //! back-to-front order, each item carrying its viewport-space transform and
-//! innermost clip. The private painter walks it frontwards, then retains it
-//! beside the scene; [`Document::elements_from_point`],
+//! innermost clip. The private painter walks it forwards, back to front,
+//! then retains it beside the scene; [`Document::elements_from_point`],
 //! [`Document::elements_from_points`], and [`Document::route_input`] walk
 //! that retained frame backwards as pure reads — hit testing never re-runs
 //! the pipeline. Neither the frame nor the painter crosses the document API
@@ -72,8 +72,13 @@
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.
-//! - No retained/incremental visual-order structure: internal stacking damage is the designated
-//!   invalidation hook, but no order cache exists today.
+//! - No incremental visual-order structure. The last `PaintOrder` is retained beside the scene, but
+//!   only as the hit-test snapshot: it is never an input to the next build, and every visual
+//!   mutation rebuilds the whole order. Invalidation is the document's private visual epoch
+//!   ([`Document::needs_render`]) — one counter for every kind of change, so a one-pixel scroll and
+//!   a structural edit are indistinguishable to the render path. `StyleDamage`'s repaint and
+//!   stacking classes are computed by the style flush and dropped; they are what a tiered scheme
+//!   would key on, but nothing on this path reads them today.
 
 mod build;
 mod geometry;
@@ -128,7 +133,7 @@ pub(crate) enum PaintItemKind {
     TextRun { element: NodeId },
 }
 
-/// One node's slot in the paint order.
+/// One node's entry in the paint order.
 #[derive(Debug, Clone)]
 pub(crate) struct PaintItem {
     pub(crate) node: NodeId,
@@ -141,6 +146,11 @@ pub(crate) struct PaintItem {
 }
 
 /// A stacking context rendered as a composited group.
+///
+/// Only contexts with group effects (`opacity`, `filter`, `mix-blend-mode`,
+/// `clip-path`, `mask-image`, `isolation`) get one. A plain transform or
+/// `z-index` context has no [`RenderLayer`] at all, so this table is not an
+/// index of stacking contexts and cannot be used as one.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderLayer {
     pub(crate) parent: Option<usize>,
@@ -148,6 +158,9 @@ pub(crate) struct RenderLayer {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
+    /// The contiguous run of [`PaintOrder::items`] this group encloses. A
+    /// stacking context paints atomically, so its members are always
+    /// contiguous; an empty run is not recorded at all (the layer is popped).
     pub(crate) items: std::ops::Range<usize>,
 }
 

@@ -12,8 +12,11 @@
 //! - `scroll` is a scroll container the user can drag and wheel.
 //! - `hidden` is a scroll container that is **not user-scrollable**: it clips, and it moves only
 //!   when something asks it to programmatically. That distinction carries real weight here, because
-//!   Lynx's UA cascade puts `overflow: hidden` on *every* element — conflating the two would make
-//!   every box drag-scrollable.
+//!   a page whose config turns off `defaultOverflowVisible` gets `overflow: hidden` from the Lynx
+//!   UA cascade on *every* `page` and `view` — conflating the two would make every box in such a
+//!   page drag-scrollable. The default config leaves overflow visible, so this is a per-page fact,
+//!   not a standing one; the sheet that decides it belongs to the embedder (`bobcat-core`'s
+//!   `ua_stylesheet`), not to this crate.
 //! - `clip` is not a scroll container at all: it clips and stops, with no scrolling area and no
 //!   offset, and its content does not reach into an ancestor's scrolling area either.
 //!
