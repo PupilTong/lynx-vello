@@ -127,6 +127,25 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## Text layout (see [css-text.md](css-text.md))
 
+- **`text-align: justify` does not parse, and the declaration is dropped
+  without a trace** — the vendored fork excludes `Justify` from
+  `TextAlignKeyword` under its `lynx` feature
+  (`vendor/stylo/style/values/specified/text.rs`, `#[cfg(not(feature =
+  "lynx"))]`), so the value is invalid at parse time and CSS drops the whole
+  declaration. Both worlds it is measured against accept it: native Lynx's own
+  parser maps the keyword to `TextAlignType::kJustify`
+  (`lynx/core/renderer/css/parser/enum_handler.cc`), and the web target hands
+  `text-align` straight to the browser, which really does justify. The failure
+  mode is quiet and it is *not* a fallback to `start`: an invalid declaration
+  leaves whatever `text-align` already cascaded or inherited in place, so a
+  `text` inside a `text-align: center` subtree stays centered instead of
+  becoming justified — no console message, no computed-value difference to
+  notice. Recorded, not fixed. Nothing below the parser is missing: Parley
+  already implements `Alignment::Justify` (inter-cluster expansion on every
+  line but the last), and `hughie`'s `TextAlign` → `Alignment` map is a `match`
+  with one arm to add. The whole cost is a fork patch un-gating the keyword,
+  which is a change to the vendored submodule and its own review, so it is
+  filed here rather than smuggled into an engine-side change.
 - **Parley 0.11 paragraph base direction** — the public Parley builders and
   `Layout` expose no base-direction override. Internally, text analysis always
   invokes bidi resolution with an automatic/first-strong base level, even
@@ -207,6 +226,21 @@ consequential choice about whether to follow the spec or the quirk.
   native-Lynx gate is documented as a config-gated fallback design
   (doctored parent `ComputedValues`, allowlist mask) but not implemented.
   Custom properties inherit unconditionally in both worlds.
+  **Landed 2026-08-21** in `bobcat_core::tree`'s UA sheet, which had carried
+  the decision unimplemented until then — until it landed an ancestor `view`'s
+  `color` really did reach the text under it. The port is `color: initial` on
+  `text`, `color: inherit` on `text > text` and `text > wrapper > text`, and
+  the `text > *` child suppression the same block relies on. Two consequences
+  worth knowing: the reset stops a Lynx **text gradient** at the text root
+  exactly as it stops a solid color (the fork's `color` holds either, and
+  `inherit` carries the gradient into a nested run intact); and a `view` or
+  `image` that opts back out of the suppression becomes a plain flex box,
+  where web-elements can hand it `inline-flex`/`contents` inside a real inline
+  formatting context — the same no-IFC substitution already recorded for a
+  nested `text`.
+  A tag this engine has no rule for (anything but `wrapper`, `view`, `image`,
+  `text`, `raw-text`) generates no box inside a `text`, which is the literal
+  `x-text > * { display: none }` behavior and not a narrowing of it.
 
 - **`:is()`, `:where()`, `:has()`, `:nth-child()` family, `:first-child`/`:last-child`/`:only-child`/`:empty`**
   — all are *parsed* by Lynx's selector grammar but have **no matcher case at
@@ -251,6 +285,26 @@ consequential choice about whether to follow the spec or the quirk.
   drops them even earlier, with no trace. Neither is spec-compliant CSS
   Cascading & Fonts behavior; pick the real spec as the target since there's
   no working native behavior worth preserving here.
+- **A top-level `@font-face` is parsed, mounted, and then completely inert**
+  — this one is ours, not Lynx's. The path runs end to end: the decoder
+  surfaces `PreparsedRule::FontFace`, `bobcat_core::style::lower` turns it
+  into a rule through `Document::build_font_face_rule`, `dom` parses the
+  descriptor block with stylo's own `parse_font_face_block`, and
+  `append_rules` mounts the result in the stylist. Nothing then reads it.
+  Fonts reach Parley by exactly one route — the embedder handing
+  `View::register_fonts` a `FontBlob`, which `hughie`'s `TextContext` passes
+  to Parley with no alias, so the families come from inside the font file —
+  and family matching never consults a font-face rule. So `src` is never
+  fetched, a `font-family` descriptor never names anything, and `font-display`,
+  `unicode-range`, and the descriptor-level weight/style/stretch ranges have no
+  effect at all. A sheet declaring a webfont costs a parse and a rule slot and
+  changes no glyph; text renders in whatever the embedder registered, or the
+  system fallback. Recorded, not fixed: making it real needs a font *loader* —
+  a fetch of the `src` list with format/tech negotiation, a load state machine
+  behind `font-display`, and a Parley registration keyed by the descriptor
+  family rather than the file's own — which is a resource-pipeline feature,
+  not a style-engine one. Until then, treat `@font-face` in a bundle as
+  something that will silently do nothing.
 
 ## Components (see [components.md](components.md))
 
@@ -276,6 +330,46 @@ consequential choice about whether to follow the spec or the quirk.
   with overlapping method names. No single "the" behavior to copy — treat
   native Lynx's virtualized-position-map model as the reference since that's
   what `list.scrollToPosition`/`getVisibleCells` actually need.
+- **`scroll-view` and `list` take their display mode from
+  `defaultDisplayLinear` here; web-core gives neither of them that**, for two
+  different reasons. `scroll-view` is pinned linear:
+  `scroll-view { --lynx-display: linear !important }` in `scroll-view.css`,
+  which the page-config sheet's `[lynx-default-display-linear=false] *` cannot
+  outrank, so on the current container-query path a page built with the flag
+  off still gets a linear scroller in a browser. `x-list` is the opposite — it
+  is in `linear.css`'s common block but in neither the list that enables the
+  `--lynx-display-toggle` nor the one that swaps
+  `flex-direction`/`flex-wrap`/`justify-content` by mode, and `x-list.css`
+  writes `display: flex; flex-direction: column` outright, so a list is a flex
+  container in a browser whichever way the flag is set. **Decision (user,
+  2026-08-21): the UA sheet treats a scroller's display like a view's** — one
+  rule, one switch, and no per-tag exception. That is deliberate, and the
+  alternative is not a different UA rule: `!important` is exactly what
+  [docs/style-assumptions.md](../style-assumptions.md) §D.15 forbids in this
+  sheet (web-elements' defaults are author origin, ours are user-agent origin,
+  and an important UA declaration would outrank author `!important` instead of
+  losing to it), so §D.15 hands forced modes to the layout engine's element
+  policy — which is the piece not yet built, and what this row records. It
+  shows only with `defaultDisplayLinear` off for `scroll-view` and only with it
+  on for `list`, and with the main axis pinned the same way in both modes what
+  is left to differ is how a child is sized —
+  `linear-weight`/`linear-weight-sum` against
+  `flex-grow`/`flex-shrink`/`flex-basis` — and that a linear container never
+  wraps.
+- **A `scroll-view`/`list` is a scroll container and an axis, and nothing
+  else** — the UA sheet gives both tags the container block (border box,
+  configured display), the scrolling axis with its clipped cross axis, the
+  matching main axis in both display modes, and `enable-scroll="false"`. The
+  rest of what `scroll-view.css` and `x-list.css` carry is absent: fading
+  edges, scrollbar visibility (`enable-scrollbar`/`scroll-bar-enable`), scroll
+  snapping (`item-snap`/`paging-enabled`), `sticky-top`/`sticky-bottom`,
+  the threshold-observer parts behind `scrolltoupper`/`scrolltolower`,
+  `list-type="flow"`/`"waterfall"`, and `list-item` itself — which has no rule
+  at all, so a cell is an ordinary flex box rather than the
+  `content-visibility`-virtualized, `contain: layout paint` one web-elements
+  builds. Several of those are shadow-part or virtualization machinery that a
+  UA sheet cannot express alone; they belong with the component work, not with
+  the tag defaults.
 
 ## JS runtime & APIs (see [js-runtime.md](js-runtime.md), [accessibility.md](accessibility.md))
 
