@@ -13,18 +13,19 @@
 //!   sub-streams `color_stops`, `glyphs`, `glyph_runs`, `normalized_coords`.
 //! - Compared by length only: `resources.patches`. `vello_encoding::Patch` is reachable from
 //!   `vello` only as an unnameable field type, and it derives neither `Debug` nor `PartialEq`, so
-//!   its variants cannot be destructured here. The consequence is one real hole: `Patch::Image`
-//!   carries the replaced/`url()` image's `peniko::ImageData`, and no other stream carries those
-//!   pixels. Two scenes whose only difference is *which* decoded image a draw resolves to compare
-//!   equal. Gradient ramps and glyph runs are safe — their patches index `color_stops` and
-//!   `glyph_runs`, both compared — but `Patch::Ramp::extend` and every patch's `draw_data_offset`
-//!   are likewise unobservable.
+//!   its variants cannot be destructured here. Everything a patch carries is therefore
+//!   unobservable: the `peniko::ImageData` in `Patch::Image` — and no other stream carries those
+//!   pixels, so two scenes differing only in *which* decoded image a draw resolves to compare equal
+//!   — `Patch::Ramp`'s `extend` and its sub-range into `color_stops`, `Patch::GlyphRun`'s index
+//!   into `glyph_runs`, and every patch's `draw_data_offset`. The concatenated `color_stops` and
+//!   `glyph_runs` streams are compared, but not how the patches partition them.
 //! - Not compared at all: nothing else exists on `Encoding`; every field is public.
 //!
 //! Float comparison is bitwise, not `==`: an incremental path that reproduces a `NaN` or a `-0.0`
-//! exactly must pass, and one that turns `-0.0` into `0.0` must fail. `color_stops` and
-//! `peniko::Style` are the two exceptions, compared with their own `PartialEq` because their
-//! interiors are private.
+//! exactly must pass, and one that turns `-0.0` into `0.0` must fail. `color_stops` goes through
+//! peniko's own `BitEq`, which is the comparison vello's gradient ramp cache keys on.
+//! `glyph_runs[].style` is the one value compared with `PartialEq`: it is a `peniko::Style`, whose
+//! `Stroke` variant carries an owned dash pattern, and the text painter only ever emits `Fill`.
 //!
 //! The complete observer is the GPU: `flashbulb::capture_scene_sized` on both scenes with an
 //! `assert_eq!` on the two pixel buffers closes the image hole, at the cost of an adapter.
@@ -32,6 +33,7 @@
 //! isolation case.
 
 use crate::vello::Scene;
+use crate::vello::peniko::color::cache_key::BitEq;
 
 /// The bit pattern of a `vello_encoding::Transform`, which cannot be named
 /// through the `vello` re-export.
@@ -128,7 +130,12 @@ pub(crate) fn compare_scenes(a: &Scene, b: &Scene) -> Result<(), String> {
         .zip(&right_resources.color_stops)
         .enumerate()
     {
-        if l != r {
+        // `bit_eq`, not `==`: vello keys its gradient ramp cache on peniko's
+        // own bitwise hash, so a stop at `-0.0` and one at `0.0` occupy
+        // different cache entries and get different ramp ids patched into
+        // `draw_data`. `PartialEq` calls those two scenes equal while they
+        // dispatch different ramps.
+        if !l.bit_eq(r) {
             return Err(format!("resources.color_stops[{index}]: {l:?} vs {r:?}"));
         }
     }

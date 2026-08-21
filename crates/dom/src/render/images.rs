@@ -54,6 +54,11 @@
 //! [`ImageStore::oversized`] / [`ImageStore::oversized_count`], and writes one
 //! line to standard error.
 //!
+//! The two channels are capped separately, and the printed cap counts
+//! refusals rather than records: a caller that reads the record and clears it
+//! every frame — which is how the read-back is meant to be used — would
+//! otherwise re-arm the stream every time it cleared.
+//!
 //! Both channels exist because neither alone reaches the failure. This crate
 //! has no logging dependency, so the record is the only channel a program can
 //! read back, and nothing in the engine reads it — the stderr line is what a
@@ -168,6 +173,10 @@ pub struct ImageStore {
     frame: u64,
     oversized: Vec<OversizedImage>,
     oversized_count: u64,
+    /// Lines written to standard error, so the cap on them is testable
+    /// without capturing the stream.
+    #[cfg(test)]
+    printed: u64,
 }
 
 impl ImageStore {
@@ -343,6 +352,11 @@ impl ImageStore {
         self.oversized.clear();
     }
 
+    #[cfg(test)]
+    const fn printed(&self) -> u64 {
+        self.printed
+    }
+
     #[must_use]
     pub fn url(&self, url: &str) -> Option<&ImageData> {
         Some(self.by_url.get(url)?.touch(self.frame))
@@ -374,22 +388,33 @@ impl ImageStore {
     #[inline(never)]
     fn refuse(&mut self, image: &ImageData, key: impl FnOnce() -> ImageKey) {
         self.oversized_count = self.oversized_count.saturating_add(1);
-        if self.oversized.len() >= MAX_OVERSIZED_REPORTS {
+        // The printed cap counts refusals, not records: a caller that reads
+        // `oversized` and clears it every frame — the way the read-back is
+        // meant to be used — would otherwise re-arm the stream every time.
+        let print = self.oversized_count <= MAX_OVERSIZED_REPORTS as u64;
+        let record = self.oversized.len() < MAX_OVERSIZED_REPORTS;
+        if !print && !record {
             return;
         }
         let key = key();
-        // Both channels are bounded by the same cap, so the stream cannot be
-        // flooded and the read-back cannot grow into the leak it reports.
-        eprintln!(
-            "dom: refused a {}x{} image registered for {key}: vello renders \
-             nothing past {MAX_RENDERABLE_DIMENSION}px per axis",
-            image.width, image.height,
-        );
-        self.oversized.push(OversizedImage {
-            key,
-            width: image.width,
-            height: image.height,
-        });
+        if print {
+            #[cfg(test)]
+            {
+                self.printed += 1;
+            }
+            eprintln!(
+                "dom: refused a {}x{} image registered for {key}: vello renders \
+                 nothing past {MAX_RENDERABLE_DIMENSION}px per axis",
+                image.width, image.height,
+            );
+        }
+        if record {
+            self.oversized.push(OversizedImage {
+                key,
+                width: image.width,
+                height: image.height,
+            });
+        }
     }
 
     fn enforce_url_budget(&mut self) {
@@ -519,6 +544,26 @@ mod tests {
         store.clear_oversized();
         assert!(store.oversized().is_empty());
         assert_eq!(store.oversized_count(), 1, "the count survives a clear");
+    }
+
+    #[test]
+    fn clearing_the_record_does_not_re_arm_the_printed_report() {
+        let mut store = ImageStore::new();
+        let oversized = || image(MAX_RENDERABLE_DIMENSION + 1, 1, 4);
+        for node in 0..(MAX_OVERSIZED_REPORTS as u64 * 3) {
+            register_oversized(&mut store, &ImageKey::Node(node), oversized());
+            // The read-and-clear loop the accessors exist for. It must not
+            // let the print cap start over.
+            store.clear_oversized();
+        }
+        assert_eq!(store.oversized_count(), MAX_OVERSIZED_REPORTS as u64 * 3);
+        assert_eq!(
+            store.printed(),
+            MAX_OVERSIZED_REPORTS as u64,
+            "the printed cap counts refusals, not records, so clearing the \
+             record cannot re-arm the stream",
+        );
+        assert!(store.is_empty());
     }
 
     #[test]

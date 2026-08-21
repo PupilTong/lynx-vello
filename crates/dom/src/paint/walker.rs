@@ -1153,9 +1153,17 @@ mod tests {
             doc.el(group, "view.box");
         }
         let frames = walk_twice(&mut doc);
-        let encoding = frames.cultured.encoding();
         assert_eq!(
-            encoding.n_open_clips, 0,
+            frames.painted, 1,
+            "only the page item is left: both groups and their members go",
+        );
+        assert!(
+            draws(&frames.uncultured) > draws(&frames.cultured),
+            "the uncultured walk must encode them, or the fixture proves nothing",
+        );
+        assert_eq!(
+            frames.cultured.encoding().n_open_clips,
+            0,
             "every pushed layer must still be popped",
         );
         assert_eq!(

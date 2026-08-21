@@ -29,11 +29,14 @@
 //!   viewport culling: both cases re-encode the whole frame from the same scroll offset, so culling
 //!   drops the same rows out of both and lowers them together. Reading a persistent tie there as
 //!   culling having failed is the available misreading, so it is written down here.
-//! - **Scaled by document size.** The list cases take a row-count argument, and the ratio between
-//!   the two arguments says which cost the engine is paying. A frame whose encode is bounded by the
-//!   scrollport is O(visible) and the ratio flattens; a frame that walks the whole document is
-//!   O(rows) and the ratio tracks the argument. `frame_scroll_tick[64]` against
-//!   `frame_scroll_tick[512]` is the direct read of viewport culling.
+//! - **Scaled by document size.** The list cases take a row-count argument. Their encode is already
+//!   bounded by the scrollport — the walker discards items no clip chain admits — so the scene the
+//!   512-row page produces is the same size as the 64-row one. What the two arguments still
+//!   separate is everything *upstream* of the encode: the style flush, the layout commit, the
+//!   paint-order build and the walker's own prepass all walk the whole document, and that is what
+//!   the remaining ratio measures. Read the pair as the cost of rebuilding a frame the damage tiers
+//!   should not be rebuilding, not as a check on culling; culling shows up in the absolute number,
+//!   which fell by about three quarters at 512 rows when it landed.
 //! - **`frame_inert_attribute` is the floor.** It writes a `data-` attribute no rule selects. The
 //!   write still bumps the visual epoch (`ensure_snapshot` in
 //!   `crates/dom/src/style/invalidation.rs` notes a visual mutation unconditionally), so today it
@@ -49,7 +52,7 @@
 //!    mutation when the clamped offset differs, `Document::add_class`/`remove_class` return early
 //!    when the class is already present/absent, and `Document::set_inline_style_property` returns
 //!    early when the declaration block would not change. [`Staleness::Repaints`] runs both phases
-//!    before timing and asserts each one produced a frame.
+//!    before timing and asserts at least one produced a frame.
 //! 2. **The mutation must not drift.** Every step takes a `phase` and *writes from* it rather than
 //!    accumulating: two colors, two transforms, two scroll offsets, two image buffers. Iteration N
 //!    therefore starts where iteration 0 started. A step that scrolled one more pixel each time
@@ -90,8 +93,8 @@ const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 const CARDS: usize = 120;
 
 /// Rows in the list page. The two arguments differ by 8x with the same
-/// scrollport, so a frame whose cost tracks the visible rows and a frame whose
-/// cost tracks the document are trivially distinguishable.
+/// scrollport, so a cost that tracks the document separates from one that
+/// tracks the visible rows.
 const ROW_ARGS: [usize; 2] = [64, 512];
 
 /// Text-carrying boxes on the paragraph page.

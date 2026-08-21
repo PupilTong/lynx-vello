@@ -88,7 +88,15 @@ impl Painter {
             .is_multiple_of(NODE_SWEEP_INTERVAL_FRAMES)
         {
             self.images.retain_nodes(|owner| {
-                crate::NodeId::from_bits(owner).is_some_and(|node| document.contains_node(node))
+                // An owner key that does not decode is kept, not dropped. The
+                // registry's key space is opaque `u64`, and `NodeId::from_bits`
+                // also refuses a key whose generation field has outgrown its
+                // 21 bits, which a long-lived document that recycles one arena
+                // slot enough times will reach. Reading either as "the node is
+                // gone" would blank a live element's pixels for good, whereas
+                // keeping an undecodable key costs only the bytes, and the
+                // embedder can still drop it through `remove_node`.
+                crate::NodeId::from_bits(owner).is_none_or(|node| document.contains_node(node))
             });
         }
         self.scene_epoch = Some(frame.visual_epoch());
@@ -102,7 +110,7 @@ impl Painter {
     /// The spare frame buffers' and the build scratch's capacities, for the
     /// reuse tests.
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> ([usize; 3], [usize; 5]) {
+    pub(crate) fn storage_capacities(&self) -> ([usize; 3], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
     }
 
@@ -128,6 +136,10 @@ impl Painter {
 
     pub(crate) const fn scene(&self) -> &Scene {
         &self.scene
+    }
+
+    pub(crate) const fn images(&self) -> &ImageStore {
+        &self.images
     }
 
     pub(crate) const fn images_mut(&mut self) -> &mut ImageStore {
@@ -189,12 +201,23 @@ mod tests {
         assert_eq!(document.painter.borrow().images.node_bytes(), 16);
 
         document.drop_element(image);
-        // The sweep runs on one painted frame in `NODE_SWEEP_INTERVAL_FRAMES`,
-        // so this many repaints reach it from any starting count.
-        for _ in 0..super::NODE_SWEEP_INTERVAL_FRAMES {
+        // The sweep is paced, so the pixels must still be there right up to
+        // the frame it runs on. Asserting that pins the interval: an
+        // implementation that swept every frame would pass the final
+        // assertion on its own.
+        let interval = super::NODE_SWEEP_INTERVAL_FRAMES;
+        let start = document.painter.borrow().images.frame_index();
+        for _ in 0..(interval - 1 - start % interval) {
             document.images_mut();
             document.render();
+            assert_eq!(
+                document.painter.borrow().images.node_bytes(),
+                16,
+                "the sweep must not run before its frame",
+            );
         }
+        document.images_mut();
+        document.render();
 
         assert_eq!(
             document.painter.borrow().images.node_bytes(),

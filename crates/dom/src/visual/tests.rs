@@ -1593,34 +1593,75 @@ fn reuse_harness() -> (Harness, NodeId) {
     h.el(nested, "view.box.rel");
     h.el(root, "view.box.under");
     h.el(root, "view.box.over");
+    // `scroll_to` clamps against the last committed layout, so a fixture that
+    // scrolls before laying out silently scrolls nothing.
+    h.doc.dom.layout();
     (h, scroller)
+}
+
+/// Scrolls the fixture's container and fails if the offset did not move,
+/// which would quietly turn every reuse round into the same build.
+fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) {
+    let applied = document.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+    assert_eq!(
+        applied.y, offset,
+        "the fixture's container must admit the offset the test asked for",
+    );
+}
+
+/// The fingerprint of the frame a document currently retains.
+fn retained_fingerprint(document: &crate::Document<()>) -> String {
+    let painter = document.painter.borrow();
+    fingerprint(
+        painter
+            .frame()
+            .expect("a rendered document retains its frame"),
+    )
 }
 
 #[test]
 fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     let (mut h, scroller) = reuse_harness();
-    h.doc
-        .dom
-        .scroll_to(scroller, crate::Vector2D::new(0.0, 37.0));
+    let rest = crate::Vector2D::new(0.0, 37.0);
+    let nudge = crate::Vector2D::new(0.0, 38.0);
 
-    // The first build runs against empty buffers and an empty scratch. Every
-    // later one runs against storage at the previous frame's high-water mark,
-    // and against a pseudo-context pool that has already been handed out and
-    // returned once.
-    let cold = fingerprint(&h.paint());
-    for round in 1..4 {
-        assert_eq!(cold, fingerprint(&h.paint()), "build {round} diverged");
-    }
+    // Only `Painter::paint` retires a frame into the spare buffers, so the
+    // rounds below render rather than build: a loop of bare builds would
+    // exercise the working scratch and never the three frame tables, which are
+    // the buffers carrying the node ids, clip links and layer ranges this
+    // fingerprint checks.
+    scroll_to(&mut h.doc.dom, scroller, rest.y);
+    h.doc.dom.render();
+    let cold = retained_fingerprint(&h.doc.dom);
     assert!(cold.contains("layer"), "the fixture must exercise a group");
     assert!(cold.contains("clip"), "the fixture must exercise a clip");
+    assert_eq!(
+        h.doc.dom.paint_storage_capacities()[3],
+        0,
+        "the first build has nothing to recycle",
+    );
+
+    for round in 1..4 {
+        scroll_to(&mut h.doc.dom, scroller, nudge.y);
+        h.doc.dom.render();
+        assert!(
+            h.doc.dom.paint_storage_capacities()[3] > 0,
+            "round {round} must have a retired frame to build into",
+        );
+        scroll_to(&mut h.doc.dom, scroller, rest.y);
+        h.doc.dom.render();
+        assert_eq!(
+            cold,
+            retained_fingerprint(&h.doc.dom),
+            "round {round} diverged",
+        );
+    }
 }
 
 #[test]
 fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     let (mut h, scroller) = reuse_harness();
-    h.doc
-        .dom
-        .scroll_to(scroller, crate::Vector2D::new(0.0, 37.0));
+    scroll_to(&mut h.doc.dom, scroller, 37.0);
     h.doc.dom.render();
     let cold = h.doc.dom.scene().clone();
 
@@ -1628,34 +1669,26 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     // scroll offset and moves it back. The second render of each pair sees the
     // recycled buffers and must land on the same encoding as the first.
     for _ in 0..3 {
-        h.doc
-            .dom
-            .scroll_to(scroller, crate::Vector2D::new(0.0, 38.0));
+        scroll_to(&mut h.doc.dom, scroller, 38.0);
         h.doc.dom.render();
-        h.doc
-            .dom
-            .scroll_to(scroller, crate::Vector2D::new(0.0, 37.0));
+        scroll_to(&mut h.doc.dom, scroller, 37.0);
         h.doc.dom.render();
     }
     crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene());
 }
 
 #[test]
-fn the_builder_stops_allocating_once_the_page_shape_settles() {
+fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
     let (mut h, scroller) = reuse_harness();
     h.doc.dom.render();
     for offset in [1.0_f32, 0.0, 1.0, 0.0] {
-        h.doc
-            .dom
-            .scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+        scroll_to(&mut h.doc.dom, scroller, offset);
         h.doc.dom.render();
     }
     let settled = h.doc.dom.paint_storage_capacities();
 
     for offset in [1.0_f32, 0.0, 1.0, 0.0] {
-        h.doc
-            .dom
-            .scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+        scroll_to(&mut h.doc.dom, scroller, offset);
         h.doc.dom.render();
     }
 
@@ -1667,6 +1700,11 @@ fn the_builder_stops_allocating_once_the_page_shape_settles() {
     assert!(
         settled.iter().all(|&capacity| capacity > 0),
         "the fixture must exercise every buffer at least once, got {settled:?}",
+    );
+    assert!(
+        settled.len() > 10,
+        "every pooled pseudo-context buffer is reported on its own, so a \
+         reallocation that moved capacity between two of them is visible",
     );
 }
 

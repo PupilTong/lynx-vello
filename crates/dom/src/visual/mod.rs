@@ -333,20 +333,41 @@ impl<T> Document<T> {
     }
 
     /// The capacity of every buffer the paint pipeline retains between
-    /// frames, in a fixed order.
+    /// frames: the retained frame's three tables, the spare frame's three,
+    /// then the working scratch, ending with one entry per pooled
+    /// pseudo-context buffer.
     ///
-    /// Exists for the reuse tests: a settled page must reproduce this array
-    /// exactly from one frame to the next, because an entry that grew is a
-    /// buffer that reallocated.
+    /// Exists for the reuse tests: a settled page must reproduce this exactly
+    /// from one frame to the next, because an entry that grew is a buffer that
+    /// reallocated. The pool is reported per entry rather than as a total, so
+    /// that a reallocation moving capacity from one pooled buffer to another
+    /// is visible instead of cancelling out.
     #[cfg(test)]
-    pub(crate) fn paint_storage_capacities(&self) -> [usize; 11] {
+    pub(crate) fn paint_storage_capacities(&self) -> Vec<usize> {
         let painter = self.painter.borrow();
-        let frame = painter.frame().map_or([0, 0, 0], PaintOrder::capacities);
+        let mut out = painter
+            .frame()
+            .map_or([0, 0, 0], PaintOrder::capacities)
+            .to_vec();
         let (spare, scratch) = painter.storage_capacities();
-        [
-            frame[0], frame[1], frame[2], spare[0], spare[1], spare[2], scratch[0], scratch[1],
-            scratch[2], scratch[3], scratch[4],
-        ]
+        out.extend_from_slice(&spare);
+        out.extend(scratch);
+        out
+    }
+
+    /// Reads decoded images without invalidating the retained scene.
+    ///
+    /// Separate from [`Self::images_mut`] because that one has to invalidate:
+    /// registering pixels changes what a frame draws. Reading how many bytes
+    /// the registry holds, or which registrations were refused, changes
+    /// nothing, and going through the mutable accessor to ask would turn a
+    /// static page into one that rebuilds its scene on every poll.
+    #[must_use]
+    pub fn images(&self) -> Ref<'_, ImageStore> {
+        Ref::map(
+            self.painter.borrow(),
+            crate::paint::painter::Painter::images,
+        )
     }
 
     /// Mutably accesses decoded images and invalidates the retained scene.

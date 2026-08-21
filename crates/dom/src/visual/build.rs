@@ -132,17 +132,18 @@ pub(crate) struct BuildScratch {
 
 impl BuildScratch {
     /// The working buffers' capacities: children ranking, members, in-flow
-    /// records, pooled pseudo-context buffers, and their total record
-    /// capacity.
+    /// records, the pseudo-context pool's length, then one entry per pooled
+    /// buffer.
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 5] {
-        [
+    pub(crate) fn capacities(&self) -> Vec<usize> {
+        let mut out = vec![
             self.ranked.capacity(),
             self.members.capacity(),
             self.stream.capacity(),
             self.pseudo_pool.len(),
-            self.pseudo_pool.iter().map(Vec::capacity).sum(),
-        ]
+        ];
+        out.extend(self.pseudo_pool.iter().map(Vec::capacity));
+        out
     }
 
     /// Every stack is balanced and every pooled buffer is back in the pool.
