@@ -11,6 +11,8 @@
 mod background;
 mod border;
 mod convert;
+#[cfg(test)]
+pub(crate) mod equivalence;
 mod filters;
 mod mask;
 pub(crate) mod painter;

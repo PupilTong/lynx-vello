@@ -41,9 +41,18 @@ use crate::{Document, ImageStore};
 pub(crate) struct Painter {
     scene: Scene,
     scratch: crate::paint::walker::Scratch,
+    build_scratch: crate::visual::BuildScratch,
     images: ImageStore,
     scene_epoch: Option<u64>,
     frame: Option<PaintOrder>,
+    /// Storage reclaimed from the frame this painter last retired, held for
+    /// the next build.
+    ///
+    /// Kept apart from `frame` because `frame` is the one thing hit testing
+    /// can read between renders: emptying it in place would leave the
+    /// document frameless for the length of a build, and permanently
+    /// frameless if that build panicked.
+    spare: crate::visual::FrameBuffers,
 }
 
 impl std::fmt::Debug for Painter {
@@ -83,7 +92,30 @@ impl Painter {
             });
         }
         self.scene_epoch = Some(frame.visual_epoch());
-        self.frame = Some(frame);
+        // Reclaiming here, past the point where the walk can fail, is what
+        // keeps a frame retained at every instant.
+        if let Some(retired) = self.frame.replace(frame) {
+            self.spare = retired.into_buffers();
+        }
+    }
+
+    /// The spare frame buffers' and the build scratch's capacities, for the
+    /// reuse tests.
+    #[cfg(test)]
+    pub(crate) fn storage_capacities(&self) -> ([usize; 3], [usize; 5]) {
+        (self.spare.capacities(), self.build_scratch.capacities())
+    }
+
+    pub(crate) fn take_build_scratch(&mut self) -> crate::visual::BuildScratch {
+        std::mem::take(&mut self.build_scratch)
+    }
+
+    pub(crate) fn restore_build_scratch(&mut self, scratch: crate::visual::BuildScratch) {
+        self.build_scratch = scratch;
+    }
+
+    pub(crate) fn take_spare_buffers(&mut self) -> crate::visual::FrameBuffers {
+        std::mem::take(&mut self.spare)
     }
 
     pub(crate) const fn frame(&self) -> Option<&PaintOrder> {

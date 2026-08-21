@@ -93,6 +93,7 @@ use std::cell::Ref;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
+pub(crate) use self::build::BuildScratch;
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
@@ -105,7 +106,57 @@ pub(crate) struct PaintOrder {
     visual_epoch: u64,
 }
 
+/// The three growable tables a [`PaintOrder`] is made of, emptied of one
+/// frame's contents but not of their capacity.
+///
+/// The builder fills a set and the painter reclaims the set from the frame it
+/// retires, so a document whose page shape has stopped growing allocates
+/// paint-order storage zero times per frame. The set the painter reclaims is
+/// never the frame it retains: hit testing reads that one between renders, so
+/// it must never be the object being emptied.
+#[derive(Debug, Default)]
+pub(crate) struct FrameBuffers {
+    items: Vec<PaintItem>,
+    clips: Vec<ClipNode>,
+    layers: Vec<RenderLayer>,
+}
+
+impl FrameBuffers {
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 3] {
+        [
+            self.items.capacity(),
+            self.clips.capacity(),
+            self.layers.capacity(),
+        ]
+    }
+}
+
 impl PaintOrder {
+    /// Empties this frame and hands back its storage with capacity intact.
+    ///
+    /// [`PaintItem`], [`ClipNode`] and [`RenderLayer`] own no heap data, so
+    /// each clear is a length write.
+    pub(crate) fn into_buffers(mut self) -> FrameBuffers {
+        self.items.clear();
+        self.clips.clear();
+        self.layers.clear();
+        FrameBuffers {
+            items: self.items,
+            clips: self.clips,
+            layers: self.layers,
+        }
+    }
+
+    #[cfg(test)]
+    fn capacities(&self) -> [usize; 3] {
+        [
+            self.items.capacity(),
+            self.clips.capacity(),
+            self.layers.capacity(),
+        ]
+    }
+
     #[must_use]
     pub(crate) fn items(&self) -> &[PaintItem] {
         &self.items
@@ -203,7 +254,17 @@ impl CornerRadii {
 impl<T: Sync> Document<T> {
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
-        build::build(self)
+        // Both takes finish before `build` reborrows the document shared. The
+        // retained frame is not among them: it stays where hit testing can
+        // read it for the whole build, and a build that panics loses only one
+        // frame's worth of capacity.
+        let (scratch, buffers) = {
+            let painter = self.painter.get_mut();
+            (painter.take_build_scratch(), painter.take_spare_buffers())
+        };
+        let (frame, scratch) = build::build(self, scratch, buffers);
+        self.painter.get_mut().restore_build_scratch(scratch);
+        frame
     }
 
     /// Renders only when the retained scene no longer represents the current
@@ -269,6 +330,23 @@ impl<T> Document<T> {
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
         Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)
+    }
+
+    /// The capacity of every buffer the paint pipeline retains between
+    /// frames, in a fixed order.
+    ///
+    /// Exists for the reuse tests: a settled page must reproduce this array
+    /// exactly from one frame to the next, because an entry that grew is a
+    /// buffer that reallocated.
+    #[cfg(test)]
+    pub(crate) fn paint_storage_capacities(&self) -> [usize; 11] {
+        let painter = self.painter.borrow();
+        let frame = painter.frame().map_or([0, 0, 0], PaintOrder::capacities);
+        let (spare, scratch) = painter.storage_capacities();
+        [
+            frame[0], frame[1], frame[2], spare[0], spare[1], spare[2], scratch[0], scratch[1],
+            scratch[2], scratch[3], scratch[4],
+        ]
     }
 
     /// Mutably accesses decoded images and invalidates the retained scene.
