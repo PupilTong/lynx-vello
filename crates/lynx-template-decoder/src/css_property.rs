@@ -1,6 +1,12 @@
 //! rkyv 0.7 wire model for `StyleInfo` CSS properties; declaration and enum
 //! ordering is serialized ABI.
 
+// The rkyv derives synthesize companion types (`Archived*`, `*Resolver`)
+// whose spans land inside the local `css_properties!` expansion, where rustc
+// no longer applies its external-macro lint suppression; `Debug` is derived
+// on everything the module itself declares.
+#![allow(missing_debug_implementations)]
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// Declares the `StyleInfo` property-id wire enum together with the

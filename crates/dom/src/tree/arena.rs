@@ -474,9 +474,8 @@ mod tests {
             "the freed storage comes back"
         );
         assert_ne!(next, freed, "but the handle to it does not");
-        assert_eq!(
-            layout.at(next).scroll_offset.x,
-            0.0,
+        assert!(
+            layout.at(next).scroll_offset.x.to_bits() == 0,
             "reused storage must not inherit the freed node's layout state"
         );
     }

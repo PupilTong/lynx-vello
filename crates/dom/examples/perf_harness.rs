@@ -6,6 +6,14 @@
 //! writes, class flips) each followed by a style flush + layout + scene
 //! rebuild. Run under a sampling profiler to find hot paths.
 
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::needless_raw_string_hashes,
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    reason = "profiling harness: wall-clock ratios and one long scenario driver"
+)]
+
 use std::hint::black_box;
 use std::time::Instant;
 

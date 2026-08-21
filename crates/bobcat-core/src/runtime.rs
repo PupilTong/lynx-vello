@@ -367,16 +367,17 @@ macro_rules! tree_members {
     ($engine:ident, $handle:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
     )*) => {$({
-        let tree = Rc::clone($handle);
         const NAME: &str = concat!("bobcat.", stringify!($name));
+        let tree = Rc::clone($handle);
         let arity = 0u8 $(+ { let _ = stringify!($arg); 1u8 })*;
         install($engine, stringify!($name), arity, move |arguments| {
+            #[allow(unused_mut, reason = "zero-argument members never advance it")]
             let mut index = 0usize;
             $(
                 let $arg = $parser(NAME, arguments, index)?;
                 index += 1;
             )*
-            let _ = index;
+            let _ = (arguments, index);
             let mut handle = borrow_tree(NAME, &tree)?;
             let $document = handle.tree();
             $body

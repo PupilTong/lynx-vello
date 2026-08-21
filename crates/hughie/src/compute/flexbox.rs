@@ -78,6 +78,10 @@ fn flex_axes(
 
 /// Transient per-item state accumulated across Flexbox sizing and alignment.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "per-item layout facts the algorithm phases hand each other"
+)]
 struct FlexItem<N> {
     geometry: ItemGeometry,
     key: ItemKey<N>,
@@ -404,6 +408,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the flex-basis resolution steps read as one sequence"
+)]
 fn determine_flex_base_sizes<T>(
     tree: &T,
     state: &mut T::State,
@@ -922,6 +930,10 @@ fn is_first_baseline_candidate<N>(item: &FlexItem<N>, axes: Axes) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the hypothetical-cross resolution steps read as one sequence"
+)]
 fn determine_hypothetical_cross_sizes<T>(
     tree: &T,
     state: &mut T::State,

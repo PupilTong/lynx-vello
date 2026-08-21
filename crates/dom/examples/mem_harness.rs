@@ -1,6 +1,16 @@
 //! Heap-accounting harness: builds the ReactLynx-shaped list page and reports
 //! live heap bytes per phase through a counting global allocator.
 
+#![allow(
+    unsafe_code,
+    missing_debug_implementations,
+    clippy::cast_precision_loss,
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::needless_raw_string_hashes,
+    reason = "measurement harness: a counting global allocator and ratio prints"
+)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

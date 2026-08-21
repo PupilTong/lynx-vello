@@ -682,6 +682,10 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
 /// container's scrollable overflow — the common tail of every algorithm's
 /// in-flow commit loop.
 #[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the durable-layout store consumes exactly the commit loop's locals"
+)]
 pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
     tree: &T,
     state: &mut T::State,
