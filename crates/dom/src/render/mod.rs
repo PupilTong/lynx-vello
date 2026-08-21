@@ -9,3 +9,5 @@
 
 pub mod gpu;
 pub(crate) mod images;
+
+pub use crate::render::images::{ImageKey, MAX_RENDERABLE_DIMENSION, OversizedImage};

@@ -52,10 +52,20 @@ impl std::fmt::Debug for Painter {
     }
 }
 
+/// Painted frames between two replaced-content liveness sweeps.
+///
+/// The sweep is what bounds `ImageStore`'s node key space: an entry whose
+/// owner node no longer exists can never be looked up again, because the
+/// arena retires that handle for good. Running it on every frame would cost
+/// one arena probe per registered image per frame to reclaim bytes nothing is
+/// waiting on, so it runs on one frame in this many instead.
+const NODE_SWEEP_INTERVAL_FRAMES: u64 = 64;
+
 impl Painter {
     pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: PaintOrder) {
         self.scene_epoch = None;
         self.scene.reset();
+        self.images.begin_frame();
         crate::paint::walker::walk(
             &mut self.scene,
             &mut self.scratch,
@@ -63,6 +73,15 @@ impl Painter {
             &frame,
             &self.images,
         );
+        if self
+            .images
+            .frame_index()
+            .is_multiple_of(NODE_SWEEP_INTERVAL_FRAMES)
+        {
+            self.images.retain_nodes(|owner| {
+                crate::NodeId::from_bits(owner).is_some_and(|node| document.contains_node(node))
+            });
+        }
         self.scene_epoch = Some(frame.visual_epoch());
         self.frame = Some(frame);
     }
@@ -110,5 +129,45 @@ mod tests {
 
         assert!(result.is_err(), "the stale frame must fail closed");
         assert!(painter.needs_render(current_epoch));
+    }
+
+    #[test]
+    fn a_freed_replaced_element_stops_retaining_its_pixels() {
+        use crate::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            "page { width: 20px; height: 20px; } img { width: 2px; height: 2px; }",
+            StylesheetOrigin::Author,
+        );
+        let page = document.document_element().id();
+        let image = document.create_element("img", ());
+        document.insert_before(page, image, None);
+        document.images_mut().insert_node(
+            image.to_bits(),
+            ImageData {
+                data: Blob::from(vec![0_u8; 16]),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width: 2,
+                height: 2,
+            },
+        );
+        document.render();
+        assert_eq!(document.painter.borrow().images.node_bytes(), 16);
+
+        document.drop_element(image);
+        // The sweep runs on one painted frame in `NODE_SWEEP_INTERVAL_FRAMES`,
+        // so this many repaints reach it from any starting count.
+        for _ in 0..super::NODE_SWEEP_INTERVAL_FRAMES {
+            document.images_mut();
+            document.render();
+        }
+
+        assert_eq!(
+            document.painter.borrow().images.node_bytes(),
+            0,
+            "an owner key the arena retired can never be looked up again"
+        );
     }
 }
