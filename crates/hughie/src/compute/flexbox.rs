@@ -488,11 +488,19 @@ fn determine_flex_base_sizes<T>(
                 StyleSize::LengthPercentage(lp) if lp.0.to_percentage().is_none() => {
                     probes.max_content()
                 }
-                StyleSize::Auto
-                | StyleSize::LengthPercentage(_)
-                | StyleSize::FitContent
-                | StyleSize::Stretch
-                | StyleSize::WebkitFillAvailable => {
+                // A used flex basis of `content` (or an unresolved percentage,
+                // which behaves as `auto`) puts the item's max-content main size
+                // in place of its main size per css-flexbox-1 9.2.3 step E, so
+                // the container's own definite available main size never enters
+                // the probe. Step C keeps the min-content constraint.
+                StyleSize::Auto | StyleSize::LengthPercentage(_) => {
+                    if available_main == AvailableSpace::MinContent {
+                        probes.min_content()
+                    } else {
+                        probes.max_content()
+                    }
+                }
+                StyleSize::FitContent | StyleSize::Stretch | StyleSize::WebkitFillAvailable => {
                     if available_main == AvailableSpace::MinContent {
                         probes.min_content()
                     } else {
@@ -2199,8 +2207,42 @@ mod tests {
             true,
         );
 
-        assert_eq!(items[0].flex_basis, 37.0);
+        // A used flex basis of `content` puts the item's max-content main size
+        // in place of its main size, so the container's definite 37px available
+        // main size never reaches the probe (css-flexbox-1 9.2.3 step E).
+        assert_eq!(items[0].flex_basis, 23.0);
         assert_eq!(TEST_MEASURE_CALLS.get(), 1);
+    }
+
+    #[test]
+    fn content_flex_basis_ignores_a_definite_available_main_size() {
+        let axes = row_axes(flex_wrap::T::Nowrap);
+        let tree = TestTree;
+
+        for available in [11.0, 37.0, 400.0] {
+            let mut items = [item(0.0, 0.0)];
+            items[0].min_size.width = Some(0.0);
+            let mut state = TestState::default();
+            determine_flex_base_sizes(
+                &tree,
+                &mut state,
+                &mut items,
+                axes,
+                Size::new(Some(available), Some(20.0)),
+                Size::new(
+                    AvailableSpace::Definite(available),
+                    AvailableSpace::Definite(20.0),
+                ),
+                Some(available),
+                true,
+                true,
+            );
+
+            assert_eq!(
+                items[0].flex_basis, 23.0,
+                "a content flex basis stays max-content under {available}px of available main space"
+            );
+        }
     }
 
     #[test]
