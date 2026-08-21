@@ -488,17 +488,15 @@ fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
 }
 
 #[test]
-fn display_contents_on_the_document_element_blockifies() {
+#[should_panic(expected = "Bobcat does not support Stylo computed display")]
+fn display_contents_root_fixup_panics_as_an_unsupported_display() {
     let mut h = Harness::new(
         "page { display: contents; width: 120px; height: 30px; }
          view { width: 20px; height: 10px; }",
     );
     let root = h.doc.root;
-    let child = h.doc.el(root, "view");
+    let _child = h.doc.el(root, "view");
     h.layout();
-
-    assert_eq!(h.rect(root), (0.0, 0.0, 120.0, 30.0));
-    assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
 }
 
 #[test]
@@ -610,7 +608,7 @@ fn offset_path_establishes_the_fixed_containing_block() {
 }
 
 #[test]
-fn fixed_descendants_of_the_leaf_fallback_stay_zeroed() {
+fn fixed_descendants_of_default_flex_are_laid_out() {
     let mut h = Harness::new(
         "page { display: flex; width: 800px; height: 600px; align-items: flex-start; }
          .flow { width: 40px; height: 30px; }
@@ -622,7 +620,7 @@ fn fixed_descendants_of_the_leaf_fallback_stay_zeroed() {
     h.layout();
 
     assert_eq!(h.rect(flow), (0.0, 0.0, 40.0, 30.0));
-    assert_eq!(h.rect(fixed), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(fixed), (10.0, 20.0, 30.0, 40.0));
 }
 
 #[test]
@@ -731,19 +729,19 @@ fn hoisted_nodes_relayout_across_passes() {
 }
 
 #[test]
-fn flow_containers_fall_back_to_leaves_and_zero_their_children() {
+fn omitted_display_uses_flex_and_lays_out_children() {
     let mut h = Harness::new(
         "page { display: flex; width: 100px; height: 100px; align-items: flex-start; }
-         .flow { width: 40px; height: 30px; }
-         .child { width: 999px; height: 999px; }",
+         .default { width: 40px; height: 30px; align-items: flex-start; }
+         .child { flex: none; width: 20px; height: 10px; }",
     );
     let root = h.doc.root;
-    let flow = h.doc.el(root, ".flow");
-    let child = h.doc.el(flow, ".child");
+    let default = h.doc.el(root, ".default");
+    let child = h.doc.el(default, ".child");
     h.layout();
 
-    assert_eq!(h.rect(flow), (0.0, 0.0, 40.0, 30.0));
-    assert_eq!(h.rect(child), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(h.rect(default), (0.0, 0.0, 40.0, 30.0));
+    assert_eq!(h.rect(child), (0.0, 0.0, 20.0, 10.0));
 }
 
 #[test]

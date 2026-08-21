@@ -167,9 +167,9 @@ mod tests {
         document.layout();
 
         let style = document.get(view).unwrap().computed_style().unwrap();
-        assert_ne!(
+        assert_eq!(
             style.clone_display(),
-            dom::stylo::values::computed::Display::Linear
+            dom::stylo::values::computed::Display::Flex
         );
         assert_eq!(
             style.clone_box_sizing(),

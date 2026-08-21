@@ -222,37 +222,30 @@ fn border_color_defaults_to_current_color() {
 }
 
 #[test]
-fn text_decoration_thickness_family_is_absent() {
-    for missing in [
-        "text-decoration-thickness",
-        "-x-text-decoration-width",
-        "-x-text-decoration-gap",
-    ] {
+fn text_decoration_thickness_values() {
+    assert!(property_is_supported("text-decoration-thickness"));
+    for missing in ["-x-text-decoration-width", "-x-text-decoration-gap"] {
         assert!(
             !property_is_supported(missing),
-            "{missing} appeared in the property surface — unignore \
-             `text_decoration_thickness_values` and port the C++ rows"
+            "unsupported Lynx extension `{missing}` must stay out of the property surface"
         );
     }
-    assert!(!parses("text-decoration", "underline 2px"));
-    assert!(!parses("text-decoration", "underline -1px"));
-}
 
-#[test]
-#[ignore = "engine-gap: no text-decoration-thickness longhand in the servo build (gecko-only upstream)"]
-fn text_decoration_thickness_values() {
     assert_eq!(
         specified("text-decoration-thickness", "2px").as_deref(),
         Some("2px")
     );
-    assert!(
-        specified("text-decoration-thickness", "-1px").is_none(),
-        "negative thickness is rejected"
+    assert_eq!(
+        specified("text-decoration-thickness", "-1px").as_deref(),
+        Some("-1px"),
+        "the standard <length-percentage> grammar is not range-restricted"
     );
     assert_eq!(
         specified("text-decoration-thickness", "0px").as_deref(),
         Some("0px")
     );
+    assert!(parses("text-decoration", "underline 2px"));
+    assert!(parses("text-decoration", "underline -1px"));
 
     let mut doc = Doc::new();
     let el = doc.el(doc.root, "view");

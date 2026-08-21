@@ -348,7 +348,11 @@ fn text_decoration_grammar() {
     assert_eq!(doc.value(el, "text-decoration-style"), "dashed");
     assert_eq!(doc.value(el, "text-decoration-color"), "rgb(255, 255, 0)");
 
-    assert!(!parses("text-decoration", "none 2px"));
+    assert!(parses("text-decoration", "none 2px"));
+    assert_eq!(
+        computed("text-decoration: none 2px", "text-decoration-thickness"),
+        "2px"
+    );
     assert!(!parses("text-decoration", "underline 1px 2px"));
 }
 

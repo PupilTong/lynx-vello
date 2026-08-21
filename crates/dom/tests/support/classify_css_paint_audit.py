@@ -104,7 +104,7 @@ ISSUES: dict[str, set[str]] = {
     "css-text-decoration-auto-thickness-ua-choice": cases(
         "text-decoration", (2, 6, 10, 14, 18)
     ),
-    "stylo-lynx-text-decoration-thickness-grammar": cases(
+    "pulsar-text-decoration-thickness": cases(
         "text-decoration", (3, 7, 11, 15, 19)
     ),
     "pulsar-text-stroke-join-geometry": cases("text-stroke", range(20))
@@ -138,7 +138,7 @@ ISSUE_DISPOSITIONS = {
     "stylo-lynx-text-shadow-list-grammar": W3C_GAP,
     "pulsar-text-shadow-blur": W3C_GAP,
     "css-text-decoration-auto-thickness-ua-choice": W3C_CORRECT_UA_CHOICE,
-    "stylo-lynx-text-decoration-thickness-grammar": W3C_GAP,
+    "pulsar-text-decoration-thickness": W3C_GAP,
     "pulsar-text-stroke-join-geometry": NON_W3C_COMPATIBILITY,
     "css-text-subpixel-rasterization": W3C_CORRECT_RASTER_OR_SAMPLING,
 }
