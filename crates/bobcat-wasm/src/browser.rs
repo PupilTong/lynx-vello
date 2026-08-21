@@ -131,6 +131,8 @@ impl Window for BrowserWindow {
     }
 }
 
+type BrowserLynxView = LynxView<'static, BrowserWindow, Arc<ManualClock>>;
+
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
 type BrowserResourceRegistry = Mutex<HashMap<String, Arc<[u8]>>>;
@@ -142,6 +144,17 @@ struct BrowserResources {
 }
 
 impl BrowserResources {
+    fn clear(&self) {
+        self.scripts
+            .lock()
+            .unwrap_or_else(|error| panic!("the browser script map is poisoned: {error}"))
+            .clear();
+        self.style_sheets
+            .lock()
+            .unwrap_or_else(|error| panic!("the browser stylesheet map is poisoned: {error}"))
+            .clear();
+    }
+
     fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
         Self::register(&self.scripts, "script", url, bytes)
     }
@@ -396,15 +409,24 @@ impl ResourceFetcher for BrowserResources {
 }
 
 /// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. The document, element tree, VM, and engine stay
-/// behind the opaque `LynxView` facade.
+/// Worker that constructs it. Its canvas, Wasm instance, resource provider,
+/// and Stylo pool survive a native-view reset; each document, element tree,
+/// `QuickJS` realm, and engine still stays behind one opaque `LynxView`.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: LynxView<'static, BrowserWindow, Arc<ManualClock>>,
+    view: Option<BrowserLynxView>,
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
+    config: PageConfig,
+    width: f32,
+    height: f32,
+    device_pixel_ratio: f32,
+    /// Owned font containers are part of the stable browser wrapper, so a
+    /// replacement native view receives the same registered faces without
+    /// another UI-to-Worker transfer.
+    font_sources: Vec<Arc<[u8]>>,
     /// The same clock the view reads. A Worker could read a monotonic clock
     /// of its own, but `requestAnimationFrame` hands over the instant the
     /// frame is *for*, which is the better reading and the one browsers
@@ -418,7 +440,7 @@ impl fmt::Debug for BobcatRenderer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BobcatRenderer")
-            .field("view", &self.view)
+            .field("has_view", &self.view.is_some())
             .field("disposed", &self.disposed)
             .finish_non_exhaustive()
     }
@@ -452,7 +474,7 @@ impl BobcatRenderer {
         }
         if RENDERER_CREATED.swap(true, Ordering::AcqRel) {
             return Err(js_error(
-                "one Bobcat Wasm instance supports exactly one renderer; create each view in its own Render Worker",
+                "one Bobcat Wasm instance supports exactly one renderer; reset the existing renderer to replace its native view",
             ));
         }
 
@@ -460,7 +482,6 @@ impl BobcatRenderer {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
             let resources = Arc::new(BrowserResources::default());
-            let resource_fetcher: Arc<dyn ResourceFetcher> = resources.clone();
             let events = Arc::new(EventSignal::default());
             let config = PageConfig {
                 default_display_linear,
@@ -472,32 +493,31 @@ impl BobcatRenderer {
             // makes it part of the view's type; the handle below is the same
             // clock, since a shared clock is itself a clock.
             let clock = Arc::new(ManualClock::new());
-            let mut view: LynxView<'static, BrowserWindow, Arc<ManualClock>> =
-                LynxView::with_animation_clock(
-                    config,
-                    resource_fetcher,
-                    quickjs_engine_factory(),
-                    events.clone(),
-                    width,
-                    height,
-                    device_pixel_ratio,
-                    clock.clone(),
-                )
-                .map_err(js_error)?;
-            set_canvas_size(&canvas, view.frame_size());
-
             let frames = FrameSignal::default();
-            let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(canvas.clone());
-            view.attach_target(target, frames.clone(), view.frame_size())
-                .await
-                .map_err(js_error)?;
+            let view = create_browser_view(
+                config,
+                resources.clone(),
+                events.clone(),
+                &canvas,
+                frames.clone(),
+                clock.clone(),
+                width,
+                height,
+                device_pixel_ratio,
+            )
+            .await?;
 
             Ok(Self {
-                view,
+                view: Some(view),
                 resources,
                 canvas,
                 frames,
                 events,
+                config,
+                width,
+                height,
+                device_pixel_ratio,
+                font_sources: Vec::new(),
                 clock,
                 script_finished: false,
                 disposed: false,
@@ -508,6 +528,45 @@ impl BobcatRenderer {
             RENDERER_CREATED.store(false, Ordering::Release);
         }
         result
+    }
+
+    /// Drop the current native `LynxView` and attach a fresh one to the same
+    /// Worker-owned `OffscreenCanvas`. The Wasm instance, configured Stylo pool,
+    /// browser resource provider, page configuration, current metrics, clock,
+    /// and registered font containers remain owned by this wrapper. Transient
+    /// script and stylesheet bytes from the old page are cleared.
+    #[wasm_bindgen(js_name = reset)]
+    pub async fn reset(&mut self) -> Result<(), JsValue> {
+        self.ensure_running()?;
+
+        // Drop this view's realm and document on the persistent Lynx-main
+        // Worker. Awaiting the hand-off keeps the Render Worker's JavaScript
+        // event loop available before the replacement is installed.
+        if let Some(view) = self.view.take() {
+            view.shutdown().await;
+        }
+        self.resources.clear();
+        self.frames.take();
+        self.events.take();
+        self.script_finished = false;
+
+        let mut view = create_browser_view(
+            self.config,
+            self.resources.clone(),
+            self.events.clone(),
+            &self.canvas,
+            self.frames.clone(),
+            self.clock.clone(),
+            self.width,
+            self.height,
+            self.device_pixel_ratio,
+        )
+        .await?;
+        for source in &self.font_sources {
+            view.register_fonts(source.clone()).map_err(js_error)?;
+        }
+        self.view = Some(view);
+        Ok(())
     }
 
     /// Internal Render-Worker seam: retain bytes that the browser host already
@@ -581,8 +640,10 @@ impl BobcatRenderer {
     /// boundary. The Render Worker awaits completion independently from drawing.
     #[wasm_bindgen(js_name = executeScript)]
     pub async fn execute_script(&mut self, url: String) -> Result<(), JsValue> {
-        self.ensure_running()?;
-        self.view.execute_script(&url).await.map_err(js_error)
+        self.view_mut()?
+            .execute_script(&url)
+            .await
+            .map_err(js_error)
     }
 
     /// Load an author stylesheet through `LynxView`'s resource boundary.
@@ -592,8 +653,10 @@ impl BobcatRenderer {
     /// contract.
     #[wasm_bindgen(js_name = loadStyleSheet)]
     pub async fn load_style_sheet(&mut self, url: String) -> Result<(), JsValue> {
-        self.ensure_running()?;
-        self.view.load_style_sheet(&url).await.map_err(js_error)
+        self.view_mut()?
+            .load_style_sheet(&url)
+            .await
+            .map_err(js_error)
     }
 
     /// Register CSS bytes the browser host fetched, under the URL
@@ -611,14 +674,21 @@ impl BobcatRenderer {
     /// Register every usable face in an embedder-provided font container.
     #[wasm_bindgen(js_name = registerFonts)]
     pub fn register_fonts(&mut self, bytes: Vec<u8>) -> Result<usize, JsValue> {
-        self.ensure_running()?;
-        self.view.register_fonts(bytes).map_err(js_error)
+        let source: Arc<[u8]> = Arc::from(bytes);
+        let registered = self
+            .view_mut()?
+            .register_fonts(source.clone())
+            .map_err(js_error)?;
+        if registered != 0 {
+            self.font_sources.push(source);
+        }
+        Ok(registered)
     }
 
     /// Await the next durable engine wakeup without timer polling.
     #[wasm_bindgen(js_name = waitForEngineEvent)]
     pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
-        self.ensure_running()?;
+        self.view()?;
         let wait = self.events.wait();
         Ok(future_to_promise(async move {
             wait.await;
@@ -629,9 +699,8 @@ impl BobcatRenderer {
     /// Drain script engine events independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
-        self.ensure_running()?;
         if !self.script_finished && self.events.take() {
-            for event in self.view.pump() {
+            for event in self.view_mut()?.pump() {
                 match event {
                     EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
                     EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
@@ -650,14 +719,14 @@ impl BobcatRenderer {
     /// at the instant the host says the frame is for.
     #[wasm_bindgen(js_name = renderIfRequested)]
     pub fn render_if_requested(&mut self, now_ms: f64) -> Result<bool, JsValue> {
-        self.ensure_running()?;
+        self.view()?;
         if !self.frames.take() {
             return Ok(false);
         }
         if now_ms.is_finite() {
             self.clock.set(now_ms / 1000.0);
         }
-        self.view.notify_redraw().map_err(js_error)?;
+        self.view_mut()?.notify_redraw().map_err(js_error)?;
         Ok(true)
     }
 
@@ -669,20 +738,26 @@ impl BobcatRenderer {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<(), JsValue> {
-        self.ensure_running()?;
         validate_metrics(width, height, device_pixel_ratio)?;
-        self.view
+        self.view_mut()?
             .resize(width, height, device_pixel_ratio)
             .map_err(js_error)?;
-        set_canvas_size(&self.canvas, self.view.frame_size());
+        self.width = width;
+        self.height = height;
+        self.device_pixel_ratio = device_pixel_ratio;
+        let frame_size = self.view()?.frame_size();
+        set_canvas_size(&self.canvas, frame_size);
         Ok(())
     }
 
-    /// Release the browser facade. Engine-owned workers finish their current
-    /// operation and drop their private runtime state naturally.
+    /// Release the current native view before the outer facade terminates its
+    /// Render Worker and the Wasm session with it.
     #[wasm_bindgen(js_name = dispose)]
-    pub fn dispose(&mut self) {
+    pub async fn dispose(&mut self) {
         self.disposed = true;
+        if let Some(view) = self.view.take() {
+            view.shutdown().await;
+        }
     }
 }
 
@@ -694,6 +769,52 @@ impl BobcatRenderer {
             Ok(())
         }
     }
+
+    fn view(&self) -> Result<&BrowserLynxView, JsValue> {
+        self.ensure_running()?;
+        self.view
+            .as_ref()
+            .ok_or_else(|| js_error("the native Lynx view is unavailable"))
+    }
+
+    fn view_mut(&mut self) -> Result<&mut BrowserLynxView, JsValue> {
+        self.ensure_running()?;
+        self.view
+            .as_mut()
+            .ok_or_else(|| js_error("the native Lynx view is unavailable"))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_browser_view(
+    config: PageConfig,
+    resources: Arc<BrowserResources>,
+    events: Arc<EventSignal>,
+    canvas: &OffscreenCanvas,
+    frames: FrameSignal,
+    clock: Arc<ManualClock>,
+    width: f32,
+    height: f32,
+    device_pixel_ratio: f32,
+) -> Result<BrowserLynxView, JsValue> {
+    let resource_fetcher: Arc<dyn ResourceFetcher> = resources;
+    let mut view = LynxView::with_animation_clock(
+        config,
+        resource_fetcher,
+        quickjs_engine_factory(),
+        events,
+        width,
+        height,
+        device_pixel_ratio,
+        clock,
+    )
+    .map_err(js_error)?;
+    set_canvas_size(canvas, view.frame_size());
+    let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(canvas.clone());
+    view.attach_target(target, frames, view.frame_size())
+        .await
+        .map_err(js_error)?;
+    Ok(view)
 }
 
 fn validate_metrics(width: f32, height: f32, ratio: f32) -> Result<(), JsValue> {

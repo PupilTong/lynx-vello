@@ -37,6 +37,7 @@ for (const requiredMethod of [
   'loadStyleSheet(',
   'pollScript(',
   'registerFonts(',
+  'reset(',
   'waitForEngineEvent(',
 ]) {
   if (!glue.includes(requiredMethod)) {
@@ -80,6 +81,7 @@ for (const requiredDeclaration of [
   'loadStyleSheet(url: string | URL)',
   'loadLynxXml(url: string | URL)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
+  'reset(): Promise<void>',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
@@ -105,6 +107,12 @@ if (
   !facade.includes("this.#request('loadLynxXml'")
 ) {
   throw new Error('browser facade does not dispatch loadLynxXml')
+}
+if (
+  !facade.includes('async reset()') ||
+  !facade.includes("this.#request('reset')")
+) {
+  throw new Error('browser facade does not dispatch native-view reset')
 }
 
 const renderWorker = await readFile(
@@ -178,7 +186,7 @@ for (const requiredLynxXmlDispatchStep of [
   'console.warn(',
   'await renderer.executeScript(mainThreadScriptUrl)',
   'entryScriptStarted = true',
-  'waitForScriptCompletion()',
+  'trackScriptCompletion(request)',
 ]) {
   if (!lynxXmlDispatch.includes(requiredLynxXmlDispatchStep)) {
     throw new Error(
@@ -201,10 +209,25 @@ if (
 if (renderWorker.includes('DOMParser')) {
   throw new Error('Render Worker must leave Lynx XML parsing to Rust')
 }
-if (!renderWorker.includes("message.operation === 'loadLynxXml'")) {
-  throw new Error(
-    'Render Worker must serialize Lynx XML loads with other source entry points',
-  )
+const resetDispatchStart = renderWorker.indexOf("case 'reset':")
+const resetDispatchEnd = renderWorker.indexOf("case 'registerFonts':")
+if (resetDispatchStart === -1 || resetDispatchEnd === -1) {
+  throw new Error('Render Worker is missing the native-view reset case')
+}
+const resetDispatch = renderWorker.slice(resetDispatchStart, resetDispatchEnd)
+for (const requiredResetStep of [
+  'await scriptCompletion',
+  'entryScriptStarted = false',
+  'resettingNativeView = true',
+  'await renderer.reset()',
+  'resettingNativeView = false',
+]) {
+  if (!resetDispatch.includes(requiredResetStep)) {
+    throw new Error(`Render Worker reset is missing ${requiredResetStep}`)
+  }
+}
+if (!renderWorker.includes('requestQueue = requestQueue.then(dispatch)')) {
+  throw new Error('Render Worker must serialize every facade operation')
 }
 if (renderWorker.includes('setTimeout(resolve, 1)')) {
   throw new Error('Render Worker still polls script completion on a timer')

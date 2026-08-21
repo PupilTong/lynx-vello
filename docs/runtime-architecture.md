@@ -249,12 +249,22 @@ the core then uses that same target-specific spawn path for the Lynx main
 Worker and for Stylo's Rayon Workers. Stylo pool creation belongs to the core,
 not the browser facade.
 
-The Stylo pool includes the Lynx-main owner thread, so one shared Wasm instance
-accepts one view. The npm facade satisfies this by creating a fresh Render
-Worker and Wasm instance for every `BobcatCanvas`; a second view in the same
-instance is rejected explicitly. The pool has at least two threads: the
-entry-task owner at index zero plus one managed worker that remains available
-after the synchronous entry task exits.
+The first Lynx-main Worker is the persistent owner at index zero of the Stylo
+pool. It survives for the Wasm session, while each view installs and later
+drops its own QuickJS realm, document, and event/frame endpoints on that
+Worker. One shared Wasm instance accepts one live view at a time and can accept
+a sequence of views without replacing any Worker. The npm facade creates a
+fresh Render Worker and Wasm instance for every `BobcatCanvas`, while
+`BobcatCanvas.reset()` keeps that outer session and replaces only native
+`LynxView`. The configured count remains a combined budget: the persistent
+Lynx-main owner plus at least one managed Stylo worker.
+
+Because that owner is also Rayon index zero, the presenting side does not enter
+style traversal while a queued realm command is executing; it retains the
+previous target and retries the requested frame after the command completes.
+While the realm is idle, the owner cooperatively yields to traversal scopes
+started by the Render Worker. This avoids a lock cycle between a presenter
+holding the document and a startup script waiting to take it.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns

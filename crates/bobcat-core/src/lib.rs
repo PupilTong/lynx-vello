@@ -14,6 +14,7 @@
 //! engine contracts without compiling `QuickJS`.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
 
 pub mod clock;
 mod engine;

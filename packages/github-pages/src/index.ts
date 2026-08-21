@@ -453,63 +453,81 @@ class PreviewRenderer {
     }
 
     const generation = ++this.#generation;
-    await this.#releaseView();
-    const canvas = createCanvas();
-    this.#shell.canvasHost.replaceChildren(canvas);
-    this.#canvas = canvas;
-    this.#lastSize = undefined;
+    let view = this.#view;
+    if (view === undefined) {
+      const canvas = createCanvas();
+      this.#shell.canvasHost.replaceChildren(canvas);
+      this.#canvas = canvas;
+      this.#lastSize = undefined;
 
-    await nextAnimationFrame();
-    const initial = canvasMetrics(canvas);
-    this.#updateCanvasSize(initial);
+      await nextAnimationFrame();
+      const initial = canvasMetrics(canvas);
+      this.#updateCanvasSize(initial);
 
-    let view: BobcatCanvas | undefined;
-    try {
-      view = await this.#factory.create(
-        canvas,
-        initial.width,
-        initial.height,
-        initial.dpr,
-        this.#config,
-      );
-      if (generation !== this.#generation) {
-        await view.dispose();
-        return;
-      }
-      view.onerror = (error): void => {
-        if (generation === this.#generation) {
-          this.#reportFatal(error);
-        }
-      };
-
-      const registered = await view.registerFonts(this.#fontBytes);
-      if (registered === 0) {
-        throw new Error('The demo font container did not contain a usable font face');
-      }
-
-      const sourceUrl = URL.createObjectURL(sourceBlob);
       try {
-        await view.loadLynxXml(sourceUrl);
-      } finally {
-        URL.revokeObjectURL(sourceUrl);
+        view = await this.#factory.create(
+          canvas,
+          initial.width,
+          initial.height,
+          initial.dpr,
+          this.#config,
+        );
+      } catch (error) {
+        if (this.#canvas === canvas) {
+          this.#canvas = undefined;
+        }
+        throw error;
       }
       if (generation !== this.#generation) {
         await view.dispose();
         return;
       }
       this.#view = view;
-      this.scheduleResize();
-    } catch (error) {
-      if (view !== undefined) {
+      view.onerror = (error): void => {
+        if (this.#view === view) {
+          this.#reportFatal(error);
+        }
+      };
+
+      try {
+        const registered = await view.registerFonts(this.#fontBytes);
+        if (registered === 0) {
+          throw new Error(
+            'The demo font container did not contain a usable font face',
+          );
+        }
+      } catch (error) {
+        if (this.#view === view) {
+          this.#view = undefined;
+        }
+        if (this.#canvas === canvas) {
+          this.#canvas = undefined;
+        }
         view.onerror = null;
         try {
           await view.dispose();
         } catch (disposeError) {
           console.warn('Could not dispose a failed Bobcat renderer', disposeError);
         }
+        throw error;
       }
-      throw error;
+    } else {
+      await view.reset();
+      if (generation !== this.#generation) {
+        return;
+      }
     }
+
+    const sourceUrl = URL.createObjectURL(sourceBlob);
+    try {
+      await view.loadLynxXml(sourceUrl);
+    } finally {
+      URL.revokeObjectURL(sourceUrl);
+    }
+    if (generation !== this.#generation) {
+      return;
+    }
+    this.scheduleResize();
   }
 
   scheduleResize(): void {
@@ -558,7 +576,7 @@ class PreviewRenderer {
     try {
       await view.dispose();
     } catch (error) {
-      console.warn('Could not dispose the previous Bobcat renderer', error);
+      console.warn('Could not dispose the Bobcat renderer', error);
     }
   }
 
@@ -612,14 +630,14 @@ function installEditor(
     shell.renderButtonLabel.textContent = 'Rendering…';
     setSourceStatus(shell, `Rendering ${label}…`, 'pending');
     setIndicator(shell.renderer, 'Rendering…', 'pending');
-    shell.message.textContent = `Creating a fresh isolated renderer for ${label}…`;
+    shell.message.textContent = `Preparing the native Lynx view for ${label}…`;
 
     try {
       await renderer.render(source);
       setSourceStatus(shell, `Rendered ${label}`, 'ok');
       setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
       shell.message.textContent =
-        'Render complete. Edit the source and submit again to replace the isolated canvas session.';
+        'Render complete. The Worker, canvas, and Wasm instance stay warm for the next submission.';
     } catch (error) {
       const message = errorMessage(error);
       setSourceStatus(shell, `Render failed: ${message}`, 'error');

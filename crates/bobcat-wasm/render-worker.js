@@ -2,9 +2,11 @@ import initWasm, { BobcatRenderer } from './pkg/bobcat_wasm.js'
 
 let renderer
 let running = false
+let resettingNativeView = false
 let initialized = false
 let entryScriptStarted = false
-let executeQueue = Promise.resolve()
+let scriptCompletion
+let requestQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
@@ -44,14 +46,16 @@ function renderFrame(now) {
   if (!running) {
     return
   }
-  try {
-    // `requestAnimationFrame` hands over the frame's timestamp; the
-    // `setTimeout` fallback does not, so read one. This is the engine's
-    // animation timeline — Rust reads no clock on wasm32.
-    renderer.renderIfRequested(typeof now === 'number' ? now : performance.now())
-  } catch (error) {
-    reportFatal(error)
-    return
+  if (!resettingNativeView) {
+    try {
+      // `requestAnimationFrame` hands over the frame's timestamp; the
+      // `setTimeout` fallback does not, so read one. This is the engine's
+      // animation timeline — Rust reads no clock on wasm32.
+      renderer.renderIfRequested(typeof now === 'number' ? now : performance.now())
+    } catch (error) {
+      reportFatal(error)
+      return
+    }
   }
   scheduleFrame(renderFrame)
 }
@@ -184,6 +188,15 @@ async function waitForScriptCompletion() {
   }
 }
 
+function trackScriptCompletion(request) {
+  const completion = waitForScriptCompletion()
+  scriptCompletion = completion
+  void completion.then(
+    () => postResponse(request, true),
+    (error) => postResponse(request, false, error),
+  )
+}
+
 function ensureEntryScriptNotStarted() {
   if (entryScriptStarted) {
     throw new Error('This Bobcat Canvas has already started its entry script')
@@ -202,10 +215,7 @@ async function dispatchRequest(message) {
       const registeredUrl = await fetchScript(message.url)
       await renderer.executeScript(registeredUrl)
       entryScriptStarted = true
-      void waitForScriptCompletion().then(
-        () => postResponse(request, true),
-        (error) => postResponse(request, false, error),
-      )
+      trackScriptCompletion(request)
       break
     }
     case 'loadStyleSheet': {
@@ -232,10 +242,29 @@ async function dispatchRequest(message) {
       }
       await renderer.executeScript(mainThreadScriptUrl)
       entryScriptStarted = true
-      void waitForScriptCompletion().then(
-        () => postResponse(request, true),
-        (error) => postResponse(request, false, error),
-      )
+      trackScriptCompletion(request)
+      break
+    }
+    case 'reset': {
+      // A reset is a native-view boundary, not a Worker boundary. Let a
+      // started entry evaluation publish its own response first, then drop
+      // and rebuild LynxView inside the existing Wasm instance and canvas.
+      if (scriptCompletion !== undefined) {
+        try {
+          await scriptCompletion
+        } catch {
+          // A failed page is still replaceable by the next submission.
+        }
+      }
+      entryScriptStarted = false
+      scriptCompletion = undefined
+      resettingNativeView = true
+      try {
+        await renderer.reset()
+      } finally {
+        resettingNativeView = false
+      }
+      postResponse(request, true)
       break
     }
     case 'registerFonts':
@@ -251,7 +280,7 @@ async function dispatchRequest(message) {
       break
     case 'dispose':
       running = false
-      renderer.dispose()
+      await renderer.dispose()
       renderer.free()
       renderer = undefined
       postResponse(request, true)
@@ -280,17 +309,9 @@ self.addEventListener('message', (event) => {
         postResponse(message.request, false, error)
       }
     }
-    // Script and stylesheet loads reach engine state the script thread can be
-    // holding, and stylesheets cascade in load order, so all source entry
-    // points share one queue rather than dispatching as their fetches complete.
-    if (
-      message.operation === 'executeScript' ||
-      message.operation === 'loadStyleSheet' ||
-      message.operation === 'loadLynxXml'
-    ) {
-      executeQueue = executeQueue.then(dispatch)
-    } else {
-      void dispatch()
-    }
+    // Every facade operation shares one queue. In particular, resize and font
+    // requests must not re-enter an async native reset while it temporarily
+    // owns `&mut BobcatRenderer` across WebGPU surface attachment.
+    requestQueue = requestQueue.then(dispatch)
   }
 })

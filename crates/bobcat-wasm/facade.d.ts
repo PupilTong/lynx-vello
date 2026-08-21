@@ -28,7 +28,8 @@ export declare class BobcatCanvas {
    * script boot sequence finishes and rejects on loading or evaluation error.
    * Relative URLs use the embedding document's base URL. The embedded QuickJS
    * realm and the browser facade do not impose a loading, startup, or execution
-   * deadline. A Canvas accepts exactly one entry-script operation.
+   * deadline. The current native view accepts exactly one entry-script
+   * operation; `reset()` installs a fresh view.
    */
   executeScript(url: string | URL): Promise<void>
 
@@ -44,12 +45,20 @@ export declare class BobcatCanvas {
    * stylesheet, and then runs its main-thread script. The Promise resolves
    * after the script boot sequence finishes. A background-thread script is
    * retained but not executed and produces a console warning. This is a
-   * one-shot entry-script operation; a repeated call rejects before fetch or
-   * stylesheet mounting.
+   * one-shot entry-script operation for the current native view; a repeated
+   * call rejects before fetch or stylesheet mounting unless `reset()` ran
+   * first.
    */
   loadLynxXml(url: string | URL): Promise<void>
 
-  /** Registers all font faces in an OpenType font container. */
+  /**
+   * Drops and rebuilds the native Lynx view while retaining the Render Worker,
+   * transferred canvas, Wasm instance, page configuration, current metrics,
+   * and registered font containers.
+   */
+  reset(): Promise<void>
+
+  /** Registers all font faces and restores them after each reset. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>
   resize(
     width: number,

@@ -224,6 +224,7 @@ dependencies = [
  "dom",
  "flashbulb",
  "http",
+ "js-sys",
  "lynx-template-decoder",
  "png",
  "pollster",
@@ -234,6 +235,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm_thread",
  "web-time",
 ]
