@@ -477,6 +477,21 @@ mod tests {
         }
     }
 
+    /// The registry stamps recency through a [`std::cell::Cell`], which makes
+    /// it `!Sync` — fine where it lives, inside the document's
+    /// `RefCell<Painter>`, which is `!Sync` already. `Send` is the half that
+    /// carries a contract: `Mutex<T>` is `Sync` only when `T` is `Send`, and
+    /// sharing a document between the script thread and the presenting thread
+    /// is exactly what an embedder does with it. A stamp that reached for an
+    /// atomic would keep this passing; one that reached for a raw pointer or
+    /// an `Rc` would not.
+    #[test]
+    fn the_registry_stays_send_so_a_document_can_cross_threads() {
+        const fn assert_send<T: Send>() {}
+        assert_send::<ImageStore>();
+        assert_send::<crate::Document<()>>();
+    }
+
     #[test]
     fn registration_round_trips_through_both_key_spaces() {
         let mut store = ImageStore::new();

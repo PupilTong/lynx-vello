@@ -327,6 +327,15 @@ impl<T> Document<T> {
 
     /// The Vello scene retained by the last successful
     /// [`Self::render`] call.
+    ///
+    /// Valid only within this document's own viewport — [`Self::viewport_size`]
+    /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
+    /// sizes its target from. The painter discards content that can put no ink
+    /// there, so rendering this scene into a target covering more CSS pixels
+    /// than the document's viewport leaves the excess blank rather than
+    /// showing what happens to be laid out beyond it. Resize the document
+    /// first: changing the viewport invalidates the retained scene, so the
+    /// next render builds one for the larger region.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
         Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)

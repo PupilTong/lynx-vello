@@ -82,6 +82,12 @@ impl Painter {
             &frame,
             &self.images,
         );
+        // The sweep reads the document while the painter is mutably borrowed
+        // (`Document::render` calls this through `painter.borrow_mut()`), the
+        // same way the walk above reads styles and layouts. Nothing it calls
+        // may reach back into `Document::painter`: the walk would fail on
+        // every frame, but the sweep would fail on one frame in
+        // `NODE_SWEEP_INTERVAL_FRAMES`, which is the harder failure to find.
         if self
             .images
             .frame_index()
