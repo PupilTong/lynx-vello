@@ -15,6 +15,7 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod clock;
 mod engine;
 pub mod image;
 #[cfg(feature = "quickjs")]
@@ -33,6 +34,7 @@ pub mod input {
     pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
+pub use clock::{AnimationClock, ManualClock, SystemClock};
 #[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{

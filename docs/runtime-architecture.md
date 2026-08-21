@@ -9,6 +9,8 @@ capabilities and OS facts:
 - a transferable `ScriptEngineFactory`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
+- optionally an `AnimationClock` type, when the host has a better reading of a
+  frame's time than the platform clock, or wants a reproducible one;
 - owned font bytes or already-decoded image pixels when those resources are
   registered explicitly;
 - viewport/device metrics and normalized input events;
@@ -33,6 +35,42 @@ main-thread JavaScript
 bobcat-cli ──▶ lynx-template-decoder + winit
 bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 ```
+
+## Animation timeline
+
+A view is generic over its timeline and names one at construction, the same way
+it is generic over its `Window`: `LynxView<'window, W, C>`, where `C` is an
+`AnimationClock`. Every reading is a direct call, there is no trait object, and
+no timeline can be swapped in after the view exists.
+
+`LynxView::new` names `SystemClock` — the platform's monotonic clock,
+`std::time::Instant` natively and `web_time::Instant` on Wasm, the same split
+`quickjs-rust-bridge` already uses. A host that arranges nothing therefore gets
+running animations, and `bobcat-cli` names no clock at all.
+
+`LynxView::with_animation_clock` is the constructor for a host that names its
+own, and two do. A browser has a better reading than it could take itself:
+`requestAnimationFrame` hands over the frame's timestamp, the instant the frame
+is *for*, where reading a clock partway through producing the frame drifts and
+jitters — so the Render Worker builds its view on an `Arc<ManualClock>` and
+writes that `DOMHighResTimeStamp` into it each frame. Tests and scripted
+offscreen capture do the same with their own `ManualClock`, for a reproducible
+sequence. Both work because a shared clock is itself a clock: `AnimationClock`
+is implemented for `Arc<T>`, so the host keeps a handle to the very clock its
+view reads without the view holding a trait object.
+
+Whichever is installed, the engine samples it once per frame on the presenting
+side and hands that one value to the document, so every animation in a frame is
+sampled at the same instant. `dom` itself still reads no clock — `now` is a
+parameter to `Document::advance_animations`, which is what keeps the timeline
+substitutable at all.
+
+Advancing an animation never crosses to the Lynx main thread. The presenting
+side already holds the document between frames, and the tick is a Stylo
+animation-only traversal of just the animating elements — no selector
+matching, no snapshots, and no layout unless an animated property actually
+moved a box. Starting and cancelling animations still belong to the main
+thread, and ride the style flush it already runs at `__FlushElementTree`.
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
 remain independently usable libraries, but an application embedding Bobcat
@@ -235,8 +273,13 @@ direct create/append/drop/flush DOM API is exposed to JavaScript.
    PAPI, evaluates the named source, and runs the boot sequence.
 4. `__FlushElementTree` performs style/layout commit, returns the document,
    and asks `FrameRequester` for a frame.
-5. The presenting side non-blockingly renders the retained document scene and
-   submits it to its attached target.
+5. The presenting side non-blockingly drains buffered input and resize, then
+   samples the installed `AnimationClock` once and advances every running
+   animation to that instant, then renders the retained document scene and
+   submits it to its attached target. An animation that is still running makes
+   the presenting side ask for the next frame itself, so the loop sustains
+   without waking the Lynx main thread; `LynxView::is_animating` reports the
+   same fact to an offscreen host that drives its own cadence.
 6. The task enqueues sanitized script completion and calls `EventRequester`;
    the awakened host observes it through `pump`. No realm or tree object
    crosses the boundary.

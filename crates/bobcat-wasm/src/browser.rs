@@ -16,8 +16,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
-    WindowTarget, configure_wasm_workers, quickjs_engine_factory,
+    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, ManualClock, PageConfig,
+    Window, WindowTarget, configure_wasm_workers, quickjs_engine_factory,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -400,11 +400,16 @@ impl ResourceFetcher for BrowserResources {
 /// behind the opaque `LynxView` facade.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: LynxView<'static, BrowserWindow>,
+    view: LynxView<'static, BrowserWindow, Arc<ManualClock>>,
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
+    /// The same clock the view reads. A Worker could read a monotonic clock
+    /// of its own, but `requestAnimationFrame` hands over the instant the
+    /// frame is *for*, which is the better reading and the one browsers
+    /// animate against.
+    clock: Arc<ManualClock>,
     script_finished: bool,
     disposed: bool,
 }
@@ -462,16 +467,23 @@ impl BobcatRenderer {
                 default_overflow_visible,
                 enable_css_selector,
             };
-            let mut view: LynxView<'static, BrowserWindow> = LynxView::new(
-                config,
-                resource_fetcher,
-                quickjs_engine_factory(),
-                events.clone(),
-                width,
-                height,
-                device_pixel_ratio,
-            )
-            .map_err(js_error)?;
+            // The animation timeline is `requestAnimationFrame`'s timestamp,
+            // written into this clock by `render_if_requested`. Naming it here
+            // makes it part of the view's type; the handle below is the same
+            // clock, since a shared clock is itself a clock.
+            let clock = Arc::new(ManualClock::new());
+            let mut view: LynxView<'static, BrowserWindow, Arc<ManualClock>> =
+                LynxView::with_animation_clock(
+                    config,
+                    resource_fetcher,
+                    quickjs_engine_factory(),
+                    events.clone(),
+                    width,
+                    height,
+                    device_pixel_ratio,
+                    clock.clone(),
+                )
+                .map_err(js_error)?;
             set_canvas_size(&canvas, view.frame_size());
 
             let frames = FrameSignal::default();
@@ -486,6 +498,7 @@ impl BobcatRenderer {
                 canvas,
                 frames,
                 events,
+                clock,
                 script_finished: false,
                 disposed: false,
             })
@@ -631,11 +644,18 @@ impl BobcatRenderer {
 
     /// Present a requested frame without exposing the engine or document to
     /// the browser host.
+    ///
+    /// `now_ms` is `requestAnimationFrame`'s `DOMHighResTimeStamp`, which is
+    /// also the animation timeline: every animation in the frame is sampled
+    /// at the instant the host says the frame is for.
     #[wasm_bindgen(js_name = renderIfRequested)]
-    pub fn render_if_requested(&mut self) -> Result<bool, JsValue> {
+    pub fn render_if_requested(&mut self, now_ms: f64) -> Result<bool, JsValue> {
         self.ensure_running()?;
         if !self.frames.take() {
             return Ok(false);
+        }
+        if now_ms.is_finite() {
+            self.clock.set(now_ms / 1000.0);
         }
         self.view.notify_redraw().map_err(js_error)?;
         Ok(true)

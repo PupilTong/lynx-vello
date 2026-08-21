@@ -67,6 +67,7 @@ use wasm_thread::Builder as ThreadBuilder;
 
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+use crate::clock::{AnimationClock, SystemClock};
 use crate::image::DecodedImage;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -302,7 +303,7 @@ impl FrameRequester for NoWindow {
 }
 
 #[cfg(test)]
-pub(crate) type OffscreenEngine = Engine<'static, NoWindow>;
+pub(crate) type OffscreenEngine<C = SystemClock> = Engine<'static, NoWindow, C>;
 
 /// The hand-off slot for the one document.
 #[derive(Clone)]
@@ -472,7 +473,7 @@ enum ScriptCommand {
 /// [`crate::OffscreenLynxView`].
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
-pub(crate) struct Engine<'window, W: Window> {
+pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     elements: SharedTree,
     script_owner_available: bool,
     viewport: Viewport,
@@ -486,6 +487,14 @@ pub(crate) struct Engine<'window, W: Window> {
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
     pending_input: VecDeque<InputEvent>,
     pending_resize: Option<(f32, f32, f32)>,
+    /// The animation timeline, named by the host at construction. Every
+    /// reading is a direct call; there is no trait object and no way to swap
+    /// one in after the fact.
+    clock: C,
+    /// Whether the last frame left an animation running. Read without the
+    /// document, because the frame request has to be made whether or not the
+    /// slot was free this frame.
+    animating: bool,
     /// The only `Sender`. It must never be cloned anywhere the script thread
     /// can reach: the channel closing is what ends that thread's loop, and a
     /// surviving clone would leave it parked with a live realm forever.
@@ -493,7 +502,7 @@ pub(crate) struct Engine<'window, W: Window> {
     thread_bound: PhantomData<Rc<()>>,
 }
 
-impl<W: Window> fmt::Debug for Engine<'_, W> {
+impl<W: Window, C: AnimationClock> fmt::Debug for Engine<'_, W, C> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Engine")
@@ -504,14 +513,16 @@ impl<W: Window> fmt::Debug for Engine<'_, W> {
     }
 }
 
-impl<'window, W: Window> Engine<'window, W> {
-    /// Builds the engine and its element tree at the given CSS viewport.
+impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
+    /// Builds the engine and its element tree at the given CSS viewport, on
+    /// the supplied animation timeline.
     pub(crate) fn new(
         config: PageConfig,
         event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
+        clock: C,
     ) -> Result<Self, EngineError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
@@ -531,6 +542,8 @@ impl<'window, W: Window> Engine<'window, W> {
             frames: Arc::new(Mutex::new(None)),
             pending_input: VecDeque::new(),
             pending_resize: None,
+            clock,
+            animating: false,
             script_commands: None,
             thread_bound: PhantomData,
         })
@@ -551,6 +564,28 @@ impl<'window, W: Window> Engine<'window, W> {
         }
         self.script_owner_available = false;
         Ok(self.elements.clone())
+    }
+
+    /// Whether the last produced frame left an animation running, and so owes
+    /// the timeline another frame.
+    #[must_use]
+    pub(crate) const fn is_animating(&self) -> bool {
+        self.animating
+    }
+
+    /// Samples the clock once and advances the document's animations to it.
+    ///
+    /// Runs on the presenting thread, inside the borrow that is about to
+    /// produce the frame: no script, no DOM mutation, and no hand-off to the
+    /// Lynx main thread. An animation of a property that does not affect
+    /// geometry re-cascades only the elements it touches and never reaches
+    /// layout.
+    ///
+    /// Takes the clock rather than `&self` so it can run while the attached
+    /// output is mutably borrowed.
+    fn advance_animations(clock: &C, tree: &mut LynxDocument) -> bool {
+        tree.advance_animations(clock.now_seconds())
+            .needs_next_frame
     }
 
     /// The current physical render-target size in device pixels.
@@ -807,6 +842,11 @@ impl<'window, W: Window> Engine<'window, W> {
                     &mut tree,
                     self.script_commands.as_ref(),
                 );
+                // Input and resize first, then the timeline, so a scroll and
+                // an animation compose in one defined order under one truth;
+                // then render, so an animation that just ended relayouts in
+                // the same frame it ended.
+                self.animating = Self::advance_animations(&self.clock, &mut tree);
                 let produced = tree.render();
                 if produced || !graphics.rendered_at(size) {
                     graphics.render_to_target(&tree.scene(), size)?;
@@ -821,7 +861,7 @@ impl<'window, W: Window> Engine<'window, W> {
         // A script/DOM batch can take the slot after requesting this frame.
         // Keep the request alive so event-driven embedders retry instead of
         // losing the only wakeup while presenting the retained target.
-        if tree_was_busy {
+        if tree_was_busy || self.animating {
             frames.request_frame();
         }
         if graphics.rendered_at(size) {
@@ -845,6 +885,7 @@ impl<'window, W: Window> Engine<'window, W> {
             &mut tree,
             self.script_commands.as_ref(),
         );
+        self.animating = Self::advance_animations(&self.clock, &mut tree);
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
@@ -1157,6 +1198,7 @@ mod tests {
             393.0,
             727.0,
             1.0,
+            crate::clock::SystemClock::new(),
         )
         .expect("engine")
     }
@@ -1348,6 +1390,7 @@ mod event_loop_tests {
             393.0,
             727.0,
             1.0,
+            crate::clock::SystemClock::new(),
         )
         .expect("engine");
         engine

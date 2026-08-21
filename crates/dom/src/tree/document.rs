@@ -46,6 +46,7 @@ pub struct Document<T> {
     relayout_root_ids: FxHashSet<NodeId>,
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
+    animations: crate::style::animation::AnimationDriver,
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -92,6 +93,7 @@ impl<T> Document<T> {
             relayout_root_ids: FxHashSet::default(),
             shadow_roots: 0,
             custom_elements: CustomElementRegistry::default(),
+            animations: crate::style::animation::AnimationDriver::default(),
             visual_epoch: 0,
             layout_dirty: false,
             layout_root_dirty: false,
@@ -125,6 +127,14 @@ impl<T> Document<T> {
 
     pub(crate) const fn style_engine(&self) -> &StyleEngine {
         &self.style_engine
+    }
+
+    pub(crate) const fn animations(&self) -> &crate::style::animation::AnimationDriver {
+        &self.animations
+    }
+
+    pub(crate) const fn animations_mut(&mut self) -> &mut crate::style::animation::AnimationDriver {
+        &mut self.animations
     }
 
     pub(crate) const fn style_engine_mut(&mut self) -> &mut StyleEngine {
@@ -478,6 +488,7 @@ impl<T> Document<T> {
         };
         let was_connected = self.custom_subtree_may_contain(child) && self.is_connected(parent);
 
+        self.cancel_animations_in_subtree(child);
         self.invalidate_layout(child);
 
         let child_slot = self.live_slot(child);
@@ -588,12 +599,45 @@ impl<T> Document<T> {
         removed
     }
 
+    /// Cancels the animations of a subtree that is leaving its parent.
+    ///
+    /// A node taken out of the tree stops being rendered, so its animations
+    /// end — and a move, which unlinks before re-inserting, restarts them,
+    /// which is what browsers do too. Costs one map read on a document that
+    /// never animates.
+    fn cancel_animations_in_subtree(&mut self, root: NodeId) {
+        if self.animations.is_empty() {
+            return;
+        }
+        let mut subtree = Vec::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let Some(node) = self.tree.get(current) else {
+                continue;
+            };
+            // The node survives an unlink, so its animation bit has to be
+            // cleared with its animations rather than left to the next flush.
+            node.set_may_have_animations(false);
+            subtree.push(current);
+            stack.extend(
+                node.child_slots()
+                    .iter()
+                    .map(|&slot| self.tree.at(slot).id()),
+            );
+            if let Some(shadow) = node.shadow_root_id() {
+                stack.push(shadow);
+            }
+        }
+        self.animations.forget(&subtree);
+    }
+
     /// Empties all three arenas of one node and retires its id.
     fn free_node(&mut self, id: NodeId) -> (Node<T>, PayloadSlot<T>) {
         let removed_snapshot = self
             .pending_snapshots
             .remove(&OpaqueNode(id.arena_key()))
             .is_some();
+        self.animations.forget(&[id]);
         let (node, payload) = self.tree.remove_node(id);
         let slot = id;
         debug_assert_eq!(

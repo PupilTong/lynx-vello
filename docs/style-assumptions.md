@@ -117,30 +117,59 @@ the semantics are stylo's.** Everything below refines that sentence.
     is separate future work. `Device`/media machinery also serves viewport
     units and the `rpx` basis regardless.
 
-11. **Animations: hybrid from day 1.** `transform`/`opacity`/`filter`
-    animate render-side without touching the cascade (compositor-style);
-    layout-affecting properties animate style-side through stylo's
-    Animations/Transitions cascade levels (per-frame computed-value
-    interpolation, correct cascade interactions). Two clocks by design.
+11. **Animations: through the cascade, driven off the main thread.**
+    Revised 2026-08-20 to follow browsers, superseding the earlier ruling
+    that `transform`/`opacity`/`filter` should animate render-side *without
+    touching the cascade*. No engine does that. An animated value is a
+    cascade value: CSS Animations 1 §2 says an animation adds a specified
+    value to the cascade at the animations level, and CSS Cascade 5 §6.1
+    puts transition declarations above important author rules and animation
+    declarations between important author and normal author. Blink samples
+    effects into an `EffectStack` that the next style resolve folds into the
+    element's `ComputedStyle`; WebKit resolves an animated `RenderStyle`;
+    Gecko cascades at dedicated Animations/Transitions origins — which *are*
+    stylo's `CascadeOrigin::Animations` and `CascadeOrigin::Transitions`
+    (`vendor/stylo/style/rule_tree/level.rs`), so this engine inherits
+    Firefox's mechanism rather than approximating it. A value outside the
+    cascade would also be unobservable to `getComputedStyle` and unable to
+    lose to `!important`, both of which the specs require.
 
-    *Structural side effects are not render-private.* A transform/filter
-    also creates a containing block for positioned descendants and a
-    stacking context — and those must be visible to layout even while the
-    interpolated value lives render-side. Resolution (matching browser
-    behavior and `will-change` semantics): an element with a **running**
-    animation or transition of `transform`/`filter`/`opacity` establishes
-    its containing block / stacking context **for the entire duration**,
-    even across `none` keyframes. That makes the structural bits a
-    per-animation constant flipped at start/end through the normal
-    style-side path — layout never needs per-frame animation state, only
-    the render side interpolates.
+    What browsers actually move off the main thread for
+    `transform`/`opacity`/`filter` is the per-frame interpolation and
+    rasterization, and what they throttle is the per-frame *restyle* — never
+    the cascade. So: every animated property cascades, and the per-frame work
+    runs on the presenting thread rather than the thread that owns the script
+    realm, as a stylo animation-only traversal over just the animating
+    elements, with no selector matching and no layout for properties that
+    cannot move a box. **The open gap is layerization, and it is also why this
+    engine does not throttle.** A browser can skip the per-frame restyle
+    because a compositor is interpolating instead; here the animation-only
+    traversal is the only thing that produces the animated value, and with no
+    compose-time layers the whole retained scene is rebuilt every animated
+    frame anyway. So what a frame saves today is the cascade over the elements
+    that are *not* animating, and the layout pass — not the restyle a browser
+    throttles, nor the rasterization a compositor skips. Both of those follow
+    from layers, not from a second animation path.
 
-12. **Animation staleness seam: query-time sync.** The render side owns the
-    in-flight value for render-driven properties; when something needs the
-    current value (style queries, a transition starting *from* an animating
-    value, cascade/invalidation logic), it is sampled back and overlaid on
-    computed style on demand. One source of truth per property; the sync
-    surface is small and explicit.
+    *Structural side effects are per-animation constants.* A transform/filter
+    also creates a containing block for positioned descendants and a stacking
+    context, and those must be visible to layout for the whole animation
+    rather than flickering with the interpolated value. Resolution (matching
+    browser behavior and `will-change` semantics): an element with a
+    **running** animation or transition of `transform`/`filter`/`opacity`
+    establishes its containing block / stacking context **for the entire
+    duration**, even across `none` keyframes — flipped once at start and once
+    at end, so layout never needs per-frame animation state.
+
+12. **No animation staleness seam.** Superseded by 11: the cascade output *is*
+    the animated value, so computed style is correct mid-animation and a style
+    query, a transition starting *from* an animating value, and invalidation
+    all read the same one truth with nothing to sample back. The earlier
+    query-time overlay existed only to reconcile a render-private value with
+    computed style, and there is no render-private value. If layerization later
+    introduces one, this item returns with it — and browsers already say what
+    it must do then: keep the cascade authoritative and re-sample on demand
+    rather than let the two diverge.
 
 13. **Dynamic pseudo-classes deferred past v1.** `:hover`/`:active`/`:focus`
     simply don't match until the event system lands. The reserved

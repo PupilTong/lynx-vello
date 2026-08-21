@@ -40,12 +40,15 @@ function scheduleFrame(callback) {
   }
 }
 
-function renderFrame() {
+function renderFrame(now) {
   if (!running) {
     return
   }
   try {
-    renderer.renderIfRequested()
+    // `requestAnimationFrame` hands over the frame's timestamp; the
+    // `setTimeout` fallback does not, so read one. This is the engine's
+    // animation timeline — Rust reads no clock on wasm32.
+    renderer.renderIfRequested(typeof now === 'number' ? now : performance.now())
   } catch (error) {
     reportFatal(error)
     return

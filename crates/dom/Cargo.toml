@@ -44,6 +44,10 @@ markup5ever_rcdom = { workspace = true }
 png = { workspace = true }
 
 [[bench]]
+name = "animation"
+harness = false
+
+[[bench]]
 name = "css"
 harness = false
 

@@ -71,6 +71,79 @@ Lynx exposes a single low-level **imperative** animation entry point on native e
 
 ---
 
+## As landed
+
+The driver exists as of the `@keyframes` timeline change. What that means
+concretely, so the tables above are read as "the target" and this section as
+"the state":
+
+- **Where the state lives.** Stylo's own `DocumentAnimationSet`
+  (`vendor/stylo/style/servo/animation.rs`) is the animation state, held by the
+  `Document` and handed to every `SharedStyleContext`. Keyframe resolution,
+  interpolation, timing functions, direction, fill mode, and the
+  `Animations`/`Transitions` cascade origins are all Stylo's; the engine
+  contributes the timeline. Animations start and cancel inside the ordinary
+  style flush, through `MatchMethods::process_animations`.
+- **Where the frame work happens.** `Document::advance_animations(now)` runs on
+  the presenting thread, inside the borrow that is about to produce the frame:
+  no script, no DOM mutation, and no hand-off to the Lynx main thread. It is a
+  Stylo animation-only traversal, which does no selector matching and reads no
+  snapshots, over just the animating elements and whatever inherits from them.
+  A property that cannot move a box never reaches layout, because the damage
+  harvest only invalidates layout for damage that says relayout.
+- **Measured cost** (Apple silicon, `cargo bench -p dom --bench animation`, a
+  120-card page; medians). An idle page pays **6.9 ns** per frame — one bool
+  and one epoch compare, so a document that never animates never pays for the
+  driver. One `transform` frame costs **254 µs** with a single animating
+  element and **642 µs** with all 120; the animation half of that is 5.2 µs and
+  380 µs, so the tick is O(animating) at roughly 3.2 µs per element. A `width`
+  animation, which does reach layout, costs 24 µs more at one element and 69 µs
+  more at 120 — that is the reflow the paint-only path avoids.
+- **The scene rebuild is the dominant term, and the driver cannot touch it.**
+  Every frame above carries a constant ~248 µs of scene rebuild: at one
+  animating element that is 98% of the frame. This is `docs/style-assumptions.md`
+  §11's open gap in numbers — the animation work is already small, and the
+  remaining win is bounded by a constant that only compose-time layers can
+  remove.
+- **Wiring the driver costs non-animating documents nothing**: `initial_commit`,
+  `media_viewport_flip`, `var_chain_cascade`, and `noop_commit` in the `css`
+  bench all sit within noise of their pre-driver medians. Reaching that required
+  guarding every animation-map read behind a per-node bit — Stylo asks
+  `has_animations` for every element on every match-and-cascade and twice more
+  per candidate through the style-sharing cache, and an unguarded read of the
+  one document-wide lock from every Rayon worker cost 3-10x on those benches.
+- **Cascade participation follows browsers** (`docs/style-assumptions.md` §11,
+  revised 2026-08-20). Every animated property goes through the cascade, at
+  Stylo's `Animations`/`Transitions` origins, including `transform`, `opacity`,
+  and `filter`. That is what the specs require — CSS Animations 1 §2 adds the
+  animated value *to the cascade*, CSS Cascade 5 §6.1 places it between
+  important author and normal author declarations — and what all three engines
+  do; what they move off the main thread is per-frame interpolation and
+  rasterization, and what they throttle is the per-frame restyle, never the
+  cascade. Consequence: §12's query-time staleness seam is gone, because the
+  cascade output *is* the animated value and `Node::computed_style` is correct
+  mid-animation with no sync surface at all. The remaining gap versus a browser
+  is layerization, not the cascade.
+- **Two Stylo behaviors the driver has to correct**, both from the same area and
+  both fixed without patching the fork. `process_animations_for_style` retains
+  only unfinished animations, which would drop an
+  `animation-fill-mode: forwards` value at the next restyle of that element, so
+  the driver keeps finished-but-filling animations and puts them back after each
+  traversal. And `ElementAnimationSet::update_animations_for_new_style` cancels
+  an animation the new style no longer names *without marking the set dirty* —
+  unlike the two sibling cancel paths beside it — so `process_animations` never
+  replaces the element's `Animations` origin and the element keeps the value the
+  animation had when it was cancelled, running or filling, until something else
+  happens to restyle it. The driver detects cancelled animations after each
+  traversal and re-cascades those elements itself.
+- **Known gaps.** No animation events yet
+  (`animationstart`/`animationend`/`animationiteration`/`animationcancel`) —
+  the driver knows the state transitions, nothing relays them to the realm.
+  Transitions are wired (`transition_rule`, `has_css_transitions`) but not yet
+  covered by tests. `element.animate()` has no producer and is out of scope.
+
+---
+
 ## Also see
 
 Scope note: this feeds both the style engine (parsing/interpolation) and the render engine (frame scheduling/compositing) — see `.claude/agents/lynx-css-engine.md` and `.claude/agents/lynx-render-engine.md`.
