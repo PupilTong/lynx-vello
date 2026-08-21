@@ -757,6 +757,72 @@ pub(super) fn edges_depend_on_inline_basis(
         || padding.bottom.0.has_percentage()
 }
 
+/// Whether any of the item's own sizing values on this axis is an intrinsic
+/// keyword, which resolves by measuring the item's content.
+#[inline]
+pub(super) fn axis_has_intrinsic_style(geometry: &ItemGeometry, axis: Axis) -> bool {
+    geometry.intrinsic.preferred(axis).is_intrinsic()
+        || geometry.intrinsic.minimum(axis).is_intrinsic()
+        || geometry.intrinsic.maximum(axis).is_intrinsic()
+}
+
+/// Per axis: whether the container's own used size on that axis cannot move
+/// when only its subtree content changes — its input is stable there, and
+/// either the parent imposed the size or the container's style resolves one
+/// against that stable input. This is what every percentage its children
+/// resolve, and every stretch target it imposes, chains off.
+#[inline]
+pub(super) fn container_content_independence(
+    input: LayoutInput,
+    style_definite: Size<bool>,
+) -> Size<bool> {
+    Size::new(
+        input.content_independent.width
+            && (input.known_dimensions.width.is_some() || style_definite.width),
+        input.content_independent.height
+            && (input.known_dimensions.height.is_some() || style_definite.height),
+    )
+}
+
+/// The per-item facts a container needs before it can call any part of an
+/// item's committed input imposed: per axis, whether the item's own sizing
+/// values stand on their own, and whether its margins and paddings do.
+#[inline]
+pub(super) fn item_value_stability(
+    style: &impl CoreStyle,
+    aspect_ratio: Option<f32>,
+    container_independent: Size<bool>,
+) -> (Size<bool>, bool) {
+    let mut values = Size::new(
+        axis_sizing_is_stable(style, Axis::Horizontal, container_independent),
+        axis_sizing_is_stable(style, Axis::Vertical, container_independent),
+    );
+    if aspect_ratio.is_some() {
+        // The ratio transfers a size across the axes, so either axis is only
+        // as stable as both.
+        let both = values.width && values.height;
+        values = Size::new(both, both);
+    }
+    let edges = container_independent.width
+        || !edges_depend_on_inline_basis(&style.margin(), &style.padding());
+    (values, edges)
+}
+
+/// Whether every sizing value the item resolves on this axis stands on its
+/// own: a pure length, or a percentage of a container axis that is itself
+/// content-independent.
+#[inline]
+pub(super) fn axis_sizing_is_stable(
+    style: &impl CoreStyle,
+    axis: Axis,
+    container_independent: Size<bool>,
+) -> bool {
+    axis.size(container_independent)
+        || (!style_size_depends_on_basis(axis.size(style.size()))
+            && !style_size_depends_on_basis(axis.size(style.min_size()))
+            && !max_size_depends_on_basis(axis.size(style.max_size())))
+}
+
 #[inline]
 pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {

@@ -45,9 +45,10 @@ impl<T: Sync> Document<T> {
         }
 
         let full = self.layout_requires_full_pass(viewport, scale);
+        let rescale = self.layout_inputs_changed(viewport, scale);
         let bound = self.arenas().slot_bound();
         self.layout_state_mut().ensure_covers(bound);
-        host::run_layout(self, viewport, scale, full);
+        host::run_layout(self, viewport, scale, full, rescale);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
     }
@@ -304,6 +305,164 @@ mod tests {
         for id in [DOCUMENT_NODE_ID, root, image] {
             assert_eq!(document.layout_cache_is_empty(id), Some(true));
         }
+    }
+
+    /// Whether the node's committing parent proved its input survives any
+    /// change confined to the node's own subtree — the license the in-place
+    /// relayout path parks on.
+    fn is_content_independent(doc: &Document<()>, id: crate::NodeId) -> bool {
+        let slot = doc.live_slot(id);
+        doc.layout_state()
+            .get(slot)
+            .is_some_and(|state| state.slot.committed_independent().is_some())
+    }
+
+    fn linear_page() -> Document<()> {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            // `overflow: hidden` is what the Lynx UA sheet gives every element,
+            // and it is load-bearing here: it is what frees the flex list's
+            // automatic minimum size from its content, without which the list
+            // has no independent main axis for percentages to chain off.
+            "page, view { overflow: hidden; box-sizing: border-box; }
+             page { display: flex; flex-direction: column; width: 100%; height: 100%; }
+             .list { display: linear; linear-direction: column;
+                     flex-grow: 1; flex-basis: 0px; }
+             .row { display: linear; linear-direction: row; height: 56px; }
+             .weighted { display: linear; linear-weight: 1; }
+             .measured { display: linear; }
+             .ratio { display: linear; width: 40px; aspect-ratio: 2; }
+             .percent-row { display: linear; linear-direction: row; height: 50%; }",
+            StylesheetOrigin::Author,
+        );
+        doc
+    }
+
+    fn child_of(doc: &mut Document<()>, parent: crate::NodeId, class: &str) -> crate::NodeId {
+        let child = doc.create_element("view", ());
+        doc.add_class(child, class);
+        doc.append_child(parent, child);
+        child
+    }
+
+    #[test]
+    fn linear_imposes_content_independent_inputs_on_pinned_and_weighted_children() {
+        let mut doc = linear_page();
+        let root = doc.document_element().id();
+        let list = child_of(&mut doc, root, "list");
+        // A pinned main size and a stretched cross axis: both imposed. Linear
+        // has no content-based automatic minimum, so `overflow` plays no part
+        // here the way it does under flexbox.
+        let row = child_of(&mut doc, list, "row");
+        // Main size distributed from the row's own definite main size by
+        // weight, cross size stretched to it.
+        let weighted = child_of(&mut doc, row, "weighted");
+        // Its main size is whatever its content measures.
+        let measured = child_of(&mut doc, row, "measured");
+        // A ratio ties the axes together: a definite width fixes the height.
+        let ratio = child_of(&mut doc, row, "ratio");
+        // A percentage main size resolves against the list's own main axis,
+        // which the page imposes.
+        let percent = child_of(&mut doc, list, "percent-row");
+
+        doc.layout();
+
+        assert!(is_content_independent(&doc, row));
+        assert!(is_content_independent(&doc, weighted));
+        assert!(is_content_independent(&doc, ratio));
+        assert!(is_content_independent(&doc, percent));
+        assert!(
+            !is_content_independent(&doc, measured),
+            "a content-measured main size cannot license an in-place relayout",
+        );
+    }
+
+    #[test]
+    fn grid_relative_and_out_of_flow_children_carry_their_own_independence() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            // Lynx's UA `overflow: hidden` is again load-bearing: it is what
+            // frees a grid item's automatic minimum from its content, which is
+            // what lets a flexible track stay put under it.
+            "page, view { overflow: hidden; box-sizing: border-box; }
+             page { display: flex; flex-direction: column; width: 300px; height: 300px; }
+             .grid { display: grid; grid-template-columns: 100px 1fr;
+                     grid-template-rows: 60px; width: 300px; height: 60px; }
+             .pinned { width: 40px; }
+             .relative { display: relative; width: 200px; height: 100px; }
+             .sized { width: 30px; height: 30px; }
+             .abs { position: absolute; left: 4px; top: 4px; width: 20px; height: 20px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let grid = child_of(&mut doc, root, "grid");
+        // Fixed column, fixed row: the area cannot move at all.
+        let fixed_cell = child_of(&mut doc, grid, "");
+        // Flexible column, but a pinned width keeps this item's contribution
+        // out of the track's sizing.
+        let pinned_cell = child_of(&mut doc, grid, "pinned");
+        let relative = child_of(&mut doc, root, "relative");
+        let anchored = child_of(&mut doc, relative, "sized");
+        let measured = child_of(&mut doc, relative, "");
+        let out_of_flow = child_of(&mut doc, relative, "abs");
+
+        doc.layout();
+
+        assert!(is_content_independent(&doc, fixed_cell));
+        assert!(is_content_independent(&doc, pinned_cell));
+        assert!(is_content_independent(&doc, anchored));
+        assert!(
+            is_content_independent(&doc, out_of_flow),
+            "an out-of-flow box is sized from its containing block and its own \
+             style, never from a measurement of itself",
+        );
+        assert!(
+            !is_content_independent(&doc, measured),
+            "a relative child with no imposed size is whatever it measures",
+        );
+    }
+
+    #[test]
+    fn a_grid_item_in_a_flexible_track_follows_its_own_content_without_a_pinned_size() {
+        let mut doc: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.add_stylesheet(
+            "page, view { overflow: hidden; box-sizing: border-box; }
+             page { display: flex; flex-direction: column; width: 300px; height: 300px; }
+             .grid { display: grid; grid-template-columns: 1fr;
+                     grid-template-rows: auto; width: 300px; height: 60px; }",
+            StylesheetOrigin::Author,
+        );
+        let root = doc.document_element().id();
+        let grid = child_of(&mut doc, root, "grid");
+        let cell = child_of(&mut doc, grid, "");
+        doc.layout();
+
+        assert!(
+            !is_content_independent(&doc, cell),
+            "an auto row sizes itself from this item, so the item's own area \
+             moves with its content",
+        );
+    }
+
+    #[test]
+    fn a_linear_subtree_mutation_parks_instead_of_reaching_the_root() {
+        let mut doc = linear_page();
+        let root = doc.document_element().id();
+        let list = child_of(&mut doc, root, "list");
+        let row = child_of(&mut doc, list, "row");
+        let cell = child_of(&mut doc, row, "weighted");
+        let leaf = child_of(&mut doc, cell, "measured");
+        doc.layout();
+
+        let viewport = Size::new(800.0, 600.0);
+        doc.invalidate_layout(leaf);
+        assert!(
+            !doc.layout_requires_full_pass(viewport, 1.0),
+            "a mutation under a content-independent linear ancestor stays incremental",
+        );
     }
 
     #[test]

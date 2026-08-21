@@ -156,6 +156,7 @@ pub(super) fn run_layout<T: Sync>(
     viewport: Size<f32>,
     scale: f32,
     full: bool,
+    rescale: bool,
 ) {
     let root = document.document_element().id();
     let parked = collect_parked_boundaries(document);
@@ -174,7 +175,8 @@ pub(super) fn run_layout<T: Sync>(
                 RelayoutKind::Boundary => {
                     if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
                         let output = compute_boundary_relayout(tree, state, slot, pending.input);
-                        tree.layout_mut(state, slot).unrounded.content_size = output.content_size;
+                        tree.layout_mut(state, slot)
+                            .set_unrounded_content_size(output.content_size);
                     }
                 }
                 RelayoutKind::InPlace { previous } => {
@@ -208,7 +210,7 @@ pub(super) fn run_layout<T: Sync>(
         let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
             pre_position(tree, state, node, viewport)
         };
-        round_with(tree, state, root, scale, Point::ZERO, position);
+        round_with(tree, state, root, scale, Point::ZERO, rescale, position);
     } else {
         position_and_round_parked_boundaries(tree, state, parked_ids, &parked, viewport, scale);
     }
@@ -259,7 +261,7 @@ fn position_and_round_parked_boundaries<T: Sync>(
         let position = |tree: &TreeArenas<T>, state: &mut DocumentLayoutState, node| {
             pre_position(tree, state, node, viewport)
         };
-        round_with(tree, state, slot, scale, parent_origin, position);
+        round_with(tree, state, slot, scale, parent_origin, false, position);
     }
 }
 
@@ -319,7 +321,8 @@ fn pre_position<T: Sync>(
         return false;
     }
     if display == DisplayMode::Contents {
-        tree.layout_mut(state, node_id).unrounded = Layout::default();
+        tree.layout_mut(state, node_id)
+            .set_unrounded(Layout::default());
         return true;
     }
     if node
@@ -395,7 +398,7 @@ fn position_hoisted<T: Sync>(
     );
     let ordering_parent = box_parent(node).map_or(parent_slot, Node::slot);
     layout.order = sibling_paint_order(tree, ordering_parent, node_id);
-    tree.layout_mut(state, node_id).unrounded = layout;
+    tree.layout_mut(state, node_id).set_unrounded(layout);
 }
 
 fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeSlot, target: NodeSlot) -> u32 {

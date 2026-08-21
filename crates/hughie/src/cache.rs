@@ -275,9 +275,6 @@ impl MeasurementSlot {
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
-    /// The committed input's `content_independent` flags, carried beside the
-    /// packed slot (the packed key covers only geometry-relevant fields).
-    committed_content_independent: Size<bool>,
     measurements: SmallVec<[MeasurementSlot; MEASURE_CACHE_INLINE]>,
 }
 
@@ -286,7 +283,6 @@ impl Cache {
     pub const fn new() -> Self {
         Self {
             committed: None,
-            committed_content_independent: Size::new(false, false),
             measurements: SmallVec::new_const(),
         }
     }
@@ -296,26 +292,17 @@ impl Cache {
         self.committed.is_none() && self.measurements.is_empty()
     }
 
+    /// The committed input, minus the fields the packed key does not cover:
+    /// `content_independent` reads back as `false` on both axes, and the
+    /// owning [`crate::tree::LayoutSlot`] re-attaches what it stored.
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
-        self.committed.map(|slot| {
-            let mut input = slot.input.unpack();
-            input.content_independent = self.committed_content_independent;
-            input
-        })
+        self.committed.map(|slot| slot.input.unpack())
     }
 
-    /// Returns the committed input/output pair when the committing parent
-    /// marked the input content-independent on both axes — the license for a
-    /// host to relayout this subtree in place under the stored input.
     #[must_use]
-    pub fn committed_independent(&self) -> Option<(LayoutInput, LayoutOutput)> {
-        if !(self.committed_content_independent.width && self.committed_content_independent.height)
-        {
-            return None;
-        }
-        self.committed_input()
-            .zip(self.committed.map(MeasurementSlot::unpack_output))
+    pub fn committed_output(&self) -> Option<LayoutOutput> {
+        self.committed.map(MeasurementSlot::unpack_output)
     }
 
     /// Returns a cached output.
@@ -341,10 +328,7 @@ impl Cache {
     pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
         let slot = MeasurementSlot::new(input, output);
         match input.goal {
-            LayoutGoal::Commit => {
-                self.committed = Some(slot);
-                self.committed_content_independent = input.content_independent;
-            }
+            LayoutGoal::Commit => self.committed = Some(slot),
             LayoutGoal::Measure(_) => {
                 // Retiring a live same-shape measurement while the cache still
                 // has room costs a whole subtree recomputation the next time
@@ -380,7 +364,6 @@ impl Cache {
 
     pub fn clear(&mut self) {
         self.committed = None;
-        self.committed_content_independent = Size::new(false, false);
         self.measurements.clear();
     }
 }
