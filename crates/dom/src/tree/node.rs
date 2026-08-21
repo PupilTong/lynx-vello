@@ -932,7 +932,12 @@ mod tests {
         let Some(NodeContent::Text(_)) = text.content.as_deref() else {
             unreachable!("text nodes carry literal-text content")
         };
-        assert!(document.layout_state().at(text_slot).text.is_none());
+        assert!(
+            document
+                .layout_state()
+                .get(text_slot)
+                .is_none_or(|state| state.text.is_none())
+        );
 
         let first = {
             let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);

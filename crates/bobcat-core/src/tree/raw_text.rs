@@ -9,8 +9,8 @@
 //! (`web-elements`' `RawText.ts`), and the UA rules that decide where a
 //! carrier's run lays out ([`UA_RULES`]).
 //!
-//! The `text` element's own defaults are not here — they belong with the
-//! other Lynx tag defaults in the [parent module](super)'s UA sheet.
+//! The `text` element's own defaults are not here — they are
+//! [`super::text`]'s, one module over.
 
 use dom::{CustomElement, NodeId};
 
@@ -28,6 +28,11 @@ const TEXT_ATTRIBUTE: &str = "text";
 /// reflected run, making a literal newline in the attribute break the line,
 /// which is the one place Lynx preserves one (its `white-space` grammar is
 /// `normal | nowrap`, so nothing else can ask for this).
+///
+/// The opt-in rule earns its keep twice over: [`super::text`]'s defaults
+/// suppress every child of a `text` that is not content, so without it a
+/// carrier would generate no box even in the one place it belongs. It outranks
+/// that suppression on specificity, not on source order.
 pub(super) const UA_RULES: &str = "\
 raw-text { display: none; white-space-collapse: preserve-breaks; }
 text > raw-text, text > wrapper > raw-text { display: contents; }
@@ -124,7 +129,7 @@ pub(crate) fn drop_element_and_owned_text(document: &mut LynxDocument, element: 
 mod tests {
     use dom::NodeId;
 
-    use super::super::{PageConfig, Viewport, new_document};
+    use super::super::test_support::{child, display, document};
     use super::{
         LynxDocument, RAW_TEXT_TAG, TEXT_ATTRIBUTE, drop_element_and_owned_text, owned_text_node,
     };
@@ -132,17 +137,9 @@ mod tests {
     /// Solid em squares, so a run's box is its glyph count times its font size.
     const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
-    fn document() -> LynxDocument {
-        new_document(Viewport::new(393.0, 727.0), PageConfig::default())
-    }
-
     /// A `text` element under the page, styled to Ahem's exact metrics.
     fn text_element(document: &mut LynxDocument) -> NodeId {
-        let page = document.document_element().id();
-        let text = document.create_element("text", ());
-        document.set_inline_style(text, "font-family: Ahem; font-size: 20px");
-        document.append_child(page, text);
-        text
+        child(document, "text", "font-family: Ahem; font-size: 20px")
     }
 
     /// What `__CreateRawText` does: mint the carrier, write the run on it,
@@ -156,15 +153,6 @@ mod tests {
 
     fn run_of(document: &LynxDocument, element: NodeId) -> NodeId {
         owned_text_node(document, element).expect("a non-empty raw-text carries a text node")
-    }
-
-    fn display(document: &LynxDocument, element: NodeId) -> dom::stylo::values::computed::Display {
-        document
-            .get(element)
-            .expect("a live element")
-            .computed_style()
-            .expect("a flushed element has computed style")
-            .clone_display()
     }
 
     #[test]

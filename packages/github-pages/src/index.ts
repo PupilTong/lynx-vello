@@ -496,6 +496,12 @@ class PreviewRenderer {
             'The demo font container did not contain a usable font face',
           );
         }
+        const defaultFontConfigured = await view.setDefaultFontFamily('Roboto');
+        if (!defaultFontConfigured) {
+          throw new Error(
+            'The registered demo font did not expose the Roboto family',
+          );
+        }
       } catch (error) {
         if (this.#view === view) {
           this.#view = undefined;

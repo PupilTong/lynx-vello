@@ -250,6 +250,19 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
         self.engine.register_fonts(dom::FontBlob::new(data))
     }
 
+    /// Selects a registered font family as this view's platform default.
+    ///
+    /// This is primarily for embedders without system-font discovery, such as
+    /// Wasm. It maps CSS `system-ui`, `sans-serif`, and `serif` to `family`
+    /// ahead of any platform fallbacks. Call it after [`Self::register_fonts`].
+    /// Returns `false` when no registered or system family has that name.
+    ///
+    /// If a script batch currently owns the document, the update is rejected
+    /// with [`EngineError::ResourceUpdateBusy`].
+    pub fn set_default_font_family(&mut self, family: &str) -> Result<bool, EngineError> {
+        self.engine.set_default_font_family(family)
+    }
+
     /// Installs decoded pixels under a CSS image URL in the private paint
     /// registry, replacing an earlier registration for the same URL.
     pub fn register_image_url(

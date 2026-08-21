@@ -3,7 +3,7 @@
 use core::fmt;
 use std::sync::OnceLock;
 
-use parley::fontique::{Collection, CollectionOptions, SourceCache};
+use parley::fontique::{Collection, CollectionOptions, GenericFamily, SourceCache};
 use parley::{FontContext, LayoutContext};
 
 use super::FontBlob;
@@ -58,6 +58,31 @@ impl TextContext {
             .into_iter()
             .map(|(_, fonts)| fonts.len())
             .sum()
+    }
+
+    /// Selects a registered family as the embedder-provided platform default.
+    ///
+    /// Native contexts already discover the platform's generic-family maps.
+    /// Embedders without a system-font backend, notably Wasm, can use this
+    /// after [`Self::register_fonts`] to give CSS's `system-ui`, `sans-serif`,
+    /// and `serif` families a concrete first choice. Existing platform
+    /// fallbacks remain available after the selected family.
+    ///
+    /// Returns `false` without changing the maps when `family` is unknown.
+    pub fn set_default_font_family(&mut self, family: &str) -> bool {
+        let Some(family) = self.font.collection.family_id(family) else {
+            return false;
+        };
+        for generic in [
+            GenericFamily::SystemUi,
+            GenericFamily::SansSerif,
+            GenericFamily::Serif,
+        ] {
+            self.font
+                .collection
+                .set_generic_families(generic, std::iter::once(family));
+        }
+        true
     }
 
     pub(super) fn font_and_layout_contexts(
@@ -128,6 +153,43 @@ mod tests {
             panic!("an in-memory font must retain an in-memory source");
         };
         assert_eq!(retained.id(), original_id);
+    }
+
+    #[test]
+    fn embedder_default_populates_the_css_default_generic_families() {
+        let mut context = TextContext::without_system_fonts();
+        assert!(!context.set_default_font_family("Ahem"));
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let ahem = context
+            .font
+            .collection
+            .family_id("Ahem")
+            .expect("registered family");
+
+        assert!(context.set_default_font_family("Ahem"));
+
+        for generic in [
+            GenericFamily::SystemUi,
+            GenericFamily::SansSerif,
+            GenericFamily::Serif,
+        ] {
+            assert_eq!(
+                context
+                    .font
+                    .collection
+                    .generic_families(generic)
+                    .collect::<Vec<_>>(),
+                vec![ahem]
+            );
+        }
+        assert!(
+            context
+                .font
+                .collection
+                .generic_families(GenericFamily::Monospace)
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

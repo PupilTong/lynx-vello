@@ -641,6 +641,20 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         Ok(registered)
     }
 
+    /// Selects a registered family as the embedder-provided platform default.
+    pub(crate) fn set_default_font_family(&mut self, family: &str) -> Result<bool, EngineError> {
+        let Some(mut tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        let configured = tree.set_default_font_family(family);
+        if configured {
+            tree.layout();
+            drop(tree);
+            self.refresh();
+        }
+        Ok(configured)
+    }
+
     /// Mounts an author stylesheet the host had already parsed.
     ///
     /// Mount order is cascade order: a sheet mounted later wins ties against
@@ -1311,6 +1325,10 @@ mod tests {
 
         assert!(matches!(
             engine.register_fonts(FontBlob::new(Bytes::from_static(b"font"))),
+            Err(super::EngineError::ResourceUpdateBusy)
+        ));
+        assert!(matches!(
+            engine.set_default_font_family("Ahem"),
             Err(super::EngineError::ResourceUpdateBusy)
         ));
 

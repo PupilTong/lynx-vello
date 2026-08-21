@@ -6,7 +6,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hughie::geometry::Size;
-use hughie::tree::LayoutInput;
+use hughie::tree::{LayoutInput, LayoutOutput};
 use rustc_hash::FxHashSet;
 use stylo::LocalName;
 use stylo::dom::OpaqueNode;
@@ -27,11 +27,24 @@ pub(crate) fn about_blank_url_data() -> UrlExtraData {
     UrlExtraData::from(::url::Url::parse("about:blank").expect("about:blank is a valid URL"))
 }
 
-/// A containment boundary scheduled for a committed-input relayout.
+/// How a scheduled committed-input relayout is allowed to finish.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RelayoutKind {
+    /// A `contain: strict` boundary: containment guarantees nothing escapes,
+    /// so the recompute is final whatever it produces.
+    Boundary,
+    /// An ordinary node whose committed input is content-independent: the
+    /// recompute stands only if it reproduces the previous output bit for
+    /// bit; any difference escalates to a whole-tree pass.
+    InPlace { previous: LayoutOutput },
+}
+
+/// A node scheduled for a committed-input relayout.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PendingRelayout {
     pub node_id: NodeId,
     pub input: LayoutInput,
+    pub kind: RelayoutKind,
 }
 
 /// One DOM tree, including its actual document node at primary-arena slot
@@ -76,13 +89,11 @@ impl<T> Document<T> {
         let root = tree.insert_node(PayloadSlot::Document, |owner, id| {
             Node::new_document(owner, id, lock, url_data)
         });
-        let slot = root;
         assert_eq!(
             root, DOCUMENT_NODE_ID,
             "the DOM document node must take the first id the document ever issues"
         );
-        let mut layout = DocumentLayoutState::new();
-        layout.insert(slot);
+        let layout = DocumentLayoutState::new();
         let mut document = Self {
             style_engine,
             tree,
@@ -145,10 +156,16 @@ impl<T> Document<T> {
         (&mut self.style_engine, &mut self.tree)
     }
 
-    pub(crate) fn record_relayout_root(&mut self, id: NodeId, committed_input: LayoutInput) {
+    pub(crate) fn record_relayout_root(
+        &mut self,
+        id: NodeId,
+        committed_input: LayoutInput,
+        kind: RelayoutKind,
+    ) {
         self.relayout_roots.push(PendingRelayout {
             node_id: id,
             input: committed_input,
+            kind,
         });
         self.relayout_root_ids.insert(id);
     }
@@ -303,9 +320,7 @@ impl<T> Document<T> {
         payload: PayloadSlot<T>,
         make: impl FnOnce(*mut TreeArenas<T>, NodeId) -> Node<T>,
     ) -> NodeId {
-        let id = self.tree.insert_node(payload, make);
-        self.layout.insert(id);
-        id
+        self.tree.insert_node(payload, make)
     }
 
     #[must_use]
@@ -1006,7 +1021,7 @@ pub(crate) mod tests {
         let slot = document.live_slot(b);
         document.append_child(a, b);
 
-        document.record_relayout_root(b, LayoutInput::default());
+        document.record_relayout_root(b, LayoutInput::default(), RelayoutKind::Boundary);
         assert!(document.relayout_root_ids.contains(&b));
 
         assert_eq!(document.drop_subtree(b).len(), 1);

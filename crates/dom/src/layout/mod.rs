@@ -17,6 +17,7 @@ use hughie::style::CoreStyle;
 pub(crate) use hughie::text::TextLayout;
 use hughie::text::{FontBlob, TextContext};
 pub use hughie::tree::Layout;
+use hughie::tree::LayoutSlot;
 use stylo::properties::ComputedValues;
 use stylo::servo_arc::Arc;
 
@@ -24,7 +25,7 @@ pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
     establishes_fixed_containing_block, skips_contents,
 };
-use crate::tree::document::{Document, NodeLayoutState};
+use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
 pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new(|| {
     use stylo::properties::style_structs::Font;
@@ -44,6 +45,8 @@ impl<T: Sync> Document<T> {
         }
 
         let full = self.layout_requires_full_pass(viewport, scale);
+        let bound = self.arenas().slot_bound();
+        self.layout_state_mut().ensure_covers(bound);
         host::run_layout(self, viewport, scale, full);
         self.clear_relayout_roots();
         self.mark_layout_complete(viewport, scale);
@@ -110,16 +113,32 @@ impl<T> Document<T> {
         registered
     }
 
+    /// Selects a registered family as the embedder-provided platform default.
+    ///
+    /// This maps CSS `system-ui`, `sans-serif`, and `serif` to `family` ahead
+    /// of any platform fallbacks. Returns `false` when the family is unknown.
+    pub fn set_default_font_family(&mut self, family: &str) -> bool {
+        let context = self
+            .layout_state_mut()
+            .text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()));
+        let configured = context.set_default_font_family(family);
+        if configured {
+            self.invalidate_layout_all();
+        }
+        configured
+    }
+
     #[must_use]
     pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
         let slot = self.slot(id)?;
-        Some(&self.layout_state().at(slot).slot.rounded)
+        Some(&self.layout_state().get(slot)?.slot.rounded)
     }
 
     #[must_use]
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         let slot = self.slot(id)?;
-        self.layout_state().at(slot).text.as_deref()?.committed()
+        self.layout_state().get(slot)?.text.as_deref()?.committed()
     }
 
     #[must_use]
@@ -131,50 +150,78 @@ impl<T> Document<T> {
     #[cfg(test)]
     pub(crate) fn layout_cache_is_empty(&self, id: crate::NodeId) -> Option<bool> {
         let slot = self.slot(id)?;
-        Some(self.layout_state().at(slot).slot.layout_cache_is_empty())
+        Some(
+            self.layout_state()
+                .get(slot)
+                .is_none_or(|state| state.slot.layout_cache_is_empty()),
+        )
     }
 
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
-        let (boundary, reached_root) = {
-            let (tree, state, parked) = self.layout_parts();
+        let (pending, reached_root) = {
+            let (tree, state, _) = self.layout_parts();
             let slot = tree
                 .slot(id)
                 .expect("stale NodeId passed to Document::invalidate_layout");
             let start = tree.at(slot);
             state.clear_layout_cache(slot);
 
-            let mut boundary = None;
+            let mut pending = None;
             let mut reached_root = true;
             let mut current = start.flat_parent_id();
             while let Some(node_id) = current {
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
+                let node_state = state.get(node_slot).map(|state| &state.slot);
+                if node_state.is_none_or(LayoutSlot::layout_cache_is_empty)
+                    && node.flat_parent_id().is_some()
+                {
+                    // Nothing above needs clearing: either an earlier
+                    // invalidation already walked past here (whatever it
+                    // recorded still stands), the node sits parked for a
+                    // committed-input relayout (recording clears its cache),
+                    // or it was never laid out (detached or hidden). The
+                    // parentless document node is exempt — it never holds a
+                    // cache, and stopping there must still count as reaching
+                    // the root.
+                    reached_root = false;
+                    break;
+                }
                 let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;
                 }
-                let is_boundary = style_view.as_ref().is_some_and(is_relayout_boundary);
-                if is_boundary && parked.contains(&node_id) {
-                    reached_root = false;
-                    break;
-                }
-                let boundary_input = is_boundary
-                    .then(|| state.at(node_slot).slot.committed_input())
-                    .flatten();
+                let scheduled = if style_view.as_ref().is_some_and(is_relayout_boundary) {
+                    node_state
+                        .and_then(LayoutSlot::committed_input)
+                        .map(|input| (node_id, input, RelayoutKind::Boundary))
+                } else if node.is_element()
+                    && node_id != crate::tree::document::DOCUMENT_ELEMENT_NODE_ID
+                {
+                    // A committed input the parent imposed independently of
+                    // this subtree's content survives the mutation, so the
+                    // subtree can relayout in place under it; run_layout
+                    // verifies the output stayed identical before trusting it.
+                    node_state.and_then(LayoutSlot::committed_independent).map(
+                        |(input, previous)| (node_id, input, RelayoutKind::InPlace { previous }),
+                    )
+                } else {
+                    None
+                };
                 state.clear_layout_cache(node_slot);
-                if let Some(input) = boundary_input {
-                    boundary = Some((node_id, input));
+                if let Some(entry) = scheduled {
+                    pending = Some(entry);
                     reached_root = false;
                     break;
                 }
                 current = node.flat_parent_id();
             }
-            (boundary, reached_root)
+            (pending, reached_root)
         };
         self.mark_layout_dirty(reached_root);
-        if let Some((boundary_id, committed_input)) = boundary {
-            self.record_relayout_root(boundary_id, committed_input);
+        if let Some((root_id, committed_input, kind)) = pending {
+            self.record_relayout_root(root_id, committed_input, kind);
         }
     }
 
@@ -244,7 +291,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 640, 656, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352, 16,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
     }

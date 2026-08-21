@@ -427,6 +427,9 @@ pub struct BobcatRenderer {
     /// replacement native view receives the same registered faces without
     /// another UI-to-Worker transfer.
     font_sources: Vec<Arc<[u8]>>,
+    /// The last successfully selected embedder default is stable wrapper
+    /// state too; a replacement document gets the same generic-family map.
+    default_font_family: Option<String>,
     /// The same clock the view reads. A Worker could read a monotonic clock
     /// of its own, but `requestAnimationFrame` hands over the instant the
     /// frame is *for*, which is the better reading and the one browsers
@@ -518,6 +521,7 @@ impl BobcatRenderer {
                 height,
                 device_pixel_ratio,
                 font_sources: Vec::new(),
+                default_font_family: None,
                 clock,
                 script_finished: false,
                 disposed: false,
@@ -533,8 +537,9 @@ impl BobcatRenderer {
     /// Drop the current native `LynxView` and attach a fresh one to the same
     /// Worker-owned `OffscreenCanvas`. The Wasm instance, configured Stylo pool,
     /// browser resource provider, page configuration, current metrics, clock,
-    /// and registered font containers remain owned by this wrapper. Transient
-    /// script and stylesheet bytes from the old page are cleared.
+    /// registered font containers, and the selected default font family remain
+    /// owned by this wrapper. Transient script and stylesheet bytes from the
+    /// old page are cleared.
     #[wasm_bindgen(js_name = reset)]
     pub async fn reset(&mut self) -> Result<(), JsValue> {
         self.ensure_running()?;
@@ -564,6 +569,14 @@ impl BobcatRenderer {
         .await?;
         for source in &self.font_sources {
             view.register_fonts(source.clone()).map_err(js_error)?;
+        }
+        if let Some(family) = &self.default_font_family {
+            let configured = view.set_default_font_family(family).map_err(js_error)?;
+            if !configured {
+                return Err(js_error(format!(
+                    "the restored font containers no longer expose the `{family}` family"
+                )));
+            }
         }
         self.view = Some(view);
         Ok(())
@@ -683,6 +696,19 @@ impl BobcatRenderer {
             self.font_sources.push(source);
         }
         Ok(registered)
+    }
+
+    /// Map CSS's default generic families to an embedder-selected font family.
+    #[wasm_bindgen(js_name = setDefaultFontFamily)]
+    pub fn set_default_font_family(&mut self, family: String) -> Result<bool, JsValue> {
+        let configured = self
+            .view_mut()?
+            .set_default_font_family(&family)
+            .map_err(js_error)?;
+        if configured {
+            self.default_font_family = Some(family);
+        }
+        Ok(configured)
     }
 
     /// Await the next durable engine wakeup without timer polling.

@@ -11,17 +11,14 @@
 //! - **Apple** (macOS/iOS): `AppleDecoder`, `ImageIO`. Claims PNG, JPEG, WebP, GIF, HEIC and AVIF
 //!   unconditionally — this workspace assumes an OS recent enough to carry all six codecs, so there
 //!   is no runtime probe.
-//! - **Windows**: `WicDecoder`, the Windows Imaging Component. PNG and JPEG are inbox; WebP is a
-//!   Store extension, so a runtime probe decides per format.
-//! - **Android**: `NdkDecoder`, the NDK's `AImageDecoder`, reached through `dlopen` because the API
-//!   is 30+ and the workspace minimum is lower.
 //! - **Linux**: `SoftwareDecoder`, the pure-Rust reference (`png` + `zune-jpeg` + `image-webp`).
 //!   Linux has no system still-image decode API; this is the only target that compiles it.
 //!
-//! The Windows and Android modules are carried for the embedder that does not
-//! exist yet: this CLI builds for macOS and Linux, so they compile on no
-//! supported target and no CI gate reaches them — they are reference material,
-//! reviewed when they were written, not live code.
+//! Windows (WIC, probe-per-format) and Android (NDK `AImageDecoder` via
+//! `dlopen`) reference modules were carried here for embedders that do not
+//! exist yet; the CLI never compiled them on a supported target and no CI gate
+//! reached them, so they were removed — recover `windows.rs`/`android.rs` from
+//! git history if such an embedder materializes.
 
 use std::sync::Arc;
 
@@ -30,37 +27,21 @@ use bobcat_core::image::Decoder;
 mod resample;
 pub(crate) use resample::resample;
 
-#[cfg_attr(
-    not(any(target_os = "android", target_os = "macos", target_os = "ios")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "ios")), allow(dead_code))]
 mod animation;
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "windows"
-))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod orientation;
 
-#[cfg(target_os = "android")]
-mod android;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod apple;
 #[cfg(target_os = "linux")]
 mod software;
-#[cfg(target_os = "windows")]
-mod windows;
 
-#[cfg(target_os = "android")]
-pub use android::NdkDecoder;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use apple::AppleDecoder;
 #[cfg(target_os = "linux")]
 pub use software::SoftwareDecoder;
-#[cfg(target_os = "windows")]
-pub use windows::WicDecoder;
 
 /// Returns the decoder selected for the current target when available.
 #[must_use]
@@ -73,21 +54,7 @@ pub fn platform_decoder() -> Option<Arc<dyn Decoder>> {
     {
         Some(Arc::new(SoftwareDecoder::new()) as Arc<dyn Decoder>)
     }
-    #[cfg(target_os = "windows")]
-    {
-        WicDecoder::detect().map(|decoder| Arc::new(decoder) as Arc<dyn Decoder>)
-    }
-    #[cfg(target_os = "android")]
-    {
-        NdkDecoder::detect().map(|decoder| Arc::new(decoder) as Arc<dyn Decoder>)
-    }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "windows",
-        target_os = "android"
-    )))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     {
         None
     }

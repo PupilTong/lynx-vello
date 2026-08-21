@@ -78,9 +78,10 @@ cannot mutate the running page's cascade. A caller that wants a new page first
 calls `reset()`, which preserves the outer Worker, OffscreenCanvas, initialized
 Wasm module, page configuration, latest device metrics, resource provider, and
 registered font containers while replacing the private view, Lynx-main Worker,
-VM, and document. The provider clears the old page's transient script and
-stylesheet bytes during reset so repeated Blob-URL submissions do not
-accumulate stale sources.
+VM, and document. A successfully selected embedder default font family is
+restored after those font containers are registered on the replacement view.
+The provider clears the old page's transient script and stylesheet bytes
+during reset so repeated Blob-URL submissions do not accumulate stale sources.
 
 The optional XML background section is retained under a URL derived from the
 final XML response URL but is not executed. Bobcat does not yet have a

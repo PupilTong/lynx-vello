@@ -321,7 +321,8 @@ export class BobcatCanvas {
   /**
    * Replace the native Lynx view while retaining this Render Worker, its
    * transferred canvas, initialized Wasm instance, page configuration,
-   * current device metrics, and registered font containers.
+   * current device metrics, registered font containers, and selected default
+   * font family.
    */
   async reset() {
     await this.#request('reset')
@@ -330,6 +331,18 @@ export class BobcatCanvas {
   /** Register one or more font faces and restore them after each reset. */
   async registerFonts(data) {
     return await this.#request('registerFonts', { bytes: fontBytes(data) })
+  }
+
+  /** Map CSS system-ui, sans-serif, and serif to a registered family. */
+  async setDefaultFontFamily(family) {
+    if (typeof family !== 'string' || family.trim() === '') {
+      throw new TypeError(
+        'BobcatCanvas.setDefaultFontFamily requires a non-empty family name',
+      )
+    }
+    return await this.#request('setDefaultFontFamily', {
+      family: family.trim(),
+    })
   }
 
   async resize(width, height, devicePixelRatio) {

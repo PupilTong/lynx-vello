@@ -771,6 +771,26 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
 }
 
 #[test]
+fn embedder_default_family_shapes_text_without_an_authored_font_family() {
+    let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
+    dom.add_stylesheet(
+        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+                font-size: 16px; }",
+        dom::StylesheetOrigin::Author,
+    );
+    assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
+    let root = dom.document_element().id();
+    let text = dom.create_text_node("hello", ());
+    dom.append_child(root, text);
+
+    dom.layout();
+    assert!(dom.set_default_font_family("Ahem"));
+    dom.layout();
+
+    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+}
+
+#[test]
 fn inherited_text_style_change_remeasures_text_child() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(

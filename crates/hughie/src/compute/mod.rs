@@ -39,11 +39,11 @@ pub fn compute_root_layout<T: LayoutTree>(
     available_space: Size<AvailableSpace>,
 ) {
     let parent_size = available_space.definite_values();
-    let output = tree.compute_layout(
-        state,
-        root,
-        LayoutInput::commit(Size::NONE, parent_size, available_space),
-    );
+    let mut root_input = LayoutInput::commit(Size::NONE, parent_size, available_space);
+    // The viewport imposes the root's constraints; no document content can
+    // move them, which is what lets style-imposed sizing chain down from here.
+    root_input.content_independent = Size::new(true, true);
+    let output = tree.compute_layout(state, root, root_input);
 
     let style = tree.style(root);
     let margin_value = style.margin();

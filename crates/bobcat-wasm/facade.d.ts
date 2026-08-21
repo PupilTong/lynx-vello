@@ -54,12 +54,15 @@ export declare class BobcatCanvas {
   /**
    * Drops and rebuilds the native Lynx view while retaining the Render Worker,
    * transferred canvas, Wasm instance, page configuration, current metrics,
-   * and registered font containers.
+   * registered font containers, and selected default font family.
    */
   reset(): Promise<void>
 
   /** Registers all font faces and restores them after each reset. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>
+
+  /** Maps CSS system-ui, sans-serif, and serif to a registered family. */
+  setDefaultFontFamily(family: string): Promise<boolean>
   resize(
     width: number,
     height: number,
