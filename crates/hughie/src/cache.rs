@@ -7,7 +7,7 @@ use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, RequestedAxis, SizingMode,
 };
 
-/// Inline measurement slots every node carries without allocating.
+/// Constraint-shape buckets the last-resort eviction hashes into.
 pub const MEASURE_CACHE_SLOTS: usize = 8;
 
 /// The hard ceiling on live measurements for one node.
@@ -17,9 +17,15 @@ pub const MEASURE_CACHE_SLOTS: usize = 8;
 /// track sizing asks for far more — a single-child `display: grid` chain needs
 /// thirteen live entries per node — and evicting one of those turns every later
 /// re-request into a full subtree recomputation, which is quadratic in the
-/// number of grid levels. Spilling to the heap past the inline slots keeps that
+/// number of grid levels. Growing on the heap up to this ceiling keeps that
 /// cost linear and is paid only by the nodes that need it.
 const MEASURE_CACHE_LIMIT: usize = 32;
+
+/// Inline measurement capacity. Most nodes (fixed-size leaves, committed flex
+/// items) record at most a couple of measurement shapes, so the cache keeps
+/// two entries inline and spills to the heap only for the nodes whose
+/// containers actually probe many constraint shapes.
+const MEASURE_CACHE_INLINE: usize = 2;
 
 const KNOWN_WIDTH_PRESENT: u16 = 1 << 0;
 const KNOWN_HEIGHT_PRESENT: u16 = 1 << 1;
@@ -151,6 +157,7 @@ impl PackedLayoutInput {
                 unpack_available_space(self.values[4], self.flags, AVAILABLE_WIDTH_SHIFT),
                 unpack_available_space(self.values[5], self.flags, AVAILABLE_HEIGHT_SHIFT),
             ),
+            content_independent: Size::new(false, false),
         }
     }
 
@@ -268,7 +275,10 @@ impl MeasurementSlot {
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
-    measurements: SmallVec<[MeasurementSlot; MEASURE_CACHE_SLOTS]>,
+    /// The committed input's `content_independent` flags, carried beside the
+    /// packed slot (the packed key covers only geometry-relevant fields).
+    committed_content_independent: Size<bool>,
+    measurements: SmallVec<[MeasurementSlot; MEASURE_CACHE_INLINE]>,
 }
 
 impl Cache {
@@ -276,6 +286,7 @@ impl Cache {
     pub const fn new() -> Self {
         Self {
             committed: None,
+            committed_content_independent: Size::new(false, false),
             measurements: SmallVec::new_const(),
         }
     }
@@ -287,7 +298,24 @@ impl Cache {
 
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
-        self.committed.map(|slot| slot.input.unpack())
+        self.committed.map(|slot| {
+            let mut input = slot.input.unpack();
+            input.content_independent = self.committed_content_independent;
+            input
+        })
+    }
+
+    /// Returns the committed input/output pair when the committing parent
+    /// marked the input content-independent on both axes — the license for a
+    /// host to relayout this subtree in place under the stored input.
+    #[must_use]
+    pub fn committed_independent(&self) -> Option<(LayoutInput, LayoutOutput)> {
+        if !(self.committed_content_independent.width && self.committed_content_independent.height)
+        {
+            return None;
+        }
+        self.committed_input()
+            .zip(self.committed.map(MeasurementSlot::unpack_output))
     }
 
     /// Returns a cached output.
@@ -313,7 +341,10 @@ impl Cache {
     pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
         let slot = MeasurementSlot::new(input, output);
         match input.goal {
-            LayoutGoal::Commit => self.committed = Some(slot),
+            LayoutGoal::Commit => {
+                self.committed = Some(slot);
+                self.committed_content_independent = input.content_independent;
+            }
             LayoutGoal::Measure(_) => {
                 // Retiring a live same-shape measurement while the cache still
                 // has room costs a whole subtree recomputation the next time
@@ -349,6 +380,7 @@ impl Cache {
 
     pub fn clear(&mut self) {
         self.committed = None;
+        self.committed_content_independent = Size::new(false, false);
         self.measurements.clear();
     }
 }
@@ -626,6 +658,7 @@ mod tests {
                                     ),
                                     parent_size: Size::new(option(2), option(3)),
                                     available_space: Size::new(available_width, available_height),
+                                    content_independent: Size::new(false, false),
                                 };
                                 assert_input_bits_eq(input, PackedLayoutInput::new(input).unpack());
                             }
@@ -696,6 +729,7 @@ mod tests {
                                                         stored_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    content_independent: Size::new(false, false),
                                                 };
                                                 let requested = LayoutInput {
                                                     goal: requested_goal,
@@ -713,6 +747,7 @@ mod tests {
                                                         requested_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
+                                                    content_independent: Size::new(false, false),
                                                 };
                                                 assert_packed_match_agrees_with_oracle(
                                                     stored, requested,
@@ -928,7 +963,6 @@ mod tests {
             assert_eq!(cache.get(input), Some(output));
         }
         assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
-        assert!(!cache.measurements.spilled());
     }
 
     #[test]
@@ -979,11 +1013,11 @@ mod tests {
 
         // Distinct constraints of one shape accumulate instead of replacing
         // each other, first through the inline slots and then on the heap.
-        let inline = filled(MEASURE_CACHE_SLOTS);
-        assert_eq!(inline.measurements.len(), MEASURE_CACHE_SLOTS);
+        let inline = filled(MEASURE_CACHE_INLINE);
+        assert_eq!(inline.measurements.len(), MEASURE_CACHE_INLINE);
         assert!(!inline.measurements.spilled());
-        let spilled = filled(MEASURE_CACHE_SLOTS + 1);
-        assert_eq!(spilled.measurements.len(), MEASURE_CACHE_SLOTS + 1);
+        let spilled = filled(MEASURE_CACHE_INLINE + 1);
+        assert_eq!(spilled.measurements.len(), MEASURE_CACHE_INLINE + 1);
         assert!(spilled.measurements.spilled());
 
         // At the limit the cache stops growing and retires the first entry of
@@ -1008,11 +1042,25 @@ mod tests {
         assert!(core::mem::size_of::<PackedLayoutInput>() <= 28);
         assert!(core::mem::size_of::<PackedLayoutOutput>() <= 24);
         assert!(core::mem::size_of::<MeasurementSlot>() <= 52);
-        assert!(core::mem::size_of::<Cache>() <= 488);
+        assert!(core::mem::size_of::<Cache>() <= 288);
     }
 
     #[test]
-    fn clear_preserves_allocation_free_inline_storage() {
+    fn clear_preserves_the_spilled_full_budget_and_inline_small_use() {
+        let mut small = Cache::new();
+        small.store(
+            measurement(Size::NONE, Size::MAX_CONTENT),
+            LayoutOutput::new(Size::ZERO, Size::ZERO),
+        );
+        small.store(
+            measurement(Size::NONE, Size::MIN_CONTENT),
+            LayoutOutput::new(Size::ZERO, Size::ZERO),
+        );
+        assert!(
+            !small.measurements.spilled(),
+            "a node measured under two shapes must stay allocation-free"
+        );
+
         let mut cache = Cache::new();
         let shapes = [
             AvailableSpace::MinContent,
@@ -1031,12 +1079,13 @@ mod tests {
             }
         }
         assert_eq!(cache.measurements.len(), MEASURE_CACHE_SLOTS);
-        assert!(!cache.measurements.spilled());
 
         cache.clear();
 
         assert!(cache.is_empty());
-        assert!(!cache.measurements.spilled());
-        assert_eq!(cache.measurements.capacity(), MEASURE_CACHE_SLOTS);
+        assert!(
+            cache.measurements.capacity() >= MEASURE_CACHE_SLOTS,
+            "clear keeps the spilled budget so a busy node does not re-allocate"
+        );
     }
 }

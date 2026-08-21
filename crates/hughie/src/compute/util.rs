@@ -678,6 +678,85 @@ pub(super) fn used_aspect_ratio(value: AspectRatio) -> Option<f32> {
     }
 }
 
+/// Stores one committed child's durable layout and folds its box into the
+/// container's scrollable overflow — the common tail of every algorithm's
+/// in-flow commit loop.
+#[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the durable-layout store consumes exactly the commit loop's locals"
+)]
+pub(super) fn store_committed_child<T: crate::tree::LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    order: u32,
+    location: Point<f32>,
+    output: crate::tree::LayoutOutput,
+    geometry: &ItemGeometry,
+    scrollable: &mut Size<f32>,
+) {
+    let mut layout = crate::tree::Layout::with_order(order);
+    layout.location = location;
+    layout.size = output.size;
+    layout.content_size = output.content_size;
+    layout.border = geometry.border;
+    layout.padding = geometry.padding;
+    layout.margin = geometry.margin;
+    tree.set_unrounded_layout(state, node, layout);
+    accumulate_scrollable_overflow(
+        scrollable,
+        location,
+        output.size,
+        output.content_size,
+        geometry.overflow,
+    );
+}
+
+/// Whether the sizing value resolves against a percentage basis, making it
+/// track the basis rather than stand on its own.
+#[inline]
+pub(super) fn style_size_depends_on_basis(value: &StyleSize) -> bool {
+    match value {
+        StyleSize::LengthPercentage(lp) => lp.0.has_percentage(),
+        StyleSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        _ => false,
+    }
+}
+
+#[inline]
+pub(super) fn max_size_depends_on_basis(value: &MaxSize) -> bool {
+    match value {
+        MaxSize::LengthPercentage(lp) => lp.0.has_percentage(),
+        MaxSize::FitContentFunction(limit) => limit.0.has_percentage(),
+        _ => false,
+    }
+}
+
+/// Whether any margin or padding percentage resolves against the container's
+/// inline size.
+#[inline]
+pub(super) fn edges_depend_on_inline_basis(
+    margin: &Edges<&Margin>,
+    padding: &Edges<&NonNegativeLengthPercentage>,
+) -> bool {
+    let margin_depends = |value: &Margin| match value {
+        Margin::LengthPercentage(lp) => lp.has_percentage(),
+        Margin::Auto => false,
+        Margin::AnchorSizeFunction(_) | Margin::AnchorContainingCalcFunction(_) => {
+            unreachable!("anchor margins are pref-dead under the lynx feature")
+        }
+    };
+    margin_depends(margin.left)
+        || margin_depends(margin.right)
+        || margin_depends(margin.top)
+        || margin_depends(margin.bottom)
+        || padding.left.0.has_percentage()
+        || padding.right.0.has_percentage()
+        || padding.top.0.has_percentage()
+        || padding.bottom.0.has_percentage()
+}
+
 #[inline]
 pub(super) fn style_size_behaves_auto(value: &StyleSize) -> bool {
     match value {

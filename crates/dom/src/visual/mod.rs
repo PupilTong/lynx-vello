@@ -199,6 +199,10 @@ impl<T: Sync> Document<T> {
         if !self.needs_render() {
             return false;
         }
+        // A caller may render without ever laying out; the paint walk still
+        // reads layout slots wholesale, so size them first.
+        let bound = self.arenas().slot_bound();
+        self.layout_state_mut().ensure_covers(bound);
         let frame = self.build_paint_order();
         self.painter.borrow_mut().paint(self, frame);
         true

@@ -96,12 +96,6 @@ objc2-image-io = { version = "0.3.2", default-features = false, features = [
     "objc2-core-graphics",
     "std",
 ] }
-windows = { version = "0.62.2", features = [
-    "Win32_Graphics_Imaging",
-    "Win32_System_Com",
-] }
-ndk-sys = { version = "0.6.0", features = ["bitmap"] }
-libc = "0.2"
 vello = { version = "0.9", default-features = false }
 
 [workspace.lints.rust]

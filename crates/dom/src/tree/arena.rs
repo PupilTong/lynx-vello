@@ -177,6 +177,13 @@ impl<T> TreeArenas<T> {
         self.generations.push(0);
     }
 
+    /// One past the highest arena key ever occupied — the bound the
+    /// slot-aligned layout state sizes itself to.
+    #[inline]
+    pub(crate) fn slot_bound(&self) -> usize {
+        self.generations.len()
+    }
+
     /// Whether a handle still names the node it was made for.
     ///
     /// False for one held across the free of its node, whether or not the key
@@ -344,55 +351,64 @@ pub(crate) struct NodeLayoutState {
     pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
+/// Slot-aligned layout/text state, sized lazily rather than kept in lockstep
+/// with the primary arena: creating a node costs nothing here, and a node that
+/// is never laid out never allocates layout state. `Document::layout` sizes
+/// the vector to the primary arena's slot bound before the engine reads slots
+/// wholesale; mutation entry points grow on demand, and an absent entry reads
+/// as "never laid out" (an empty cache) everywhere else.
 pub(crate) struct DocumentLayoutState {
-    nodes: Slab<NodeLayoutState>,
+    nodes: Vec<NodeLayoutState>,
     pub(crate) text_context: Option<Box<TextContext>>,
 }
 
 impl DocumentLayoutState {
     pub(crate) fn new() -> Self {
-        let mut nodes = Slab::with_capacity(INITIAL_NODE_CAPACITY);
-        // Key zero is reserved in every arena, so all three stay aligned.
-        assert_eq!(nodes.insert(NodeLayoutState::default()), RESERVED);
         Self {
-            nodes,
+            nodes: Vec::new(),
             text_context: None,
         }
     }
 
-    pub(crate) fn insert(&mut self, slot: NodeId) {
-        assert_eq!(self.nodes.vacant_key(), slot.arena_key());
-        assert_eq!(
-            self.nodes.insert(NodeLayoutState::default()),
-            slot.arena_key()
-        );
+    /// Sizes the slot-aligned state to cover every key below `slots`.
+    pub(crate) fn ensure_covers(&mut self, slots: usize) {
+        if self.nodes.len() < slots {
+            self.nodes.resize_with(slots, NodeLayoutState::default);
+        }
     }
 
+    /// Resets a freed slot so the key's next occupant starts clean. The entry
+    /// itself stays: slot storage is recycled, never compacted.
     pub(crate) fn remove(&mut self, slot: NodeId) {
-        self.nodes
-            .try_remove(slot.arena_key())
-            .expect("removed node must have layout-arena state");
+        if let Some(entry) = self.nodes.get_mut(slot.arena_key()) {
+            *entry = NodeLayoutState::default();
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, slot: NodeId) -> Option<&NodeLayoutState> {
+        self.nodes.get(slot.arena_key())
     }
 
     #[inline]
     pub(crate) fn at(&self, slot: NodeId) -> &NodeLayoutState {
         self.nodes
             .get(slot.arena_key())
-            .expect("live primary node must have matching layout-arena state")
+            .expect("layout state must be sized to the arena before slot reads")
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (usize, &mut NodeLayoutState)> {
-        self.nodes.iter_mut()
+        self.nodes.iter_mut().enumerate()
     }
 
     #[inline]
     pub(crate) fn at_mut(&mut self, slot: NodeId) -> &mut NodeLayoutState {
-        self.nodes
-            .get_mut(slot.arena_key())
-            .expect("live primary node must have matching layout-arena state")
+        self.ensure_covers(slot.arena_key() + 1);
+        &mut self.nodes[slot.arena_key()]
     }
 
     pub(crate) fn text_parts(&mut self, slot: NodeId) -> (&mut TextContext, &mut TextLayoutStore) {
+        self.ensure_covers(slot.arena_key() + 1);
         let Self {
             nodes,
             text_context,
@@ -400,9 +416,7 @@ impl DocumentLayoutState {
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
             .as_mut();
-        let artifacts = nodes
-            .get_mut(slot.arena_key())
-            .expect("live node must have layout-arena state")
+        let artifacts = nodes[slot.arena_key()]
             .text
             .get_or_insert_with(|| Box::new(TextLayoutStore::default()))
             .as_mut();
@@ -410,13 +424,11 @@ impl DocumentLayoutState {
     }
 
     pub(crate) fn clear_layout_cache(&mut self, slot: NodeId) {
-        let node = self
-            .nodes
-            .get_mut(slot.arena_key())
-            .expect("live node must have layout-arena state");
-        node.slot.clear_layout_cache();
-        if let Some(artifacts) = node.text.as_deref_mut() {
-            artifacts.invalidate();
+        if let Some(node) = self.nodes.get_mut(slot.arena_key()) {
+            node.slot.clear_layout_cache();
+            if let Some(artifacts) = node.text.as_deref_mut() {
+                artifacts.invalidate();
+            }
         }
     }
 }
@@ -432,9 +444,9 @@ mod tests {
     }
 
     /// The one property no caller can check for itself: the two tree arenas
-    /// hand out, and give back, the same key for the same node. The layout
-    /// arena is the third partner in that lockstep and asserts it in
-    /// [`DocumentLayoutState::insert`].
+    /// hand out, and give back, the same key for the same node, and the
+    /// lazily sized layout state resets a freed key so its next occupant
+    /// starts clean.
     #[test]
     fn the_tree_arenas_stay_key_aligned_across_reuse() {
         let mut arenas: TreeArenas<u32> = TreeArenas::new();
@@ -443,12 +455,12 @@ mod tests {
         let mut issued = Vec::new();
         for payload in 0..4 {
             let id = arenas.insert_node(PayloadSlot::Node(payload), text);
-            layout.insert(id);
             assert_eq!(arenas.nodes.len(), arenas.payloads.len());
             issued.push(id);
         }
 
         let freed = issued[1];
+        layout.at_mut(freed).scroll_offset.x = 7.0;
         let (_, payload) = arenas.remove_node(freed);
         layout.remove(freed);
         assert!(matches!(payload, PayloadSlot::Node(1)));
@@ -456,13 +468,16 @@ mod tests {
         assert_eq!(arenas.slot(freed), None);
 
         let next = arenas.insert_node(PayloadSlot::Node(9), text);
-        layout.insert(next);
         assert_eq!(
             next.arena_key(),
             freed.arena_key(),
             "the freed storage comes back"
         );
         assert_ne!(next, freed, "but the handle to it does not");
+        assert!(
+            layout.at(next).scroll_offset.x.to_bits() == 0,
+            "reused storage must not inherit the freed node's layout state"
+        );
     }
 
     /// A handle nobody ever made resolves to nothing rather than indexing past

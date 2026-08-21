@@ -16,17 +16,18 @@ use super::single_axis::{
 };
 use super::util::{
     Axis, ItemGeometry, ItemKey, OrderedItem, ResolvedContainerBox, accumulate_scrollable_overflow,
-    clamp_axis, normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
+    clamp_axis, edges_depend_on_inline_basis, max_size_depends_on_basis,
+    normalize_content_alignment, normalize_item_alignment, own_scrollable_overflow,
     relative_offset, resolve_container_box, resolve_gap, resolve_gap_axis, resolve_insets,
     resolve_item_geometry, resolve_length_percentage, resolve_style_size,
-    sort_and_assign_layout_order, style_size_behaves_auto,
+    sort_and_assign_layout_order, store_committed_child, style_size_behaves_auto,
+    style_size_depends_on_basis,
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
-    SizingMode,
+    AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
 type Axes = FlowAxes<BaseReversals>;
@@ -77,6 +78,10 @@ fn flex_axes(
 
 /// Transient per-item state accumulated across Flexbox sizing and alignment.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "per-item layout facts the algorithm phases hand each other"
+)]
 struct FlexItem<N> {
     geometry: ItemGeometry,
     key: ItemKey<N>,
@@ -102,6 +107,18 @@ struct FlexItem<N> {
     main_position: f32,
     cross_position: f32,
     main_size_is_definite: bool,
+    /// Per physical axis: every value the container's algorithm reads from
+    /// this item on the axis (flex base, automatic minimum, hypothetical/used
+    /// size) is style-imposed rather than measured — and every percentage it
+    /// resolves has a basis that is itself content-independent — so the item's
+    /// committed input cannot change when only its own subtree content
+    /// changes. Becomes the commit input's `content_independent` flags.
+    content_independent: Size<bool>,
+    /// No margin or padding percentage tracks a content-derived inline basis.
+    edges_stable: bool,
+    /// The item's cross-axis size/min/max values are stable: pure lengths, or
+    /// percentages of a content-independent container axis.
+    cross_values_stable: bool,
 }
 super::util::impl_item_geometry!(FlexItem);
 
@@ -263,7 +280,19 @@ where
         main_position: 0.0,
         cross_position: 0.0,
         main_size_is_definite: false,
+        content_independent: Size::new(false, false),
+        edges_stable: false,
+        cross_values_stable: false,
     }
+}
+
+/// Whether any of the item's sizing properties on `axis` is an intrinsic
+/// keyword, making the resolved constraint a measurement of its content.
+#[inline]
+fn axis_has_intrinsic_style<N>(item: &FlexItem<N>, axis: Axis) -> bool {
+    item.intrinsic.preferred(axis).is_intrinsic()
+        || item.intrinsic.minimum(axis).is_intrinsic()
+        || item.intrinsic.maximum(axis).is_intrinsic()
 }
 
 /// Lazily memoized main-axis measurements for one flex base-size pass.
@@ -379,6 +408,10 @@ where
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the flex-basis resolution steps read as one sequence"
+)]
 fn determine_flex_base_sizes<T>(
     tree: &T,
     state: &mut T::State,
@@ -389,6 +422,10 @@ fn determine_flex_base_sizes<T>(
     flex_basis_percentage_basis: Option<f32>,
     container_main_is_definite: bool,
     needs_intrinsic_main_contributions: bool,
+    // `Some` only on a commit-goal pass: the flags it derives are consumed
+    // exclusively by the in-flow commit, so measure passes skip the style
+    // inspection entirely.
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -538,6 +575,47 @@ fn determine_flex_base_sizes<T>(
                 content_suggestion.min(axes.main.size(item.max_size).unwrap_or(f32::INFINITY));
             content_suggestion.max(main_floor)
         };
+
+        // Content-independence bookkeeping: a value is *stable* when it is a
+        // pure length, or a percentage whose basis (the container's axis) is
+        // itself content-independent. Only stable values may license an
+        // in-place relayout, because an unstable one re-resolves differently
+        // once the container re-sizes to changed content.
+        if let Some(container_independent) = container_independent {
+            item.edges_stable = container_independent.width
+                || !edges_depend_on_inline_basis(&style.margin(), &style.padding());
+            let axis_values_stable = |axis: Axis| {
+                axis.size(container_independent)
+                    || (!style_size_depends_on_basis(axis.size(raw_size))
+                        && !style_size_depends_on_basis(axis.size(raw_min_size))
+                        && !max_size_depends_on_basis(axis.size(raw_max_size)))
+            };
+            let flex_basis_stable = axes.main.size(container_independent)
+                || match raw_flex_basis {
+                    FlexBasis::Content => true,
+                    FlexBasis::Size(size) => !style_size_depends_on_basis(size),
+                };
+            let mut main_values_stable = axis_values_stable(axes.main) && flex_basis_stable;
+            let mut cross_values_stable = axis_values_stable(axes.cross);
+            if item.aspect_ratio.is_some() {
+                // The ratio transfers sizes across axes, so either axis is
+                // only as stable as both.
+                let both = main_values_stable && cross_values_stable;
+                main_values_stable = both;
+                cross_values_stable = both;
+            }
+            item.cross_values_stable = cross_values_stable;
+            let min_is_content_free = explicit_min.is_some()
+                || item.overflow.x.is_scrollable()
+                || item.overflow.y.is_scrollable();
+            let main_independent = definite_basis.is_some()
+                && min_is_content_free
+                && !axis_has_intrinsic_style(item, axes.main)
+                && main_values_stable
+                && item.edges_stable;
+            axes.main
+                .set_size(&mut item.content_independent, main_independent);
+        }
 
         item.hypothetical_main = clamp_axis(
             item.flex_basis,
@@ -852,6 +930,10 @@ fn is_first_baseline_candidate<N>(item: &FlexItem<N>, axes: Axes) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the hypothetical-cross resolution steps read as one sequence"
+)]
 fn determine_hypothetical_cross_sizes<T>(
     tree: &T,
     state: &mut T::State,
@@ -861,6 +943,7 @@ fn determine_hypothetical_cross_sizes<T>(
     wrap: flex_wrap::T,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
+    container_independent: Size<bool>,
 ) where
     T: LayoutTree,
 {
@@ -911,20 +994,29 @@ fn determine_hypothetical_cross_sizes<T>(
                         )
                     })
                 });
-            let cross_has_intrinsic_style = item.intrinsic.preferred(axes.cross).is_intrinsic()
-                || item.intrinsic.minimum(axes.cross).is_intrinsic()
-                || item.intrinsic.maximum(axes.cross).is_intrinsic();
+            let cross_has_intrinsic_style = axis_has_intrinsic_style(item, axes.cross);
 
             if !baseline_is_consumed
                 && !cross_has_intrinsic_style
                 && let Some(cross) = resolved_cross
             {
+                let imposed = item.edges_stable
+                    && if axes.cross.size(item.preferred_size).is_some() {
+                        axes.cross.size(item.preferred_definite) && item.cross_values_stable
+                    } else {
+                        // `stretched_cross`: the single line spans the
+                        // container's cross size, imposed only when that size
+                        // is itself content-independent.
+                        axes.cross.size(container_independent)
+                    };
+                axes.cross.set_size(&mut item.content_independent, imposed);
                 item.hypothetical_cross = cross;
                 item.target_cross = cross;
                 item.measured_baselines = Point::NONE;
                 item.baseline = cross;
                 continue;
             }
+            axes.cross.set_size(&mut item.content_independent, false);
 
             let mut known = Size::NONE;
             axes.main.set_size(&mut known, Some(item.target_main));
@@ -1052,7 +1144,12 @@ fn stretch_lines(
     }
 }
 
-fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], axes: Axes) {
+fn determine_used_cross_sizes<N>(
+    items: &mut [FlexItem<N>],
+    lines: &[FlexLine],
+    axes: Axes,
+    line_cross_imposed: bool,
+) {
     for line in lines {
         for item in &mut items[line.start..line.end] {
             let inset_size = item.box_floor();
@@ -1062,6 +1159,10 @@ fn determine_used_cross_sizes<N>(items: &mut [FlexItem<N>], lines: &[FlexLine], 
                 && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
                 && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
             item.target_cross = if should_stretch {
+                let imposed = line_cross_imposed
+                    && item.edges_stable
+                    && !axis_has_intrinsic_style(item, axes.cross);
+                axes.cross.set_size(&mut item.content_independent, imposed);
                 clamp_axis(
                     line.cross_size - axes.cross.sum(item.margin),
                     axes.cross.size(item.min_size),
@@ -1327,6 +1428,7 @@ where
             axes.main
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
             input.sizing_mode = SizingMode::IgnoreSizeStyles;
+            input.content_independent = item.content_independent;
             let output = tree.compute_layout(state, item.key.node, input);
 
             let offset = if item.position == PositionProperty::Relative {
@@ -1339,21 +1441,15 @@ where
             location.x += offset.x;
             location.y += offset.y;
 
-            let mut layout = Layout::with_order(item.key.layout_order);
-            layout.location = location;
-            layout.size = output.size;
-            layout.content_size = output.content_size;
-            layout.border = item.border;
-            layout.padding = item.padding;
-            layout.margin = item.margin;
-            tree.set_unrounded_layout(state, item.key.node, layout);
-
-            accumulate_scrollable_overflow(
-                &mut content_size,
+            store_committed_child(
+                tree,
+                state,
+                item.key.node,
+                item.key.layout_order,
                 location,
-                output.size,
-                output.content_size,
-                item.overflow,
+                output,
+                item,
+                &mut content_size,
             );
 
             if first_baseline.is_none()
@@ -1617,6 +1713,15 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
+    // The container's own size is content-independent per axis when its input
+    // is stable there and either the parent imposed the size or the style
+    // resolves one against that stable input.
+    let container_independent = Size::new(
+        input.content_independent.width
+            && (input.known_dimensions.width.is_some() || style_definite.width),
+        input.content_independent.height
+            && (input.known_dimensions.height.is_some() || style_definite.height),
+    );
     let item_inline_basis_was_indefinite = !outer_definite.width;
     let main_percentage_basis_was_indefinite = !axes.main.size(outer_definite);
     let gap_value = style.gap();
@@ -1648,6 +1753,7 @@ where
             .flatten(),
         !main_percentage_basis_was_indefinite,
         axes.main.size(outer_size).is_none() && size_containment.is_none(),
+        (input.goal == LayoutGoal::Commit).then_some(container_independent),
     );
 
     let main_gap = axes.main.size(gap);
@@ -1703,6 +1809,7 @@ where
         flex_wrap,
         inner_size,
         inner_available_space,
+        container_independent,
     );
     calculate_line_cross_sizes(
         &items,
@@ -1761,6 +1868,7 @@ where
             },
             !main_percentage_basis_was_indefinite,
             false,
+            (input.goal == LayoutGoal::Commit).then_some(container_independent),
         );
         lines = collect_flex_lines(
             &items,
@@ -1781,6 +1889,7 @@ where
             flex_wrap,
             inner_size,
             final_available_space,
+            container_independent,
         );
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap, Some(inner_cross));
     }
@@ -1791,7 +1900,12 @@ where
         line.cross_size = inner_cross;
     }
     stretch_lines(&mut lines, flex_wrap, align_content, inner_cross, cross_gap);
-    determine_used_cross_sizes(&mut items, &lines, axes);
+    determine_used_cross_sizes(
+        &mut items,
+        &lines,
+        axes,
+        flex_wrap == flex_wrap::T::Nowrap && axes.cross.size(container_independent),
+    );
     distribute_main_axis(
         &mut items,
         &lines,
@@ -2016,6 +2130,9 @@ mod tests {
             main_position: 0.0,
             cross_position: 0.0,
             main_size_is_definite: false,
+            content_independent: Size::new(false, false),
+            edges_stable: false,
+            cross_values_stable: false,
         }
     }
 
@@ -2082,6 +2199,7 @@ mod tests {
                 AvailableSpace::Definite(100.0),
                 AvailableSpace::Definite(cross),
             ),
+            Size::new(false, false),
         );
     }
 
@@ -2205,6 +2323,7 @@ mod tests {
             Some(100.0),
             true,
             true,
+            None,
         );
 
         // A used flex basis of `content` puts the item's max-content main size
@@ -2236,6 +2355,7 @@ mod tests {
                 Some(available),
                 true,
                 true,
+                None,
             );
 
             assert_eq!(
@@ -2326,7 +2446,7 @@ mod tests {
         );
         assert_eq!(items[0].measured_baselines.y, Some(5.0));
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::Nowrap, Some(40.0));
-        determine_used_cross_sizes(&mut items, &lines, axes);
+        determine_used_cross_sizes(&mut items, &lines, axes, true);
         assert_eq!(
             items.each_ref().map(|item| item.target_cross),
             [40.0, 30.0, 40.0]

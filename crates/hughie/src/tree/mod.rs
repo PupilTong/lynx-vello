@@ -39,6 +39,12 @@ impl LayoutSlot {
         self.cache.committed_input()
     }
 
+    /// See [`crate::cache::Cache::committed_independent`].
+    #[must_use]
+    pub fn committed_independent(&self) -> Option<(LayoutInput, LayoutOutput)> {
+        self.cache.committed_independent()
+    }
+
     #[must_use]
     pub fn layout_cache_is_empty(&self) -> bool {
         self.cache.is_empty()
@@ -191,6 +197,6 @@ mod tests {
     #[test]
     fn layout_slot_fits_the_split_state_memory_budget() {
         let size = core::mem::size_of::<LayoutSlot>();
-        assert!(size <= 648, "LayoutSlot grew to {size} bytes");
+        assert!(size <= 336, "LayoutSlot grew to {size} bytes");
     }
 }

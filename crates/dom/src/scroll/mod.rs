@@ -181,9 +181,9 @@ impl<T> Document<T> {
     }
 
     fn stored_scroll_offset(&self, id: NodeId) -> Vector2D<f32> {
-        self.slot(id).map_or_else(Vector2D::zero, |slot| {
-            self.layout_state().at(slot).scroll_offset
-        })
+        self.slot(id)
+            .and_then(|slot| self.layout_state().get(slot))
+            .map_or_else(Vector2D::zero, |state| state.scroll_offset)
     }
 
     /// Scrolls to a clamped offset and returns the applied offset.

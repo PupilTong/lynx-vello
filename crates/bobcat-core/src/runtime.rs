@@ -359,91 +359,84 @@ fn install(
         .map_err(|error| MainThreadError::from_engine("installing the bobcat namespace", error))
 }
 
+/// Installs `bobcat.<name>` members that parse their arguments, borrow the
+/// tree, and run against the private document. Each `$parser` is one of the
+/// argument helpers below, applied at the argument's position; `NAME` is the
+/// diagnostic prefix every helper and validator stitches into its error.
+macro_rules! tree_members {
+    ($engine:ident, $handle:ident; $(
+        fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
+    )*) => {$({
+        const NAME: &str = concat!("bobcat.", stringify!($name));
+        let tree = Rc::clone($handle);
+        let arity = 0u8 $(+ { let _ = stringify!($arg); 1u8 })*;
+        install($engine, stringify!($name), arity, move |arguments| {
+            #[allow(unused_mut, reason = "zero-argument members never advance it")]
+            let mut index = 0usize;
+            $(
+                let $arg = $parser(NAME, arguments, index)?;
+                index += 1;
+            )*
+            let _ = (arguments, index);
+            let mut handle = borrow_tree(NAME, &tree)?;
+            let $document = handle.tree();
+            $body
+        })?;
+    })*};
+}
+
 fn install_bobcat_object(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
-    let tree = Rc::clone(handle);
-    install(engine, "createPage", 0, move |_arguments| {
-        let mut tree = borrow_tree("bobcat.createPage", &tree)?;
-        let node = tree.tree().document_element().id();
-        Ok(node_id_value(node))
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "createElement", 1, move |arguments| {
-        let tag = string_argument("bobcat.createElement", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat.createElement", &tree)?;
-        let node = tree.tree().create_element(tag, ());
-        Ok(node_id_value(node))
-    })?;
+    tree_members! { engine, handle;
+        fn createPage() |document| {
+            Ok(node_id_value(document.document_element().id()))
+        }
+        fn createElement(tag: string_argument) |document| {
+            Ok(node_id_value(document.create_element(tag, ())))
+        }
+        fn parentNode(node: node_id_argument) |document| {
+            let parent = document.get(node).and_then(dom::Node::parent_id);
+            Ok(parent.map_or(HostValue::Null, node_id_value))
+        }
+        fn insertBefore(
+            parent: node_id_argument,
+            child: node_id_argument,
+            reference: optional_node_id_argument
+        ) |document| {
+            validate_insert(document, NAME, parent, child, reference)?;
+            document.insert_before(parent, child, reference);
+            Ok(HostValue::Undefined)
+        }
+        fn removeElement(child: node_id_argument) |document| {
+            validate_removable(document, NAME, child)?;
+            document.remove_element(child);
+            Ok(HostValue::Undefined)
+        }
+        fn replaceElement(
+            new_element: node_id_argument,
+            old_element: node_id_argument
+        ) |document| {
+            validate_removable(document, NAME, old_element)?;
+            validate_live_element(document, NAME, new_element)?;
+            if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
+                validate_insert(document, NAME, parent, new_element, Some(old_element))?;
+                document.insert_before(parent, new_element, Some(old_element));
+                document.remove_element(old_element);
+            }
+            Ok(HostValue::Undefined)
+        }
+        fn swapElement(a: node_id_argument, b: node_id_argument) |document| {
+            validate_swap(document, NAME, a, b)?;
+            document.swap_element(a, b);
+            Ok(HostValue::Undefined)
+        }
+    }
 
     install_attribute_members(engine, handle)?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "parentNode", 1, move |arguments| {
-        let node = node_id_argument("bobcat.parentNode", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat.parentNode", &tree)?;
-        let parent = tree.tree().get(node).and_then(dom::Node::parent_id);
-        Ok(parent.map_or(HostValue::Null, node_id_value))
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "insertBefore", 3, move |arguments| {
-        let parent = node_id_argument("bobcat.insertBefore", arguments, 0)?;
-        let child = node_id_argument("bobcat.insertBefore", arguments, 1)?;
-        let reference = optional_node_id_argument("bobcat.insertBefore", arguments, 2)?;
-        let mut tree = borrow_tree("bobcat.insertBefore", &tree)?;
-        let document = tree.tree();
-        validate_insert(document, "bobcat.insertBefore", parent, child, reference)?;
-        document.insert_before(parent, child, reference);
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "removeElement", 1, move |arguments| {
-        let child = node_id_argument("bobcat.removeElement", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat.removeElement", &tree)?;
-        let document = tree.tree();
-        validate_removable(document, "bobcat.removeElement", child)?;
-        document.remove_element(child);
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "replaceElement", 2, move |arguments| {
-        let new_element = node_id_argument("bobcat.replaceElement", arguments, 0)?;
-        let old_element = node_id_argument("bobcat.replaceElement", arguments, 1)?;
-        let mut handle = borrow_tree("bobcat.replaceElement", &tree)?;
-        let document = handle.tree();
-        validate_removable(document, "bobcat.replaceElement", old_element)?;
-        validate_live_element(document, "bobcat.replaceElement", new_element)?;
-        if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
-            validate_insert(
-                document,
-                "bobcat.replaceElement",
-                parent,
-                new_element,
-                Some(old_element),
-            )?;
-            document.insert_before(parent, new_element, Some(old_element));
-            document.remove_element(old_element);
-        }
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "swapElement", 2, move |arguments| {
-        let a = node_id_argument("bobcat.swapElement", arguments, 0)?;
-        let b = node_id_argument("bobcat.swapElement", arguments, 1)?;
-        let mut tree = borrow_tree("bobcat.swapElement", &tree)?;
-        let document = tree.tree();
-        validate_swap(document, "bobcat.swapElement", a, b)?;
-        document.swap_element(a, b);
-        Ok(HostValue::Undefined)
-    })?;
 
     let tree = Rc::clone(handle);
     let state = Rc::clone(events);
@@ -531,72 +524,52 @@ fn install_attribute_members(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
 ) -> Result<(), MainThreadError> {
-    let tree = Rc::clone(handle);
-    install(engine, "setAttribute", 3, move |arguments| {
-        let node = node_id_argument("bobcat.setAttribute", arguments, 0)?;
-        let name = string_argument("bobcat.setAttribute", arguments, 1)?;
-        let value = string_argument("bobcat.setAttribute", arguments, 2)?;
-        let mut tree = borrow_tree("bobcat.setAttribute", &tree)?;
-        let document = tree.tree();
-        validate_live_element(document, "bobcat.setAttribute", node)?;
-        document.set_attribute(node, name, value);
-        Ok(HostValue::Undefined)
-    })?;
-
-    // Deliberately name-based: this PAPI receives record keys, custom
-    // properties have no numeric id, and Stylo's internal PropertyId is not a
-    // stable script ABI. A future numeric-key `__AddInlineStyle` can translate
-    // its bundle id in JavaScript/the decoder-owned layer before reaching this
-    // one primitive.
-    let tree = Rc::clone(handle);
-    install(engine, "set_node_property", 3, move |arguments| {
-        let node = node_id_argument("bobcat.set_node_property", arguments, 0)?;
-        let name = string_argument("bobcat.set_node_property", arguments, 1)?;
-        let value = string_argument("bobcat.set_node_property", arguments, 2)?;
-        let mut tree = borrow_tree("bobcat.set_node_property", &tree)?;
-        let document = tree.tree();
-        validate_live_element(document, "bobcat.set_node_property", node)?;
-        document.set_inline_style_property(node, name, value);
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "removeAttribute", 2, move |arguments| {
-        let node = node_id_argument("bobcat.removeAttribute", arguments, 0)?;
-        let name = string_argument("bobcat.removeAttribute", arguments, 1)?;
-        let mut tree = borrow_tree("bobcat.removeAttribute", &tree)?;
-        let document = tree.tree();
-        validate_live_element(document, "bobcat.removeAttribute", node)?;
-        document.remove_attribute(node, name);
-        Ok(HostValue::Undefined)
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "getAttribute", 2, move |arguments| {
-        let node = node_id_argument("bobcat.getAttribute", arguments, 0)?;
-        let name = string_argument("bobcat.getAttribute", arguments, 1)?;
-        let mut tree = borrow_tree("bobcat.getAttribute", &tree)?;
-        let document = tree.tree();
-        validate_live_element(document, "bobcat.getAttribute", node)?;
-        let value = document
-            .get(node)
-            .and_then(|node| node.attribute(name))
-            .map(Arc::<str>::from);
-        Ok(value.map_or(HostValue::Null, HostValue::String))
-    })?;
-
-    let tree = Rc::clone(handle);
-    install(engine, "tagName", 1, move |arguments| {
-        let node = node_id_argument("bobcat.tagName", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat.tagName", &tree)?;
-        let document = tree.tree();
-        validate_live_element(document, "bobcat.tagName", node)?;
-        let tag = document
-            .get(node)
-            .and_then(dom::Node::tag_name)
-            .ok_or_else(|| "bobcat.tagName requires a live element tag".to_owned())?;
-        Ok(HostValue::String(Arc::from(tag)))
-    })?;
+    tree_members! { engine, handle;
+        fn setAttribute(
+            node: node_id_argument,
+            name: string_argument,
+            value: string_argument
+        ) |document| {
+            validate_live_element(document, NAME, node)?;
+            document.set_attribute(node, name, value);
+            Ok(HostValue::Undefined)
+        }
+        // Deliberately name-based: this PAPI receives record keys, custom
+        // properties have no numeric id, and Stylo's internal PropertyId is
+        // not a stable script ABI. A future numeric-key `__AddInlineStyle`
+        // can translate its bundle id in JavaScript/the decoder-owned layer
+        // before reaching this one primitive.
+        fn set_node_property(
+            node: node_id_argument,
+            name: string_argument,
+            value: string_argument
+        ) |document| {
+            validate_live_element(document, NAME, node)?;
+            document.set_inline_style_property(node, name, value);
+            Ok(HostValue::Undefined)
+        }
+        fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            document.remove_attribute(node, name);
+            Ok(HostValue::Undefined)
+        }
+        fn getAttribute(node: node_id_argument, name: string_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            let value = document
+                .get(node)
+                .and_then(|node| node.attribute(name))
+                .map(Arc::<str>::from);
+            Ok(value.map_or(HostValue::Null, HostValue::String))
+        }
+        fn tagName(node: node_id_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            let tag = document
+                .get(node)
+                .and_then(dom::Node::tag_name)
+                .ok_or_else(|| "bobcat.tagName requires a live element tag".to_owned())?;
+            Ok(HostValue::String(Arc::from(tag)))
+        }
+    }
 
     Ok(())
 }

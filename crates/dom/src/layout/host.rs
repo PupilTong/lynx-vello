@@ -30,7 +30,9 @@ use super::style::{
     establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
     skips_contents,
 };
-use crate::tree::document::{Document, DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
+use crate::tree::document::{
+    Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout, RelayoutKind, TreeArenas,
+};
 use crate::tree::node::Node;
 
 impl<T> LayoutTree for TreeArenas<T> {
@@ -159,15 +161,40 @@ pub(super) fn run_layout<T: Sync>(
     let parked = collect_parked_boundaries(document);
     let (tree, state, parked_ids) = document.layout_parts();
     let root = tree.live_slot(root);
-    for &(_, id, input) in &parked {
-        if let Some(slot) = tree.slot(id)
-            && tree.at(slot).is_element()
-            && is_relayout_boundary(&StyleView::of(tree.at(slot)))
-        {
-            let output = compute_boundary_relayout(tree, state, slot, input);
-            tree.layout_mut(state, slot).unrounded.content_size = output.content_size;
+    let mut escalated = false;
+    if !full {
+        for &(_, pending) in &parked {
+            let Some(slot) = tree.slot(pending.node_id) else {
+                continue;
+            };
+            if !tree.at(slot).is_element() {
+                continue;
+            }
+            match pending.kind {
+                RelayoutKind::Boundary => {
+                    if is_relayout_boundary(&StyleView::of(tree.at(slot))) {
+                        let output = compute_boundary_relayout(tree, state, slot, pending.input);
+                        tree.layout_mut(state, slot).unrounded.content_size = output.content_size;
+                    }
+                }
+                RelayoutKind::InPlace { previous } => {
+                    let output = tree.compute_layout(state, slot, pending.input);
+                    // A reproduced output proves nothing above this node can
+                    // observe the change; anything else falls back to the
+                    // whole-tree pass, which reuses the caches just filled.
+                    if output != previous {
+                        escalated = true;
+                        let mut current = tree.at(slot).flat_parent_slot();
+                        while let Some(ancestor) = current {
+                            state.clear_layout_cache(ancestor);
+                            current = tree.at(ancestor).flat_parent_slot();
+                        }
+                    }
+                }
+            }
         }
     }
+    let full = full || escalated;
     compute_root_layout(
         tree,
         state,
@@ -187,20 +214,14 @@ pub(super) fn run_layout<T: Sync>(
     }
 }
 
-fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, NodeId, LayoutInput)> {
+fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRelayout)> {
     let roots = document.relayout_roots();
     if roots.is_empty() {
         return Vec::new();
     }
-    let mut parked: Vec<(usize, NodeId, LayoutInput)> = roots
+    let mut parked: Vec<(usize, PendingRelayout)> = roots
         .iter()
-        .map(|pending| {
-            (
-                boundary_depth(document, pending.node_id),
-                pending.node_id,
-                pending.input,
-            )
-        })
+        .map(|&pending| (boundary_depth(document, pending.node_id), pending))
         .collect();
     if parked.len() > 1 {
         parked.sort_by_key(|&(depth, ..)| std::cmp::Reverse(depth));
@@ -212,16 +233,21 @@ fn position_and_round_parked_boundaries<T: Sync>(
     tree: &TreeArenas<T>,
     state: &mut DocumentLayoutState,
     parked_ids: &FxHashSet<NodeId>,
-    parked: &[(usize, NodeId, LayoutInput)],
+    parked: &[(usize, PendingRelayout)],
     viewport: Size<f32>,
     scale: f32,
 ) {
-    for &(_, id, _) in parked {
-        let Some(slot) = tree.slot(id) else {
+    for &(_, pending) in parked {
+        let Some(slot) = tree.slot(pending.node_id) else {
             continue;
         };
         let node = tree.at(slot);
-        if !node.is_element() || !is_relayout_boundary(&StyleView::of(node)) {
+        if !node.is_element() {
+            continue;
+        }
+        if matches!(pending.kind, RelayoutKind::Boundary)
+            && !is_relayout_boundary(&StyleView::of(node))
+        {
             continue;
         }
         if has_parked_ancestor(tree, node, parked_ids) {

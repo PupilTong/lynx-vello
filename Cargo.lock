@@ -198,10 +198,8 @@ dependencies = [
  "flashbulb",
  "http",
  "image-webp",
- "libc",
  "lynx-template-decoder",
  "lynx-xml",
- "ndk-sys",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-image-io",
@@ -210,7 +208,6 @@ dependencies = [
  "rkyv",
  "thiserror 2.0.18",
  "url",
- "windows",
  "winit",
  "zune-jpeg",
 ]
