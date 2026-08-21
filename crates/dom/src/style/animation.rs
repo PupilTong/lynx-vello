@@ -502,10 +502,10 @@ impl<T: Sync> Document<T> {
                         data.clear_restyle_flags_and_damage();
                         (!damage.is_empty()).then(|| StyleDamage::from(damage))
                     });
-                    let style_changed = node.refresh_layout_style(refreshed);
+                    let refresh = node.refresh_layout_style(refreshed);
                     (
-                        harvested,
-                        node.has_animation_dirty_descendants() || style_changed,
+                        harvested.map(|damage| (damage, refresh)),
+                        node.has_animation_dirty_descendants() || refresh.changed,
                     )
                 };
                 if descend {
@@ -522,12 +522,16 @@ impl<T: Sync> Document<T> {
                 }
                 harvested
             };
-            let Some(damage) = harvested else {
+            let Some((damage, refresh)) = harvested else {
                 continue;
             };
             tick.restyled += 1;
             if damage.needs_relayout() {
                 tick.relayout = true;
+                // An animated `font-size` reaches its text through this
+                // harvest and no other, so the text children need the same
+                // two-level invalidation the style harvest gives them.
+                self.invalidate_text_children(current, refresh.shaping_changed);
                 self.invalidate_layout(current);
             }
         }

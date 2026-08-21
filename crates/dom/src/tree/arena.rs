@@ -360,6 +360,11 @@ pub(crate) struct NodeLayoutState {
 pub(crate) struct DocumentLayoutState {
     nodes: Vec<NodeLayoutState>,
     pub(crate) text_context: Option<Box<TextContext>>,
+    /// Text nodes whose one retained Parley layout a probe re-broke away from
+    /// its committed line break during the pass in flight. The pass owes them
+    /// a restore before anything outside it (painting, hit testing) reads a
+    /// committed layout; see [`Self::restore_probed_text`].
+    probed_text: Vec<NodeId>,
 }
 
 impl DocumentLayoutState {
@@ -367,6 +372,7 @@ impl DocumentLayoutState {
         Self {
             nodes: Vec::new(),
             text_context: None,
+            probed_text: Vec::new(),
         }
     }
 
@@ -412,6 +418,7 @@ impl DocumentLayoutState {
         let Self {
             nodes,
             text_context,
+            probed_text: _,
         } = self;
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
@@ -423,12 +430,75 @@ impl DocumentLayoutState {
         (context, artifacts)
     }
 
-    pub(crate) fn clear_layout_cache(&mut self, slot: NodeId) {
+    /// Records that `slot`'s probe left its retained text layout off the
+    /// committed line break. Cheap enough to call after every probe: the check
+    /// is two comparisons, and only a probe that actually re-entered Parley
+    /// enqueues anything.
+    pub(crate) fn note_probed_text(&mut self, slot: NodeId) {
+        if self
+            .nodes
+            .get(slot.arena_key())
+            .and_then(|node| node.text.as_deref())
+            .is_some_and(TextLayoutStore::is_probe_dirty)
+        {
+            self.probed_text.push(slot);
+        }
+    }
+
+    /// Returns every text node this pass probed to its committed line break.
+    ///
+    /// Restoring is a no-op for a node whose commit already brought it back,
+    /// which is the ordinary case; the queue exists for the nodes a pass
+    /// measures but never commits, whose committed layout painting still
+    /// reads.
+    pub(crate) fn restore_probed_text(&mut self) {
+        let mut probed = std::mem::take(&mut self.probed_text);
+        for slot in probed.drain(..) {
+            if let Some(artifacts) = self
+                .nodes
+                .get_mut(slot.arena_key())
+                .and_then(|node| node.text.as_deref_mut())
+            {
+                artifacts.restore_committed();
+            }
+        }
+        self.probed_text = probed;
+        // The queue is only as good as the pushes that fill it, and a text
+        // node missing from it paints its probe's line breaks with no other
+        // symptom. Debug builds re-derive the answer the expensive way.
+        debug_assert!(
+            !self
+                .nodes
+                .iter()
+                .filter_map(|node| node.text.as_deref())
+                .any(TextLayoutStore::is_probe_dirty),
+            "a probed text node never reached the restore queue"
+        );
+    }
+
+    /// Drops a node's cached box measurements without touching its shaped
+    /// text.
+    ///
+    /// The pair exists because the two caches answer to different inputs: the
+    /// box cache is invalid the moment any geometry around a node moves, while
+    /// the shaped layout only dies when the text or the style Parley shaped it
+    /// from changes. Re-shaping a paragraph to lay it out one pixel narrower
+    /// is the single most expensive thing this engine can do for no reason.
+    pub(crate) fn clear_box_cache(&mut self, slot: NodeId) {
         if let Some(node) = self.nodes.get_mut(slot.arena_key()) {
             node.slot.clear_layout_cache();
-            if let Some(artifacts) = node.text.as_deref_mut() {
-                artifacts.invalidate();
-            }
+        }
+    }
+
+    /// Drops both a node's cached box measurements and its shaped text.
+    pub(crate) fn clear_layout_cache(&mut self, slot: NodeId) {
+        self.clear_box_cache(slot);
+        if let Some(artifacts) = self
+            .nodes
+            .get_mut(slot.arena_key())
+            .and_then(|node| node.text.as_deref_mut())
+        {
+            artifacts.invalidate();
         }
     }
 }

@@ -245,7 +245,7 @@ impl TextFixture {
         Observation {
             size: measurement.size(),
             baseline: measurement.first_baselines().y,
-            line_count: measurement.layout().line_count(),
+            line_count: measurement.line_count(),
         }
     }
 
@@ -403,14 +403,18 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
     let minimum = fixture.intrinsic(&container, &style, "abc defgh", AvailableSpace::MinContent);
     assert_size(minimum.size, Size::new(80.0, 32.0));
     assert_eq!(minimum.line_count, 2);
-    assert_eq!(
-        fixture.artifacts.probe().expect("probe").max_advance(),
-        Some(80.0)
+    let probed = fixture.artifacts.retained().expect("retained");
+    assert_eq!(probed.max_advance(), Some(80.0));
+    assert!(
+        fixture.artifacts.is_probe_dirty(),
+        "the probe broke the retained layout away from its committed width"
     );
+
+    assert!(fixture.artifacts.restore_committed());
     let committed = fixture
         .artifacts
         .committed()
-        .expect("committed survives probe");
+        .expect("the committed state is restorable after a probe");
     assert_eq!(committed.max_advance(), None);
     assert_eq!(committed.line_count(), 1);
 
@@ -422,7 +426,7 @@ fn intrinsic_width_and_nowrap_rebreak_retained_shape() {
     assert_eq!(
         fixture
             .artifacts
-            .probe()
+            .retained()
             .expect("break-all probe")
             .max_advance(),
         Some(16.0)
@@ -943,8 +947,12 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
             .first_baseline()
             .expect("large baseline");
     assert_close(small_baseline, large_baseline);
-    assert!(state.artifacts[small].probe().is_none());
-    assert!(state.artifacts[large].probe().is_none());
+    for node in [small, large] {
+        assert!(
+            !state.artifacts[node].is_probe_dirty(),
+            "a committed text node rests at its committed line break",
+        );
+    }
 
     let calls_after_first_layout = state.leaf_measure_calls;
     assert!(calls_after_first_layout >= 4);
@@ -953,7 +961,7 @@ fn flex_baseline_integration_reuses_artifacts_and_jointly_invalidates_caches() {
 
     tree.clear_layout_cache(&mut state, tree.node(small));
     assert!(state.slots[small].layout_cache_is_empty());
-    assert!(state.artifacts[small].probe().is_none());
+    assert!(state.artifacts[small].retained().is_none());
     assert!(state.artifacts[small].committed().is_none());
     tree.clear_layout_cache(&mut state, tree.node(root));
     compute_root_layout(&tree, &mut state, tree.node(root), Size::MAX_CONTENT);

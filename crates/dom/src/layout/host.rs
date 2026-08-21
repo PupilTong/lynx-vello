@@ -26,7 +26,7 @@ use hughie::tree::{
 use rustc_hash::FxHashSet;
 
 use super::style::{
-    DisplayMode, StyleView, TextStyleView, box_parent, display_mode,
+    DisplayMode, StyleView, TextContainerView, TextRunView, box_parent, display_mode,
     establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
     skips_contents,
 };
@@ -109,16 +109,23 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
                     let output = if node_ref.is_text_node() {
-                        let view = TextStyleView::of(node_ref);
+                        let paragraph = TextContainerView::of(node_ref);
+                        let run_style = TextRunView::of(node_ref);
                         let run = TextRun {
                             text: node_ref.text().unwrap_or_default(),
-                            style: &view,
+                            style: &run_style,
                             preserve_newlines: false,
                         };
                         let (context, artifacts) = state.text_parts(node);
                         let mut measurer =
-                            TextMeasurer::new(context, artifacts, &view, std::iter::once(run));
-                        measurer.compute_layout(input)
+                            TextMeasurer::new(context, artifacts, &paragraph, std::iter::once(run));
+                        let text_output = measurer.compute_layout(input);
+                        if input.goal != LayoutGoal::Commit {
+                            // A probe re-breaks the same retained layout the
+                            // commit uses, so it owes the pass a restore.
+                            state.note_probed_text(node);
+                        }
+                        text_output
                     } else {
                         let view = tree.style(node);
                         #[cfg(feature = "layout-test-utils")]
@@ -214,6 +221,9 @@ pub(super) fn run_layout<T: Sync>(
     } else {
         position_and_round_parked_boundaries(tree, state, parked_ids, &parked, viewport, scale);
     }
+    // Every text node this pass measured but did not commit still holds the
+    // probe's line break; painting reads the committed one.
+    state.restore_probed_text();
 }
 
 fn collect_parked_boundaries<T>(document: &Document<T>) -> Vec<(usize, PendingRelayout)> {

@@ -18,6 +18,9 @@ use stylo::values::computed::font::{FontFamily, GenericFontFamily, SingleFontFam
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
 use super::content::normalize_runs;
+use super::layout::BreakConstraint;
+#[cfg(debug_assertions)]
+use super::layout::ShapeFingerprint;
 use super::{TextContext, TextLayout, TextLayoutStore, TextMeasurement};
 use crate::compute::{LeafMeasureInput, compute_leaf_layout_with_measurement};
 use crate::style::{TextContainerStyle, TextRun, TextRunStyle};
@@ -100,27 +103,118 @@ where
 
         let has_text = !content.text.is_empty();
         let layout = builder.build(content.text.as_str());
-        TextLayout::shaped(layout, has_text)
+        TextLayout::shaped(
+            layout,
+            has_text,
+            #[cfg(debug_assertions)]
+            self.shape_fingerprint(),
+        )
     }
 
-    fn install_artifact_if_needed(&mut self, goal: LayoutGoal) {
-        let missing = match goal {
-            LayoutGoal::Measure(_) => self.artifacts.probe.is_none(),
-            LayoutGoal::Commit => self.artifacts.committed.is_none(),
-        };
-        if !missing {
-            return;
+    /// Returns the node's retained layout, shaping it on first use.
+    ///
+    /// There is one layout per node for every goal. A probe re-breaks the same
+    /// shaped data the commit uses instead of deep-cloning Parley's ten
+    /// vectors into a second slot, and hands it back afterwards through
+    /// [`TextLayoutStore::restore_committed`].
+    fn retained(&mut self) -> &mut TextLayout {
+        #[cfg(debug_assertions)]
+        let fingerprint = self.shape_fingerprint();
+        if self.artifacts.artifact.is_none() {
+            let shaped = self.shape();
+            self.artifacts.artifact = Some(Box::new(shaped));
         }
+        let artifact = self
+            .artifacts
+            .artifact
+            .as_deref_mut()
+            .expect("the retained layout was just installed");
+        #[cfg(debug_assertions)]
+        artifact.assert_shaped_from(fingerprint);
+        artifact
+    }
 
-        let reusable = match goal {
-            LayoutGoal::Measure(_) => self.artifacts.committed.clone(),
-            LayoutGoal::Commit => self.artifacts.probe.take(),
-        };
-        let artifact = reusable.unwrap_or_else(|| Box::new(self.shape()));
-        match goal {
-            LayoutGoal::Measure(_) => self.artifacts.probe = Some(artifact),
-            LayoutGoal::Commit => self.artifacts.committed = Some(artifact),
+    /// Hashes exactly the content and style values that reach Parley's shaper,
+    /// so a retained layout that outlived one of them is caught here instead
+    /// of painting stale glyphs.
+    #[cfg(debug_assertions)]
+    fn shape_fingerprint(&self) -> ShapeFingerprint {
+        use core::hash::{Hash, Hasher};
+        use core::mem::discriminant;
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        // Paragraph-level values the shaper and the normalizer read. Neither
+        // `text-indent` nor `text-align` belongs here: the first is part of
+        // the break constraint and the second is re-applied on every commit,
+        // so a change in either re-breaks or re-aligns the retained layout
+        // rather than leaving it stale.
+        discriminant(&self.container_style.white_space_collapse()).hash(&mut hasher);
+        discriminant(&self.container_style.word_break()).hash(&mut hasher);
+        discriminant(&self.container_style.text_wrap_mode()).hash(&mut hasher);
+
+        for run in self.runs.clone() {
+            run.text.hash(&mut hasher);
+            run.preserve_newlines.hash(&mut hasher);
+            let style = run.style;
+            let owned_family;
+            let family = if let Some(family) = style.font_family_ref() {
+                family
+            } else {
+                owned_family = style.font_family();
+                &owned_family
+            };
+            for single in family.families.list.iter() {
+                match single {
+                    SingleFontFamily::FamilyName(name) => {
+                        0u8.hash(&mut hasher);
+                        name.name.as_ref().hash(&mut hasher);
+                    }
+                    SingleFontFamily::Generic(generic) => {
+                        1u8.hash(&mut hasher);
+                        discriminant(generic).hash(&mut hasher);
+                    }
+                }
+            }
+            style.font_size().to_bits().hash(&mut hasher);
+            style.font_weight().value().to_bits().hash(&mut hasher);
+            let font_style = style.font_style();
+            if font_style == FontStyle::NORMAL {
+                0u8.hash(&mut hasher);
+            } else if font_style == FontStyle::ITALIC {
+                1u8.hash(&mut hasher);
+            } else {
+                2u8.hash(&mut hasher);
+                font_style.oblique_degrees().to_bits().hash(&mut hasher);
+            }
+            style
+                .letter_spacing()
+                .0
+                .resolve(Length::zero())
+                .px()
+                .to_bits()
+                .hash(&mut hasher);
+            match style.line_height() {
+                LineHeight::Normal => 0u8.hash(&mut hasher),
+                LineHeight::Number(factor) => {
+                    1u8.hash(&mut hasher);
+                    factor.0.to_bits().hash(&mut hasher);
+                }
+                LineHeight::Length(length) => {
+                    2u8.hash(&mut hasher);
+                    length.0.px().to_bits().hash(&mut hasher);
+                }
+            }
+            for feature in &style.font_feature_settings().0 {
+                feature.tag.0.hash(&mut hasher);
+                feature.value.hash(&mut hasher);
+            }
+            for variation in &style.font_variation_settings().0 {
+                variation.tag.0.hash(&mut hasher);
+                variation.value.to_bits().hash(&mut hasher);
+            }
         }
+        ShapeFingerprint::from_hash(hasher.finish())
     }
 }
 
@@ -144,7 +238,7 @@ where
     RunStyle: TextRunStyle + 'source,
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
-    pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement<'_> {
+    pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement {
         let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
         let indent = self
             .container_style
@@ -157,31 +251,39 @@ where
             self.container_style.direction(),
         );
 
-        self.install_artifact_if_needed(input.goal);
-        let artifact = match input.goal {
-            LayoutGoal::Measure(_) => self
-                .artifacts
-                .probe
-                .as_deref_mut()
-                .expect("a probe artifact was installed"),
-            LayoutGoal::Commit => self
-                .artifacts
-                .committed
-                .as_deref_mut()
-                .expect("a committed artifact was installed"),
-        };
+        let artifact = self.retained();
         let max_advance = line_break_width(input, artifact);
-        artifact.rebreak(max_advance, indent);
-        if matches!(input.goal, LayoutGoal::Commit) {
-            let measured_width = artifact.size().width;
-            if input.known_dimensions.width.is_none()
-                && max_advance.is_some_and(|limit| limit > measured_width)
-            {
-                artifact.rebreak(Some(measured_width), indent);
-            }
-            artifact.align(alignment);
+        let constraint = BreakConstraint::new(max_advance, indent);
+        if !matches!(input.goal, LayoutGoal::Commit) {
+            return artifact.probe(constraint);
         }
-        TextMeasurement::new(artifact)
+
+        let mut measured = artifact.commit_break(constraint);
+        // Shrink-to-fit: alignment distributes the leftover of the width lines
+        // were broken at, so an auto-sized box that broke against a wider
+        // constraint breaks again against its own used width. Parley does this
+        // for itself when the break was unconstrained (its line breaker
+        // rewrites `inline_max_coord` to the laid-out width), so only a finite
+        // constraint wider than the content needs the second pass.
+        //
+        // Re-breaking at `Layout::width()` is not neutral: that width excludes
+        // hanging trailing whitespace while the breaker's fit test includes it,
+        // so text ending in a space can gain an empty trailing line, and the
+        // f32 round trip through a subtracted width can split the widest line
+        // one cluster early. Both make a commit disagree with the measurement
+        // the parent already sized this box from. Reproducing that is
+        // deliberate for now — it is what ships today, and correcting it needs
+        // an alignment width that is independent of the break width, which
+        // Parley 0.11 does not expose.
+        if input.known_dimensions.width.is_none()
+            && max_advance.is_some_and(|limit| limit > measured.size().width)
+        {
+            measured =
+                artifact.commit_break(BreakConstraint::new(Some(measured.size().width), indent));
+        }
+        artifact.align(alignment);
+        artifact.mark_committed(alignment);
+        measured
     }
 }
 
@@ -429,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn one_shaped_layout_is_rebroken_for_probe_and_commit_constraints() {
+    fn one_shaped_layout_serves_every_probe_and_commit_constraint() {
         let mut context = TextContext::without_system_fonts();
         assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
         let style = RunStyle {
@@ -451,39 +553,171 @@ mod tests {
 
         assert_eq!(measurer.measure(probe).size(), Size::new(80.0, 32.0));
         assert_eq!(measurer.context.shape_count(), 1);
+        let retained = core::ptr::from_ref(
+            measurer
+                .artifacts
+                .retained()
+                .expect("the probe installed the node's one retained layout"),
+        );
+        assert!(
+            measurer.artifacts.committed().is_none(),
+            "a probe alone commits nothing"
+        );
+
+        // A repeated probe at the same constraint costs nothing at all.
+        assert_eq!(measurer.measure(probe).size(), Size::new(80.0, 32.0));
+        assert_eq!(measurer.artifacts.retained().unwrap().break_count(), 1);
+
         let narrower = measure_input(
             AvailableSpace::Definite(48.0),
             LayoutGoal::Measure(RequestedAxis::Both),
         );
         assert_eq!(measurer.measure(narrower).size(), Size::new(48.0, 64.0));
         assert_eq!(measurer.context.shape_count(), 1);
-        let probe_address = core::ptr::from_ref(
-            measurer
-                .artifacts
-                .probe()
-                .expect("the measured artifact remains a probe"),
-        );
+        assert_eq!(measurer.artifacts.retained().unwrap().break_count(), 2);
 
+        // The commit re-uses the same shaped layout — no second slot, no copy.
         let commit = measure_input(AvailableSpace::Definite(80.0), LayoutGoal::Commit);
-        assert_eq!(measurer.measure(commit).layout().line_count(), 2);
+        assert_eq!(measurer.measure(commit).line_count(), 2);
         assert_eq!(measurer.context.shape_count(), 1);
-        assert!(measurer.artifacts.probe().is_none());
         let committed = measurer
             .artifacts
             .committed()
-            .expect("the probe was promoted to committed");
-        assert!(core::ptr::eq(probe_address, core::ptr::from_ref(committed)));
+            .expect("the retained layout is now committed");
+        assert!(core::ptr::eq(retained, core::ptr::from_ref(committed)));
+        assert_eq!(committed.break_count(), 3);
+        assert!(!measurer.artifacts.is_probe_dirty());
 
+        // A probe at an already-measured constraint answers from the memo and
+        // leaves the committed line break in place.
         assert_eq!(measurer.measure(narrower).size(), Size::new(48.0, 64.0));
+        assert!(!measurer.artifacts.is_probe_dirty());
+        assert_eq!(measurer.artifacts.retained().unwrap().break_count(), 3);
+
+        // A probe at a constraint the memo has forgotten does move it, and
+        // owes the restore the pass driver performs.
+        let unseen = measure_input(
+            AvailableSpace::Definite(32.0),
+            LayoutGoal::Measure(RequestedAxis::Both),
+        );
+        assert_eq!(measurer.measure(unseen).size(), Size::new(32.0, 80.0));
+        assert!(measurer.artifacts.is_probe_dirty());
+        assert!(measurer.artifacts.restore_committed());
+        assert!(!measurer.artifacts.is_probe_dirty());
+        assert_eq!(
+            measurer.artifacts.committed().unwrap().max_advance(),
+            Some(80.0)
+        );
         assert_eq!(measurer.context.shape_count(), 1);
-        assert!(measurer.artifacts.probe().is_some());
-        assert!(measurer.artifacts.committed().is_some());
+    }
+
+    #[test]
+    fn a_commit_at_the_probed_width_reuses_the_probe_line_break() {
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let style = RunStyle {
+            family: named_family("Ahem"),
+        };
+        let container = ContainerStyle::default();
+        let runs = [TextRun {
+            text: "abcdefghij",
+            style: &style,
+            preserve_newlines: false,
+        }];
+        let mut artifacts = TextLayoutStore::default();
+        let mut measurer =
+            TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+
+        // Exactly the sequence a flex container imposes on an auto-sized text
+        // child: probe the line width, then commit at it. Start alignment in
+        // LTR never reads the leftover space, so the shrink-to-fit rebreak is
+        // skipped and the whole pass costs one line break.
+        let width = AvailableSpace::Definite(80.0);
+        measurer.measure(measure_input(
+            width,
+            LayoutGoal::Measure(RequestedAxis::Both),
+        ));
+        measurer.measure(measure_input(width, LayoutGoal::Commit));
+
+        let committed = measurer.artifacts.committed().expect("committed");
+        assert_eq!(committed.break_count(), 1);
+        assert_eq!(committed.line_count(), 2);
+        assert_eq!(committed.size(), Size::new(80.0, 32.0));
+    }
+
+    #[test]
+    fn an_auto_sized_commit_shrinks_to_its_measured_width() {
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let style = RunStyle {
+            family: named_family("Ahem"),
+        };
+        let container = ContainerStyle {
+            align: TextAlign::Center,
+            direction: direction::T::Ltr,
+        };
+        let runs = [TextRun {
+            text: "abcd",
+            style: &style,
+            preserve_newlines: false,
+        }];
+        let mut artifacts = TextLayoutStore::default();
+        let mut measurer =
+            TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+
+        measurer.measure(measure_input(
+            AvailableSpace::Definite(200.0),
+            LayoutGoal::Commit,
+        ));
+
+        let committed = measurer.artifacts.committed().expect("committed");
+        assert_eq!(committed.max_advance(), Some(64.0));
+        assert_eq!(committed.break_count(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "outlived the content or style it was shaped from")]
+    #[cfg(debug_assertions)]
+    fn a_retained_layout_that_outlived_its_content_is_caught() {
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let style = RunStyle {
+            family: named_family("Ahem"),
+        };
+        let container = ContainerStyle::default();
+        let mut artifacts = TextLayoutStore::default();
+        let commit = measure_input(AvailableSpace::Definite(80.0), LayoutGoal::Commit);
+        {
+            let runs = [TextRun {
+                text: "abc",
+                style: &style,
+                preserve_newlines: false,
+            }];
+            let mut measurer =
+                TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+            measurer.measure(commit);
+        }
+
+        // The host changed the text but no eviction path dropped the artifact.
+        let runs = [TextRun {
+            text: "abcd",
+            style: &style,
+            preserve_newlines: false,
+        }];
+        let mut measurer =
+            TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
+        measurer.measure(commit);
     }
 
     #[test]
     fn constraint_and_alignment_mappings_cover_protocol_values() {
         let input = measure_input(AvailableSpace::MinContent, LayoutGoal::Commit);
-        let empty = TextLayout::shaped(parley::Layout::default(), false);
+        let empty = TextLayout::shaped(
+            parley::Layout::default(),
+            false,
+            #[cfg(debug_assertions)]
+            super::super::layout::ShapeFingerprint::from_hash(0),
+        );
         assert_eq!(line_break_width(input, &empty), Some(0.0));
         for (value, direction, expected) in [
             (TextAlign::Start, direction::T::Rtl, Alignment::Right),
@@ -624,6 +858,95 @@ mod tests {
                 ParleyGenericFamily::Monospace
             ))
         ));
+    }
+
+    /// A run style that answers from real computed values, the way the
+    /// document host does — the branch `font_family_ref` exists for.
+    #[derive(Debug)]
+    struct ComputedRunStyle(stylo::servo_arc::Arc<stylo::properties::ComputedValues>);
+
+    impl TextRunStyle for ComputedRunStyle {
+        fn computed_text_values(&self) -> Option<&stylo::properties::ComputedValues> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn every_run_style_shape_shapes_and_re_checks_its_fingerprint() {
+        fn measure_twice<R: TextRunStyle>(
+            context: &mut TextContext,
+            container: &ContainerStyle,
+            input: LeafMeasureInput,
+            style: &R,
+            preserve_newlines: bool,
+        ) {
+            let shaped = context.shape_count();
+            let mut artifacts = TextLayoutStore::default();
+            let run = TextRun {
+                text: "ab",
+                style,
+                preserve_newlines,
+            };
+            let mut measurer =
+                TextMeasurer::new(context, &mut artifacts, container, [run].into_iter());
+            let first = measurer.measure(input);
+            // The second pass re-derives the fingerprint and checks it against
+            // the layout the first one shaped.
+            assert_eq!(measurer.measure(input), first);
+            assert_eq!(measurer.context.shape_count(), shaped + 1);
+        }
+
+        use stylo::properties::style_structs::Font;
+
+        let mut context = TextContext::without_system_fonts();
+        assert_eq!(context.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let container = ContainerStyle::default();
+        let commit = measure_input(AvailableSpace::Definite(80.0), LayoutGoal::Commit);
+
+        // Borrowed computed values, and a family list long enough to take the
+        // multi-name translation.
+        let computed = ComputedRunStyle(
+            stylo::properties::ComputedValues::initial_values_with_font_override(
+                Font::initial_values(),
+            ),
+        );
+        let listed = RunStyle {
+            family: FontFamily {
+                families: FontFamilyList {
+                    list: stylo::ArcSlice::from_iter(
+                        [
+                            SingleFontFamily::FamilyName(FamilyName {
+                                name: Atom::from("Ahem"),
+                                syntax: FontFamilyNameSyntax::Identifiers,
+                            }),
+                            SingleFontFamily::Generic(GenericFontFamily::SansSerif),
+                        ]
+                        .into_iter(),
+                    ),
+                },
+                is_system_font: false,
+                is_initial: false,
+            },
+        };
+        // Owned families, oblique and italic slants, both relative line-height
+        // forms.
+        let oblique = EmptyRunStyle {
+            font_style: FontStyle::oblique(20.0),
+            line_height: LineHeight::Length(NonNegativeLength::new(24.0)),
+            weight: FontWeight::NORMAL,
+            generic: Some(GenericFontFamily::Monospace),
+        };
+        let italic = EmptyRunStyle {
+            font_style: FontStyle::ITALIC,
+            line_height: LineHeight::Number(NonNegative(1.5)),
+            weight: FontWeight::from_float(700.0),
+            generic: None,
+        };
+
+        measure_twice(&mut context, &container, commit, &computed, false);
+        measure_twice(&mut context, &container, commit, &listed, true);
+        measure_twice(&mut context, &container, commit, &oblique, false);
+        measure_twice(&mut context, &container, commit, &italic, false);
     }
 
     #[test]
