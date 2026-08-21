@@ -135,7 +135,11 @@ useful signal for currently-compatible versions of those libraries.
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec
   `Decoder`, draw-target, OS-input, and lifecycle-wakeup capabilities, plus
-  narrow view-level font and decoded-image registration. `PageConfig` is
+  narrow view-level font and decoded-image registration. A host may select a
+  registered family as the view's platform default; this prepends that family
+  to the `system-ui`, `sans-serif`, and `serif` generic maps, which lets a Wasm
+  embedder supply its otherwise-absent system-font backend without baking a
+  particular font into core. `PageConfig` is
   supplied when the view is constructed. Bundle retrieval, `.web.bundle`
   decoding, and config parsing are embedder responsibilities; core accepts a
   script URL through `LynxView::execute_script`, resolves/fetches its UTF-8

@@ -322,6 +322,18 @@ export class BobcatCanvas {
     return await this.#request('registerFonts', { bytes: fontBytes(data) })
   }
 
+  /** Map CSS system-ui, sans-serif, and serif to a registered family. */
+  async setDefaultFontFamily(family) {
+    if (typeof family !== 'string' || family.trim() === '') {
+      throw new TypeError(
+        'BobcatCanvas.setDefaultFontFamily requires a non-empty family name',
+      )
+    }
+    return await this.#request('setDefaultFontFamily', {
+      family: family.trim(),
+    })
+  }
+
   async resize(width, height, devicePixelRatio) {
     await this.#request('resize', { devicePixelRatio, height, width })
   }

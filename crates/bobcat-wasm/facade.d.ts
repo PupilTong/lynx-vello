@@ -51,6 +51,9 @@ export declare class BobcatCanvas {
 
   /** Registers all font faces in an OpenType font container. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>
+
+  /** Maps CSS system-ui, sans-serif, and serif to a registered family. */
+  setDefaultFontFamily(family: string): Promise<boolean>
   resize(
     width: number,
     height: number,
