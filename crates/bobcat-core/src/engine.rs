@@ -51,8 +51,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-#[cfg(target_arch = "wasm32")]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
@@ -83,12 +81,7 @@ pub struct FrameSize {
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
 #[cfg(target_arch = "wasm32")]
-static WASM_STYLE_THREAD_COUNT: AtomicUsize = AtomicUsize::new(1);
-#[cfg(target_arch = "wasm32")]
 static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
-#[cfg(target_arch = "wasm32")]
-static WASM_SCRIPT_OWNER_CLAIMED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
 
@@ -127,9 +120,10 @@ pub enum EngineError {
 /// thread and Stylo workers in a Wasm build.
 ///
 /// This is an OS bootstrap capability only; the spawned task and document
-/// remain private to the engine. `style_thread_count` must be at least two:
-/// index zero is the entry-task owner and at least one managed Rayon worker
-/// must remain after that synchronous task exits.
+/// remain private to the engine. The caller becomes index zero of the
+/// process-wide Stylo pool and must outlive every view that uses it;
+/// `style_thread_count` must be at least two so the pool also has one managed
+/// Worker. Each view's separate Lynx-main Worker is outside this budget.
 #[cfg(target_arch = "wasm32")]
 pub fn configure_wasm_workers(
     worker_script_url: String,
@@ -154,11 +148,16 @@ pub fn configure_wasm_workers(
             message: "the style thread pool was already initialized".to_owned(),
         });
     }
-    WASM_STYLE_THREAD_COUNT.store(style_thread_count, Ordering::Release);
     wasm_thread::Builder::empty()
         .worker_script_url(worker_script_url)
         .set_default();
-    Ok(())
+    WASM_STYLE_POOL
+        .get_or_init(|| create_wasm_style_pool(style_thread_count))
+        .clone()
+        .map_err(|message| EngineError::Thread {
+            name: "wasm style pool",
+            message,
+        })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -450,11 +449,11 @@ fn event_detail(event: &InputEvent) -> String {
     }
 }
 
-/// What the presenting side asks the script thread to do after the entry
-/// script has finished.
+/// What the presenting side asks one view's script thread to do after the
+/// entry script has finished.
 ///
-/// Only plain data crosses: node ids, an event name, a JSON payload. The realm
-/// and the document both stay where they are.
+/// Only plain data crosses: node ids, an event name, and a JSON payload. The
+/// realm and document both stay where they are.
 enum ScriptCommand {
     /// Deliver one already-computed event path to the realm's listeners.
     DispatchEvent {
@@ -474,6 +473,11 @@ enum ScriptCommand {
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
+    /// The only `Sender`, dropped first so this view's detached script thread
+    /// wakes and releases its owner-thread-bound realm. It must never be cloned
+    /// anywhere the script thread can reach: a surviving clone would leave the
+    /// receiver parked with a live realm forever.
+    script_commands: Option<mpsc::Sender<ScriptCommand>>,
     elements: SharedTree,
     script_owner_available: bool,
     viewport: Viewport,
@@ -495,10 +499,6 @@ pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     /// document, because the frame request has to be made whether or not the
     /// slot was free this frame.
     animating: bool,
-    /// The only `Sender`. It must never be cloned anywhere the script thread
-    /// can reach: the channel closing is what ends that thread's loop, and a
-    /// surviving clone would leave it parked with a live realm forever.
-    script_commands: Option<mpsc::Sender<ScriptCommand>>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -529,6 +529,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         let (message_sender, messages) = mpsc::channel();
         let elements = SharedTree::new(new_document(viewport, config));
         Ok(Self {
+            script_commands: None,
             script_owner_available: true,
             elements,
             viewport,
@@ -544,7 +545,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             pending_resize: None,
             clock,
             animating: false,
-            script_commands: None,
             thread_bound: PhantomData,
         })
     }
@@ -964,15 +964,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         factory: Arc<dyn crate::script::ScriptEngineFactory>,
     ) -> Result<(), EngineError> {
         let elements = self.take_script_tree()?;
-        #[cfg(target_arch = "wasm32")]
-        if WASM_SCRIPT_OWNER_CLAIMED.swap(true, Ordering::AcqRel) {
-            self.script_owner_available = true;
-            return Err(EngineError::Thread {
-                name: "script",
-                message: "one Wasm instance supports one Lynx view; create each view in its own Render Worker"
-                    .to_owned(),
-            });
-        }
         let events = self.event_sender.clone();
         let frame_requesters = Arc::clone(&self.frames);
         let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
@@ -986,8 +977,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 let on_flush = Arc::clone(&frame_requesters);
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     (|| {
-                        #[cfg(target_arch = "wasm32")]
-                        prepare_script_thread()?;
                         let mut runtime = crate::runtime::MainThreadRuntime::new(
                             factory.as_ref(),
                             elements,
@@ -1022,9 +1011,9 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 };
                 request_current_frame(&frame_requesters);
 
-                // The realm now outlives its entry script. `recv` returns
-                // `Err` when the engine drops its `Sender`, which is the only
-                // shutdown signal this thread needs or gets.
+                // The realm now outlives its entry script. Dropping this
+                // view's sender closes the receiver and releases the realm on
+                // its owner thread.
                 if let Some(mut runtime) = runtime {
                     while let Ok(command) = commands.recv() {
                         match command {
@@ -1066,17 +1055,18 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                 set_script_panic_reporter(None);
             });
-        if let Err(error) = spawn {
-            self.script_owner_available = true;
-            #[cfg(target_arch = "wasm32")]
-            WASM_SCRIPT_OWNER_CLAIMED.store(false, Ordering::Release);
-            return Err(EngineError::Thread {
-                name: "script",
-                message: error.to_string(),
-            });
-        }
+        let script_thread = spawn.map_err(|error| self.script_spawn_error(&error))?;
         self.script_commands = Some(command_sender);
+        drop(script_thread);
         Ok(())
+    }
+
+    fn script_spawn_error(&mut self, error: &std::io::Error) -> EngineError {
+        self.script_owner_available = true;
+        EngineError::Thread {
+            name: "script",
+            message: error.to_string(),
+        }
     }
 }
 
@@ -1129,36 +1119,31 @@ fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn prepare_script_thread() -> Result<(), ScriptRunError> {
-    WASM_STYLE_POOL
-        .get_or_init(|| {
-            let thread_count = WASM_STYLE_THREAD_COUNT.load(Ordering::Acquire);
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(thread_count)
-                .use_current_thread()
-                .thread_name(|index| format!("StyleThread#{index}"))
-                .start_handler(|_| {
-                    dom::stylo::thread_state::initialize_layout_worker_thread();
-                })
-                .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
-                .spawn_handler(|thread| {
-                    let mut builder = wasm_thread::Builder::new();
-                    if let Some(name) = thread.name() {
-                        builder = builder.name(name.to_owned());
-                    }
-                    if let Some(stack_size) = thread.stack_size() {
-                        builder = builder.stack_size(stack_size);
-                    }
-                    builder.spawn(move || thread.run()).map(|_| ())
-                })
-                .build()
-                .map_err(|error| error.to_string())?;
-            dom::install_style_thread_pool(pool)
-                .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())?;
-            Ok(())
+fn create_wasm_style_pool(thread_count: usize) -> Result<(), String> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        // The persistent presenting Worker is index zero; every LynxView's
+        // owner-thread-bound VM runs on a separate, transient Worker.
+        .num_threads(thread_count)
+        .use_current_thread()
+        .thread_name(|index| format!("StyleThread#{index}"))
+        .start_handler(|_| {
+            dom::stylo::thread_state::initialize_layout_worker_thread();
         })
-        .clone()
-        .map_err(ScriptRunError::Platform)
+        .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
+        .spawn_handler(|thread| {
+            let mut builder = wasm_thread::Builder::new();
+            if let Some(name) = thread.name() {
+                builder = builder.name(name.to_owned());
+            }
+            if let Some(stack_size) = thread.stack_size() {
+                builder = builder.stack_size(stack_size);
+            }
+            builder.spawn(move || thread.run()).map(|_| ())
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
+    dom::install_style_thread_pool(pool)
+        .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())
 }
 
 fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameSize, EngineError> {
@@ -1428,6 +1413,28 @@ mod event_loop_tests {
             }
             assert!(Instant::now() < deadline, "the entry script did not finish");
             std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn independent_views_can_own_live_script_threads_in_one_process() {
+        let source = r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              __AppendElement(page, __CreateView(0));
+              __FlushElementTree();
+            };
+        ";
+
+        let first = booted(source);
+        let second = booted(source);
+
+        for engine in [&first, &second] {
+            let tree = engine
+                .elements
+                .try_tree()
+                .expect("each live view retains its own document");
+            assert_eq!(tree.document_element().child_ids().len(), 1);
         }
     }
 

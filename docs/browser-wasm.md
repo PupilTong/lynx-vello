@@ -30,13 +30,25 @@ limited to view creation with `PageConfig`, URL-based script, stylesheet, and
 Lynx XML requests, font registration, resize, error observation, and disposal.
 
 The Render Worker constructs `LynxView`, attaches the transferred canvas, and
-calls `configure_wasm_workers`. That core API configures the worker bootstrap
-used by both the engine-owned Lynx main task and the private Stylo Rayon pool.
-The Wasm embedder does not take a document owner or initialize Stylo itself.
-Because the pool includes its Lynx-main owner thread, one Wasm instance owns
-one renderer. The public facade creates one fresh Render Worker and Wasm
-instance per `BobcatCanvas`. A minimum pool size of two leaves one managed
-Rayon worker available after the synchronous entry-task Worker exits.
+calls `configure_wasm_workers` once. That core API configures the worker
+bootstrap used by both the engine-owned Lynx main task and the private Stylo
+Rayon pool. The Wasm embedder does not take a document owner or initialize
+Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
+pool, while that renderer may own a sequence of non-overlapping native views.
+`BobcatCanvas.reset()` drops the current view, closing its sole command sender,
+and immediately constructs its replacement. The detached per-view Lynx-main
+Worker drops its thread-bound realm and exits naturally; the independent
+replacement does not join it. The process-wide pool adopts the persistent
+Render Worker as index zero and remains valid across resets. The configured
+count covers that owner plus at least one managed Stylo Worker; each live view's
+Lynx-main Worker is separate. The public facade still creates one fresh Render
+Worker and Wasm instance per `BobcatCanvas`, not per reset.
+
+The transient Lynx-main Worker invokes Stylo from outside its Rayon pool, so
+Stylo transfers that traversal's root closure onto a managed worker. The Render
+Worker enters from its stable index-zero slot. This keeps view lifetime
+independent from the shared pool without requiring an idle script Worker to
+service style work.
 
 ## Resource and script boundaries
 
@@ -60,10 +72,17 @@ exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
 `false`/`false`/`true` display/overflow/selector defaults, while callers may
 still pass an intentional host override to `BobcatCanvas.create`.
 
-Like `executeScript`, `loadLynxXml` is a one-shot entry-script operation for a
-Canvas. Once either entry point has started a script, another call rejects
-before fetching or mounting XML CSS, so a failed repeated load cannot mutate
-the running page's cascade.
+Like `executeScript`, `loadLynxXml` is a one-shot entry-script operation for
+the current native view. Once either entry point has started a script, another
+call rejects before fetching or mounting XML CSS, so a failed repeated load
+cannot mutate the running page's cascade. A caller that wants a new page first
+calls `reset()`, which preserves the outer Worker, OffscreenCanvas, initialized
+Wasm module, page configuration, latest device metrics, resource provider, and
+registered font containers while replacing the private view, Lynx-main Worker,
+VM, and document. A successfully selected embedder default font family is
+restored after those font containers are registered on the replacement view.
+The provider clears the old page's transient script and stylesheet bytes
+during reset so repeated Blob-URL submissions do not accumulate stale sources.
 
 The optional XML background section is retained under a URL derived from the
 final XML response URL but is not executed. Bobcat does not yet have a
@@ -190,11 +209,12 @@ resources must satisfy CORS or a compatible Cross-Origin-Resource-Policy.
 
 The Pages shell exposes its Canvas and Lynx XML workspace views through the
 `tab` query parameter. The XML view loads `demo.lynx.xml` into a text editor and
-submits edits through a same-origin Blob URL. Because a view accepts one entry
-script and transferring an `HTMLCanvasElement` is irreversible, every submit
-disposes the prior `BobcatCanvas`, replaces the DOM canvas, creates a new
-Worker-owned view, re-registers the cached font bytes, and then loads the new
-source. The Blob URL is revoked only after `loadLynxXml` settles.
+submits edits through a same-origin Blob URL. It creates and transfers the DOM
+canvas only for the first render. Every later submit calls `reset()` to drop
+and rebuild only native `LynxView`, then loads the new source through the same
+warm `BobcatCanvas`; the Render Worker, transferred OffscreenCanvas, Wasm
+instance, Stylo pool, and cached font bytes remain in place. The Blob URL is
+revoked only after `loadLynxXml` settles.
 
 Synchronous GPU readback remains absent because browser WebGPU map completion
 is Promise-driven; native capture blocks on device polling. Browser capture

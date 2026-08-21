@@ -290,8 +290,9 @@ export class BobcatCanvas {
    * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
    * VM initialization, or evaluation failure. Relative URLs are resolved
    * against this document's base URL before they cross the Worker boundary.
-   * A Canvas accepts exactly one entry-script operation. Loading, VM startup,
-   * and execution have no facade-imposed deadline.
+   * The current native view accepts exactly one entry-script operation;
+   * `reset()` installs a fresh view. Loading, VM startup, and execution have
+   * no facade-imposed deadline.
    */
   async executeScript(url) {
     await this.#request('executeScript', { url: documentUrl(url) })
@@ -310,14 +311,24 @@ export class BobcatCanvas {
    * warning because Bobcat does not execute it yet. Page configuration remains
    * the host's `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies
    * web-core's raw-loader defaults when the host does not need overrides. This
-   * is a one-shot entry-script operation; a repeated call rejects before fetch
-   * or stylesheet mounting.
+   * is a one-shot operation for the current native view; a repeated call
+   * rejects before fetch or stylesheet mounting unless `reset()` ran first.
    */
   async loadLynxXml(url) {
     await this.#request('loadLynxXml', { url: documentUrl(url) })
   }
 
-  /** Register one or more font faces from an OpenType font container. */
+  /**
+   * Replace the native Lynx view while retaining this Render Worker, its
+   * transferred canvas, initialized Wasm instance, page configuration,
+   * current device metrics, registered font containers, and selected default
+   * font family.
+   */
+  async reset() {
+    await this.#request('reset')
+  }
+
+  /** Register one or more font faces and restore them after each reset. */
   async registerFonts(data) {
     return await this.#request('registerFonts', { bytes: fontBytes(data) })
   }

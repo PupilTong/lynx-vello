@@ -23,10 +23,10 @@ static EMBEDDER_STYLE_THREAD_POOL: std::sync::OnceLock<rayon::ThreadPool> =
 
 /// Installs the process-wide style traversal pool supplied by a Wasm embedder.
 ///
-/// The pool must include the thread that owns and mutates the document, as
-/// Stylo reserves worker index zero for that caller. It must be installed
-/// before the first style flush. Subsequent calls return the supplied pool
-/// unchanged.
+/// The persistent presenting owner occupies index zero. Script owners enter
+/// traversal from outside the pool, and Stylo moves their root closures onto a
+/// managed worker. It must be installed before the first style flush.
+/// Subsequent calls return the supplied pool unchanged.
 #[cfg(target_arch = "wasm32")]
 pub fn install_style_thread_pool(pool: rayon::ThreadPool) -> Result<(), rayon::ThreadPool> {
     EMBEDDER_STYLE_THREAD_POOL.set(pool)

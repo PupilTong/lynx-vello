@@ -514,10 +514,23 @@ useful signal for currently-compatible versions of those libraries.
   synchronously at each execution checkpoint; there is no browser
   microtask-completion protocol. The underlying QuickJS bridge retains an
   opt-in execution timeout for its direct users and tests.
-  One Wasm instance owns one view and
-  its Stylo pool; every public `BobcatCanvas` gets a separate Render Worker and
-  Wasm instance. The pool minimum is two threads so one managed Rayon worker
-  remains after the synchronous entry-task Worker exits. The UI never
+  A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
+  its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
+  native view does. Every public `BobcatCanvas` gets a separate Render Worker
+  and Wasm instance; `BobcatCanvas.reset()` drops the current native `LynxView`
+  and constructs a replacement in that same warm session. Closing the view's
+  sole command sender makes its detached Lynx-main Worker drop the thread-bound
+  QuickJS realm and exit naturally; replacement creation does not join it. The
+  transferred OffscreenCanvas, module instance,
+  configuration, latest metrics, resource provider, registered font
+  containers, selected default font family, and Stylo pool survive; reset
+  clears the old page's transient registered script and stylesheet bytes. The
+  persistent Render Worker is
+  Stylo's Rayon index-zero owner; the pool also contains managed style Workers.
+  A per-view script owner enters traversal from outside that pool, and Stylo
+  transfers its root closure onto a managed worker. The configured style-pool
+  minimum is two: the Render Worker plus at least one managed Stylo Worker;
+  each live view's Lynx-main Worker is separate. The UI never
   blocks, while Worker-side Rust may block wherever the native runtime does.
   The browser target enables `parking_lot_core/nightly` so transitive
   Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
@@ -544,8 +557,9 @@ useful signal for currently-compatible versions of those libraries.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
   loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, mounts
   a present raw stylesheet, and starts its main-thread body through the same
-  URL-shaped contracts. Like `executeScript`, it is a one-shot entry operation;
-  a repeated call is rejected before fetching or mounting XML CSS. The
+  URL-shaped contracts. Like `executeScript`, it is a one-shot entry operation
+  for the current native view; a repeated call is rejected before fetching or
+  mounting XML CSS until the host calls `reset()`. The
   exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
   a host may still deliberately override them.
   The optional background body is retained and reported as not executed,
