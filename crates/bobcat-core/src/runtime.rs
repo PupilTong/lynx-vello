@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::event::EventSteps;
+use smallvec::SmallVec;
 
 use crate::engine::{SharedListenerNames, SharedTree};
 use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
@@ -17,6 +18,10 @@ const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+
+/// Declarations one `__SetInlineStyles` record carries without touching the
+/// heap. Compiled `ReactLynx` records are a handful of properties.
+const INLINE_DECLARATIONS: usize = 16;
 
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
@@ -678,14 +683,15 @@ fn install_event_members(
     Ok(())
 }
 
-/// Installs the DOM-attribute and inline-style portion of the host namespace.
+/// Installs the DOM-attribute and inline-style portion of the host module.
 ///
 /// `id`, `class`, and `style` deliberately travel through the same narrow
 /// string boundary as every other attribute. [`LynxDocument`] owns their
-/// specialized DOM/style invalidation paths. `set_node_property` is the one
-/// narrower CSSOM-like primitive: exactly one name/value pair per call, with
-/// JavaScript retaining responsibility for fanning out a style record. Neither
-/// the Element PAPI nor an injected VM receives a document handle.
+/// specialized DOM/style invalidation paths. `setInlineStyles` is the one
+/// wider primitive: a whole record in one crossing, because a record is a
+/// whole-block replacement and building it from empty is what the setter
+/// means. Neither the Element PAPI nor an injected VM receives a document
+/// handle.
 fn install_attribute_members(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
@@ -700,18 +706,18 @@ fn install_attribute_members(
             document.set_attribute(node, name, value);
             Ok(HostValue::Undefined)
         }
+        // One crossing for a whole `__SetInlineStyles` record, and one
+        // declaration block built from empty for it.
+        //
         // Deliberately name-based: this PAPI receives record keys, custom
         // properties have no numeric id, and Stylo's internal PropertyId is
         // not a stable script ABI. A future numeric-key `__AddInlineStyle`
         // can translate its bundle id in JavaScript/the decoder-owned layer
         // before reaching this one primitive.
-        fn set_node_property(
-            node: node_id_argument,
-            name: string_argument,
-            value: string_argument
-        ) |document| {
+        fn setInlineStyles(node: node_id_argument, record: string_argument) |document| {
             validate_live_element(document, NAME, node)?;
-            document.set_inline_style_property(node, name, value);
+            let declarations = split_style_record(NAME, record)?;
+            document.set_inline_style_declarations(node, declarations);
             Ok(HostValue::Undefined)
         }
         fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
@@ -740,6 +746,59 @@ fn install_attribute_members(
     }
 
     Ok(())
+}
+
+/// Splits a `__SetInlineStyles` record payload into its declarations.
+///
+/// The payload is a flat sequence of `<units>:<text>` fields, two per
+/// declaration — the hyphenated property name, then the value. `<units>` is
+/// the text's length in UTF-16 code units, which is exactly what JavaScript's
+/// `String.prototype.length` reports, so the writing side needs no scan and
+/// no escaping.
+///
+/// Length-prefixing rather than delimiting is the point: a declaration value
+/// is arbitrary author text, and any separator this could have used — a
+/// semicolon, a NUL, a private-use code point — is a character some value may
+/// legitimately contain. A length says where the next field starts without
+/// asking what is inside this one.
+fn split_style_record<'a>(
+    function: &str,
+    payload: &'a str,
+) -> Result<SmallVec<[(&'a str, &'a str); INLINE_DECLARATIONS]>, String> {
+    let mut declarations = SmallVec::new();
+    let mut rest = payload;
+    while !rest.is_empty() {
+        let (property, after_property) = take_record_field(function, rest)?;
+        let (value, after_value) = take_record_field(function, after_property)?;
+        declarations.push((property, value));
+        rest = after_value;
+    }
+    Ok(declarations)
+}
+
+/// Reads one `<units>:<text>` field, returning it and what follows.
+fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a str), String> {
+    let malformed = || format!("{function} received a malformed style record");
+    let separator = rest.find(':').ok_or_else(malformed)?;
+    let units: usize = rest[..separator].parse().map_err(|_| malformed())?;
+    let body = &rest[separator + 1..];
+
+    let mut counted = 0usize;
+    let mut end = 0usize;
+    for (offset, character) in body.char_indices() {
+        if counted == units {
+            end = offset;
+            break;
+        }
+        counted += character.len_utf16();
+        end = offset + character.len_utf8();
+    }
+    // Short of the count means the payload was truncated; past it means the
+    // count landed inside a surrogate pair. Neither can come from the writer.
+    if counted != units {
+        return Err(malformed());
+    }
+    Ok((&body[..end], &body[end..]))
 }
 
 fn borrow_tree<'a>(
@@ -1342,7 +1401,7 @@ mod tests {
     }
 
     #[test]
-    fn record_inline_styles_are_fanned_out_by_name_before_reaching_stylo() {
+    fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -1379,6 +1438,95 @@ mod tests {
                 .split(';')
                 .any(|declaration| declaration.trim_start().starts_with("color:")),
             "{style}"
+        );
+    }
+
+    #[test]
+    fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  __SetInlineStyles(view, {
+                    '--separators': 'a:b 3:x 11:y',
+                    '--astral': '\u{1F980}',
+                    width: '7px',
+                  });
+                };
+                ",
+                "app:///delimiter-style.js",
+            )
+            .expect("main-thread script");
+
+        let elements = elements.tree();
+        let style = elements
+            .get(node_id(3))
+            .expect("the view is live")
+            .attribute("style")
+            .expect("the record produced an inline style");
+        assert!(style.contains("--separators: a:b 3:x 11:y"), "{style}");
+        assert!(style.contains("--astral: \u{1F980}"), "{style}");
+        assert!(style.contains("width: 7px"), "{style}");
+    }
+
+    /// A value the per-property setter would reject must stay rejected: a
+    /// batch that concatenated the record into style-attribute text would let
+    /// a `;` start a second declaration instead.
+    #[test]
+    fn a_style_record_value_cannot_inject_a_second_declaration() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  __SetInlineStyles(view, { width: '5px; height: 9px' });
+                };
+                ",
+                "app:///injection-style.js",
+            )
+            .expect("main-thread script");
+
+        let elements = elements.tree();
+        let view = elements.get(node_id(3)).expect("the view is live");
+        let style = view
+            .attribute("style")
+            .expect("an empty block is still set");
+        assert!(!style.contains("height"), "{style}");
+        assert!(!style.contains("width"), "{style}");
+    }
+
+    #[test]
+    fn a_malformed_style_record_is_a_boundary_error_rather_than_a_guess() {
+        for payload in ["4:ab", "notalength:x0:", "3:ab", "2:ab", "1:\u{1F980}x0:"] {
+            assert!(
+                split_style_record("bobcat.setInlineStyles", payload).is_err(),
+                "{payload:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_style_record_splits_on_lengths_rather_than_delimiters() {
+        let payload = "5:width4:10px11:font-family9:a;b:c 3:x";
+        assert_eq!(
+            split_style_record("bobcat.setInlineStyles", payload).expect("well-formed")[..],
+            [("width", "10px"), ("font-family", "a;b:c 3:x")]
+        );
+        assert!(
+            split_style_record("bobcat.setInlineStyles", "")
+                .expect("an empty record")
+                .is_empty()
+        );
+        assert_eq!(
+            split_style_record("bobcat.setInlineStyles", "7:--empty0:").expect("empty value")[..],
+            [("--empty", "")]
         );
     }
 

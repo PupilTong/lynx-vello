@@ -176,6 +176,72 @@ impl StyleEngine {
         Some((block, css))
     }
 
+    /// Builds a complete inline declaration block from a record of
+    /// name/value pairs.
+    ///
+    /// This is the batch counterpart of
+    /// [`Self::update_inline_style_property`], for the setter whose semantics
+    /// are a *replacement* rather than a mutation. Building from an empty
+    /// block is what makes it linear: the per-property path has to clone and
+    /// re-serialize the whole block for each declaration, so replaying a
+    /// record of `n` declarations through it costs `O(n²)`.
+    ///
+    /// Each declaration is parsed exactly as
+    /// [`Self::update_inline_style_property`] parses one — a name that does
+    /// not resolve, or a value that does not parse, drops that declaration
+    /// and nothing else. An empty value is skipped: `setProperty` with an
+    /// empty value removes a property, and there is nothing here to remove.
+    ///
+    /// Returns the block (`None` when nothing parsed) and its serialization,
+    /// which is what the `style` attribute reads back as.
+    pub(crate) fn build_inline_style_block<'a>(
+        &self,
+        declarations: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> (Option<Arc<Locked<PropertyDeclarationBlock>>>, String) {
+        let context = self.parser_context(CssRuleType::Style);
+        let mut block = PropertyDeclarationBlock::new();
+        let mut source = SourcePropertyDeclaration::default();
+        for (property, value) in declarations {
+            // Fresh per declaration: `prepare_for_update` asserts it starts
+            // empty and only `update` clears it, so a declaration that
+            // parses but changes nothing would poison the next one.
+            let mut updates = SourcePropertyDeclarationUpdate::default();
+            if value.is_empty() {
+                continue;
+            }
+            let Ok(property) = PropertyId::parse(property, &context) else {
+                continue;
+            };
+            source.clear();
+            if parse_one_declaration_into(
+                &mut source,
+                property,
+                value,
+                Origin::Author,
+                &self.url_data,
+                None,
+                ParsingMode::DEFAULT,
+                QuirksMode::NoQuirks,
+                CssRuleType::Style,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            if !block.prepare_for_update(&source, Importance::Normal, &mut updates) {
+                continue;
+            }
+            block.update(source.drain(), Importance::Normal, &mut updates);
+        }
+
+        let mut css = String::new();
+        block
+            .to_css(&mut css)
+            .expect("serializing a declaration block into a String cannot fail");
+        let block = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
+        (block, css)
+    }
+
     #[must_use]
     pub(crate) fn device(&self) -> &Device {
         self.stylist.device()

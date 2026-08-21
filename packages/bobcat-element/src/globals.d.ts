@@ -9,8 +9,12 @@ interface BobcatNative {
   /** Creates a detached element and returns its `NodeId`. */
   createElement(tag: string): number;
   setAttribute(nodeId: number, name: string, value: string): void;
-  /** CSSOM-like single-property update; an empty value removes the property. */
-  set_node_property(nodeId: number, name: string, value: string): void;
+  /**
+   * Replaces the whole inline declaration block from one record payload: a
+   * flat sequence of `<utf16Length>:<text>` fields, name then value, two per
+   * declaration. An empty payload leaves an empty `style` attribute.
+   */
+  setInlineStyles(nodeId: number, record: string): void;
   removeAttribute(nodeId: number, name: string): void;
   /** The attribute's value, or null when the element does not carry it. */
   getAttribute(nodeId: number, name: string): string | null;
@@ -56,7 +60,7 @@ declare module "bobcat-internal:host" {
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];
   export const setAttribute: BobcatNative["setAttribute"];
-  export const set_node_property: BobcatNative["set_node_property"];
+  export const setInlineStyles: BobcatNative["setInlineStyles"];
   export const removeAttribute: BobcatNative["removeAttribute"];
   export const getAttribute: BobcatNative["getAttribute"];
   export const tagName: BobcatNative["tagName"];
