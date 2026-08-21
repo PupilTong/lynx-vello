@@ -87,6 +87,11 @@ fn external_vm_factory_composes_into_the_opaque_view() {
             .expect("available document"),
         0
     );
+    assert!(
+        !view
+            .set_default_font_family("missing")
+            .expect("available document")
+    );
     let image = DecodedImage::from_rgba8(
         1,
         1,

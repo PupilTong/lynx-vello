@@ -241,6 +241,13 @@ async function dispatchRequest(message) {
     case 'registerFonts':
       postResponse(request, true, renderer.registerFonts(message.bytes))
       break
+    case 'setDefaultFontFamily':
+      postResponse(
+        request,
+        true,
+        renderer.setDefaultFontFamily(message.family),
+      )
+      break
     case 'resize':
       renderer.resize(
         message.width,

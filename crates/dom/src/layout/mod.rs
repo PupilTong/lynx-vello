@@ -113,6 +113,22 @@ impl<T> Document<T> {
         registered
     }
 
+    /// Selects a registered family as the embedder-provided platform default.
+    ///
+    /// This maps CSS `system-ui`, `sans-serif`, and `serif` to `family` ahead
+    /// of any platform fallbacks. Returns `false` when the family is unknown.
+    pub fn set_default_font_family(&mut self, family: &str) -> bool {
+        let context = self
+            .layout_state_mut()
+            .text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()));
+        let configured = context.set_default_font_family(family);
+        if configured {
+            self.invalidate_layout_all();
+        }
+        configured
+    }
+
     #[must_use]
     pub fn rounded_layout(&self, id: crate::NodeId) -> Option<&Layout> {
         let slot = self.slot(id)?;

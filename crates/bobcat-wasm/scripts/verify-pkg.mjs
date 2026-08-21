@@ -37,6 +37,7 @@ for (const requiredMethod of [
   'loadStyleSheet(',
   'pollScript(',
   'registerFonts(',
+  'setDefaultFontFamily(',
   'waitForEngineEvent(',
 ]) {
   if (!glue.includes(requiredMethod)) {
@@ -80,6 +81,7 @@ for (const requiredDeclaration of [
   'loadStyleSheet(url: string | URL)',
   'loadLynxXml(url: string | URL)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
+  'setDefaultFontFamily(family: string)',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
     throw new Error(`browser declarations are missing ${requiredDeclaration}`)
@@ -105,6 +107,12 @@ if (
   !facade.includes("this.#request('loadLynxXml'")
 ) {
   throw new Error('browser facade does not dispatch loadLynxXml')
+}
+if (
+  !facade.includes('async setDefaultFontFamily(family)') ||
+  !facade.includes("this.#request('setDefaultFontFamily'")
+) {
+  throw new Error('browser facade does not dispatch setDefaultFontFamily')
 }
 
 const renderWorker = await readFile(
@@ -149,6 +157,12 @@ if (!renderWorker.includes('await renderer.loadStyleSheet(registeredUrl)')) {
   throw new Error(
     'Render Worker must register fetched stylesheet bytes before loading them',
   )
+}
+if (
+  !renderWorker.includes("case 'setDefaultFontFamily':") ||
+  !renderWorker.includes('renderer.setDefaultFontFamily(message.family)')
+) {
+  throw new Error('Render Worker is missing the default-font dispatch case')
 }
 const lynxXmlDispatchStart = renderWorker.indexOf("case 'loadLynxXml':")
 const lynxXmlDispatchEnd = renderWorker.indexOf("case 'registerFonts':")

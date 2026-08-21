@@ -615,6 +615,13 @@ impl BobcatRenderer {
         self.view.register_fonts(bytes).map_err(js_error)
     }
 
+    /// Map CSS's default generic families to an embedder-selected font family.
+    #[wasm_bindgen(js_name = setDefaultFontFamily)]
+    pub fn set_default_font_family(&mut self, family: String) -> Result<bool, JsValue> {
+        self.ensure_running()?;
+        self.view.set_default_font_family(&family).map_err(js_error)
+    }
+
     /// Await the next durable engine wakeup without timer polling.
     #[wasm_bindgen(js_name = waitForEngineEvent)]
     pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
