@@ -1669,3 +1669,52 @@ fn the_builder_stops_allocating_once_the_page_shape_settles() {
         "the fixture must exercise every buffer at least once, got {settled:?}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Culling is invisible to hit testing
+//
+// The painter discards items that cannot put ink where the scene is looked at.
+// That decision lives in the painter's scratch, never in the retained frame,
+// which is what keeps a programmatic hit outside the viewport — and an event
+// arriving between a scroll and its repaint — answering from the geometry the
+// frame was built with.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_box_outside_the_viewport_still_answers_hit_queries() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    let far = h.el(root, "view.box");
+    h.doc.set_inline(far, "left: -500px; top: 20px");
+    assert_eq!(h.hit(-450.0, 70.0), Some(far));
+}
+
+#[test]
+fn culling_does_not_change_the_retained_frame() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    for index in 0..6 {
+        let box_id = h.el(root, "view.box");
+        h.doc
+            .set_inline(box_id, &format!("left: 4000px; top: {}px", index * 120));
+    }
+    let built = h.paint().items().len();
+    h.doc.dom.render();
+    let retained = h
+        .doc
+        .dom
+        .painter
+        .borrow()
+        .frame()
+        .expect("a rendered document retains its frame")
+        .items()
+        .len();
+    assert_eq!(
+        built, retained,
+        "the frame carries every item, painted or not"
+    );
+}
