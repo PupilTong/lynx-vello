@@ -59,8 +59,9 @@ use std::thread::Builder as ThreadBuilder;
 
 use dom::FontBlob;
 use dom::event::EventSteps;
-use dom::input::{DefaultAction, InputEvent, InputKind, PointerPhase};
+use dom::input::InputEvent;
 use dom::render::gpu::Headless;
+use dom::scroll::ScrollAxes;
 use dom::vello::peniko::Color;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
@@ -68,7 +69,7 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
 use crate::clock::{AnimationClock, SystemClock};
-use crate::gesture::{GestureRouter, LONG_PRESS_EVENT, SynthesizedEvent};
+use crate::gesture::{EmitEvent, GestureRouter, InputDecision, RouterHost};
 use crate::image::DecodedImage;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -466,43 +467,47 @@ enum Output<'window> {
     Window(Box<WindowGraphics<'window>>),
 }
 
-/// The event one routed input becomes.
-///
-/// Deliberately the W3C pointer names rather than Lynx's `tap`/`longpress`:
-/// those are *synthesized* from the whole pointer sequence by
-/// [`crate::gesture::GestureRouter`] and dispatched beside these raw events,
-/// so naming a single `pointerup` `tap` here would double-report the guess
-/// the router exists to replace.
-fn event_name(event: &InputEvent) -> Option<&'static str> {
-    match event.kind {
-        InputKind::Pointer { phase, .. } => match phase {
-            PointerPhase::Down => Some("pointerdown"),
-            PointerPhase::Move => Some("pointermove"),
-            PointerPhase::Up => Some("pointerup"),
-            PointerPhase::Cancel => Some("pointercancel"),
-            // `InputKind` and its enums are `#[non_exhaustive]` so keyboard
-            // and focus can arrive without a break; an unnamed one dispatches
-            // nothing rather than guessing at a name.
-            _ => None,
-        },
-        InputKind::Wheel { .. } => Some("wheel"),
-        _ => None,
-    }
-}
-
-/// The device facts the realm turns into a Lynx event object's `detail`.
+/// The device facts the realm turns into a Lynx event object's `detail`,
+/// serialized from a router decision.
 ///
 /// Viewport CSS px, which in this engine is also document space: there is no
 /// document scrolling area, so the standard's `clientX`/`pageX` pair has one
 /// value here.
-fn event_detail(event: &InputEvent) -> String {
+fn emit_detail(event: &EmitEvent) -> String {
     let position = event.position;
-    match event.kind {
-        InputKind::Wheel { delta, .. } => format!(
+    match event.wheel {
+        Some(delta) => format!(
             r#"{{"x":{},"y":{},"deltaX":{},"deltaY":{}}}"#,
             position.x, position.y, delta.x, delta.y
         ),
-        _ => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
+        None => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
+    }
+}
+
+/// The document facts the router asks for while deciding, answered from the
+/// borrowed tree and the shared listener-name table.
+struct EngineRouterHost<'a> {
+    tree: &'a LynxDocument,
+    listener_names: &'a SharedListenerNames,
+}
+
+impl RouterHost for EngineRouterHost<'_> {
+    fn nearest_user_scrollable(&self, node: dom::NodeId, axes: ScrollAxes) -> Option<dom::NodeId> {
+        self.tree.nearest_user_scrollable(node, axes)
+    }
+
+    fn contains_node(&self, node: dom::NodeId) -> bool {
+        self.tree.get(node).is_some()
+    }
+
+    fn scrollport_size(&self, node: dom::NodeId) -> Option<(f32, f32)> {
+        self.tree
+            .scroll_box(node)
+            .map(|scroll_box| (scroll_box.scrollport.width, scroll_box.scrollport.height))
+    }
+
+    fn has_listener(&self, name: &str) -> bool {
+        self.listener_names.contains(name)
     }
 }
 
@@ -751,83 +756,82 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             tree.set_viewport(width, height);
             tree.set_device_pixel_ratio(ratio);
         }
-        let mut synthesized = Vec::new();
+        let mut decisions = Vec::new();
         while let Some((event, at)) = pending_input.pop_front() {
-            // A deadline this event's arrival time has passed resolves — and
-            // crosses the ordered channel — before the event itself, so a
-            // release arriving after the long-press deadline delivers
-            // `longpress` before its own `pointerup`, the while-still-pressed
-            // order Lynx guarantees.
-            gesture.on_tick(
-                at,
-                || listener_names.contains(LONG_PRESS_EVENT),
-                &mut synthesized,
-            );
-            Self::flush_synthesized(&mut synthesized, tree, commands);
-            // Routing performs the user-agent default action, and reports the
-            // node it routed to — so the event path costs no second hit test.
-            // The default action runs first and unconditionally: no listener
-            // can suppress one, because Lynx has no cancelable event.
-            let response = tree.handle_input(event);
-            if let (Some(commands), Some(target)) = (commands, response.target)
-                && let Some(name) = event_name(&event)
-            {
-                // Built here, where the document is already borrowed, so the
-                // thread that owns the realm never has to take it to find out
-                // who an event reaches.
-                let steps = tree.event_steps(target, true, true);
-                let _ = commands.send(ScriptCommand::DispatchEvent {
-                    steps,
-                    name: Arc::from(name),
-                    detail: Arc::from(event_detail(&event)),
-                });
-            }
-            // After the raw event, so a synthesized `tap` follows its own
-            // `pointerup` the way Lynx's `tap` follows `touchend`. A scroll
-            // the default action performed is the sequence's claim signal.
-            let scrolled = matches!(response.default_action, DefaultAction::Scroll { .. });
-            gesture.on_pointer(
+            // Routing only: the prevented copy makes `dom` perform no default
+            // action, because deciding the user-agent scroll now belongs to
+            // the router. The event the router sees keeps its original
+            // `default_prevented` — that bit is the embedder's suppression
+            // seam, and the router honors it by deciding no scroll.
+            let target = tree.handle_input(event.with_default_prevented(true)).target;
+            gesture.on_input(
                 &event,
-                response.target,
-                scrolled,
+                target,
                 at,
-                || listener_names.contains(LONG_PRESS_EVENT),
-                &mut synthesized,
+                &EngineRouterHost {
+                    tree,
+                    listener_names,
+                },
+                &mut decisions,
             );
-            Self::flush_synthesized(&mut synthesized, tree, commands);
+            Self::execute_decisions(&mut decisions, gesture, tree, commands);
         }
     }
 
-    /// Sends the router's synthesized events down the ordinary dispatch path.
+    /// Executes the router's decisions in order — which is the delivery
+    /// order, because the command channel is ordered.
     ///
-    /// A target freed since its down resolves to nothing rather than a path —
-    /// the same non-guarantee raw events already have, just checked before
-    /// path construction because `event_steps` asserts liveness.
-    fn flush_synthesized(
-        synthesized: &mut Vec<SynthesizedEvent>,
+    /// A scroll decision drives the document's scroll chain, reporting real
+    /// consumption back so the router can claim the sequence. An emit
+    /// decision goes to path construction and the channel; a target freed
+    /// since the decision formed resolves to nothing rather than a path —
+    /// checked here because `event_steps` asserts liveness.
+    fn execute_decisions(
+        decisions: &mut Vec<InputDecision>,
+        gesture: &mut GestureRouter,
         tree: &mut LynxDocument,
         commands: Option<&mpsc::Sender<ScriptCommand>>,
     ) {
-        let Some(commands) = commands else {
-            synthesized.clear();
-            return;
-        };
-        for event in synthesized.drain(..) {
-            if tree.get(event.target).is_none() {
-                continue;
+        for decision in decisions.drain(..) {
+            match decision {
+                InputDecision::Scroll {
+                    pointer,
+                    from,
+                    delta,
+                } => {
+                    if tree.get(from).is_none() {
+                        continue;
+                    }
+                    if tree.scroll_chain(from, delta).is_some()
+                        && let Some(pointer) = pointer
+                    {
+                        gesture.note_scroll_consumed(pointer);
+                    }
+                }
+                InputDecision::Emit(event) => {
+                    let Some(commands) = commands else {
+                        continue;
+                    };
+                    if tree.get(event.target).is_none() {
+                        continue;
+                    }
+                    // Built here, where the document is already borrowed, so
+                    // the thread that owns the realm never has to take it to
+                    // find out who an event reaches. The router decided the
+                    // type and the target; the chain is this module's.
+                    let steps = tree.event_steps(event.target, true, true);
+                    let _ = commands.send(ScriptCommand::DispatchEvent {
+                        steps,
+                        name: Arc::from(event.name),
+                        detail: Arc::from(emit_detail(&event)),
+                    });
+                }
             }
-            let steps = tree.event_steps(event.target, true, true);
-            let detail = format!(r#"{{"x":{},"y":{}}}"#, event.position.x, event.position.y);
-            let _ = commands.send(ScriptCommand::DispatchEvent {
-                steps,
-                name: Arc::from(event.name),
-                detail: Arc::from(detail),
-            });
         }
     }
 
     /// Resolves gesture deadlines against the frame clock — the per-frame
-    /// half of recognition, beside the per-event half in
+    /// half of the router, beside the per-event half in
     /// [`Self::drain_deferred`]. While a deadline is armed the router's
     /// [`GestureRouter::needs_frame`] keeps frames coming, the same
     /// continuation contract running animations use.
@@ -838,13 +842,16 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         commands: Option<&mpsc::Sender<ScriptCommand>>,
         now: f64,
     ) {
-        let mut synthesized = Vec::new();
+        let mut decisions = Vec::new();
         gesture.on_tick(
             now,
-            || listener_names.contains(LONG_PRESS_EVENT),
-            &mut synthesized,
+            &EngineRouterHost {
+                tree,
+                listener_names,
+            },
+            &mut decisions,
         );
-        Self::flush_synthesized(&mut synthesized, tree, commands);
+        Self::execute_decisions(&mut decisions, gesture, tree, commands);
     }
 
     /// Routes one host input event on the presenting side.
@@ -1448,13 +1455,13 @@ mod tests {
         );
     }
 
-    /// A synthesized event whose down-target was freed before the flush must
-    /// be skipped, because `Document::event_steps` asserts liveness — the
-    /// guard is the only thing between a mid-sequence `dropElement` and a
+    /// An emit decision whose target was freed before execution must be
+    /// skipped, because `Document::event_steps` asserts liveness — the guard
+    /// is the only thing between a mid-sequence `dropElement` and a
     /// presenting-thread panic.
     #[test]
-    fn a_synthesized_event_for_a_freed_target_is_skipped_not_delivered() {
-        use crate::gesture::{SynthesizedEvent, TAP_EVENT};
+    fn an_emit_decision_for_a_freed_target_is_skipped_not_delivered() {
+        use crate::gesture::{EmitEvent, GestureRouter, InputDecision, TAP_EVENT};
 
         let engine = engine();
         let (sender, receiver) = std::sync::mpsc::channel::<super::ScriptCommand>();
@@ -1462,17 +1469,20 @@ mod tests {
         let doomed = tree.create_element("view", ());
         crate::tree::raw_text::drop_element_and_owned_text(&mut tree, doomed);
 
-        let mut synthesized = vec![SynthesizedEvent {
+        let mut decisions = vec![InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
             target: doomed,
             position: dom::Point2D::new(1.0, 1.0),
-        }];
-        super::OffscreenEngine::<crate::clock::SystemClock>::flush_synthesized(
-            &mut synthesized,
+            wheel: None,
+        })];
+        let mut gesture = GestureRouter::default();
+        super::OffscreenEngine::<crate::clock::SystemClock>::execute_decisions(
+            &mut decisions,
+            &mut gesture,
             &mut tree,
             Some(&sender),
         );
-        assert!(synthesized.is_empty(), "the queue is always drained");
+        assert!(decisions.is_empty(), "the queue is always drained");
         assert!(
             receiver.try_recv().is_err(),
             "a freed target reaches no one rather than panicking the walk"
@@ -2006,6 +2016,53 @@ mod event_loop_tests {
         engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
         engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
         wait_for_log(&mut engine, "tap:150");
+
+        // The router's scroll decision drove the document: 30px of travel
+        // minus the 8px drag slop moved the scroller 22px.
+        let offset = engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .scroll_offset(node_id(3));
+        assert!(
+            (offset.y - 22.0).abs() < 0.5,
+            "the drag scrolled the view, got {offset:?}"
+        );
+    }
+
+    /// A wheel over scrollable content scrolls it (the router's decision,
+    /// executed against the document) and dispatches `wheel` with its delta
+    /// in the detail — in that order.
+    #[test]
+    fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
+        let page = SCROLLING_GESTURE_PAGE.replace(
+            "__AddEventListener(view, 'tap', note, {});",
+            "__AddEventListener(view, 'wheel', (event) => {
+               entries.push(event.type + ':' + event.detail.deltaY);
+               __SetAttribute(view, 'log', entries.join());
+             }, {});",
+        );
+        let mut engine = booted(&page);
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(InputEvent::wheel(
+            Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 30.0),
+        ));
+        wait_for_log(&mut engine, "wheel:30");
+        let offset = engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .scroll_offset(node_id(3));
+        assert!(
+            (offset.y - 30.0).abs() < 0.5,
+            "the wheel scrolled the view, got {offset:?}"
+        );
     }
 
     /// A stationary hold produces no further input, so only the frame half

@@ -124,8 +124,12 @@ pub enum PointerKind {
 }
 
 impl PointerKind {
+    /// Whether a drag of this device scrolls content: touch and pen do, a
+    /// mouse drag does not, matching every browser. Public because a runtime
+    /// layer that suppresses the default action and drives scrolling itself
+    /// applies the same device policy.
     #[must_use]
-    const fn drags_to_scroll(self) -> bool {
+    pub const fn drags_to_scroll(self) -> bool {
         matches!(self, Self::Touch | Self::Pen)
     }
 }
