@@ -3,16 +3,22 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
+use smallvec::SmallVec;
 
 use crate::script::{
     HostCallback, HostValue, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind,
     ScriptErrorPhase, ScriptSourceLocation,
 };
+
+/// Arguments a host-to-realm call carries without touching the heap. The
+/// widest member the runtime calls is `event_listener_callback`, with seven.
+const INLINE_CALL_ARGUMENTS: usize = 8;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
@@ -65,9 +71,21 @@ pub fn engine_factory() -> Arc<dyn ScriptEngineFactory> {
     Arc::new(QuickJsFactory)
 }
 
+/// One loaded module's namespace object, plus the export names already
+/// interned in it.
+///
+/// `QuickJS` resolves a property by atom. Interning the name on every call
+/// would hash and allocate once per crossing, so a namespace remembers the
+/// atom for each export the host has ever called through it — the event path
+/// calls exactly one, on every step of every walk.
+struct ModuleNamespace {
+    object: quickjs::Value,
+    exports: HashMap<Box<str>, Rc<quickjs::Member>>,
+}
+
 struct QuickJsScriptEngine {
     realm: quickjs::Realm,
-    module_namespaces: HashMap<String, quickjs::Value>,
+    module_namespaces: HashMap<String, ModuleNamespace>,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
     deferred_checkpoint_error: Option<ScriptError>,
@@ -89,16 +107,54 @@ impl QuickJsScriptEngine {
     }
 
     fn module_namespace(&mut self, specifier: &str) -> Result<quickjs::Value, ScriptError> {
-        if let Some(namespace) = self.module_namespaces.get(specifier) {
-            return Ok(namespace.clone());
+        if let Some(entry) = self.module_namespaces.get(specifier) {
+            return Ok(entry.object.clone());
         }
-        let namespace = self
+        let object = self
             .realm
             .module_namespace(specifier)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+        self.module_namespaces.insert(
+            specifier.to_owned(),
+            ModuleNamespace {
+                object: object.clone(),
+                exports: HashMap::new(),
+            },
+        );
+        Ok(object)
+    }
+
+    /// Resolves a module export to the namespace object it lives on and the
+    /// interned name to look it up by, interning that name at most once per
+    /// export.
+    ///
+    /// A module namespace is an ordinary object to `QuickJS`, so the atom a
+    /// property lookup needs is the same one whatever the object is — which
+    /// is why the cache survived the move off `globalThis`.
+    fn module_export(
+        &mut self,
+        specifier: &str,
+        export_name: &str,
+    ) -> Result<(quickjs::Value, Rc<quickjs::Member>), ScriptError> {
+        let object = self.module_namespace(specifier)?;
+        if let Some(member) = self
+            .module_namespaces
+            .get(specifier)
+            .and_then(|entry| entry.exports.get(export_name))
+        {
+            return Ok((object, Rc::clone(member)));
+        }
+        let member = Rc::new(
+            self.realm
+                .member(export_name)
+                .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?,
+        );
         self.module_namespaces
-            .insert(specifier.to_owned(), namespace.clone());
-        Ok(namespace)
+            .get_mut(specifier)
+            .expect("the module namespace was just ensured")
+            .exports
+            .insert(Box::from(export_name), Rc::clone(&member));
+        Ok((object, member))
     }
 
     fn execute_raw(
@@ -198,7 +254,7 @@ impl ScriptEngine for QuickJsScriptEngine {
                         .map(host_value_from_quickjs)
                         .collect::<Result<Vec<_>, _>>()?;
                     callback(&arguments)
-                        .map(host_value_to_quickjs)
+                        .map(|value| host_value_to_quickjs(&value))
                         .map_err(quickjs::HostFunctionError::new)
                 },
             )
@@ -261,28 +317,26 @@ impl ScriptEngine for QuickJsScriptEngine {
     ) -> Result<bool, ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
         self.resume_incomplete_checkpoint(PHASE)?;
-        let namespace = self.module_namespace(module_specifier)?;
-        let member = self
-            .realm
-            .property(&namespace, export_name)
-            .map_err(|error| map_quickjs_error(error, PHASE))?;
-        if member.kind() != quickjs::ValueKind::Function {
-            // The realm published nothing here. Not an error: a bundle with no
-            // listener runtime simply has no member to call.
-            return Ok(false);
-        }
+        let (object, member) = self.module_export(module_specifier, export_name)?;
+        // One crossing carries the lookup and every argument. Nothing here
+        // allocates per argument: the primitives are described in place and
+        // a string is handed over as the `Arc<str>` bytes it already is.
         let arguments = arguments
             .iter()
-            .map(|argument| host_value_into_quickjs(&self.realm, argument))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| map_quickjs_error(error, PHASE))?;
+            .map(host_value_to_quickjs)
+            .collect::<SmallVec<[quickjs::HostValue; INLINE_CALL_ARGUMENTS]>>();
         // The checkpoint runs through `finish_operation`, never inline: an
         // execution guard is alive for the whole call, and QuickJS refuses to
         // nest one — draining jobs here would begin a second.
         let result = self
             .realm
-            .call(&member, None, &arguments)
-            .map(|_| true)
+            .call_member(&object, &member, &arguments)
+            .map(|outcome| match outcome {
+                // The realm published nothing here. Not an error: a bundle
+                // with no listener runtime simply has no member to call.
+                quickjs::CallOutcome::MemberAbsent => false,
+                quickjs::CallOutcome::Called(_) => true,
+            })
             .map_err(|error| map_quickjs_error(error, PHASE));
         self.finish_operation(result, PHASE)
     }
@@ -303,35 +357,25 @@ fn host_value_from_quickjs(
         quickjs::HostValue::Null => Ok(HostValue::Null),
         quickjs::HostValue::Boolean(value) => Ok(HostValue::Boolean(*value)),
         quickjs::HostValue::Number(value) => Ok(HostValue::Number(*value)),
-        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::from(value.as_str()))),
+        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::clone(value))),
         _ => Err(quickjs::HostFunctionError::new(
             "this QuickJS value cannot cross Bobcat's host boundary",
         )),
     }
 }
 
-/// The outbound twin of [`host_value_from_quickjs`]: a primitive becomes a
-/// realm value so it can be an argument.
-fn host_value_into_quickjs(
-    realm: &quickjs::Realm,
-    value: &HostValue,
-) -> Result<quickjs::Value, quickjs::Error> {
-    match value {
-        HostValue::Undefined => realm.undefined(),
-        HostValue::Null => realm.null(),
-        HostValue::Boolean(value) => realm.boolean(*value),
-        HostValue::Number(value) => realm.number(*value),
-        HostValue::String(value) => realm.string(value),
-    }
-}
-
-fn host_value_to_quickjs(value: HostValue) -> quickjs::HostValue {
+/// The outbound twin of [`host_value_from_quickjs`].
+///
+/// Both boundaries carry the same primitives-only vocabulary and spell text
+/// as a reference-counted `str`, so text crosses as a refcount rather than as
+/// the copy an owned `String` would force.
+fn host_value_to_quickjs(value: &HostValue) -> quickjs::HostValue {
     match value {
         HostValue::Undefined => quickjs::HostValue::Undefined,
         HostValue::Null => quickjs::HostValue::Null,
-        HostValue::Boolean(value) => quickjs::HostValue::Boolean(value),
-        HostValue::Number(value) => quickjs::HostValue::Number(value),
-        HostValue::String(value) => quickjs::HostValue::String(value.to_string()),
+        HostValue::Boolean(value) => quickjs::HostValue::Boolean(*value),
+        HostValue::Number(value) => quickjs::HostValue::Number(*value),
+        HostValue::String(value) => quickjs::HostValue::String(Arc::clone(value)),
     }
 }
 

@@ -55,6 +55,9 @@ mod implementation {
 
     const HOST_INLINE_ARGS: usize = 8;
 
+    /// `QuickJS`'s "no such atom" sentinel, returned when interning fails.
+    const JS_ATOM_NULL: u32 = 0;
+
     const JS_EVAL_TYPE_GLOBAL: i32 = 0;
     const JS_EVAL_TYPE_MODULE: i32 = 1;
     const JS_EVAL_FLAG_STRICT: i32 = 1 << 3;
@@ -437,11 +440,11 @@ mod implementation {
             ffi::HOST_ARG_STRING => {
                 let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
                 if let Ok(text) = std::str::from_utf8(bytes) {
-                    return Ok(HostValue::String(text.to_owned()));
+                    return Ok(HostValue::String(Arc::from(text)));
                 }
                 let units = decode_cesu8(bytes).map_err(HostFunctionError::new)?;
                 String::from_utf16(&units)
-                    .map(HostValue::String)
+                    .map(|text| HostValue::String(Arc::from(text)))
                     .map_err(|_| {
                         HostFunctionError::new(
                             "an ill-formed UTF-16 string cannot cross the host-function boundary",
@@ -527,6 +530,13 @@ mod implementation {
         }
     }
 
+    /// A primitive crossing the host-function boundary in either direction.
+    ///
+    /// Text is a reference-counted `str` rather than a `String` so that
+    /// handing the same string on — to the realm as a call argument, or back
+    /// to an adapter that owns its own `Arc<str>` — costs a refcount rather
+    /// than a copy. It is also always well-formed UTF-8, which is what lets
+    /// every outbound string take `JS_NewStringLen` directly.
     #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
@@ -534,7 +544,36 @@ mod implementation {
         Null,
         Boolean(bool),
         Number(f64),
-        String(String),
+        String(Arc<str>),
+    }
+
+    impl HostValue {
+        /// Fills in one C-ABI argument descriptor borrowing this value.
+        ///
+        /// The descriptor borrows: a string points into this `HostValue`'s
+        /// own buffer, so the value must outlive the call it describes.
+        fn describe(&self, slot: &mut ffi::QjsHostArg) {
+            slot.number = 0.0;
+            slot.text = ptr::null();
+            slot.text_len = 0;
+            match self {
+                Self::Undefined => slot.kind = ffi::HOST_ARG_UNDEFINED,
+                Self::Null => slot.kind = ffi::HOST_ARG_NULL,
+                Self::Boolean(value) => {
+                    slot.kind = ffi::HOST_ARG_BOOLEAN;
+                    slot.number = if *value { 1.0 } else { 0.0 };
+                }
+                Self::Number(value) => {
+                    slot.kind = ffi::HOST_ARG_NUMBER;
+                    slot.number = *value;
+                }
+                Self::String(value) => {
+                    slot.kind = ffi::HOST_ARG_STRING;
+                    slot.text = value.as_ptr();
+                    slot.text_len = value.len();
+                }
+            }
+        }
     }
 
     /// Error returned by a Rust host function.
@@ -581,7 +620,13 @@ mod implementation {
     struct HostTable {
         context: Cell<*mut ffi::JSContext>,
         pending_release: RefCell<Vec<*mut HostSlot>>,
-        return_text: RefCell<Vec<u16>>,
+        /// Keeps a returned string alive across the ABI return.
+        ///
+        /// The descriptor the trampoline reads borrows the host function's
+        /// return value, which is dropped as soon as `host_dispatch` returns
+        /// — so the `Arc` is parked here instead, and the bytes C reads are
+        /// the string's own. Nothing is copied and nothing is re-encoded.
+        return_text: RefCell<Option<Arc<str>>>,
     }
 
     impl HostTable {
@@ -589,34 +634,19 @@ mod implementation {
             Self {
                 context: Cell::new(ptr::null_mut()),
                 pending_release: RefCell::new(Vec::new()),
-                return_text: RefCell::new(Vec::new()),
+                return_text: RefCell::new(None),
             }
         }
 
         fn write_result(&self, value: &HostValue, out: &mut ffi::QjsHostResult) {
-            out.text = ptr::null();
-            out.text_len = 0;
-            out.number = 0.0;
-            match value {
-                HostValue::Undefined => out.kind = ffi::HOST_ARG_UNDEFINED,
-                HostValue::Null => out.kind = ffi::HOST_ARG_NULL,
-                HostValue::Boolean(value) => {
-                    out.kind = ffi::HOST_ARG_BOOLEAN;
-                    out.number = if *value { 1.0 } else { 0.0 };
-                }
-                HostValue::Number(value) => {
-                    out.kind = ffi::HOST_ARG_NUMBER;
-                    out.number = *value;
-                }
-                HostValue::String(value) => {
-                    let mut scratch = self.return_text.borrow_mut();
-                    scratch.clear();
-                    scratch.extend(value.encode_utf16());
-                    out.kind = ffi::HOST_ARG_STRING;
-                    out.text = scratch.as_ptr();
-                    out.text_len = scratch.len();
-                }
+            if let HostValue::String(text) = value {
+                // A clone shares the buffer the descriptor points at, so
+                // parking one here is exactly what keeps those bytes alive
+                // until the trampoline has read them. The previous return
+                // value, already consumed, is released by the same write.
+                *self.return_text.borrow_mut() = Some(Arc::clone(text));
             }
+            value.describe(out);
         }
 
         fn note_released(&self, slot: *mut HostSlot) {
@@ -1092,15 +1122,31 @@ mod implementation {
             })
         }
 
+        /// Constructs a JavaScript string from well-formed text.
+        ///
+        /// A Rust `str` is always well-formed UTF-8, so this hands the bytes
+        /// straight to `QuickJS`'s own decoder — one pass, no host-side
+        /// allocation, and a `memcpy` for the ASCII case.
         pub fn string(&self, value: &str) -> Result<Value, Error> {
-            let utf16: Vec<u16> = value.encode_utf16().collect();
-            self.string_utf16(&utf16)
+            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                ffi::qjs_new_string_utf8(context, value.as_ptr(), value.len())
+            })
         }
 
+        /// Constructs a JavaScript string from UTF-16 code units, including
+        /// ill-formed ones.
+        ///
+        /// Well-formed units transcode to UTF-8 and take the same path as
+        /// [`Self::string`]. Only an unpaired surrogate — which has no UTF-8
+        /// spelling at all — falls back to the escape-and-parse path that
+        /// preserves it.
         pub fn string_utf16(&self, units: &[u16]) -> Result<Value, Error> {
-            self.construct(ErrorPhase::ConstructValue, |context| unsafe {
-                ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len())
-            })
+            match String::from_utf16(units) {
+                Ok(text) => self.string(&text),
+                Err(_) => self.construct(ErrorPhase::ConstructValue, |context| unsafe {
+                    ffi::qjs_new_string_utf16(context, units.as_ptr(), units.len())
+                }),
+            }
         }
 
         pub fn evaluate(
@@ -1272,6 +1318,94 @@ mod implementation {
             guard.finish(result, ErrorPhase::Call)
         }
 
+        /// Interns a property name so repeated lookups cost no string work.
+        ///
+        /// `QuickJS` resolves a property by atom; a name-keyed lookup hashes
+        /// and interns the name on every call. A host that calls the same
+        /// member every event interns it once instead.
+        pub fn member(&mut self, name: &str) -> Result<Member, Error> {
+            self.reclaim();
+            let context = self.inner.context.as_ptr();
+            let atom = unsafe { ffi::qjs_atom_new(context, name.as_ptr(), name.len()) };
+            if atom == JS_ATOM_NULL {
+                return Err(self.capture_exception(context, ErrorPhase::ConstructValue));
+            }
+            Ok(Member {
+                atom,
+                owner: Rc::clone(&self.inner),
+            })
+        }
+
+        /// Calls `target[member]` with primitive arguments, in one crossing.
+        ///
+        /// The arguments become `JSValue`s in a stack array inside the ABI,
+        /// so a call allocates nothing per argument — no rooted [`Value`], no
+        /// boxed `QuickJS` value, no UTF-16 buffer. Strings are handed over as
+        /// the `Arc<str>` bytes they already are.
+        ///
+        /// A target with no callable under that name is
+        /// [`CallOutcome::MemberAbsent`], not an error: a realm that
+        /// published no such member is a realm that has nothing to say.
+        ///
+        /// The member runs with `this` undefined, as [`Self::call`] with no
+        /// receiver does — the target names where to look the callable up,
+        /// not what to bind it to.
+        pub fn call_member(
+            &mut self,
+            target: &Value,
+            member: &Member,
+            arguments: &[HostValue],
+        ) -> Result<CallOutcome, Error> {
+            self.reclaim();
+            self.ensure_affinity(target, ErrorPhase::Call)?;
+            if !Rc::ptr_eq(&self.inner, &member.owner) {
+                return Err(Error::bridge(
+                    ErrorKind::WrongRealm,
+                    ErrorPhase::Call,
+                    "member name belongs to a different QuickJS realm",
+                ));
+            }
+            let mut described: SmallVec<[ffi::QjsHostArg; HOST_INLINE_ARGS]> =
+                SmallVec::with_capacity(arguments.len());
+            for argument in arguments {
+                let mut slot = ffi::QjsHostArg {
+                    kind: ffi::HOST_ARG_UNDEFINED,
+                    number: 0.0,
+                    text: ptr::null(),
+                    text_len: 0,
+                };
+                argument.describe(&mut slot);
+                described.push(slot);
+            }
+            let context = self.inner.context.as_ptr();
+            let guard = self.inner.interrupt.begin();
+            let mut raw = ptr::null_mut();
+            let status = unsafe {
+                ffi::qjs_call_member(
+                    context,
+                    target.inner.raw.as_ptr(),
+                    member.atom,
+                    described.len(),
+                    described.as_ptr(),
+                    &raw mut raw,
+                )
+            };
+            // The descriptors borrow `arguments`, which outlives the call.
+            drop(described);
+            let result = match status {
+                0 => match NonNull::new(raw) {
+                    Some(raw) => Ok(CallOutcome::Called(Value::from_raw(
+                        Rc::clone(&self.inner),
+                        raw,
+                    ))),
+                    None => Err(self.capture_exception(context, ErrorPhase::Call)),
+                },
+                1 => Ok(CallOutcome::MemberAbsent),
+                _ => Err(self.capture_exception(context, ErrorPhase::Call)),
+            };
+            guard.finish(result, ErrorPhase::Call)
+        }
+
         pub fn try_execute_pending_job(&mut self) -> Result<bool, Error> {
             self.reclaim();
             let guard = self.inner.interrupt.begin();
@@ -1401,6 +1535,36 @@ mod implementation {
             let reason = Value::from_raw(Rc::clone(&self.inner), raw);
             Some(sanitize_exception(&reason, ErrorPhase::PendingJob, false))
         }
+    }
+
+    /// An interned property name, owned by the realm that interned it.
+    pub struct Member {
+        atom: u32,
+        owner: Rc<RealmInner>,
+    }
+
+    impl fmt::Debug for Member {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.debug_struct("Member").finish_non_exhaustive()
+        }
+    }
+
+    impl Drop for Member {
+        fn drop(&mut self) {
+            unsafe { ffi::qjs_atom_free(self.owner.context.as_ptr(), self.atom) }
+        }
+    }
+
+    /// What [`Realm::call_member`] found where it looked.
+    ///
+    /// Deliberately closed: a lookup either found a callable and ran it or it
+    /// did not, and a caller that has to handle both has handled everything.
+    #[derive(Debug)]
+    pub enum CallOutcome {
+        /// The member ran and returned this value.
+        Called(Value),
+        /// The target has no callable under that name.
+        MemberAbsent,
     }
 
     struct ValueInner {
@@ -2487,11 +2651,11 @@ mod implementation {
             realm
                 .define_global_function("describe", 1, |arguments| {
                     Ok(HostValue::String(match &arguments[0] {
-                        HostValue::Undefined => "undefined".to_owned(),
-                        HostValue::Null => "null".to_owned(),
-                        HostValue::Boolean(value) => format!("boolean:{value}"),
-                        HostValue::Number(value) => format!("number:{value}"),
-                        HostValue::String(value) => format!("string:{value}"),
+                        HostValue::Undefined => Arc::from("undefined"),
+                        HostValue::Null => Arc::from("null"),
+                        HostValue::Boolean(value) => Arc::from(format!("boolean:{value}")),
+                        HostValue::Number(value) => Arc::from(format!("number:{value}")),
+                        HostValue::String(value) => Arc::from(format!("string:{value}")),
                     }))
                 })
                 .unwrap();
@@ -2647,6 +2811,131 @@ mod implementation {
             assert_eq!(String::from_utf16(&units).unwrap(), "named");
         }
 
+        fn text_of(realm: &mut Realm, expression: &str) -> String {
+            let value = realm
+                .evaluate(EvalSource::new(expression), EvalOptions::default())
+                .expect("evaluate");
+            String::from_utf16(&value.to_utf16().expect("text")).expect("well-formed")
+        }
+
+        #[test]
+        fn a_member_call_passes_every_primitive_through() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .evaluate(
+                    EvalSource::new(
+                        "globalThis.host = { seen: null }; \
+                         host.take = function take(...args) { host.seen = args; }; \
+                         globalThis.host",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let host = realm
+                .evaluate(EvalSource::new("globalThis.host"), EvalOptions::default())
+                .unwrap();
+            let take = realm.member("take").unwrap();
+            let outcome = realm
+                .call_member(
+                    &host,
+                    &take,
+                    &[
+                        HostValue::Undefined,
+                        HostValue::Null,
+                        HostValue::Boolean(true),
+                        HostValue::Number(-2.5),
+                        HostValue::String(Arc::from("a\u{1f980}b")),
+                    ],
+                )
+                .unwrap();
+            assert!(matches!(outcome, CallOutcome::Called(_)));
+            assert_eq!(
+                text_of(&mut realm, "host.seen.map(v => typeof v).join(',')"),
+                "undefined,object,boolean,number,string"
+            );
+            assert_eq!(number(&mut realm, "host.seen[3]"), Some(-2.5));
+            assert_eq!(text_of(&mut realm, "host.seen[4]"), "a\u{1f980}b");
+        }
+
+        #[test]
+        fn a_member_call_survives_more_arguments_than_the_inline_capacity() {
+            let mut realm = Realm::new().unwrap();
+            let host = realm
+                .evaluate(
+                    EvalSource::new(
+                        "globalThis.host = { sum(...args) { \
+                           return args.reduce((a, b) => a + b, 0); } }; globalThis.host",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let sum = realm.member("sum").unwrap();
+            let arguments: Vec<HostValue> =
+                (0..32).map(|i| HostValue::Number(f64::from(i))).collect();
+            let CallOutcome::Called(total) = realm.call_member(&host, &sum, &arguments).unwrap()
+            else {
+                panic!("the member ran");
+            };
+            assert_eq!(total.as_number(), Some(496.0));
+        }
+
+        #[test]
+        fn an_unpublished_member_is_absent_rather_than_an_error() {
+            let mut realm = Realm::new().unwrap();
+            let host = realm
+                .evaluate(
+                    EvalSource::new("globalThis.host = { notAFunction: 7 }; globalThis.host"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            for name in ["missing", "notAFunction"] {
+                let member = realm.member(name).unwrap();
+                let outcome = realm.call_member(&host, &member, &[]).unwrap();
+                assert!(matches!(outcome, CallOutcome::MemberAbsent), "{name}");
+            }
+        }
+
+        #[test]
+        fn a_throwing_member_reports_its_exception() {
+            let mut realm = Realm::new().unwrap();
+            let host = realm
+                .evaluate(
+                    EvalSource::new(
+                        "globalThis.host = { boom() { throw new Error('listener'); } }; \
+                         globalThis.host",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let boom = realm.member("boom").unwrap();
+            let error = realm
+                .call_member(&host, &boom, &[])
+                .expect_err("the member threw");
+            assert_eq!(error.kind, ErrorKind::Exception);
+            assert!(error.message.contains("listener"), "{error:?}");
+        }
+
+        #[test]
+        fn a_member_name_from_another_realm_is_refused() {
+            let mut realm = Realm::new().unwrap();
+            let mut other = Realm::new().unwrap();
+            let host = realm.global_object().unwrap();
+            let foreign = other.member("anything").unwrap();
+            let error = realm
+                .call_member(&host, &foreign, &[])
+                .expect_err("cross-realm member");
+            assert_eq!(error.kind, ErrorKind::WrongRealm);
+        }
+
+        #[test]
+        fn an_interned_member_outlives_its_realm_handle() {
+            let member = {
+                let mut realm = Realm::new().unwrap();
+                realm.member("kept").unwrap()
+            };
+            drop(member);
+        }
+
         #[test]
         fn an_ill_formed_utf16_argument_is_rejected_at_the_boundary() {
             let mut realm = Realm::new().unwrap();
@@ -2671,6 +2960,7 @@ mod implementation {
 }
 
 pub use implementation::{
-    Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError, HostValue,
-    InterruptHandle, JobDrain, Realm, RealmOptions, SourceLocation, SourceType, Value, ValueKind,
+    CallOutcome, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostFunctionError,
+    HostValue, InterruptHandle, JobDrain, Member, Realm, RealmOptions, SourceLocation, SourceType,
+    Value, ValueKind,
 };

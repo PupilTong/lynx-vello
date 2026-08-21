@@ -7,12 +7,12 @@
 //! rather than as a silently growing process, which is what makes these
 //! assertions meaningful.
 
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use quickjs_rust_bridge::{
-    EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, RealmOptions,
+    CallOutcome, EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, RealmOptions,
 };
 
 fn tight_realm() -> Realm {
@@ -67,7 +67,7 @@ fn string_round_trip_does_not_leak() {
             let HostValue::String(value) = &arguments[0] else {
                 return Err(HostFunctionError::new("expected a string"));
             };
-            Ok(HostValue::String(value.repeat(4)))
+            Ok(HostValue::String(Arc::from(value.repeat(4))))
         })
         .unwrap();
     let value = realm
@@ -80,6 +80,71 @@ fn string_round_trip_does_not_leak() {
         )
         .unwrap();
     assert_eq!(value.as_number(), Some(50000.0 * 800.0));
+}
+
+#[test]
+fn repeated_member_calls_do_not_leak() {
+    let mut realm = tight_realm();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { total: 0 }; \
+                 host.take = function take(id, name, detail, last) { \
+                   host.total += id + name.length + detail.length + (last ? 1 : 0); \
+                 }; \
+                 globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let take = realm.member("take").unwrap();
+    let name: Arc<str> = Arc::from("pointermove");
+    let detail: Arc<str> = Arc::from("y".repeat(300));
+    let mut expected = 0.0f64;
+    for index in 0..50_000u32 {
+        expected += f64::from(index % 7)
+            + f64::from(u32::try_from(name.len() + detail.len()).expect("short test strings"))
+            + f64::from(u8::from(index % 2 == 0));
+    }
+    for index in 0..50_000 {
+        let outcome = realm
+            .call_member(
+                &host,
+                &take,
+                &[
+                    HostValue::Number(f64::from(index % 7)),
+                    HostValue::String(Arc::clone(&name)),
+                    HostValue::String(Arc::clone(&detail)),
+                    HostValue::Boolean(index % 2 == 0),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(outcome, CallOutcome::Called(_)));
+    }
+    let total = realm
+        .evaluate(EvalSource::new("host.total"), EvalOptions::default())
+        .unwrap();
+    assert_eq!(total.as_number(), Some(expected));
+}
+
+#[test]
+fn a_throwing_member_call_does_not_leak() {
+    let mut realm = tight_realm();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { boom(text) { throw new Error(text); } }; globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let boom = realm.member("boom").unwrap();
+    let text: Arc<str> = Arc::from("z".repeat(300));
+    for _ in 0..50_000 {
+        realm
+            .call_member(&host, &boom, &[HostValue::String(Arc::clone(&text))])
+            .expect_err("the member throws every time");
+    }
 }
 
 #[test]

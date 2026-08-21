@@ -21,6 +21,7 @@ pollster = { workspace = true }
 quickjs-rust-bridge = { workspace = true, optional = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

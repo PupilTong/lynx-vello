@@ -75,12 +75,10 @@ typedef struct QjsHostArg {
 } QjsHostArg;
 
 
-typedef struct QjsHostResult {
-    int32_t kind;
-    double number;
-    const uint16_t *text;
-    size_t text_len;
-} QjsHostResult;
+/* The result of a host call travels in the same struct an argument does:
+   both are the primitives-only boundary vocabulary, and both carry text as
+   UTF-8 bytes. */
+typedef QjsHostArg QjsHostResult;
 
 
 typedef int QjsHostDispatch(void *opaque, void *handler, size_t argument_count,
@@ -592,6 +590,12 @@ QjsValue *qjs_new_big_uint64(JSContext *context, uint64_t value) {
 }
 
 
+/* The escape hatch for ill-formed UTF-16: text containing an unpaired
+   surrogate has no UTF-8 spelling, and `JS_NewStringLen` would replace the
+   surrogate with U+FFFD. `JS_ParseJSON` is the one entry point that accepts a
+   lone `\uD800` escape and preserves it, at the cost of four passes and three
+   allocations. Well-formed text never reaches here: it goes straight through
+   `qjs_new_string_utf8`. */
 static JSValue qjs_string_from_utf16(JSContext *context, const uint16_t *units,
                                      size_t length) {
     static const char hex[] = "0123456789abcdef";
@@ -627,6 +631,23 @@ static JSValue qjs_string_from_utf16(JSContext *context, const uint16_t *units,
 QjsValue *qjs_new_string_utf16(JSContext *context, const uint16_t *units,
                                size_t length) {
     return qjs_box(context, qjs_string_from_utf16(context, units, length));
+}
+
+/* Well-formed UTF-8 straight into QuickJS's own decoder, which has an ASCII
+   fast path that memcpy's into a Latin-1 string. Every Rust `str` qualifies,
+   so this is the only construction path host text normally takes. */
+QjsValue *qjs_new_string_utf8(JSContext *context, const uint8_t *bytes,
+                              size_t length) {
+    return qjs_box(context,
+                   JS_NewStringLen(context, (const char *)bytes, length));
+}
+
+uint32_t qjs_atom_new(JSContext *context, const uint8_t *bytes, size_t length) {
+    return (uint32_t)JS_NewAtomLen(context, (const char *)bytes, length);
+}
+
+void qjs_atom_free(JSContext *context, uint32_t atom) {
+    JS_FreeAtom(context, (JSAtom)atom);
 }
 
 void qjs_value_free(JSContext *context, QjsValue *value) {
@@ -860,11 +881,80 @@ static JSValue qjs_host_build(JSContext *context, const QjsHostResult *result) {
     case QJS_ARG_NUMBER:
         return JS_NewFloat64(context, result->number);
     case QJS_ARG_STRING:
-        return qjs_string_from_utf16(context, result->text, result->text_len);
+        return JS_NewStringLen(context, (const char *)result->text,
+                               result->text_len);
     default:
         return JS_ThrowInternalError(context, "invalid host return value");
     }
 }
+
+/* One crossing for a whole host->realm call: the arguments arrive as the
+   boundary's own primitive descriptors and become JSValues in a stack array,
+   so a call costs no per-argument heap box on either side of the ABI.
+
+   Returns 0 when the member ran (`*result` owns the returned value), 1 when
+   the target has no callable under that atom, and -1 with a pending exception
+   otherwise. */
+int qjs_call_member(JSContext *context, const QjsValue *target, uint32_t atom,
+                    size_t argument_count, const QjsHostArg *arguments,
+                    QjsValue **result) {
+    JSValue inline_argv[QJS_HOST_INLINE_ARGS];
+    JSValue *argv = inline_argv;
+    JSValue member;
+    JSValue returned;
+    size_t built;
+    int status = 0;
+
+    *result = NULL;
+    member = JS_GetProperty(context, target->value, (JSAtom)atom);
+    if (JS_IsException(member)) {
+        return -1;
+    }
+    if (!JS_IsFunction(context, member)) {
+        JS_FreeValue(context, member);
+        return 1;
+    }
+    if (argument_count > INT_MAX ||
+        argument_count > SIZE_MAX / sizeof(*argv)) {
+        JS_FreeValue(context, member);
+        JS_ThrowRangeError(context, "too many call arguments");
+        return -1;
+    }
+    if (argument_count > QJS_HOST_INLINE_ARGS) {
+        argv = malloc(argument_count * sizeof(*argv));
+        if (argv == NULL) {
+            JS_FreeValue(context, member);
+            JS_ThrowOutOfMemory(context);
+            return -1;
+        }
+    }
+    for (built = 0; built < argument_count; ++built) {
+        argv[built] = qjs_host_build(context, &arguments[built]);
+        if (JS_IsException(argv[built])) {
+            status = -1;
+            break;
+        }
+    }
+    if (status == 0) {
+        returned =
+            JS_Call(context, member, JS_UNDEFINED, (int)argument_count, argv);
+        /* `qjs_box` turns an exception into NULL and leaves it pending, and
+           throws OOM itself if the box cannot be allocated. */
+        *result = qjs_box(context, returned);
+        if (*result == NULL) {
+            status = -1;
+        }
+    }
+    while (built > 0) {
+        JS_FreeValue(context, argv[--built]);
+    }
+    if (argv != inline_argv) {
+        free(argv);
+    }
+    JS_FreeValue(context, member);
+    return status;
+}
+
 
 static JSValue qjs_host_trampoline(JSContext *context, JSValueConst this_value,
                                    int argc, JSValueConst *argv, int magic,

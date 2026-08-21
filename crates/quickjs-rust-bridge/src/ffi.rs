@@ -20,13 +20,9 @@ pub(crate) struct QjsHostArg {
     pub(crate) text_len: usize,
 }
 
-#[repr(C)]
-pub(crate) struct QjsHostResult {
-    pub(crate) kind: i32,
-    pub(crate) number: c_double,
-    pub(crate) text: *const u16,
-    pub(crate) text_len: usize,
-}
+/// The result of a host call has the same shape an argument does: both are
+/// the boundary's primitives-only vocabulary, and both spell text as UTF-8.
+pub(crate) type QjsHostResult = QjsHostArg;
 
 pub(crate) type HostDispatch = unsafe extern "C" fn(
     opaque: *mut c_void,
@@ -95,6 +91,13 @@ unsafe extern "C" {
         units: *const u16,
         length: usize,
     ) -> *mut QjsValue;
+    pub(crate) fn qjs_new_string_utf8(
+        context: *mut JSContext,
+        bytes: *const u8,
+        length: usize,
+    ) -> *mut QjsValue;
+    pub(crate) fn qjs_atom_new(context: *mut JSContext, bytes: *const u8, length: usize) -> u32;
+    pub(crate) fn qjs_atom_free(context: *mut JSContext, atom: u32);
     pub(crate) fn qjs_value_free(context: *mut JSContext, value: *mut QjsValue);
     pub(crate) fn qjs_value_kind(context: *mut JSContext, value: *const QjsValue) -> c_int;
     pub(crate) fn qjs_value_get_boolean(
@@ -136,6 +139,14 @@ unsafe extern "C" {
         argument_count: usize,
         arguments: *const *const QjsValue,
     ) -> *mut QjsValue;
+    pub(crate) fn qjs_call_member(
+        context: *mut JSContext,
+        target: *const QjsValue,
+        atom: u32,
+        argument_count: usize,
+        arguments: *const QjsHostArg,
+        result: *mut *mut QjsValue,
+    ) -> c_int;
     pub(crate) fn qjs_execute_pending_job(
         runtime: *mut QjsRuntime,
         context: *mut *mut JSContext,
