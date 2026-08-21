@@ -17,6 +17,7 @@
 
 pub mod clock;
 mod engine;
+mod gesture;
 pub mod image;
 #[cfg(feature = "quickjs")]
 mod quickjs;

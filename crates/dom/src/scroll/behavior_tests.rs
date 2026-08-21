@@ -6,7 +6,8 @@
 use euclid::default::Vector2D;
 use stylo::queries::values::PrefersColorScheme;
 
-use crate::input::{DefaultAction, InputEvent, InputResponse, PointerKind, PointerPhase};
+use crate::input::{InputEvent, PointerKind, PointerPhase};
+use crate::scroll::ScrollAxes;
 use crate::test_common::{Doc, device_with};
 use crate::visual::{PaintItemKind, PaintOrder};
 use crate::{NodeId, Point2D};
@@ -55,9 +56,9 @@ impl Harness {
             .copied()
     }
 
-    fn input(&mut self, event: InputEvent) -> InputResponse {
+    fn route(&mut self, event: InputEvent) -> Option<NodeId> {
         self.doc.dom.render();
-        self.doc.dom.handle_input(event)
+        self.doc.dom.route_input(event)
     }
 
     fn scroll_to(&mut self, id: NodeId, x: f32, y: f32) {
@@ -168,19 +169,34 @@ fn a_wheel_over_a_pinned_box_does_not_scroll_what_it_is_pinned_above() {
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(scroller, "view.row")).collect();
     let pinned = h.el(scroller, "view.pinned");
 
-    let over_pinned = h.input(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0)));
-    assert_eq!(over_pinned.target, Some(pinned));
-    assert_eq!(over_pinned.default_action, DefaultAction::None);
+    // Routing hits the pinned box, and the scroll chain a router would start
+    // there follows the containing-block chain — page-anchored, so it finds
+    // no scroller. That divergence from DOM ancestry is what keeps a wheel
+    // over the pinned box from moving the content it covers.
+    assert_eq!(
+        h.route(InputEvent::wheel(Point2D::new(30.0, 30.0), (0.0, 80.0))),
+        Some(pinned)
+    );
+    assert_eq!(
+        h.doc
+            .dom
+            .nearest_user_scrollable(pinned, ScrollAxes { x: false, y: true }),
+        None
+    );
+    assert_eq!(
+        h.doc.dom.scroll_chain(pinned, Vector2D::new(0.0, 80.0)),
+        None
+    );
     assert_eq!(h.doc.dom.scroll_offset(scroller), Vector2D::zero());
 
-    let over_content = h.input(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0)));
-    assert_eq!(over_content.target, Some(rows[0]));
+    // Over the content the chain starts inside the scroller and consumes.
     assert_eq!(
-        over_content.default_action,
-        DefaultAction::Scroll {
-            node: scroller,
-            delta: Vector2D::new(0.0, 80.0),
-        },
+        h.route(InputEvent::wheel(Point2D::new(80.0, 80.0), (0.0, 80.0))),
+        Some(rows[0])
+    );
+    assert_eq!(
+        h.doc.dom.scroll_chain(rows[0], Vector2D::new(0.0, 80.0)),
+        Some((scroller, Vector2D::new(0.0, 80.0))),
     );
 }
 
@@ -258,11 +274,20 @@ fn overflow_hidden_clips_without_answering_a_gesture() {
     let clipper = h.el(root, "view.clipper");
     let rows: Vec<NodeId> = (0..3).map(|_| h.el(clipper, "view.row")).collect();
 
-    let response = h
-        .doc
-        .dom
-        .handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0)));
-    assert_eq!(response.default_action, DefaultAction::None);
+    // `hidden` is a scroll container that answers no user gesture: the chain
+    // a router would start under the wheel finds no user-scrollable box.
+    assert_eq!(
+        h.route(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 60.0))),
+        Some(rows[0])
+    );
+    assert_eq!(
+        h.doc.dom.nearest_user_scrollable(rows[0], ScrollAxes::BOTH),
+        None
+    );
+    assert_eq!(
+        h.doc.dom.scroll_chain(rows[0], Vector2D::new(0.0, 60.0)),
+        None
+    );
     assert_eq!(h.doc.dom.scroll_offset(clipper), Vector2D::zero());
 
     h.scroll_to(clipper, 0.0, 60.0);
@@ -333,91 +358,35 @@ fn clip_on_one_axis_leaves_the_other_unbounded() {
 }
 
 #[test]
-fn a_host_gesture_drives_paint_and_hit_testing_end_to_end() {
+fn a_routed_chain_scroll_drives_paint_and_hit_testing_end_to_end() {
     let mut h = Harness::new(SCROLLER);
     let root = h.root();
     let scroller = h.el(root, "view.scroller");
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
 
-    let drag = |h: &mut Harness, y: f32, phase| {
-        h.input(InputEvent::pointer(
-            Point2D::new(50.0, y),
+    // The runtime's router turns a 70px touch drag into a 62px chain scroll
+    // (its 8px slop subtracted); the document's half is routing, the chain,
+    // the repaint, and hit testing through the scrolled frame.
+    let target = h
+        .route(InputEvent::pointer(
+            Point2D::new(50.0, 90.0),
             7,
             PointerKind::Touch,
-            phase,
+            PointerPhase::Down,
         ))
-    };
-
-    drag(&mut h, 90.0, PointerPhase::Down);
-    let moved = drag(&mut h, 20.0, PointerPhase::Move);
-    drag(&mut h, 20.0, PointerPhase::Up);
-
+        .expect("the press routes");
+    let latched = h
+        .doc
+        .dom
+        .nearest_user_scrollable(target, ScrollAxes::BOTH)
+        .expect("the press lands on scrollable content");
+    assert_eq!(latched, scroller);
     assert_eq!(
-        moved.default_action,
-        DefaultAction::Scroll {
-            node: scroller,
-            delta: Vector2D::new(0.0, 62.0),
-        },
+        h.doc.dom.scroll_chain(latched, Vector2D::new(0.0, 62.0)),
+        Some((scroller, Vector2D::new(0.0, 62.0))),
     );
     assert_eq!(h.origin(rows[1]), Point2D::new(0.0, 38.0));
     assert_eq!(h.hit(50.0, 40.0), Some(rows[1]));
-}
-
-/// A `NodeId` is retired on free and never reissued, so a latched gesture
-/// only has to ask whether its own scroller is still live. Freeing something
-/// else in the tree — even a sibling that was on screen — leaves the gesture
-/// alone; freeing the scroller ends it.
-#[test]
-fn a_latched_drag_survives_an_unrelated_free_and_ends_with_its_own_scroller() {
-    let drag = |h: &mut Harness, y: f32, phase| {
-        h.input(InputEvent::pointer(
-            Point2D::new(50.0, y),
-            7,
-            PointerKind::Touch,
-            phase,
-        ))
-    };
-
-    let mut h = Harness::new(SCROLLER);
-    let root = h.root();
-    let scroller = h.el(root, "view.scroller");
-    for _ in 0..4 {
-        h.el(scroller, "view.row");
-    }
-    let bystander = h.el(root, "view.row");
-
-    drag(&mut h, 90.0, PointerPhase::Down);
-    h.doc.dom.drop_subtree(bystander);
-    let moved = drag(&mut h, 20.0, PointerPhase::Move);
-    assert_eq!(
-        moved.default_action,
-        DefaultAction::Scroll {
-            node: scroller,
-            delta: Vector2D::new(0.0, 62.0),
-        },
-        "a free elsewhere in the tree cannot alias the latched scroller, so the gesture continues",
-    );
-
-    // The scroller itself is a different matter: its id names nothing after
-    // the free, so the gesture has nothing left to scroll.
-    let mut h = Harness::new(SCROLLER);
-    let root = h.root();
-    let scroller = h.el(root, "view.scroller");
-    for _ in 0..4 {
-        h.el(scroller, "view.row");
-    }
-
-    drag(&mut h, 90.0, PointerPhase::Down);
-    h.doc.dom.drop_subtree(scroller);
-    assert_eq!(
-        drag(&mut h, 20.0, PointerPhase::Move).default_action,
-        DefaultAction::None,
-    );
-    assert_eq!(
-        drag(&mut h, 40.0, PointerPhase::Move).default_action,
-        DefaultAction::None,
-        "and the gesture stays ended rather than reviving on the next move",
-    );
 }
 
 #[test]
@@ -428,12 +397,12 @@ fn input_targets_through_the_scrolled_frame() {
     let rows: Vec<NodeId> = (0..4).map(|_| h.el(scroller, "view.row")).collect();
     h.scroll_to(scroller, 0.0, 120.0);
 
-    let response = h.input(InputEvent::pointer(
+    let target = h.route(InputEvent::pointer(
         Point2D::new(30.0, 10.0),
         1,
         PointerKind::Touch,
         PointerPhase::Down,
     ));
 
-    assert_eq!(response.target, Some(rows[1]));
+    assert_eq!(target, Some(rows[1]));
 }

@@ -1,5 +1,6 @@
-//! The host input seam: how a window, a canvas, or a test harness hands user
-//! interaction to the document.
+//! The host input seam: the event vocabulary a window, a canvas, or a test
+//! harness hands to the runtime, and the one thing the document itself does
+//! with an event — route it.
 //!
 //! # The shape of the seam
 //!
@@ -12,67 +13,43 @@
 //! no host handle for the document to hold. A host adapter is a `match` and a
 //! constructor call, and a test is a literal.
 //!
+//! # What the document does, and what it leaves to the runtime layer
+//!
+//! [`Document::route_input`] does the one thing that is unambiguously the
+//! browser core's job and impossible to do from outside it: it **routes** the
+//! event — hit testing through the frame's true paint order, honoring
+//! transforms, clips, `visibility` and `pointer-events` — and reports the
+//! node it hit.
+//!
 //! ```
 //! # use dom::input::InputEvent;
 //! # use dom::Point2D;
-//! # fn f<T: Sync>(document: &mut dom::Document<T>) {
-//! let response = document.handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
-//! # let _ = response;
+//! # fn f<T: Sync>(document: &dom::Document<T>) {
+//! let target = document.route_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 120.0)));
+//! # let _ = target;
 //! # }
 //! ```
 //!
-//! # What the document does, and what it leaves to you
-//!
-//! [`Document::handle_input`] does the two things that are unambiguously the
-//! browser core's job and impossible to do from outside it: it **routes** the
-//! event (hit testing through the frame's true paint order, honoring
-//! transforms, clips, `visibility` and `pointer-events`), and it performs the
-//! **UA default action** the event resolves to — today, scrolling a scroll
-//! container. It reports both in an [`InputResponse`].
-//!
-//! It does *not* dispatch, and no part of this crate does. [`crate::event`]
-//! works out which nodes an event visits and in what order; reaching a
-//! listener means leaving this thread, so that is the runtime layer's, along
-//! with naming the event, choosing which routed pointer phase becomes which
-//! event type, and everything Lynx-shaped — `bindEvent`/`catchEvent` phase
-//! encoding, gesture-arena arbitration, `hit-slop`,
-//! `user-interaction-enabled`, tap/long-press synthesis, fling momentum.
-//!
-//! ```
-//! # use dom::input::InputEvent;
-//! # use dom::{Document, Point2D};
-//! # fn f(document: &mut Document<()>, event: InputEvent) {
-//! # fn deliver(_: &dom::event::EventStep) {}
-//! let Some(&hit) = document.elements_from_point(event.position).first() else {
-//!     return;
-//! };
-//! for step in document.event_steps(hit, true, false).steps() {
-//!     deliver(step);
-//! }
-//! document.handle_input(event);
-//! # }
-//! ```
+//! Everything after routing belongs to the runtime layer above: naming the
+//! event, choosing which routed pointer phase becomes which event type,
+//! deciding and driving the user-agent default action — scrolling, through
+//! [`Document::scroll_by`] and [`Document::scroll_chain`], whose unconsumed
+//! remainders exist for exactly that caller — and everything Lynx-shaped:
+//! `bindEvent`/`catchEvent` phase encoding, gesture-arena arbitration,
+//! `hit-slop`, `user-interaction-enabled`, tap/long-press synthesis, fling
+//! momentum. This crate has no default-action machinery and no recognizer:
+//! that single decision point is the runtime's input router, and there is no
+//! second consumer this crate would keep one for. Dispatch is likewise not
+//! this crate's — [`crate::event`] computes which nodes an event visits and
+//! in what order, and reaching a listener means leaving this thread.
 //!
 //! [`InputEvent::default_prevented`] is `preventDefault()` by another name,
-//! and nothing on the event path sets it. Lynx has no cancelable event: a
-//! handler that wants to suppress a built-in behavior goes through gesture
+//! and this crate never reads it. Lynx has no cancelable event: a handler
+//! that wants to suppress a built-in behavior goes through gesture
 //! arbitration (`consumeGesture`/`interceptGesture`), not through the event
-//! object. So this flag is the *gesture* layer's to set, and that layer does
-//! not exist yet — until it does, nothing routed through [`crate::event`]
-//! suppresses a scroll, and a host that needs to suppress one says so
-//! directly:
-//!
-//! ```
-//! # use dom::input::InputEvent;
-//! # fn f(document: &mut dom::Document<()>, event: InputEvent, claimed: bool) {
-//! document.handle_input(event.with_default_prevented(claimed));
-//! # }
-//! ```
-//!
-//! A runtime that wants a *different* default action — Lynx's `parent-first`
-//! nested scrolling, rubber-band overscroll, fling — prevents the default and
-//! drives [`Document::scroll_by`] and [`Document::scroll_chain`] itself. Those
-//! primitives are the whole point of reporting an unconsumed remainder.
+//! object. The flag is the embedder's word to the runtime's input router that
+//! something already claimed the event, and the router answers it by deciding
+//! no scroll.
 //!
 //! # Visual-frame ownership
 //!
@@ -82,36 +59,20 @@
 //! rebuild. Input therefore targets what is on screen: before the first
 //! render nothing is. A node freed since that render drops out of the answer
 //! on its own, because its id is retired rather than reissued and so names
-//! nothing — the same check that ends a latched drag whose scroller was
-//! removed mid-gesture, and the reason a removal elsewhere in the tree no
-//! longer blanks routing. Geometric staleness is allowed and wanted: an
-//! event that lands between a scroll and its repaint hits the content the
-//! user was actually shown. The frame itself stays a DOM implementation detail; callers never
+//! nothing. Geometric staleness is allowed and wanted: an event that lands
+//! between a scroll and its repaint hits the content the user was actually
+//! shown. The frame itself stays a DOM implementation detail; callers never
 //! coordinate or retain a `PaintOrder` beside the document.
 //!
 //! # Recorded limits
 //!
-//! - Two devices are modeled — pointers and wheels. Keyboard, focus, and IME have no consumer in
-//!   this crate yet; [`InputEvent`] and its enums are `#[non_exhaustive]` so they can arrive
-//!   without a break.
-//! - Scroll gestures are drag and wheel only. There is no momentum, no rubber-band overscroll, no
-//!   scrollbar to grab, and no smooth (`scroll-behavior`) animation: this crate owns no clock, and
-//!   a frame pump is the layer above's.
-//! - Only touch and pen drags scroll. A mouse drag does not, matching every browser: a mouse
-//!   scrolls with its wheel.
-//! - Multi-touch is tracked per pointer id, but each pointer scrolls independently. Pinch/zoom is
-//!   not a thing this crate recognizes.
+//! - Two devices are modeled — pointers and wheels. Keyboard, focus, and IME have no consumer yet;
+//!   [`InputEvent`] and its enums are `#[non_exhaustive]` so they can arrive without a break.
 
 use euclid::default::{Point2D, Vector2D};
-use smallvec::SmallVec;
 
 use crate::NodeId;
-use crate::scroll::ScrollAxes;
 use crate::tree::document::Document;
-
-const TOUCH_SLOP: f32 = 8.0;
-
-const WHEEL_LINE_PX: f32 = 40.0;
 
 pub type PointerId = u32;
 
@@ -124,8 +85,12 @@ pub enum PointerKind {
 }
 
 impl PointerKind {
+    /// Whether a drag of this device scrolls content: touch and pen do, a
+    /// mouse drag does not, matching every browser. Public because a runtime
+    /// layer that suppresses the default action and drives scrolling itself
+    /// applies the same device policy.
     #[must_use]
-    const fn drags_to_scroll(self) -> bool {
+    pub const fn drags_to_scroll(self) -> bool {
         matches!(self, Self::Touch | Self::Pen)
     }
 }
@@ -214,9 +179,9 @@ impl InputEvent {
         }
     }
 
-    /// This event with [`Self::default_prevented`] set as given — the handoff
-    /// point for a layer that dispatches to script before letting the document
-    /// act.
+    /// This event with [`Self::default_prevented`] set as given — the
+    /// embedder's word to the runtime's input router that something already
+    /// claimed the event. This crate never reads the flag.
     #[must_use]
     pub const fn with_default_prevented(mut self, prevented: bool) -> Self {
         self.default_prevented = prevented;
@@ -234,188 +199,21 @@ impl InputEvent {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
-pub enum DefaultAction {
-    None,
-    Scroll { node: NodeId, delta: Vector2D<f32> },
-}
-
-/// What one event resolved to.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
-pub struct InputResponse {
-    /// Topmost hit-testable element at the event position.
-    pub target: Option<NodeId>,
-    pub default_action: DefaultAction,
-}
-
-/// One pointer's latched scroll gesture.
-#[derive(Debug, Clone, Copy)]
-struct Drag {
-    pointer: PointerId,
-    scroller: NodeId,
-    origin: Point2D<f32>,
-    scrolling: bool,
-}
-
-/// Per-document interaction state: the gestures currently latched to a
-/// pointer. Two inline slots cover a mouse and a couple of fingers without
-/// allocating.
-#[derive(Debug, Default)]
-pub(crate) struct InputState {
-    drags: SmallVec<[Drag; 2]>,
-}
-
-impl InputState {
-    fn find(&mut self, pointer: PointerId) -> Option<&mut Drag> {
-        self.drags.iter_mut().find(|drag| drag.pointer == pointer)
-    }
-
-    fn scroller(&self, pointer: PointerId) -> Option<NodeId> {
-        self.drags
-            .iter()
-            .find(|drag| drag.pointer == pointer)
-            .map(|drag| drag.scroller)
-    }
-
-    fn end(&mut self, pointer: PointerId) {
-        self.drags.retain(|drag| drag.pointer != pointer);
-    }
-}
-
 impl<T: Sync> Document<T> {
-    /// Routes input against the rendered frame and applies default scrolling.
-    pub fn handle_input(&mut self, event: InputEvent) -> InputResponse {
+    /// Routes one input event against the rendered frame: the topmost
+    /// hit-testable element at its position, or `None` before the first
+    /// render or outside every element.
+    ///
+    /// A pure read — no flush, no rebuild, no state. Everything that follows
+    /// routing (event naming, the user-agent default action, gesture
+    /// synthesis) is the runtime layer's input router.
+    #[must_use]
+    pub fn route_input(&self, event: InputEvent) -> Option<NodeId> {
         if !event.is_finite() {
             debug_assert!(false, "host input events must be finite, got {event:?}");
-            return InputResponse {
-                target: None,
-                default_action: DefaultAction::None,
-            };
+            return None;
         }
-        let mut response = InputResponse {
-            target: self.rendered_element_at(event.position),
-            default_action: DefaultAction::None,
-        };
-        response.default_action = match event.kind {
-            InputKind::Pointer { id, device, phase } => {
-                self.handle_pointer(&event, response.target, id, device, phase)
-            }
-            InputKind::Wheel { delta, mode } => {
-                if event.default_prevented {
-                    DefaultAction::None
-                } else {
-                    self.handle_wheel(response.target, delta, mode)
-                }
-            }
-        };
-        response
-    }
-
-    fn handle_pointer(
-        &mut self,
-        event: &InputEvent,
-        target: Option<NodeId>,
-        id: PointerId,
-        device: PointerKind,
-        phase: PointerPhase,
-    ) -> DefaultAction {
-        match phase {
-            PointerPhase::Down => {
-                self.input_state_mut().end(id);
-                if event.default_prevented || !device.drags_to_scroll() {
-                    return DefaultAction::None;
-                }
-                let scroller =
-                    target.and_then(|node| self.nearest_user_scrollable(node, ScrollAxes::BOTH));
-                if let Some(scroller) = scroller {
-                    self.input_state_mut().drags.push(Drag {
-                        pointer: id,
-                        scroller,
-                        origin: event.position,
-                        scrolling: false,
-                    });
-                }
-                DefaultAction::None
-            }
-            PointerPhase::Move => self.drag_step(event, id),
-            PointerPhase::Up | PointerPhase::Cancel => {
-                self.input_state_mut().end(id);
-                DefaultAction::None
-            }
-        }
-    }
-
-    fn drag_step(&mut self, event: &InputEvent, id: PointerId) -> DefaultAction {
-        let Some(scroller) = self.input_state().scroller(id) else {
-            return DefaultAction::None;
-        };
-        // The latched scroller can be freed mid-gesture. Its id is retired
-        // rather than reissued, so this is a plain liveness question and the
-        // gesture simply ends.
-        if !self.contains_node(scroller) {
-            self.input_state_mut().end(id);
-            return DefaultAction::None;
-        }
-        let drag = self
-            .input_state_mut()
-            .find(id)
-            .expect("the drag was found one statement ago");
-        if event.default_prevented {
-            drag.origin = event.position;
-            return DefaultAction::None;
-        }
-        let travel = event.position - drag.origin;
-        let movement = if drag.scrolling {
-            travel
-        } else {
-            let distance = travel.length();
-            if distance <= TOUCH_SLOP {
-                return DefaultAction::None;
-            }
-            drag.scrolling = true;
-            travel * ((distance - TOUCH_SLOP) / distance)
-        };
-        drag.origin = event.position;
-
-        match self.scroll_chain(scroller, -movement) {
-            Some((node, delta)) => DefaultAction::Scroll { node, delta },
-            None => DefaultAction::None,
-        }
-    }
-
-    fn handle_wheel(
-        &mut self,
-        target: Option<NodeId>,
-        delta: Vector2D<f32>,
-        mode: DeltaMode,
-    ) -> DefaultAction {
-        let axes = ScrollAxes {
-            x: delta.x != 0.0,
-            y: delta.y != 0.0,
-        };
-        let Some(scroller) = target.and_then(|node| self.nearest_user_scrollable(node, axes))
-        else {
-            return DefaultAction::None;
-        };
-        let pixels = match mode {
-            DeltaMode::Pixel => delta,
-            DeltaMode::Line => delta * WHEEL_LINE_PX,
-            DeltaMode::Page => self.scroll_box(scroller).map_or(delta, |scroll_box| {
-                Vector2D::new(
-                    delta.x * scroll_box.scrollport.width,
-                    delta.y * scroll_box.scrollport.height,
-                )
-            }),
-        };
-        match self.scroll_chain(scroller, pixels) {
-            Some((node, consumed)) => DefaultAction::Scroll {
-                node,
-                delta: consumed,
-            },
-            None => DefaultAction::None,
-        }
+        self.rendered_element_at(event.position)
     }
 }
 
@@ -423,256 +221,57 @@ impl<T: Sync> Document<T> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::StylesheetOrigin;
     use crate::tree::document::tests::device;
-    use crate::{NodeId, StylesheetOrigin};
 
-    fn scrolling_page() -> (Document<()>, NodeId, NodeId, NodeId) {
+    fn page() -> (Document<()>, crate::NodeId, crate::NodeId) {
         let mut document: Document<()> = Document::new(device(), "page", ());
         document.add_stylesheet(
             "page { display: flex; width: 800px; height: 600px; }
-             .outer { display: flex; overflow: scroll; width: 200px; height: 200px; }
-             .list { display: flex; overflow: scroll; width: 100px; height: 100px; }
-             .content { flex-shrink: 0; width: 100px; height: 400px; }
-             .filler { flex-shrink: 0; width: 100px; height: 1000px; }",
+             .box { display: flex; width: 100px; height: 100px; }",
             StylesheetOrigin::Author,
         );
         let root = document.document_element().id();
-        let outer = document.create_element("view", ());
-        document.add_class(outer, "outer");
-        document.append_child(root, outer);
-        let list = document.create_element("view", ());
-        document.add_class(list, "list");
-        document.append_child(outer, list);
-        let content = document.create_element("view", ());
-        document.add_class(content, "content");
-        document.append_child(list, content);
-        let filler = document.create_element("view", ());
-        document.add_class(filler, "filler");
-        document.append_child(outer, filler);
-        document.layout();
-        (document, outer, list, content)
-    }
-
-    fn touch(position: (f32, f32), phase: PointerPhase) -> InputEvent {
-        InputEvent::pointer(
-            Point2D::new(position.0, position.1),
-            1,
-            PointerKind::Touch,
-            phase,
-        )
-    }
-
-    fn gesture(document: &mut Document<()>, events: &[InputEvent]) -> InputResponse {
-        let mut last = None;
-        for event in events {
-            document.render();
-            last = Some(document.handle_input(*event));
-        }
-        last.expect("a gesture has at least one event")
+        let child = document.create_element("view", ());
+        document.add_class(child, "box");
+        document.append_child(root, child);
+        (document, root, child)
     }
 
     #[test]
-    fn a_touch_drag_scrolls_the_box_under_the_finger() {
-        let (mut document, _outer, list, content) = scrolling_page();
-
-        let response = gesture(
-            &mut document,
-            &[
-                touch((50.0, 90.0), PointerPhase::Down),
-                touch((50.0, 30.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(response.target, Some(content));
-        assert_eq!(
-            response.default_action,
-            DefaultAction::Scroll {
-                node: list,
-                delta: Vector2D::new(0.0, 52.0),
-            },
-        );
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 52.0));
-
-        gesture(&mut document, &[touch((50.0, 30.0), PointerPhase::Up)]);
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 52.0));
-    }
-
-    #[test]
-    fn a_drag_below_the_slop_threshold_scrolls_nothing() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-
-        let response = gesture(
-            &mut document,
-            &[
-                touch((50.0, 50.0), PointerPhase::Down),
-                touch((50.0, 44.0), PointerPhase::Move),
-                touch((50.0, 45.0), PointerPhase::Up),
-            ],
-        );
-
-        assert_eq!(response.default_action, DefaultAction::None);
-        assert_eq!(document.scroll_offset(list), Vector2D::zero());
-    }
-
-    #[test]
-    fn a_mouse_drag_does_not_scroll_but_its_wheel_does() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-        let at = |y: f32, phase| {
-            InputEvent::pointer(Point2D::new(50.0, y), 1, PointerKind::Mouse, phase)
-        };
-
-        gesture(
-            &mut document,
-            &[at(50.0, PointerPhase::Down), at(-50.0, PointerPhase::Move)],
-        );
-        assert_eq!(document.scroll_offset(list), Vector2D::zero());
-
-        let response =
-            document.handle_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)));
-        assert_eq!(
-            response.default_action,
-            DefaultAction::Scroll {
-                node: list,
-                delta: Vector2D::new(0.0, 30.0),
-            },
-        );
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 30.0));
-    }
-
-    #[test]
-    fn wheel_delta_modes_resolve_to_pixels() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-
-        gesture(
-            &mut document,
-            &[InputEvent::wheel_with_mode(
-                Point2D::new(50.0, 50.0),
-                (0.0, 1.0),
-                DeltaMode::Line,
-            )],
-        );
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 40.0));
-
-        document.scroll_to(list, Vector2D::zero());
-        gesture(
-            &mut document,
-            &[InputEvent::wheel_with_mode(
-                Point2D::new(50.0, 50.0),
-                (0.0, 1.0),
-                DeltaMode::Page,
-            )],
-        );
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 100.0));
-    }
-
-    #[test]
-    fn a_gesture_stays_latched_to_the_box_it_started_on() {
-        let (mut document, outer, list, _content) = scrolling_page();
-        document.scroll_to(list, Vector2D::new(0.0, 300.0));
-
-        gesture(
-            &mut document,
-            &[
-                touch((50.0, 90.0), PointerPhase::Down),
-                touch((50.0, 32.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 300.0));
-        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 50.0));
-    }
-
-    #[test]
-    fn preventing_the_press_suppresses_the_whole_gesture() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-
-        gesture(
-            &mut document,
-            &[
-                touch((50.0, 50.0), PointerPhase::Down).with_default_prevented(true),
-                touch((50.0, -50.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(document.scroll_offset(list), Vector2D::zero());
-    }
-
-    #[test]
-    fn preventing_one_move_skips_only_that_step() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-
-        gesture(
-            &mut document,
-            &[
-                touch((50.0, 50.0), PointerPhase::Down),
-                touch((50.0, 20.0), PointerPhase::Move).with_default_prevented(true),
-                touch((50.0, 0.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 12.0));
-    }
-
-    #[test]
-    fn a_cancelled_pointer_stops_scrolling() {
-        let (mut document, _outer, list, _content) = scrolling_page();
-
-        gesture(
-            &mut document,
-            &[
-                touch((50.0, 50.0), PointerPhase::Down),
-                touch((50.0, 20.0), PointerPhase::Move),
-                touch((50.0, 10.0), PointerPhase::Cancel),
-                touch((50.0, -50.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 22.0));
-    }
-
-    #[test]
-    fn two_fingers_drag_their_own_scrollers() {
-        let (mut document, outer, list, _content) = scrolling_page();
-        let finger = |id, position: (f32, f32), phase| {
-            InputEvent::pointer(
-                Point2D::new(position.0, position.1),
-                id,
-                PointerKind::Touch,
-                phase,
-            )
-        };
-
-        gesture(
-            &mut document,
-            &[
-                finger(1, (50.0, 50.0), PointerPhase::Down),
-                finger(2, (150.0, 150.0), PointerPhase::Down),
-                finger(1, (50.0, 22.0), PointerPhase::Move),
-                finger(2, (150.0, 102.0), PointerPhase::Move),
-            ],
-        );
-
-        assert_eq!(document.scroll_offset(list), Vector2D::new(0.0, 20.0));
-        assert_eq!(document.scroll_offset(outer), Vector2D::new(0.0, 40.0));
-    }
-
-    #[test]
-    fn an_event_over_nothing_scrollable_reports_a_target_and_no_action() {
-        let mut document: Document<()> = Document::new(device(), "page", ());
-        document.add_stylesheet(
-            "page { display: flex; width: 800px; height: 600px; }",
-            StylesheetOrigin::Author,
-        );
-        let root = document.document_element().id();
+    fn routing_reports_the_topmost_element_and_nothing_outside() {
+        let (mut document, root, child) = page();
         document.render();
 
-        let response =
-            document.handle_input(InputEvent::wheel(Point2D::new(10.0, 10.0), (0.0, 50.0)));
-        assert_eq!(response.target, Some(root));
-        assert_eq!(response.default_action, DefaultAction::None);
+        let over_child =
+            document.route_input(InputEvent::wheel(Point2D::new(50.0, 50.0), (0.0, 30.0)));
+        assert_eq!(over_child, Some(child));
+
+        let over_page = document.route_input(InputEvent::pointer(
+            Point2D::new(500.0, 500.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+        assert_eq!(over_page, Some(root));
 
         let outside =
-            document.handle_input(InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)));
-        assert_eq!(outside.target, None);
+            document.route_input(InputEvent::wheel(Point2D::new(10_000.0, 10.0), (0.0, 50.0)));
+        assert_eq!(outside, None);
+    }
+
+    #[test]
+    fn routing_answers_nothing_before_the_first_render() {
+        let (document, _root, _child) = page();
+        assert_eq!(
+            document.route_input(InputEvent::pointer(
+                Point2D::new(50.0, 50.0),
+                1,
+                PointerKind::Touch,
+                PointerPhase::Down,
+            )),
+            None,
+            "input targets what is on screen, and nothing is yet"
+        );
     }
 }

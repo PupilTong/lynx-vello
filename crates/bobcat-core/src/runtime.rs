@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use dom::event::EventSteps;
 
-use crate::engine::SharedTree;
+use crate::engine::{SharedListenerNames, SharedTree};
 use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
 use crate::tree::LynxDocument;
 use crate::tree::raw_text::drop_element_and_owned_text;
@@ -167,13 +167,14 @@ impl MainThreadRuntime {
     pub(crate) fn new(
         factory: &dyn ScriptEngineFactory,
         elements: SharedTree,
+        listener_names: Arc<SharedListenerNames>,
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, MainThreadError> {
         let mut engine = factory
             .create()
             .map_err(|error| MainThreadError::from_engine("creating the script VM", error))?;
         let events = Rc::new(EventState::default());
-        let tree = install_bobcat(engine.as_mut(), elements, on_flush, &events)?;
+        let tree = install_bobcat(engine.as_mut(), elements, listener_names, on_flush, &events)?;
         Ok(Self {
             engine,
             tree,
@@ -326,6 +327,7 @@ impl MainThreadRuntime {
 fn install_bobcat(
     engine: &mut dyn ScriptEngine,
     elements: SharedTree,
+    listener_names: Arc<SharedListenerNames>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
 ) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
@@ -334,8 +336,14 @@ fn install_bobcat(
         taken: None,
     }));
 
-    install_bobcat_object(engine, &handle, on_flush, events)?;
-    install_event_members(engine, events)?;
+    install_bobcat_object(
+        engine,
+        &handle,
+        on_flush,
+        events,
+        Arc::clone(&listener_names),
+    )?;
+    install_event_members(engine, events, listener_names)?;
     engine
         .execute_script(MAIN_THREAD_GLOBALS_SOURCE, MAIN_THREAD_GLOBALS_SOURCE_NAME)
         .map_err(|error| {
@@ -390,6 +398,7 @@ fn install_bobcat_object(
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
+    listener_names: Arc<SharedListenerNames>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
         fn createPage() |document| {
@@ -446,8 +455,16 @@ fn install_bobcat_object(
         let document = tree.tree();
         validate_removable(document, "bobcat.dropElement", node)?;
         drop_element_and_owned_text(document, node);
-        state.listeners.borrow_mut().retain(|_, nodes| {
-            nodes.retain(|(id, _)| *id != node);
+        state.listeners.borrow_mut().retain(|name, nodes| {
+            nodes.retain(|(id, _)| {
+                let keep = *id != node;
+                if !keep {
+                    // The purge is a removal like any other: the shared
+                    // name table must not keep counting a dead registration.
+                    listener_names.note_disabled(name);
+                }
+                keep
+            });
             !nodes.is_empty()
         });
         Ok(HostValue::Undefined)
@@ -473,29 +490,39 @@ fn install_bobcat_object(
 fn install_event_members(
     engine: &mut dyn ScriptEngine,
     events: &Rc<EventState>,
+    listener_names: Arc<SharedListenerNames>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
+    let names = Arc::clone(&listener_names);
     install(engine, "enableEventListener", 3, move |arguments| {
         let node = node_id_argument("bobcat.enableEventListener", arguments, 0)?;
         let capture = capture_argument("bobcat.enableEventListener", arguments, 1)?;
         let name = string_argument("bobcat.enableEventListener", arguments, 2)?;
-        state
+        if state
             .listeners
             .borrow_mut()
             .entry(Arc::from(name))
             .or_default()
-            .insert((node, capture));
+            .insert((node, capture))
+        {
+            // Mirrored to the presenting thread only on true transitions, so
+            // the shared table counts registrations, never repeats.
+            names.note_enabled(name);
+        }
         Ok(HostValue::Undefined)
     })?;
 
     let state = Rc::clone(events);
+    let names = listener_names;
     install(engine, "disableEventListener", 3, move |arguments| {
         let node = node_id_argument("bobcat.disableEventListener", arguments, 0)?;
         let capture = capture_argument("bobcat.disableEventListener", arguments, 1)?;
         let name = string_argument("bobcat.disableEventListener", arguments, 2)?;
         let mut listeners = state.listeners.borrow_mut();
         if let Some(nodes) = listeners.get_mut(name) {
-            nodes.remove(&(node, capture));
+            if nodes.remove(&(node, capture)) {
+                names.note_disabled(name);
+            }
             if nodes.is_empty() {
                 listeners.remove(name);
             }
@@ -785,8 +812,13 @@ mod tests {
     fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, SharedTree) {
         let elements = SharedTree::new(document);
         let factory = crate::quickjs::engine_factory();
-        let runtime = MainThreadRuntime::new(factory.as_ref(), elements.clone(), || {})
-            .expect("main-thread runtime");
+        let runtime = MainThreadRuntime::new(
+            factory.as_ref(),
+            elements.clone(),
+            Arc::new(SharedListenerNames::default()),
+            || {},
+        )
+        .expect("main-thread runtime");
         (runtime, elements)
     }
 

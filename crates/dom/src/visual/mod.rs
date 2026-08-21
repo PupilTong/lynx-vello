@@ -5,7 +5,7 @@
 //! back-to-front order, each item carrying its viewport-space transform and
 //! innermost clip. The private painter walks it frontwards, then retains it
 //! beside the scene; [`Document::elements_from_point`],
-//! [`Document::elements_from_points`], and [`Document::handle_input`] walk
+//! [`Document::elements_from_points`], and [`Document::route_input`] walk
 //! that retained frame backwards as pure reads — hit testing never re-runs
 //! the pipeline. Neither the frame nor the painter crosses the document API
 //! boundary.
