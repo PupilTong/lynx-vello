@@ -517,9 +517,11 @@ useful signal for currently-compatible versions of those libraries.
   A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
   its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
   native view does. Every public `BobcatCanvas` gets a separate Render Worker
-  and Wasm instance; `BobcatCanvas.reset()` waits for the current native
-  `LynxView` and its Lynx-main Worker to drop before constructing a replacement
-  in that same warm session. The transferred OffscreenCanvas, module instance,
+  and Wasm instance; `BobcatCanvas.reset()` drops the current native `LynxView`
+  and constructs a replacement in that same warm session. Closing the view's
+  sole command sender makes its detached Lynx-main Worker drop the thread-bound
+  QuickJS realm and exit naturally; replacement creation does not join it. The
+  transferred OffscreenCanvas, module instance,
   configuration, latest metrics, resource provider, registered font
   containers, selected default font family, and Stylo pool survive; reset
   clears the old page's transient registered script and stylesheet bytes. The

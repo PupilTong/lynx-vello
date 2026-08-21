@@ -253,9 +253,11 @@ Wasm follows the native ownership model: every `LynxView` spawns and owns one
 Lynx-main Worker, and dropping that view closes its command channel so the
 Worker drops its QuickJS realm and exits. Independent views are not a
 process-global singleton. The npm facade keeps one live view in each
-`BobcatRenderer`; `BobcatCanvas.reset()` waits for that view and Worker to stop,
-then constructs a replacement while retaining the Render Worker, transferred
-canvas, Wasm instance, and resource state.
+`BobcatRenderer`; `BobcatCanvas.reset()` drops that view and constructs a
+replacement while retaining the Render Worker, transferred canvas, Wasm
+instance, and resource state. It does not join the detached script Worker: the
+closed command channel makes that Worker drop its thread-bound realm and exit
+naturally, and independent views may overlap during that brief teardown.
 
 Only the Stylo Rayon pool is process-wide. It adopts the persistent Render
 Worker as index zero rather than a view's transient Lynx-main Worker, and adds

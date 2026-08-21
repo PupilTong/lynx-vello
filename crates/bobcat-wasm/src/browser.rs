@@ -544,12 +544,10 @@ impl BobcatRenderer {
     pub async fn reset(&mut self) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Drop this view's realm, document, and Lynx-main Worker. Awaiting the
-        // hand-off keeps the Render Worker's JavaScript event loop available
-        // before the replacement view starts its own Worker.
-        if let Some(view) = self.view.take() {
-            view.shutdown().await;
-        }
+        // Dropping the view closes its sole command sender. The detached
+        // Lynx-main Worker then drops its thread-bound realm and exits
+        // naturally; an independent replacement does not need to join it.
+        drop(self.view.take());
         self.resources.clear();
         self.frames.take();
         self.events.take();
@@ -777,13 +775,12 @@ impl BobcatRenderer {
     }
 
     /// Release the current native view before the outer facade terminates its
-    /// Render Worker and the Wasm session with it.
+    /// Render Worker and the Wasm session with it. Its detached script Worker
+    /// observes the closed command channel and exits naturally.
     #[wasm_bindgen(js_name = dispose)]
-    pub async fn dispose(&mut self) {
+    pub fn dispose(&mut self) {
         self.disposed = true;
-        if let Some(view) = self.view.take() {
-            view.shutdown().await;
-        }
+        drop(self.view.take());
     }
 }
 

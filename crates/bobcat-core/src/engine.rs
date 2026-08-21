@@ -463,41 +463,6 @@ enum ScriptCommand {
     },
 }
 
-struct ScriptThreadOwner {
-    commands: mpsc::Sender<ScriptCommand>,
-    #[cfg(target_arch = "wasm32")]
-    stopped: tokio::sync::oneshot::Receiver<()>,
-}
-
-impl Deref for ScriptThreadOwner {
-    type Target = mpsc::Sender<ScriptCommand>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.commands
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl ScriptThreadOwner {
-    async fn stop(self) {
-        let Self { commands, stopped } = self;
-        drop(commands);
-        let _ = stopped.await;
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-struct ScriptThreadCompletion(Option<tokio::sync::oneshot::Sender<()>>);
-
-#[cfg(target_arch = "wasm32")]
-impl Drop for ScriptThreadCompletion {
-    fn drop(&mut self) {
-        if let Some(stopped) = self.0.take() {
-            let _ = stopped.send(());
-        }
-    }
-}
-
 /// The engine half of a Lynx view: the shared element tree, input routing,
 /// frame production, presentation, and the engine-owned script thread.
 ///
@@ -508,9 +473,11 @@ impl Drop for ScriptThreadCompletion {
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
-    /// Dropped first so this view's detached script thread wakes and releases
-    /// its owner-thread-bound realm.
-    script_commands: Option<ScriptThreadOwner>,
+    /// The only `Sender`, dropped first so this view's detached script thread
+    /// wakes and releases its owner-thread-bound realm. It must never be cloned
+    /// anywhere the script thread can reach: a surviving clone would leave the
+    /// receiver parked with a live realm forever.
+    script_commands: Option<mpsc::Sender<ScriptCommand>>,
     elements: SharedTree,
     script_owner_available: bool,
     viewport: Viewport,
@@ -742,7 +709,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                     &mut self.pending_resize,
                     &mut self.pending_input,
                     &mut tree,
-                    self.script_commands.as_deref(),
+                    self.script_commands.as_ref(),
                 );
                 tree.needs_render()
             }
@@ -887,7 +854,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                     &mut self.pending_resize,
                     &mut self.pending_input,
                     &mut tree,
-                    self.script_commands.as_deref(),
+                    self.script_commands.as_ref(),
                 );
                 // Input and resize first, then the timeline, so a scroll and
                 // an animation compose in one defined order under one truth;
@@ -930,7 +897,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             &mut self.pending_resize,
             &mut self.pending_input,
             &mut tree,
-            self.script_commands.as_deref(),
+            self.script_commands.as_ref(),
         );
         self.animating = Self::advance_animations(&self.clock, &mut tree);
         let changed = tree.render();
@@ -1000,13 +967,9 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         let events = self.event_sender.clone();
         let frame_requesters = Arc::clone(&self.frames);
         let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
-        #[cfg(target_arch = "wasm32")]
-        let (worker_stopped, stopped) = tokio::sync::oneshot::channel();
         let spawn = ThreadBuilder::new()
             .name("bobcat-main".to_owned())
             .spawn(move || {
-                #[cfg(target_arch = "wasm32")]
-                let _completion = ScriptThreadCompletion(Some(worker_stopped));
                 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                 install_script_panic_hook();
                 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
@@ -1093,11 +1056,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 set_script_panic_reporter(None);
             });
         let script_thread = spawn.map_err(|error| self.script_spawn_error(&error))?;
-        self.script_commands = Some(ScriptThreadOwner {
-            commands: command_sender,
-            #[cfg(target_arch = "wasm32")]
-            stopped,
-        });
+        self.script_commands = Some(command_sender);
         drop(script_thread);
         Ok(())
     }
@@ -1108,16 +1067,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             name: "script",
             message: error.to_string(),
         }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn shutdown(mut self) {
-        if let Some(owner) = self.script_commands.take() {
-            owner.stop().await;
-        }
-        // `self` now drops normally. The worker has already released its realm
-        // and returned the document; the process-wide Stylo pool is independent
-        // and remains available to replacement views.
     }
 }
 

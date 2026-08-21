@@ -466,19 +466,6 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl<W: Window, C: AnimationClock> LynxView<'_, W, C> {
-    /// Drop this view's owner-thread-bound realm, document, and Lynx-main
-    /// Worker without blocking the browser Worker's JavaScript event loop.
-    ///
-    /// Browser wrappers use this consuming lifecycle boundary before they
-    /// construct a replacement view in the same shared Wasm instance.
-    #[doc(hidden)]
-    pub async fn shutdown(self) {
-        self.engine.shutdown().await;
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
     pub fn attach_window(

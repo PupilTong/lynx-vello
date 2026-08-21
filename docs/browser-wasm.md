@@ -35,13 +35,14 @@ bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
 pool, while that renderer may own a sequence of non-overlapping native views.
-`BobcatCanvas.reset()` waits for the current view's realm, document, and
-per-view Lynx-main Worker to drop before constructing its replacement. The
-process-wide pool adopts the persistent Render Worker as index zero and remains
-valid across resets. The configured count covers that owner plus at least one
-managed Stylo Worker; each live view's Lynx-main Worker is separate. The public
-facade still creates one fresh Render Worker and Wasm instance per
-`BobcatCanvas`, not per reset.
+`BobcatCanvas.reset()` drops the current view, closing its sole command sender,
+and immediately constructs its replacement. The detached per-view Lynx-main
+Worker drops its thread-bound realm and exits naturally; the independent
+replacement does not join it. The process-wide pool adopts the persistent
+Render Worker as index zero and remains valid across resets. The configured
+count covers that owner plus at least one managed Stylo Worker; each live view's
+Lynx-main Worker is separate. The public facade still creates one fresh Render
+Worker and Wasm instance per `BobcatCanvas`, not per reset.
 
 The transient Lynx-main Worker invokes Stylo from outside its Rayon pool, so
 Stylo transfers that traversal's root closure onto a managed worker. The Render
