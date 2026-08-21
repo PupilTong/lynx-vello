@@ -633,11 +633,17 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         Ok(self.elements.clone())
     }
 
-    /// Whether the last produced frame left an animation running, and so owes
-    /// the timeline another frame.
+    /// Whether the engine owes the timeline another frame: the last produced
+    /// frame left an animation running, or a gesture deadline is armed and
+    /// waiting on the clock.
+    ///
+    /// This is the one continuation signal an offscreen embedder has — no
+    /// [`FrameRequester`] exists on that output, so a host that idles its
+    /// tick loop must keep ticking while this reports `true` or an armed
+    /// long-press never resolves.
     #[must_use]
-    pub(crate) const fn is_animating(&self) -> bool {
-        self.animating
+    pub(crate) fn is_animating(&self) -> bool {
+        self.animating || self.gesture.needs_frame()
     }
 
     /// Samples the clock once and advances the document's animations to it.
@@ -747,6 +753,17 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         }
         let mut synthesized = Vec::new();
         while let Some((event, at)) = pending_input.pop_front() {
+            // A deadline this event's arrival time has passed resolves — and
+            // crosses the ordered channel — before the event itself, so a
+            // release arriving after the long-press deadline delivers
+            // `longpress` before its own `pointerup`, the while-still-pressed
+            // order Lynx guarantees.
+            gesture.on_tick(
+                at,
+                || listener_names.contains(LONG_PRESS_EVENT),
+                &mut synthesized,
+            );
+            Self::flush_synthesized(&mut synthesized, tree, commands);
             // Routing performs the user-agent default action, and reports the
             // node it routed to — so the event path costs no second hit test.
             // The default action runs first and unconditionally: no listener
@@ -1431,6 +1448,37 @@ mod tests {
         );
     }
 
+    /// A synthesized event whose down-target was freed before the flush must
+    /// be skipped, because `Document::event_steps` asserts liveness — the
+    /// guard is the only thing between a mid-sequence `dropElement` and a
+    /// presenting-thread panic.
+    #[test]
+    fn a_synthesized_event_for_a_freed_target_is_skipped_not_delivered() {
+        use crate::gesture::{SynthesizedEvent, TAP_EVENT};
+
+        let engine = engine();
+        let (sender, receiver) = std::sync::mpsc::channel::<super::ScriptCommand>();
+        let mut tree = engine.elements.tree();
+        let doomed = tree.create_element("view", ());
+        crate::tree::raw_text::drop_element_and_owned_text(&mut tree, doomed);
+
+        let mut synthesized = vec![SynthesizedEvent {
+            name: TAP_EVENT,
+            target: doomed,
+            position: dom::Point2D::new(1.0, 1.0),
+        }];
+        super::OffscreenEngine::<crate::clock::SystemClock>::flush_synthesized(
+            &mut synthesized,
+            &mut tree,
+            Some(&sender),
+        );
+        assert!(synthesized.is_empty(), "the queue is always drained");
+        assert!(
+            receiver.try_recv().is_err(),
+            "a freed target reaches no one rather than panicking the walk"
+        );
+    }
+
     #[test]
     fn resource_updates_report_a_busy_script_batch() {
         use bytes::Bytes;
@@ -1548,6 +1596,7 @@ mod event_loop_tests {
     use dom::input::{InputEvent, PointerKind, PointerPhase};
 
     use super::OffscreenEngine;
+    use crate::clock::AnimationClock;
 
     /// The handle a packed id names, the way script spells one.
     fn node_id(bits: u64) -> dom::NodeId {
@@ -1796,12 +1845,14 @@ mod event_loop_tests {
 
     /// Polls until the view's `log` attribute equals `expected` — equality,
     /// not containment, so an event that should have been suppressed fails
-    /// the wait by showing up in the actual value.
+    /// the wait by showing up in the actual value. The deadline is generous
+    /// because the whole suite's realm boots share the machine with this
+    /// spin.
     fn wait_for_log<W: super::Window, C: crate::clock::AnimationClock>(
         engine: &mut super::Engine<'_, W, C>,
         expected: &str,
     ) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let log = engine.elements.try_tree().and_then(|tree| {
                 tree.get(node_id(3))
@@ -1895,5 +1946,134 @@ mod event_loop_tests {
         clock.set(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
         wait_for_log(&mut engine, "tap:10");
+    }
+
+    /// A scrollable page: the 200×200 view scrolls a 1000px-tall child, and
+    /// its `tap` listener logs `type:x` exactly as the gesture page does.
+    const SCROLLING_GESTURE_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          const filler = __CreateView(0);
+          __AppendElement(page, view);
+          __AppendElement(view, filler);
+          globalThis.held = [page, view, filler];
+          globalThis.entries = [];
+          __SetInlineStyles(view, 'display:flex;overflow:scroll;width:200px;height:200px');
+          __SetInlineStyles(filler, 'flex-shrink:0;width:200px;height:1000px');
+          const note = (event) => {
+            entries.push(event.type + ':' + event.detail.x);
+            __SetAttribute(view, 'log', entries.join());
+          };
+          __AddEventListener(view, 'tap', note, {});
+          __FlushElementTree();
+        };
+        ";
+
+    /// A drag the user-agent scroll consumed is the claim that suppresses
+    /// `tap` — end to end, through the real drag recognizer's
+    /// `DefaultAction::Scroll` rather than an injected flag. The drag travels
+    /// 30px: past `dom`'s 8px drag slop so it scrolls, inside the 50px tap
+    /// slop so the claim is the only suppressor. The fence tap at another x
+    /// pins that the suppressed one never crossed the channel.
+    #[test]
+    fn a_scroll_consuming_drag_suppresses_the_tap() {
+        let mut engine = booted(SCROLLING_GESTURE_PAGE);
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(100.0, 100.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(100.0, 70.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Move,
+        ));
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(100.0, 70.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Up,
+        ));
+        engine.dispatch_input(touch(1, PointerPhase::Down, 150.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
+        wait_for_log(&mut engine, "tap:150");
+    }
+
+    /// A stationary hold produces no further input, so only the frame half
+    /// — `service_gesture_clock` plus the `needs_frame` continuation — can
+    /// resolve it. This drives that half exactly as `notify_redraw`/`tick`
+    /// do, without needing a GPU output.
+    #[test]
+    fn a_stationary_hold_longpresses_on_the_frame_clock() {
+        let clock = Arc::new(crate::clock::ManualClock::new());
+        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        assert!(
+            engine.gesture.needs_frame(),
+            "the down arms a deadline, which is what keeps frames coming"
+        );
+
+        clock.set(0.6);
+        {
+            let mut tree = engine
+                .elements
+                .try_tree()
+                .expect("the script thread is parked");
+            OffscreenEngine::<Arc<crate::clock::ManualClock>>::service_gesture_clock(
+                &mut engine.gesture,
+                &engine.listener_names,
+                &mut tree,
+                engine.script_commands.as_ref(),
+                engine.clock.now_seconds(),
+            );
+        }
+        wait_for_log(&mut engine, "longpress:10");
+        assert!(
+            !engine.gesture.needs_frame(),
+            "a resolved deadline stops asking for frames"
+        );
+    }
+
+    /// Input buffered behind an open batch keeps its arrival time: a hold
+    /// whose down and release both waited out a busy document still spans
+    /// the deadline, so the drain delivers `longpress` first and suppresses
+    /// the tap — drain-time stamping would deliver a plain tap instead.
+    #[test]
+    fn buffered_input_keeps_its_arrival_time_across_a_busy_batch() {
+        let clock = Arc::new(crate::clock::ManualClock::new());
+        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        engine
+            .elements
+            .try_tree()
+            .expect("the script thread is parked")
+            .render();
+
+        // Open the batch state by hand: the slot is empty, input buffers.
+        let tree = engine.elements.take();
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        clock.set(0.6);
+        engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
+        engine.elements.put(tree);
+
+        // The next event drains the buffer under the returned document.
+        clock.set(0.61);
+        engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
+        wait_for_log(&mut engine, "longpress:10,tap:30");
     }
 }

@@ -135,7 +135,11 @@ impl GestureRouter {
     /// drain time, so a sequence buffered behind a busy document keeps its
     /// real duration. Due deadlines fire before the event applies, which is
     /// what lets a release that arrives after the long-press deadline still
-    /// see the `longpress` first.
+    /// suppress its tap. Delivery ordering needs more than this internal
+    /// rule, though: the engine also drains due deadlines through
+    /// [`Self::on_tick`] and dispatches them *before* the raw event, so the
+    /// `longpress` crosses the ordered channel ahead of the `pointerup`
+    /// that followed it.
     pub(crate) fn on_pointer(
         &mut self,
         event: &InputEvent,

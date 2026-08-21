@@ -442,8 +442,13 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
         self.engine.notify_redraw()
     }
 
-    /// Whether the last produced frame left an animation running, and so owes
-    /// the timeline another frame.
+    /// Whether the view owes the timeline another frame: the last produced
+    /// frame left an animation running, or an input sequence armed a gesture
+    /// deadline (a pending long-press) the frame clock still has to resolve.
+    ///
+    /// Offscreen embedders that idle their tick loop must keep ticking while
+    /// this reports `true`; windowed embedders need nothing, because the
+    /// engine requests its own frames through the attached window.
     #[must_use]
     pub fn is_animating(&self) -> bool {
         self.engine.is_animating()
