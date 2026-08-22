@@ -1443,8 +1443,8 @@ mod tests {
 
     /// An emit decision whose target was freed before execution must be
     /// skipped, because `Document::event_steps` asserts liveness — the guard
-    /// is the only thing between a mid-sequence `dropElement` and a
-    /// presenting-thread panic.
+    /// is the only thing between a mid-sequence release of a detached element
+    /// and a presenting-thread panic.
     #[test]
     fn an_emit_decision_for_a_freed_target_is_skipped_not_delivered() {
         use crate::gesture::{EmitEvent, GestureRouter, InputDecision, TAP_EVENT};
@@ -1453,7 +1453,8 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel::<super::ScriptCommand>();
         let mut tree = engine.elements.tree();
         let doomed = tree.create_element("view", ());
-        crate::tree::raw_text::drop_element_and_owned_text(&mut tree, doomed);
+        tree.release(doomed);
+        tree.collect_unheld();
 
         let mut decisions = vec![InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,

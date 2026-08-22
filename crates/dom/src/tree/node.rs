@@ -100,6 +100,19 @@ pub struct Node<T> {
     pub(crate) custom_state: CustomElementState,
     custom_subtree_may_contain: bool,
 
+    /// Whether an owner outside the tree holds this node.
+    ///
+    /// A node is kept allocated by its parent or by an outside holder — the
+    /// script handle, in Bobcat. The parent link is the strong one: a held
+    /// node stays allocated while detached, and an unheld node lives exactly
+    /// as long as its parent does. Every node a document creates starts held,
+    /// so an embedder that never calls [`Document::release`] sees a tree
+    /// whose removals only unlink. A shadow root is the exception: it is
+    /// attached to its host rather than handed out, so it is never held.
+    ///
+    /// [`Document::release`]: crate::Document::release
+    held: bool,
+
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
     pub(crate) shadow: Option<Box<ShadowLinks>>,
@@ -169,7 +182,9 @@ impl<T> Node<T> {
         id: NodeId,
         data: ShadowRootData,
     ) -> Self {
-        Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None)
+        let mut node = Self::new(owner, id, NodeData::ShadowRoot(Box::new(data)), None, None);
+        node.held = false;
+        node
     }
 
     fn new(
@@ -194,6 +209,7 @@ impl<T> Node<T> {
             custom_definition: None,
             custom_state: CustomElementState::default(),
             custom_subtree_may_contain: false,
+            held: true,
             parsed_inline_style: None,
             shadow: None,
             style_data: ElementDataWrapper::default(),
@@ -228,6 +244,17 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn custom_subtree_may_contain(&self) -> bool {
         self.custom_subtree_may_contain
+    }
+
+    /// Whether an owner outside the tree holds this node; see the field.
+    #[must_use]
+    #[inline]
+    pub fn is_held(&self) -> bool {
+        self.held
+    }
+
+    pub(crate) fn set_held(&mut self, held: bool) {
+        self.held = held;
     }
 
     /// Marks this node's shadow-including subtree as possibly containing a

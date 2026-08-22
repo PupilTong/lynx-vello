@@ -98,7 +98,12 @@ fn owned_text_node(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
 fn reflect_text(document: &mut LynxDocument, element: NodeId, text: &str) {
     match (owned_text_node(document, element), text.is_empty()) {
         (Some(node), false) => document.set_text_node_data(node, text),
-        (Some(node), true) => document.drop_element(node),
+        // Freed now rather than left for the batch boundary: the run is the
+        // component's own, nothing else can reach it, and freeing it here is
+        // what evicts its retained shaping and layout state at once.
+        (Some(node), true) => {
+            document.drop_element(node);
+        }
         (None, false) => {
             let node = document.create_text_node(text, ());
             let first = document
@@ -106,23 +111,15 @@ fn reflect_text(document: &mut LynxDocument, element: NodeId, text: &str) {
                 .and_then(dom::Node::first_child)
                 .map(dom::Node::id);
             document.insert_before(element, node, first);
+            // No handle could ever name the run — the realm mints none for a
+            // text node — so nothing outside the tree holds it: its carrier
+            // does, and it is freed with the carrier or when the value
+            // empties. Released after the insert, so the release finds it
+            // attached and leaves nothing for the batch boundary.
+            document.release(node);
         }
         (None, true) => {}
     }
-}
-
-/// Frees `element` together with the text node a `raw-text` owns.
-///
-/// [`Document::drop_element`](dom::Document::drop_element) leaves an element's
-/// children detached rather than freed, because a child element can still be
-/// named by a live script handle. A reflected text node never can be — the
-/// realm mints no handle for one — so its element's release is the only
-/// occasion it could ever be freed on.
-pub(crate) fn drop_element_and_owned_text(document: &mut LynxDocument, element: NodeId) {
-    if let Some(text) = owned_text_node(document, element) {
-        document.drop_element(text);
-    }
-    document.drop_element(element);
 }
 
 #[cfg(test)]
@@ -130,9 +127,7 @@ mod tests {
     use dom::NodeId;
 
     use super::super::test_support::{child, display, document};
-    use super::{
-        LynxDocument, RAW_TEXT_TAG, TEXT_ATTRIBUTE, drop_element_and_owned_text, owned_text_node,
-    };
+    use super::{LynxDocument, RAW_TEXT_TAG, TEXT_ATTRIBUTE, owned_text_node};
 
     /// Solid em squares, so a run's box is its glyph count times its font size.
     const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
@@ -235,20 +230,42 @@ mod tests {
         );
     }
 
+    /// The run is held by nothing but its carrier, so it goes wherever the
+    /// carrier goes: kept while the released carrier is attached, freed with
+    /// it at the boundary after the carrier is both released and detached —
+    /// in either order.
     #[test]
-    fn releasing_a_raw_text_frees_the_text_node_no_handle_can_name() {
+    fn a_run_is_freed_with_its_carrier_whichever_of_release_and_removal_comes_last() {
         let mut document = document();
         let text = text_element(&mut document);
+
         let raw = raw_text(&mut document, text, "hello");
         let run = run_of(&document, raw);
-
-        drop_element_and_owned_text(&mut document, raw);
-
+        document.release(raw);
+        document.collect_unheld();
+        assert!(
+            document.get(run).is_some(),
+            "an attached carrier keeps its run even after its handle is gone"
+        );
+        document.remove_element(raw);
+        assert_eq!(document.collect_unheld(), 2, "the carrier and its run");
         assert!(document.get(raw).is_none());
         assert!(
             document.get(run).is_none(),
             "the run's node dies with its carrier: nothing else would ever free it"
         );
+
+        let raw = raw_text(&mut document, text, "again");
+        let run = run_of(&document, raw);
+        document.remove_element(raw);
+        document.collect_unheld();
+        assert!(
+            document.get(run).is_some(),
+            "a detached carrier whose handle is live keeps its run"
+        );
+        document.release(raw);
+        assert_eq!(document.collect_unheld(), 2);
+        assert!(document.get(raw).is_none() && document.get(run).is_none());
     }
 
     #[test]
