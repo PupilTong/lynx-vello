@@ -27,7 +27,8 @@ Render Worker
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
 limited to view creation with `PageConfig`, URL-based script, stylesheet, and
-Lynx XML requests, font registration, resize, error observation, and disposal.
+Lynx XML requests, font registration, resize, error observation, disposal, and
+automatic pointer forwarding from the attached HTML canvas.
 
 The Render Worker constructs `LynxView`, attaches the transferred canvas, and
 calls `configure_wasm_workers` once. That core API configures the worker
@@ -122,6 +123,33 @@ bundle retrieval, decode, `PageConfig` parsing, and `StyleInfo` lowering remain
 external work, exactly as in the native CLI — where the CLI does perform them
 and hands core the pre-parsed arm.
 
+## Pointer input
+
+`transferControlToOffscreen()` transfers drawing control, not the DOM canvas's
+event target. `BobcatCanvas` therefore retains the `HTMLCanvasElement` and
+listens for active `pointerdown`/`pointermove`/`pointerup`/`pointercancel`
+sequences itself. It accepts the primary mouse button and every touch or pen
+contact, captures each accepted pointer until release, and treats unexpected
+capture loss as cancellation. Hover-only moves stay on the UI thread. The
+facade temporarily sets `touch-action: none` because Bobcat's gesture router,
+not the embedding page, arbitrates tap against content scrolling; disposal
+restores the previous inline value and removes every listener.
+
+Client coordinates are mapped through the canvas's current bounding rectangle
+into the latest logical viewport size, in CSS pixels. The UI sends that small,
+flat input record to the Render Worker without waiting for a response. Input
+shares the same ordered Worker queue as reset and resize, so it cannot re-enter
+the Wasm wrapper while an asynchronous view replacement owns it and a pointer
+following resize is interpreted in the metrics installed before it.
+
+Immediately before dispatch, the Render Worker stamps the event with its own
+`performance.now()`. `BobcatRenderer::dispatchPointer` writes that reading into
+the same `ManualClock` used by Worker rAF, constructs core's `InputEvent`, and
+calls the opaque `LynxView::dispatch_input`. This prevents a press after a long
+idle period from deriving its `longpress` deadline from the last rendered
+frame. Reset releases active captures before replacing the view; disposal
+stops input before terminating the Worker. Wheel input is not connected yet.
+
 ## Synchronization and rendering
 
 The private document moves through core's `SharedTree` slot. A PAPI batch
@@ -180,8 +208,8 @@ and tail calls. Generated glue and Wasm live under
 `crates/bobcat-wasm/pkg/` and are not checked in. The verification script
 checks that optimization removed the debugging name section while preserving
 `target_features`, shared imported/exported memory, the Worker-only Wasm
-import, the URL execution/XML methods, and the absence of the removed direct
-DOM API.
+import, the URL execution/XML and private pointer-dispatch methods, and the
+absence of the removed direct DOM API.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary

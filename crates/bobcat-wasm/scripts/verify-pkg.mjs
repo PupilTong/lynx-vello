@@ -30,6 +30,7 @@ for (const requiredExport of [
   }
 }
 for (const requiredMethod of [
+  'dispatchPointer(',
   'registerScript(',
   'registerStyleSheet(',
   'registerLynxXml(',
@@ -109,6 +110,24 @@ if (
   !facade.includes("this.#request('loadLynxXml'")
 ) {
   throw new Error('browser facade does not dispatch loadLynxXml')
+}
+for (const requiredPointerStep of [
+  "canvas.addEventListener('pointerdown'",
+  "canvas.addEventListener('pointermove'",
+  "canvas.addEventListener('pointerup'",
+  "canvas.addEventListener('pointercancel'",
+  'canvas.setPointerCapture(event.pointerId)',
+  'getBoundingClientRect()',
+  "type: 'bobcat-pointer'",
+]) {
+  if (!facade.includes(requiredPointerStep)) {
+    throw new Error(
+      `browser facade pointer bridge is missing ${requiredPointerStep}`,
+    )
+  }
+}
+if (declarations.includes('dispatchPointer')) {
+  throw new Error('browser declarations expose the private pointer bridge')
 }
 for (const [operation, method, message] of [
   ['reset', 'async reset()', 'native-view reset'],
@@ -245,6 +264,18 @@ for (const requiredResetStep of [
 }
 if (!renderWorker.includes('requestQueue = requestQueue.then(dispatch)')) {
   throw new Error('Render Worker must serialize every facade operation')
+}
+for (const requiredPointerStep of [
+  "message?.type === 'bobcat-pointer'",
+  'renderer.dispatchPointer(',
+  'message.defaultPrevented',
+  'performance.now()',
+]) {
+  if (!renderWorker.includes(requiredPointerStep)) {
+    throw new Error(
+      `Render Worker pointer dispatch is missing ${requiredPointerStep}`,
+    )
+  }
 }
 if (renderWorker.includes('setTimeout(resolve, 1)')) {
   throw new Error('Render Worker still polls script completion on a timer')

@@ -564,6 +564,19 @@ useful signal for currently-compatible versions of those libraries.
   a host may still deliberately override them.
   The optional background body is retained and reported as not executed,
   matching the runtime limitation above.
+  Transferring the canvas does not transfer its DOM event target, so the
+  `BobcatCanvas` facade retains that element and automatically forwards active
+  `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims
+  each accepted pointer, maps client coordinates through the canvas bounds
+  into viewport CSS px, and sends compact fire-and-forget records through the
+  same ordered Render-Worker queue as reset/resize. The Worker stamps input
+  with its own `performance.now()` before `BobcatRenderer` writes the shared
+  manual clock and calls `LynxView::dispatch_input`; this keeps gesture time on
+  the Worker rAF timeline and prevents an idle frame clock from making
+  `longpress` fire immediately. Reset clears active captures, disposal removes
+  all listeners and restores the canvas's prior inline `touch-action`, and
+  unexpected capture loss becomes `pointercancel`. Hover moves, secondary
+  mouse buttons, and wheel input do not cross the boundary.
   The facade exposes no create/append/drop/flush,
   document, tree, or engine API. It does not decode `.web.bundle` containers;
   callers supply `PageConfig` and either executable script URLs or a raw Lynx
