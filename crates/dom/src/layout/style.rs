@@ -191,50 +191,133 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 }
 
-/// Text-only view: static anonymous-box geometry plus its parent's post-flush
-/// inherited paragraph/run values.
-pub(crate) struct TextStyleView<'dom> {
-    text_style: &'dom ComputedValues,
+/// Whether a restyle changed anything Parley *shapes* from, and therefore
+/// whether a descendant text node's retained layout has to be thrown away
+/// rather than merely re-broken.
+///
+/// Two levels, the shape Stylo's own damage computation uses
+/// (`properties.mako.rs`, `restyle_damage_rebuild_box`): a pointer comparison
+/// on the two style structs that hold every shaping input, and — only when one
+/// of those differs — a field comparison narrowed to the inputs themselves.
+/// The second level is what earns the first its keep: `text-align`,
+/// `text-indent`, `-webkit-text-stroke-*` and `color` share `InheritedText`
+/// with `letter-spacing` and `word-break`, so a struct-granular answer alone
+/// would still re-shape a paragraph whose only change was its alignment.
+///
+/// The field list mirrors [`crate::layout::TextLayout`]'s shaping inputs —
+/// what `hughie`'s `translate_run_style` and `normalize_runs` read, and
+/// nothing else. `direction` is deliberately absent: Parley is never told a
+/// base direction (bidi comes from the text), so `direction` only selects the
+/// alignment a commit re-applies anyway. Keeping this list in step with the
+/// measurer is guarded in debug builds by the shaping fingerprint the retained
+/// layout carries, which panics if a kept artifact outlived its inputs.
+pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
+    let (old_font, new_font) = (old.get_font(), new.get_font());
+    let (old_text, new_text) = (old.get_inherited_text(), new.get_inherited_text());
+    if std::ptr::eq(old_font, new_font) && std::ptr::eq(old_text, new_text) {
+        return false;
+    }
+    (!std::ptr::eq(old_font, new_font)
+        && (old_font.font_family != new_font.font_family
+            || old_font.font_size != new_font.font_size
+            || old_font.font_weight != new_font.font_weight
+            || old_font.font_style != new_font.font_style
+            || old_font.line_height != new_font.line_height
+            || old_font.font_feature_settings != new_font.font_feature_settings
+            || old_font.font_variation_settings != new_font.font_variation_settings))
+        || (!std::ptr::eq(old_text, new_text)
+            && (old_text.letter_spacing != new_text.letter_spacing
+                || old_text.word_break != new_text.word_break
+                || old_text.text_wrap_mode != new_text.text_wrap_mode
+                || old_text.white_space_collapse != new_text.white_space_collapse))
 }
 
-impl std::fmt::Debug for TextStyleView<'_> {
+/// The style of the box that establishes a text node's formatting context.
+///
+/// Paragraph-level: the anonymous box contributes no geometry of its own, so
+/// [`CoreStyle`] answers from the initial values, and everything Parley reads
+/// per *paragraph* — `white-space`, `word-break`, `text-wrap`, `text-align`,
+/// `text-indent` — comes from the inherited values of the establishing
+/// element.
+///
+/// This is deliberately a different view from [`TextRunView`] even though both
+/// resolve to the same element today. A text node is a single anonymous run
+/// inside its parent, so the two roles coincide; in an inline formatting
+/// context they do not — one paragraph spans many runs, and each run carries
+/// the style of the innermost inline box its characters sit in. Keeping the
+/// roles apart here is what lets the run side gain its own style source
+/// without disturbing the paragraph side.
+pub(crate) struct TextContainerView<'dom> {
+    paragraph: &'dom ComputedValues,
+}
+
+impl std::fmt::Debug for TextContainerView<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TextStyleView")
+        formatter.write_str("TextContainerView")
     }
 }
 
-impl<'dom> TextStyleView<'dom> {
+impl<'dom> TextContainerView<'dom> {
+    /// The paragraph style for `node`'s anonymous box — the style of the
+    /// element that establishes its formatting context, which for a lone text
+    /// child is its flat parent.
     pub(crate) fn of<T>(node: &'dom Node<T>) -> Self {
-        debug_assert!(node.is_text_node(), "text style requires a text node");
         Self {
-            text_style: node
-                .flat_parent()
-                .and_then(Node::layout_computed_style)
-                .unwrap_or(&super::ANONYMOUS_STYLE),
+            paragraph: inline_style_of(node),
         }
     }
-
-    fn text_values(&self) -> &ComputedValues {
-        self.text_style
-    }
 }
 
-impl CoreStyle for TextStyleView<'_> {
+impl CoreStyle for TextContainerView<'_> {
     fn computed_values(&self) -> &ComputedValues {
         &super::ANONYMOUS_STYLE
     }
 
     fn inherited_values(&self) -> &ComputedValues {
-        self.text_values()
+        self.paragraph
     }
 }
 
-impl TextContainerStyle for TextStyleView<'_> {}
+impl TextContainerStyle for TextContainerView<'_> {}
 
-impl TextRunStyle for TextStyleView<'_> {
-    fn computed_text_values(&self) -> Option<&ComputedValues> {
-        Some(self.text_values())
+/// The style one shaped run carries: everything Parley resolves per *run* —
+/// the font family, size, weight, style, variations, features, `line-height`
+/// and `letter-spacing`.
+///
+/// Today a text node is one run and its style is its parent's; see
+/// [`TextContainerView`] for why the two views exist separately anyway.
+pub(crate) struct TextRunView<'dom> {
+    run: &'dom ComputedValues,
+}
+
+impl std::fmt::Debug for TextRunView<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TextRunView")
     }
+}
+
+impl<'dom> TextRunView<'dom> {
+    /// The run style for `node`'s characters — the style of the innermost
+    /// inline box containing them, which for a lone text child is its flat
+    /// parent.
+    pub(crate) fn of<T>(node: &'dom Node<T>) -> Self {
+        Self {
+            run: inline_style_of(node),
+        }
+    }
+}
+
+impl TextRunStyle for TextRunView<'_> {
+    fn computed_text_values(&self) -> Option<&ComputedValues> {
+        Some(self.run)
+    }
+}
+
+fn inline_style_of<T>(node: &Node<T>) -> &ComputedValues {
+    debug_assert!(node.is_text_node(), "text style requires a text node");
+    node.flat_parent()
+        .and_then(Node::layout_computed_style)
+        .unwrap_or(&super::ANONYMOUS_STYLE)
 }
 
 #[cfg(test)]
@@ -245,7 +328,7 @@ mod tests {
     use hughie::style::Display;
     use stylo::values::specified::box_::DisplayInside;
 
-    use super::{DisplayMode, StyleView, TextStyleView, display_mode};
+    use super::{DisplayMode, StyleView, TextContainerView, TextRunView, display_mode};
 
     #[test]
     fn supported_lynx_displays_map_to_layout_modes() {
@@ -272,6 +355,7 @@ mod tests {
     fn post_flush_style_views_stay_within_their_expected_footprint() {
         let word = size_of::<usize>();
         assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
-        assert_eq!(size_of::<TextStyleView<'static>>(), word);
+        assert_eq!(size_of::<TextContainerView<'static>>(), word);
+        assert_eq!(size_of::<TextRunView<'static>>(), word);
     }
 }

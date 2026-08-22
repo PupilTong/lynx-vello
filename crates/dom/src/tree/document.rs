@@ -735,6 +735,33 @@ impl<T> Document<T> {
         });
     }
 
+    /// Invalidates an element's text children for a relayout of that element.
+    ///
+    /// `invalidate_layout` walks *up*, so nothing else clears a text child's
+    /// box cache — without this the child's committed measurement answers the
+    /// re-layout unchanged. The shaped layout behind it is a separate
+    /// question: it survives every change the element made to its own
+    /// geometry, and dies only when `shaping_changed` says Parley would shape
+    /// the paragraph differently.
+    pub(crate) fn invalidate_text_children(&mut self, element: NodeId, shaping_changed: bool) {
+        let Some(node) = self.tree.get(element) else {
+            return;
+        };
+        let text_children: Vec<NodeSlot> = node
+            .flat_children()
+            .iter()
+            .copied()
+            .filter(|&slot| self.tree.at(slot).is_text_node())
+            .collect();
+        for slot in text_children {
+            if shaping_changed {
+                self.layout.clear_layout_cache(slot);
+            } else {
+                self.layout.clear_box_cache(slot);
+            }
+        }
+    }
+
     fn harvest_style_damage<F>(&mut self, stack: &mut Vec<NodeId>, sink: &mut F)
     where
         F: FnMut(NodeId, StyleDamage),
@@ -753,9 +780,12 @@ impl<T> Document<T> {
                         data.clear_restyle_state();
                         (!damage.is_empty()).then(|| StyleDamage::from(damage))
                     });
-                    let style_changed = node.refresh_layout_style(refreshed);
+                    let refresh = node.refresh_layout_style(refreshed);
                     let dirty = node.styling.dirty_descendants.get_mut();
-                    (harvested, std::mem::replace(dirty, false) || style_changed)
+                    (
+                        harvested.map(|damage| (damage, refresh)),
+                        std::mem::replace(dirty, false) || refresh.changed,
+                    )
                 };
                 if descend {
                     let node = self
@@ -771,21 +801,11 @@ impl<T> Document<T> {
                 }
                 harvested
             };
-            let Some(damage) = harvested else {
+            let Some((damage, refresh)) = harvested else {
                 continue;
             };
             if damage.needs_relayout() {
-                if let Some(element) = self.tree.get(current) {
-                    let text_children: Vec<NodeSlot> = element
-                        .flat_children()
-                        .iter()
-                        .copied()
-                        .filter(|&slot| self.tree.at(slot).is_text_node())
-                        .collect();
-                    for slot in text_children {
-                        self.layout.clear_layout_cache(slot);
-                    }
-                }
+                self.invalidate_text_children(current, refresh.shaping_changed);
                 // Reconstruction damage needs no second walk from the parent:
                 // this one already cleared the parent's cache (or stopped
                 // because it was empty, or because the parent skips its

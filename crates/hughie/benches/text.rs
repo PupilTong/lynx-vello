@@ -8,7 +8,7 @@ use hughie::compute::LeafMeasureInput;
 use hughie::geometry::Size;
 use hughie::style::{CoreStyle, TextContainerStyle, TextRun, TextRunStyle};
 use hughie::text::{FontBlob, TextContext, TextLayoutStore, TextMeasurer};
-use hughie::tree::{AvailableSpace, LayoutGoal};
+use hughie::tree::{AvailableSpace, LayoutGoal, RequestedAxis};
 use stylo::values::computed::Display;
 use stylo::values::computed::font::{
     FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, SingleFontFamily,
@@ -100,7 +100,13 @@ impl TextCase {
         }
     }
 
-    fn measure(&mut self, context: &mut TextContext, width: f32, goal: LayoutGoal) -> Size<f32> {
+    fn request(
+        &mut self,
+        context: &mut TextContext,
+        known_width: Option<f32>,
+        width: AvailableSpace,
+        goal: LayoutGoal,
+    ) -> Size<f32> {
         let runs = self
             .spec
             .iter()
@@ -119,11 +125,54 @@ impl TextCase {
         );
         measurer
             .measure(LeafMeasureInput::new(
-                Size::NONE,
-                Size::new(AvailableSpace::Definite(width), AvailableSpace::MaxContent),
+                Size::new(known_width, None),
+                Size::new(width, AvailableSpace::MaxContent),
                 goal,
             ))
             .size()
+    }
+
+    fn measure(&mut self, context: &mut TextContext, width: f32, goal: LayoutGoal) -> Size<f32> {
+        self.request(context, None, AvailableSpace::Definite(width), goal)
+    }
+
+    /// The request sequence a flex container actually imposes on a text child
+    /// in one pass: intrinsic contributions in both directions, the used width
+    /// twice (the box cache keys on an available height text does not depend
+    /// on), then the commit.
+    fn pass(&mut self, context: &mut TextContext, width: f32) -> Size<f32> {
+        let used = AvailableSpace::Definite(width);
+        self.request(
+            context,
+            None,
+            AvailableSpace::MaxContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        );
+        self.request(
+            context,
+            None,
+            AvailableSpace::MinContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        );
+        self.request(
+            context,
+            Some(width),
+            used,
+            LayoutGoal::Measure(RequestedAxis::Both),
+        );
+        self.request(
+            context,
+            None,
+            AvailableSpace::MaxContent,
+            LayoutGoal::Measure(RequestedAxis::Horizontal),
+        );
+        self.request(
+            context,
+            Some(width),
+            used,
+            LayoutGoal::Measure(RequestedAxis::Both),
+        );
+        self.request(context, Some(width), used, LayoutGoal::Commit)
     }
 }
 
@@ -148,6 +197,14 @@ impl TextBatch {
         let mut last = Size::new(0.0, 0.0);
         for case in &mut self.cases {
             last = divan::black_box(case.measure(&mut self.context, width, goal));
+        }
+        last
+    }
+
+    fn pass_all(&mut self, width: f32) -> Size<f32> {
+        let mut last = Size::new(0.0, 0.0);
+        for case in &mut self.cases {
+            last = divan::black_box(case.pass(&mut self.context, width));
         }
         last
     }
@@ -179,8 +236,37 @@ fn warm_rebreak(
         });
 }
 
+/// A whole first pass over a fresh node: shape once, then serve the six
+/// requests a flex parent makes. This is the benchmark the probe/commit
+/// artifact design moves — it used to deep-clone the shaped layout for the
+/// first probe and break lines for every request.
+fn cold_pass(bencher: divan::Bencher<'_, '_>, spec: &'static [(&'static str, f32)], batch: usize) {
+    bencher
+        .counter(ItemsCount::new(batch))
+        .with_inputs(|| TextBatch::new(spec, batch))
+        .bench_local_refs(|batch| {
+            divan::black_box(batch.pass_all(320.0));
+        });
+}
+
+/// The same six requests against nodes whose shaped layout already exists and
+/// is already broken at the width the pass will commit at — the steady state a
+/// re-layout with an unchanged constraint lands in.
+fn warm_pass(bencher: divan::Bencher<'_, '_>, spec: &'static [(&'static str, f32)], batch: usize) {
+    bencher
+        .counter(ItemsCount::new(batch))
+        .with_inputs(|| {
+            let mut batch = TextBatch::new(spec, batch);
+            divan::black_box(batch.pass_all(320.0));
+            batch
+        })
+        .bench_local_refs(|batch| {
+            divan::black_box(batch.pass_all(320.0));
+        });
+}
+
 macro_rules! text_benchmarks {
-    ($cold:ident, $warm:ident, $spec:ident, $cold_batch:expr, $warm_batch:expr) => {
+    ($cold:ident, $warm:ident, $cold_pass:ident, $warm_pass:ident, $spec:ident, $cold_batch:expr, $warm_batch:expr) => {
         #[divan::bench]
         fn $cold(bencher: divan::Bencher<'_, '_>) {
             cold(bencher, $spec, $cold_batch);
@@ -190,16 +276,60 @@ macro_rules! text_benchmarks {
         fn $warm(bencher: divan::Bencher<'_, '_>) {
             warm_rebreak(bencher, $spec, $warm_batch);
         }
+
+        #[divan::bench]
+        fn $cold_pass(bencher: divan::Bencher<'_, '_>) {
+            cold_pass(bencher, $spec, $cold_batch);
+        }
+
+        #[divan::bench]
+        fn $warm_pass(bencher: divan::Bencher<'_, '_>) {
+            warm_pass(bencher, $spec, $warm_batch);
+        }
     };
 }
 
-text_benchmarks!(cold_label, warm_rebreak_label, LABEL, 1_024, 8_192);
-text_benchmarks!(cold_sentence, warm_rebreak_sentence, SENTENCE, 512, 2_048);
-text_benchmarks!(cold_paragraph, warm_rebreak_paragraph, PARAGRAPH, 128, 512);
-text_benchmarks!(cold_cjk, warm_rebreak_cjk, CJK_PARAGRAPH, 256, 2_048);
+text_benchmarks!(
+    cold_label,
+    warm_rebreak_label,
+    cold_pass_label,
+    warm_pass_label,
+    LABEL,
+    1_024,
+    8_192
+);
+text_benchmarks!(
+    cold_sentence,
+    warm_rebreak_sentence,
+    cold_pass_sentence,
+    warm_pass_sentence,
+    SENTENCE,
+    512,
+    2_048
+);
+text_benchmarks!(
+    cold_paragraph,
+    warm_rebreak_paragraph,
+    cold_pass_paragraph,
+    warm_pass_paragraph,
+    PARAGRAPH,
+    128,
+    512
+);
+text_benchmarks!(
+    cold_cjk,
+    warm_rebreak_cjk,
+    cold_pass_cjk,
+    warm_pass_cjk,
+    CJK_PARAGRAPH,
+    256,
+    2_048
+);
 text_benchmarks!(
     cold_multi_run,
     warm_rebreak_multi_run,
+    cold_pass_multi_run,
+    warm_pass_multi_run,
     MULTI_RUN,
     256,
     1_024

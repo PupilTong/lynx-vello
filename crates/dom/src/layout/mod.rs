@@ -23,7 +23,7 @@ use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, skips_contents,
+    establishes_fixed_containing_block, shaping_inputs_changed, skips_contents,
 };
 use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
@@ -140,6 +140,13 @@ impl<T> Document<T> {
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         let slot = self.slot(id)?;
         self.layout_state().get(slot)?.text.as_deref()?.committed()
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn text_store(&self, id: crate::NodeId) -> Option<&hughie::text::TextLayoutStore> {
+        let slot = self.slot(id)?;
+        self.layout_state().get(slot)?.text.as_deref()
     }
 
     #[must_use]
@@ -292,9 +299,218 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352, 16,),
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352, 8,),
             "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
         );
+    }
+
+    /// Builds the shape a Lynx label actually has: an auto-sized `text`
+    /// element holding one text node, inside a definite-width flex row.
+    fn label_document(text: &str, width: f32) -> (Document<()>, crate::NodeId) {
+        let (document, _, run) = label_document_parts(text, width);
+        (document, run)
+    }
+
+    fn label_document_parts(
+        text: &str,
+        width: f32,
+    ) -> (Document<()>, crate::NodeId, crate::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+
+        let mut document: Document<()> =
+            Document::new(crate::tree::document::tests::device(), "page", ());
+        document.add_stylesheet(
+            &format!(
+                "page {{ display: flex; width: {width}px; height: 100px;
+                         align-items: flex-start; font-family: Ahem; font-size: 16px; }}
+                 .label {{ display: flex; }}"
+            ),
+            StylesheetOrigin::Author,
+        );
+        assert_eq!(document.register_fonts(FontBlob::from_static(AHEM)), 1);
+        let root = document.document_element().id();
+        let label = document.create_element("text", ());
+        document.add_class(label, "label");
+        document.append_child(root, label);
+        let run = document.create_text_node(text, ());
+        document.append_child(label, run);
+        (document, label, run)
+    }
+
+    /// The number this whole path exists to hold down.
+    ///
+    /// Nine measurements reach a flex text child in one pass — max-content,
+    /// min-content, and its used width, each asked once per enclosing flex
+    /// level, plus the commit — because the box cache keys on the available
+    /// height a text node's answer does not depend on. What survives is one
+    /// line break per *distinct* constraint, which is the floor. Before the
+    /// break and constraint memos all nine broke, and the first probe also
+    /// deep-cloned the shaped layout.
+    #[test]
+    fn one_pass_breaks_a_text_node_once_per_distinct_constraint() {
+        for (case, text, width, lines, breaks) in [
+            // min-content == max-content == used width: two distinct widths.
+            ("one word", "hello", 200.0, 1, 2),
+            // min-content (one word) < used width == max-content: three.
+            ("one line, two words", "hello world", 200.0, 1, 3),
+            // min-content, max-content as a width, the used width, and
+            // unconstrained: four, one break each.
+            ("wrapped", "hello world", 100.0, 2, 4),
+        ] {
+            let (mut document, run) = label_document(text, width);
+            document.layout();
+
+            let store = document
+                .text_store(run)
+                .expect("the text node retains a layout");
+            assert!(!store.is_probe_dirty(), "{case}");
+            let committed = store.committed().expect("the pass committed a text layout");
+            assert_eq!(committed.line_count(), lines, "{case}: lines");
+            assert_eq!(
+                committed.break_count(),
+                breaks,
+                "{case}: line breaks per pass"
+            );
+        }
+    }
+
+    /// The case the restore queue exists for: a pass that measures a text node
+    /// and never commits it.
+    ///
+    /// It is reachable whenever the box cache answers a node's `Commit` but
+    /// not the `Measure` that preceded it — a single-axis probe can never be
+    /// served from the committed slot, while the commit input the parent
+    /// re-imposes always is. Driving the host directly is the deterministic
+    /// way to produce it; what matters is that the layout does not end the
+    /// pass painting the probe's line breaks.
+    #[test]
+    fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
+        use hughie::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis};
+
+        let (mut document, run) = label_document("hello world", 200.0);
+        document.layout();
+        let committed = document.text_layout(run).expect("committed").max_advance();
+        let lines = document.text_layout(run).expect("committed").line_count();
+
+        let slot = document.live_slot(run);
+        let (tree, state, _) = document.layout_parts();
+        tree.compute_layout(
+            state,
+            slot,
+            LayoutInput::measure(
+                Size::NONE,
+                Size::NONE,
+                Size::new(AvailableSpace::Definite(37.0), AvailableSpace::MaxContent),
+                RequestedAxis::Horizontal,
+            ),
+        );
+
+        let store = document.text_store(run).expect("retained");
+        assert!(
+            store.is_probe_dirty(),
+            "a probe at an unseen constraint moves the retained line breaks",
+        );
+        assert_eq!(
+            store.retained().expect("retained").max_advance(),
+            Some(37.0)
+        );
+
+        document.layout_state_mut().restore_probed_text();
+
+        let store = document.text_store(run).expect("retained");
+        assert!(!store.is_probe_dirty());
+        let restored = store.committed().expect("committed");
+        assert_eq!(restored.max_advance(), committed);
+        assert_eq!(restored.line_count(), lines);
+    }
+
+    /// The two-level eviction, from the outside: a relayout-damaged element
+    /// keeps its text children's shaped glyphs unless the restyle moved
+    /// something Parley shapes from.
+    #[test]
+    fn a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved() {
+        for (case, declaration, survives) in [
+            // Geometry: a different `Font`/`InheritedText` is never even
+            // allocated, so level one answers.
+            ("width", "width: 150px", true),
+            ("padding", "padding: 4px", true),
+            // Same struct as `letter-spacing`, but not a shaping input — only
+            // the field comparison can tell these apart.
+            ("text-align", "text-align: center", true),
+            ("text-indent", "text-indent: 8px", true),
+            // Shaping inputs.
+            ("font-size", "font-size: 24px", false),
+            ("font-weight", "font-weight: 700", false),
+            ("letter-spacing", "letter-spacing: 2px", false),
+            ("word-break", "word-break: break-all", false),
+        ] {
+            let (mut document, label, run) = label_document_parts("hello world", 200.0);
+            document.layout();
+            assert!(
+                document
+                    .text_store(run)
+                    .expect("retained")
+                    .committed()
+                    .is_some()
+            );
+
+            document.set_inline_style(label, declaration);
+            document.flush_styles_with_damage_sink(&mut |_, _| {});
+
+            assert_eq!(
+                document
+                    .text_store(run)
+                    .expect("the store outlives its artifact")
+                    .retained()
+                    .is_some(),
+                survives,
+                "{case}: shaped text should {} the restyle",
+                if survives { "survive" } else { "not survive" },
+            );
+            assert!(
+                document.layout_cache_is_empty(run).expect("live text node"),
+                "{case}: a relayout always drops the text child's box cache",
+            );
+        }
+    }
+
+    #[test]
+    fn a_repaint_only_restyle_never_reaches_the_text_eviction_path() {
+        let (mut document, label, run) = label_document_parts("hello world", 200.0);
+        document.layout();
+
+        document.set_inline_style(label, "color: rgb(255, 0, 0)");
+        document.flush_styles_with_damage_sink(&mut |_, _| {});
+
+        assert!(
+            document
+                .text_store(run)
+                .expect("retained")
+                .retained()
+                .is_some()
+        );
+        assert!(
+            !document.layout_cache_is_empty(run).expect("live text node"),
+            "a repaint-only change leaves even the box cache alone",
+        );
+    }
+
+    #[test]
+    fn a_re_measured_text_node_ends_the_pass_on_its_committed_break() {
+        let (mut document, run) = label_document("hello world", 200.0);
+        document.layout();
+        let first = document.text_layout(run).expect("committed").max_advance();
+
+        // Force the whole spine to re-measure, then check the retained layout
+        // did not end the pass holding an intrinsic-sizing probe's break.
+        document.invalidate_layout(run);
+        document.layout();
+
+        let store = document.text_store(run).expect("retained");
+        assert!(!store.is_probe_dirty());
+        let committed = store.committed().expect("committed after re-measure");
+        assert_eq!(committed.max_advance(), first);
+        assert_eq!(committed.line_count(), 1);
     }
 
     #[test]

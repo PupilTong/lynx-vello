@@ -363,7 +363,9 @@ useful signal for currently-compatible versions of those libraries.
   newline. **Not implemented**: an inline formatting context, so sibling runs
   in one `text` are separate flex items rather than one wrapped paragraph, a
   nested `text` is a flex item rather than an inline box, and `text-maxline`
-  truncation is still absent.
+  truncation is still absent — `docs/text-measurement-and-ifc.md` records the
+  retained-layout and eviction contracts those would build on, and the open
+  design decisions (brush, artifact ownership, truncation ordering).
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The

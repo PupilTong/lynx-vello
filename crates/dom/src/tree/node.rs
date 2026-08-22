@@ -112,6 +112,23 @@ pub struct Node<T> {
     content: Option<Box<NodeContent>>,
 }
 
+/// What a post-flush style swap moved on one element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StyleRefresh {
+    /// Whether the element's computed style is a different `Arc` than before.
+    pub(crate) changed: bool,
+    /// Whether anything a descendant text node is *shaped* from moved with
+    /// it. Only meaningful when `changed`.
+    pub(crate) shaping_changed: bool,
+}
+
+impl StyleRefresh {
+    pub(crate) const UNCHANGED: Self = Self {
+        changed: false,
+        shaping_changed: false,
+    };
+}
+
 impl<T> Node<T> {
     pub(crate) fn new_document(
         owner: *mut TreeArenas<T>,
@@ -464,20 +481,41 @@ impl<T> Node<T> {
         self.has_style_data().then_some(&self.style_data)
     }
 
-    pub(crate) fn refresh_layout_style(&mut self, style: Option<Arc<ComputedValues>>) -> bool {
+    /// Swaps in the post-flush computed style, reporting what moved.
+    ///
+    /// The shaping verdict has to be taken here, while both the old and the
+    /// new style are alive: the caller only sees the new one, and the old
+    /// style structs can be freed — and their addresses reused — the moment
+    /// this returns.
+    pub(crate) fn refresh_layout_style(
+        &mut self,
+        style: Option<Arc<ComputedValues>>,
+    ) -> StyleRefresh {
         let NodeData::Element(snapshot) = &mut self.data else {
             debug_assert!(style.is_none(), "only elements own computed styles");
-            return false;
+            return StyleRefresh::UNCHANGED;
         };
-        let changed = match (&*snapshot, &style) {
-            (None, None) => false,
-            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
-            _ => true,
+        let refresh = match (&*snapshot, &style) {
+            (None, None) => StyleRefresh::UNCHANGED,
+            (Some(old), Some(new)) => {
+                if Arc::ptr_eq(old, new) {
+                    StyleRefresh::UNCHANGED
+                } else {
+                    StyleRefresh {
+                        changed: true,
+                        shaping_changed: crate::layout::shaping_inputs_changed(old, new),
+                    }
+                }
+            }
+            _ => StyleRefresh {
+                changed: true,
+                shaping_changed: true,
+            },
         };
-        if changed {
+        if refresh.changed {
             *snapshot = style;
         }
-        changed
+        refresh
     }
 
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {

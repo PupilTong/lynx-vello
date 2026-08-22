@@ -1,5 +1,6 @@
 //! The `@keyframes` driver: Stylo owns the animation, the document owns the
 //! timeline, and the caller owns the clock.
+#![allow(clippy::float_cmp, reason = "Ahem gives exact integral layout numbers")]
 
 mod common;
 
@@ -31,6 +32,47 @@ const SLIDE: &str = "
     }
     .mover { animation: slide 10s linear; width: 20px; height: 20px; }
 ";
+
+/// An animated shaping property has to reach the text, and the only path from
+/// the animation harvest to a text node's cached measurement is the text-child
+/// invalidation the style harvest also does. Without it the element restyles,
+/// re-lays out, and the text answers from the box cache it filled at the first
+/// font size.
+#[test]
+fn an_animated_font_size_remeasures_the_text_it_scales() {
+    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+
+    let mut doc = Doc::with_css(
+        "@keyframes grow { from { font-size: 16px; } to { font-size: 32px; } }
+         page { display: flex; width: 400px; height: 100px; align-items: flex-start;
+                font-family: Ahem; }
+         .label { display: flex; animation: grow 10s linear; }",
+    );
+    assert_eq!(
+        doc.dom.register_fonts(dom::FontBlob::from_static(AHEM)),
+        1,
+        "Ahem gives every glyph an exact one-em advance"
+    );
+    let root = doc.root;
+    let label = doc.el(root, "text.label");
+    let run = doc.dom.create_text_node("hello", ());
+    doc.dom.append_child(label, run);
+
+    doc.dom.advance_animations(0.0);
+    doc.flush();
+    let start = box_of(&doc, run).1;
+    assert_eq!(start.width, 80.0, "five Ahem glyphs at 16px");
+
+    let tick = doc.dom.advance_animations(5.0);
+    assert!(tick.relayout, "an animated font-size is not a repaint");
+    doc.flush();
+
+    assert_eq!(
+        box_of(&doc, run).1.width,
+        120.0,
+        "the text re-measures at the animated 24px"
+    );
+}
 
 #[test]
 fn a_keyframes_animation_starts_without_being_ticked() {
