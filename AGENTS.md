@@ -256,8 +256,7 @@ useful signal for currently-compatible versions of those libraries.
   PAPI runtime (`packages/bobcat-element`) as `bobcat:element` in QuickJS's
   synchronous preloaded ESM loader. A `.web.bundle`'s `lepusCode.root` or raw
   XML main body becomes a real ESM at its resolved entry URL: core prepends
-  named imports from both built-ins plus the `navigator`/`postMessage`/`window`
-  shadows formerly supplied by web-core's IIFE. The `bobcat:boot` ESM imports
+  named imports from both built-ins. The `bobcat:boot` ESM imports
   `__FlushElementTree` from `bobcat:element`, uses top-level await on
   `import(entry_url)`, and then runs
   `processData` → `renderPage` → `__FlushElementTree` inside JavaScript; Rust

@@ -67,7 +67,6 @@ import {
   __FlushElementTree,
 } from "bobcat:element";
 //# allFunctionsCalledOnLoad
-const navigator = void 0, postMessage = void 0, window = void 0;
 "#;
 
 /// Why constructing or running the engine-owned main-thread runtime failed.
@@ -1592,11 +1591,11 @@ mod tests {
             .expect("main-thread script");
 
         let steps = steps(&elements, 3);
-        // Free the unrelated element the way a finalizer would, between the
-        // path being built and the walk running.
-        runtime
-            .evaluate_module("bobcat.dropElement(doomed);", "app:///sweep.js", "sweeping")
-            .expect("sweep");
+        // Collect the unrelated handle between building the path and running
+        // the walk. The real finalizer performs the one `dropElement` call;
+        // invoking it manually here would leave that finalizer armed and make
+        // its later cleanup a duplicate stale-id call.
+        runtime.collect_garbage().expect("sweep");
 
         runtime.dispatch_event(&steps, "tap", "").expect("dispatch");
 

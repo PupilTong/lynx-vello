@@ -156,8 +156,7 @@ private `bobcat.*` callbacks and preloads three kinds of ESM source: the
 core-owned `bobcat:runtime` named compatibility exports, the embedded
 `bobcat:element` named Element-PAPI exports, and the fetched entry under its
 resolved URL. Before registering that entry, core prepends its runtime and
-Element-PAPI import declarations plus the environment-shadow declarations
-used by web-core's MTS wrapper.
+Element-PAPI import declarations.
 
 The final `bobcat:boot` module imports the flush binding from
 `bobcat:element`; the transformed entry itself statically imports both
