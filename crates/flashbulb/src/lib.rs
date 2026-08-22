@@ -1,3 +1,10 @@
+// The workspace sets `unsafe_code = "warn"`, which any module can silence with a
+// local `allow`. This crate holds no `unsafe` at all, and that is a property
+// worth a machine check rather than a convention: `forbid` cannot be overridden
+// from inside the crate, so introducing `unsafe` here has to be a deliberate
+// edit to this line.
+#![forbid(unsafe_code)]
+
 //! `flashbulb` — screenshot testing infrastructure for lynx-vello.
 //!
 //! This crate is to lynx-vello's render tests what Playwright's

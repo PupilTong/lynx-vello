@@ -20,11 +20,15 @@
 //!
 //! - **Apple** (macOS/iOS): `ImageIO`, claiming PNG, JPEG, WebP, GIF, HEIC and AVIF. The system
 //!   decoder is the *only* decoder on these targets.
-//! - **Windows**: WIC — PNG and JPEG inbox, WebP when the Store extension is installed.
-//! - **Android**: NDK `AImageDecoder` (API 30+), reached via `dlopen`.
 //! - **Linux**: the pure-Rust reference decoder (`png` + `zune-jpeg` + `image-webp`), compiled for
 //!   that OS only. It exists so headless Linux hosts decode at all; it is not shipped on the
-//!   platforms above.
+//!   platform above.
+//!
+//! There is no Windows or Android decoder. Reference modules for both (WIC,
+//! and the NDK `AImageDecoder` via `dlopen`) were carried here for embedders
+//! that do not exist yet and were removed in #129; recover them from git
+//! history if one materializes. On those targets the CLI's `platform_decoder`
+//! returns `None` and the embedder must inject its own.
 //!
 //! An embedder with its own image pipeline (an app already running `SDWebImage`,
 //! `Fresco` or similar) implements [`Decoder`] over that pipeline instead and
@@ -88,12 +92,11 @@
 //! 14. One image pixel is one CSS pixel. There are no density descriptors (`srcset`/`sizes` are not
 //!     implemented), so nothing here needs a scale factor; when density lands, the conversion
 //!     belongs on [`ImageHeader`] rather than at each call site.
-//! 15. The WIC and `AImageDecoder` reference decoders are unexecuted, and since they moved into the
-//!     CLI — whose mandatory `QuickJS` C sources do not cross-compile to those ABIs — no CI gate
-//!     type-checks them either. They are recorded reference material for embedders that do not
-//!     exist yet. On those targets a failed capability probe leaves the embedder with no decoder at
-//!     all (the reference decoder is Linux-only); shipping there means accepting that or injecting
-//!     an embedder-side fallback.
+//! 15. Windows and Android have no decoder at all. The WIC and `AImageDecoder` reference modules
+//!     that once stood in for them were never executed and never type-checked — they lived in the
+//!     CLI, whose mandatory `QuickJS` C sources do not cross-compile to those ABIs, so no CI gate
+//!     could reach them — and were removed rather than left to rot. Shipping on those targets means
+//!     injecting an embedder-side decoder.
 
 // Retained as an engine-owned pipeline while the Lynx `<image>` element is wired above it.
 #[allow(dead_code)]

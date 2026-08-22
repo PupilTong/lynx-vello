@@ -184,7 +184,12 @@ useful signal for currently-compatible versions of those libraries.
   adapter's module operations. Workspace dependencies disable defaults
   explicitly; only an upper layer that wants the built-in engine enables
   `quickjs`.
-  The core depends on `dom` but does **not** re-export it. Its private `Engine`
+  The core depends on `dom` and re-exports exactly one narrow seam of it: the
+  `input` module republishes `dom::Point2D` and
+  `dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
+  so an embedder can name the input vocabulary without depending on `dom`
+  itself. Nothing else crosses — no document, no node, no hit-test result —
+  and that list is the whole of it. Its private `Engine`
   passes the element tree to and from its engine-owned Lynx main thread through
   the private `SharedTree` hand-off slot — one holder at any instant — and runs input
   routing, scrolling, frame production, and presentation on the thread the
@@ -955,7 +960,7 @@ useful signal for currently-compatible versions of those libraries.
   (post-flush, no `Arc` bump), geometry is the rounded layout, and the
   document Device supplies viewport/DPR so paint cannot disagree with layout.
   The authoritative paint limits are recorded in
-  `crates/dom/src/painter.rs`; DOM-aware paint tests and the paint benchmark
+  `crates/dom/src/paint/painter.rs`; DOM-aware paint tests and the paint benchmark
   live under `crates/dom/tests` and `crates/dom/benches`.
   Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
   geometry off the layout engine's accumulated `content_size`, a per-node
@@ -1030,7 +1035,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `019d1fb50`): `contain` was already seeded
+  canonical `lynx` branch, tip `9e647b249`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -1054,6 +1059,17 @@ useful signal for currently-compatible versions of those libraries.
   draggable). The three non-`visible` values stay genuinely distinct:
   `scroll` is user-scrollable, `hidden` is a scroll container that moves only
   programmatically, `clip` is not a scroll container at all.
+  Three commits have landed on `lynx` since #12, and the tip above is the last
+  of them: fork PR #14 requires `Send` of `FontMetricsProvider` implementations
+  (what lets a `Document` cross to the presenting thread at all), fork PR #13
+  corrects `ElementData` reference documentation, and fork PR #21 moves the
+  `display` longhand's initial value from `inline` to `Display::initial()`,
+  which under the `lynx` feature is `flex`. Read that last one against the
+  paragraph above rather than as a contradiction of it: the *initial* value is
+  what an element computes to with no declaration reaching it at all, while
+  Lynx's `display: linear` default is a UA-sheet declaration this embedder
+  cascades. Confirm the tip with `git -C vendor/stylo rev-parse --short HEAD`
+  before trusting this line — the gitlink moves and the prose does not.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -1213,13 +1229,104 @@ this section is the only place the absolute paths are spelled out.
   excluded from the workspace, and the fork carries pre-existing upstream
   rustfmt drift, so it "fixes" files nobody touched. Check
   `git -C vendor/stylo status` afterwards and revert anything outside your own
-  change, or the next fork commit ships unrelated reformatting.
+  change, or the next fork commit ships unrelated reformatting. Use
+  `./.github/scripts/fmt-check.sh` instead — it is what CI runs, it names the
+  members from `cargo metadata` rather than from a list someone has to
+  remember to extend, and it covers the out-of-workspace `fuzz` package. The
+  hand-written list it replaced had been missing `lynx-xml` since that crate
+  was added.
 
 ## Testing
 
 Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
+
+### Fuzzing the parsers
+
+`lynx-template-decoder` and `lynx-xml` are the two crates fed bytes the engine
+did not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both
+are written in the `Result` style, and both have unit tests — but every one of
+those tests feeds input a *correct* encoder produced, which cannot establish
+the property that actually matters at that boundary: that no byte string,
+however hostile, takes the process down. `fuzz/` holds
+three libFuzzer targets that do (`fuzz/README.md` has the details):
+`template_container` over the whole container, `template_style_info` over the
+rkyv archive — reached through a synthetic 20-byte envelope, because going in
+through `decode` would spend nearly every execution on the container header —
+and `lynx_xml`, which also asserts that the returned sections borrow from the
+source and that a `ParseError` offset lands on a real UTF-8 boundary.
+
+The package declares its own `[workspace]` and is excluded from the root one,
+so a sanitizer build never enters the resolve that `clippy`, `llvm-cov` and
+`codspeed` share. `.github/workflows/fuzz.yml` runs it nightly against a cached
+corpus and briefly on pull requests that touch either parser; `ci.yml` builds
+and unit-tests the package on every pull request, which is what keeps the
+targets from rotting between nightly runs.
+
+Seed before running anything — unseeded, almost every execution stops at the
+`SDRA`/`WROF` magic or the `<?xml` prologue:
+
+```sh
+./fuzz/seed-corpus.sh
+cargo fuzz run template_style_info
+```
+
+Scope is panic-freedom, not decode correctness. An input that decodes to the
+wrong thing without panicking passes, deliberately — round-trip correctness is
+the crates' own test suites' job.
+
+### The unsafe floor
+
+`hughie`, `flashbulb`, `lynx-template-decoder` and `lynx-xml` carry
+`#![forbid(unsafe_code)]`. The workspace-wide `unsafe_code = "warn"` is a lint
+any module can silence locally; `forbid` cannot be overridden from inside the
+crate, so `unsafe` appearing in one of these four has to be a deliberate edit
+to that line.
+
+Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
+enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
+`bobcat-cli` (its fifteen ImageIO and Core Graphics blocks in
+`image_decoders/apple.rs`) and in `dom` (its two). The lint is still
+crate-local rather than workspace-wide because `quickjs-rust-bridge` (133
+blocks) is the last holdout and is being restructured separately; raising it
+there is what would let this move into `[workspace.lints.clippy]`.
+
+One trap, worth knowing before writing the comment: the lint does **not** scan
+past an intervening attribute. Where an unsafe site carries
+`#[expect(unsafe_code, reason = …)]`, as every one in `dom` does, the
+`// SAFETY:` comment has to sit *between* that attribute and the block —
+placing it above the attribute still trips the lint, and `cargo fmt` will not
+move it either way.
+
+### Benchmarks measure a debug-instrumented dom
+
+Cargo unifies the features of a package's dev-dependencies into that package's
+own library whenever dev targets are in the build. `hughie` dev-depends on
+`dom` with `layout-test-utils` for its bench harness, and `dom` depends on
+`hughie`, so the cycle turns the feature on for both libraries in any build
+that includes bench targets:
+
+```sh
+cargo build --unit-graph -Z unstable-options --workspace            # dom: []
+cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layout-test-utils]
+```
+
+The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
+The cost is one `test_leaf_metrics()` probe per leaf in
+`crates/dom/src/layout/host.rs` that a release build does not contain — so the
+CodSpeed numbers, which are the authority for this repo (single-run local
+walltime here is noise), describe a `dom` that is one branch away from the
+shipped one. On the `hughie` side the feature only adds the
+`compute_leaf_layout_with_measurement_for_testing` wrapper and costs nothing.
+
+**This is accepted, not fixed.** Breaking the cycle means moving hughie's
+dom-based benches into `dom`, which renumbers every CodSpeed benchmark id and
+throws away its history — a worse trade than one predictable branch.
+`.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
+it diffs the two resolutions, prints the two recorded deviations, and fails on
+a third appearing or on a recorded one silently going away. Any new entry needs
+a written reason for the same cost the existing ones state.
 
 ### Restricted-environment troubleshooting
 
@@ -1255,6 +1362,21 @@ default explanation for a failure:
   `cargo check --workspace --all-targets`, `cargo clippy`, and the test suite
   never type-check it, so anything touching the browser embedder — or any
   `#[cfg]`-gated import it depends on — is unverified until that target builds.
+  CI's `browser` job now lints that target, so the gap is no longer silent:
+
+  ```sh
+  cargo clippy --target wasm32-unknown-unknown --lib \
+    -p bobcat-wasm -p bobcat-core -p dom -p hughie \
+    -p lynx-xml -p lynx-template-decoder -p quickjs-rust-bridge -- -D warnings
+  ```
+
+  `--lib`, not `--all-targets`: `bobcat-core` dev-depends on tokio's
+  `rt-multi-thread`, which refuses to compile for wasm32, and feature
+  unification drags it into anything that builds dev targets. The packages are
+  named rather than `--workspace` because `bobcat-cli` is a native binary. The
+  two `-Ctarget-feature` warnings `.cargo/config.toml` produces on every crate
+  are rustc codegen warnings rather than lints, so `-D warnings` leaves them
+  alone.
 
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and

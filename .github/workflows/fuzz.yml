@@ -1,0 +1,122 @@
+name: Fuzz
+
+# Machine verification that the two parsers fed untrusted external bytes reject
+# malformed input rather than panicking. Both are written in the `Result` style
+# and both have unit tests, but every one of those tests feeds input a *correct*
+# encoder produced — nothing was checking the property that matters at the trust
+# boundary. See fuzz/README.md.
+#
+# Kept out of ci.yml because the two have opposite shapes: CI must finish fast
+# and deterministically, fuzzing wants a long run against a corpus that
+# accumulates. ci.yml still builds and unit-tests the fuzz package on every pull
+# request, so the targets cannot rot unnoticed between runs here.
+
+on:
+  pull_request:
+    paths:
+      - "crates/lynx-template-decoder/**"
+      - "crates/lynx-xml/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    # 03:17 UTC daily. Off the hour so it does not queue behind the crowd of
+    # cron jobs that everyone points at :00.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Seconds to fuzz each target
+        required: false
+        default: "900"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: fuzz-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # One target crashing says nothing about the others, and the whole point
+      # of a nightly run is to collect every finding in one pass.
+      fail-fast: false
+      matrix:
+        target: [template_container, template_style_info, lynx_xml]
+    env:
+      # A pull request only has to prove the targets still build and that the
+      # accumulated corpus stays clean; the nightly run does the searching.
+      FUZZ_SECONDS: ${{ inputs.duration || (github.event_name == 'pull_request' && 120 || 900) }}
+    steps:
+      # No submodules: the fuzz package resolves to lynx-template-decoder and
+      # lynx-xml only, and neither reaches the vendored stylo fork.
+      - uses: actions/checkout@v6
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed corpus from repository fixtures
+        # Idempotent, and not optional: starting from nothing, libFuzzer spends
+        # nearly its whole budget failing the `SDRA`/`WROF` magic or the `<?xml`
+        # prologue and no section decoder is ever reached.
+        run: ./fuzz/seed-corpus.sh
+
+      - name: Fuzz
+        run: >-
+          cargo fuzz run ${{ matrix.target }} --
+          -max_total_time=${{ env.FUZZ_SECONDS }}
+          -timeout=25
+          -rss_limit_mb=4096
+          -print_final_stats=1
+
+      - name: Minimize corpus
+        # Without this the corpus only grows: a 90-second local run added 19 MB
+        # to template_container alone. Minimizing keeps the cached artifact
+        # bounded and every later run faster.
+        if: ${{ github.event_name != 'pull_request' }}
+        run: cargo fuzz cmin ${{ matrix.target }}
+
+      - name: Save corpus
+        # Scheduled and dispatched runs only. A pull request may read the shared
+        # corpus but must not write it — otherwise any branch can poison the
+        # input every later run starts from.
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+      - name: Upload crashing inputs
+        # The reproducer is the finding. Without the artifact the log says a
+        # crash happened and the input that caused it dies with the runner.
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30

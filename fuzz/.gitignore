@@ -1,0 +1,7 @@
+# Build output and the inputs libFuzzer accumulates. `seed-corpus.sh` rebuilds
+# the starting corpus from fixtures already in the repository; CI restores the
+# accumulated one from its cache.
+target
+corpus
+artifacts
+coverage

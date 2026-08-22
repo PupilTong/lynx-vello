@@ -1,0 +1,52 @@
+# Its own workspace root. The parent's `workspace.exclude` states the intent,
+# but exclusion alone is not enough: Cargo keeps walking up past an excluding
+# manifest, so a checkout nested inside another Cargo project (a git worktree
+# under `.claude/worktrees/`, for one) would otherwise bind this package to
+# whatever workspace it found further up.
+[workspace]
+
+[package]
+name = "lynx-vello-fuzz"
+description = "libFuzzer targets for the two parsers that are fed untrusted external bytes"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lynx-template-decoder = { path = "../crates/lynx-template-decoder" }
+lynx-xml = { path = "../crates/lynx-xml" }
+
+# `cargo fuzz` builds with `-C debug-assertions` on top of the release profile,
+# so every `debug_assert!` in the crates under test is live. Keep overflow
+# checks on for the same reason: an arithmetic wrap while walking attacker-shaped
+# length fields is a decode bug even when it cannot reach memory unsafety.
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "template_container"
+path = "fuzz_targets/template_container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template_style_info"
+path = "fuzz_targets/template_style_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lynx_xml"
+path = "fuzz_targets/lynx_xml.rs"
+test = false
+doc = false
+bench = false

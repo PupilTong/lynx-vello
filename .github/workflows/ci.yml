@@ -29,19 +29,30 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: >-
-          cargo fmt --check
-          -p bobcat-core
-          -p bobcat-cli
-          -p bobcat-wasm
-          -p flashbulb
-          -p lynx-template-decoder
-          -p quickjs-rust-bridge
-          -p dom
-          -p hughie
+        # The package list used to be written out by hand here and had drifted:
+        # lynx-xml was never checked. The script asks Cargo for the members
+        # instead, so a new crate is covered the moment it joins the workspace.
+        run: ./.github/scripts/fmt-check.sh
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Fuzz targets (out of workspace)
+        # fuzz/ declares its own workspace, so every step above is blind to it.
+        # Build and unit-test it here — including the tests that assert the
+        # synthetic container really reaches the StyleInfo decoder, without
+        # which `template_style_info` would fuzz nothing while still reporting
+        # executions. The fuzzing itself runs in fuzz.yml.
+        run: |
+          cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path fuzz/Cargo.toml
+
+      - name: Benchmarks measure the shipped feature set
+        # Cargo unifies dev-dependency features into the library itself, so
+        # `cargo codspeed build` can measure a library production never ships.
+        # Two such deviations exist and are recorded in the script; this fails
+        # on a third appearing, or on a recorded one going away unnoticed.
+        run: python3 .github/scripts/check-bench-feature-parity.py
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -106,6 +117,29 @@ jobs:
         with:
           shared-key: browser-wasm
 
+      - name: Clippy (wasm32)
+        # The macOS job's `cargo clippy` runs for the host, where every
+        # wasm32-gated item is `cfg`-ed out — `crates/bobcat-wasm/src/browser.rs`
+        # is the whole browser embedder and had never been linted, or even
+        # type-checked, by CI. This job already carries the LLVM 22 toolchain
+        # the target needs.
+        #
+        # `--lib` rather than `--all-targets`: bobcat-core dev-depends on
+        # tokio's `rt-multi-thread`, which refuses to compile for wasm32, and
+        # feature unification would drag it into any build that includes dev
+        # targets. The packages are named rather than `--workspace` because
+        # bobcat-cli is a native binary that does not target wasm32 at all.
+        run: >-
+          cargo clippy --target wasm32-unknown-unknown --lib
+          -p bobcat-wasm
+          -p bobcat-core
+          -p dom
+          -p hughie
+          -p lynx-xml
+          -p lynx-template-decoder
+          -p quickjs-rust-bridge
+          -- -D warnings
+
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
@@ -136,6 +170,45 @@ jobs:
         run: pnpm --filter github-pages build
         env:
           PAGES_BASE_PATH: /ci-preview
+
+  linux-cli:
+    name: bobcat-cli type-check + clippy (Ubuntu)
+    runs-on: ubuntu-26.04
+    env:
+      CC: clang-22
+      CXX: clang++-22
+    steps:
+      # bobcat-cli is the one workspace member no job compiles on Linux. The
+      # macOS job builds its Apple decoder; the Ubuntu benchmark job builds
+      # dom/hughie/quickjs-rust-bridge through their bench targets but never
+      # reaches the CLI, which nothing depends on. So
+      # `src/image_decoders/software.rs` — the pure-Rust reference decoder that
+      # exists *for* headless Linux — had no gate compiling it at all, the same
+      # blind spot that let the Windows and Android decoders sit unbuilt until
+      # they were deleted in #129.
+      #
+      # No tests: the CLI's dev-dependencies pull in flashbulb's GPU capture,
+      # and a hosted runner has no adapter.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+
+      - name: Install system dependencies
+        # libfontconfig1-dev is a build-time dependency of parley's `system`
+        # font source, which the CLI reaches through dom.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang-22 llvm-22 libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-cli
+
+      - name: Clippy
+        run: cargo clippy -p bobcat-cli --all-targets -- -D warnings
 
   element-papi:
     name: Element PAPI runtime tests (Ubuntu)
