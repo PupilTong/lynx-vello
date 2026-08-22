@@ -17,6 +17,12 @@ _Static_assert(JS_EVAL_FLAG_BACKTRACE_BARRIER == (1 << 6),
                "Rust JS_EVAL_FLAG_BACKTRACE_BARRIER must match quickjs.h");
 _Static_assert(JS_EVAL_FLAG_ASYNC == (1 << 7),
                "Rust JS_EVAL_FLAG_ASYNC must match quickjs.h");
+_Static_assert(JS_PROMISE_PENDING == 0,
+               "Rust QJS_PROMISE_PENDING must match quickjs.h");
+_Static_assert(JS_PROMISE_FULFILLED == 1,
+               "Rust QJS_PROMISE_FULFILLED must match quickjs.h");
+_Static_assert(JS_PROMISE_REJECTED == 2,
+               "Rust QJS_PROMISE_REJECTED must match quickjs.h");
 
 typedef struct QjsValue {
     JSValue value;
@@ -30,6 +36,12 @@ typedef struct QjsUnhandledRejection {
 
 typedef int QjsInterruptCallback(void *opaque);
 
+typedef struct QjsModuleSource {
+    char *name;
+    uint8_t *source;
+    size_t source_length;
+    struct QjsModuleSource *next;
+} QjsModuleSource;
 
 enum QjsHostArgKind {
     QJS_ARG_UNDEFINED = 0,
@@ -76,6 +88,7 @@ typedef struct QjsRuntime {
     QjsHostRelease *host_release;
     void *host_opaque;
     JSClassID host_owner_class_id;
+    QjsModuleSource *module_sources;
 } QjsRuntime;
 
 
@@ -200,6 +213,43 @@ static int qjs_interrupt_trampoline(JSRuntime *raw, void *opaque) {
     return runtime->interrupt_callback(runtime->interrupt_opaque);
 }
 
+static JSModuleDef *qjs_module_loader(JSContext *context,
+                                      const char *module_name, void *opaque) {
+    QjsRuntime *runtime = opaque;
+    QjsModuleSource *module = runtime->module_sources;
+    JSValue compiled;
+    JSModuleDef *definition;
+
+    while (module != NULL && strcmp(module->name, module_name) != 0) {
+        module = module->next;
+    }
+    if (module == NULL) {
+        JS_ThrowReferenceError(context, "module '%s' is not preloaded",
+                               module_name);
+        return NULL;
+    }
+
+    compiled = JS_Eval(context, (const char *)module->source,
+                       module->source_length, module->name,
+                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(compiled)) {
+        return NULL;
+    }
+    definition = JS_VALUE_GET_PTR(compiled);
+    JS_FreeValue(context, compiled);
+    return definition;
+}
+
+static void qjs_module_sources_free(QjsModuleSource *module) {
+    while (module != NULL) {
+        QjsModuleSource *next = module->next;
+        free(module->name);
+        free(module->source);
+        free(module);
+        module = next;
+    }
+}
+
 JSClassID qjs_host_owner_class_id_new(void) {
     JSClassID class_id = 0;
 
@@ -217,6 +267,7 @@ QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id) {
         JS_SetHostPromiseRejectionTracker(runtime->raw,
                                           qjs_promise_rejection_tracker,
                                           runtime);
+        JS_SetModuleLoaderFunc(runtime->raw, NULL, qjs_module_loader, runtime);
         runtime->host_owner_class_id = host_owner_class_id;
         if (JS_NewClass(runtime->raw, runtime->host_owner_class_id,
                         &qjs_host_owner_class) < 0) {
@@ -246,7 +297,49 @@ void qjs_runtime_free(QjsRuntime *runtime) {
         current = next;
     }
     JS_FreeRuntime(runtime->raw);
+    qjs_module_sources_free(runtime->module_sources);
     free(runtime);
+}
+
+int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
+                           const uint8_t *source, size_t source_length) {
+    QjsModuleSource *current;
+    QjsModuleSource *module;
+    size_t name_length;
+
+    for (current = runtime->module_sources; current != NULL;
+         current = current->next) {
+        if (strcmp(current->name, name) == 0) {
+            return -2;
+        }
+    }
+    if (source_length == SIZE_MAX) {
+        return -1;
+    }
+    name_length = strlen(name);
+    if (name_length == SIZE_MAX) {
+        return -1;
+    }
+
+    module = calloc(1, sizeof(*module));
+    if (module == NULL) {
+        return -1;
+    }
+    module->name = malloc(name_length + 1);
+    module->source = malloc(source_length + 1);
+    if (module->name == NULL || module->source == NULL) {
+        free(module->name);
+        free(module->source);
+        free(module);
+        return -1;
+    }
+    memcpy(module->name, name, name_length + 1);
+    memcpy(module->source, source, source_length);
+    module->source[source_length] = '\0';
+    module->source_length = source_length;
+    module->next = runtime->module_sources;
+    runtime->module_sources = module;
+    return 0;
 }
 
 JSContext *qjs_context_new(QjsRuntime *runtime) {
@@ -378,6 +471,15 @@ int qjs_value_get_boolean(JSContext *context, const QjsValue *value, int *result
 
 int qjs_value_get_number(JSContext *context, const QjsValue *value, double *result) {
     return JS_ToFloat64(context, result, value->value);
+}
+
+int qjs_value_promise_state(JSContext *context, const QjsValue *value) {
+    return JS_PromiseState(context, value->value);
+}
+
+QjsValue *qjs_value_promise_result(JSContext *context,
+                                   const QjsValue *value) {
+    return qjs_box(context, JS_PromiseResult(context, value->value));
 }
 
 int qjs_value_to_cesu8(JSContext *context, const QjsValue *value,

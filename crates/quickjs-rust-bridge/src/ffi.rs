@@ -67,6 +67,12 @@ unsafe extern "C" {
         callback: Option<InterruptCallback>,
         opaque: *mut c_void,
     );
+    pub(crate) fn qjs_runtime_add_module(
+        runtime: *mut QjsRuntime,
+        name: *const c_char,
+        source: *const u8,
+        source_length: usize,
+    ) -> c_int;
 
     pub(crate) fn qjs_new_undefined(context: *mut JSContext) -> *mut QjsValue;
     pub(crate) fn qjs_new_null(context: *mut JSContext) -> *mut QjsValue;
@@ -91,6 +97,12 @@ unsafe extern "C" {
         value: *const QjsValue,
         result: *mut c_double,
     ) -> c_int;
+    pub(crate) fn qjs_value_promise_state(context: *mut JSContext, value: *const QjsValue)
+    -> c_int;
+    pub(crate) fn qjs_value_promise_result(
+        context: *mut JSContext,
+        value: *const QjsValue,
+    ) -> *mut QjsValue;
     pub(crate) fn qjs_value_to_cesu8(
         context: *mut JSContext,
         value: *const QjsValue,

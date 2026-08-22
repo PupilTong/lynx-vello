@@ -61,6 +61,26 @@ async fn public_view_boots_element_papi_without_exposing_the_tree() {
 }
 
 #[tokio::test]
+async fn script_finished_waits_for_the_tla_entry_and_javascript_boot() {
+    run(
+        r"
+        import { __CreateView as createView } from 'bobcat:element';
+        await Promise.resolve();
+        if (typeof globalThis.__CreateView !== 'undefined') {
+          throw new Error('Element PAPI leaked onto globalThis');
+        }
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          __AppendElement(page, createView(0));
+        };
+        ",
+        "app:///entry.mjs",
+    )
+    .await
+    .expect("TLA entry boot");
+}
+
+#[tokio::test]
 async fn resolved_script_url_is_preserved_in_errors() {
     let error = run("const = 1", "app:///broken.js")
         .await

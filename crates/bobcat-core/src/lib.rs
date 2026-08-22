@@ -9,9 +9,10 @@
 //! contract ([`image::Decoder`]; `bobcat-cli` carries reference codecs).
 //! Wiring the codec into the future Lynx `<image>` element remains pending.
 //!
-//! The default `quickjs` feature adds Bobcat's internal `QuickJS` adapter and
-//! main-thread runtime. Disable default features to use only the external
-//! engine contracts without compiling `QuickJS`.
+//! The default `quickjs` feature adds Bobcat's internal `QuickJS` adapter,
+//! preloaded ESM graph, and main-thread runtime. ESM startup currently requires
+//! that adapter; disabling default features only keeps the injection contracts
+//! available without compiling `QuickJS`.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 

@@ -141,10 +141,11 @@ useful signal for currently-compatible versions of those libraries.
   embedder supply its otherwise-absent system-font backend without baking a
   particular font into core. `PageConfig` is
   supplied when the view is constructed. Bundle retrieval, `.web.bundle`
-  decoding, and config parsing are embedder responsibilities; core accepts a
-  script URL through `LynxView::execute_script`, resolves/fetches its UTF-8
-  source through the injected `ResourceFetcher`, and reports completion
-  through `pump`. `execute_script_with_cancellation` accepts the resource
+  decoding, and config parsing are embedder responsibilities; core accepts an
+  entry MTS URL through `LynxView::execute_script`, resolves/fetches its UTF-8
+  source through the injected `ResourceFetcher`, registers the resolved URL in
+  QuickJS's preloaded ESM graph, and reports boot completion through `pump`.
+  `execute_script_with_cancellation` accepts the resource
   protocol's public `CancellationToken`; dropping its future cancels the same
   token observed by pending resolution/fetch work.
   `load_style_sheet(url)` loads author CSS through the same fetcher and mounts
@@ -165,8 +166,9 @@ useful signal for currently-compatible versions of those libraries.
   cannot be borrowed or decomposed from the facade.
   `ScriptEngineFactory` is `Send + Sync` and creates the owner-thread-bound,
   non-`Send` `ScriptEngine` only after the factory reaches the engine-owned
-  Lynx main thread. The VM contract installs named host callbacks, evaluates
-  named source, and provides the optional GC seam; `HostValue` is primitives-only,
+  Lynx main thread. The VM contract installs named host callbacks, registers
+  named preloaded ESM source, evaluates a module through its TLA completion
+  promise, and provides the optional GC seam; `HostValue` is primitives-only,
   so realm values and DOM handles never cross it. The default `quickjs`
   feature adds a private QuickJS adapter and exposes only
   `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. The private
@@ -177,9 +179,11 @@ useful signal for currently-compatible versions of those libraries.
   on the taken document, puts it back, and notifies the presenter through
   the callback injected at construction — locks are touched twice per
   batch, never per call;
-  `default-features = false` excludes QuickJS while preserving all external
-  injection contracts. Workspace dependencies disable defaults explicitly;
-  only an upper layer that wants the built-in engine enables `quickjs`.
+  `default-features = false` excludes QuickJS while preserving the external
+  injection contracts, but ESM startup currently requires the built-in
+  adapter's module operations. Workspace dependencies disable defaults
+  explicitly; only an upper layer that wants the built-in engine enables
+  `quickjs`.
   The core depends on `dom` but does **not** re-export it. Its private `Engine`
   passes the element tree to and from its engine-owned Lynx main thread through
   the private `SharedTree` hand-off slot — one holder at any instant — and runs input
@@ -196,7 +200,7 @@ useful signal for currently-compatible versions of those libraries.
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
-  `ScriptFinished` reports the entry script and `ListenerFailed` reports a
+  `ScriptFinished` reports the entry-module boot and `ListenerFailed` reports a
   listener that threw during event delivery — separate because the second is
   not fatal: the walk continues, the realm stays usable, and later events are
   delivered as normal;
@@ -247,19 +251,26 @@ useful signal for currently-compatible versions of those libraries.
   `removeAttribute`,
   `getAttribute`, `tagName`, `insertBefore`,
   `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
-  speaking DOM vocabulary over numeric `NodeId`s), evaluates the core-owned
-  `main-thread-globals.js` compatibility shell, then the embedded Element PAPI
-  runtime (`packages/bobcat-element`), and finally evaluates a
-  `.web.bundle`'s `lepusCode.root` inside web-core's wrapper and runs
-  `processData` → `renderPage` → `__FlushElementTree`. The globals shell is
+  speaking DOM vocabulary over numeric `NodeId`s), then registers the
+  core-owned compatibility shell as `bobcat:runtime` and the embedded Element
+  PAPI runtime (`packages/bobcat-element`) as `bobcat:element` in QuickJS's
+  synchronous preloaded ESM loader. A `.web.bundle`'s `lepusCode.root` or raw
+  XML main body becomes a real ESM at its resolved entry URL: core prepends
+  named imports from both built-ins plus the `navigator`/`postMessage`/`window`
+  shadows formerly supplied by web-core's IIFE. The `bobcat:boot` ESM imports
+  the built-ins, uses top-level await on `import(entry_url)`, and then runs
+  `processData` → `renderPage` → `__FlushElementTree` inside JavaScript; Rust
+  no longer follows entry evaluation with a separate render-page evaluation.
+  The globals shell is
   deliberately shape-only: it supplies a stub `lynx` object, an empty
   `SystemInfo` snapshot, init/global props, context sinks, the native-module
   sentinel and empty JS event module,
   performance/error hooks, and
   `__OnLifecycleEvent`; it retains no listener, delivers no message or
   lifecycle event, and does not invent the background-only `lynxCoreInject`
-  realm. The PAPI runtime
-  assigns the twenty-seven Element PAPI globals: every ReactLynx Snapshot
+  realm. The PAPI runtime exports the supported Element PAPI only as named ESM
+  bindings; transformed entries receive them through the prepended import:
+  every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,
   `__CreateScrollView`, `__CreateRawText`, `__CreateList`), all six tree
@@ -367,12 +378,14 @@ useful signal for currently-compatible versions of those libraries.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
-  future preloaded module graph belongs in the feature-gated core adapter, not
-  in `quickjs-rust-bridge` or the engine-neutral traits.
+  bridge owns only the generic synchronous preloaded-source loader and settled
+  Promise inspection; Bobcat's specifiers, entry transform, graph membership,
+  and boot policy stay in the feature-gated core adapter.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
-  ECMAScript string conversion, exception sanitization, and pending-job pump.
+  ECMAScript string conversion, exception sanitization, pending-job pump,
+  synchronous preloaded module loader, and module-evaluation Promise state.
   Every heap allocation made by the C shim or the five compiled QuickJS C
   translation units is redirected through a private C ABI into Rust's global
   allocator; a fixed aligned prefix supplies the size required for matching
@@ -440,8 +453,9 @@ useful signal for currently-compatible versions of those libraries.
   script and render threads. Frame callbacks go through the `MacWindow` it
   borrows at attach time (the winit window as the draw target,
   `request_redraw`, `pre_present_notify`); lifecycle events wake the event
-  loop through the separately injected `EventRequester`. The CLI starts the root with
-  `execute_script(url)` and observes `ScriptFinished` through `pump`. Headed
+  loop through the separately injected `EventRequester`. The CLI starts the
+  entry MTS URL with `execute_script(url)` and observes the complete TLA boot
+  through `ScriptFinished` and `pump`. Headed
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
@@ -510,9 +524,10 @@ useful signal for currently-compatible versions of those libraries.
   completion independently of Worker rAF, so a hidden page may pause drawing
   without stranding the `executeScript` Promise. The UI facade, nested VM
   Worker startup, and built-in QuickJS configuration impose no wall-clock
-  deadline on loading or execution. QuickJS drains its owned pending jobs
-  synchronously at each execution checkpoint; there is no browser
-  microtask-completion protocol. The underlying QuickJS bridge retains an
+  deadline on loading or execution. QuickJS drains its owned pending jobs and
+  waits for the TLA boot module's evaluation Promise to settle at its host
+  checkpoint; there is no browser microtask-completion protocol. The
+  underlying QuickJS bridge retains an
   opt-in execution timeout for its direct users and tests.
   A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
   its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
@@ -551,9 +566,10 @@ useful signal for currently-compatible versions of those libraries.
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
   The module enables `bobcat-core`'s `quickjs` feature and uses its opaque
-  QuickJS factory. Browser `fetch` remains outside Wasm: the
-  Render Worker registers raw fetched bytes in its `ResourceFetcher`, core
-  performs strict UTF-8 validation, and the worker calls `execute_script(url)`.
+  QuickJS factory. Browser `fetch` remains outside Wasm: the Render Worker
+  registers raw fetched entry-MTS bytes in its `ResourceFetcher`, core performs
+  strict UTF-8 validation, and the worker calls `execute_script(url)`; the
+  final response URL is the ESM specifier imported by `bobcat:boot`.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
   loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, mounts
   a present raw stylesheet, and starts its main-thread body through the same
@@ -583,11 +599,11 @@ useful signal for currently-compatible versions of those libraries.
   XML URL. Synchronous GPU
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
-- `packages/bobcat-element` — the Element PAPI runtime, a single
-  dependency-free classic-script JavaScript file (`src/element-papi.js`) that
-  `bobcat-core` embeds with `include_str!` and evaluates into the injected
-  script-engine realm before any bundle code; its Rstest suite runs the same
-  bytes. It owns the twenty-seven `__*` PAPI members and their web-core arities,
+- `packages/bobcat-element` — the dependency-free `bobcat:element` ESM
+  (`src/element-papi.js`) that `bobcat-core` embeds with `include_str!` and
+  registers in QuickJS's preloaded graph before any entry code; its Rstest
+  suite imports the same bytes and verifies every named export. It owns the
+  supported `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
   `list`). It also owns the value coercions web-core gets from the HTML DOM for
@@ -610,12 +626,11 @@ useful signal for currently-compatible versions of those libraries.
   host's job checkpoints, and never at realm teardown, which preserves the
   last committed tree. The JavaScript layer deliberately does not validate
   handles: a foreign handle resolves to `undefined`, which the private native
-  boundary rejects as a JavaScript error before entering `dom`. The file must
-  stay a classic script (no import/export at runtime, ECMAScript intrinsics
-  plus `globalThis.bobcat` only — the realm has no
-  `console`/`setTimeout`/DOM), which is also what lets Rstest import it for
-  side effects and `tsc --noEmit` check it under
-  `checkJs`.
+  boundary rejects as a JavaScript error before entering `dom`. Native access
+  remains limited to `globalThis.bobcat`; the realm has no
+  `console`/`setTimeout`/DOM. Named exports are the only Element-PAPI surface
+  for transformed MTS entries; the module installs no `__*` globals. Rstest
+  imports the ESM normally and `tsc --noEmit` checks it under `checkJs`.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a

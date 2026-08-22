@@ -1,4 +1,4 @@
-// The shape-only Lynx main-thread globals installed before a card runs.
+// The shape-only `bobcat:runtime` ESM loaded before an MTS entry runs.
 //
 // Bobcat does not have the background-thread realm, cross-context transport,
 // native-module registry, error reporter, or lifecycle delivery path yet.  A
@@ -99,3 +99,25 @@
     __OnLifecycleEvent: noop,
   });
 })();
+
+const {
+  lynx,
+  SystemInfo,
+  __globalProps,
+  NativeModules,
+  _AddEventListener,
+  _ReportError,
+  _SetSourceMapRelease,
+  __OnLifecycleEvent,
+} = globalThis;
+
+export {
+  lynx,
+  SystemInfo,
+  __globalProps,
+  NativeModules,
+  _AddEventListener,
+  _ReportError,
+  _SetSourceMapRelease,
+  __OnLifecycleEvent,
+};

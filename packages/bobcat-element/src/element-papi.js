@@ -1,12 +1,10 @@
 // @ts-check
 // The Lynx Element PAPI runtime.
 //
-// Evaluated as a classic script inside the QuickJS main-thread realm before
-// any bundle code runs (bobcat-core embeds it with include_str!); its Rstest
-// suite imports the same bytes for side effects. No import/export syntax; it
-// reaches the outside world only through `globalThis.bobcat` (the native
-// object the host installs first) and the `__*` PAPI globals it assigns,
-// mirroring web-core's flat `Object.assign(mtsRealm.globalWindow, ...)`.
+// Preloaded as the `bobcat:element` ESM inside the QuickJS main-thread realm;
+// its Rstest suite imports the same bytes. It reaches native code only through
+// `globalThis.bobcat`, installed before the module graph runs. Named exports
+// are the MTS bindings; this module installs no Element-PAPI globals.
 //
 // # Element PAPI scope
 //
@@ -178,7 +176,7 @@
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
 
-(function () {
+const elementPapi = (function () {
   "use strict";
 
   const bobcat = globalThis.bobcat;
@@ -1571,7 +1569,7 @@
   // that has to travel this way: everything else on `bobcat` is native.
   bobcat.event_listener_callback = eventListenerCallback;
 
-  Object.assign(globalThis, {
+  return {
     __CreatePage,
     __CreateElement,
     __CreateWrapperElement,
@@ -1605,5 +1603,77 @@
     __StopPropagation,
     __StopImmediatePropagation,
     __FlushElementTree,
-  });
+  };
 })();
+
+const {
+  __CreatePage,
+  __CreateElement,
+  __CreateWrapperElement,
+  __CreateText,
+  __CreateImage,
+  __CreateView,
+  __CreateScrollView,
+  __CreateRawText,
+  __CreateList,
+  __AppendElement,
+  __InsertElementBefore,
+  __RemoveElement,
+  __ReplaceElement,
+  __ReplaceElements,
+  __SwapElement,
+  __SetClasses,
+  __SetID,
+  __GetID,
+  __GetTag,
+  __GetElementUniqueID,
+  __SetInlineStyles,
+  __SetCSSId,
+  __SetAttribute,
+  __UpdateListCallbacks,
+  __AddEvent,
+  __GetEvent,
+  __GetEvents,
+  __SetEvents,
+  __AddEventListener,
+  __RemoveEventListener,
+  __StopPropagation,
+  __StopImmediatePropagation,
+  __FlushElementTree,
+} = elementPapi;
+
+export {
+  __CreatePage,
+  __CreateElement,
+  __CreateWrapperElement,
+  __CreateText,
+  __CreateImage,
+  __CreateView,
+  __CreateScrollView,
+  __CreateRawText,
+  __CreateList,
+  __AppendElement,
+  __InsertElementBefore,
+  __RemoveElement,
+  __ReplaceElement,
+  __ReplaceElements,
+  __SwapElement,
+  __SetClasses,
+  __SetID,
+  __GetID,
+  __GetTag,
+  __GetElementUniqueID,
+  __SetInlineStyles,
+  __SetCSSId,
+  __SetAttribute,
+  __UpdateListCallbacks,
+  __AddEvent,
+  __GetEvent,
+  __GetEvents,
+  __SetEvents,
+  __AddEventListener,
+  __RemoveEventListener,
+  __StopPropagation,
+  __StopImmediatePropagation,
+  __FlushElementTree,
+};
