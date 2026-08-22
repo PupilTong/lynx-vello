@@ -662,7 +662,9 @@ useful signal for currently-compatible versions of those libraries.
   primary nodes; layout/text state does not. The crate's entire `unsafe`
   surface is two blocks — the arena backpointer deref and the
   `TElement::ensure_data` contract call — plus the `unsafe fn` signatures
-  Stylo's traits mandate (all bodies safe).
+  Stylo's traits mandate (all bodies safe). Both blocks carry a `SAFETY`
+  comment stating the invariant they rest on, and a crate-local
+  `#![warn(clippy::undocumented_unsafe_blocks)]` keeps that true.
   `Document<T>` also owns one private concrete `Painter`, including its
   reusable walk scratch, retained `vello::Scene`, and `ImageStore`.
   `render` privately builds `PaintOrder` and invokes that painter

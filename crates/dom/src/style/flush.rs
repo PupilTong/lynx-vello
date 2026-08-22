@@ -102,6 +102,14 @@ impl<'a, T: Sync> DomTraversal<&'a Node<T>> for RecalcStyle<'a> {
             unsafe_code,
             reason = "TElement::ensure_data is an unsafe trait entry point; the traversal owns this element exclusively"
         )]
+        // SAFETY: `ensure_data`'s precondition is exclusive access to the
+        // element — `ElementDataWrapper` is an `UnsafeCell<ElementData>` whose
+        // `AtomicRefCell` guard is compiled in only under `debug_assertions`,
+        // so an overlapping `borrow_mut` aliases `&mut` unchecked in release.
+        // The driver supplies that exclusivity: an element is queued only by
+        // its one parent's `note_child`, work units are disjoint ranges split
+        // off that queue, and each entry is popped into `process_preorder`
+        // exactly once.
         let mut data = unsafe { element.ensure_data() };
         recalc_style_at(
             self,

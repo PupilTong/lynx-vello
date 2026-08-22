@@ -205,6 +205,16 @@ impl<T> Node<T> {
 
     pub(crate) fn arenas(&self) -> &TreeArenas<T> {
         #[expect(unsafe_code, reason = "deref the owning arena-set backpointer")]
+        // SAFETY: `owner` is the address of the `TreeArenas<T>` holding this
+        // node — taken by `ptr::from_mut` at construction, never stored again,
+        // and fixed for the document's life because `Document` boxes the arena
+        // set. The arenas therefore outlive every node inside them, including
+        // one `remove_node` has handed back. The reborrow is shared, and every
+        // caller reaches it from a `&Node` already lent out of these same
+        // arenas, so no `&mut TreeArenas<T>` is live across it. `Relaxed`
+        // orders nothing it needs to: the pointer is atomic only so that a
+        // bare `*mut` does not cost `Node<T>` the `Sync` that Stylo's parallel
+        // traversal requires.
         unsafe {
             &*self.owner.load(Ordering::Relaxed)
         }
