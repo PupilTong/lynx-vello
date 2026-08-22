@@ -772,15 +772,16 @@ impl<T> Document<T> {
                     let Some(node) = self.tree.get_mut(current) else {
                         continue;
                     };
-                    let mut refreshed = None;
                     let harvested = node.stylo_data_mut().and_then(|wrapper| {
                         let mut data = wrapper.borrow_mut();
-                        refreshed.clone_from(&data.styles.primary);
                         let damage = data.damage;
                         data.clear_restyle_state();
                         (!damage.is_empty()).then(|| StyleDamage::from(damage))
                     });
-                    let refresh = node.refresh_layout_style(refreshed);
+                    // Reads the primary style after the clear above, which is
+                    // sound only because clearing restyle state touches the
+                    // hint, the damage, and the flags — never `styles`.
+                    let refresh = node.refresh_layout_style();
                     let dirty = node.styling.dirty_descendants.get_mut();
                     (
                         harvested.map(|damage| (damage, refresh)),

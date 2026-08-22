@@ -30,6 +30,9 @@ const STRUCTURE_SENSITIVE: ElementSelectorFlags = ElementSelectorFlags::HAS_SLOW
 static CLASS: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("class"));
 static ID: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("id"));
 static STYLE: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("style"));
+static LANG: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("lang"));
+static PART: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("part"));
+static EXPORTPARTS: LazyLock<LocalName> = LazyLock::new(|| LocalName::from("exportparts"));
 
 impl<T> Document<T> {
     pub(crate) fn mark_subtree_dirty(&mut self, id: NodeId) {
@@ -38,6 +41,39 @@ impl<T> Document<T> {
             node.set_dirty_descendants_bit(true);
         }
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
+        self.mark_ancestors_dirty_descendants(id);
+    }
+
+    /// Marks a subtree to be cascaded again without being matched again.
+    ///
+    /// Every descendant cascades and none is matched: Stylo propagates
+    /// `RECASCADE_DESCENDANTS` down as `recascade_subtree()`, transitively. The
+    /// element the mark lands on is the only one matched again, which is one
+    /// element against the whole tree.
+    ///
+    /// That element's share is spelled `RESTYLE_SELF` rather than the
+    /// `RECASCADE_SELF` that `RestyleHint::recascade_subtree()` would pair
+    /// here, because `RECASCADE_SELF` does not survive until the flush that
+    /// should read it. It is inside
+    /// `RestyleHint::has_animation_hint_or_recascade`'s mask, and
+    /// `remove_animation_hints` deletes it outright, on the stated assumption
+    /// that only a traversal ever sets it — so an animation tick between this
+    /// mark and the next style flush strips it. Measured directly: with
+    /// `recascade_subtree()` the mark reads `RECASCADE_SELF |
+    /// RECASCADE_DESCENDANTS` after a resize and `RECASCADE_DESCENDANTS` alone
+    /// after one `advance_animations`, while the spelling below survives a tick
+    /// unchanged. No stale rendering was reproduced from the loss — something
+    /// downstream evidently recomputes the root anyway — so this is avoiding a
+    /// dependency on that, not fixing an observed defect.
+    pub(crate) fn mark_subtree_recascade(&mut self, id: NodeId) {
+        let node = self.live_element(id);
+        if !node.flat_children().is_empty() {
+            node.set_dirty_descendants_bit(true);
+        }
+        self.add_restyle_hint(
+            id,
+            RestyleHint::RESTYLE_SELF | RestyleHint::RECASCADE_DESCENDANTS,
+        );
         self.mark_ancestors_dirty_descendants(id);
     }
 
@@ -81,45 +117,76 @@ impl<T> Document<T> {
 
     pub(crate) fn note_child_list_change(&mut self, parent: NodeId, index: usize) {
         self.note_visual_mutation();
-        let parent_node = self.live(parent);
-        let flags = parent_node.selector_flags();
+        let flags = self.live(parent).selector_flags();
         if flags.intersects(STRUCTURE_SENSITIVE) {
-            let children: Vec<NodeId> = parent_node.child_ids().to_vec();
             if flags.intersects(ElementSelectorFlags::HAS_EMPTY_SELECTOR) {
                 self.note_emptiness_change(parent);
             }
-            let (hint, affected) = if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
-                (Some(RestyleHint::restyle_subtree()), &children[..])
+            // `HAS_SLOW_SELECTOR` restyles every child; its later-siblings
+            // counterpart restyles the suffix that starts at the mutated
+            // position, which is every child when that position is the first.
+            let restyle_from = if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR) {
+                Some(0)
             } else if flags.intersects(ElementSelectorFlags::HAS_SLOW_SELECTOR_LATER_SIBLINGS) {
-                (
-                    Some(RestyleHint::restyle_subtree()),
-                    children.get(index..).unwrap_or_default(),
-                )
-            } else if flags.intersects(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION) {
-                (Some(RestyleHint::RECASCADE_SELF), &children[..])
+                Some(index)
             } else {
-                (None, &[][..])
+                None
             };
-            if let Some(hint) = hint {
-                for &child in affected {
-                    if self.live(child).is_element() {
-                        self.add_restyle_hint(child, hint);
+            if let Some(from) = restyle_from {
+                // Restyling every element child is what `RESTYLE_DESCENDANTS`
+                // on the parent already denotes: Stylo propagates it to each
+                // child as `restyle_subtree()` — the hint the walk below would
+                // write on each of them — and recurses identically, so the set
+                // of restyled elements is the same one, not a larger one.
+                // Leaving `RESTYLE_SELF` off is what keeps the parent itself
+                // out of it.
+                //
+                // Two things have to hold for the one write to stand in for the
+                // walk. Stylo propagates along the *flat* tree, which is the
+                // child list only while nothing redirects it: a shadow host's
+                // flat children are its shadow root's children, so the hint
+                // would descend through the shadow tree — reaching the slotted
+                // light children anyway, but restyling the shadow tree's own
+                // elements on the way, which the walk does not. A shadow root
+                // parent holds no `ElementData` for the hint to land in at all.
+                // Rather than test each redirection, this takes the
+                // whole-document answer: with no shadow root anywhere, no
+                // redirection exists and the two forms name the same set. The
+                // fallback is still the allocation-free walk, so it costs a
+                // walk, not a copy.
+                let ancestor_hint_carries =
+                    from == 0 && !self.has_shadow_roots() && self.live(parent).has_style_data();
+                if ancestor_hint_carries {
+                    self.add_restyle_hint(parent, RestyleHint::RESTYLE_DESCENDANTS);
+                } else {
+                    // Hinting a child never edits a child list, so each step
+                    // re-reads the parent's rather than holding a copy across
+                    // the `&mut self` calls. A copy would be proportional to
+                    // the sibling count on *every* insertion, which is what
+                    // made filling a list quadratic.
+                    let mut position = from;
+                    while let Some(&child) = self.live(parent).child_ids().get(position) {
+                        if self.live(child).is_element() {
+                            self.add_restyle_hint(child, RestyleHint::restyle_subtree());
+                        }
+                        position += 1;
                     }
+                }
+            } else if flags.intersects(ElementSelectorFlags::MAY_HAVE_TREE_COUNTING_FUNCTION) {
+                // No ancestor hint denotes this set. `RECASCADE_DESCENDANTS`
+                // reaches the whole subtree, while `sibling-index()` and
+                // `sibling-count()` only change for the children themselves, so
+                // the walk stays.
+                let mut position = 0;
+                while let Some(&child) = self.live(parent).child_ids().get(position) {
+                    if self.live(child).is_element() {
+                        self.add_restyle_hint(child, RestyleHint::RECASCADE_SELF);
+                    }
+                    position += 1;
                 }
             }
             if flags.intersects(ElementSelectorFlags::HAS_EDGE_CHILD_SELECTOR) {
-                let mut forward = children.iter().filter(|&&c| self.live(c).is_element());
-                let mut backward = children
-                    .iter()
-                    .rev()
-                    .filter(|&&c| self.live(c).is_element());
-                let edges = [
-                    forward.next().copied(),
-                    forward.next().copied(),
-                    backward.next().copied(),
-                    backward.next().copied(),
-                ];
-                for child in edges.into_iter().flatten() {
+                for child in self.edge_element_children(parent).into_iter().flatten() {
                     self.add_restyle_hint(child, RestyleHint::restyle_subtree());
                 }
             }
@@ -133,27 +200,63 @@ impl<T> Document<T> {
         self.mark_ancestors_dirty_descendants(parent);
     }
 
+    /// The first two and last two element children, which are every child an
+    /// edge-child selector (`:first-child`, `:last-child`, `:only-child`, and
+    /// their `-of-type` forms) can start or stop matching when one child is
+    /// added or removed. Non-element children are skipped, so the scan reaches
+    /// past leading and trailing text nodes but stops at the second element
+    /// from each end.
+    fn edge_element_children(&self, parent: NodeId) -> [Option<NodeId>; 4] {
+        let children = self.live(parent).child_ids();
+        let mut forward = children
+            .iter()
+            .filter(|&&child| self.live(child).is_element());
+        let mut backward = children
+            .iter()
+            .rev()
+            .filter(|&&child| self.live(child).is_element());
+        [
+            forward.next().copied(),
+            forward.next().copied(),
+            backward.next().copied(),
+            backward.next().copied(),
+        ]
+    }
+
     fn note_emptiness_change(&mut self, id: NodeId) {
         self.add_restyle_hint(id, RestyleHint::restyle_subtree());
-        let later_siblings: Vec<NodeId> = {
-            let tree = self.arenas();
-            tree.get(id)
-                .and_then(|node| {
-                    let self_slot = tree.slot(id)?;
-                    let siblings = tree.at(node.parent_slot()?).child_slots();
-                    let pos = siblings.iter().position(|&c| c == self_slot)?;
-                    Some(
-                        siblings[pos + 1..]
-                            .iter()
-                            .map(|&slot| tree.at(slot).id())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default()
+        // `:empty` turning on or off on this element moves what every later
+        // sibling matches. The walk indexes the parent's list a step at a time
+        // rather than collecting it, for the reason
+        // `note_child_list_change` does: hinting a sibling cannot edit that
+        // list, and this runs on every child-list change of the element.
+        let Some(after) = self.sibling_position(id).map(|position| position + 1) else {
+            return;
         };
-        for sibling in later_siblings {
+        let mut position = after;
+        while let Some(sibling) = self.sibling_at(id, position) {
             self.add_restyle_hint(sibling, RestyleHint::restyle_subtree());
+            position += 1;
         }
+    }
+
+    /// This node's index in its parent's child list.
+    fn sibling_position(&self, id: NodeId) -> Option<usize> {
+        let tree = self.arenas();
+        let node = tree.get(id)?;
+        let self_slot = tree.slot(id)?;
+        let siblings = tree.at(node.parent_slot()?).child_slots();
+        siblings.iter().position(|&slot| slot == self_slot)
+    }
+
+    /// The `position`th child of `id`'s parent, if there is one.
+    fn sibling_at(&self, id: NodeId, position: usize) -> Option<NodeId> {
+        let tree = self.arenas();
+        let parent = tree.get(id)?.parent_slot()?;
+        tree.at(parent)
+            .child_slots()
+            .get(position)
+            .map(|&slot| tree.at(slot).id())
     }
 }
 
@@ -293,8 +396,18 @@ impl<T> Document<T> {
             "Document::{{add,remove}}_element_state: `:defined` is owned by the custom element \
              state machine and is not settable as element state"
         );
-        self.ensure_snapshot(id);
-        self.mark_ancestors_dirty_descendants(id);
+        // Element state is element-only, and the gate below can skip the
+        // `ensure_snapshot` that used to carry this check.
+        self.live_element(id);
+        if self.any_rule_depends_on_state(flags) {
+            self.ensure_snapshot(id);
+            self.mark_ancestors_dirty_descendants(id);
+        } else {
+            // Nothing can match on these bits, so no restyle is scheduled. The
+            // state still lands on the node, and a stylesheet mounted later
+            // restyles from the root, which covers every element this skipped.
+            self.note_visual_mutation();
+        }
         self.live_node_mut(id).element_state.set(flags, enabled);
     }
 
@@ -418,11 +531,69 @@ impl<T> Document<T> {
     }
 
     fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
+        // Attributes are an element-only concept. The check used to ride on
+        // `ensure_snapshot`, which the gate below can skip, so it is taken here
+        // where it happens on every path.
+        self.live_element(id);
+        if !is_gate_exempt(name) && !self.any_rule_depends_on_attribute(name) {
+            self.note_visual_mutation();
+            return;
+        }
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.other_attributes_changed = true;
             push_changed_attr(snapshot, name);
         }
         self.mark_ancestors_dirty_descendants(id);
+    }
+
+    /// Whether any rule in the document could match on this attribute.
+    ///
+    /// Stylo records, per origin, every attribute name that appears in an
+    /// attribute selector. The record is a superset of what a plain selector
+    /// needs: `visit_attribute_selector` inserts into `attribute_dependencies`
+    /// unconditionally and only *adds* the `:nth-child(... of S)` entry on top,
+    /// and a relative selector list — `:has()` — is walked into by
+    /// `visit_relative_selector_list`, so its attribute selectors land in the
+    /// same set. A name absent from every origin therefore cannot start or stop
+    /// any selector matching, and the snapshot the invalidator would take of it
+    /// would have no reader.
+    ///
+    /// `class`, `id`, and `style` never reach this: they carry their own
+    /// invalidation, which does not depend on a rule naming them as attributes.
+    ///
+    /// The sets are read at mutation time, so a rule arriving afterwards would
+    /// have missed the write. What makes that sound is that every rule-set
+    /// addition re-matches from the root — `Document::change_style_rules` and
+    /// `add_shadow_stylesheet` both call `mark_subtree_dirty`, and a device
+    /// change that moves a media answer takes the same path. Weakening any of
+    /// those to something narrower would strand every write this gate skipped;
+    /// `an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later`
+    /// in tests/style.rs is what holds that down.
+    fn any_rule_depends_on_attribute(&self, name: &LocalName) -> bool {
+        // Shadow-scoped author rules keep their own `CascadeData`, which
+        // `iter_origins` does not reach. With a shadow root anywhere in the
+        // document, answer conservatively rather than miss one.
+        self.has_shadow_roots()
+            || self
+                .style_engine()
+                .stylist()
+                .iter_origins()
+                .any(|(data, _)| data.might_have_attribute_dependency(name))
+    }
+
+    /// Whether any rule in the document could match on these state bits.
+    ///
+    /// The same superset argument as [`Self::any_rule_depends_on_attribute`]:
+    /// `state_dependencies` takes every `NonTSPseudoClass`'s state flag
+    /// unconditionally, with the `:nth-child(... of S)` set recorded separately
+    /// on top rather than instead.
+    fn any_rule_depends_on_state(&self, state: stylo_dom::ElementState) -> bool {
+        self.has_shadow_roots()
+            || self
+                .style_engine()
+                .stylist()
+                .iter_origins()
+                .any(|(data, _)| data.has_state_dependency(state))
     }
 
     fn ensure_snapshot(&mut self, id: NodeId) -> Option<&mut Snapshot> {
@@ -460,6 +631,30 @@ fn sync_class_attribute<T>(node: &mut Node<T>) {
         .collect::<Vec<_>>()
         .join(" ");
     node.set_attr_local_name(CLASS.clone(), value);
+}
+
+/// Attributes whose invalidation is not recorded in
+/// `CascadeData::attribute_dependencies`, and which therefore cannot be gated
+/// on it.
+///
+/// The gate asks Stylo whether an attribute selector anywhere names this
+/// attribute. Four attributes matter to matching without ever being named by
+/// one:
+///
+/// - `style` carries declarations, not matching. Its flush is scheduled by the
+///   `RESTYLE_STYLE_ATTRIBUTE` hint plus the ancestor mark, never by a rule mentioning `[style]`.
+/// - `lang` is what `:lang()` reads. Stylo files that dependency into the `InvalidationMap` from
+///   `on_pseudo_class`, under the attribute name — a different structure from the
+///   `attribute_dependencies` set this gate reads, which only `visit_attribute_selector` fills.
+/// - `part` and `exportparts` drive `::part()` matching through
+///   `TElement::has_part_attr`/`imported_part`, again with no attribute selector involved.
+///
+/// Only `style` is load-bearing today. `::part()` reaches an element only through a containing
+/// shadow root, and a document that has one already answers the gate conservatively; `:lang()`
+/// cannot match anything while `TElement::match_element_lang` returns false. The other three are
+/// listed so that closing either of those gaps does not quietly make the gate wrong.
+fn is_gate_exempt(name: &LocalName) -> bool {
+    *name == *STYLE || *name == *LANG || *name == *PART || *name == *EXPORTPARTS
 }
 
 fn push_changed_attr(snapshot: &mut Snapshot, name: &LocalName) {
@@ -507,5 +702,205 @@ fn attr_identifier(local_name: LocalName) -> AttrIdentifier {
         local_name,
         namespace: stylo::Namespace::default(),
         prefix: None,
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use stylo::invalidation::element::restyle_hints::RestyleHint;
+
+    use crate::test_common::Doc;
+
+    fn root_hint(doc: &Doc) -> RestyleHint {
+        doc.dom
+            .get(doc.root)
+            .expect("the document element")
+            .style_data_wrapper()
+            .map_or_else(RestyleHint::empty, |wrapper| wrapper.borrow().hint)
+    }
+
+    /// The mark a resize leaves on the document element has to still be there
+    /// at the next style flush. An animation tick runs between the two on the
+    /// presenting thread, and it strips `RECASCADE_SELF` from every hint it
+    /// walks past — see [`Document::mark_subtree_recascade`].
+    #[test]
+    fn a_resize_mark_on_the_root_survives_an_animation_tick() {
+        let mut doc = Doc::with_css(
+            "@keyframes slide { from { transform: translateX(0px) } \
+             to { transform: translateX(100px) } } \
+             page { font-size: 5vw } \
+             .mover { animation: slide 10s linear; width: 20px; height: 20px }",
+        );
+        let root = doc.root;
+        doc.el(root, "view.mover");
+        doc.dom.layout();
+        doc.dom.advance_animations(0.0);
+
+        doc.dom.set_viewport(400.0, 600.0);
+        let marked = root_hint(&doc);
+        assert!(
+            marked.intersects(RestyleHint::RESTYLE_SELF | RestyleHint::RECASCADE_SELF),
+            "the resize marks the element it lands on, not only its descendants"
+        );
+
+        doc.dom.advance_animations(5.0);
+
+        assert!(
+            root_hint(&doc).intersects(RestyleHint::RESTYLE_SELF | RestyleHint::RECASCADE_SELF),
+            "an animation tick must not strip the resize mark before the flush \
+             that reads it"
+        );
+    }
+
+    /// The flush root only reports work when something scheduled it. This is
+    /// what the attribute and state gates actually change: a write nothing can
+    /// match on leaves the tree clean, so the flush returns without traversing.
+    fn schedules_a_flush(doc: &Doc) -> bool {
+        doc.dom.document_element().needs_style_flush()
+    }
+
+    #[test]
+    fn an_attribute_no_rule_mentions_schedules_no_flush() {
+        let mut doc = Doc::with_css("view[data-on] { color: rgb(255, 0, 0) }");
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc), "styled and settled");
+
+        doc.dom.set_attribute(el, "data-unmentioned", "1");
+        assert!(
+            !schedules_a_flush(&doc),
+            "no rule names this attribute, so nothing has to be restyled"
+        );
+
+        doc.dom.set_attribute(el, "data-on", "1");
+        assert!(
+            schedules_a_flush(&doc),
+            "a rule does name this one, so the restyle is still scheduled"
+        );
+    }
+
+    #[test]
+    fn an_element_state_no_rule_selects_on_schedules_no_flush() {
+        let mut doc = Doc::with_css("view:hover { color: rgb(255, 0, 0) }");
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        doc.dom.layout();
+
+        doc.dom
+            .add_element_state(el, stylo_dom::ElementState::FOCUS);
+        assert!(
+            !schedules_a_flush(&doc),
+            "nothing selects on :focus in this document"
+        );
+
+        doc.dom
+            .add_element_state(el, stylo_dom::ElementState::HOVER);
+        assert!(schedules_a_flush(&doc), ":hover is selected on");
+    }
+
+    /// The style attribute is exempt from the gate. Its invalidation does not
+    /// come from a rule naming `[style]` — it comes from the declaration block
+    /// changing — so gating it on rule dependencies would strand the write.
+    #[test]
+    fn an_inline_style_write_always_schedules_a_flush() {
+        let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
+        let root = doc.root;
+        let el = doc.el(root, "view");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc));
+
+        doc.dom.set_inline_style(el, "color: rgb(255, 0, 0)");
+        assert!(
+            schedules_a_flush(&doc),
+            "no rule mentions [style], and the write still has to be flushed"
+        );
+    }
+
+    /// `:lang()` reads the `lang` attribute, but Stylo files that dependency in
+    /// the `InvalidationMap` rather than in the `attribute_dependencies` set the
+    /// gate reads — so `lang` is exempt rather than gated. `part` and
+    /// `exportparts` are exempt for the same shape of reason: `::part()` matches
+    /// through them without any attribute selector naming them.
+    #[test]
+    fn attributes_matched_without_an_attribute_selector_are_never_gated() {
+        for attribute in ["lang", "part", "exportparts", "style"] {
+            let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
+            let root = doc.root;
+            let el = doc.el(root, "view");
+            doc.dom.layout();
+            assert!(!schedules_a_flush(&doc), "{attribute}: styled and settled");
+
+            doc.dom.set_attribute(el, attribute, "en");
+            assert!(
+                schedules_a_flush(&doc),
+                "{attribute} is matched on without an attribute selector naming \
+                 it, so it cannot be gated on one"
+            );
+        }
+    }
+
+    /// Shadow-scoped author rules keep their own `CascadeData`, which the gate
+    /// cannot see, so a document holding any shadow root answers
+    /// conservatively and keeps taking snapshots.
+    #[test]
+    fn a_document_with_a_shadow_root_gates_nothing() {
+        let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
+        let root = doc.root;
+        let host = doc.el(root, "host");
+        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        doc.dom
+            .add_shadow_stylesheet(shadow, "view[data-on] { color: rgb(255, 0, 0) }");
+        let el = doc.el(root, "view");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc));
+
+        doc.dom.set_attribute(el, "data-unmentioned", "1");
+        assert!(
+            schedules_a_flush(&doc),
+            "the scoped sheet is invisible to the gate, so nothing is skipped"
+        );
+    }
+
+    /// A resize with no media query flipping must not re-run selector
+    /// matching on the tree, only re-cascade it.
+    #[test]
+    fn a_resize_that_changes_no_media_answer_only_recascades() {
+        let mut doc = Doc::with_css("page { font-size: 5vw } view { width: 10px }");
+        let root = doc.root;
+        doc.el(root, "view");
+        doc.dom.layout();
+
+        doc.dom.set_viewport(400.0, 600.0);
+
+        let hint = root_hint(&doc);
+        assert!(
+            !hint.contains(RestyleHint::RESTYLE_DESCENDANTS),
+            "no media answer moved, so no descendant needs matching again"
+        );
+        assert!(
+            hint.contains(RestyleHint::RECASCADE_DESCENDANTS),
+            "but every descendant still has to be cascaded against the new device"
+        );
+    }
+
+    /// A resize that does flip a media query has to re-match: a rule that was
+    /// not applying before can start to.
+    #[test]
+    fn a_resize_that_flips_a_media_answer_rematches() {
+        let mut doc = Doc::with_css(
+            "@media (min-width: 700px) { view { width: 30px } } view { width: 10px }",
+        );
+        let root = doc.root;
+        doc.el(root, "view");
+        doc.dom.layout();
+
+        doc.dom.set_viewport(400.0, 600.0);
+
+        assert!(
+            root_hint(&doc).contains(RestyleHint::RESTYLE_DESCENDANTS),
+            "crossing the breakpoint changes which rules apply"
+        );
     }
 }

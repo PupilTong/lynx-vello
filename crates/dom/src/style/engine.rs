@@ -79,6 +79,18 @@ impl CssRule {
     }
 }
 
+/// What a change to the style context requires of the tree that was styled
+/// under the old one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[must_use]
+pub(crate) enum StyleInvalidation {
+    /// Which rules apply is unchanged; only their computed values can move.
+    Recascade,
+    /// The set of applicable rules may have moved, so selectors have to run
+    /// again.
+    Rematch,
+}
+
 /// The private stylo state owned by exactly one [`Document`].
 pub(crate) struct StyleEngine {
     stylist: Stylist,
@@ -181,20 +193,20 @@ impl StyleEngine {
         self.stylist.device()
     }
 
-    pub(crate) fn update_device(&mut self, update: impl FnOnce(&mut Device)) {
+    pub(crate) fn update_device(&mut self, update: impl FnOnce(&mut Device)) -> StyleInvalidation {
         update(self.stylist.device_mut());
-        self.refresh_device();
+        self.refresh_device()
     }
 
-    pub(crate) fn set_viewport(&mut self, width: f32, height: f32) {
+    pub(crate) fn set_viewport(&mut self, width: f32, height: f32) -> StyleInvalidation {
         self.update_device(|device| {
             let dpr = device.device_pixel_ratio().get();
             device.set_viewport_size(euclid::Size2D::new(width, height));
             device.set_device_size(euclid::Size2D::new(width * dpr, height * dpr));
-        });
+        })
     }
 
-    pub(crate) fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
+    pub(crate) fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) -> StyleInvalidation {
         self.update_device(|device| {
             device.set_device_pixel_ratio(euclid::Scale::new(device_pixel_ratio));
             let viewport = device.viewport_size();
@@ -202,7 +214,7 @@ impl StyleEngine {
                 viewport.width * device_pixel_ratio,
                 viewport.height * device_pixel_ratio,
             ));
-        });
+        })
     }
 
     fn parse_stylesheet(&self, css: &str, origin: Origin) -> DocumentStyleSheet {
@@ -400,16 +412,26 @@ impl StyleEngine {
         )
     }
 
-    fn refresh_device(&mut self) {
+    /// Re-evaluates the media queries against the device that was just
+    /// changed, and reports what the tree now needs.
+    ///
+    /// Stylo answers which origins' rule sets a device change moved. An empty
+    /// answer means every media query still evaluates the way it did, so no
+    /// selector can start or stop matching and only the computed values that
+    /// read the device — viewport units, `rpx`, resolution-dependent images,
+    /// snapped border widths — have to be produced again.
+    fn refresh_device(&mut self) -> StyleInvalidation {
         let guard = self.lock.read();
         let guards = StylesheetGuards::same(&guard);
         let changed = self
             .stylist
             .media_features_change_changed_style(&guards, self.stylist.device());
-        if !changed.is_empty() {
-            self.stylist.force_stylesheet_origins_dirty(changed);
-            self.stylist.flush(&guards);
+        if changed.is_empty() {
+            return StyleInvalidation::Recascade;
         }
+        self.stylist.force_stylesheet_origins_dirty(changed);
+        self.stylist.flush(&guards);
+        StyleInvalidation::Rematch
     }
 }
 
@@ -433,15 +455,15 @@ impl<T> Document<T> {
     }
 
     pub fn set_viewport(&mut self, width: f32, height: f32) {
-        self.change_style_context(|engine| engine.set_viewport(width, height));
+        self.change_device(|engine| engine.set_viewport(width, height));
     }
 
     pub fn set_device_pixel_ratio(&mut self, device_pixel_ratio: f32) {
-        self.change_style_context(|engine| engine.set_device_pixel_ratio(device_pixel_ratio));
+        self.change_device(|engine| engine.set_device_pixel_ratio(device_pixel_ratio));
     }
 
     pub fn add_stylesheet(&mut self, css: &str, origin: Origin) {
-        self.change_style_context(|engine| engine.add_stylesheet(css, origin));
+        self.change_style_rules(|engine| engine.add_stylesheet(css, origin));
     }
 
     /// Appends rules this document built as one author-origin stylesheet.
@@ -459,7 +481,7 @@ impl<T> Document<T> {
     ///
     /// Panics if any rule was built by a different document.
     pub fn append_rules(&mut self, rules: Vec<CssRule>) {
-        self.change_style_context(|engine| engine.append_rules(rules));
+        self.change_style_rules(|engine| engine.append_rules(rules));
     }
 
     /// Builds one style rule from selector text and pre-parsed declarations.
@@ -521,7 +543,22 @@ impl<T> Document<T> {
         (engine, shadow)
     }
 
-    fn change_style_context(&mut self, change: impl FnOnce(&mut StyleEngine)) {
+    /// A change to the device the document is styled against. The engine says
+    /// whether any media query changed its answer; only then does the tree
+    /// need its selectors run again.
+    fn change_device(&mut self, change: impl FnOnce(&mut StyleEngine) -> StyleInvalidation) {
+        self.note_visual_mutation();
+        let invalidation = change(self.style_engine_mut());
+        let root = self.document_element().id();
+        match invalidation {
+            StyleInvalidation::Rematch => self.mark_subtree_dirty(root),
+            StyleInvalidation::Recascade => self.mark_subtree_recascade(root),
+        }
+    }
+
+    /// A change to the rule set itself, which always re-matches: a rule that
+    /// did not exist before cannot be known not to match.
+    fn change_style_rules(&mut self, change: impl FnOnce(&mut StyleEngine)) {
         self.note_visual_mutation();
         change(self.style_engine_mut());
         let root = self.document_element().id();

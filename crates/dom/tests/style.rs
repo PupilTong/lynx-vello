@@ -324,3 +324,255 @@ fn documents_own_independent_stylesheets() {
     assert_eq!(first_style.clone_color(), rgb(RED));
     assert_ne!(second_style.clone_color(), first_style.clone_color());
 }
+
+/// `:nth-last-child` and the `-of-type` family count from the end, so adding or
+/// removing any child can change which siblings match — Stylo asks for every
+/// child to be restyled by setting `HAS_SLOW_SELECTOR` on the parent. The
+/// invalidation reaches descendants of those children too, not just the
+/// children themselves.
+#[test]
+fn counting_from_the_end_restyles_every_child_and_their_descendants() {
+    let mut doc = document();
+    doc.add_stylesheet(
+        ".row { color: blue; } .label { color: blue; } \
+         .row:nth-last-child(2) { color: red; } \
+         .row:nth-last-child(1) .label { color: green; }",
+        StylesheetOrigin::Author,
+    );
+
+    let root = doc.document_element().id();
+    let list = doc.create_element("view", ());
+    doc.append_child(root, list);
+
+    let mut rows = Vec::new();
+    let mut labels = Vec::new();
+    for _ in 0..4 {
+        let row = doc.create_element("view", ());
+        doc.add_class(row, "row");
+        let label = doc.create_element("view", ());
+        doc.add_class(label, "label");
+        doc.append_child(row, label);
+        doc.append_child(list, row);
+        rows.push(row);
+        labels.push(label);
+    }
+    doc.layout();
+
+    assert_color!(doc, rows[2], RED, "the second-from-last row matches");
+    assert_color!(doc, rows[3], BLUE);
+    assert_color!(
+        doc,
+        labels[3],
+        GREEN,
+        "the last row's label matches through its parent"
+    );
+
+    // Appending shifts every position counted from the end by one.
+    let appended = doc.create_element("view", ());
+    doc.add_class(appended, "row");
+    let appended_label = doc.create_element("view", ());
+    doc.add_class(appended_label, "label");
+    doc.append_child(appended, appended_label);
+    doc.append_child(list, appended);
+    doc.layout();
+
+    assert_color!(doc, rows[2], BLUE, "row 2 is no longer second-from-last");
+    assert_color!(doc, rows[3], RED, "row 3 became second-from-last");
+    assert_color!(
+        doc,
+        labels[3],
+        BLUE,
+        "the displaced last row's label must lose the descendant match"
+    );
+    assert_color!(
+        doc,
+        appended_label,
+        GREEN,
+        "the new last row's label must gain it"
+    );
+
+    // Removing from the front shifts nothing counted from the end, but the
+    // parent is still asked to restyle every child.
+    doc.remove_element(rows[0]);
+    doc.layout();
+
+    assert_color!(doc, rows[3], RED, "row 3 is still second-from-last");
+    assert_color!(doc, appended_label, GREEN);
+    assert_color!(doc, labels[1], BLUE);
+}
+
+/// `:only-of-type` matches only while a child is the sole element of its tag,
+/// so it flips on both the second insertion and the return to one.
+#[test]
+fn only_of_type_flips_on_the_second_child_and_back() {
+    let mut doc = document();
+    doc.add_stylesheet(
+        "view { color: blue; } view:only-of-type { color: red; }",
+        StylesheetOrigin::Author,
+    );
+
+    let root = doc.document_element().id();
+    let list = doc.create_element("view", ());
+    doc.append_child(root, list);
+    let first = doc.create_element("view", ());
+    doc.append_child(list, first);
+    doc.layout();
+    assert_color!(doc, first, RED, "the sole view of its type matches");
+
+    let second = doc.create_element("view", ());
+    doc.append_child(list, second);
+    doc.layout();
+    assert_color!(doc, first, BLUE, "a second view of the type ends the match");
+    assert_color!(doc, second, BLUE);
+
+    doc.remove_element(second);
+    doc.layout();
+    assert_color!(doc, first, RED, "removing it restores the match");
+}
+
+/// An attribute no rule mentions still lands on the element, and a stylesheet
+/// mounted afterwards matches against it.
+///
+/// Writing such an attribute skips the style snapshot entirely — nothing could
+/// read it — which is only sound because a later stylesheet re-styles from the
+/// root, covering every element whose snapshot was skipped. This is that
+/// argument, executed.
+#[test]
+fn an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later() {
+    let mut doc = document();
+    doc.add_stylesheet("view { color: rgb(0, 0, 255) }", StylesheetOrigin::Author);
+    let root = doc.document_element().id();
+    let el = doc.create_element("view", ());
+    doc.append_child(root, el);
+    doc.layout();
+    assert_color!(doc, el, BLUE);
+
+    // No rule mentions `data-state`, so this write schedules no restyle.
+    doc.set_attribute(el, "data-state", "ready");
+    doc.layout();
+    assert_color!(doc, el, BLUE);
+    assert_eq!(
+        doc.get(el).unwrap().attributes().collect::<Vec<_>>(),
+        [("data-state", "ready")],
+        "the attribute is on the element either way"
+    );
+
+    // The sheet arrives after the write and must still see it.
+    doc.add_stylesheet(
+        "view[data-state=\"ready\"] { color: rgb(255, 0, 0) }",
+        StylesheetOrigin::Author,
+    );
+    doc.layout();
+    assert_color!(
+        doc,
+        el,
+        RED,
+        "a stylesheet mounted after the write matches the attribute it skipped"
+    );
+}
+
+/// The gate is per attribute name, not per element: an attribute some rule does
+/// mention keeps invalidating immediately, including onto other elements.
+#[test]
+fn an_attribute_a_rule_mentions_still_invalidates_immediately() {
+    let mut doc = document();
+    doc.add_stylesheet(
+        "view { color: rgb(0, 0, 255) } \
+         view[data-on] { color: rgb(255, 0, 0) } \
+         view[data-on] + view { color: rgb(0, 128, 0) }",
+        StylesheetOrigin::Author,
+    );
+    let root = doc.document_element().id();
+    let first = doc.create_element("view", ());
+    let second = doc.create_element("view", ());
+    doc.append_child(root, first);
+    doc.append_child(root, second);
+    doc.layout();
+    assert_color!(doc, first, BLUE);
+    assert_color!(doc, second, BLUE);
+
+    doc.set_attribute(first, "data-on", "");
+    doc.layout();
+    assert_color!(doc, first, RED);
+    assert_color!(doc, second, GREEN, "the sibling selector still fires");
+
+    doc.remove_attribute(first, "data-on");
+    doc.layout();
+    assert_color!(doc, first, BLUE);
+    assert_color!(doc, second, BLUE, "and unfires on removal");
+}
+
+/// Element state is gated the same way and by the same bits: `:hover` keeps
+/// working while a state no rule selects on costs no restyle.
+#[test]
+fn element_state_invalidates_only_for_states_a_rule_selects_on() {
+    let mut doc = document();
+    doc.add_stylesheet(
+        "view { color: rgb(0, 0, 255) } view:hover { color: rgb(255, 0, 0) }",
+        StylesheetOrigin::Author,
+    );
+    let root = doc.document_element().id();
+    let el = doc.create_element("view", ());
+    doc.append_child(root, el);
+    doc.layout();
+
+    // No rule mentions `:focus`.
+    doc.add_element_state(el, dom::ElementState::FOCUS);
+    doc.layout();
+    assert_color!(doc, el, BLUE);
+
+    doc.add_element_state(el, dom::ElementState::HOVER);
+    doc.layout();
+    assert_color!(doc, el, RED, ":hover is selected on, so it restyles");
+
+    doc.remove_element_state(el, dom::ElementState::HOVER);
+    doc.layout();
+    assert_color!(doc, el, BLUE);
+    assert!(
+        doc.get(el)
+            .unwrap()
+            .element_state()
+            .contains(dom::ElementState::FOCUS),
+        "the ungated state is still recorded on the element"
+    );
+}
+
+/// The "a later stylesheet covers it" argument has to hold inside a
+/// `display: none` subtree too, which a root restyle does not descend into —
+/// `recalc_style_at` cuts `traverse_children` on `styles.is_display_none()`.
+#[test]
+fn an_ungated_attribute_written_inside_display_none_is_matched_when_shown() {
+    let mut doc = document();
+    doc.add_stylesheet(
+        ".hidden { display: none } view { color: rgb(0, 0, 255) }",
+        StylesheetOrigin::Author,
+    );
+    let root = doc.document_element().id();
+    let container = doc.create_element("view", ());
+    doc.add_class(container, "hidden");
+    doc.append_child(root, container);
+    let buried = doc.create_element("view", ());
+    doc.append_child(container, buried);
+    doc.layout();
+
+    // No rule mentions `data-state`, so this write inside the hidden subtree
+    // schedules nothing.
+    doc.set_attribute(buried, "data-state", "ready");
+    doc.layout();
+
+    // The sheet arrives afterwards, and only then is the subtree shown.
+    doc.add_stylesheet(
+        "view[data-state=\"ready\"] { color: rgb(255, 0, 0) }",
+        StylesheetOrigin::Author,
+    );
+    doc.layout();
+    doc.remove_class(container, "hidden");
+    doc.layout();
+
+    assert_color!(
+        doc,
+        buried,
+        RED,
+        "an attribute written while hidden must match once the subtree is shown"
+    );
+}

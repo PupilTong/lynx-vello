@@ -433,6 +433,46 @@ impl<T> Node<T> {
         self.element_state
     }
 
+    /// Every field of a node, its size in bytes, and whether only an element
+    /// can ever use it.
+    ///
+    /// One node type is stored for all four kinds, so a text node carries an
+    /// element's fields without a use for any of them. Nothing in this crate
+    /// reads this; it exists so `examples/mem_harness.rs` can price that
+    /// without a mirror of the struct that would silently go stale. Read-only,
+    /// and the sizes differ between profiles — `ElementDataWrapper` carries a
+    /// debug-only borrow flag — so a census has to report which profile it ran
+    /// under.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn census_field_sizes() -> &'static [(&'static str, usize, bool)] {
+        use std::mem::size_of;
+        &[
+            ("owner", size_of::<AtomicPtr<TreeArenas<()>>>(), false),
+            ("id", size_of::<NodeId>(), false),
+            ("data", size_of::<NodeData>(), false),
+            ("parent", size_of::<Option<NodeSlot>>(), false),
+            ("children", size_of::<Vec<NodeSlot>>(), false),
+            ("local_name", size_of::<Option<LocalName>>(), true),
+            ("classes", size_of::<SmallVec<[Atom; 2]>>(), true),
+            ("id_attribute", size_of::<Option<Atom>>(), true),
+            ("attrs", size_of::<Vec<(LocalName, String)>>(), true),
+            ("element_state", size_of::<ElementState>(), true),
+            ("custom_definition", size_of::<Option<DefinitionId>>(), true),
+            ("custom_state", size_of::<CustomElementState>(), true),
+            (
+                "parsed_inline_style",
+                size_of::<Option<Arc<Locked<PropertyDeclarationBlock>>>>(),
+                true,
+            ),
+            ("shadow", size_of::<Option<Box<ShadowLinks>>>(), true),
+            ("style_data", size_of::<ElementDataWrapper>(), true),
+            ("stylo_data_present", size_of::<AtomicBool>(), true),
+            ("styling", size_of::<StylingData>(), true),
+            ("content", size_of::<Option<Box<NodeContent>>>(), false),
+        ]
+    }
+
     #[must_use]
     pub fn text(&self) -> Option<&str> {
         match self.content.as_deref() {
@@ -497,15 +537,26 @@ impl<T> Node<T> {
     /// new style are alive: the caller only sees the new one, and the old
     /// style structs can be freed — and their addresses reused — the moment
     /// this returns.
-    pub(crate) fn refresh_layout_style(
-        &mut self,
-        style: Option<Arc<ComputedValues>>,
-    ) -> StyleRefresh {
+    ///
+    /// Stylo's style is read here rather than passed in, so the two `Arc`s can
+    /// be compared before either is cloned. A harvest visits every element
+    /// under a dirty ancestor, but only the ones the flush actually restyled
+    /// hold a different `Arc` than they did before, so cloning first would pay
+    /// an atomic increment and a decrement per visited element for a value
+    /// immediately dropped. Reading it here is also what makes that possible:
+    /// the comparison needs Stylo's data and the snapshot at once, and only
+    /// disjoint field borrows can hold both.
+    pub(crate) fn refresh_layout_style(&mut self) -> StyleRefresh {
+        let data = self
+            .stylo_data_present
+            .get_mut()
+            .then(|| self.style_data.borrow());
+        let live = data.as_ref().and_then(|data| data.styles.primary.as_ref());
         let NodeData::Element(snapshot) = &mut self.data else {
-            debug_assert!(style.is_none(), "only elements own computed styles");
+            debug_assert!(live.is_none(), "only elements own computed styles");
             return StyleRefresh::UNCHANGED;
         };
-        let refresh = match (&*snapshot, &style) {
+        let refresh = match (&*snapshot, live) {
             (None, None) => StyleRefresh::UNCHANGED,
             (Some(old), Some(new)) => {
                 if Arc::ptr_eq(old, new) {
@@ -523,7 +574,7 @@ impl<T> Node<T> {
             },
         };
         if refresh.changed {
-            *snapshot = style;
+            *snapshot = live.cloned();
         }
         refresh
     }
