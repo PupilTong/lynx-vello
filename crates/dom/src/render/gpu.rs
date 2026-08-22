@@ -4,20 +4,11 @@
 //! `vello::util::RenderContext`/`RenderSurface` themselves through the
 //! [`crate::vello`] re-export).
 //!
-//! Spec sketch (agent: gpu):
-//! - `Headless::new()`: `vello::util::RenderContext::new()`, pick a device via
-//!   `context.device(None)` (pollster-blocked); construct one `vello::Renderer` with area-AA
-//!   support only (the one AA mode pulsar renders with). Return `Err(NoAdapter)` cleanly when the
-//!   platform has no usable adapter — embedders can surface that error, while tests treat it as a
-//!   hard environment failure.
-//! - `Headless::render_frame`: render into a retained `Rgba8Unorm` storage texture through
-//!   `Renderer::render_to_texture`, with no CPU synchronization.
-//! - `Headless::read_pixels`: copy the last target into a retained padded readback buffer (256-byte
-//!   row alignment), block on the map (`map_async` + an indefinite device poll), and return
-//!   tightly-packed RGBA8 rows. `Headless::render` composes the two for screenshot callers.
-//! - `Headless::wait_idle` bounds in-flight work for paced frame loops; [`read_texture`] is the
-//!   one-shot readback for embedders that render on their own device; [`renderer_options`] and
-//!   [`render_params`] are the single render policy every pulsar target must construct with.
+//! There is one render policy in this crate: area-only antialiasing.
+//! [`renderer_options`] and [`render_params`] are its single definition, and
+//! every target rendered through this crate — the headless one here and an
+//! embedder's windowed one — must be constructed from them, or a windowed
+//! frame will not match a headless screenshot of the same scene.
 
 use std::fmt;
 use std::sync::mpsc;
@@ -72,9 +63,10 @@ impl fmt::Display for GpuError {
 
 impl std::error::Error for GpuError {}
 
-/// Renderer construction options for pulsar's one render policy: area-only
-/// antialiasing. Windowed embedders building their own [`vello::Renderer`]
-/// must construct it with these options to match the headless path.
+/// Renderer construction options for this crate's one render policy:
+/// area-only antialiasing. Windowed embedders building their own
+/// [`vello::Renderer`] must construct it with these options to match the
+/// headless path.
 #[must_use]
 pub fn renderer_options() -> vello::RendererOptions {
     vello::RendererOptions {
@@ -83,7 +75,7 @@ pub fn renderer_options() -> vello::RendererOptions {
     }
 }
 
-/// Per-frame render parameters for pulsar's render policy over `base_color`.
+/// Per-frame render parameters for that same policy over `base_color`.
 #[must_use]
 pub fn render_params(
     base_color: vello::peniko::Color,
@@ -100,6 +92,10 @@ pub fn render_params(
 
 impl Headless {
     /// Creates a headless renderer on the platform's default adapter.
+    ///
+    /// Returns [`GpuError::NoAdapter`] when the platform has no usable adapter
+    /// rather than panicking: an embedder can surface that and fall back, while
+    /// tests treat it as a hard environment failure.
     pub fn new() -> Result<Self, GpuError> {
         let mut context = RenderContext::new();
         let device_index = pollster::block_on(context.device(None)).ok_or(GpuError::NoAdapter)?;
@@ -193,7 +189,7 @@ impl Headless {
 
         let tight_bytes_per_row = width * 4;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pulsar headless readback copy"),
+            label: Some("dom headless readback copy"),
         });
         encoder.copy_texture_to_buffer(
             target.texture.as_image_copy(),
@@ -270,7 +266,7 @@ impl Headless {
 
         let device = &self.context.devices[self.device_index].device;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pulsar headless target"),
+            label: Some("dom headless target"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -302,7 +298,7 @@ impl Headless {
 
         let device = &self.context.devices[self.device_index].device;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pulsar headless readback"),
+            label: Some("dom headless readback"),
             size: u64::from(padded_bytes_per_row) * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
@@ -333,13 +329,13 @@ pub fn read_texture(
     let padded_bytes_per_row =
         tight_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("pulsar texture readback"),
+        label: Some("dom texture readback"),
         size: u64::from(padded_bytes_per_row) * u64::from(height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("pulsar texture readback copy"),
+        label: Some("dom texture readback copy"),
     });
     encoder.copy_texture_to_buffer(
         texture.as_image_copy(),

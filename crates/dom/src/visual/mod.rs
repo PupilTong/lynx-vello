@@ -3,8 +3,8 @@
 //!
 //! [`Document::render`] builds the private `PaintOrder`: a flat item list in
 //! back-to-front order, each item carrying its viewport-space transform and
-//! innermost clip. The private painter walks it frontwards, then retains it
-//! beside the scene; [`Document::elements_from_point`],
+//! innermost clip. The private painter walks it forwards, back to front,
+//! then retains it beside the scene; [`Document::elements_from_point`],
 //! [`Document::elements_from_points`], and [`Document::route_input`] walk
 //! that retained frame backwards as pure reads — hit testing never re-runs
 //! the pipeline. Neither the frame nor the painter crosses the document API
@@ -72,8 +72,13 @@
 //! - `transform-style: preserve-3d`, `backface-visibility`, and `perspective-origin` are not
 //!   authorable (the latter two are not even compiled) — everything flattens and perspective
 //!   projects about the border-box center.
-//! - No retained/incremental visual-order structure: internal stacking damage is the designated
-//!   invalidation hook, but no order cache exists today.
+//! - No incremental visual-order structure. The last `PaintOrder` is retained beside the scene, but
+//!   only as the hit-test snapshot: it is never an input to the next build, and every visual
+//!   mutation rebuilds the whole order. Invalidation is the document's private visual epoch
+//!   ([`Document::needs_render`]) — one counter for every kind of change, so a one-pixel scroll and
+//!   a structural edit are indistinguishable to the render path. `StyleDamage`'s repaint and
+//!   stacking classes are computed by the style flush and dropped; they are what a tiered scheme
+//!   would key on, but nothing on this path reads them today.
 
 mod build;
 mod geometry;
@@ -88,6 +93,7 @@ use std::cell::Ref;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
+pub(crate) use self::build::BuildScratch;
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
@@ -100,7 +106,57 @@ pub(crate) struct PaintOrder {
     visual_epoch: u64,
 }
 
+/// The three growable tables a [`PaintOrder`] is made of, emptied of one
+/// frame's contents but not of their capacity.
+///
+/// The builder fills a set and the painter reclaims the set from the frame it
+/// retires, so a document whose page shape has stopped growing allocates
+/// paint-order storage zero times per frame. The set the painter reclaims is
+/// never the frame it retains: hit testing reads that one between renders, so
+/// it must never be the object being emptied.
+#[derive(Debug, Default)]
+pub(crate) struct FrameBuffers {
+    items: Vec<PaintItem>,
+    clips: Vec<ClipNode>,
+    layers: Vec<RenderLayer>,
+}
+
+impl FrameBuffers {
+    #[cfg(test)]
+    pub(crate) fn capacities(&self) -> [usize; 3] {
+        [
+            self.items.capacity(),
+            self.clips.capacity(),
+            self.layers.capacity(),
+        ]
+    }
+}
+
 impl PaintOrder {
+    /// Empties this frame and hands back its storage with capacity intact.
+    ///
+    /// [`PaintItem`], [`ClipNode`] and [`RenderLayer`] own no heap data, so
+    /// each clear is a length write.
+    pub(crate) fn into_buffers(mut self) -> FrameBuffers {
+        self.items.clear();
+        self.clips.clear();
+        self.layers.clear();
+        FrameBuffers {
+            items: self.items,
+            clips: self.clips,
+            layers: self.layers,
+        }
+    }
+
+    #[cfg(test)]
+    fn capacities(&self) -> [usize; 3] {
+        [
+            self.items.capacity(),
+            self.clips.capacity(),
+            self.layers.capacity(),
+        ]
+    }
+
     #[must_use]
     pub(crate) fn items(&self) -> &[PaintItem] {
         &self.items
@@ -128,7 +184,7 @@ pub(crate) enum PaintItemKind {
     TextRun { element: NodeId },
 }
 
-/// One node's slot in the paint order.
+/// One node's entry in the paint order.
 #[derive(Debug, Clone)]
 pub(crate) struct PaintItem {
     pub(crate) node: NodeId,
@@ -141,6 +197,11 @@ pub(crate) struct PaintItem {
 }
 
 /// A stacking context rendered as a composited group.
+///
+/// Only contexts with group effects (`opacity`, `filter`, `mix-blend-mode`,
+/// `clip-path`, `mask-image`, `isolation`) get one. A plain transform or
+/// `z-index` context has no [`RenderLayer`] at all, so this table is not an
+/// index of stacking contexts and cannot be used as one.
 #[derive(Debug, Clone)]
 pub(crate) struct RenderLayer {
     pub(crate) parent: Option<usize>,
@@ -148,6 +209,9 @@ pub(crate) struct RenderLayer {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
+    /// The contiguous run of [`PaintOrder::items`] this group encloses. A
+    /// stacking context paints atomically, so its members are always
+    /// contiguous; an empty run is not recorded at all (the layer is popped).
     pub(crate) items: std::ops::Range<usize>,
 }
 
@@ -190,7 +254,17 @@ impl CornerRadii {
 impl<T: Sync> Document<T> {
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
-        build::build(self)
+        // Both takes finish before `build` reborrows the document shared. The
+        // retained frame is not among them: it stays where hit testing can
+        // read it for the whole build, and a build that panics loses only one
+        // frame's worth of capacity.
+        let (scratch, buffers) = {
+            let painter = self.painter.get_mut();
+            (painter.take_build_scratch(), painter.take_spare_buffers())
+        };
+        let (frame, scratch) = build::build(self, scratch, buffers);
+        self.painter.get_mut().restore_build_scratch(scratch);
+        frame
     }
 
     /// Renders only when the retained scene no longer represents the current
@@ -253,9 +327,56 @@ impl<T> Document<T> {
 
     /// The Vello scene retained by the last successful
     /// [`Self::render`] call.
+    ///
+    /// Valid only within this document's own viewport — [`Self::viewport_size`]
+    /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
+    /// sizes its target from. The painter discards content that can put no ink
+    /// there, so rendering this scene into a target covering more CSS pixels
+    /// than the document's viewport leaves the excess blank rather than
+    /// showing what happens to be laid out beyond it. Resize the document
+    /// first: changing the viewport invalidates the retained scene, so the
+    /// next render builds one for the larger region.
     #[must_use]
     pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
         Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)
+    }
+
+    /// The capacity of every buffer the paint pipeline retains between
+    /// frames: the retained frame's three tables, the spare frame's three,
+    /// then the working scratch, ending with one entry per pooled
+    /// pseudo-context buffer.
+    ///
+    /// Exists for the reuse tests: a settled page must reproduce this exactly
+    /// from one frame to the next, because an entry that grew is a buffer that
+    /// reallocated. The pool is reported per entry rather than as a total, so
+    /// that a reallocation moving capacity from one pooled buffer to another
+    /// is visible instead of cancelling out.
+    #[cfg(test)]
+    pub(crate) fn paint_storage_capacities(&self) -> Vec<usize> {
+        let painter = self.painter.borrow();
+        let mut out = painter
+            .frame()
+            .map_or([0, 0, 0], PaintOrder::capacities)
+            .to_vec();
+        let (spare, scratch) = painter.storage_capacities();
+        out.extend_from_slice(&spare);
+        out.extend(scratch);
+        out
+    }
+
+    /// Reads decoded images without invalidating the retained scene.
+    ///
+    /// Separate from [`Self::images_mut`] because that one has to invalidate:
+    /// registering pixels changes what a frame draws. Reading how many bytes
+    /// the registry holds, or which registrations were refused, changes
+    /// nothing, and going through the mutable accessor to ask would turn a
+    /// static page into one that rebuilds its scene on every poll.
+    #[must_use]
+    pub fn images(&self) -> Ref<'_, ImageStore> {
+        Ref::map(
+            self.painter.borrow(),
+            crate::paint::painter::Painter::images,
+        )
     }
 
     /// Mutably accesses decoded images and invalidates the retained scene.

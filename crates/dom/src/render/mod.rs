@@ -1,6 +1,5 @@
-//! The DOM-free render floor absorbed from the former `pulsar` crate: decoded
-//! image resources and wgpu submission/readback over the one workspace
-//! [`vello`] version.
+//! The DOM-free render floor: decoded image resources and wgpu
+//! submission/readback over the one workspace [`vello`] version.
 //!
 //! Nothing here knows about nodes, computed styles, layout, or paint order —
 //! the document-aware painter builds a [`vello::Scene`] and this floor turns
@@ -9,3 +8,5 @@
 
 pub mod gpu;
 pub(crate) mod images;
+
+pub use crate::render::images::{ImageKey, MAX_RENDERABLE_DIMENSION, OversizedImage};

@@ -1488,3 +1488,271 @@ fn leaf_group_contexts_close_their_layer() {
     assert_eq!(layers[0].items.start, item_index(&paint, fade));
     assert!(!layers[0].items.contains(&item_index(&paint, over)));
 }
+
+// ---------------------------------------------------------------------------
+// Buffer reuse
+//
+// The builder fills buffers reclaimed from the frame the painter last retired
+// and a working set carried across frames, so the second build of a document
+// runs against warm storage where the first ran against empty storage. These
+// pin the property that makes that admissible: the storage a build starts from
+// is not an input to what it produces.
+// ---------------------------------------------------------------------------
+
+/// Every field of a `PaintOrder` an observer could distinguish, with floats
+/// compared by bit pattern so a path that turned `-0.0` into `0.0` would fail.
+fn fingerprint(paint: &PaintOrder) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    for item in paint.items() {
+        let _ = writeln!(
+            out,
+            "item {:?} {:?} clip={:?} hit={} size={:?} radii={:?} m={:?}",
+            item.node,
+            item.kind,
+            item.clip,
+            item.hit_testable,
+            (item.size.width.to_bits(), item.size.height.to_bits()),
+            radii_bits(&item.radii),
+            item.transform.to_array().map(f32::to_bits),
+        );
+    }
+    for clip in paint.clips() {
+        let _ = writeln!(
+            out,
+            "clip parent={:?} rect={:?} radii={:?} m={:?}",
+            clip.parent,
+            (
+                clip.rect.origin.x.to_bits(),
+                clip.rect.origin.y.to_bits(),
+                clip.rect.size.width.to_bits(),
+                clip.rect.size.height.to_bits(),
+            ),
+            radii_bits(&clip.radii),
+            clip.transform.to_array().map(f32::to_bits),
+        );
+    }
+    for layer in paint.layers() {
+        let _ = writeln!(
+            out,
+            "layer {:?} parent={:?} items={:?} size={:?} radii={:?} m={:?}",
+            layer.node,
+            layer.parent,
+            layer.items,
+            (layer.size.width.to_bits(), layer.size.height.to_bits()),
+            radii_bits(&layer.radii),
+            layer.transform.to_array().map(f32::to_bits),
+        );
+    }
+    out
+}
+
+fn radii_bits(radii: &crate::visual::CornerRadii) -> [u32; 8] {
+    [
+        radii.top_left.width.to_bits(),
+        radii.top_left.height.to_bits(),
+        radii.top_right.width.to_bits(),
+        radii.top_right.height.to_bits(),
+        radii.bottom_right.width.to_bits(),
+        radii.bottom_right.height.to_bits(),
+        radii.bottom_left.width.to_bits(),
+        radii.bottom_left.height.to_bits(),
+    ]
+}
+
+/// Every shape the build's buffer discipline has to survive: nested stacking
+/// contexts, a group effect, negative and positive stack levels, an escaping
+/// absolute inside a scrolled clipper, nested pseudo-contexts, reordered
+/// siblings, and a `display: none` sibling among them.
+fn reuse_harness() -> (Harness, NodeId) {
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .box {{ display: flex; position: absolute; left: 4px; top: 6px;
+                 width: 100px; height: 100px; }}
+         .rel {{ position: relative; }}
+         .fade {{ opacity: 0.5; }}
+         .under {{ z-index: -1; }}
+         .over {{ z-index: 3; }}
+         .clip {{ overflow: scroll; width: 40px; height: 40px; }}
+         .tall {{ display: flex; flex-shrink: 0; width: 200px; height: 400px; }}
+         .flow {{ display: flex; width: 30px; height: 12px; }}
+         .first {{ order: -1; }}
+         .gone {{ display: none; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.box.rel.clip");
+    h.el(scroller, "view.tall");
+    let escaping = h.el(scroller, "view.box");
+    h.el(escaping, "view.flow");
+    let fade = h.el(root, "view.box.fade");
+    h.el(fade, "view.flow");
+    h.el(fade, "view.flow.first");
+    h.el(fade, "view.flow.gone");
+    let nested = h.el(fade, "view.box.rel");
+    h.el(nested, "view.box.rel");
+    h.el(root, "view.box.under");
+    h.el(root, "view.box.over");
+    // `scroll_to` clamps against the last committed layout, so a fixture that
+    // scrolls before laying out silently scrolls nothing.
+    h.doc.dom.layout();
+    (h, scroller)
+}
+
+/// Scrolls the fixture's container and fails if the offset did not move,
+/// which would quietly turn every reuse round into the same build.
+fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) {
+    let applied = document.scroll_to(scroller, crate::Vector2D::new(0.0, offset));
+    assert_eq!(
+        applied.y, offset,
+        "the fixture's container must admit the offset the test asked for",
+    );
+}
+
+/// The fingerprint of the frame a document currently retains.
+fn retained_fingerprint(document: &crate::Document<()>) -> String {
+    let painter = document.painter.borrow();
+    fingerprint(
+        painter
+            .frame()
+            .expect("a rendered document retains its frame"),
+    )
+}
+
+#[test]
+fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
+    let (mut h, scroller) = reuse_harness();
+    let rest = crate::Vector2D::new(0.0, 37.0);
+    let nudge = crate::Vector2D::new(0.0, 38.0);
+
+    // Only `Painter::paint` retires a frame into the spare buffers, so the
+    // rounds below render rather than build: a loop of bare builds would
+    // exercise the working scratch and never the three frame tables, which are
+    // the buffers carrying the node ids, clip links and layer ranges this
+    // fingerprint checks.
+    scroll_to(&mut h.doc.dom, scroller, rest.y);
+    h.doc.dom.render();
+    let cold = retained_fingerprint(&h.doc.dom);
+    assert!(cold.contains("layer"), "the fixture must exercise a group");
+    assert!(cold.contains("clip"), "the fixture must exercise a clip");
+    assert_eq!(
+        h.doc.dom.paint_storage_capacities()[3],
+        0,
+        "the first build has nothing to recycle",
+    );
+
+    for round in 1..4 {
+        scroll_to(&mut h.doc.dom, scroller, nudge.y);
+        h.doc.dom.render();
+        assert!(
+            h.doc.dom.paint_storage_capacities()[3] > 0,
+            "round {round} must have a retired frame to build into",
+        );
+        scroll_to(&mut h.doc.dom, scroller, rest.y);
+        h.doc.dom.render();
+        assert_eq!(
+            cold,
+            retained_fingerprint(&h.doc.dom),
+            "round {round} diverged",
+        );
+    }
+}
+
+#[test]
+fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
+    let (mut h, scroller) = reuse_harness();
+    scroll_to(&mut h.doc.dom, scroller, 37.0);
+    h.doc.dom.render();
+    let cold = h.doc.dom.scene().clone();
+
+    // A repaint of an unchanged document is refused, so each round moves the
+    // scroll offset and moves it back. The second render of each pair sees the
+    // recycled buffers and must land on the same encoding as the first.
+    for _ in 0..3 {
+        scroll_to(&mut h.doc.dom, scroller, 38.0);
+        h.doc.dom.render();
+        scroll_to(&mut h.doc.dom, scroller, 37.0);
+        h.doc.dom.render();
+    }
+    crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene());
+}
+
+#[test]
+fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
+    let (mut h, scroller) = reuse_harness();
+    h.doc.dom.render();
+    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
+        scroll_to(&mut h.doc.dom, scroller, offset);
+        h.doc.dom.render();
+    }
+    let settled = h.doc.dom.paint_storage_capacities();
+
+    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
+        scroll_to(&mut h.doc.dom, scroller, offset);
+        h.doc.dom.render();
+    }
+
+    assert_eq!(
+        settled,
+        h.doc.dom.paint_storage_capacities(),
+        "a settled page must reuse every buffer instead of growing a new one",
+    );
+    assert!(
+        settled.iter().all(|&capacity| capacity > 0),
+        "the fixture must exercise every buffer at least once, got {settled:?}",
+    );
+    assert!(
+        settled.len() > 10,
+        "every pooled pseudo-context buffer is reported on its own, so a \
+         reallocation that moved capacity between two of them is visible",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Culling is invisible to hit testing
+//
+// The painter discards items that cannot put ink where the scene is looked at.
+// That decision lives in the painter's scratch, never in the retained frame,
+// which is what keeps a programmatic hit outside the viewport — and an event
+// arriving between a scroll and its repaint — answering from the geometry the
+// frame was built with.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_box_outside_the_viewport_still_answers_hit_queries() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    let far = h.el(root, "view.box");
+    h.doc.set_inline(far, "left: -500px; top: 20px");
+    assert_eq!(h.hit(-450.0, 70.0), Some(far));
+}
+
+#[test]
+fn culling_does_not_change_the_retained_frame() {
+    let mut h = Harness::new(&format!(
+        "{PAGE} .box {{ display: flex; position: absolute; width: 100px; height: 100px; }}"
+    ));
+    let root = h.root();
+    for index in 0..6 {
+        let box_id = h.el(root, "view.box");
+        h.doc
+            .set_inline(box_id, &format!("left: 4000px; top: {}px", index * 120));
+    }
+    let built = h.paint().items().len();
+    h.doc.dom.render();
+    let retained = h
+        .doc
+        .dom
+        .painter
+        .borrow()
+        .frame()
+        .expect("a rendered document retains its frame")
+        .items()
+        .len();
+    assert_eq!(
+        built, retained,
+        "the frame carries every item, painted or not"
+    );
+}
