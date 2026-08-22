@@ -258,18 +258,21 @@ useful signal for currently-compatible versions of those libraries.
   XML main body becomes a real ESM at its resolved entry URL: core prepends
   named imports from both built-ins plus the `navigator`/`postMessage`/`window`
   shadows formerly supplied by web-core's IIFE. The `bobcat:boot` ESM imports
-  the built-ins, uses top-level await on `import(entry_url)`, and then runs
+  `__FlushElementTree` from `bobcat:element`, uses top-level await on
+  `import(entry_url)`, and then runs
   `processData` → `renderPage` → `__FlushElementTree` inside JavaScript; Rust
   no longer follows entry evaluation with a separate render-page evaluation.
-  The globals shell is
-  deliberately shape-only: it supplies a stub `lynx` object, an empty
+  The runtime module is deliberately shape-only: it directly exports a stub
+  `lynx` object, an empty
   `SystemInfo` snapshot, init/global props, context sinks, the native-module
   sentinel and empty JS event module,
   performance/error hooks, and
-  `__OnLifecycleEvent`; it retains no listener, delivers no message or
-  lifecycle event, and does not invent the background-only `lynxCoreInject`
-  realm. The PAPI runtime exports the supported Element PAPI only as named ESM
-  bindings; transformed entries receive them through the prepended import:
+  `__OnLifecycleEvent`; transformed entries receive every binding through the
+  prepended import, and the module installs none of them on `globalThis`. It
+  retains no listener, delivers no message or lifecycle event, and does not
+  invent the background-only `lynxCoreInject` realm. The PAPI runtime exports
+  the supported Element PAPI only as named ESM bindings; transformed entries
+  receive them through the prepended import:
   every ReactLynx Snapshot
   constructor except `__CreateFrame` (`__CreatePage`, `__CreateElement`,
   `__CreateWrapperElement`, `__CreateText`, `__CreateImage`, `__CreateView`,

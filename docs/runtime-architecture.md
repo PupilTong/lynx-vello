@@ -28,11 +28,12 @@ bobcat-wasm ─┘          │              ├─▶ vendor/stylo
 
 QuickJS preloaded ESM graph
   bobcat:boot
-    ├──▶ bobcat:runtime (shape-only runtime compatibility sinks)
-    ├──▶ bobcat:element (packages/bobcat-element)
-    │     └──▶ private bobcat host callbacks
-    │           └──▶ private dom::Document<()> tree
+    ├──▶ bobcat:element (flush binding)
     └──▶ await import(resolved entry MTS URL)
+          ├──▶ bobcat:runtime (shape-only named compatibility exports)
+          └──▶ bobcat:element (packages/bobcat-element)
+                └──▶ private bobcat host callbacks
+                      └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ lynx-template-decoder + winit
 bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
@@ -152,13 +153,15 @@ there. The VM itself is intentionally not `Send`.
 The callback boundary carries only `HostValue` primitives. Objects, symbols,
 functions, raw VM values, and DOM handles cannot cross it. Bobcat installs the
 private `bobcat.*` callbacks and preloads three kinds of ESM source: the
-core-owned `bobcat:runtime` compatibility shell, the embedded
+core-owned `bobcat:runtime` named compatibility exports, the embedded
 `bobcat:element` named Element-PAPI exports, and the fetched entry under its
 resolved URL. Before registering that entry, core prepends its runtime and
 Element-PAPI import declarations plus the environment-shadow declarations
 used by web-core's MTS wrapper.
 
-The final `bobcat:boot` module statically imports both built-ins, then runs:
+The final `bobcat:boot` module imports the flush binding from
+`bobcat:element`; the transformed entry itself statically imports both
+built-ins. Boot then runs:
 
 ```js
 await import(entryMtsUrl);
@@ -173,8 +176,9 @@ the entry.
 
 Those sinks retain and deliver nothing. They make compiled main-thread chunks
 installable before Bobcat has the corresponding runtime subsystems; they do
-not create a background `lynxCoreInject` realm or hide missing Element PAPI
-members such as `__AddClass`.
+not install runtime bindings on `globalThis`, create a background
+`lynxCoreInject` realm, or hide missing Element PAPI members such as
+`__AddClass`.
 
 The host-facing boot boundary is synchronous, but the graph is fully ESM and
 supports top-level await. QuickJS drains its owned pending-job queue until the

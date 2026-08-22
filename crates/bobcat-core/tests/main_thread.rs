@@ -69,6 +69,15 @@ async fn script_finished_waits_for_the_tla_entry_and_javascript_boot() {
         if (typeof globalThis.__CreateView !== 'undefined') {
           throw new Error('Element PAPI leaked onto globalThis');
         }
+        for (const name of [
+          'lynx', 'SystemInfo', '__globalProps', 'NativeModules',
+          '_AddEventListener', '_ReportError', '_SetSourceMapRelease',
+          '__OnLifecycleEvent'
+        ]) {
+          if (name in globalThis) {
+            throw new Error(name + ' leaked onto globalThis');
+          }
+        }
         globalThis.renderPage = function () {
           const page = __CreatePage('card', 0);
           __AppendElement(page, createView(0));

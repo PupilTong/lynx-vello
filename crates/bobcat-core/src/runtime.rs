@@ -19,7 +19,7 @@ const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
-const MAIN_THREAD_GLOBALS_SOURCE: &str = include_str!("main-thread-globals.js");
+const RUNTIME_MODULE_SOURCE: &str = include_str!("main-thread-runtime.mjs");
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
@@ -323,8 +323,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import "{RUNTIME_MODULE_SPECIFIER}";
-import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+            r#"import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 
 await import({entry_specifier});
 
@@ -388,7 +387,7 @@ fn install_bobcat(
     )?;
     install_event_members(engine, events, listener_names)?;
     engine
-        .register_module_source(RUNTIME_MODULE_SPECIFIER, MAIN_THREAD_GLOBALS_SOURCE)
+        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
         .map_err(|error| {
             MainThreadError::from_engine("registering the Bobcat runtime module", error)
         })?;
@@ -914,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn main_thread_globals_supply_shape_only_runtime_bridges() {
+    fn imported_runtime_bindings_supply_shape_only_bridges_without_globals() {
         let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -928,8 +927,17 @@ mod tests {
                 if (lynx.__initData === null || typeof lynx.__initData !== 'object') {
                   throw new Error('init data must start as an empty object');
                 }
-                if (!('NativeModules' in globalThis) || NativeModules !== undefined) {
-                  throw new Error('the main-thread native-module sentinel must be undefined');
+                if (NativeModules !== undefined) {
+                  throw new Error('the imported native-module sentinel must be undefined');
+                }
+                for (const name of [
+                  'lynx', 'SystemInfo', '__globalProps', 'NativeModules',
+                  '_AddEventListener', '_ReportError', '_SetSourceMapRelease',
+                  '__OnLifecycleEvent'
+                ]) {
+                  if (name in globalThis) {
+                    throw new Error(name + ' must be supplied only by the injected import');
+                  }
                 }
                 if (typeof lynxCoreInject !== 'undefined') {
                   throw new Error('the background-thread injection must not leak into this realm');
@@ -990,9 +998,9 @@ mod tests {
                   __CreatePage('card', 0);
                 };
                 ",
-                "app:///runtime-globals.js",
+                "app:///runtime-imports.mjs",
             )
-            .expect("shape-only main-thread globals");
+            .expect("shape-only imported runtime bindings");
     }
 
     #[test]
