@@ -227,6 +227,44 @@ impl ScriptEngine for QuickJsScriptEngine {
         )
     }
 
+    fn register_module_source(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
+        self.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterModule)?;
+        self.realm
+            .register_module_source(specifier, source)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
+
+    fn execute_module(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
+        self.resume_incomplete_checkpoint(PHASE)?;
+        let evaluation = self
+            .realm
+            .evaluate(
+                quickjs::EvalSource {
+                    name: Some(source_name),
+                    ..quickjs::EvalSource::new(source)
+                },
+                quickjs::EvalOptions {
+                    source_type: quickjs::SourceType::Module,
+                    ..quickjs::EvalOptions::default()
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        let evaluation = self.finish_operation(evaluation, PHASE)?;
+        match self
+            .realm
+            .settled_promise_result(&evaluation)
+            .map_err(|error| map_quickjs_error(error, PHASE))?
+        {
+            Some(_) => Ok(()),
+            None => Err(script_error(
+                ScriptErrorKind::ModuleEvaluate,
+                PHASE,
+                "QuickJS module evaluation remained pending after its job checkpoint",
+            )),
+        }
+    }
+
     fn call_host_member(
         &mut self,
         namespace: &str,
@@ -315,6 +353,9 @@ fn map_quickjs_error(error: quickjs::Error, phase: ScriptErrorPhase) -> ScriptEr
         quickjs::ErrorKind::Exception => ScriptErrorKind::Exception,
         quickjs::ErrorKind::InvalidInput if error.phase == quickjs::ErrorPhase::ConstructValue => {
             ScriptErrorKind::InvalidBoundaryValue
+        }
+        quickjs::ErrorKind::InvalidInput if error.phase == quickjs::ErrorPhase::RegisterModule => {
+            ScriptErrorKind::ModuleLoad
         }
         quickjs::ErrorKind::Interrupted | quickjs::ErrorKind::ExecutionTimeout => {
             ScriptErrorKind::Other
@@ -410,6 +451,40 @@ mod tests {
         engine
             .execute_script("globalThis.answer = 42", "app:///main.js")
             .expect("execute");
+    }
+
+    #[test]
+    fn preloaded_entry_modules_finish_before_execute_module_returns() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .register_module_source(
+                "app:///entry.js",
+                "globalThis.answer = await Promise.resolve(42);",
+            )
+            .expect("register entry");
+        engine
+            .execute_module("await import('app:///entry.js');", "bobcat:boot")
+            .expect("execute boot module");
+        engine
+            .execute_script(
+                "if (globalThis.answer !== 42) throw new Error('entry was not awaited')",
+                "verify.js",
+            )
+            .expect("entry completion must be visible");
+    }
+
+    #[test]
+    fn a_missing_preloaded_module_is_a_named_module_error() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        let error = engine
+            .execute_module("await import('app:///missing.mjs');", "bobcat:boot")
+            .expect_err("the loader must reject an unknown module");
+
+        assert_eq!(error.phase, ScriptErrorPhase::ExecuteModule);
+        assert!(error.message.contains("app:///missing.mjs"));
+        assert!(error.message.contains("not preloaded"));
     }
 
     #[test]

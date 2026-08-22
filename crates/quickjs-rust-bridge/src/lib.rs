@@ -6,7 +6,10 @@
 //! standard-library declaration facade; unsupported `FILE` diagnostics are
 //! removed instead of becoming a host ABI. The realm deliberately omits
 //! JavaScript shared-memory primitives (`Atomics` and `SharedArrayBuffer`);
-//! this does not disable Rust or host-side synchronization.
+//! this does not disable Rust or host-side synchronization. A realm may also
+//! preload exact-name UTF-8 modules into its synchronous loader and inspect a
+//! module-evaluation `Promise` after driving the owned pending-job queue; module
+//! graph and resource policy remain its caller's responsibility.
 
 #[allow(
     unsafe_code,
@@ -57,6 +60,9 @@ mod implementation {
     const JS_EVAL_FLAG_BACKTRACE_BARRIER: i32 = 1 << 6;
     const JS_EVAL_FLAG_ASYNC: i32 = 1 << 7;
     const QJS_EVAL_FAILURE_COMPILE: i32 = 1;
+    const QJS_PROMISE_PENDING: i32 = 0;
+    const QJS_PROMISE_FULFILLED: i32 = 1;
+    const QJS_PROMISE_REJECTED: i32 = 2;
 
     static HOST_OWNER_CLASS_ID: OnceLock<u32> = OnceLock::new();
 
@@ -126,6 +132,7 @@ mod implementation {
     #[non_exhaustive]
     pub enum ErrorPhase {
         CreateRealm,
+        RegisterModule,
         ConstructValue,
         Evaluate,
         Call,
@@ -766,6 +773,55 @@ mod implementation {
             })
         }
 
+        /// Adds one UTF-8 source module to this realm's synchronous loader.
+        ///
+        /// Module names are exact after `QuickJS`'s normal normalization. A
+        /// module must be registered before any entry that imports it is
+        /// compiled, and a name cannot be replaced after registration.
+        pub fn register_module_source(&mut self, name: &str, source: &str) -> Result<(), Error> {
+            self.reclaim();
+            if name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is empty",
+                ));
+            }
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            let status = unsafe {
+                ffi::qjs_runtime_add_module(
+                    self.inner.runtime.as_ptr(),
+                    name.as_ptr(),
+                    source.as_ptr(),
+                    source.len(),
+                )
+            };
+            match status {
+                0 => Ok(()),
+                -1 => Err(Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS could not retain the module source",
+                )),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                _ => Err(Error::bridge(
+                    ErrorKind::Engine,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS returned an unknown module-registration status",
+                )),
+            }
+        }
+
         /// Replaces a named property while enforcing realm affinity and interrupts.
         pub fn set_property(
             &mut self,
@@ -1021,6 +1077,38 @@ mod implementation {
                         failure_stage == QJS_EVAL_FAILURE_COMPILE,
                     )
                 });
+            guard.finish(result, ErrorPhase::Evaluate)
+        }
+
+        /// Returns a settled promise's result, or `None` while it is pending.
+        ///
+        /// A rejected promise is returned as a sanitized JavaScript error.
+        pub fn settled_promise_result(&mut self, promise: &Value) -> Result<Option<Value>, Error> {
+            self.reclaim();
+            self.ensure_affinity(promise, ErrorPhase::Evaluate)?;
+            let context = self.inner.context.as_ptr();
+            let guard = self.inner.interrupt.begin();
+            let result = match unsafe {
+                ffi::qjs_value_promise_state(context, promise.inner.raw.as_ptr())
+            } {
+                QJS_PROMISE_PENDING => Ok(None),
+                state @ (QJS_PROMISE_FULFILLED | QJS_PROMISE_REJECTED) => {
+                    let raw = unsafe {
+                        ffi::qjs_value_promise_result(context, promise.inner.raw.as_ptr())
+                    };
+                    let value = self.value_or_exception(raw, context, ErrorPhase::Evaluate)?;
+                    if state == QJS_PROMISE_REJECTED {
+                        Err(sanitize_exception(&value, ErrorPhase::Evaluate, false))
+                    } else {
+                        Ok(Some(value))
+                    }
+                }
+                _ => Err(Error::bridge(
+                    ErrorKind::TypeMismatch,
+                    ErrorPhase::Evaluate,
+                    "module evaluation did not return a Promise",
+                )),
+            };
             guard.finish(result, ErrorPhase::Evaluate)
         }
 
@@ -1591,6 +1679,62 @@ mod implementation {
 
             assert_eq!(function.kind(), ValueKind::Function);
             assert_eq!(result.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn preloaded_modules_support_dynamic_import_and_top_level_await() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .register_module_source("bobcat:answer", "export const answer = 42;")
+                .unwrap();
+            realm
+                .register_module_source(
+                    "app:///entry.js",
+                    "import { answer } from 'bobcat:answer';\n\
+                     globalThis.answer = await Promise.resolve(answer);",
+                )
+                .unwrap();
+
+            let evaluation = realm
+                .evaluate(
+                    EvalSource {
+                        text: "await import('app:///entry.js');",
+                        name: Some("bobcat:boot"),
+                        line_offset: 0,
+                    },
+                    EvalOptions {
+                        source_type: SourceType::Module,
+                        ..EvalOptions::default()
+                    },
+                )
+                .expect("boot module should start");
+            realm
+                .drain_pending_jobs()
+                .expect("module jobs should settle");
+            assert!(
+                realm
+                    .settled_promise_result(&evaluation)
+                    .expect("module evaluation should fulfill")
+                    .is_some()
+            );
+            let answer = realm
+                .evaluate(EvalSource::new("globalThis.answer"), EvalOptions::default())
+                .unwrap();
+            assert_eq!(answer.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn preloaded_module_names_are_unique() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .register_module_source("bobcat:element", "export {};")
+                .unwrap();
+            let error = realm
+                .register_module_source("bobcat:element", "export {};")
+                .expect_err("a module name must not be replaced");
+
+            assert_eq!(error.kind, ErrorKind::InvalidInput);
+            assert_eq!(error.phase, ErrorPhase::RegisterModule);
         }
 
         #[test]

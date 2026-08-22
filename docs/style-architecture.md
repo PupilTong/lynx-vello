@@ -150,9 +150,10 @@ CSS supplied as text.
 
 Private `bobcat_core::tree` composes the native operations over
 `Document<()>`, and the embedded `packages/bobcat-element` runtime exposes
-the Lynx Element PAPI over them. `LynxView::execute_script(url)` fetches source
-through the injected resource contract; the optional QuickJS factory or an
-external VM factory runs it against that composition.
+the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
+`LynxView::execute_script(url)` fetches an entry MTS module through the
+injected resource contract; the QuickJS boot module awaits that resolved URL
+before it calls `renderPage` against this composition.
 What that covers, and what it does not:
 
 **Landed**
@@ -171,9 +172,9 @@ What that covers, and what it does not:
 - every ReactLynx Snapshot constructor except `__CreateFrame`, all six tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
   `__ReplaceElement`, `__ReplaceElements`, `__SwapElement`),
-  `__FlushElementTree`, and web-core's
-  boot sequence. `__CreateList` creates the element and retains its JavaScript
-  callbacks, alongside `__UpdateListCallbacks`, but nothing executes them yet;
+  `__FlushElementTree`, and web-core's ESM boot sequence. `__CreateList`
+  creates the element and retains its JavaScript callbacks, alongside
+  `__UpdateListCallbacks`, but nothing executes them yet;
 - the property surface a Snapshot writes through — `__SetClasses`, `__SetID`,
   `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
   read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,

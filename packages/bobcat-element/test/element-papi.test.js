@@ -1,7 +1,7 @@
 // @ts-check
 // Behavior tests for the Element PAPI runtime over a recording native mock.
 //
-// These pin the semantics that live in element-papi.js: the PAPI surface and
+// These pin the semantics that live in element-papi.mjs: the PAPI surface and
 // arities, tag vocabulary, handle-to-NodeId mapping, return identity, and
 // drop bookkeeping. The mock mirrors the real boundary's shape: it returns
 // sequential node ids and rejects non-number ids the way the native number
@@ -226,6 +226,8 @@ function createMockBobcat(issuedIds) {
 
 /** @type {ReturnType<typeof createMockBobcat>} */
 let mock;
+/** @type {typeof import("../src/element-papi.mjs")} */
+let elementModule;
 
 beforeEach(async () => {
   rstest.resetModules();
@@ -234,11 +236,15 @@ beforeEach(async () => {
   // Installed by a card's own worklet runtime, never by this file; a test
   // that wants one puts it here itself.
   globalThis.runWorklet = undefined;
-  await import("../src/element-papi.js");
+  elementModule = await import("../src/element-papi.mjs");
+  // The rest of this legacy-shaped behavior suite calls PAPI names directly;
+  // expose this test instance without making global installation a module
+  // responsibility.
+  Object.assign(globalThis, elementModule);
 });
 
 describe("installation", () => {
-  it("assigns every PAPI global with the arity its reference declares", () => {
+  it("exports every PAPI binding with the arity its reference declares", () => {
     /** @type {[string, number][]} */
     const arities = [
       ["__CreatePage", 2],
@@ -276,10 +282,13 @@ describe("installation", () => {
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
-      const papi = /** @type {Record<string, unknown>} */ (globalThis)[name];
+      const papi = /** @type {Record<string, unknown>} */ (elementModule)[name];
       expect(papi, name).toBeTypeOf("function");
       expect(/** @type {Function} */ (papi).length, name).toBe(arity);
     }
+    expect(Object.keys(elementModule).sort()).toEqual(
+      arities.map(([name]) => name).sort(),
+    );
   });
 
   it("does not install __DropElement: collection is the only release path", () => {
@@ -298,7 +307,7 @@ describe("installation", () => {
     rstest.resetModules();
     // @ts-expect-error deliberately removing the native object
     globalThis.bobcat = undefined;
-    await expect(import("../src/element-papi.js")).rejects.toThrow(
+    await expect(import("../src/element-papi.mjs")).rejects.toThrow(
       "requires the native bobcat object",
     );
   });
@@ -582,15 +591,15 @@ describe("__GetElementUniqueID", () => {
     const issued = [41, 7, 900];
     rstest.resetModules();
     globalThis.bobcat = createMockBobcat(issued);
-    await import("../src/element-papi.js");
+    const isolatedModule = await import("../src/element-papi.mjs");
 
     const created = [
-      __CreateView(0),
-      __CreateText(0),
-      __CreateElement("custom-widget", 0),
+      isolatedModule.__CreateView(0),
+      isolatedModule.__CreateText(0),
+      isolatedModule.__CreateElement("custom-widget", 0),
     ];
 
-    expect(created.map((element) => __GetElementUniqueID(element)))
+    expect(created.map((element) => isolatedModule.__GetElementUniqueID(element)))
       .toStrictEqual(issued);
   });
 

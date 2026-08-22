@@ -35,10 +35,12 @@ pub type HostCallback = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, String>
 ///
 /// `register_host_function` creates the namespace when it does not exist and
 /// adds/replaces the named member; registration must retain the callback but
-/// must not invoke it. `execute_script` is a synchronous evaluation boundary.
-/// A VM with an explicitly owned job queue may drain its checkpoint before
-/// returning. The VM instance itself is deliberately not required to be
-/// `Send`.
+/// must not invoke it. `register_module_source` adds one source to the VM's
+/// synchronous preloaded module graph. `execute_module` compiles, links, and
+/// evaluates an entry module, including its top-level-await promise, before
+/// returning. A VM with an explicitly owned job queue may drain its checkpoint
+/// at either execution boundary. The VM instance itself is deliberately not
+/// required to be `Send`.
 pub trait ScriptEngine: fmt::Debug {
     fn register_host_function(
         &mut self,
@@ -48,7 +50,27 @@ pub trait ScriptEngine: fmt::Debug {
         callback: HostCallback,
     ) -> Result<(), ScriptError>;
 
+    /// Evaluates auxiliary classic source. Bobcat's startup path does not call
+    /// this operation; entries and built-ins use the ESM operations below.
     fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError>;
+
+    /// Registers one exact, normalized module name and its UTF-8 source.
+    ///
+    /// Bobcat's ESM runtime currently requires the built-in `QuickJS` adapter;
+    /// the default keeps older injected test VMs source-compatible while
+    /// rejecting module startup precisely.
+    fn register_module_source(
+        &mut self,
+        _specifier: &str,
+        _source: &str,
+    ) -> Result<(), ScriptError> {
+        Err(module_support_required(ScriptErrorPhase::RegisterModule))
+    }
+
+    /// Evaluates one ESM entry and waits for its evaluation promise to settle.
+    fn execute_module(&mut self, _source: &str, _source_name: &str) -> Result<(), ScriptError> {
+        Err(module_support_required(ScriptErrorPhase::ExecuteModule))
+    }
 
     /// Calls a function the realm published on the host namespace, if it
     /// published one.
@@ -112,6 +134,8 @@ impl std::error::Error for ScriptError {}
 #[non_exhaustive]
 pub enum ScriptErrorKind {
     EvaluationDenied,
+    ModuleLoad,
+    ModuleEvaluate,
     Syntax,
     Exception,
     InvalidBoundaryValue,
@@ -124,10 +148,24 @@ pub enum ScriptErrorKind {
 pub enum ScriptErrorPhase {
     Initialize,
     RegisterHostFunction,
+    RegisterModule,
     Execute,
+    ExecuteModule,
     /// Calling a member the realm published back to the host.
     CallHostMember,
     CollectGarbage,
+}
+
+fn module_support_required(phase: ScriptErrorPhase) -> ScriptError {
+    ScriptError {
+        kind: match phase {
+            ScriptErrorPhase::RegisterModule => ScriptErrorKind::ModuleLoad,
+            _ => ScriptErrorKind::ModuleEvaluate,
+        },
+        phase,
+        message: Arc::from("the script engine does not support Bobcat's ESM module graph"),
+        location: None,
+    }
 }
 
 /// Sanitized source location for a [`ScriptError`].

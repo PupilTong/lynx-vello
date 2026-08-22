@@ -13,30 +13,61 @@ use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
 use crate::tree::LynxDocument;
 use crate::tree::raw_text::drop_element_and_owned_text;
 
-const BOOT_SOURCE_NAME: &str = "<lynx boot>";
-const ELEMENT_PAPI_SOURCE_NAME: &str = "element-papi.js";
-const MAIN_THREAD_GLOBALS_SOURCE_NAME: &str = "main-thread-globals.js";
+const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
+const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
+const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 
 const ELEMENT_PAPI_SOURCE: &str =
-    include_str!("../../../packages/bobcat-element/src/element-papi.js");
-const MAIN_THREAD_GLOBALS_SOURCE: &str = include_str!("main-thread-globals.js");
+    include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
+const RUNTIME_MODULE_SOURCE: &str = include_str!("main-thread-runtime.mjs");
 
-const WRAPPER_PREFIX: &str = "//# allFunctionsCalledOnLoad\n(function(){ \"use strict\"; \
-                              const navigator=void 0,postMessage=void 0,window=void 0; ";
-const WRAPPER_SUFFIX: &str = " \n })()\n";
-
-const BOOT_SEQUENCE: &str = r#"(function () {
-  "use strict";
-  var data = undefined;
-  if (typeof processData === "function") {
-    data = processData(data);
-  }
-  if (typeof renderPage !== "function") {
-    throw new Error("the main-thread script did not assign globalThis.renderPage");
-  }
-  renderPage(data);
-  __FlushElementTree();
-})()"#;
+const ENTRY_PREAMBLE: &str = r#"import {
+  lynx,
+  SystemInfo,
+  __globalProps,
+  NativeModules,
+  _AddEventListener,
+  _ReportError,
+  _SetSourceMapRelease,
+  __OnLifecycleEvent,
+} from "bobcat:runtime";
+import {
+  __CreatePage,
+  __CreateElement,
+  __CreateWrapperElement,
+  __CreateText,
+  __CreateImage,
+  __CreateView,
+  __CreateScrollView,
+  __CreateRawText,
+  __CreateList,
+  __AppendElement,
+  __InsertElementBefore,
+  __RemoveElement,
+  __ReplaceElement,
+  __ReplaceElements,
+  __SwapElement,
+  __SetClasses,
+  __SetID,
+  __GetID,
+  __GetTag,
+  __GetElementUniqueID,
+  __SetInlineStyles,
+  __SetCSSId,
+  __SetAttribute,
+  __UpdateListCallbacks,
+  __AddEvent,
+  __GetEvent,
+  __GetEvents,
+  __SetEvents,
+  __AddEventListener,
+  __RemoveEventListener,
+  __StopPropagation,
+  __StopImmediatePropagation,
+  __FlushElementTree,
+} from "bobcat:element";
+//# allFunctionsCalledOnLoad
+"#;
 
 /// Why constructing or running the engine-owned main-thread runtime failed.
 #[derive(Debug)]
@@ -277,26 +308,36 @@ impl MainThreadRuntime {
         Ok(delivered)
     }
 
-    pub(crate) fn evaluate_main_thread_script(
-        &mut self,
-        source: &str,
-        source_name: &str,
-    ) -> Result<(), MainThreadError> {
-        let wrapped = format!("{WRAPPER_PREFIX}{source}{WRAPPER_SUFFIX}");
-        self.evaluate(&wrapped, source_name, "evaluating the main-thread script")
-    }
-
-    pub(crate) fn render_page(&mut self) -> Result<(), MainThreadError> {
-        self.evaluate(BOOT_SEQUENCE, BOOT_SOURCE_NAME, "rendering the page")
-    }
-
     pub(crate) fn run_main_thread_script(
         &mut self,
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
-        self.evaluate_main_thread_script(source, source_name)?;
-        self.render_page()
+        let entry_source = format!("{ENTRY_PREAMBLE}{source}");
+        self.engine
+            .register_module_source(source_name, &entry_source)
+            .map_err(|error| {
+                MainThreadError::from_engine("registering the MTS entry module", error)
+            })?;
+        let entry_specifier = serde_json::to_string(source_name)
+            .expect("serializing a Rust string as a JavaScript string cannot fail");
+        let boot = format!(
+            r#"import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+
+await import({entry_specifier});
+
+let data = undefined;
+if (typeof globalThis.processData === "function") {{
+  data = globalThis.processData(data);
+}}
+if (typeof globalThis.renderPage !== "function") {{
+  throw new Error("the MTS entry did not assign globalThis.renderPage");
+}}
+globalThis.renderPage(data);
+__FlushElementTree();
+"#
+        );
+        self.evaluate_module(&boot, BOOT_MODULE_SPECIFIER, "booting the MTS entry")
     }
 
     #[allow(dead_code, reason = "used by the future runtime lifecycle surface")]
@@ -309,7 +350,7 @@ impl MainThreadRuntime {
         result
     }
 
-    fn evaluate(
+    fn evaluate_module(
         &mut self,
         source: &str,
         name: &str,
@@ -317,7 +358,7 @@ impl MainThreadRuntime {
     ) -> Result<(), MainThreadError> {
         let result = self
             .engine
-            .execute_script(source, name)
+            .execute_module(source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));
         self.tree.borrow_mut().release();
         result
@@ -345,13 +386,15 @@ fn install_bobcat(
     )?;
     install_event_members(engine, events, listener_names)?;
     engine
-        .execute_script(MAIN_THREAD_GLOBALS_SOURCE, MAIN_THREAD_GLOBALS_SOURCE_NAME)
+        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
         .map_err(|error| {
-            MainThreadError::from_engine("installing the main-thread globals", error)
+            MainThreadError::from_engine("registering the Bobcat runtime module", error)
         })?;
     engine
-        .execute_script(ELEMENT_PAPI_SOURCE, ELEMENT_PAPI_SOURCE_NAME)
-        .map_err(|error| MainThreadError::from_engine("installing the Element PAPI", error))?;
+        .register_module_source(ELEMENT_MODULE_SPECIFIER, ELEMENT_PAPI_SOURCE)
+        .map_err(|error| {
+            MainThreadError::from_engine("registering the Element PAPI module", error)
+        })?;
 
     Ok(handle)
 }
@@ -841,7 +884,35 @@ mod tests {
     }
 
     #[test]
-    fn main_thread_globals_supply_shape_only_runtime_bridges() {
+    fn boot_awaits_the_esm_entry_before_rendering_once() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                import { __CreateView as createView } from 'bobcat:element';
+                await Promise.resolve();
+                if (typeof globalThis.__CreateView !== 'undefined') {
+                  throw new Error('Element PAPI must be ESM-only');
+                }
+                let renderCount = 0;
+                globalThis.renderPage = function () {
+                  renderCount += 1;
+                  if (renderCount !== 1) {
+                    throw new Error('renderPage ran more than once');
+                  }
+                  const page = __CreatePage('card', 0);
+                  __AppendElement(page, createView(0));
+                };
+                ",
+                "app:///async-entry.mjs",
+            )
+            .expect("top-level-await entry boot");
+
+        assert!(elements.tree().get(node_id(3)).is_some());
+    }
+
+    #[test]
+    fn imported_runtime_bindings_supply_shape_only_bridges_without_globals() {
         let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -855,8 +926,17 @@ mod tests {
                 if (lynx.__initData === null || typeof lynx.__initData !== 'object') {
                   throw new Error('init data must start as an empty object');
                 }
-                if (!('NativeModules' in globalThis) || NativeModules !== undefined) {
-                  throw new Error('the main-thread native-module sentinel must be undefined');
+                if (NativeModules !== undefined) {
+                  throw new Error('the imported native-module sentinel must be undefined');
+                }
+                for (const name of [
+                  'lynx', 'SystemInfo', '__globalProps', 'NativeModules',
+                  '_AddEventListener', '_ReportError', '_SetSourceMapRelease',
+                  '__OnLifecycleEvent'
+                ]) {
+                  if (name in globalThis) {
+                    throw new Error(name + ' must be supplied only by the injected import');
+                  }
                 }
                 if (typeof lynxCoreInject !== 'undefined') {
                   throw new Error('the background-thread injection must not leak into this realm');
@@ -917,9 +997,9 @@ mod tests {
                   __CreatePage('card', 0);
                 };
                 ",
-                "app:///runtime-globals.js",
+                "app:///runtime-imports.mjs",
             )
-            .expect("shape-only main-thread globals");
+            .expect("shape-only imported runtime bindings");
     }
 
     #[test]
@@ -1257,7 +1337,7 @@ mod tests {
         assert!(delivered);
 
         runtime
-            .evaluate(
+            .evaluate_module(
                 r"
                 if (seen.join('|') !== 'page-capture:2:1|inner:4:2') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
@@ -1315,7 +1395,7 @@ mod tests {
         );
 
         runtime
-            .evaluate(
+            .evaluate_module(
                 r"
                 if (seen.join('|') !== 'page-capture:2|inner-catch:4') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
@@ -1362,8 +1442,9 @@ mod tests {
         );
 
         runtime
-            .evaluate(
+            .evaluate_module(
                 r"
+                import { __AddEvent, __GetEvent } from 'bobcat:element';
                 if (seen.join('|') !== 'capture') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
                 }
@@ -1411,7 +1492,7 @@ mod tests {
         // contract becomes observable: what the realm does with these numbers
         // is its business, but the numbers themselves are the host's.
         runtime
-            .evaluate(
+            .evaluate_module(
                 r"
                 globalThis.calls = [];
                 bobcat.event_listener_callback = (node, target, phase, name,
@@ -1433,7 +1514,7 @@ mod tests {
         }
 
         runtime
-            .evaluate(
+            .evaluate_module(
                 r"
                 const shape = calls.map((call) => call.join(':')).join('|');
                 // Two deliveries per walk: `outer` registered nothing, so the
@@ -1510,18 +1591,18 @@ mod tests {
             .expect("main-thread script");
 
         let steps = steps(&elements, 3);
-        // Free the unrelated element the way a finalizer would, between the
-        // path being built and the walk running.
-        runtime
-            .evaluate("bobcat.dropElement(doomed);", "app:///sweep.js", "sweeping")
-            .expect("sweep");
+        // Collect the unrelated handle between building the path and running
+        // the walk. The real finalizer performs the one `dropElement` call;
+        // invoking it manually here would leave that finalizer armed and make
+        // its later cleanup a duplicate stale-id call.
+        runtime.collect_garbage().expect("sweep");
 
         runtime.dispatch_event(&steps, "tap", "").expect("dispatch");
 
         // A collected handle is routine — a ReactLynx re-render drops them
         // constantly — so it must not silently cost the rest of the walk.
         runtime
-            .evaluate(
+            .evaluate_module(
                 "if (seen.join('|') !== 'page|view') throw new Error('truncated: ' + seen.join('|'));",
                 "app:///verify.js",
                 "verifying",
@@ -1557,7 +1638,7 @@ mod tests {
             .expect("dispatch");
 
         runtime
-            .evaluate(
+            .evaluate_module(
                 "if (seen.join('|') !== 'page') throw new Error('got ' + seen.join('|'));",
                 "app:///verify.js",
                 "verifying",

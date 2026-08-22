@@ -136,17 +136,19 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
         })
     }
 
-    /// Fetches a UTF-8 main-thread script through the injected resource
-    /// provider and starts it on the engine-owned Lynx main thread.
+    /// Fetches a UTF-8 entry MTS module through the injected resource provider
+    /// and boots it on the engine-owned Lynx main thread.
     ///
     /// Completion is reported through [`EngineEvent::ScriptFinished`].
-    /// A view currently accepts one entry script; a second call is rejected.
+    /// The resolved URL is the module specifier imported by Bobcat's ESM boot
+    /// module. A view currently accepts one entry module; a second call is
+    /// rejected.
     pub async fn execute_script(&mut self, url: &str) -> Result<(), LynxViewError> {
         self.execute_script_with_cancellation(url, CancellationToken::new())
             .await
     }
 
-    /// Fetches and starts an entry script with host-controlled cancellation.
+    /// Fetches and starts an entry MTS module with host-controlled cancellation.
     ///
     /// Dropping the returned future cancels `cancellation`; retain a clone to
     /// cancel it from another task. The same token is carried in every

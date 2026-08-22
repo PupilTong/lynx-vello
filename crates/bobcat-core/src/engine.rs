@@ -108,7 +108,7 @@ pub enum EngineError {
     Render(String),
     #[error("could not start the {name} thread: {message}")]
     Thread { name: &'static str, message: String },
-    #[error("this view has already started its entry script")]
+    #[error("this view has already started its entry MTS module")]
     ScriptAlreadyStarted,
     #[error("the engine has no draw target attached")]
     NoDrawTarget,
@@ -167,7 +167,7 @@ pub fn configure_wasm_workers(
 pub enum ScriptRunError {
     #[error("could not initialize the main-thread runtime: {0}")]
     Initialization(#[source] crate::script::ScriptError),
-    #[error("main-thread script failed: {0}")]
+    #[error("main-thread module failed: {0}")]
     Script(#[source] crate::script::ScriptError),
     #[error("could not initialize the script thread: {0}")]
     Platform(String),
@@ -175,7 +175,7 @@ pub enum ScriptRunError {
 
 /// A message crossing from an engine-owned thread.
 enum EngineMessage {
-    /// The main-thread script ran to completion (or failed) on its thread.
+    /// The entry MTS module and Bobcat boot completed (or failed) on their thread.
     ScriptDone(Result<(), ScriptRunError>),
     /// A listener failed while an event was being delivered.
     ListenerFailed(ScriptError),
@@ -191,7 +191,7 @@ pub enum EngineEvent {
     /// [`Self::ScriptFinished`] because it is not fatal: the walk goes on, the
     /// realm stays usable, and every later event is delivered as normal. An
     /// embedder that logs it gets the same visibility over its own handlers
-    /// that it has over its entry script; one that ignores it loses nothing
+    /// that it has over its entry module; one that ignores it loses nothing
     /// but the message.
     ListenerFailed(ScriptError),
 }
@@ -511,7 +511,7 @@ impl RouterHost for EngineRouterHost<'_> {
 }
 
 /// What the presenting side asks one view's script thread to do after the
-/// entry script has finished.
+/// entry module has finished booting.
 ///
 /// Only plain data crosses: node ids, an event name, and a JSON payload. The
 /// realm and document both stay where they are.
@@ -1132,7 +1132,8 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
     }
 
     /// Spawns the Lynx main thread and creates its injected JavaScript VM on
-    /// that owner thread before running `source`.
+    /// that owner thread before registering `source` at its resolved entry URL
+    /// and running Bobcat's ESM boot module.
     pub(crate) fn spawn_script(
         &mut self,
         source: String,
@@ -1189,7 +1190,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 };
                 request_current_frame(&frame_requesters);
 
-                // The realm now outlives its entry script. Dropping this
+                // The realm now outlives its entry module. Dropping this
                 // view's sender closes the receiver and releases the realm on
                 // its owner thread.
                 if let Some(mut runtime) = runtime {
@@ -1630,7 +1631,7 @@ mod event_loop_tests {
             }) {
                 return engine;
             }
-            assert!(Instant::now() < deadline, "the entry script did not finish");
+            assert!(Instant::now() < deadline, "the entry module did not finish");
             std::thread::yield_now();
         }
     }

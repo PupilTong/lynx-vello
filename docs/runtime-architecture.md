@@ -26,11 +26,14 @@ bobcat-wasm ─┘          │              ├─▶ vendor/stylo
                         └──▶ quickjs-rust-bridge
                              [feature = "quickjs"; native adapter]
 
-main-thread JavaScript
-  ├──▶ main-thread-globals.js (shape-only runtime compatibility sinks)
-  └──▶ element-papi.js (packages/bobcat-element, embedded by bobcat-core)
-        └──▶ private bobcat host callbacks
-              └──▶ private dom::Document<()> tree
+QuickJS preloaded ESM graph
+  bobcat:boot
+    ├──▶ bobcat:element (flush binding)
+    └──▶ await import(resolved entry MTS URL)
+          ├──▶ bobcat:runtime (shape-only named compatibility exports)
+          └──▶ bobcat:element (packages/bobcat-element)
+                └──▶ private bobcat host callbacks
+                      └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ lynx-template-decoder + winit
 bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
@@ -87,8 +90,8 @@ For the native product, `bobcat-cli`:
 1. reads the local input and content-sniffs Lynx XML versus a web bundle;
 2. decodes a bundle with `lynx-template-decoder`, or parses XML with
    `lynx-xml`, then produces the corresponding `PageConfig`;
-3. retains `lepusCode.root` or the XML main-thread body in its own
-   `ResourceFetcher` under a URL;
+3. retains `lepusCode.root` or the XML main-thread body as an entry MTS module
+   in its own `ResourceFetcher` under a URL;
 4. constructs `LynxView` with the `PageConfig` and injected capabilities;
 5. mounts bundle `StyleInfo` through the pre-parsed stylesheet arm or XML
    `<style>` through the CSS-text arm, then calls
@@ -99,9 +102,10 @@ its Render Worker after fetching one XML URL. Neither embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 
-`execute_script` resolves and fetches UTF-8 JavaScript through the injected
-resource contract, then starts the engine-owned Lynx main thread. Script
-completion is reported by `LynxView::pump` as
+`execute_script` resolves and fetches the UTF-8 entry MTS module through the
+injected resource contract, then starts the engine-owned Lynx main thread. The
+resolved URL becomes the entry's exact module specifier. Boot completion is
+reported by `LynxView::pump` as
 `EngineEvent::ScriptFinished`; the engine enqueues that event before invoking
 the construction-time `EventRequester`, so the host can pump immediately
 without polling. `execute_script_with_cancellation` accepts a public resource
@@ -142,32 +146,51 @@ there. The VM itself is intentionally not `Send`.
 `ScriptEngine` is a small host-integration protocol:
 
 - install a named leaf callback under a namespace;
-- execute source with a source URL/name;
+- register UTF-8 source under an exact preloaded module specifier;
+- execute an ESM entry and wait for its evaluation promise to settle;
 - expose the VM's optional garbage-collection operation.
 
 The callback boundary carries only `HostValue` primitives. Objects, symbols,
-functions, raw VM values, and DOM handles cannot cross it. Bobcat installs
-the private `bobcat.*` callbacks, evaluates a core-owned classic script with
-shape-only `lynx` and `SystemInfo` stubs, props, context/module, error,
-performance, and lifecycle sinks, evaluates the embedded Element PAPI, wraps
-the fetched main-thread source, then runs
-`processData → renderPage → __FlushElementTree`.
+functions, raw VM values, and DOM handles cannot cross it. Bobcat installs the
+private `bobcat.*` callbacks and preloads three kinds of ESM source: the
+core-owned `bobcat:runtime` named compatibility exports, the embedded
+`bobcat:element` named Element-PAPI exports, and the fetched entry under its
+resolved URL. Before registering that entry, core prepends its runtime and
+Element-PAPI import declarations.
+
+The final `bobcat:boot` module imports the flush binding from
+`bobcat:element`; the transformed entry itself statically imports both
+built-ins. Boot then runs:
+
+```js
+await import(entryMtsUrl);
+const data = globalThis.processData?.(undefined);
+globalThis.renderPage(data);
+__FlushElementTree();
+```
+
+`renderPage` is therefore a JavaScript boot responsibility. Rust evaluates one
+boot module; it does not issue a second native lifecycle call after evaluating
+the entry.
 
 Those sinks retain and deliver nothing. They make compiled main-thread chunks
 installable before Bobcat has the corresponding runtime subsystems; they do
-not create a background `lynxCoreInject` realm or hide missing Element PAPI
-members such as `__AddClass`.
+not install runtime bindings on `globalThis`, create a background
+`lynxCoreInject` realm, or hide missing Element PAPI members such as
+`__AddClass`.
 
-Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
-each checkpoint before returning, including jobs queued by the entry script
-and synchronous boot sequence. A persistent JavaScript event loop remains a
-later runtime feature.
+The host-facing boot boundary is synchronous, but the graph is fully ESM and
+supports top-level await. QuickJS drains its owned pending-job queue until the
+boot module's evaluation promise settles before returning. An entry whose TLA
+remains pending without another queued job is rejected rather than reported as
+finished; a persistent JavaScript event loop remains a later runtime feature.
 
 The default `quickjs` feature contributes only
 `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
-configuration, values, and runtime entry points remain private. With default
-features disabled, an embedder supplies another factory. The browser embedder
-enables QuickJS explicitly and passes this factory directly to `LynxView`.
+configuration, values, and runtime entry points remain private. ESM startup is
+currently implemented only by this adapter; a factory that does not implement
+the module operations is rejected precisely. The browser embedder enables
+QuickJS explicitly and passes this factory directly to `LynxView`.
 The built-in factory has no execution deadline; the underlying bridge retains
 an opt-in timeout for its direct users and tests.
 
@@ -235,7 +258,7 @@ live-DOM visibility.
 
 ## Native and Wasm spawning
 
-`LynxView::execute_script` always delegates VM creation and execution to an
+`LynxView::execute_script` always delegates VM creation and module boot to an
 engine-owned task. The core selects the thread builder at compile time:
 
 ```text
@@ -277,10 +300,11 @@ direct create/append/drop/flush DOM API is exposed to JavaScript.
 
 1. `LynxView::new` builds the private document from `PageConfig` and device
    metrics.
-2. `execute_script(url)` fetches source through `ResourceFetcher` and spawns
-   the target-specific Lynx main task.
-3. The task creates the injected VM, installs Bobcat callbacks and Element
-   PAPI, evaluates the named source, and runs the boot sequence.
+2. `execute_script(url)` fetches the entry MTS source through
+   `ResourceFetcher` and spawns the target-specific Lynx main task.
+3. The task creates the injected VM, installs Bobcat callbacks, preloads
+   `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
+   TLA-based `bobcat:boot` module.
 4. `__FlushElementTree` performs style/layout commit, returns the document,
    and asks `FrameRequester` for a frame.
 5. The presenting side non-blockingly drains buffered input and resize, then

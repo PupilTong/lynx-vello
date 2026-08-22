@@ -55,11 +55,11 @@ service style work.
 
 Browser fetch policy stays in JavaScript. For `executeScript(url)`, the Render
 Worker uses browser `fetch`, reads the response stream with a 16 MiB bound,
-and registers the raw response bytes in its
-`BrowserResources` implementation under the final response URL, then calls
-the opaque Rust view's `execute_script(url)`. The view resolves and reads the
-bytes through `ResourceFetcher` and performs strict UTF-8 validation; it never
-receives a bundle decoder.
+and registers the raw entry-MTS bytes in its `BrowserResources`
+implementation under the final response URL, then calls the opaque Rust
+view's `execute_script(url)`. The view resolves and reads the bytes through
+`ResourceFetcher`, performs strict UTF-8 validation, and uses that final URL as
+the ESM entry specifier; it never receives a bundle decoder.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
@@ -100,22 +100,25 @@ there, so the resulting realm remains owner-thread-bound and uses Bobcat's
 primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 
-Entry evaluation is synchronous. QuickJS drains its owned pending-job queue at
-each execution checkpoint before returning to core, so script completion is
-exactly the `ScriptFinished` engine event. No browser microtask checkpoint,
-timer interception, or JavaScript callback-retention protocol participates in
+Startup is one synchronous host boundary over an asynchronous ESM evaluation.
+QuickJS preloads `bobcat:runtime`, `bobcat:element`, and the resolved entry URL;
+the `bobcat:boot` module uses top-level await to import the entry before it
+calls `renderPage`. QuickJS drains its owned pending-job queue until that
+module-evaluation promise settles, so boot completion is exactly the
+`ScriptFinished` engine event. No browser microtask checkpoint, timer
+interception, or JavaScript callback-retention protocol participates in
 completion.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
-mutation is reachable only from the fetched main-thread script through the
-embedded Element PAPI. `registerFonts(bytes)` is a narrow resource capability:
-it registers every usable face in an OpenType container through the opaque
-view and returns the number accepted, without exposing the document or text
-engine. `loadStyleSheet(url)` fetches CSS in the Render Worker, registers the bytes,
-and mounts them as author-origin rules through the same resource boundary the
-main-thread script uses; sheets cascade in load order. The stylesheet contract
-has a second arm for a host that already parsed its CSS, but a browser host
-never does, so this embedder always takes the text arm.
+mutation is reachable only from the fetched entry MTS module through the named
+exports of `bobcat:element`. `registerFonts(bytes)` is a narrow resource
+capability: it registers every usable face in an OpenType container through
+the opaque view and returns the number accepted, without exposing the document
+or text engine. `loadStyleSheet(url)` fetches CSS in the Render Worker,
+registers the bytes, and mounts them as author-origin rules through the same
+resource boundary the entry MTS module uses; sheets cascade in load order. The
+stylesheet contract has a second arm for a host that already parsed its CSS,
+but a browser host never does, so this embedder always takes the text arm.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
 may execute suitable JavaScript by URL or load a raw Lynx XML source card;

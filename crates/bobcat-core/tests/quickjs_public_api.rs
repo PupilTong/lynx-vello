@@ -12,8 +12,14 @@ fn quickjs_is_exposed_only_as_a_transferable_factory_capability() {
 
     let factory = quickjs_engine_factory();
     let mut vm = factory.create().expect("QuickJS realm");
-    vm.execute_script("globalThis.answer = 42", "app:///main.js")
-        .expect("named script");
+    vm.register_module_source("bobcat:answer", "export const answer = 42;")
+        .expect("preloaded module");
+    vm.execute_module(
+        "import { answer } from 'bobcat:answer';\n\
+         if (answer !== 42) throw new Error('wrong answer');",
+        "app:///main.mjs",
+    )
+    .expect("named ESM entry");
 
     let debug = format!("{factory:?}");
     assert!(!debug.contains("Realm"));

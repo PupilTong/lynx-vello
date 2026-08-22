@@ -227,6 +227,7 @@ dependencies = [
  "quickjs-rust-bridge",
  "rayon",
  "rustc-hash 2.1.3",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
