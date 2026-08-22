@@ -183,9 +183,7 @@ jobs:
       # dom/hughie/quickjs-rust-bridge through their bench targets but never
       # reaches the CLI, which nothing depends on. So
       # `src/image_decoders/software.rs` — the pure-Rust reference decoder that
-      # exists *for* headless Linux — had no gate compiling it at all, the same
-      # blind spot that let the Windows and Android decoders sit unbuilt until
-      # they were deleted in #129.
+      # exists *for* headless Linux — had no gate compiling it at all.
       #
       # No tests: the CLI's dev-dependencies pull in flashbulb's GPU capture,
       # and a hosted runner has no adapter.

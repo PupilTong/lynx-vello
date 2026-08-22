@@ -14,7 +14,7 @@ on them** — which is exactly where the platform decoders diverge.
 |---|---|---|
 | `checker-16.jpg` | 16×16, four opaque quadrants (red / green / blue / white) | cross-backend decode agreement; JPEG is lossy, so comparisons carry a per-channel tolerance |
 | `checker-16.webp` | the same image, lossless, with the fourth quadrant fully transparent | cross-backend agreement *and* alpha handling, where the backends genuinely disagree (straight vs. premultiplied) |
-| `exif-rot90.jpg` | 16×8 tagged EXIF orientation 6 | orientation normalisation: every backend must report an **8×16** natural size and matching pixels, even though `image`, ImageIO and `AImageDecoder` orient differently by default |
+| `exif-rot90.jpg` | 16×8 tagged EXIF orientation 6 | orientation normalisation: every backend must report an **8×16** natural size and matching pixels, even though neither the software codecs nor ImageIO orient by default |
 | `apng-fallback.png` | 4×4 APNG: `acTL`, then a **transparent** default image with no preceding `fcTL`, then an opaque red animation frame 0 | frame-0 selection. Because no `fcTL` precedes `IDAT`, the default image is a fallback for non-APNG decoders and is *not* part of the animation — `Reader::next_frame` hands it back first, so a decoder that takes it returns the transparent placeholder instead of the red frame |
 | `truncated.png` | a valid PNG cut immediately after the `IDAT` chunk header | truncation rejection. ImageIO decodes this to a full-size, entirely transparent image and reports the source *complete*, where the software decoder errors — `format::is_complete` is what stops that divergence reaching a backend, and this file is its regression test |
 

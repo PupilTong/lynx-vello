@@ -478,11 +478,9 @@ useful signal for currently-compatible versions of those libraries.
   byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
   Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
   `image-webp` taken directly rather than through the crates.io `image`
-  facade). On any other target `platform_decoder()` = `None` with **no
-  fallback behind it**. The former Windows WIC and Android NDK reference
-  modules — which compiled on no supported target and had no CI gate — were
-  removed; recover `windows.rs`/`android.rs` from git history if such an
-  embedder materializes. Decoder-behaviour tests
+  facade). Those two are the whole list: on any other target
+  `platform_decoder()` = `None` with **no fallback behind it**, and an embedder
+  shipping elsewhere implements `Decoder` itself. Decoder-behaviour tests
   (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
   measured `ImageIO` API comparison that fixed the Apple decoder's choices
   (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG

@@ -15,9 +15,9 @@
 //! (WebP arrived in macOS 11 / iOS 14, AVIF in macOS 13 / iOS 16; the minimum
 //! deployment target sits above both), so [`AppleDecoder::new`] claims all six
 //! formats unconditionally and there is nothing to detect. This is a recorded
-//! decision, not an oversight: the capability probe the WIC decoder still
-//! carries answers a question — "is the codec installed on *this* machine?" —
-//! that has no analogue on Apple platforms at the supported OS floor.
+//! decision, not an oversight: a capability probe answers "is the codec
+//! installed on *this* machine?", and that question has no analogue on Apple
+//! platforms at the supported OS floor.
 //!
 //! # Recorded costs (measured 2026-08-10, Apple Silicon, 2048² photo-like fixtures)
 //!

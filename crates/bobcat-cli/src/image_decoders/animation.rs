@@ -1,12 +1,11 @@
 //! Container-level animation declarations, read from the bytes.
 //!
-//! Exists because no platform API answers "is this animated?" both reliably
-//! and everywhere it is needed: `AImageDecoder_isAnimated` is **API 31** while
-//! the Android decoder's floor is 30, and `ImageIO`'s frame count misses an
-//! APNG whose animation has a single frame (the `acTL` is present, the count
-//! is 1). The two chunk-level facts below are exactly what `png` and
-//! `image-webp` report, so every decoder that consults this module agrees with
-//! the Linux reference about the same file.
+//! Exists because the platform API does not answer "is this animated?"
+//! reliably: `ImageIO`'s frame count misses an APNG whose animation has a
+//! single frame (the `acTL` is present, the count is 1). The two chunk-level
+//! facts below are exactly what `png` and `image-webp` report, so a decoder
+//! that consults this module agrees with the Linux reference about the same
+//! file.
 
 use bobcat_core::image::ImageFormat;
 
