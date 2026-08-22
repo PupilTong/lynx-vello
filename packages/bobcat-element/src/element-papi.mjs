@@ -3,7 +3,7 @@ import {
   createElement,
   createPage,
   disableEventListener,
-  dropElement,
+  releaseElement,
   enableEventListener,
   flushElementTree,
   getAttribute,
@@ -84,8 +84,14 @@ import {
 // # Events
 //
 // An element handle is an `EventTarget`. Listeners are JavaScript closures
-// held here, keyed by the handle, and they die with it — nothing about a
-// handler ever crosses into Rust.
+// filed on the handle itself, under this file's symbols, and they die with
+// it — nothing about a handler ever crosses into Rust. On the handle rather
+// than in a `WeakMap` keyed by it, because QuickJS's `WeakMap` holds its
+// values strongly whatever becomes of the key (it marks every value; it is
+// not an ephemeron), so a listener that captured its own element would have
+// kept the handle — and through it the element, and everything the element
+// holds — alive for the life of the realm. A closure reachable only from the
+// handle it captures is a cycle with no root, which the collector does free.
 //
 // Registration is the standard's: identity is (element, name, callback,
 // capture), a second add of those four is ignored outright, and `once` and
@@ -182,17 +188,24 @@ import {
 //   authority. Older web-core generations kept a JS-side counter beside the
 //   native id; that split does not exist here.
 // - A `unique_id` is never reissued. Freeing an element retires its id for
-//   the life of the document, so a handle that outlives its element — one
-//   the registry has not swept yet, an id a bundle stashed in a variable —
-//   can only ever name something gone, never a later element that happens to
-//   sit in the freed one's storage. Nothing in this file has to guard
-//   against that case because it cannot arise.
-// - Collection is the only release path — web-core's model, where a swept
-//   WeakRef is what frees an element. Every non-page handle is registered
-//   with a FinalizationRegistry whose cleanup calls the native `dropElement`;
-//   cleanup runs as a pending job at the host's job checkpoints, and never
-//   at realm teardown, so the last committed tree survives the bootstrap
-//   realm.
+//   the life of the document, so an id a bundle stashed in a variable after
+//   its handle died can only ever name something gone, never a later element
+//   that happens to sit in the freed one's storage. Nothing in this file has
+//   to guard against that case because it cannot arise.
+// - A handle is what holds an element from outside the tree; inside it, a
+//   parent holds its children and a child holds nothing. So collecting a
+//   handle frees nothing by itself: the element stays for as long as it is
+//   attached, and once it is detached as well — by the removal that detaches
+//   it or an ancestor, before or after the handle died — the host frees it
+//   at the end of the batch, together with every descendant whose handle is
+//   gone too. Collection is the only way a handle lets go, web-core's model:
+//   every non-page handle is registered with a FinalizationRegistry whose
+//   cleanup calls the native `releaseElement`; cleanup runs as a pending job
+//   at the host's job checkpoints, and never at realm teardown, so the last
+//   committed tree survives the bootstrap realm. A handle that dies while
+//   its element is attached is the routine case, not a leak: a ReactLynx
+//   list recycles cells by handing their elements from one snapshot
+//   instance to another.
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
 
@@ -218,18 +231,18 @@ const AT_TARGET = 2;
 const BUBBLING_PHASE = 3;
 
 /**
- * One element's listeners, weak by handle so a registration can never keep
- * its element alive: the entry dies with the handle, which keeps collection
- * the only release path.
+ * Where a handle files its listeners: an event name to a pair of lists
+ * indexed by [`BUBBLE`, `CAPTURE`]. A list holds `{ callback, once }` in
+ * registration order, which is firing order.
  *
- * Each element maps an event name to a pair of lists indexed by [`BUBBLE`,
- * `CAPTURE`]. A list holds `{ callback, once }` in registration order, which
- * is firing order.
+ * On the handle, not in a map keyed by it — see the header's note on
+ * QuickJS's `WeakMap` — so a registration can never be what keeps its
+ * element alive: it dies with the handle, and nothing else reaches it.
  *
  * @typedef {{ callback: Function, once: boolean, removed: boolean }} Registration
- * @type {WeakMap<object, Map<string, [Registration[], Registration[]]>>}
+ * @typedef {Map<string, [Registration[], Registration[]]>} ListenerLists
  */
-const listeners = new WeakMap();
+const listenersSymbol = Symbol("listeners");
 
 /**
  * The `type` strings `__AddEvent` has to recognize, lowercased the way
@@ -254,15 +267,13 @@ const STATIC = 0;
 const GLOBAL = 1;
 
 /**
- * One element's `__AddEvent` handlers: at most one per name in each map.
- *
- * Weak by handle, for the reason the closure store is — an entry dies with
- * its handle, so a registration can never be what keeps an element alive.
+ * Where a handle files its `__AddEvent` handlers: at most one per name in
+ * each map. On the handle, for the reason the listener lists are.
  *
  * @typedef {{ type: string, name: string, handler: unknown }} FiledHandler
- * @type {WeakMap<object, [Map<string, FiledHandler>, Map<string, FiledHandler>]>}
+ * @typedef {[Map<string, FiledHandler>, Map<string, FiledHandler>]} HandlerMaps
  */
-const handlers = new WeakMap();
+const handlersSymbol = Symbol("handlers");
 
 /**
  * What this file has last told the host about a (handle, name, pass).
@@ -272,11 +283,11 @@ const handlers = new WeakMap();
  * registration kind still wants the node visited. Two kinds file into that
  * one index, `__AddEventListener` closures and one `__AddEvent` handler, so
  * the decision belongs here, taken from both, with only the transitions
- * crossing the boundary.
+ * crossing the boundary. Filed on the handle, like the rest.
  *
- * @type {WeakMap<object, Map<string, [boolean, boolean]>>}
+ * @typedef {Map<string, [boolean, boolean]>} IndexedPasses
  */
-const indexed = new WeakMap();
+const indexedSymbol = Symbol("indexed");
 
 /**
  * The list callbacks `__CreateList` and `__UpdateListCallbacks` file.
@@ -293,27 +304,77 @@ const indexed = new WeakMap();
  *   enqueueComponent: unknown,
  *   componentAtIndexes: unknown,
  * }} ListCallbacks
- * @type {WeakMap<object, ListCallbacks>}
  */
-const listCallbacks = new WeakMap();
+const listCallbacksSymbol = Symbol("listCallbacks");
+
+/**
+ * A handle as this file sees it: the node id, plus whatever it has filed
+ * on the handle under its own symbols.
+ *
+ * @typedef {{ [key: symbol]: unknown }} Handle
+ */
+
+/**
+ * @param {object} handle
+ * @returns {Handle}
+ */
+function slotsOf(handle) {
+  return /** @type {Handle} */ (handle);
+}
+
+/**
+ * @param {object} handle
+ * @returns {ListenerLists | undefined}
+ */
+function listenersOf(handle) {
+  return /** @type {ListenerLists | undefined} */ (
+    slotsOf(handle)[listenersSymbol]
+  );
+}
+
+/**
+ * @param {object} handle
+ * @returns {HandlerMaps | undefined}
+ */
+function handlersOf(handle) {
+  return /** @type {HandlerMaps | undefined} */ (
+    slotsOf(handle)[handlersSymbol]
+  );
+}
+
+/**
+ * @param {object} handle
+ * @returns {IndexedPasses | undefined}
+ */
+function indexedOf(handle) {
+  return /** @type {IndexedPasses | undefined} */ (
+    slotsOf(handle)[indexedSymbol]
+  );
+}
 
 /**
  * The reverse of a handle's `nodeIdSymbol`: dispatch arrives from the host
  * naming a `NodeId`, and the handler store is keyed by handle.
  *
- * Held weakly, and cleared in the same sweep that drops the element, so this
- * index cannot become the reference that keeps a handle — and through it an
- * element — alive. That is the same rule the handler store follows, and for
- * the same reason: collection stays the only release path.
+ * Held weakly, and cleared in the same sweep that releases the element, so
+ * this index cannot become the reference that keeps a handle — and through
+ * it an element — alive. The per-handle stores keep the same rule by living
+ * on the handle, and for the same reason: collection stays the only way a
+ * handle lets go.
  *
  * @type {Map<number, WeakRef<object>>}
  */
 const handlesByNodeId = new Map();
 
+/**
+ * Tells the host a handle is gone. The host decides what that frees: an
+ * attached element is kept by its parent, a detached one goes at the end
+ * of the batch.
+ */
 const registry = new FinalizationRegistry(
   (/** @type {number} */ nodeId) => {
     handlesByNodeId.delete(nodeId);
-    dropElement(nodeId);
+    releaseElement(nodeId);
   },
 );
 
@@ -336,7 +397,15 @@ function createHandle(nodeId) {
  *
  * A swept-but-not-yet-finalized handle leaves a dead `WeakRef` behind, so
  * the entry is dropped on the way past rather than waiting for the cleanup
- * job that will drop the element too.
+ * job that will release the element too.
+ *
+ * Undefined is an answer only for dispatch: a node with no handle is
+ * skipped (it can have no listeners), and a dispatch whose *target* has no
+ * handle is not delivered at all, since the event could not name its
+ * target. A query member that must *return* a handle (`__GetParent` and
+ * its kind, none implemented) cannot mint a second one for a node whose
+ * first has died, and must throw rather than answer with a fresh object:
+ * the host would then be holding a node no handle names.
  *
  * @param {number} nodeId
  * @returns {object | undefined}
@@ -461,7 +530,7 @@ export function __CreateList(
 ) {
   void parentComponentUniqueID;
   const handle = createHandle(createElement("list"));
-  listCallbacks.set(handle, {
+  slotsOf(handle)[listCallbacksSymbol] = /** @type {ListCallbacks} */ ({
     componentAtIndex,
     enqueueComponent,
     componentAtIndexes: rest[1],
@@ -817,13 +886,13 @@ function isCatchType(type) {
  * One element's two handler maps, created on demand.
  *
  * @param {object} handle
- * @returns {[Map<string, FiledHandler>, Map<string, FiledHandler>]}
+ * @returns {HandlerMaps}
  */
 function handlersFor(handle) {
-  let maps = handlers.get(handle);
+  let maps = handlersOf(handle);
   if (maps === undefined) {
     maps = [new Map(), new Map()];
-    handlers.set(handle, maps);
+    slotsOf(handle)[handlersSymbol] = maps;
   }
   return maps;
 }
@@ -839,7 +908,7 @@ function handlersFor(handle) {
  * @returns {undefined}
  */
 function syncPass(handle, name, phase, wanted) {
-  let byName = indexed.get(handle);
+  let byName = indexedOf(handle);
   const state = byName?.get(name);
   if (wanted === (state?.[phase] ?? false)) {
     return undefined;
@@ -858,7 +927,7 @@ function syncPass(handle, name, phase, wanted) {
   }
   if (byName === undefined) {
     byName = new Map();
-    indexed.set(handle, byName);
+    slotsOf(handle)[indexedSymbol] = byName;
   }
   const created = /** @type {[boolean, boolean]} */ ([false, false]);
   created[phase] = wanted;
@@ -875,8 +944,8 @@ function syncPass(handle, name, phase, wanted) {
  * @returns {undefined}
  */
 function syncIndex(handle, name) {
-  const lists = listeners.get(handle)?.get(name);
-  const filed = handlers.get(handle)?.[STATIC].get(name);
+  const lists = listenersOf(handle)?.get(name);
+  const filed = handlersOf(handle)?.[STATIC].get(name);
   const filedPhase = filed === undefined ? undefined : phaseOfType(filed.type);
   syncPass(
     handle,
@@ -903,10 +972,10 @@ function syncIndex(handle, name) {
  * @returns {[Registration[], Registration[]]}
  */
 function listsFor(handle, name) {
-  let byName = listeners.get(handle);
+  let byName = listenersOf(handle);
   if (byName === undefined) {
     byName = new Map();
-    listeners.set(handle, byName);
+    slotsOf(handle)[listenersSymbol] = byName;
   }
   let lists = byName.get(name);
   if (lists === undefined) {
@@ -971,7 +1040,7 @@ function addListener(handle, eventName, callback, options) {
  */
 function removeListener(handle, eventName, callback, options) {
   const name = String(eventName).toLowerCase();
-  const byName = listeners.get(handle);
+  const byName = listenersOf(handle);
   const lists = byName?.get(name);
   if (lists === undefined) {
     return undefined;
@@ -1021,7 +1090,7 @@ function addEvent(handle, eventType, eventName, handler) {
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
   if (handler === null || handler === undefined) {
-    handlers.get(handle)?.[slot].delete(name);
+    handlersOf(handle)?.[slot].delete(name);
   } else if (typeof handler === "string" || typeof handler === "object") {
     handlersFor(handle)[slot].set(name, { type, name, handler });
   } else {
@@ -1092,8 +1161,7 @@ export function __GetEvent(element, eventName, eventType) {
   const type = String(eventType).toLowerCase();
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
-  const filed = handlers
-    .get(/** @type {object} */ (element))
+  const filed = handlersOf(/** @type {object} */ (element))
     ?.[slot].get(name);
   if (filed === undefined || filed.type !== type) {
     return undefined;
@@ -1115,7 +1183,7 @@ export function __GetEvent(element, eventName, eventType) {
  * @returns {{ type: string, name: string, function: unknown }[]}
  */
 export function __GetEvents(element) {
-  const maps = handlers.get(/** @type {object} */ (element));
+  const maps = handlersOf(/** @type {object} */ (element));
   if (maps === undefined) {
     return [];
   }
@@ -1151,7 +1219,7 @@ export function __GetEvents(element) {
  */
 export function __SetEvents(element, events) {
   const handle = /** @type {object} */ (element);
-  const maps = handlers.get(handle);
+  const maps = handlersOf(handle);
   if (maps !== undefined) {
     const names = [...maps[STATIC].keys(), ...maps[GLOBAL].keys()];
     maps[STATIC].clear();
@@ -1195,11 +1263,12 @@ export function __UpdateListCallbacks(
   enqueueComponent,
   componentAtIndexes,
 ) {
-  listCallbacks.set(/** @type {object} */ (list), {
-    componentAtIndex,
-    enqueueComponent,
-    componentAtIndexes,
-  });
+  slotsOf(/** @type {object} */ (list))[listCallbacksSymbol] =
+    /** @type {ListCallbacks} */ ({
+      componentAtIndex,
+      enqueueComponent,
+      componentAtIndexes,
+    });
   return undefined;
 }
 
@@ -1440,13 +1509,23 @@ function runEventHandler(handler, event) {
  * @returns {Dispatch | undefined}
  */
 function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
+  // The target's handle, not this node's, decides first. The host routes
+  // by geometry, so it can name an element whose handle is gone — one
+  // script attached and let go of, kept on screen by its parent. The
+  // event would have to carry that element as `target`, and there is no
+  // handle to carry it by and none is minted after the first: such a
+  // dispatch is not delivered to anyone, and the host's later calls for
+  // it find no entry to end.
+  if (handleOf(targetNodeId) === undefined) {
+    return undefined;
+  }
   const handle = handleOf(node);
   if (handle === undefined) {
     return dispatches.get(id);
   }
-  const list = listeners.get(handle)?.get(name)?.[phase];
+  const list = listenersOf(handle)?.get(name)?.[phase];
   const closures = list !== undefined && list.length > 0 ? list : undefined;
-  const filed = handlers.get(handle)?.[STATIC].get(name);
+  const filed = handlersOf(handle)?.[STATIC].get(name);
   const handled =
     filed !== undefined && phaseOfType(filed.type) === phase
       ? filed

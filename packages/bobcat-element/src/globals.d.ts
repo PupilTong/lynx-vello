@@ -20,14 +20,25 @@ interface BobcatNative {
   parentNode(nodeId: number): number | null;
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
-  /** Detaches `child` from its parent; a no-op when already detached. */
+  /**
+   * Detaches `child` from its parent; a no-op when already detached. A
+   * child whose handle is gone is freed at the end of the batch.
+   */
   removeElement(child: number): void;
-  /** Replaces `oldElement` in place, leaving it detached but live. */
+  /**
+   * Replaces `oldElement` in place, leaving it detached — and live while its
+   * handle is.
+   */
   replaceElement(newElement: number, oldElement: number): void;
   /** Exchanges two distinct attached elements, in or across parents. */
   swapElement(childA: number, childB: number): void;
-  /** Frees one element, detaching its direct children. */
-  dropElement(nodeId: number): void;
+  /**
+   * Declares the handle for `nodeId` gone. Frees nothing by itself: the
+   * element stays while attached, and once it is detached as well it is freed
+   * at the end of the batch together with every descendant whose handle is
+   * gone.
+   */
+  releaseElement(nodeId: number): void;
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
   /**
@@ -54,7 +65,7 @@ declare module "bobcat-internal:host" {
   export const removeElement: BobcatNative["removeElement"];
   export const replaceElement: BobcatNative["replaceElement"];
   export const swapElement: BobcatNative["swapElement"];
-  export const dropElement: BobcatNative["dropElement"];
+  export const releaseElement: BobcatNative["releaseElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
   export const enableEventListener: BobcatNative["enableEventListener"];
   export const disableEventListener: BobcatNative["disableEventListener"];

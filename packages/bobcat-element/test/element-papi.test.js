@@ -5,7 +5,7 @@
 // arities, tag vocabulary, handle-to-NodeId mapping, return identity, and
 // drop bookkeeping. The mock mirrors the real boundary's shape: it returns
 // sequential node ids and rejects non-number ids the way the native number
-// extraction does. Structural behavior and the collection-driven drop path
+// extraction does. Structural behavior and the collection-driven release path
 // run against the real native side in
 // crates/bobcat-core/tests/main_thread.rs.
 
@@ -29,7 +29,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
     swapElement: native.swapElement,
-    dropElement: native.dropElement,
+    releaseElement: native.releaseElement,
     flushElementTree: native.flushElementTree,
     enableEventListener: native.enableEventListener,
     disableEventListener: native.disableEventListener,
@@ -221,8 +221,8 @@ function createMockBobcat(issuedIds) {
       calls.push(["swapElement", a, b]);
     },
     /** @param {unknown} node */
-    dropElement: (node) => {
-      calls.push(["dropElement", nodeId("dropElement", node)]);
+    releaseElement: (node) => {
+      calls.push(["releaseElement", nodeId("releaseElement", node)]);
     },
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
@@ -1065,6 +1065,27 @@ describe("event listeners", () => {
     elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 77, true);
 
     expect(seen).toEqual([undefined, undefined]);
+  });
+
+  it("delivers nothing when the target has no handle", () => {
+    const { inner } = tree();
+    /** @type {unknown[]} */
+    const seen = [];
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      seen.push(event.target.uid);
+    }, {});
+    const uid = __GetElementUniqueID(inner);
+
+    // An id no handle was ever minted for: what the host names when it
+    // routes by geometry to an element script attached and let go of. The
+    // event could not carry that target, so the listener does not run.
+    elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, false);
+    elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, true);
+    expect(seen).toEqual([]);
+
+    // And the walk left nothing behind: the next dispatch is a fresh one.
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 89, true);
+    expect(seen).toEqual([uid]);
   });
 
   it("drops the event when a listener stops propagation mid-walk", () => {

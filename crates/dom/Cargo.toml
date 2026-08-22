@@ -67,5 +67,9 @@ harness = false
 name = "query_selector"
 harness = false
 
+[[bench]]
+name = "lifecycle"
+harness = false
+
 [lints]
 workspace = true

@@ -60,6 +60,12 @@ pub struct Document<T> {
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
     animations: crate::style::animation::AnimationDriver,
+    /// Detached roots nothing holds, left for [`Self::collect_unheld`]: a
+    /// release that found its node detached, or a removal that detached an
+    /// unheld one. Hints, not a ledger — each entry is re-checked when it is
+    /// drained, so a node that was re-attached or freed in the meantime is
+    /// simply skipped.
+    unheld_detached: Vec<NodeId>,
     visual_epoch: u64,
     layout_dirty: bool,
     layout_root_dirty: bool,
@@ -104,6 +110,7 @@ impl<T> Document<T> {
             shadow_roots: 0,
             custom_elements: CustomElementRegistry::default(),
             animations: crate::style::animation::AnimationDriver::default(),
+            unheld_detached: Vec::new(),
             visual_epoch: 0,
             layout_dirty: false,
             layout_root_dirty: false,
@@ -472,10 +479,128 @@ impl<T> Document<T> {
         }
     }
 
+    /// Unlinks `child` from its parent. An unheld child has then lost the one
+    /// thing keeping it allocated and is freed by the next
+    /// [`Self::collect_unheld`], together with everything under it that is
+    /// not held either; see [`Self::release`].
     pub fn remove_element(&mut self, child: NodeId) {
         let base = self.begin_reactions();
         self.unlink_from_parent(child);
         self.drain_reactions(base);
+        if !self.live(child).is_held() {
+            self.unheld_detached.push(child);
+        }
+    }
+
+    /// Declares the owner outside the tree that held `id` gone.
+    ///
+    /// What keeps a node allocated is its parent or an outside holder, and
+    /// only the parent link is strong: a child never keeps its parent. So a
+    /// released node stays exactly as long as it is attached. Once it is both
+    /// released and detached — by this call if it is already detached, else
+    /// by the removal that detaches it or an ancestor — it is freed by the
+    /// next [`Self::collect_unheld`], and takes every unheld descendant with
+    /// it, while a held descendant is unlinked and goes on as a detached
+    /// root of its own. The freed payloads are dropped: a node nothing
+    /// outside the tree holds has no one to hand them to.
+    ///
+    /// Nothing is freed here. The bit is cleared at once; the free waits for
+    /// the caller's own boundary, so a release arriving in the middle of a
+    /// batch of mutations never changes what the rest of the batch can reach.
+    ///
+    /// The document node, the document element, and shadow roots are never
+    /// held out, so releasing one is a caller bug.
+    pub fn release(&mut self, id: NodeId) {
+        assert_ne!(
+            id, DOCUMENT_NODE_ID,
+            "Document::release: the document node is not held by anything outside the tree"
+        );
+        assert_ne!(
+            id, DOCUMENT_ELEMENT_NODE_ID,
+            "Document::release: the permanent document element is not held by anything \
+             outside the tree"
+        );
+        let node = self
+            .get(id)
+            .expect("stale NodeId passed to Document::release");
+        assert!(
+            !node.is_shadow_root(),
+            "Document::release: a shadow root is attached to its host, never held"
+        );
+        let detached = node.parent_id().is_none();
+        self.live_node_mut(id).set_held(false);
+        if detached {
+            self.unheld_detached.push(id);
+        }
+    }
+
+    /// Frees every detached node nothing holds that a [`Self::release`] or a
+    /// [`Self::remove_element`] has produced since the last call, and returns
+    /// how many nodes that freed. Freeing touches nothing that is rendered —
+    /// every freed node was detached already — so this neither schedules a
+    /// restyle nor moves the visual epoch.
+    ///
+    /// When to call it is the embedder's: Bobcat runs it where the document
+    /// changes hands, at the end of a script batch.
+    pub fn collect_unheld(&mut self) -> usize {
+        let mut freed = 0;
+        while let Some(id) = self.unheld_detached.pop() {
+            // Re-checked rather than trusted: the node may have been freed
+            // with an ancestor that was queued ahead of it, re-attached by an
+            // embedder, or freed outright by `drop_element` in the meantime.
+            let garbage = self
+                .get(id)
+                .is_some_and(|node| node.parent_id().is_none() && !node.is_held());
+            if garbage {
+                freed += self.collect(id).1;
+            }
+        }
+        freed
+    }
+
+    /// Frees `root`, a detached node, and every descendant reachable from it
+    /// through unheld nodes, returning the root's payload and the number of
+    /// nodes freed. A held descendant is unlinked where the walk meets it and
+    /// remains allocated as a detached root.
+    ///
+    /// `root` itself is freed whatever its own bit says: the callers decide
+    /// that — [`Self::collect_unheld`] only gets here for an unheld root,
+    /// [`Self::drop_element`] for any.
+    fn collect(&mut self, root: NodeId) -> (PayloadSlot<T>, usize) {
+        debug_assert!(
+            self.live(root).parent_id().is_none(),
+            "Document::collect frees detached nodes only"
+        );
+        let mut payload = None;
+        let mut freed = 0;
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            self.assert_not_pinned(current);
+            // A held child is unlinked while its parent is still live, so the
+            // removal bookkeeping (slot assignment, custom-element state) runs
+            // against a node that exists; the unheld ones are freed after it.
+            let children: Vec<NodeId> = self.live(current).child_ids().to_vec();
+            for child in children {
+                if self.live(child).is_held() {
+                    self.unlink_from_parent(child);
+                } else {
+                    stack.push(child);
+                }
+            }
+            if let Some(shadow_root) = self.live(current).shadow_root_id() {
+                stack.push(shadow_root);
+            }
+            let (_, slot) = self.free_node(current);
+            freed += 1;
+            if current == root {
+                payload = Some(slot);
+            }
+        }
+        self.prune_relayout_roots();
+        (
+            payload.expect("the root is the first node the walk frees"),
+            freed,
+        )
     }
 
     fn unlink_from_parent(&mut self, child: NodeId) {
@@ -528,6 +653,10 @@ impl<T> Document<T> {
         self.note_custom_elements_removed(child, was_connected);
     }
 
+    /// Frees `id` now, whether or not it is held, returning its payload. Its
+    /// held children are unlinked and stay allocated as detached roots; its
+    /// unheld ones are freed with it, as [`Self::release`] describes — the
+    /// difference being that nothing here waits for [`Self::collect_unheld`].
     pub fn drop_element(&mut self, id: NodeId) -> T {
         assert_ne!(
             id, DOCUMENT_NODE_ID,
@@ -549,18 +678,10 @@ impl<T> Document<T> {
             "Document::drop_element cannot drop a shadow host on its own: its shadow tree can \
              neither be re-parented nor reached again — use Document::drop_subtree"
         );
-        self.assert_not_pinned(id);
         let base = self.begin_reactions();
         self.unlink_from_parent(id);
         self.drain_reactions(base);
-        let children: Vec<NodeId> = self.live(id).child_ids().to_vec();
-        for child in children {
-            self.unlink_from_parent(child);
-        }
-        self.note_visual_mutation();
-        let (_, payload) = self.free_node(id);
-        self.prune_relayout_roots();
-        match payload {
+        match self.collect(id).0 {
             PayloadSlot::Node(payload) => payload,
             PayloadSlot::ShadowRoot => unreachable!("a shadow root is refused above"),
             PayloadSlot::Document => unreachable!("the document node is refused above"),
@@ -930,6 +1051,138 @@ pub(crate) mod tests {
         document.swap_element(b, inner);
         assert_eq!(document.get(page).unwrap().child_ids(), [c, inner, a]);
         assert_eq!(document.get(c).unwrap().child_ids(), [b]);
+    }
+
+    /// A released node is freed only once it is detached as well, and then
+    /// only at `collect_unheld`: the release itself and the removal itself
+    /// both leave the node allocated for the rest of the batch.
+    #[test]
+    fn a_node_is_freed_by_collect_unheld_once_released_and_detached() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let released_first = document.create_element("view", ());
+        let removed_first = document.create_element("view", ());
+        document.append_child(page, released_first);
+        document.append_child(page, removed_first);
+
+        document.release(released_first);
+        assert_eq!(document.collect_unheld(), 0, "attached, so nothing to free");
+        assert!(document.get(released_first).is_some());
+        document.remove_element(released_first);
+        assert!(
+            document.get(released_first).is_some(),
+            "detached and unheld, but the free waits for the boundary"
+        );
+        assert_eq!(document.collect_unheld(), 1);
+        assert!(document.get(released_first).is_none());
+
+        document.remove_element(removed_first);
+        assert_eq!(document.collect_unheld(), 0, "detached, but held");
+        document.release(removed_first);
+        assert!(document.get(removed_first).is_some());
+        assert_eq!(document.collect_unheld(), 1);
+        assert!(document.get(removed_first).is_none());
+        assert_eq!(document.collect_unheld(), 0, "the queue is drained");
+    }
+
+    /// Ownership runs parent to child only: freeing a released, detached
+    /// ancestor takes its unheld descendants and leaves a held one as a
+    /// detached root, which can be attached again afterwards.
+    #[test]
+    fn collecting_an_ancestor_frees_unheld_descendants_and_unlinks_held_ones() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let root = document.create_element("view", ());
+        let unheld = document.create_element("view", ());
+        let held = document.create_element("view", ());
+        let under_held = document.create_element("view", ());
+        let text = document.create_text_node("run", ());
+        document.append_child(page, root);
+        document.append_child(root, unheld);
+        document.append_child(root, held);
+        document.append_child(held, under_held);
+        document.append_child(unheld, text);
+        document.release(unheld);
+        document.release(text);
+        document.release(under_held);
+
+        document.remove_element(root);
+        document.release(root);
+        assert_eq!(
+            document.collect_unheld(),
+            3,
+            "root, unheld, and the text node"
+        );
+        assert!(document.get(root).is_none());
+        assert!(document.get(unheld).is_none());
+        assert!(document.get(text).is_none());
+        let survivor = document
+            .get(held)
+            .expect("a held descendant stays allocated");
+        assert_eq!(survivor.parent_id(), None, "as a detached root of its own");
+        assert_eq!(
+            survivor.child_ids(),
+            [under_held],
+            "and keeps its own unheld subtree, which it holds"
+        );
+
+        document.append_child(page, held);
+        assert!(document.is_connected(under_held));
+        document.remove_element(held);
+        assert_eq!(
+            document.collect_unheld(),
+            0,
+            "held, so its removal frees nothing"
+        );
+        document.release(held);
+        assert_eq!(document.collect_unheld(), 2);
+        assert!(document.get(under_held).is_none());
+    }
+
+    /// A queued entry is a hint: a node an embedder re-attached before the
+    /// boundary is skipped, and one `drop_element` freed in the meantime is
+    /// not freed twice.
+    #[test]
+    fn collect_unheld_rechecks_every_queued_node() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let reattached = document.create_element("view", ());
+        let dropped = document.create_element("view", ());
+        document.append_child(page, reattached);
+        document.append_child(page, dropped);
+        document.release(reattached);
+        document.release(dropped);
+        document.remove_element(reattached);
+        document.remove_element(dropped);
+
+        document.append_child(page, reattached);
+        document.drop_element(dropped);
+        assert_eq!(document.collect_unheld(), 0);
+        assert!(document.is_connected(reattached));
+    }
+
+    /// `drop_element` stays immediate and forced, with the same child rule.
+    #[test]
+    fn drop_element_frees_now_and_applies_the_child_rule() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        let page = document.document_element().id();
+        let root = document.create_element("view", ());
+        let unheld = document.create_element("view", ());
+        let held = document.create_element("view", ());
+        document.append_child(page, root);
+        document.append_child(root, unheld);
+        document.append_child(root, held);
+        document.release(unheld);
+
+        document.drop_element(root);
+        assert!(document.get(root).is_none());
+        assert!(document.get(unheld).is_none());
+        assert_eq!(document.get(held).map(Node::parent_id), Some(None));
+        assert_eq!(
+            document.collect_unheld(),
+            0,
+            "nothing was left for the boundary"
+        );
     }
 
     #[test]
