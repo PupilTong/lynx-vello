@@ -10,11 +10,12 @@
 //! not a re-export of the runtime. It is `#[doc(hidden)]` and carries no
 //! stability promise.
 //!
-//! It is compiled unconditionally rather than behind a feature on purpose.
-//! `cargo codspeed build` builds every benchmark in the workspace with no
-//! extra features, so a `required-features` benchmark would be skipped
-//! silently — a measurement that quietly stops running is worse than a small
-//! hidden module.
+//! It follows the `quickjs` feature, because a realm is exactly what it
+//! drives. That is safe here only because `quickjs` is a **default** feature:
+//! `cargo codspeed build` adds no extra features but does not disable default
+//! ones, so the benchmark still builds and runs there. Gating a benchmark on a
+//! *non-default* feature is the hazard to avoid — it would be skipped silently,
+//! and a measurement that quietly stops running is worse than no measurement.
 
 use std::sync::Arc;
 

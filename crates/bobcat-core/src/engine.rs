@@ -819,6 +819,16 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                     // for — every `pointermove` of every card that does not
                     // track the pointer — costs one lookup instead of a path
                     // walk, two allocations and a cross-thread wakeup.
+                    //
+                    // The table is what the realm has registered *so far*, and
+                    // the two threads run: a listener that registers a new
+                    // name while this event is being routed does not receive
+                    // it, where an unfiltered channel would have queued the
+                    // event behind the registration and delivered it. The
+                    // window is one routing pass wide and closes as soon as
+                    // the registering call returns. This is the same
+                    // presenting-side staleness `long_press_consumed` already
+                    // reads the table under; see `docs/tracking/dom-events.md`.
                     if !listener_names.contains(event.name) {
                         continue;
                     }
@@ -1225,45 +1235,44 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
 /// Serves the command channel for as long as the engine holds its sender.
 ///
 /// The realm now outlives its entry module. The channel closing is the only
-/// shutdown signal this thread needs or gets.
-///
-/// Every command queued is delivered, in order. The channel is unbounded and
-/// has to be — dropping an input event because the realm is busy would lose a
-/// `pointerup` — so a long task in a listener can leave a queue behind it.
-/// Collapsing superseded `pointermove`s here was tried and removed: it is a
-/// change to observable event delivery, `web-core` does not do it, and the
-/// intermediate positions a browser drops stay reachable through
-/// `getCoalescedEvents`, which this engine has no equivalent of. Queue depth
-/// is a throughput problem and wants its own answer.
+/// shutdown signal this thread needs or gets, and every command queued is
+/// delivered, in order.
 fn serve_script_commands<F: FrameRequester>(
     mut runtime: crate::runtime::MainThreadRuntime,
     commands: &mpsc::Receiver<ScriptCommand>,
     events: &EngineEventSender,
     frames: &Mutex<Option<Arc<F>>>,
 ) {
-    while let Ok(ScriptCommand::DispatchEvent {
-        steps,
-        name,
-        detail,
-    }) = commands.recv()
-    {
-        // A panicking listener must not take the realm with it: the next
-        // event still has to arrive.
-        let delivered = catch_unwind(AssertUnwindSafe(|| {
-            runtime.dispatch_event(&steps, &name, &detail)
-        }));
-        match delivered {
-            // A listener may have changed the tree without flushing, and the
-            // presenting thread asked `needs_render` before any of them ran —
-            // so nothing else will notice.
-            Ok(Ok(true)) => request_current_frame(frames),
-            Ok(Err(error)) => {
-                events.send(EngineMessage::ListenerFailed(error.into_script_error()));
+    // Matched exhaustively rather than destructured in the `while let`: a
+    // second `ScriptCommand` variant must fail to compile here, not quietly
+    // end the loop.
+    while let Ok(command) = commands.recv() {
+        match command {
+            ScriptCommand::DispatchEvent {
+                steps,
+                name,
+                detail,
+            } => {
+                // A panicking listener must not take the realm with it: the
+                // next event still has to arrive.
+                let delivered = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.dispatch_event(&steps, &name, &detail)
+                }));
+                match delivered {
+                    // A listener may have changed the tree without flushing,
+                    // and the presenting thread asked `needs_render` before
+                    // any of them ran — so nothing else will notice.
+                    Ok(Ok(true)) => request_current_frame(frames),
+                    Ok(Err(error)) => {
+                        events.send(EngineMessage::ListenerFailed(error.into_script_error()));
+                    }
+                    // A panic is already the crate's unspecified-state
+                    // contract, and the unwind carries no `ScriptError` to
+                    // report; the realm survives it, which is what the
+                    // `catch_unwind` is for.
+                    Ok(Ok(false)) | Err(_) => {}
+                }
             }
-            // A panic is already the crate's unspecified-state contract, and
-            // the unwind carries no `ScriptError` to report; the realm
-            // survives it, which is what the `catch_unwind` is for.
-            Ok(Ok(false)) | Err(_) => {}
         }
     }
 }

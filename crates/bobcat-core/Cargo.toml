@@ -43,6 +43,12 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 [[bench]]
 name = "script_boundary"
 harness = false
+# The harness it drives needs a script engine, and `quickjs` is a *default*
+# feature — so `cargo bench` and `cargo codspeed build` both satisfy this and
+# run the benchmark, while `--no-default-features` skips it instead of failing
+# to compile. A non-default required feature would be the silent-skip hazard
+# `bench_support` warns about; this is not one.
+required-features = ["quickjs"]
 
 [lints]
 workspace = true

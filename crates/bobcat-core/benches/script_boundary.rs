@@ -233,18 +233,21 @@ fn register_and_release_row_listeners(bencher: divan::Bencher) {
             harness.evaluate(
                 r"
                 import {
-                  disableEventListener,
                   enableEventListener,
+                  releaseElement,
                 } from 'bobcat-internal:host';
                 for (let i = 0; i < rows.length; i += 1) {
                   const id = __GetElementUniqueID(rows[i]);
                   enableEventListener(id, 0, 'tap');
                   enableEventListener(id, 1, 'longpress');
                 }
+                // `releaseElement`, not `disableEventListener`: this is the
+                // call the collector makes for every handle a list update
+                // drops, and the one the reverse index exists for. The rows
+                // stay attached, so their parent keeps them alive and the
+                // next iteration re-registers on the same elements.
                 for (let i = 0; i < rows.length; i += 1) {
-                  const id = __GetElementUniqueID(rows[i]);
-                  disableEventListener(id, 0, 'tap');
-                  disableEventListener(id, 1, 'longpress');
+                  releaseElement(__GetElementUniqueID(rows[i]));
                 }
                 ",
             );

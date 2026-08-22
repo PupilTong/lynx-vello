@@ -186,9 +186,13 @@ What that covers, and what it does not:
   `__GetEvents`). Classes, ids, attributes, and inline styles reach stylo
   through the ordinary `Document` setters, so they cascade and lay out on the
   next flush. A string-valued inline style uses the whole-attribute setter;
-  a record is cleared and fanned out in JavaScript into name-based
-  `set_inline_style_property` calls. This is the name/value subset of CSSOM
-  `setProperty` (no priority argument), with no numeric style-id ABI;
+  a record crosses in one call as a length-prefixed payload and the host
+  builds one declaration block from empty through
+  `set_inline_style_declarations` — replacement is what a record means, so
+  there is no old block to preserve. Each declaration still parses under the
+  name/value subset of CSSOM `setProperty` (no priority argument), with no
+  numeric style-id ABI, so an unknown name or invalid value drops that
+  declaration and nothing else;
 - VM-neutral Element-PAPI boot: embedders inject the public
   `ScriptEngineFactory` / `ScriptEngine` ESM host-module protocol; the private
   `MainThreadRuntime` installs the callbacks and performs the same boot for
