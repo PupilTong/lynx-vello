@@ -15,6 +15,7 @@ use stylo::selector_parser::Snapshot;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::Locked;
 use stylo::stylesheets::CssRuleType;
+use stylo::stylist::CascadeData;
 use stylo_atoms::Atom;
 
 use crate::tree::document::{DOCUMENT_NODE_ID, Document, NodeId};
@@ -141,21 +142,28 @@ impl<T> Document<T> {
                 // Leaving `RESTYLE_SELF` off is what keeps the parent itself
                 // out of it.
                 //
-                // Two things have to hold for the one write to stand in for the
-                // walk. Stylo propagates along the *flat* tree, which is the
-                // child list only while nothing redirects it: a shadow host's
-                // flat children are its shadow root's children, so the hint
-                // would descend through the shadow tree — reaching the slotted
-                // light children anyway, but restyling the shadow tree's own
-                // elements on the way, which the walk does not. A shadow root
-                // parent holds no `ElementData` for the hint to land in at all.
-                // Rather than test each redirection, this takes the
-                // whole-document answer: with no shadow root anywhere, no
-                // redirection exists and the two forms name the same set. The
-                // fallback is still the allocation-free walk, so it costs a
-                // walk, not a copy.
+                // Two things have to hold for the one write to stand in for
+                // the walk. Stylo propagates along the *flat* tree, which is
+                // the child list only while nothing redirects it, and exactly
+                // two things redirect it: a host, whose flat children are its
+                // shadow root's children, and a slot with assigned nodes. A
+                // shadow root parent also holds no `ElementData` for the hint
+                // to land in.
+                //
+                // Both are asked of the parent itself rather than of the
+                // document, because a page whose components are custom
+                // elements holds shadow roots everywhere and a document-wide
+                // answer would give the collapse up on all of them. Neither
+                // property can turn on between here and the traversal that
+                // reads the hint: only a slot ever gains assigned nodes, and
+                // `attach_shadow` marks its host's whole subtree dirty, which
+                // is the stronger hint. The fallback is still the
+                // allocation-free walk, so it costs a walk, not a copy.
+                let parent_node = self.live(parent);
+                let flat_children_are_dom_children = !self.has_shadow_roots()
+                    || (parent_node.shadow_root_id().is_none() && !parent_node.is_slot());
                 let ancestor_hint_carries =
-                    from == 0 && !self.has_shadow_roots() && self.live(parent).has_style_data();
+                    from == 0 && flat_children_are_dom_children && parent_node.has_style_data();
                 if ancestor_hint_carries {
                     self.add_restyle_hint(parent, RestyleHint::RESTYLE_DESCENDANTS);
                 } else {
@@ -399,7 +407,7 @@ impl<T> Document<T> {
         // Element state is element-only, and the gate below can skip the
         // `ensure_snapshot` that used to carry this check.
         self.live_element(id);
-        if self.any_rule_depends_on_state(flags) {
+        if self.any_rule_depends_on_state(id, flags) {
             self.ensure_snapshot(id);
             self.mark_ancestors_dirty_descendants(id);
         } else {
@@ -535,7 +543,7 @@ impl<T> Document<T> {
         // `ensure_snapshot`, which the gate below can skip, so it is taken here
         // where it happens on every path.
         self.live_element(id);
-        if !is_gate_exempt(name) && !self.any_rule_depends_on_attribute(name) {
+        if !is_gate_exempt(name) && !self.any_rule_depends_on_attribute(id, name) {
             self.note_visual_mutation();
             return;
         }
@@ -546,7 +554,7 @@ impl<T> Document<T> {
         self.mark_ancestors_dirty_descendants(id);
     }
 
-    /// Whether any rule in the document could match on this attribute.
+    /// Whether any rule that can match this element selects on this attribute.
     ///
     /// Stylo records, per origin, every attribute name that appears in an
     /// attribute selector. The record is a superset of what a plain selector
@@ -569,31 +577,84 @@ impl<T> Document<T> {
     /// those to something narrower would strand every write this gate skipped;
     /// `an_attribute_no_rule_mentions_is_matched_by_a_stylesheet_added_later`
     /// in tests/style.rs is what holds that down.
-    fn any_rule_depends_on_attribute(&self, name: &LocalName) -> bool {
-        // Shadow-scoped author rules keep their own `CascadeData`, which
-        // `iter_origins` does not reach. With a shadow root anywhere in the
-        // document, answer conservatively rather than miss one.
-        self.has_shadow_roots()
-            || self
-                .style_engine()
-                .stylist()
-                .iter_origins()
-                .any(|(data, _)| data.might_have_attribute_dependency(name))
+    fn any_rule_depends_on_attribute(&self, id: NodeId, name: &LocalName) -> bool {
+        self.any_applicable_cascade_data(id, &mut |data| data.might_have_attribute_dependency(name))
     }
 
-    /// Whether any rule in the document could match on these state bits.
+    /// Whether any rule that can match this element selects on these state
+    /// bits.
     ///
     /// The same superset argument as [`Self::any_rule_depends_on_attribute`]:
     /// `state_dependencies` takes every `NonTSPseudoClass`'s state flag
     /// unconditionally, with the `:nth-child(... of S)` set recorded separately
     /// on top rather than instead.
-    fn any_rule_depends_on_state(&self, state: stylo_dom::ElementState) -> bool {
-        self.has_shadow_roots()
-            || self
-                .style_engine()
-                .stylist()
-                .iter_origins()
-                .any(|(data, _)| data.has_state_dependency(state))
+    fn any_rule_depends_on_state(&self, id: NodeId, state: stylo_dom::ElementState) -> bool {
+        self.any_applicable_cascade_data(id, &mut |data| data.has_state_dependency(state))
+    }
+
+    /// Runs `test` over every rule set whose selectors can match this element,
+    /// stopping at the first that answers yes.
+    ///
+    /// `Stylist::iter_origins` reaches the document's three origins. It does
+    /// not reach the per-shadow-root `CascadeData` a scoped stylesheet builds,
+    /// and answering "is there a shadow root anywhere" instead would give up
+    /// the gate entirely on a page whose components are custom elements with
+    /// shadow trees — which is where this is going. So the scoped sets that can
+    /// reach *this* element are visited, and only those.
+    ///
+    /// This mirrors `TElement::each_applicable_non_document_style_rule_data`
+    /// rather than calling it: that is a `TElement` method, and the `TElement`
+    /// impl for `&Node<T>` requires `T: Sync`, which the mutation API does not
+    /// ask of its callers. Two deliberate differences, both widening the set
+    /// and so both safe: the document's author origin is tested even for an
+    /// element inside a shadow tree, where Stylo would skip it; and an element
+    /// carrying a `part` attribute answers yes outright instead of walking the
+    /// `::part()` chain outwards.
+    fn any_applicable_cascade_data(
+        &self,
+        id: NodeId,
+        test: &mut dyn FnMut(&CascadeData) -> bool,
+    ) -> bool {
+        if self
+            .style_engine()
+            .stylist()
+            .iter_origins()
+            .any(|(data, _)| test(data))
+        {
+            return true;
+        }
+        // No scoped rule set exists at all, which is the whole answer.
+        if !self.has_shadow_roots() {
+            return false;
+        }
+        let node = self.live(id);
+        // The tree this element lives in.
+        if let Some(data) = scoped_data(node.containing_shadow_root())
+            && test(data)
+        {
+            return true;
+        }
+        // The tree it hosts, whose `:host` rules match it.
+        if let Some(data) = scoped_data(node.shadow_root_id().map(|root| self.live(root)))
+            && test(data)
+        {
+            return true;
+        }
+        // Every slot it is assigned to, outwards, for `::slotted()`.
+        let mut current = node.assigned_slot_id();
+        while let Some(slot) = current {
+            let slot = self.live(slot);
+            if let Some(data) = scoped_data(slot.containing_shadow_root())
+                && data.any_slotted_rule()
+                && test(data)
+            {
+                return true;
+            }
+            current = slot.assigned_slot_id();
+        }
+        // `::part()` reaches outwards through trees this walk does not follow.
+        // Parts are rare; answering yes costs one snapshot.
+        node.has_part_attr()
     }
 
     fn ensure_snapshot(&mut self, id: NodeId) -> Option<&mut Snapshot> {
@@ -653,6 +714,11 @@ fn sync_class_attribute<T>(node: &mut Node<T>) {
 /// shadow root, and a document that has one already answers the gate conservatively; `:lang()`
 /// cannot match anything while `TElement::match_element_lang` returns false. The other three are
 /// listed so that closing either of those gaps does not quietly make the gate wrong.
+/// The rule set a shadow root scopes, if it holds one.
+fn scoped_data<T>(root: Option<&Node<T>>) -> Option<&CascadeData> {
+    Some(&root?.shadow_data()?.styles.data)
+}
+
 fn is_gate_exempt(name: &LocalName) -> bool {
     *name == *STYLE || *name == *LANG || *name == *PART || *name == *EXPORTPARTS
 }
@@ -841,25 +907,91 @@ mod tests {
         }
     }
 
-    /// Shadow-scoped author rules keep their own `CascadeData`, which the gate
-    /// cannot see, so a document holding any shadow root answers
-    /// conservatively and keeps taking snapshots.
+    /// A scoped rule set reaches only the tree it is scoped to, so a shadow
+    /// root elsewhere in the document must not cost the gate anything. This is
+    /// the case that matters once Lynx elements are custom elements: every page
+    /// would hold shadow roots, and a document-wide bail-out would leave the
+    /// gate permanently off.
     #[test]
-    fn a_document_with_a_shadow_root_gates_nothing() {
+    fn a_shadow_tree_elsewhere_does_not_stop_the_gate() {
         let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
         let root = doc.root;
         let host = doc.el(root, "host");
         let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
         doc.dom
             .add_shadow_stylesheet(shadow, "view[data-on] { color: rgb(255, 0, 0) }");
-        let el = doc.el(root, "view");
+        let outside = doc.el(root, "view");
         doc.dom.layout();
         assert!(!schedules_a_flush(&doc));
 
-        doc.dom.set_attribute(el, "data-unmentioned", "1");
+        doc.dom.set_attribute(outside, "data-on", "1");
+        assert!(
+            !schedules_a_flush(&doc),
+            "the rule naming this attribute is scoped to a tree this element is \
+             not in, so it still cannot match"
+        );
+    }
+
+    /// Inside the tree that scopes the rule, the same write must not be gated.
+    #[test]
+    fn a_scoped_rule_gates_nothing_inside_its_own_tree() {
+        let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
+        let root = doc.root;
+        let host = doc.el(root, "host");
+        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        doc.dom
+            .add_shadow_stylesheet(shadow, "view[data-on] { color: rgb(255, 0, 0) }");
+        let inside = doc.el(shadow, "view");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc));
+
+        doc.dom.set_attribute(inside, "data-on", "1");
         assert!(
             schedules_a_flush(&doc),
-            "the scoped sheet is invisible to the gate, so nothing is skipped"
+            "the element lives in the tree the rule is scoped to"
+        );
+    }
+
+    /// `:host()` selects the host from inside the tree it hosts, and the host
+    /// itself is in the light DOM — so the tree it hosts has to be consulted
+    /// too, not just the tree it lives in.
+    #[test]
+    fn a_host_rule_gates_nothing_on_its_host() {
+        let mut doc = Doc::with_css("host { color: rgb(0, 0, 255) }");
+        let root = doc.root;
+        let host = doc.el(root, "host");
+        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        doc.dom
+            .add_shadow_stylesheet(shadow, ":host([data-on]) { color: rgb(255, 0, 0) }");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc));
+
+        doc.dom.set_attribute(host, "data-on", "1");
+        assert!(
+            schedules_a_flush(&doc),
+            "a :host rule selects the element that hosts the tree it is in"
+        );
+    }
+
+    /// `::slotted()` selects light children through the slot they are assigned
+    /// to, which is a tree the element does not live in either.
+    #[test]
+    fn a_slotted_rule_gates_nothing_on_what_it_slots() {
+        let mut doc = Doc::with_css("view { color: rgb(0, 0, 255) }");
+        let root = doc.root;
+        let host = doc.el(root, "host");
+        let shadow = doc.dom.attach_shadow(host, crate::ShadowRootMode::Open);
+        doc.el(shadow, "slot");
+        doc.dom
+            .add_shadow_stylesheet(shadow, "::slotted([data-on]) { color: rgb(255, 0, 0) }");
+        let slotted = doc.el(host, "view");
+        doc.dom.layout();
+        assert!(!schedules_a_flush(&doc));
+
+        doc.dom.set_attribute(slotted, "data-on", "1");
+        assert!(
+            schedules_a_flush(&doc),
+            "the element is assigned to a slot in the tree that scopes the rule"
         );
     }
 
