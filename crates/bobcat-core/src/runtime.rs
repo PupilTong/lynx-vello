@@ -23,6 +23,14 @@ const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 /// heap. Compiled `ReactLynx` records are a handful of properties.
 const INLINE_DECLARATIONS: usize = 16;
 
+/// Registrations one node carries without touching the heap. A `ReactLynx`
+/// element with more than four distinct listener kinds is unusual.
+const INLINE_NODE_LISTENERS: usize = 4;
+
+/// Steps of one event path delivered without touching the heap. Deeper paths
+/// exist; a path with more than this many *listening* nodes does not.
+const INLINE_DELIVERIES: usize = 8;
+
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
 const RUNTIME_MODULE_SOURCE: &str = include_str!("main-thread-runtime.mjs");
@@ -160,6 +168,7 @@ impl TreeHandle {
         self.slot.put(tree);
     }
 
+    /// Closes the batch: returns the tree if one is held.
     fn release(&mut self) {
         if let Some(mut tree) = self.taken.take() {
             tree.collect_unheld();
@@ -192,24 +201,121 @@ impl Drop for TreeHandle {
 /// The nodes a walk should visit for one event name: `(node, is capture pass)`.
 type ListenerNodes = HashSet<(dom::NodeId, bool)>;
 
+/// The `(name, is capture pass)` pairs one node carries listeners for.
+type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
+
 /// What the realm has told the host about listeners, and what it tells it
 /// during a walk.
 ///
 /// Shared with the host functions that maintain it, so it is `Rc` rather than
 /// owned: the native `enableEventListener` export and the dispatch driver are
 /// different stack frames on the same thread.
-#[derive(Default)]
 struct EventState {
     /// The nodes the realm has a listener on, per event name and pass. Keyed
     /// by name first so a walk resolves it once and then tests each step
     /// without touching the name again — and so an event no listener wants
     /// costs one lookup for the whole walk.
     listeners: RefCell<HashMap<Arc<str>, ListenerNodes>>,
+    /// The same registrations keyed the other way, so releasing an element
+    /// costs its own listeners rather than a scan of every name.
+    ///
+    /// Element release is not rare — it is whatever the collector hands back
+    /// after a list update — and the forward index is keyed by name, so
+    /// without this a single release walks every registered event name and
+    /// every node registered under it.
+    by_node: RefCell<HashMap<dom::NodeId, NodeListeners>>,
+    /// The presenting thread's view of which names are registered anywhere.
+    ///
+    /// Maintained here rather than at a batch boundary because it is what the
+    /// realm has just been told, and touched only on a true transition: a
+    /// second listener for a name already carried moves no count.
+    names: Arc<SharedListenerNames>,
     /// Set by the native `stopPropagation` export. A pure flag write: the
     /// realm is inside a `call_module_export` when it runs, and re-entering
     /// the realm from a host function would nest an execution guard, which
     /// `QuickJS` refuses.
     stopped: Cell<bool>,
+}
+
+impl EventState {
+    fn new(names: Arc<SharedListenerNames>) -> Self {
+        Self {
+            listeners: RefCell::default(),
+            by_node: RefCell::default(),
+            names,
+            stopped: Cell::default(),
+        }
+    }
+
+    /// Records that `node` now has a listener for `(name, capture)`.
+    fn enable(&self, node: dom::NodeId, name: &str, capture: bool) {
+        let shared: Arc<str> = self
+            .listeners
+            .borrow()
+            .get_key_value(name)
+            .map_or_else(|| Arc::from(name), |(existing, _)| Arc::clone(existing));
+        let fresh_registration = self
+            .listeners
+            .borrow_mut()
+            .entry(Arc::clone(&shared))
+            .or_default()
+            .insert((node, capture));
+        if fresh_registration {
+            self.by_node
+                .borrow_mut()
+                .entry(node)
+                .or_default()
+                .push((shared, capture));
+            self.names.note_enabled(name);
+        }
+    }
+
+    /// The reverse: that registration went away.
+    fn disable(&self, node: dom::NodeId, name: &str, capture: bool) {
+        let mut listeners = self.listeners.borrow_mut();
+        let Some(nodes) = listeners.get_mut(name) else {
+            return;
+        };
+        if !nodes.remove(&(node, capture)) {
+            return;
+        }
+        if nodes.is_empty() {
+            listeners.remove(name);
+        }
+        drop(listeners);
+        self.forget_node_listener(node, name, capture);
+        self.names.note_disabled(name);
+    }
+
+    /// Drops every registration on a released element.
+    fn release_node(&self, node: dom::NodeId) {
+        let Some(registrations) = self.by_node.borrow_mut().remove(&node) else {
+            return;
+        };
+        let mut listeners = self.listeners.borrow_mut();
+        for (name, capture) in registrations {
+            if let Some(nodes) = listeners.get_mut(&name) {
+                nodes.remove(&(node, capture));
+                if nodes.is_empty() {
+                    listeners.remove(&name);
+                }
+            }
+            // A release is a removal like any other: the shared table must
+            // not keep counting a registration the element took with it.
+            self.names.note_disabled(&name);
+        }
+    }
+
+    fn forget_node_listener(&self, node: dom::NodeId, name: &str, capture: bool) {
+        let mut by_node = self.by_node.borrow_mut();
+        let Some(registrations) = by_node.get_mut(&node) else {
+            return;
+        };
+        registrations.retain(|(registered, pass)| registered.as_ref() != name || *pass != capture);
+        if registrations.is_empty() {
+            by_node.remove(&node);
+        }
+    }
 }
 
 /// The private main-thread runtime used by the engine pipeline.
@@ -248,8 +354,8 @@ impl MainThreadRuntime {
         let mut engine = factory
             .create()
             .map_err(|error| MainThreadError::from_engine("creating the script VM", error))?;
-        let events = Rc::new(EventState::default());
-        let tree = install_bobcat(engine.as_mut(), elements, listener_names, on_flush, &events)?;
+        let events = Rc::new(EventState::new(listener_names));
+        let tree = install_bobcat(engine.as_mut(), elements, on_flush, &events)?;
         Ok(Self {
             engine,
             tree,
@@ -281,21 +387,42 @@ impl MainThreadRuntime {
     pub(crate) fn dispatch_event(
         &mut self,
         steps: &EventSteps,
-        name: &str,
-        detail_json: &str,
+        name: &Arc<str>,
+        detail_json: &Arc<str>,
     ) -> Result<bool, MainThreadError> {
-        let name: Arc<str> = Arc::from(name);
-
         // One lookup for the whole walk, and the first thing done: an event no
-        // listener registered for never reaches the realm, never touches the
-        // name again, and never takes the document.
-        let nodes = {
+        // listener registered for never reaches the realm and never takes the
+        // document.
+        //
+        // The path is filtered against the index here, under the borrow,
+        // rather than the index being copied out and consulted per step: a
+        // listener may register or unregister from inside the walk, so the
+        // borrow cannot be held across a call into the realm — but the
+        // *path* is short and bounded, and the index is not.
+        //
+        // Filtering ahead of the walk is also what lets each call say whether
+        // another follows it. That is the realm's cue to drop the event
+        // object, and the only one the host can give: the walk's other two
+        // endings — a listener stopping propagation, a listener throwing —
+        // are both visible to the realm itself as they happen.
+        let mut deliverable: SmallVec<[(dom::NodeId, dom::NodeId, bool); INLINE_DELIVERIES]> =
+            SmallVec::new();
+        {
             let listeners = self.events.listeners.borrow();
-            match listeners.get(&name) {
-                Some(nodes) => nodes.clone(),
-                None => return Ok(false),
-            }
-        };
+            let Some(nodes) = listeners.get(name.as_ref()) else {
+                return Ok(false);
+            };
+            deliverable.extend(
+                steps
+                    .steps()
+                    .iter()
+                    .filter(|step| nodes.contains(&(step.node, step.capture)))
+                    .map(|step| (step.node, step.target, step.capture)),
+            );
+        }
+        if deliverable.is_empty() {
+            return Ok(false);
+        }
 
         self.events.stopped.set(false);
 
@@ -306,30 +433,20 @@ impl MainThreadRuntime {
         let event_id = self.next_event_id;
         self.next_event_id = self.next_event_id.wrapping_add(1);
 
-        // Filtered ahead of the walk so each call can say whether another
-        // follows it. That is the realm's cue to drop the event object, and
-        // the only one the host can give: the walk's other two endings — a
-        // listener stopping propagation, a listener throwing — are both
-        // visible to the realm itself as they happen.
-        let mut deliverable = steps
-            .steps()
-            .iter()
-            .filter(|step| nodes.contains(&(step.node, step.capture)))
-            .peekable();
-
+        let last = deliverable.len() - 1;
         let mut delivered = false;
-        while let Some(step) = deliverable.next() {
+        for (index, (node, target, capture)) in deliverable.into_iter().enumerate() {
             if self.events.stopped.get() {
                 break;
             }
             let arguments = [
-                node_id_value(step.node),
-                node_id_value(step.target),
-                HostValue::Number(f64::from(u8::from(step.capture))),
-                HostValue::String(Arc::clone(&name)),
-                HostValue::String(Arc::from(detail_json)),
+                node_id_value(node),
+                node_id_value(target),
+                HostValue::Number(f64::from(u8::from(capture))),
+                HostValue::String(Arc::clone(name)),
+                HostValue::String(Arc::clone(detail_json)),
                 HostValue::Number(f64::from(event_id)),
-                HostValue::Boolean(deliverable.peek().is_none()),
+                HostValue::Boolean(index == last),
             ];
             let called = self.engine.call_module_export(
                 ELEMENT_MODULE_SPECIFIER,
@@ -440,7 +557,6 @@ __FlushElementTree();
 fn install_bobcat(
     engine: &mut dyn ScriptEngine,
     elements: SharedTree,
-    listener_names: Arc<SharedListenerNames>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
 ) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
@@ -450,14 +566,8 @@ fn install_bobcat(
         removals: 0,
     }));
 
-    install_host_module(
-        engine,
-        &handle,
-        on_flush,
-        events,
-        Arc::clone(&listener_names),
-    )?;
-    install_event_members(engine, events, listener_names)?;
+    install_host_module(engine, &handle, on_flush, events)?;
+    install_event_members(engine, events)?;
     engine
         .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
         .map_err(|error| {
@@ -514,7 +624,6 @@ fn install_host_module(
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
-    listener_names: Arc<SharedListenerNames>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
         fn createPage() |document| {
@@ -599,18 +708,7 @@ fn install_host_module(
         let document = tree.tree();
         validate_removable(document, "bobcat-internal:host.releaseElement", node)?;
         document.release(node);
-        state.listeners.borrow_mut().retain(|name, nodes| {
-            nodes.retain(|(id, _)| {
-                let keep = *id != node;
-                if !keep {
-                    // The purge is a removal like any other: the shared
-                    // name table must not keep counting a dead registration.
-                    listener_names.note_disabled(name);
-                }
-                keep
-            });
-            !nodes.is_empty()
-        });
+        state.release_node(node);
         Ok(HostValue::Undefined)
     })?;
 
@@ -634,43 +732,22 @@ fn install_host_module(
 fn install_event_members(
     engine: &mut dyn ScriptEngine,
     events: &Rc<EventState>,
-    listener_names: Arc<SharedListenerNames>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
-    let names = Arc::clone(&listener_names);
     install(engine, "enableEventListener", 3, move |arguments| {
         let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
         let capture = capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
         let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
-        if state
-            .listeners
-            .borrow_mut()
-            .entry(Arc::from(name))
-            .or_default()
-            .insert((node, capture))
-        {
-            // Mirrored to the presenting thread only on true transitions, so
-            // the shared table counts registrations, never repeats.
-            names.note_enabled(name);
-        }
+        state.enable(node, name, capture);
         Ok(HostValue::Undefined)
     })?;
 
     let state = Rc::clone(events);
-    let names = listener_names;
     install(engine, "disableEventListener", 3, move |arguments| {
         let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
         let capture = capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
         let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
-        let mut listeners = state.listeners.borrow_mut();
-        if let Some(nodes) = listeners.get_mut(name) {
-            if nodes.remove(&(node, capture)) {
-                names.note_disabled(name);
-            }
-            if nodes.is_empty() {
-                listeners.remove(name);
-            }
-        }
+        state.disable(node, name, capture);
         Ok(HostValue::Undefined)
     })?;
 
@@ -1029,6 +1106,16 @@ mod tests {
         dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
     }
 
+    /// The name and detail a dispatch carries, spelled as the presenting side
+    /// already owns them.
+    fn tap() -> Arc<str> {
+        Arc::from("tap")
+    }
+
+    fn no_detail() -> Arc<str> {
+        Arc::from("")
+    }
+
     /// The path the presenting side would compute for `target`.
     fn steps(elements: &SharedTree, target: u64) -> EventSteps {
         elements.tree().event_steps(node_id(target), true, true)
@@ -1052,16 +1139,26 @@ mod tests {
     }
 
     fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, SharedTree) {
+        let (runtime, elements, _) = runtime_over_watching_names(document);
+        (runtime, elements)
+    }
+
+    /// The same runtime, plus the shared name table the presenting side
+    /// filters against — so a test can ask what the realm published.
+    fn runtime_over_watching_names(
+        document: LynxDocument,
+    ) -> (MainThreadRuntime, SharedTree, Arc<SharedListenerNames>) {
         let elements = SharedTree::new(document);
         let factory = crate::quickjs::engine_factory();
+        let names = Arc::new(SharedListenerNames::default());
         let runtime = MainThreadRuntime::new(
             factory.as_ref(),
             elements.clone(),
-            Arc::new(SharedListenerNames::default()),
+            Arc::clone(&names),
             || {},
         )
         .expect("main-thread runtime");
-        (runtime, elements)
+        (runtime, elements, names)
     }
 
     #[test]
@@ -1591,6 +1688,102 @@ mod tests {
         );
     }
 
+    /// The two indexes are one fact written twice, so every mutation has to
+    /// leave them agreeing — including the shared name table the presenting
+    /// side filters against.
+    #[test]
+    fn the_listener_indexes_and_the_published_names_stay_in_step() {
+        let names = Arc::new(SharedListenerNames::default());
+        let state = EventState::new(Arc::clone(&names));
+        let (a, b) = (node_id(3), node_id(4));
+
+        state.enable(a, "tap", false);
+        state.enable(a, "tap", true);
+        state.enable(a, "scroll", false);
+        state.enable(b, "tap", false);
+        assert!(names.contains("tap"));
+        assert!(names.contains("scroll"));
+        assert_eq!(state.by_node.borrow()[&a].len(), 3);
+        assert_eq!(state.by_node.borrow()[&b].len(), 1);
+
+        // A repeat registration is not a second one — neither index moves,
+        // so the shared count does not either.
+        state.enable(a, "tap", false);
+        assert_eq!(state.by_node.borrow()[&a].len(), 3);
+
+        state.disable(a, "scroll", false);
+        assert!(!names.contains("scroll"));
+        assert!(names.contains("tap"));
+        assert_eq!(state.by_node.borrow()[&a].len(), 2);
+
+        // Releasing an element takes its own registrations and only those.
+        state.release_node(a);
+        assert!(!state.by_node.borrow().contains_key(&a));
+        assert!(
+            names.contains("tap"),
+            "the sibling registration still holds the name open"
+        );
+        assert_eq!(
+            state.listeners.borrow()["tap"]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(b, false)]
+        );
+
+        state.release_node(b);
+        assert!(state.listeners.borrow().is_empty());
+        assert!(state.by_node.borrow().is_empty());
+        assert!(
+            !names.contains("tap"),
+            "the last listener unpublishes its name"
+        );
+    }
+
+    /// The shared name table is what the presenting side filters against, so
+    /// a registration has to reach it as the realm makes it.
+    #[test]
+    fn registering_a_listener_publishes_its_name_to_the_shared_table() {
+        let (mut runtime, _elements, names) = runtime_over_watching_names(new_document(
+            Viewport::new(393.0, 727.0),
+            PageConfig::default(),
+        ));
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                  __AddEventListener(view, 'tap', () => {}, {});
+                };
+                ",
+                "app:///publish.js",
+            )
+            .expect("main-thread script");
+        assert!(names.contains("tap"));
+        assert!(!names.contains("scroll"));
+
+        // A second module rather than a second entry: the point is a later
+        // unregistration, not a second boot.
+        runtime
+            .evaluate_module(
+                r"
+                import { __GetElementUniqueID } from 'bobcat:element';
+                import { disableEventListener } from 'bobcat-internal:host';
+                disableEventListener(__GetElementUniqueID(globalThis.held[1]), 0, 'tap');
+                ",
+                "app:///unpublish.mjs",
+                "unpublishing",
+            )
+            .expect("unregistration");
+        assert!(
+            !names.contains("tap"),
+            "the last listener for a name unpublishes it"
+        );
+    }
+
     #[test]
     fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
         let (mut runtime, elements) = runtime();
@@ -1621,7 +1814,7 @@ mod tests {
 
         let target = 4;
         let delivered = runtime
-            .dispatch_event(&steps(&elements, target), "tap", "{\"x\":1}")
+            .dispatch_event(&steps(&elements, target), &tap(), &Arc::from("{\"x\":1}"))
             .expect("dispatch");
         assert!(delivered);
 
@@ -1679,7 +1872,7 @@ mod tests {
 
         assert!(
             runtime
-                .dispatch_event(&steps(&elements, 4), "tap", "")
+                .dispatch_event(&steps(&elements, 4), &tap(), &no_detail())
                 .expect("dispatch")
         );
 
@@ -1726,7 +1919,7 @@ mod tests {
 
         assert!(
             runtime
-                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
                 .expect("dispatch")
         );
 
@@ -1751,7 +1944,7 @@ mod tests {
 
         assert!(
             !runtime
-                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
                 .expect("dispatch")
         );
     }
@@ -1787,7 +1980,7 @@ mod tests {
         for _ in 0..2 {
             assert!(
                 runtime
-                    .dispatch_event(&steps(&elements, 4), "tap", "")
+                    .dispatch_event(&steps(&elements, 4), &tap(), &no_detail())
                     .expect("dispatch")
             );
         }
@@ -1847,7 +2040,7 @@ mod tests {
             .expect("main-thread script");
 
         runtime
-            .dispatch_event(&steps(&elements, 3), "tap", "")
+            .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
             .expect("dispatch");
 
         assert_eq!(
@@ -1893,7 +2086,9 @@ mod tests {
         // place in the listener index.
         runtime.collect_garbage().expect("sweep");
 
-        runtime.dispatch_event(&steps, "tap", "").expect("dispatch");
+        runtime
+            .dispatch_event(&steps, &tap(), &no_detail())
+            .expect("dispatch");
 
         // A collected handle is routine — a ReactLynx re-render drops them
         // constantly — so it must not silently cost the rest of the walk.
@@ -1930,7 +2125,7 @@ mod tests {
             .expect("main-thread script");
 
         runtime
-            .dispatch_event(&steps(&elements, 3), "tap", "")
+            .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
             .expect("dispatch");
 
         runtime
@@ -1959,7 +2154,7 @@ mod tests {
 
         assert!(
             !runtime
-                .dispatch_event(&steps(&elements, 3), "tap", "")
+                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
                 .expect("dispatch"),
             "with an empty listener index the walk crosses the boundary zero times"
         );
@@ -2496,11 +2691,11 @@ mod tests {
 
         let at_child = steps(&elements, 4);
         runtime
-            .dispatch_event(&at_child, "tap", "")
+            .dispatch_event(&at_child, &tap(), &no_detail())
             .expect("dispatch");
         let at_wrapper = steps(&elements, 3);
         runtime
-            .dispatch_event(&at_wrapper, "tap", "")
+            .dispatch_event(&at_wrapper, &tap(), &no_detail())
             .expect("dispatch");
         runtime
             .evaluate_module(
