@@ -116,7 +116,10 @@ useful signal for currently-compatible versions of those libraries.
 
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
-  template parsing only, no JS runtime, no CSS engine (yet).
+  template parsing only, no JS runtime, no CSS engine (yet). The `StyleInfo`
+  section is capped at 1 MiB and 64 levels of rule nesting, and is validated on
+  a thread with a stack sized from its length — see "Input robustness at the
+  two external-byte boundaries" for what those bounds prevent.
 - `crates/lynx-xml` — zero-dependency, zero-copy parser for the restricted
   single-file Lynx XML source envelope. The current breaking grammar uses
   `<lynx engine-version="...">` plus `<script thread="main">` or
@@ -1230,9 +1233,8 @@ this section is the only place the absolute paths are spelled out.
   change, or the next fork commit ships unrelated reformatting. Use
   `./.github/scripts/fmt-check.sh` instead — it is what CI runs, it names the
   members from `cargo metadata` rather than from a list someone has to
-  remember to extend, and it covers the out-of-workspace `fuzz` package. The
-  hand-written list it replaced had been missing `lynx-xml` since that crate
-  was added.
+  remember to extend. The hand-written list it replaced had been missing
+  `lynx-xml` since that crate was added.
 
 ## Testing
 
@@ -1240,39 +1242,62 @@ Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
 
-### Fuzzing the parsers
+### Input robustness at the two external-byte boundaries
 
-`lynx-template-decoder` and `lynx-xml` are the two crates fed bytes the engine
-did not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both
-are written in the `Result` style, and both have unit tests — but every one of
-those tests feeds input a *correct* encoder produced, which cannot establish
-the property that actually matters at that boundary: that no byte string,
-however hostile, takes the process down. `fuzz/` holds
-three libFuzzer targets that do (`fuzz/README.md` has the details):
-`template_container` over the whole container, `template_style_info` over the
-rkyv archive — reached through a synthetic 20-byte envelope, because going in
-through `decode` would spend nearly every execution on the container header —
-and `lynx_xml`, which also asserts that the returned sections borrow from the
-source and that a `ParseError` offset lands on a real UTF-8 boundary.
+`lynx-template-decoder` and `lynx-xml` are the crates fed bytes the engine did
+not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both are
+written in the `Result` style and both have grammar tests, but every input in
+those tests is one a *correct* encoder produced, which cannot establish the
+property that matters at a trust boundary: that no input takes the process
+down. The two crates answer that differently, because their exposure differs.
 
-The package declares its own `[workspace]` and is excluded from the root one,
-so a sanitizer build never enters the resolve that `clippy`, `llvm-cov` and
-`codspeed` share. `.github/workflows/fuzz.yml` runs it nightly against a cached
-corpus and briefly on pull requests that touch either parser; `ci.yml` builds
-and unit-tests the package on every pull request, which is what keeps the
-targets from rotting between nightly runs.
+**`lynx-xml`** carries `tests/robustness.rs`: a fixed-seed character-level
+mutator over seed documents, plus named degenerate cases for every construct
+with a terminator, asserting panic-freedom and two invariants a partial-index
+bug would break silently — the returned sections borrow from the source, and a
+`ParseError` offset lands on a real UTF-8 boundary (which keeps the crate's own
+`debug_assert!` live). It ends on a coverage floor: if a grammar change made
+*nothing* parse, the success-branch assertions would quietly stop running and
+the test would still pass, so it fails instead. 20 000 inputs in under a tenth
+of a second, in the ordinary suite.
 
-Seed before running anything — unseeded, almost every execution stops at the
-`SDRA`/`WROF` magic or the `<?xml` prologue:
+This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
+543-line zero-dependency parser over `&str` — the input is already valid UTF-8,
+there are no length fields, and nothing allocates on a source-controlled count
+— and it is not worth a separate package and a scheduled job.
 
-```sh
-./fuzz/seed-corpus.sh
-cargo fuzz run template_style_info
-```
+**`lynx-template-decoder`'s `StyleInfo` section carries two hard bounds**, and
+they are load-bearing rather than defensive. `Rule` holds `children: Vec<Rule>`
+with no depth bound and rkyv 0.7's derived `CheckBytes` recurses once per
+level, so a *well-formed* section — nothing for validation to reject — drives
+that recursion as deep as its bytes allow. Measured on aarch64: a level costs
+28 archive bytes and about 410 bytes of stack in release, 3.5 KiB in debug, so
+a **168 KB** section overflowed the 2 MiB stack Rust gives a spawned thread. It
+did so *inside* `check_archived_root`, reported as `fatal runtime error: stack
+overflow` — `SIGABRT`, not a panic, uncatchable, process gone. The largest
+`StyleInfo` section in the vendored fixtures is 24 KB.
 
-Scope is panic-freedom, not decode correctness. An input that decodes to the
-wrong thing without panicking passes, deliberately — round-trip correctness is
-the crates' own test suites' job.
+Validation therefore runs on a thread whose stack the crate sizes from the
+section length, under two caps:
+
+- **Length**, 1 MiB — about 40x the largest real section. It exists only to bound how much stack
+  that thread may be asked for. A length cap on its own cannot fix the overflow, because the safe
+  length depends on the caller's stack and a library does not know it.
+- **Nesting**, 64 levels. The format nests one level in practice (a `Keyframes` rule holds its
+  keyframe rules) and `bobcat-cli`'s converter reads exactly that one.
+
+The depth cap is the half that is easy to miss: `Rule`'s drop glue also
+recurses per level, so a deep tree returned to a small-stack caller would
+overflow on the way *out*, after decoding had already succeeded. Refusing it
+keeps the deep value on the sized thread, and nothing downstream ever sees a
+tree it cannot afford to walk or free.
+
+rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say the
+result "may be vulnerable to memory overlap and recursion" — and the 0.7 pin is
+a wire-format constraint. The alternative, a hand-written iterative
+`CheckBytes` for `ArchivedRule`, would need `unsafe` and cost the crate its
+`forbid(unsafe_code)`. `crates/lynx-template-decoder/src/style_info.rs` holds
+the constants and the regression test.
 
 ### The unsafe floor
 

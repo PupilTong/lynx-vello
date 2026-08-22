@@ -33,9 +33,3 @@ echo "format-checking workspace members:$packages"
 # Word splitting is the point here: $packages is a flag list, not a filename.
 # shellcheck disable=SC2086
 cargo fmt --check $packages "$@"
-
-# The fuzz package declares its own workspace (see fuzz/Cargo.toml), so the
-# member list above cannot reach it. Named explicitly rather than with `--all`,
-# which walks back up into the parent workspace and on into vendor/stylo.
-echo "format-checking the out-of-workspace fuzz package"
-cargo fmt --check --manifest-path fuzz/Cargo.toml -p lynx-vello-fuzz "$@"

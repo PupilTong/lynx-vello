@@ -37,16 +37,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Fuzz targets (out of workspace)
-        # fuzz/ declares its own workspace, so every step above is blind to it.
-        # Build and unit-test it here — including the tests that assert the
-        # synthetic container really reaches the StyleInfo decoder, without
-        # which `template_style_info` would fuzz nothing while still reporting
-        # executions. The fuzzing itself runs in fuzz.yml.
-        run: |
-          cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
-          cargo test --manifest-path fuzz/Cargo.toml
-
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
         # `cargo codspeed build` can measure a library production never ships.

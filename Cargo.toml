@@ -1,10 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# `fuzz` is a cargo-fuzz package: libFuzzer-only, and it links a sanitizer
-# runtime, so it must stay out of the workspace build that CI, coverage and
-# CodSpeed run. `.github/workflows/fuzz.yml` builds it on its own.
-exclude = ["vendor/stylo", "fuzz"]
+exclude = ["vendor/stylo"]
 
 [workspace.package]
 version = "0.1.0"
