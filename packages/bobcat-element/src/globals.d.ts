@@ -1,6 +1,6 @@
 /**
  * The native object the host installs on `globalThis` before evaluating
- * `element-papi.js`. It speaks DOM vocabulary over numeric `NodeId`s and
+ * `element-papi.mjs`. It speaks DOM vocabulary over numeric `NodeId`s and
  * owns the document and the style/layout commit; misuse crashes at this
  * boundary instead of being validated.
  */

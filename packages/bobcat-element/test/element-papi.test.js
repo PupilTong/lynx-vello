@@ -1,7 +1,7 @@
 // @ts-check
 // Behavior tests for the Element PAPI runtime over a recording native mock.
 //
-// These pin the semantics that live in element-papi.js: the PAPI surface and
+// These pin the semantics that live in element-papi.mjs: the PAPI surface and
 // arities, tag vocabulary, handle-to-NodeId mapping, return identity, and
 // drop bookkeeping. The mock mirrors the real boundary's shape: it returns
 // sequential node ids and rejects non-number ids the way the native number
@@ -226,7 +226,7 @@ function createMockBobcat(issuedIds) {
 
 /** @type {ReturnType<typeof createMockBobcat>} */
 let mock;
-/** @type {typeof import("../src/element-papi.js")} */
+/** @type {typeof import("../src/element-papi.mjs")} */
 let elementModule;
 
 beforeEach(async () => {
@@ -236,7 +236,7 @@ beforeEach(async () => {
   // Installed by a card's own worklet runtime, never by this file; a test
   // that wants one puts it here itself.
   globalThis.runWorklet = undefined;
-  elementModule = await import("../src/element-papi.js");
+  elementModule = await import("../src/element-papi.mjs");
   // The rest of this legacy-shaped behavior suite calls PAPI names directly;
   // expose this test instance without making global installation a module
   // responsibility.
@@ -307,7 +307,7 @@ describe("installation", () => {
     rstest.resetModules();
     // @ts-expect-error deliberately removing the native object
     globalThis.bobcat = undefined;
-    await expect(import("../src/element-papi.js")).rejects.toThrow(
+    await expect(import("../src/element-papi.mjs")).rejects.toThrow(
       "requires the native bobcat object",
     );
   });
@@ -591,7 +591,7 @@ describe("__GetElementUniqueID", () => {
     const issued = [41, 7, 900];
     rstest.resetModules();
     globalThis.bobcat = createMockBobcat(issued);
-    const isolatedModule = await import("../src/element-papi.js");
+    const isolatedModule = await import("../src/element-papi.mjs");
 
     const created = [
       isolatedModule.__CreateView(0),

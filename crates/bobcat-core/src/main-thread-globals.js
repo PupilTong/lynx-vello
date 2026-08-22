@@ -8,7 +8,7 @@
 // messages, expose no native modules, and report no lifecycle events.
 //
 // This is not an Element PAPI implementation.  Every `__*` element member,
-// including the scoped-style sink `__SetCSSId`, belongs to element-papi.js,
+// including the scoped-style sink `__SetCSSId`, belongs to element-papi.mjs,
 // which the host evaluates next.  Background-thread-only globals such as
 // `lynxCoreInject` also do not belong in this realm.
 

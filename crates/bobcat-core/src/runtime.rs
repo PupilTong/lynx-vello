@@ -18,7 +18,7 @@ const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 
 const ELEMENT_PAPI_SOURCE: &str =
-    include_str!("../../../packages/bobcat-element/src/element-papi.js");
+    include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
 const MAIN_THREAD_GLOBALS_SOURCE: &str = include_str!("main-thread-globals.js");
 
 const ENTRY_PREAMBLE: &str = r#"import {

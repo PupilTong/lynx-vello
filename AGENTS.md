@@ -600,7 +600,7 @@ useful signal for currently-compatible versions of those libraries.
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the dependency-free `bobcat:element` ESM
-  (`src/element-papi.js`) that `bobcat-core` embeds with `include_str!` and
+  (`src/element-papi.mjs`) that `bobcat-core` embeds with `include_str!` and
   registers in QuickJS's preloaded graph before any entry code; its Rstest
   suite imports the same bytes and verifies every named export. It owns the
   supported `__*` PAPI members and their web-core arities,
@@ -1255,7 +1255,7 @@ The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
 while `crates/bobcat-core/tests/main_thread.rs` drives the identical bytes
 through the real QuickJS realm, `bobcat` object, and collector. Changing
-`packages/bobcat-element/src/element-papi.js` triggers a `bobcat-core` rebuild
+`packages/bobcat-element/src/element-papi.mjs` triggers a `bobcat-core` rebuild
 through `include_str!` — there is no generated artifact to refresh.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic

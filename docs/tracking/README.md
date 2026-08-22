@@ -38,7 +38,7 @@ tree mutation calls (`__AppendElement`, `__InsertElementBefore`,
 `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
 `__SwapElement`) and `__FlushElementTree`. `js-runtime.md` still declines to enumerate the
 Element PAPI; the authoritative list of what exists is the header of
-`packages/bobcat-element/src/element-papi.js`.
+`packages/bobcat-element/src/element-papi.mjs`.
 
 ## Column conventions
 
