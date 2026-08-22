@@ -12,7 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 use quickjs_rust_bridge::{
-    EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, RealmOptions,
+    CallOutcome, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm,
+    RealmOptions,
 };
 
 fn tight_realm() -> Realm {
@@ -80,6 +81,71 @@ fn string_round_trip_does_not_leak() {
         )
         .unwrap();
     assert_eq!(value.as_number(), Some(50000.0 * 800.0));
+}
+
+#[test]
+fn repeated_member_calls_do_not_leak() {
+    let mut realm = tight_realm();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { total: 0 }; \
+                 host.take = function take(id, name, detail, last) { \
+                   host.total += id + name.length + detail.length + (last ? 1 : 0); \
+                 }; \
+                 globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let take = realm.member("take").unwrap();
+    let name = "pointermove";
+    let detail = "y".repeat(300);
+    let mut expected = 0.0f64;
+    for index in 0..50_000u32 {
+        expected += f64::from(index % 7)
+            + f64::from(u32::try_from(name.len() + detail.len()).expect("short test strings"))
+            + f64::from(u8::from(index % 2 == 0));
+    }
+    for index in 0..50_000 {
+        let outcome = realm
+            .call_member(
+                &host,
+                &take,
+                &[
+                    HostArgument::Number(f64::from(index % 7)),
+                    HostArgument::String(name),
+                    HostArgument::String(&detail),
+                    HostArgument::Boolean(index % 2 == 0),
+                ],
+            )
+            .unwrap();
+        assert!(matches!(outcome, CallOutcome::Called(_)));
+    }
+    let total = realm
+        .evaluate(EvalSource::new("host.total"), EvalOptions::default())
+        .unwrap();
+    assert_eq!(total.as_number(), Some(expected));
+}
+
+#[test]
+fn a_throwing_member_call_does_not_leak() {
+    let mut realm = tight_realm();
+    let host = realm
+        .evaluate(
+            EvalSource::new(
+                "globalThis.host = { boom(text) { throw new Error(text); } }; globalThis.host",
+            ),
+            EvalOptions::default(),
+        )
+        .unwrap();
+    let boom = realm.member("boom").unwrap();
+    let text = "z".repeat(300);
+    for _ in 0..50_000 {
+        realm
+            .call_member(&host, &boom, &[HostArgument::String(&text)])
+            .expect_err("the member throws every time");
+    }
 }
 
 #[test]

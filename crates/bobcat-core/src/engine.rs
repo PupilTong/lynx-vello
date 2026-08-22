@@ -774,7 +774,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 },
                 &mut decisions,
             );
-            Self::execute_decisions(&mut decisions, gesture, tree, commands);
+            Self::execute_decisions(&mut decisions, gesture, listener_names, tree, commands);
         }
     }
 
@@ -789,6 +789,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
     fn execute_decisions(
         decisions: &mut Vec<InputDecision>,
         gesture: &mut GestureRouter,
+        listener_names: &SharedListenerNames,
         tree: &mut LynxDocument,
         commands: Option<&mpsc::Sender<ScriptCommand>>,
     ) {
@@ -812,6 +813,25 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                     let Some(commands) = commands else {
                         continue;
                     };
+                    // Asked before anything is built. The shared name table
+                    // the gesture router already consults answers "does the
+                    // realm want this at all?", so an event no card listens
+                    // for — every `pointermove` of every card that does not
+                    // track the pointer — costs one lookup instead of a path
+                    // walk, two allocations and a cross-thread wakeup.
+                    //
+                    // The table is what the realm has registered *so far*, and
+                    // the two threads run: a listener that registers a new
+                    // name while this event is being routed does not receive
+                    // it, where an unfiltered channel would have queued the
+                    // event behind the registration and delivered it. The
+                    // window is one routing pass wide and closes as soon as
+                    // the registering call returns. This is the same
+                    // presenting-side staleness `long_press_consumed` already
+                    // reads the table under; see `docs/tracking/dom-events.md`.
+                    if !listener_names.contains(event.name) {
+                        continue;
+                    }
                     if tree.get(event.target).is_none() {
                         continue;
                     }
@@ -851,7 +871,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             },
             &mut decisions,
         );
-        Self::execute_decisions(&mut decisions, gesture, tree, commands);
+        Self::execute_decisions(&mut decisions, gesture, listener_names, tree, commands);
     }
 
     /// Routes one host input event on the presenting side.
@@ -1191,46 +1211,8 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 };
                 request_current_frame(&frame_requesters);
 
-                // The realm now outlives its entry module. Dropping this
-                // view's sender closes the receiver and releases the realm on
-                // its owner thread.
-                if let Some(mut runtime) = runtime {
-                    while let Ok(command) = commands.recv() {
-                        match command {
-                            ScriptCommand::DispatchEvent {
-                                steps,
-                                name,
-                                detail,
-                            } => {
-                                // A panicking listener must not take the realm
-                                // with it: the next event still has to arrive.
-                                let delivered = catch_unwind(AssertUnwindSafe(|| {
-                                    runtime.dispatch_event(&steps, &name, &detail)
-                                }));
-                                match delivered {
-                                    Ok(Ok(true)) => {
-                                        // A listener may have changed the tree
-                                        // without flushing, and the presenting
-                                        // thread asked `needs_render` before
-                                        // any of them ran — so nothing else
-                                        // will notice.
-                                        request_current_frame(&frame_requesters);
-                                    }
-                                    Ok(Err(error)) => {
-                                        events.send(EngineMessage::ListenerFailed(
-                                            error.into_script_error(),
-                                        ));
-                                    }
-                                    // A panic is already the crate's
-                                    // unspecified-state contract, and the
-                                    // unwind carries no `ScriptError` to
-                                    // report; the realm survives it, which is
-                                    // what the `catch_unwind` is for.
-                                    Ok(Ok(false)) | Err(_) => {}
-                                }
-                            }
-                        }
-                    }
+                if let Some(runtime) = runtime {
+                    serve_script_commands(runtime, &commands, &events, &frame_requesters);
                 }
                 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                 set_script_panic_reporter(None);
@@ -1246,6 +1228,51 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         EngineError::Thread {
             name: "script",
             message: error.to_string(),
+        }
+    }
+}
+
+/// Serves the command channel for as long as the engine holds its sender.
+///
+/// The realm now outlives its entry module. The channel closing is the only
+/// shutdown signal this thread needs or gets, and every command queued is
+/// delivered, in order.
+fn serve_script_commands<F: FrameRequester>(
+    mut runtime: crate::runtime::MainThreadRuntime,
+    commands: &mpsc::Receiver<ScriptCommand>,
+    events: &EngineEventSender,
+    frames: &Mutex<Option<Arc<F>>>,
+) {
+    // Matched exhaustively rather than destructured in the `while let`: a
+    // second `ScriptCommand` variant must fail to compile here, not quietly
+    // end the loop.
+    while let Ok(command) = commands.recv() {
+        match command {
+            ScriptCommand::DispatchEvent {
+                steps,
+                name,
+                detail,
+            } => {
+                // A panicking listener must not take the realm with it: the
+                // next event still has to arrive.
+                let delivered = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.dispatch_event(&steps, &name, &detail)
+                }));
+                match delivered {
+                    // A listener may have changed the tree without flushing,
+                    // and the presenting thread asked `needs_render` before
+                    // any of them ran — so nothing else will notice.
+                    Ok(Ok(true)) => request_current_frame(frames),
+                    Ok(Err(error)) => {
+                        events.send(EngineMessage::ListenerFailed(error.into_script_error()));
+                    }
+                    // A panic is already the crate's unspecified-state
+                    // contract, and the unwind carries no `ScriptError` to
+                    // report; the realm survives it, which is what the
+                    // `catch_unwind` is for.
+                    Ok(Ok(false)) | Err(_) => {}
+                }
+            }
         }
     }
 }
@@ -1368,7 +1395,8 @@ fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameS
 mod tests {
     use std::sync::Arc;
 
-    use super::frame_size;
+    use super::{OffscreenEngine, ScriptCommand, frame_size};
+    use crate::tree::LynxDocument;
 
     fn engine_with_events(events: Arc<dyn super::EventRequester>) -> super::OffscreenEngine {
         super::OffscreenEngine::new(
@@ -1463,9 +1491,12 @@ mod tests {
             wheel: None,
         })];
         let mut gesture = GestureRouter::default();
+        let names = super::SharedListenerNames::default();
+        names.note_enabled(TAP_EVENT);
         super::OffscreenEngine::<crate::clock::SystemClock>::execute_decisions(
             &mut decisions,
             &mut gesture,
+            &names,
             &mut tree,
             Some(&sender),
         );
@@ -1522,6 +1553,69 @@ mod tests {
         tree.layout();
         script_tree.put(tree);
         assert!(engine.elements().is_connected(view));
+    }
+
+    /// An emit decision for a name nobody listens to costs a lookup and stops
+    /// there: no path is walked and nothing is queued for the thread that
+    /// owns the realm.
+    #[test]
+    fn an_event_no_listener_wants_never_crosses_to_the_script_thread() {
+        use std::sync::mpsc;
+
+        use crate::gesture::{EmitEvent, GestureRouter, InputDecision, TAP_EVENT};
+
+        let engine = engine();
+        let mut tree = engine.elements.try_tree().expect("the slot is free");
+        let page = tree.document_element().id();
+        let view = tree.create_element("view", ());
+        tree.insert_before(page, view, None);
+        tree.layout();
+
+        let (sender, receiver) = mpsc::channel();
+        let mut gesture = GestureRouter::default();
+        let names = super::SharedListenerNames::default();
+        let mut emit = |names: &super::SharedListenerNames, tree: &mut LynxDocument| {
+            let mut decisions = vec![InputDecision::Emit(EmitEvent {
+                name: TAP_EVENT,
+                target: view,
+                position: dom::Point2D::new(1.0, 1.0),
+                wheel: None,
+            })];
+            OffscreenEngine::<crate::clock::SystemClock>::execute_decisions(
+                &mut decisions,
+                &mut gesture,
+                names,
+                tree,
+                Some(&sender),
+            );
+        };
+
+        emit(&names, &mut tree);
+        assert!(
+            receiver.try_recv().is_err(),
+            "an empty listener table sends nothing"
+        );
+
+        names.note_enabled("pointerup");
+        emit(&names, &mut tree);
+        assert!(
+            receiver.try_recv().is_err(),
+            "a listener on another name sends nothing"
+        );
+
+        names.note_enabled(TAP_EVENT);
+        emit(&names, &mut tree);
+        let ScriptCommand::DispatchEvent { name, .. } =
+            receiver.try_recv().expect("the listened-for name crosses");
+        assert_eq!(name.as_ref(), TAP_EVENT);
+
+        // And the count is a count: the last removal is what closes the name.
+        names.note_disabled(TAP_EVENT);
+        emit(&names, &mut tree);
+        assert!(
+            receiver.try_recv().is_err(),
+            "the removed registration stops the crossing"
+        );
     }
 
     #[cfg(feature = "quickjs")]

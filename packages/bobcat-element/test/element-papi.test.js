@@ -20,7 +20,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     createPage: native.createPage,
     createElement: native.createElement,
     setAttribute: native.setAttribute,
-    set_node_property: native.set_node_property,
+    setInlineStyles: native.setInlineStyles,
     removeAttribute: native.removeAttribute,
     getAttribute: native.getAttribute,
     tagName: native.tagName,
@@ -118,16 +118,48 @@ function createMockBobcat(issuedIds) {
       calls.push(["setAttribute", id, name, value]);
     },
     /**
+     * Decodes the record payload the way the native side does, so the
+     * expectations below read as declarations rather than as wire text — and
+     * so a length that disagreed with its field would surface here.
+     *
      * @param {unknown} node
-     * @param {string} name
-     * @param {string} value
+     * @param {string} record
      */
-    set_node_property: (node, name, value) => {
-      const id = nodeId("set_node_property", node);
-      if (typeof name !== "string" || typeof value !== "string") {
-        throw new TypeError("set_node_property expects string name and value");
+    setInlineStyles: (node, record) => {
+      const id = nodeId("setInlineStyles", node);
+      if (typeof record !== "string") {
+        throw new TypeError("setInlineStyles expects a string record");
       }
-      calls.push(["set_node_property", id, name, value]);
+      /** @type {[string, string][]} */
+      const declarations = [];
+      /** @type {string[]} */
+      let fields = [];
+      let rest = record;
+      while (rest.length > 0) {
+        const separator = rest.indexOf(":");
+        if (separator < 0) {
+          throw new TypeError("setInlineStyles received a malformed record");
+        }
+        const units = Number(rest.slice(0, separator));
+        if (!Number.isInteger(units) || units < 0) {
+          throw new TypeError("setInlineStyles received a malformed length");
+        }
+        const body = rest.slice(separator + 1);
+        if (body.length < units) {
+          throw new TypeError("setInlineStyles received a truncated field");
+        }
+        fields.push(body.slice(0, units));
+        rest = body.slice(units);
+        const [name, value] = fields;
+        if (name !== undefined && value !== undefined) {
+          declarations.push([name, value]);
+          fields = [];
+        }
+      }
+      if (fields.length !== 0) {
+        throw new TypeError("setInlineStyles received an odd field count");
+      }
+      calls.push(["setInlineStyles", id, declarations]);
     },
     /**
      * @param {unknown} node
@@ -644,7 +676,7 @@ describe("__SetInlineStyles", () => {
     ]);
   });
 
-  it("fans a record out into ordered single-property updates", () => {
+  it("sends a record as one ordered batch", () => {
     const view = __CreateView(0);
     mock.calls.length = 0;
 
@@ -655,9 +687,10 @@ describe("__SetInlineStyles", () => {
       width: null,
     });
     expect(mock.calls).toEqual([
-      ["setAttribute", 3, "style", ""],
-      ["set_node_property", 3, "background-color", "red"],
-      ["set_node_property", 3, "border-top-left-radius", "4"],
+      ["setInlineStyles", 3, [
+        ["background-color", "red"],
+        ["border-top-left-radius", "4"],
+      ]],
     ]);
   });
 
@@ -668,8 +701,7 @@ describe("__SetInlineStyles", () => {
 
     __SetInlineStyles(view, { height: "20px" });
     expect(mock.calls).toEqual([
-      ["setAttribute", 3, "style", ""],
-      ["set_node_property", 3, "height", "20px"],
+      ["setInlineStyles", 3, [["height", "20px"]]],
     ]);
   });
 
@@ -679,8 +711,7 @@ describe("__SetInlineStyles", () => {
 
     __SetInlineStyles(view, { "--accentColor": "tomato" });
     expect(mock.calls).toEqual([
-      ["setAttribute", 3, "style", ""],
-      ["set_node_property", 3, "--accentColor", "tomato"],
+      ["setInlineStyles", 3, [["--accentColor", "tomato"]]],
     ]);
   });
 
@@ -694,8 +725,7 @@ describe("__SetInlineStyles", () => {
       definitelyNotAProperty: "value",
     });
     expect(mock.calls).toEqual([
-      ["setAttribute", 3, "style", ""],
-      ["set_node_property", 3, "definitely-not-a-property", "value"],
+      ["setInlineStyles", 3, [["definitely-not-a-property", "value"]]],
     ]);
   });
 
@@ -704,8 +734,26 @@ describe("__SetInlineStyles", () => {
     for (const styles of [{}, { color: null, width: undefined }]) {
       mock.calls.length = 0;
       __SetInlineStyles(view, styles);
-      expect(mock.calls).toEqual([["setAttribute", 3, "style", ""]]);
+      expect(mock.calls).toEqual([["setInlineStyles", 3, []]]);
     }
+  });
+
+  it("carries values containing delimiters and non-BMP text intact", () => {
+    const view = __CreateView(0);
+    mock.calls.length = 0;
+
+    __SetInlineStyles(view, {
+      fontFamily: 'a;b:c", 3:x',
+      content: "🦀:1",
+      "--empty": "",
+    });
+    expect(mock.calls).toEqual([
+      ["setInlineStyles", 3, [
+        ["font-family", 'a;b:c", 3:x'],
+        ["content", "🦀:1"],
+        ["--empty", ""],
+      ]],
+    ]);
   });
 
   it("removes the attribute for every falsy value", () => {

@@ -12,7 +12,9 @@
 //! numbers), and a string-returning query. Element identity crosses the
 //! boundary as plain numbers; handle objects never leave JavaScript.
 
-use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm, Value};
+use quickjs_rust_bridge::{
+    EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm, Value,
+};
 
 fn main() {
     divan::main();
@@ -118,4 +120,74 @@ fn string_return(bencher: divan::Bencher) {
         "tag(0).length",
     );
     bencher.bench_local(|| realm.call(&run, Some(&undefined), &[]).expect("run"));
+}
+
+/// The other direction: the host calling a member the realm published.
+///
+/// This is the event path — one call per node an event reaches, with the
+/// event's name and JSON detail as arguments. Unlike the cases above, the
+/// driver is the host, so each iteration is `CALLS` boundary crossings made
+/// from Rust rather than from JavaScript.
+fn member_driver(body: &str) -> (Realm, Value, quickjs_rust_bridge::Member) {
+    let mut realm = Realm::new().expect("realm");
+    let host = realm
+        .evaluate(
+            EvalSource::new(&format!(
+                "globalThis.host = {{ sink: 0 }}; host.deliver = {body}; globalThis.host"
+            )),
+            EvalOptions::default(),
+        )
+        .expect("install the member");
+    let member = realm.member("deliver").expect("intern the member name");
+    (realm, host, member)
+}
+
+fn drive_member(
+    bencher: divan::Bencher,
+    body: &str,
+    arguments: impl Fn() -> Vec<HostArgument<'static>> + Sync,
+) {
+    let (mut realm, host, member) = member_driver(body);
+    let arguments = arguments();
+    bencher.bench_local(|| {
+        for _ in 0..CALLS {
+            realm
+                .call_member(&host, &member, &arguments)
+                .expect("deliver");
+        }
+    });
+}
+
+#[divan::bench]
+fn member_no_arguments(bencher: divan::Bencher) {
+    drive_member(bencher, "function () { host.sink += 1; }", Vec::new);
+}
+
+#[divan::bench]
+fn member_two_number_arguments(bencher: divan::Bencher) {
+    drive_member(bencher, "function (a, b) { host.sink += a + b; }", || {
+        vec![HostArgument::Number(17.0), HostArgument::Number(4.0)]
+    });
+}
+
+/// The `event_listener_callback` shape: two node handles, a capture flag, the
+/// event name, its JSON detail, the walk id, and whether this step is last.
+#[divan::bench]
+fn member_event_arguments(bencher: divan::Bencher) {
+    drive_member(
+        bencher,
+        "function (node, target, capture, name, detail, id, last) { \
+           host.sink += node + target + capture + name.length + detail.length + id + last; }",
+        || {
+            vec![
+                HostArgument::Number(4_294_967_298.0),
+                HostArgument::Number(4_294_967_299.0),
+                HostArgument::Number(0.0),
+                HostArgument::String("pointermove"),
+                HostArgument::String(r#"{"x":123.5,"y":456.25}"#),
+                HostArgument::Number(7.0),
+                HostArgument::Boolean(true),
+            ]
+        },
+    );
 }

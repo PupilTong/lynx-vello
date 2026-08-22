@@ -503,6 +503,38 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
+    /// Replaces an element's whole inline declaration block with a record of
+    /// property/value pairs.
+    ///
+    /// This is the block-level setter — the one whose semantics are
+    /// *replacement*, like assigning `style.cssText`, rather than the
+    /// property-level mutation of [`Self::set_inline_style_property`]. The
+    /// block is built from empty, so applying an `n`-declaration record costs
+    /// one parse per declaration and one serialization, where replaying the
+    /// record through the property-level setter costs `n` whole-block clones
+    /// and `n` serializations.
+    ///
+    /// Each declaration keeps the property-level setter's parse semantics: an
+    /// unknown property name or an invalid value drops that declaration and
+    /// leaves the rest of the record alone. It is deliberately *not* the same
+    /// as joining the record into style-attribute text and parsing that — a
+    /// value containing a `;` would there start a second declaration instead
+    /// of being rejected.
+    ///
+    /// An empty record leaves an empty `style` attribute rather than removing
+    /// it, which is what assigning an empty declaration block does.
+    pub fn set_inline_style_declarations<'a>(
+        &mut self,
+        id: NodeId,
+        declarations: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) {
+        let (block, css) = self.style_engine().build_inline_style_block(declarations);
+        let base = self.begin_reactions();
+        self.enqueue_attribute_changed(id, &STYLE, Some(&css));
+        self.apply_inline_style_block(id, block, Some(css));
+        self.drain_reactions(base);
+    }
+
     fn apply_inline_style_block(
         &mut self,
         id: NodeId,

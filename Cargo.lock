@@ -217,6 +217,7 @@ name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "codspeed-divan-compat",
  "data-url",
  "dom",
  "flashbulb",
@@ -228,6 +229,7 @@ dependencies = [
  "rayon",
  "rustc-hash 2.1.3",
  "serde_json",
+ "smallvec",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

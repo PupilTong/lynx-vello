@@ -10,7 +10,7 @@ if (native === null || typeof native !== "object") {
 export const createPage = native.createPage;
 export const createElement = native.createElement;
 export const setAttribute = native.setAttribute;
-export const set_node_property = native.set_node_property;
+export const setInlineStyles = native.setInlineStyles;
 export const removeAttribute = native.removeAttribute;
 export const getAttribute = native.getAttribute;
 export const tagName = native.tagName;

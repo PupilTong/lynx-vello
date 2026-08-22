@@ -256,7 +256,7 @@ useful signal for currently-compatible versions of those libraries.
   The private `MainThreadRuntime`
   registers the native QuickJS ESM `bobcat-internal:host` (one Rust-backed
   named function export per member — `createPage`, `createElement`,
-  `setAttribute`, `set_node_property`, `removeAttribute`, `getAttribute`,
+  `setAttribute`, `setInlineStyles`, `removeAttribute`, `getAttribute`,
   `tagName`, `parentNode`, `insertBefore`, `removeElement`, `replaceElement`,
   `swapElement`, `releaseElement`, `flushElementTree`, `enableEventListener`,
   `disableEventListener`, and `stopPropagation` — all speaking DOM vocabulary
@@ -296,9 +296,12 @@ useful signal for currently-compatible versions of those libraries.
   (`__AddEventListener`, `__RemoveEventListener`, `__StopPropagation`,
   `__StopImmediatePropagation`), and `__FlushElementTree`;
   `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
-  one `style` attribute write, while a record first replaces the attribute
-  with an empty declaration block and then fans out, in enumeration order,
-  into one name-based native `set_node_property` call per non-null value.
+  one `style` attribute write, while a record crosses in a single
+  `setInlineStyles` call as a length-prefixed payload — `<utf16Length>:<text>`
+  fields, name then value, in enumeration order — from which the host builds
+  one declaration block from empty. Length-prefixing rather than delimiting is
+  what lets a declaration value contain any character, a `;` included, without
+  escaping or a guessed boundary.
   Ordinary camelCase keys are hyphenated, while case-sensitive `--*` custom
   property names pass through unchanged.
   The host operation implements the name/value subset of CSSOM

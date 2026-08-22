@@ -21,6 +21,7 @@ pollster = { workspace = true }
 quickjs-rust-bridge = { workspace = true, optional = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -33,10 +34,21 @@ wasm_thread = { workspace = true }
 web-time = { workspace = true }
 
 [dev-dependencies]
+divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
 png = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[[bench]]
+name = "script_boundary"
+harness = false
+# The harness it drives needs a script engine, and `quickjs` is a *default*
+# feature — so `cargo bench` and `cargo codspeed build` both satisfy this and
+# run the benchmark, while `--no-default-features` skips it instead of failing
+# to compile. A non-default required feature would be the silent-skip hazard
+# `bench_support` warns about; this is not one.
+required-features = ["quickjs"]
 
 [lints]
 workspace = true

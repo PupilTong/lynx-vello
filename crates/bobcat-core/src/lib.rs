@@ -16,6 +16,11 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+/// The private script boundary, exposed only so this crate's own benchmarks
+/// can drive it. Not a contract: hidden, unstable, and free to change.
+#[cfg(feature = "quickjs")]
+#[doc(hidden)]
+pub mod bench_support;
 pub mod clock;
 mod engine;
 mod gesture;

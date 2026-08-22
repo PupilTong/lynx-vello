@@ -12,8 +12,8 @@ import {
   removeAttribute,
   removeElement,
   replaceElement,
-  set_node_property as setNodeProperty,
   setAttribute,
+  setInlineStyles,
   stopPropagation,
   swapElement,
   tagName,
@@ -50,7 +50,7 @@ import {
 // | `__GetID(element)` | native `getAttribute` export |
 // | `__GetTag(element)` | native `tagName` export |
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
-// | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `set_node_property` exports |
+// | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `setInlineStyles` exports |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
 // | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
@@ -750,12 +750,34 @@ export function __GetElementUniqueID(element) {
 }
 
 /**
+ * Encodes one field of a style record: its length in UTF-16 code units,
+ * a colon, then the text.
+ *
+ * `String.prototype.length` already counts the units the native side
+ * decodes, so this costs one property read and no scan. The length is what
+ * lets a value contain any character at all — a semicolon, a quote, a NUL
+ * — without a delimiter having to be escaped or a declaration boundary
+ * having to be guessed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function styleField(text) {
+  return `${text.length}:${text}`;
+}
+
+/**
  * A string is one complete style-attribute payload and is set verbatim. A
- * record is still a complete replacement, but the JavaScript side owns the
- * fan-out: it clears the old declaration block, hyphenates each key, and
- * sends one CSSOM-like `setProperty` operation per non-null value. Keeping
- * the fan-out here leaves the native boundary as one-property-only and
- * avoids inventing an object/array wire representation for `HostValue`.
+ * record is still a complete replacement, and crosses in one call: the
+ * hyphenated names and stringified values are packed into a single
+ * self-describing payload, and the native side builds the declaration block
+ * from empty.
+ *
+ * The fan-out used to live here, one CSSOM-like `setProperty` per value.
+ * That cost one crossing per property *and* made the native side clone and
+ * re-serialize the whole block for each one, so an `n`-property record was
+ * quadratic. Replacement semantics make the reset implicit: there is no
+ * old block to preserve, so there is nothing for the fan-out to mutate.
  *
  * A falsy value removes the attribute. The `rpx`/`vw`/`vh`/`rem` token
  * rewriting web-core performs on the way through has no owner here yet, so
@@ -775,23 +797,18 @@ export function __SetInlineStyles(element, value) {
     setAttribute(nodeId, "style", value);
     return undefined;
   }
-  // `__SetInlineStyles` replaces the whole inline declaration block. Start
-  // from an explicitly empty attribute (rather than merely mutating the
-  // properties mentioned by this record), then replay the new declarations
-  // in object enumeration order so shorthand/longhand precedence is kept.
-  // Keeping the empty attribute is observable for `{}` / all-nullish records
-  // and matches web-core's complete-record setter.
-  setAttribute(nodeId, "style", "");
+  // Object enumeration order is the declaration order, so shorthand and
+  // longhand precedence within the record is kept. An empty or all-nullish
+  // record sends an empty payload, which leaves an empty `style` attribute
+  // — observable, and what web-core's complete-record setter does.
+  const fields = [];
   for (const [key, declaration] of Object.entries(value)) {
     if (declaration === null || declaration === undefined) {
       continue;
     }
-    setNodeProperty(
-      nodeId,
-      hyphenate(key),
-      String(declaration),
-    );
+    fields.push(styleField(hyphenate(key)), styleField(String(declaration)));
   }
+  setInlineStyles(nodeId, fields.join(""));
   return undefined;
 }
 
