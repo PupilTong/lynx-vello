@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{fmt, mem};
 
+use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
     PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
@@ -28,6 +29,13 @@ use web_sys::OffscreenCanvas;
 
 const MAX_RENDER_DIMENSION: f64 = 16_384.0;
 const MAX_STYLE_THREADS: u32 = 6;
+const POINTER_DEVICE_MOUSE: u8 = 0;
+const POINTER_DEVICE_TOUCH: u8 = 1;
+const POINTER_DEVICE_PEN: u8 = 2;
+const POINTER_PHASE_DOWN: u8 = 0;
+const POINTER_PHASE_MOVE: u8 = 1;
+const POINTER_PHASE_UP: u8 = 2;
+const POINTER_PHASE_CANCEL: u8 = 3;
 static RENDERER_CREATED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, Default)]
@@ -430,10 +438,9 @@ pub struct BobcatRenderer {
     /// The last successfully selected embedder default is stable wrapper
     /// state too; a replacement document gets the same generic-family map.
     default_font_family: Option<String>,
-    /// The same clock the view reads. A Worker could read a monotonic clock
-    /// of its own, but `requestAnimationFrame` hands over the instant the
-    /// frame is *for*, which is the better reading and the one browsers
-    /// animate against.
+    /// The same clock the view reads. Frame callbacks write their sample time;
+    /// browser input writes the Render Worker's current time before core stamps
+    /// the sequence. Both readings therefore use one Worker-local timeline.
     clock: Arc<ManualClock>,
     script_finished: bool,
     disposed: bool,
@@ -491,10 +498,9 @@ impl BobcatRenderer {
                 default_overflow_visible,
                 enable_css_selector,
             };
-            // The animation timeline is `requestAnimationFrame`'s timestamp,
-            // written into this clock by `render_if_requested`. Naming it here
-            // makes it part of the view's type; the handle below is the same
-            // clock, since a shared clock is itself a clock.
+            // Frame and input entry points write one Worker-local timeline into
+            // this clock. Naming it here makes it part of the view's type; the
+            // handle below is the same clock, since a shared clock is a clock.
             let clock = Arc::new(ManualClock::new());
             let frames = FrameSignal::default();
             let view = create_browser_view(
@@ -733,6 +739,57 @@ impl BobcatRenderer {
             }
         }
         Ok(self.script_finished)
+    }
+
+    /// Route one browser `PointerEvent` into the opaque native view.
+    ///
+    /// The JavaScript facade owns pointer capture and converts client
+    /// coordinates into viewport CSS px. The Render Worker supplies `now_ms`
+    /// from its own `performance` timeline immediately before this call, so a
+    /// long idle period cannot make a new `longpress` deadline start from the
+    /// last rendered frame.
+    #[wasm_bindgen(js_name = dispatchPointer)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the internal wasm-bindgen seam carries one flat pointer message"
+    )]
+    pub fn dispatch_pointer(
+        &mut self,
+        x: f32,
+        y: f32,
+        pointer_id: u32,
+        device: u8,
+        phase: u8,
+        default_prevented: bool,
+        now_ms: f64,
+    ) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(js_error("pointer coordinates must be finite"));
+        }
+        if !now_ms.is_finite() || now_ms < 0.0 {
+            return Err(js_error(
+                "the browser pointer timestamp must be finite and non-negative",
+            ));
+        }
+        let device = match device {
+            POINTER_DEVICE_MOUSE => PointerKind::Mouse,
+            POINTER_DEVICE_TOUCH => PointerKind::Touch,
+            POINTER_DEVICE_PEN => PointerKind::Pen,
+            _ => return Err(js_error(format!("unknown browser pointer device {device}"))),
+        };
+        let phase = match phase {
+            POINTER_PHASE_DOWN => PointerPhase::Down,
+            POINTER_PHASE_MOVE => PointerPhase::Move,
+            POINTER_PHASE_UP => PointerPhase::Up,
+            POINTER_PHASE_CANCEL => PointerPhase::Cancel,
+            _ => return Err(js_error(format!("unknown browser pointer phase {phase}"))),
+        };
+        let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
+            .with_default_prevented(default_prevented);
+        self.clock.set(now_ms / 1000.0);
+        self.view_mut()?.dispatch_input(event);
+        Ok(())
     }
 
     /// Present a requested frame without exposing the engine or document to

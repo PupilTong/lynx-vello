@@ -7,6 +7,11 @@ export interface PageConfig {
 /** web-core raw-loader defaults; spread this object to override individual values. */
 export declare const LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>
 
+/**
+ * A Worker-owned Bobcat view attached to one HTML canvas. Active
+ * `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences on the
+ * canvas are captured and forwarded to the native input router automatically.
+ */
 export declare class BobcatCanvas {
   private constructor()
 
@@ -21,6 +26,7 @@ export declare class BobcatCanvas {
     pageConfig: PageConfig,
   ): Promise<BobcatCanvas>
 
+  /** Releases pointer capture/listeners and terminates the Render Worker. */
   dispose(): Promise<void>
 
   /**

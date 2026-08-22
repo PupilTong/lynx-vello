@@ -1,6 +1,15 @@
 const MAX_THREADS = 6
+const MAX_RENDER_DIMENSION = 16_384
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
 const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
+
+const POINTER_DEVICE_MOUSE = 0
+const POINTER_DEVICE_TOUCH = 1
+const POINTER_DEVICE_PEN = 2
+const POINTER_PHASE_DOWN = 0
+const POINTER_PHASE_MOVE = 1
+const POINTER_PHASE_UP = 2
+const POINTER_PHASE_CANCEL = 3
 
 let initialization
 
@@ -39,6 +48,242 @@ function fontBytes(data) {
     return new Uint8Array(data)
   }
   throw new TypeError('BobcatCanvas.registerFonts requires an ArrayBuffer or Uint8Array')
+}
+
+function validateMetrics(width, height, devicePixelRatio) {
+  const physicalWidth = width * devicePixelRatio
+  const physicalHeight = height * devicePixelRatio
+  if (
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    Number.isFinite(devicePixelRatio) &&
+    width > 0 &&
+    height > 0 &&
+    devicePixelRatio > 0 &&
+    physicalWidth <= MAX_RENDER_DIMENSION &&
+    physicalHeight <= MAX_RENDER_DIMENSION
+  ) {
+    return
+  }
+  throw new TypeError(
+    `Bobcat viewport metrics must be finite, positive, and no larger than ${String(MAX_RENDER_DIMENSION)} physical pixels per axis`,
+  )
+}
+
+function pointerDevice(pointerType) {
+  switch (pointerType) {
+    case 'touch':
+      return POINTER_DEVICE_TOUCH
+    case 'pen':
+      return POINTER_DEVICE_PEN
+    case 'mouse':
+    default:
+      // Real browser input names one of the three values above. Treat an empty
+      // value from a constructed PointerEvent as a non-scrolling mouse rather
+      // than inventing another device kind at the native boundary.
+      return POINTER_DEVICE_MOUSE
+  }
+}
+
+/** Owns the DOM EventTarget half of the browser input bridge. */
+class CanvasPointerInput {
+  #active = new Map()
+  #canvas
+  #disposed = false
+  #height
+  #previousTouchAction
+  #send
+  #width
+
+  constructor(canvas, width, height, send) {
+    this.#canvas = canvas
+    this.#height = height
+    this.#previousTouchAction = canvas.style.touchAction
+    this.#send = send
+    this.#width = width
+
+    // Transferring drawing control does not transfer the canvas's DOM events.
+    // The embedder owns touch panning so the engine can arbitrate tap vs scroll.
+    canvas.style.touchAction = 'none'
+    canvas.addEventListener('pointerdown', this.#onPointerDown)
+    canvas.addEventListener('pointermove', this.#onPointerMove)
+    canvas.addEventListener('pointerup', this.#onPointerUp)
+    canvas.addEventListener('pointercancel', this.#onPointerCancel)
+    canvas.addEventListener('lostpointercapture', this.#onLostPointerCapture)
+  }
+
+  resize(width, height) {
+    this.#width = width
+    this.#height = height
+  }
+
+  reset() {
+    for (const pointerId of this.#active.keys()) {
+      this.#releaseCapture(pointerId)
+    }
+    this.#active.clear()
+  }
+
+  dispose() {
+    if (this.#disposed) {
+      return
+    }
+    this.#disposed = true
+    this.#canvas.removeEventListener('pointerdown', this.#onPointerDown)
+    this.#canvas.removeEventListener('pointermove', this.#onPointerMove)
+    this.#canvas.removeEventListener('pointerup', this.#onPointerUp)
+    this.#canvas.removeEventListener('pointercancel', this.#onPointerCancel)
+    this.#canvas.removeEventListener(
+      'lostpointercapture',
+      this.#onLostPointerCapture,
+    )
+    this.reset()
+    this.#canvas.style.touchAction = this.#previousTouchAction
+  }
+
+  #onPointerDown = (event) => {
+    if (
+      this.#disposed ||
+      !this.#validPointerId(event.pointerId) ||
+      this.#active.has(event.pointerId)
+    ) {
+      return
+    }
+    const device = pointerDevice(event.pointerType)
+    if (device === POINTER_DEVICE_MOUSE && event.button !== 0) {
+      return
+    }
+    const message = this.#message(event, device, POINTER_PHASE_DOWN)
+    if (message === undefined) {
+      return
+    }
+    this.#active.set(event.pointerId, {
+      device,
+      x: message.x,
+      y: message.y,
+    })
+    try {
+      this.#canvas.setPointerCapture(event.pointerId)
+    } catch {
+      // Capture is an interaction guarantee, not a reason to drop the down.
+      // A detached or concurrently-cancelled pointer may reject the request.
+    }
+    this.#send(message)
+  }
+
+  #onPointerMove = (event) => {
+    const active = this.#active.get(event.pointerId)
+    if (this.#disposed || active === undefined) {
+      return
+    }
+    const message = this.#message(
+      event,
+      active.device,
+      POINTER_PHASE_MOVE,
+      active,
+    )
+    if (message === undefined) {
+      return
+    }
+    active.x = message.x
+    active.y = message.y
+    this.#send(message)
+  }
+
+  #onPointerUp = (event) => {
+    this.#finish(event, POINTER_PHASE_UP)
+  }
+
+  #onPointerCancel = (event) => {
+    this.#finish(event, POINTER_PHASE_CANCEL)
+  }
+
+  #onLostPointerCapture = (event) => {
+    const active = this.#active.get(event.pointerId)
+    if (this.#disposed || active === undefined) {
+      return
+    }
+    const message = this.#message(
+      event,
+      active.device,
+      POINTER_PHASE_CANCEL,
+      active,
+    )
+    this.#active.delete(event.pointerId)
+    if (message !== undefined) {
+      this.#send(message)
+    }
+  }
+
+  #finish(event, phase) {
+    const active = this.#active.get(event.pointerId)
+    if (this.#disposed || active === undefined) {
+      return
+    }
+    const message = this.#message(event, active.device, phase, active)
+    this.#active.delete(event.pointerId)
+    this.#releaseCapture(event.pointerId)
+    if (message !== undefined) {
+      this.#send(message)
+    }
+  }
+
+  #message(event, device, phase, fallback) {
+    const bounds = this.#canvas.getBoundingClientRect()
+    let x
+    let y
+    if (
+      Number.isFinite(event.clientX) &&
+      Number.isFinite(event.clientY) &&
+      Number.isFinite(bounds.left) &&
+      Number.isFinite(bounds.top) &&
+      Number.isFinite(bounds.width) &&
+      Number.isFinite(bounds.height) &&
+      bounds.width > 0 &&
+      bounds.height > 0
+    ) {
+      x = ((event.clientX - bounds.left) * this.#width) / bounds.width
+      y = ((event.clientY - bounds.top) * this.#height) / bounds.height
+    } else if (fallback !== undefined) {
+      x = fallback.x
+      y = fallback.y
+    } else {
+      return undefined
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return undefined
+    }
+    return {
+      defaultPrevented: event.defaultPrevented === true,
+      device,
+      phase,
+      pointerId: event.pointerId,
+      x,
+      y,
+    }
+  }
+
+  #releaseCapture(pointerId) {
+    try {
+      if (
+        typeof this.#canvas.hasPointerCapture !== 'function' ||
+        this.#canvas.hasPointerCapture(pointerId)
+      ) {
+        this.#canvas.releasePointerCapture(pointerId)
+      }
+    } catch {
+      // The browser may already have released capture while dispatching up or
+      // cancel. The sequence is complete either way.
+    }
+  }
+
+  #validPointerId(pointerId) {
+    return (
+      Number.isInteger(pointerId) &&
+      pointerId >= 0 &&
+      pointerId <= 0xffff_ffff
+    )
+  }
 }
 
 class RenderWorkerClient {
@@ -152,6 +397,17 @@ class RenderWorkerClient {
     return result
   }
 
+  dispatchPointer(values) {
+    if (this.#fatalError !== undefined) {
+      return
+    }
+    try {
+      this.#worker.postMessage({ type: 'bobcat-pointer', ...values })
+    } catch (error) {
+      this.#fail(error)
+    }
+  }
+
   subscribeFatal(listener) {
     this.#fatalListeners.add(listener)
     if (this.#fatalError !== undefined) {
@@ -187,18 +443,27 @@ export default function init() {
   return initialization
 }
 
+/** A Worker-owned Bobcat view with automatic canvas pointer forwarding. */
 export class BobcatCanvas {
   #client
   #disposed = false
   #fatalError
+  #pointerInput
   #unsubscribeFatal
 
   onerror = null
 
-  constructor(client) {
+  constructor(client, canvas, width, height) {
     this.#client = client
+    this.#pointerInput = new CanvasPointerInput(
+      canvas,
+      width,
+      height,
+      (values) => client.dispatchPointer(values),
+    )
     this.#unsubscribeFatal = client.subscribeFatal((error) => {
       this.#fatalError = error
+      this.#pointerInput.dispose()
       if (typeof this.onerror === 'function') {
         this.onerror(error)
       }
@@ -225,6 +490,7 @@ export class BobcatCanvas {
     if (pageConfig === null || typeof pageConfig !== 'object') {
       throw new TypeError('BobcatCanvas.create pageConfig must be an object')
     }
+    validateMetrics(width, height, devicePixelRatio)
     const config = {
       defaultDisplayLinear: pageConfig.defaultDisplayLinear,
       defaultOverflowVisible: pageConfig.defaultOverflowVisible,
@@ -267,7 +533,7 @@ export class BobcatCanvas {
         { cause: error },
       )
     }
-    return new BobcatCanvas(client)
+    return new BobcatCanvas(client, canvas, width, height)
   }
 
   get error() {
@@ -325,6 +591,7 @@ export class BobcatCanvas {
    * font family.
    */
   async reset() {
+    this.#pointerInput.reset()
     await this.#request('reset')
   }
 
@@ -346,6 +613,11 @@ export class BobcatCanvas {
   }
 
   async resize(width, height, devicePixelRatio) {
+    validateMetrics(width, height, devicePixelRatio)
+    // Messages from one Window reach the Worker in order: updating the input
+    // map before posting resize means a following pointer is expressed in the
+    // viewport the Worker will install before it dispatches that pointer.
+    this.#pointerInput.resize(width, height)
     await this.#request('resize', { devicePixelRatio, height, width })
   }
 
@@ -354,6 +626,7 @@ export class BobcatCanvas {
       return
     }
     this.#disposed = true
+    this.#pointerInput.dispose()
     try {
       if (this.#fatalError === undefined) {
         await this.#client.request('dispose')

@@ -308,6 +308,30 @@ self.addEventListener('message', (event) => {
         reportFatal(error)
       }
     })()
+  } else if (message?.type === 'bobcat-pointer') {
+    const dispatch = () => {
+      if (!running || renderer === undefined) {
+        return
+      }
+      try {
+        // Take the timestamp here, on the same Worker timeline as rAF. Window
+        // PointerEvent timestamps need not share this Worker's time origin.
+        renderer.dispatchPointer(
+          message.x,
+          message.y,
+          message.pointerId,
+          message.device,
+          message.phase,
+          message.defaultPrevented,
+          performance.now(),
+        )
+      } catch (error) {
+        reportFatal(error)
+      }
+    }
+    // Input shares the facade-operation queue so it cannot re-enter the Wasm
+    // wrapper while an async native-view reset owns its mutable borrow.
+    requestQueue = requestQueue.then(dispatch)
   } else if (message?.type === 'bobcat-request') {
     const dispatch = async () => {
       try {
