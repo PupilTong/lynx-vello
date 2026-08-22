@@ -895,3 +895,50 @@ fn a_document_with_no_shadow_root_keeps_its_child_list_as_the_flat_tree() {
     assert_eq!(doc.dom.assigned_slot(child), None);
     assert_eq!(doc.dom.shadow_root(parent), None);
 }
+
+/// A structural selector on a shadow host still invalidates the light children
+/// whose sibling positions moved.
+///
+/// `note_child_list_change` collapses "restyle every child" into a single
+/// `RESTYLE_DESCENDANTS` on the parent only in a document with no shadow root,
+/// because Stylo propagates that hint along the flat tree: a host's flat
+/// children are its shadow root's children, so the hint would arrive at the
+/// slotted light children by way of the shadow tree, restyling the shadow
+/// tree's own elements on the way. This pins the light children's side of that
+/// — the part a reader of the collapsed form would expect to be at risk.
+#[test]
+fn a_structural_selector_on_a_shadow_host_still_restyles_its_light_children() {
+    let mut doc = Doc::new();
+    doc.add_css(
+        "item { color: rgb(0, 0, 255) } \
+         item:nth-last-child(2) { color: rgb(255, 0, 0) }",
+    );
+    let host = doc.el(doc.root, "host");
+    let shadow = doc.dom.attach_shadow(host, ShadowRootMode::Open);
+    doc.el(shadow, "slot");
+
+    let first = doc.el(host, "item");
+    let second = doc.el(host, "item");
+    doc.flush();
+    assert_eq!(
+        doc.color(first),
+        common::rgb(255, 0, 0),
+        "the first of two is second-from-last"
+    );
+
+    // A third light child shifts every position counted from the end.
+    let third = doc.el(host, "item");
+    doc.flush();
+
+    assert_eq!(
+        doc.color(first),
+        common::rgb(0, 0, 255),
+        "the displaced child must lose :nth-last-child(2)"
+    );
+    assert_eq!(
+        doc.color(second),
+        common::rgb(255, 0, 0),
+        "and its successor must gain it"
+    );
+    assert_eq!(doc.color(third), common::rgb(0, 0, 255));
+}

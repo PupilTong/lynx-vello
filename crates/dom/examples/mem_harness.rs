@@ -14,7 +14,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use dom::{Device, Document, StylesheetOrigin};
+use dom::{Device, Document, Node, StylesheetOrigin};
 
 struct Counting;
 
@@ -126,5 +126,95 @@ fn main() {
     println!(
         "\nnodes: {node_count}   bytes/node (build+layout+scene): {per_node:.0}   peak: {:.2} MiB",
         PEAK.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0)
+    );
+
+    census(&doc);
+}
+
+/// Node counts by kind, and what the one-node-type-for-all-kinds layout costs.
+///
+/// This prices bytes, not loads. Every element-only field is inline on every
+/// node because that is what made the styling hot paths fast — the A/B that put
+/// `StylingData` inline moved `noop_commit` by 13% — so a byte total here is an
+/// input to that trade, never a verdict on it.
+fn census(doc: &Document<()>) {
+    let mut counts = [0usize; 4];
+    let (document, element, text, shadow) = (0, 1, 2, 3);
+
+    let mut stack = vec![doc.document_element().id()];
+    // The document node parents the document element, so start one above it.
+    if let Some(root) = doc.document_element().parent_id() {
+        stack = vec![root];
+    }
+    let mut text_attr_bytes = 0usize;
+    while let Some(id) = stack.pop() {
+        let Some(node) = doc.get(id) else { continue };
+        let kind = if node.is_element() {
+            element
+        } else if node.is_text_node() {
+            text
+        } else if node.is_shadow_root() {
+            shadow
+        } else {
+            document
+        };
+        counts[kind] += 1;
+        if kind == text {
+            text_attr_bytes += node.attributes().count();
+        }
+        stack.extend(node.child_ids().iter().copied());
+        if let Some(root) = doc.shadow_root(id) {
+            stack.push(root);
+        }
+    }
+
+    let fields = Node::<()>::census_field_sizes();
+    let node_size = std::mem::size_of::<Node<()>>();
+    let field_total: usize = fields.iter().map(|&(_, size, _)| size).sum();
+    let element_only: usize = fields
+        .iter()
+        .filter(|&&(_, _, only)| only)
+        .map(|&(_, size, _)| size)
+        .sum();
+
+    println!(
+        "\n--- node census ({} profile) ---",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
+    println!(
+        "size_of::<Node<()>>() = {node_size} B   (fields {field_total} B + {} B padding)",
+        node_size.saturating_sub(field_total),
+    );
+    for &(name, size, only) in fields {
+        println!(
+            "  {name:<20} {size:>4} B  {}",
+            if only { "element-only" } else { "" }
+        );
+    }
+    println!(
+        "\n  document {:>6}   element {:>6}   text {:>6}   shadow-root {:>6}",
+        counts[document], counts[element], counts[text], counts[shadow],
+    );
+    let dead = (counts[document] + counts[text] + counts[shadow]) * element_only;
+    println!(
+        "\n  element-only fields: {element_only} B/node, inline on every node.\n  \
+         carried by the {} non-element nodes: {:.1} KiB ({:.1}% of the {:.1} KiB of node storage)",
+        counts[document] + counts[text] + counts[shadow],
+        dead as f64 / 1024.0,
+        100.0 * dead as f64 / (counts.iter().sum::<usize>() * node_size) as f64,
+        (counts.iter().sum::<usize>() * node_size) as f64 / 1024.0,
+    );
+    println!(
+        "  text nodes hold {text_attr_bytes} attributes between them, so the \
+         attribute\n  machinery on them is dead as well as unused."
+    );
+    println!(
+        "  against {:.2} MiB of live heap for the whole page, that is {:.1}%.",
+        LIVE.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0),
+        100.0 * dead as f64 / LIVE.load(Ordering::Relaxed) as f64,
     );
 }

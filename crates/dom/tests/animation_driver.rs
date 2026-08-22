@@ -354,3 +354,49 @@ fn cancelling_a_running_animation_restores_the_un_animated_style() {
     );
     assert!(!doc.dom.has_active_animations());
 }
+
+/// A resize now re-cascades rather than re-matches, and the tick that runs
+/// between the resize and the next flush must leave both alone: the viewport
+/// change still lands, and the animation still advances.
+///
+/// The hint shape that makes this survivable is pinned separately, in
+/// `style::invalidation`'s own tests — this one is the end-to-end reading.
+#[test]
+fn a_viewport_change_survives_an_animation_tick_before_the_next_flush() {
+    let (mut doc, mover) = animated(
+        "
+        @keyframes slide {
+            from { transform: translateX(0px); }
+            to { transform: translateX(100px); }
+        }
+        page { font-size: 5vw; }
+        .mover { animation: slide 10s linear; width: 20px; height: 20px; }
+        ",
+        "view.mover",
+    );
+    let root = doc.root;
+    doc.flush();
+    assert_eq!(
+        doc.value(root, "font-size"),
+        "40px",
+        "5vw of the initial 800px viewport"
+    );
+
+    doc.dom.advance_animations(0.0);
+    doc.dom.set_viewport(400.0, 600.0);
+    // The tick lands between the resize and the flush that would consume it.
+    doc.dom.advance_animations(5.0);
+    doc.flush();
+
+    assert_eq!(
+        doc.value(root, "font-size"),
+        "20px",
+        "the document element's own 5vw must follow the new viewport even \
+         though an animation ticked between the resize and the flush"
+    );
+    assert_eq!(
+        doc.value(mover, "transform"),
+        "translateX(50px)",
+        "and the animation itself still advanced"
+    );
+}

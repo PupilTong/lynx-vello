@@ -369,3 +369,172 @@ fn media_viewport_flip(bencher: divan::Bencher) {
             }
         });
 }
+
+const STRUCTURAL_ROWS: usize = 512;
+const RESIZE_BATCH: usize = 2;
+
+/// Appending to a list whose parent carries a structural selector flag.
+///
+/// `:nth-last-child` sets `HAS_SLOW_SELECTOR`, which asks for every child to be
+/// restyled on every child-list change — the arm that materialized the whole
+/// child list per insertion. The parent only carries the flag after a flush
+/// that had children to match, so the seed rows and the flush before the timed
+/// loop are load-bearing: without them the structural arm is never entered.
+fn structural_list(css: &str) -> (Document<()>, NodeId) {
+    let mut doc: Document<()> = Document::new(device(800.0, 600.0), "page", ());
+    doc.add_stylesheet(css, StylesheetOrigin::Author);
+    let root = doc.document_element().id();
+    let list = doc.create_element("view", ());
+    doc.add_class(list, "list");
+    doc.append_child(root, list);
+    for _ in 0..2 {
+        let seed = doc.create_element("view", ());
+        doc.add_class(seed, "row");
+        doc.append_child(list, seed);
+    }
+    doc.layout();
+    (doc, list)
+}
+
+fn append_rows(doc: &mut Document<()>, list: NodeId) {
+    for _ in 0..STRUCTURAL_ROWS {
+        let row = doc.create_element("view", ());
+        doc.add_class(row, "row");
+        doc.append_child(list, row);
+    }
+}
+
+#[divan::bench]
+fn append_rows_slow_selector(bencher: divan::Bencher) {
+    bencher
+        .counter(ItemsCount::new(STRUCTURAL_ROWS))
+        .with_inputs(|| structural_list(".list > .row:nth-last-child(2n+1) { opacity: 0.9 }"))
+        .bench_local_values(|(mut doc, list)| {
+            append_rows(&mut doc, list);
+            (doc, list)
+        });
+}
+
+#[divan::bench]
+fn append_rows_later_siblings(bencher: divan::Bencher) {
+    bencher
+        .counter(ItemsCount::new(STRUCTURAL_ROWS))
+        .with_inputs(|| structural_list(".list > .row:nth-child(2n+1) { opacity: 0.9 }"))
+        .bench_local_values(|(mut doc, list)| {
+            append_rows(&mut doc, list);
+            (doc, list)
+        });
+}
+
+#[divan::bench]
+fn append_rows_empty_selector(bencher: divan::Bencher) {
+    bencher
+        .counter(ItemsCount::new(STRUCTURAL_ROWS))
+        .with_inputs(|| structural_list(".list:empty { opacity: 0.9 }"))
+        .bench_local_values(|(mut doc, list)| {
+            append_rows(&mut doc, list);
+            (doc, list)
+        });
+}
+
+/// A resize that no media query answers differently. Nothing can start or stop
+/// matching, so the tree only has to be cascaded again — the case
+/// `media_viewport_flip` deliberately does not cover, since it crosses its own
+/// breakpoint on every iteration.
+#[divan::bench]
+fn resize_without_media_change(bencher: divan::Bencher) {
+    let (mut doc, _) = unflushed();
+    doc.add_stylesheet(
+        "@media (min-width: 300px) { .c1 { color: rgb(200, 100, 50) } } \
+         view { width: 50vw; padding-top: 1vh }",
+        StylesheetOrigin::Author,
+    );
+    doc.layout();
+    let state = RefCell::new(doc);
+    let mut wide = true;
+    bencher
+        .counter(ItemsCount::new(RESIZE_BATCH))
+        .bench_local(move || {
+            for _ in 0..RESIZE_BATCH {
+                let doc = &mut *state.borrow_mut();
+                wide = !wide;
+                // Both sizes are above the 300px breakpoint, so the media
+                // query answers `true` throughout.
+                doc.set_viewport(if wide { 800.0 } else { 700.0 }, 600.0);
+                doc.layout();
+            }
+        });
+}
+
+/// Writing an attribute no rule mentions, which is the shape every text update
+/// takes: `raw-text` carries its whole run in a `text` attribute, and no
+/// selector matches on it. The commit that follows has nothing to restyle.
+#[divan::bench]
+fn attribute_write_without_dependency(bencher: divan::Bencher) {
+    let state = RefCell::new(flushed());
+    let mut on = false;
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (doc, probe) = &mut *state.borrow_mut();
+                on = !on;
+                doc.set_attribute(
+                    *probe,
+                    black_box("text"),
+                    black_box(if on { "a run of text" } else { "another run" }),
+                );
+                doc.layout();
+            }
+        });
+}
+
+/// The paired case: an attribute the author sheet does select on
+/// (`[data-row]`), which must keep its snapshot and its restyle.
+#[divan::bench]
+fn attribute_write_with_dependency(bencher: divan::Bencher) {
+    let state = RefCell::new(flushed());
+    let mut on = false;
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(|| {
+            for _ in 0..INCREMENTAL_BATCH {
+                let (doc, probe) = &mut *state.borrow_mut();
+                on = !on;
+                doc.set_attribute(
+                    *probe,
+                    black_box("data-row"),
+                    black_box(if on { "1" } else { "2" }),
+                );
+                doc.layout();
+            }
+        });
+}
+
+/// An element-state flip no rule selects on. `incremental_state_flip` covers
+/// the `:hover` case a rule does select on.
+#[divan::bench]
+fn element_state_flip_without_dependency(bencher: divan::Bencher) {
+    let (mut doc, probe) = unflushed();
+    doc.add_stylesheet(
+        "view:hover { color: rgb(250, 250, 250); }",
+        StylesheetOrigin::Author,
+    );
+    doc.layout();
+    let state = RefCell::new(doc);
+    let mut on = false;
+    bencher
+        .counter(ItemsCount::new(INCREMENTAL_BATCH))
+        .bench_local(move || {
+            for _ in 0..INCREMENTAL_BATCH {
+                let doc = &mut *state.borrow_mut();
+                on = !on;
+                if on {
+                    doc.add_element_state(probe, ElementState::FOCUS);
+                } else {
+                    doc.remove_element_state(probe, ElementState::FOCUS);
+                }
+                doc.layout();
+            }
+        });
+}

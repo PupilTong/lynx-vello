@@ -44,6 +44,32 @@ impl RegisteredSpeculativePainters for NoPainters {
 
 pub(super) static NO_PAINTERS: NoPainters = NoPainters;
 
+/// Serializes style traversals across every document in the process.
+///
+/// Stylo's bloom filter and style-sharing cache do not own their buffers: each
+/// takes an `AtomicRefMut` on a leaked, per-OS-thread `AtomicRefCell`
+/// (`StyleBloom::new` borrows `BLOOM_KEY`, `StyleSharingCache` borrows
+/// `SHARING_CACHE_KEY`), so a second live instance on one thread panics on the
+/// borrow. Both sit in a `ThreadLocalStyleContext`, and those contexts live in
+/// the `ScopedTLS` that [`driver::traverse_dom`] owns for the whole call — so
+/// every pool worker a traversal touched keeps its two buffers borrowed until
+/// that traversal returns, not until it finishes a chunk. A rayon worker
+/// waiting on its own scope runs any job it can find, including a chunk
+/// belonging to a different traversal; that chunk builds a second
+/// `ThreadLocalStyleContext` on a thread that already holds the borrows.
+///
+/// The mutex is process-wide because the pool is: [`STYLE_THREAD_POOL`] is a
+/// global, and a Wasm embedder installs one pool for the module. Per-document
+/// would protect nothing — `flush_styles_with_damage_sink` takes `&mut self`,
+/// so one document already cannot traverse twice at once, and the collision is
+/// between separate documents whose traversals share worker threads. Narrowing
+/// it means guaranteeing no OS thread serves two traversals, which takes one
+/// pool per concurrently flushing document; until something supplies those
+/// thread sets, the pool's granularity is the guard's.
+///
+/// Taken only after `pre_traverse` reports work, so a flush with nothing to
+/// restyle never touches it. The animation-only traversal passes no pool and
+/// runs inline on the caller's thread, which is why it is not guarded.
 static STYLE_POOL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Balances [`thread_state::enter`] on unwind, so a panicking traversal does
