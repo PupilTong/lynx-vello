@@ -24,20 +24,20 @@ impl ScriptEngineFactory for InjectedFactory {
 struct InjectedVm;
 
 impl ScriptEngine for InjectedVm {
-    fn register_host_function(
+    fn register_host_module_function(
         &mut self,
-        _namespace: &str,
-        _name: &str,
+        _module_specifier: &str,
+        _export_name: &str,
         _arity: u8,
         _callback: HostCallback,
     ) -> Result<(), ScriptError> {
         Ok(())
     }
 
-    fn call_host_member(
+    fn call_module_export(
         &mut self,
-        _namespace: &str,
-        _name: &str,
+        _module_specifier: &str,
+        _export_name: &str,
         _arguments: &[HostValue],
     ) -> Result<bool, ScriptError> {
         // A VM that publishes nothing back reports exactly that.

@@ -67,7 +67,7 @@ pub fn engine_factory() -> Arc<dyn ScriptEngineFactory> {
 
 struct QuickJsScriptEngine {
     realm: quickjs::Realm,
-    namespaces: HashMap<String, quickjs::Value>,
+    module_namespaces: HashMap<String, quickjs::Value>,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
     deferred_checkpoint_error: Option<ScriptError>,
@@ -81,35 +81,23 @@ impl QuickJsScriptEngine {
     fn with_config(config: QuickJsConfig) -> Result<Self, quickjs::Error> {
         Ok(Self {
             realm: quickjs::Realm::with_options(config.realm_options)?,
-            namespaces: HashMap::new(),
+            module_namespaces: HashMap::new(),
             config,
             checkpoint_incomplete: false,
             deferred_checkpoint_error: None,
         })
     }
 
-    fn namespace(&mut self, name: &str) -> Result<quickjs::Value, ScriptError> {
-        if let Some(namespace) = self.namespaces.get(name) {
+    fn module_namespace(&mut self, specifier: &str) -> Result<quickjs::Value, ScriptError> {
+        if let Some(namespace) = self.module_namespaces.get(specifier) {
             return Ok(namespace.clone());
         }
         let namespace = self
             .realm
-            .evaluate(
-                quickjs::EvalSource {
-                    name: Some("<bobcat host namespace>"),
-                    ..quickjs::EvalSource::new("({})")
-                },
-                quickjs::EvalOptions::default(),
-            )
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
-        let global = self
-            .realm
-            .global_object()
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
-        self.realm
-            .set_property(&global, name, &namespace)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
-        self.namespaces.insert(name.to_owned(), namespace.clone());
+            .module_namespace(specifier)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::CallModuleExport))?;
+        self.module_namespaces
+            .insert(specifier.to_owned(), namespace.clone());
         Ok(namespace)
     }
 
@@ -191,30 +179,30 @@ impl fmt::Debug for QuickJsScriptEngine {
 }
 
 impl ScriptEngine for QuickJsScriptEngine {
-    fn register_host_function(
+    fn register_host_module_function(
         &mut self,
-        namespace: &str,
-        name: &str,
+        module_specifier: &str,
+        export_name: &str,
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
-        let namespace = self.namespace(namespace)?;
-        let function_name = name.to_owned();
-        let member = self
-            .realm
-            .function(name, u32::from(arity), move |arguments| {
-                let arguments = arguments
-                    .iter()
-                    .map(host_value_from_quickjs)
-                    .collect::<Result<Vec<_>, _>>()?;
-                callback(&arguments)
-                    .map(host_value_to_quickjs)
-                    .map_err(quickjs::HostFunctionError::new)
-            })
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))?;
+        self.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterHostModuleFunction)?;
         self.realm
-            .set_property(&namespace, &function_name, &member)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostFunction))
+            .register_host_module_function(
+                module_specifier,
+                export_name,
+                u32::from(arity),
+                move |arguments| {
+                    let arguments = arguments
+                        .iter()
+                        .map(host_value_from_quickjs)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    callback(&arguments)
+                        .map(host_value_to_quickjs)
+                        .map_err(quickjs::HostFunctionError::new)
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
     fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
@@ -265,18 +253,18 @@ impl ScriptEngine for QuickJsScriptEngine {
         }
     }
 
-    fn call_host_member(
+    fn call_module_export(
         &mut self,
-        namespace: &str,
-        name: &str,
+        module_specifier: &str,
+        export_name: &str,
         arguments: &[HostValue],
     ) -> Result<bool, ScriptError> {
-        const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallHostMember;
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
         self.resume_incomplete_checkpoint(PHASE)?;
-        let namespace = self.namespace(namespace)?;
+        let namespace = self.module_namespace(module_specifier)?;
         let member = self
             .realm
-            .property(&namespace, name)
+            .property(&namespace, export_name)
             .map_err(|error| map_quickjs_error(error, PHASE))?;
         if member.kind() != quickjs::ValueKind::Function {
             // The realm published nothing here. Not an error: a bundle with no
@@ -488,23 +476,62 @@ mod tests {
     }
 
     #[test]
-    fn host_functions_are_installed_under_a_namespace() {
+    fn host_functions_are_native_module_exports_not_globals() {
         let factory = engine_factory();
         let mut engine = factory.create().expect("QuickJS realm");
         engine
-            .register_host_function(
-                "bobcat",
+            .register_host_module_function(
+                "bobcat-internal:test",
                 "answer",
                 0,
                 Box::new(|_| Ok(HostValue::Number(42.0))),
             )
             .expect("register");
         engine
-            .execute_script(
-                "if (bobcat.answer() !== 42) throw new Error('wrong answer')",
-                "host-test.js",
+            .execute_module(
+                "import { answer } from 'bobcat-internal:test';\n\
+                 if (answer() !== 42) throw new Error('wrong answer');\n\
+                 if (typeof globalThis.answer !== 'undefined') throw new Error('host export leaked');\n\
+                 if (typeof globalThis.bobcat !== 'undefined') throw new Error('host object leaked');",
+                "host-test.mjs",
             )
             .expect("call host function");
+    }
+
+    #[test]
+    fn rust_calls_back_through_a_loaded_source_module_export() {
+        let factory = engine_factory();
+        let mut engine = factory.create().expect("QuickJS realm");
+        engine
+            .register_module_source(
+                "bobcat:callback",
+                "export function receive(value) { globalThis.received = value; }",
+            )
+            .expect("register callback module");
+        engine
+            .execute_module("import 'bobcat:callback';", "bobcat:boot")
+            .expect("load callback module");
+
+        assert!(
+            engine
+                .call_module_export(
+                    "bobcat:callback",
+                    "receive",
+                    &[HostValue::String(Arc::from("from Rust"))],
+                )
+                .expect("call callback export")
+        );
+        assert!(
+            !engine
+                .call_module_export("bobcat:callback", "missing", &[])
+                .expect("an absent export is not an engine failure")
+        );
+        engine
+            .execute_script(
+                "if (globalThis.received !== 'from Rust') throw new Error('callback did not run')",
+                "verify.js",
+            )
+            .expect("callback effect must be visible");
     }
 
     #[test]
@@ -585,8 +612,8 @@ mod tests {
         let seen: Arc<Mutex<Vec<HostValue>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         engine
-            .register_host_function(
-                "bobcat",
+            .register_host_module_function(
+                "bobcat-internal:test",
                 "echo",
                 1,
                 Box::new(move |arguments| {
@@ -601,18 +628,19 @@ mod tests {
             .expect("register");
 
         engine
-            .execute_script(
+            .execute_module(
                 r"
+                import { echo } from 'bobcat-internal:test';
                 const cases = [undefined, null, true, -0, 'a\u{1F980}b'];
                 for (const value of cases) {
-                    const echoed = bobcat.echo(value);
+                    const echoed = echo(value);
                     if (!Object.is(echoed, value)) {
                         throw new Error('echo changed ' + String(value));
                     }
                 }
-                if (!Number.isNaN(bobcat.echo(NaN))) throw new Error('NaN did not survive');
+                if (!Number.isNaN(echo(NaN))) throw new Error('NaN did not survive');
                 ",
-                "round-trip.js",
+                "round-trip.mjs",
             )
             .expect("every primitive crosses in both directions unchanged");
 
@@ -629,21 +657,27 @@ mod tests {
         let factory = engine_factory();
         let mut engine = factory.create().expect("QuickJS realm");
         engine
-            .register_host_function("bobcat", "echo", 1, Box::new(|_| Ok(HostValue::Undefined)))
+            .register_host_module_function(
+                "bobcat-internal:test",
+                "echo",
+                1,
+                Box::new(|_| Ok(HostValue::Undefined)),
+            )
             .expect("register");
 
         // The refusal is a JavaScript exception the script can observe, not a
         // lossy conversion: an object never reaches the callback at all.
         engine
-            .execute_script(
+            .execute_module(
                 r"
+                import { echo } from 'bobcat-internal:test';
                 let refused = '';
-                try { bobcat.echo({ answer: 42 }); } catch (error) { refused = String(error); }
+                try { echo({ answer: 42 }); } catch (error) { refused = String(error); }
                 if (!refused.includes('String arguments only')) {
                     throw new Error('an object was not refused at the boundary: ' + refused);
                 }
                 ",
-                "non-primitive.js",
+                "non-primitive.mjs",
             )
             .expect("the script observes the refusal and continues");
     }
@@ -653,21 +687,27 @@ mod tests {
         let factory = engine_factory();
         let mut engine = factory.create().expect("QuickJS realm");
         engine
-            .register_host_function("bobcat", "echo", 1, Box::new(|_| Ok(HostValue::Undefined)))
+            .register_host_module_function(
+                "bobcat-internal:test",
+                "echo",
+                1,
+                Box::new(|_| Ok(HostValue::Undefined)),
+            )
             .expect("register");
 
         // `HostValue::String` is an `Arc<str>`, so a lone surrogate has no
         // representation on the Rust side; it is refused rather than replaced.
         engine
-            .execute_script(
+            .execute_module(
                 r"
+                import { echo } from 'bobcat-internal:test';
                 let refused = '';
-                try { bobcat.echo('\uD800'); } catch (error) { refused = String(error); }
+                try { echo('\uD800'); } catch (error) { refused = String(error); }
                 if (!refused.includes('ill-formed UTF-16')) {
                     throw new Error('a lone surrogate was not refused: ' + refused);
                 }
                 ",
-                "surrogate.js",
+                "surrogate.mjs",
             )
             .expect("the script observes the refusal");
     }

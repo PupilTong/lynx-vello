@@ -15,7 +15,9 @@ use crate::tree::raw_text::drop_element_and_owned_text;
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
+const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
+const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
@@ -153,8 +155,8 @@ type ListenerNodes = HashSet<(dom::NodeId, bool)>;
 /// during a walk.
 ///
 /// Shared with the host functions that maintain it, so it is `Rc` rather than
-/// owned: `bobcat.enableEventListener` and the dispatch driver are different
-/// stack frames on the same thread.
+/// owned: the native `enableEventListener` export and the dispatch driver are
+/// different stack frames on the same thread.
 #[derive(Default)]
 struct EventState {
     /// The nodes the realm has a listener on, per event name and pass. Keyed
@@ -162,9 +164,10 @@ struct EventState {
     /// without touching the name again — and so an event no listener wants
     /// costs one lookup for the whole walk.
     listeners: RefCell<HashMap<Arc<str>, ListenerNodes>>,
-    /// Set by `bobcat.stopPropagation`. A pure flag write: the realm is inside
-    /// a `call_host_member` when it runs, and re-entering the realm from a
-    /// host function would nest an execution guard, which `QuickJS` refuses.
+    /// Set by the native `stopPropagation` export. A pure flag write: the
+    /// realm is inside a `call_module_export` when it runs, and re-entering
+    /// the realm from a host function would nest an execution guard, which
+    /// `QuickJS` refuses.
     stopped: Cell<bool>,
 }
 
@@ -287,9 +290,11 @@ impl MainThreadRuntime {
                 HostValue::Number(f64::from(event_id)),
                 HostValue::Boolean(deliverable.peek().is_none()),
             ];
-            let called =
-                self.engine
-                    .call_host_member("bobcat", "event_listener_callback", &arguments);
+            let called = self.engine.call_module_export(
+                ELEMENT_MODULE_SPECIFIER,
+                EVENT_DISPATCH_EXPORT,
+                &arguments,
+            );
             // Before anything else, including propagating a failure. Building
             // the event object alone takes the document — it reads two ids —
             // so a listener that merely throws would otherwise strand it in
@@ -377,7 +382,7 @@ fn install_bobcat(
         taken: None,
     }));
 
-    install_bobcat_object(
+    install_host_module(
         engine,
         &handle,
         on_flush,
@@ -406,11 +411,11 @@ fn install(
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
-        .register_host_function("bobcat", name, arity, Box::new(callback))
-        .map_err(|error| MainThreadError::from_engine("installing the bobcat namespace", error))
+        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+        .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
-/// Installs `bobcat.<name>` members that parse their arguments, borrow the
+/// Installs native host-module exports that parse their arguments, borrow the
 /// tree, and run against the private document. Each `$parser` is one of the
 /// argument helpers below, applied at the argument's position; `NAME` is the
 /// diagnostic prefix every helper and validator stitches into its error.
@@ -418,7 +423,7 @@ macro_rules! tree_members {
     ($engine:ident, $handle:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
     )*) => {$({
-        const NAME: &str = concat!("bobcat.", stringify!($name));
+        const NAME: &str = concat!("bobcat-internal:host.", stringify!($name));
         let tree = Rc::clone($handle);
         let arity = 0u8 $(+ { let _ = stringify!($arg); 1u8 })*;
         install($engine, stringify!($name), arity, move |arguments| {
@@ -436,7 +441,7 @@ macro_rules! tree_members {
     })*};
 }
 
-fn install_bobcat_object(
+fn install_host_module(
     engine: &mut dyn ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
@@ -493,10 +498,10 @@ fn install_bobcat_object(
     let tree = Rc::clone(handle);
     let state = Rc::clone(events);
     install(engine, "dropElement", 1, move |arguments| {
-        let node = node_id_argument("bobcat.dropElement", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat.dropElement", &tree)?;
+        let node = node_id_argument("bobcat-internal:host.dropElement", arguments, 0)?;
+        let mut tree = borrow_tree("bobcat-internal:host.dropElement", &tree)?;
         let document = tree.tree();
-        validate_removable(document, "bobcat.dropElement", node)?;
+        validate_removable(document, "bobcat-internal:host.dropElement", node)?;
         drop_element_and_owned_text(document, node);
         state.listeners.borrow_mut().retain(|name, nodes| {
             nodes.retain(|(id, _)| {
@@ -515,7 +520,7 @@ fn install_bobcat_object(
 
     let tree = Rc::clone(handle);
     install(engine, "flushElementTree", 0, move |_arguments| {
-        borrow_tree("bobcat.flushElementTree", &tree)?.flush();
+        borrow_tree("bobcat-internal:host.flushElementTree", &tree)?.flush();
         on_flush();
         Ok(HostValue::Undefined)
     })?;
@@ -538,9 +543,9 @@ fn install_event_members(
     let state = Rc::clone(events);
     let names = Arc::clone(&listener_names);
     install(engine, "enableEventListener", 3, move |arguments| {
-        let node = node_id_argument("bobcat.enableEventListener", arguments, 0)?;
-        let capture = capture_argument("bobcat.enableEventListener", arguments, 1)?;
-        let name = string_argument("bobcat.enableEventListener", arguments, 2)?;
+        let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
+        let capture = capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
+        let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
         if state
             .listeners
             .borrow_mut()
@@ -558,9 +563,9 @@ fn install_event_members(
     let state = Rc::clone(events);
     let names = listener_names;
     install(engine, "disableEventListener", 3, move |arguments| {
-        let node = node_id_argument("bobcat.disableEventListener", arguments, 0)?;
-        let capture = capture_argument("bobcat.disableEventListener", arguments, 1)?;
-        let name = string_argument("bobcat.disableEventListener", arguments, 2)?;
+        let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
+        let capture = capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
+        let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
         let mut listeners = state.listeners.borrow_mut();
         if let Some(nodes) = listeners.get_mut(name) {
             if nodes.remove(&(node, capture)) {
@@ -636,7 +641,9 @@ fn install_attribute_members(
             let tag = document
                 .get(node)
                 .and_then(dom::Node::tag_name)
-                .ok_or_else(|| "bobcat.tagName requires a live element tag".to_owned())?;
+                .ok_or_else(|| {
+                    "bobcat-internal:host.tagName requires a live element tag".to_owned()
+                })?;
             Ok(HostValue::String(Arc::from(tag)))
         }
     }
@@ -820,7 +827,49 @@ fn string_argument<'a>(
 #[cfg(all(test, feature = "quickjs"))]
 mod tests {
     use super::*;
+    use crate::script::HostCallback;
     use crate::tree::{PageConfig, Viewport, new_document};
+
+    type RecordedCalls = Vec<(String, String, Vec<HostValue>)>;
+
+    #[derive(Debug)]
+    struct RecordingEngine {
+        calls: Arc<std::sync::Mutex<RecordedCalls>>,
+    }
+
+    impl ScriptEngine for RecordingEngine {
+        fn register_host_module_function(
+            &mut self,
+            _module_specifier: &str,
+            _export_name: &str,
+            _arity: u8,
+            _callback: HostCallback,
+        ) -> Result<(), ScriptError> {
+            Ok(())
+        }
+
+        fn execute_script(&mut self, _source: &str, _source_name: &str) -> Result<(), ScriptError> {
+            Ok(())
+        }
+
+        fn call_module_export(
+            &mut self,
+            module_specifier: &str,
+            export_name: &str,
+            arguments: &[HostValue],
+        ) -> Result<bool, ScriptError> {
+            self.calls.lock().expect("call recorder").push((
+                module_specifier.to_owned(),
+                export_name.to_owned(),
+                arguments.to_vec(),
+            ));
+            Ok(true)
+        }
+
+        fn collect_garbage(&mut self) -> Result<(), ScriptError> {
+            Ok(())
+        }
+    }
 
     /// The handle a packed id names. A handle carries a generation as well as
     /// an arena key, so a test spells one the way script sees it — and for a
@@ -932,7 +981,7 @@ mod tests {
                 for (const name of [
                   'lynx', 'SystemInfo', '__globalProps', 'NativeModules',
                   '_AddEventListener', '_ReportError', '_SetSourceMapRelease',
-                  '__OnLifecycleEvent'
+                  '__OnLifecycleEvent', 'bobcat'
                 ]) {
                   if (name in globalThis) {
                     throw new Error(name + ' must be supplied only by the injected import');
@@ -1025,8 +1074,9 @@ mod tests {
         let error = runtime
             .run_main_thread_script(
                 r"
+                import { removeElement } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
-                  bobcat.removeElement(999999);
+                  removeElement(999999);
                 };
                 ",
                 "app:///invalid-tree-operation.js",
@@ -1488,22 +1538,12 @@ mod tests {
             )
             .expect("main-thread script");
 
-        // Replacing the realm's own callback is how the host's half of the
-        // contract becomes observable: what the realm does with these numbers
-        // is its business, but the numbers themselves are the host's.
-        runtime
-            .evaluate_module(
-                r"
-                globalThis.calls = [];
-                bobcat.event_listener_callback = (node, target, phase, name,
-                                                  detail, eventId, isLastCall) => {
-                  calls.push([node, eventId, isLastCall]);
-                };
-                ",
-                "app:///record.js",
-                "installing the recorder",
-            )
-            .expect("recorder");
+        // Swap only the VM boundary for a recorder. The path and listener
+        // index are still the ones the real Element module registered above.
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        runtime.engine = Box::new(RecordingEngine {
+            calls: Arc::clone(&calls),
+        });
 
         for _ in 0..2 {
             assert!(
@@ -1513,21 +1553,36 @@ mod tests {
             );
         }
 
-        runtime
-            .evaluate_module(
-                r"
-                const shape = calls.map((call) => call.join(':')).join('|');
-                // Two deliveries per walk: `outer` registered nothing, so the
-                // flag has to land on the last *delivered* step, not on the
-                // last step of the path.
-                if (shape !== '2:0:false|4:0:true|2:1:false|4:1:true') {
-                  throw new Error('unexpected walk shape: ' + shape);
-                }
-                ",
-                "app:///verify.js",
-                "verifying",
-            )
-            .expect("verification");
+        let calls = calls.lock().expect("call recorder");
+        assert!(calls.iter().all(|(module, export, _)| {
+            module == ELEMENT_MODULE_SPECIFIER && export == EVENT_DISPATCH_EXPORT
+        }));
+        let shape: Vec<_> = calls
+            .iter()
+            .map(|(_, _, arguments)| {
+                let HostValue::Number(node) = arguments[0] else {
+                    panic!("node id must be numeric")
+                };
+                let HostValue::Number(event_id) = arguments[5] else {
+                    panic!("event id must be numeric")
+                };
+                let HostValue::Boolean(is_last) = arguments[6] else {
+                    panic!("last-call flag must be boolean")
+                };
+                (node, event_id, is_last)
+            })
+            .collect();
+        // Two deliveries per walk: `outer` registered nothing, so the flag
+        // lands on the last delivered step, not the last path step.
+        assert_eq!(
+            shape,
+            [
+                (2.0, 0.0, false),
+                (4.0, 0.0, true),
+                (2.0, 1.0, false),
+                (4.0, 1.0, true),
+            ]
+        );
     }
 
     #[test]

@@ -246,17 +246,20 @@ useful signal for currently-compatible versions of those libraries.
   `Viewport`, `new_document`, `MainThreadRuntime`, and the concrete QuickJS
   adapter are all crate-private.
   The private `MainThreadRuntime`
-  installs the global `bobcat` object (one Rust host function per member —
-  `createPage`, `createElement`, `setAttribute`, `set_node_property`,
-  `removeAttribute`,
-  `getAttribute`, `tagName`, `insertBefore`,
-  `removeElement`, `replaceElement`, `dropElement`, `flushElementTree` — all
-  speaking DOM vocabulary over numeric `NodeId`s), then registers the
+  registers the native QuickJS ESM `bobcat-internal:host` (one Rust-backed
+  named function export per member — `createPage`, `createElement`,
+  `setAttribute`, `set_node_property`, `removeAttribute`, `getAttribute`,
+  `tagName`, `parentNode`, `insertBefore`, `removeElement`, `replaceElement`,
+  `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
+  `disableEventListener`, and `stopPropagation` — all speaking DOM vocabulary
+  over numeric `NodeId`s), then registers the
   core-owned compatibility shell as `bobcat:runtime` and the embedded Element
   PAPI runtime (`packages/bobcat-element`) as `bobcat:element` in QuickJS's
-  synchronous preloaded ESM loader. A `.web.bundle`'s `lepusCode.root` or raw
-  XML main body becomes a real ESM at its resolved entry URL: core prepends
-  named imports from both built-ins. The `bobcat:boot` ESM imports
+  synchronous preloaded ESM loader. The Element module imports native
+  operations directly from `bobcat-internal:host`; no host object or host
+  function is installed on `globalThis`. A `.web.bundle`'s `lepusCode.root` or
+  raw XML main body becomes a real ESM at its resolved entry URL: core
+  prepends named imports from both built-ins. The `bobcat:boot` ESM imports
   `__FlushElementTree` from `bobcat:element`, uses top-level await on
   `import(entry_url)`, and then runs
   `processData` → `renderPage` → `__FlushElementTree` inside JavaScript; Rust
@@ -287,7 +290,7 @@ useful signal for currently-compatible versions of those libraries.
   `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
   one `style` attribute write, while a record first replaces the attribute
   with an empty declaration block and then fans out, in enumeration order,
-  into one name-based `bobcat.set_node_property` call per non-null value.
+  into one name-based native `set_node_property` call per non-null value.
   Ordinary camelCase keys are hyphenated, while case-sensitive `--*` custom
   property names pass through unchanged.
   The host operation implements the name/value subset of CSSOM
@@ -315,19 +318,20 @@ useful signal for currently-compatible versions of those libraries.
   handler string, and `bind_type` selecting Lynx's `catch` forms, which an
   author writes as a listener that calls `__StopPropagation` first.
   The realm tells the host which nodes are worth visiting: a listener list
-  going empty-to-occupied calls `bobcat.enableEventListener(node, capture,
-  name)` and back calls `disableEventListener`, keyed by a weak
+  going empty-to-occupied calls the imported native
+  `enableEventListener(node, capture, name)` and back calls
+  `disableEventListener`, keyed by a weak
   `NodeId`→handle index cleared by the same sweep that drops the element. The
-  host walks and calls back into `bobcat.event_listener_callback` — published
-  by the realm onto the host's own namespace, and reached through
-  `ScriptEngine::call_host_member`, the one Rust-to-JS path in the tree — once
-  per node per pass, carrying an id naming the dispatch and whether the call is
-  its last. Those two let the realm keep one event object for the whole walk,
-  so a property one listener writes is there for the next, while the host
-  retains nothing of the realm's. `stopImmediatePropagation` never leaves the
-  realm, since it only skips the rest of one node's listeners; `stopPropagation`
-  calls `bobcat.stopPropagation`, which is a pure flag write because re-entering
-  the realm from a host function would nest a `QuickJS` execution guard.
+  host walks and calls the Element module's `__BobcatDispatchEvent` export
+  through `ScriptEngine::call_module_export`, the one Rust-to-JS path in the
+  tree, once per node per pass, carrying an id naming the dispatch and whether
+  the call is its last. Those two let the realm keep one event object for the
+  whole walk, so a property one listener writes is there for the next, while
+  the host retains nothing of the realm's. `stopImmediatePropagation` never
+  leaves the realm, since it only skips the rest of one node's listeners;
+  `stopPropagation` calls the imported native `stopPropagation`, which is a
+  pure flag write because re-entering the realm from a host function would
+  nest a `QuickJS` execution guard.
   `__SetCSSId` is absent rather than unimplemented — it names the author-CSS
   scope an element cascades in, and until a layer lowers a decoded `StyleInfo`
   into **scoped** author rules there is nothing to validate an encoding against
@@ -337,8 +341,8 @@ useful signal for currently-compatible versions of those libraries.
   with the parent-component css-id inheritance that feeds it.
   Creation calls return plain JavaScript handle objects minted by the PAPI
   runtime; each carries its DOM `NodeId` under a realm-local symbol and is
-  registered with a `FinalizationRegistry` whose cleanup calls
-  `bobcat.dropElement`, freeing only that element — its descendants remain
+  registered with a `FinalizationRegistry` whose cleanup calls the imported
+  native `dropElement`, freeing only that element — its descendants remain
   live but detached until their own handles are collected, except the text
   node a `raw-text` reflects, which is freed with its carrier because no
   handle could ever name it. Cleanup runs as
@@ -349,7 +353,7 @@ useful signal for currently-compatible versions of those libraries.
   `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
   the components the engine defines (`tree::raw_text`, one file per
   component, each owning its own UA rules and tests);
-  the `bobcat` host functions call `dom::Document` directly — while tag
+  the native host-module functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
   `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
   also the element's Lynx `unique_id` — one number, issued by the DOM, never
@@ -382,14 +386,16 @@ useful signal for currently-compatible versions of those libraries.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
-  bridge owns only the generic synchronous preloaded-source loader and settled
-  Promise inspection; Bobcat's specifiers, entry transform, graph membership,
-  and boot policy stay in the feature-gated core adapter.
+  bridge owns only the generic synchronous preloaded source/native-module
+  loader, loaded-module namespace access, and settled Promise inspection;
+  Bobcat's specifiers, entry transform, graph membership, and boot policy stay
+  in the feature-gated core adapter.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, pending-job pump,
-  synchronous preloaded module loader, and module-evaluation Promise state.
+  synchronous preloaded source/native-module loader, loaded-module namespace
+  access, and module-evaluation Promise state.
   Every heap allocation made by the C shim or the five compiled QuickJS C
   translation units is redirected through a private C ABI into Rust's global
   allocator; a fixed aligned prefix supplies the size required for matching
@@ -410,8 +416,9 @@ useful signal for currently-compatible versions of those libraries.
   its process-global class-ID mutex to the same feature, the bridge allocates
   its one host class ID through a Rust `OnceLock` and registers that ID
   separately in each runtime, preserving concurrent native realm creation.
-  It also owns the **host-function seam**: `Realm::function` /
-  `define_global_function` back a JS callable with a Rust `FnMut`, dispatched
+  It also owns the **host-function seam**: `Realm::function`,
+  `define_global_function`, and `register_host_module_function` back a JS
+  callable with a Rust `FnMut`, dispatched
   through one C trampoline (`JS_NewCFunctionData` + a realm-owned callback
   table reached via the context opaque). Host callbacks speak `HostValue`, a
   primitives-only boundary (undefined/null/bool/number/string) — ordinary
@@ -626,12 +633,13 @@ useful signal for currently-compatible versions of those libraries.
   PAPI shape and unused. Lifecycle: collection is the only release path —
   web-core's model, where a swept `WeakRef` is what frees an element.
   Every non-page handle is registered with a `FinalizationRegistry` whose
-  cleanup calls `bobcat.dropElement`; cleanup runs as a pending job at the
-  host's job checkpoints, and never at realm teardown, which preserves the
-  last committed tree. The JavaScript layer deliberately does not validate
-  handles: a foreign handle resolves to `undefined`, which the private native
-  boundary rejects as a JavaScript error before entering `dom`. Native access
-  remains limited to `globalThis.bobcat`; the realm has no
+  cleanup calls the imported native `dropElement`; cleanup runs as a pending
+  job at the host's job checkpoints, and never at realm teardown, which
+  preserves the last committed tree. The JavaScript layer deliberately does
+  not validate handles: a foreign handle resolves to `undefined`, which the
+  private native boundary rejects as a JavaScript error before entering
+  `dom`. Native access is limited to named imports from the native
+  `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat` and no
   `console`/`setTimeout`/DOM. Named exports are the only Element-PAPI surface
   for transformed MTS entries; the module installs no `__*` globals. Rstest
   imports the ESM normally and `tsc --noEmit` checks it under `checkJs`.

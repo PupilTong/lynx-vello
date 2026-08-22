@@ -285,11 +285,12 @@ impl EngineEventSender {
 /// script thread that learns about registrations and the presenting thread
 /// that synthesizes gestures.
 ///
-/// Maintained by `bobcat.enableEventListener`/`disableEventListener` — the
-/// realm already reports only empty↔occupied transitions, so the script side
-/// touches this on registration edges, never per event. The presenting side
-/// reads it when a long-press deadline resolves. Neither touch goes anywhere
-/// near the tree slot, so the locks-twice-per-batch law is untouched.
+/// Maintained by the native `enableEventListener`/`disableEventListener` ESM
+/// exports — the realm already reports only empty↔occupied transitions, so
+/// the script side touches this on registration edges, never per event. The
+/// presenting side reads it when a long-press deadline resolves. Neither
+/// touch goes anywhere near the tree slot, so the locks-twice-per-batch law is
+/// untouched.
 ///
 /// The set is name-level over the whole document. For gesture synthesis that
 /// is a recorded approximation: a `longpress` listener anywhere suppresses a
