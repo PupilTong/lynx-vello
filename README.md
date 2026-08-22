@@ -14,7 +14,7 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
 | [`packages/bobcat-element`](packages/bobcat-element) | The `bobcat:element` ESM embedded into `bobcat-core` with `include_str!`. Its named `__*` exports own the Element PAPI, Lynx tag vocabulary, native `NodeId` handles, and `WeakRef`/`FinalizationRegistry` lifecycle. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
-| [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, a synchronous preloaded module loader, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
+| [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, synchronous source/native-module loading, module namespaces, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
 | [`crates/flashbulb`](crates/flashbulb) | Screenshot testing infrastructure: RGBA images, a `pixelmatch` port matching Playwright's tolerances, and golden-file management. This is to lynx-vello's render tests what Playwright is to lynx-stack's `web-core-e2e` and `web-elements`. |
 
 `hughie` exposes Flex, Grid, Linear, and Relative as peer generic
@@ -22,9 +22,10 @@ algorithms over host-owned topology, styles, layout state, and caches.
 `dom` is the concrete Stylo-backed host, including display dispatch,
 dirty/cache wiring, the positioned pass, text measurement, visual ordering,
 and private scene construction. `bobcat-core`'s `tree` module is the native
-element layer directly over `dom`, exposed privately as the `bobcat` host
-namespace. QuickJS preloads `bobcat:runtime`, `bobcat:element`, and the resolved
-entry MTS URL. The `bobcat:boot` ESM uses top-level await to import that URL,
+element layer directly over `dom`, exposed to the Element PAPI as named
+functions in the native `bobcat-internal:host` ESM. QuickJS preloads
+`bobcat:runtime`, `bobcat:element`, and the resolved entry MTS URL. The
+`bobcat:boot` ESM uses top-level await to import that URL,
 then calls `processData`, `renderPage`, and `__FlushElementTree` inside
 JavaScript before reporting startup completion.
 

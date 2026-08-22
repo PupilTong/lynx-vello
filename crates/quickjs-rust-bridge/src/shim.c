@@ -40,8 +40,22 @@ typedef struct QjsModuleSource {
     char *name;
     uint8_t *source;
     size_t source_length;
+    JSModuleDef *definition;
     struct QjsModuleSource *next;
 } QjsModuleSource;
+
+typedef struct QjsHostModuleExport {
+    char *name;
+    JSValue value;
+    struct QjsHostModuleExport *next;
+} QjsHostModuleExport;
+
+typedef struct QjsHostModule {
+    char *name;
+    JSModuleDef *definition;
+    QjsHostModuleExport *exports;
+    struct QjsHostModule *next;
+} QjsHostModule;
 
 enum QjsHostArgKind {
     QJS_ARG_UNDEFINED = 0,
@@ -89,6 +103,7 @@ typedef struct QjsRuntime {
     void *host_opaque;
     JSClassID host_owner_class_id;
     QjsModuleSource *module_sources;
+    QjsHostModule *host_modules;
 } QjsRuntime;
 
 
@@ -213,30 +228,98 @@ static int qjs_interrupt_trampoline(JSRuntime *raw, void *opaque) {
     return runtime->interrupt_callback(runtime->interrupt_opaque);
 }
 
-static JSModuleDef *qjs_module_loader(JSContext *context,
-                                      const char *module_name, void *opaque) {
-    QjsRuntime *runtime = opaque;
+static QjsModuleSource *qjs_find_module_source(QjsRuntime *runtime,
+                                               const char *name) {
     QjsModuleSource *module = runtime->module_sources;
-    JSValue compiled;
-    JSModuleDef *definition;
 
-    while (module != NULL && strcmp(module->name, module_name) != 0) {
+    while (module != NULL && strcmp(module->name, name) != 0) {
+        module = module->next;
+    }
+    return module;
+}
+
+static QjsHostModule *qjs_find_host_module(QjsRuntime *runtime,
+                                           const char *name) {
+    QjsHostModule *module = runtime->host_modules;
+
+    while (module != NULL && strcmp(module->name, name) != 0) {
+        module = module->next;
+    }
+    return module;
+}
+
+static int qjs_host_module_init(JSContext *context, JSModuleDef *definition) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsHostModule *module;
+    QjsHostModuleExport *exported;
+
+    if (runtime == NULL) {
+        return -1;
+    }
+    module = runtime->host_modules;
+    while (module != NULL && module->definition != definition) {
         module = module->next;
     }
     if (module == NULL) {
+        JS_ThrowInternalError(context,
+                              "native host module is not registered");
+        return -1;
+    }
+    for (exported = module->exports; exported != NULL;
+         exported = exported->next) {
+        if (JS_SetModuleExport(context, definition, exported->name,
+                               JS_DupValue(context, exported->value)) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static JSModuleDef *qjs_module_loader(JSContext *context,
+                                      const char *module_name, void *opaque) {
+    QjsRuntime *runtime = opaque;
+    QjsModuleSource *module = qjs_find_module_source(runtime, module_name);
+    QjsHostModule *host_module;
+    QjsHostModuleExport *exported;
+    JSValue compiled;
+    JSModuleDef *definition;
+
+    if (module != NULL) {
+        if (module->definition != NULL) {
+            return module->definition;
+        }
+        compiled = JS_Eval(context, (const char *)module->source,
+                           module->source_length, module->name,
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if (JS_IsException(compiled)) {
+            return NULL;
+        }
+        definition = JS_VALUE_GET_PTR(compiled);
+        module->definition = definition;
+        JS_FreeValue(context, compiled);
+        return definition;
+    }
+
+    host_module = qjs_find_host_module(runtime, module_name);
+    if (host_module == NULL) {
         JS_ThrowReferenceError(context, "module '%s' is not preloaded",
                                module_name);
         return NULL;
     }
-
-    compiled = JS_Eval(context, (const char *)module->source,
-                       module->source_length, module->name,
-                       JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
-    if (JS_IsException(compiled)) {
+    if (host_module->definition != NULL) {
+        return host_module->definition;
+    }
+    definition = JS_NewCModule(context, module_name, qjs_host_module_init);
+    if (definition == NULL) {
         return NULL;
     }
-    definition = JS_VALUE_GET_PTR(compiled);
-    JS_FreeValue(context, compiled);
+    host_module->definition = definition;
+    for (exported = host_module->exports; exported != NULL;
+         exported = exported->next) {
+        if (JS_AddModuleExport(context, definition, exported->name) < 0) {
+            return NULL;
+        }
+    }
     return definition;
 }
 
@@ -245,6 +328,24 @@ static void qjs_module_sources_free(QjsModuleSource *module) {
         QjsModuleSource *next = module->next;
         free(module->name);
         free(module->source);
+        free(module);
+        module = next;
+    }
+}
+
+static void qjs_host_modules_free(JSRuntime *runtime,
+                                  QjsHostModule *module) {
+    while (module != NULL) {
+        QjsHostModule *next = module->next;
+        QjsHostModuleExport *exported = module->exports;
+        while (exported != NULL) {
+            QjsHostModuleExport *next_export = exported->next;
+            JS_FreeValueRT(runtime, exported->value);
+            free(exported->name);
+            free(exported);
+            exported = next_export;
+        }
+        free(module->name);
         free(module);
         module = next;
     }
@@ -296,6 +397,7 @@ void qjs_runtime_free(QjsRuntime *runtime) {
         free(current);
         current = next;
     }
+    qjs_host_modules_free(runtime->raw, runtime->host_modules);
     JS_FreeRuntime(runtime->raw);
     qjs_module_sources_free(runtime->module_sources);
     free(runtime);
@@ -303,15 +405,12 @@ void qjs_runtime_free(QjsRuntime *runtime) {
 
 int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
                            const uint8_t *source, size_t source_length) {
-    QjsModuleSource *current;
     QjsModuleSource *module;
     size_t name_length;
 
-    for (current = runtime->module_sources; current != NULL;
-         current = current->next) {
-        if (strcmp(current->name, name) == 0) {
-            return -2;
-        }
+    if (qjs_find_module_source(runtime, name) != NULL ||
+        qjs_find_host_module(runtime, name) != NULL) {
+        return -2;
     }
     if (source_length == SIZE_MAX) {
         return -1;
@@ -340,6 +439,96 @@ int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
     module->next = runtime->module_sources;
     runtime->module_sources = module;
     return 0;
+}
+
+int qjs_runtime_add_host_module_export(QjsRuntime *runtime, const char *name,
+                                       const char *export_name,
+                                       const QjsValue *value) {
+    QjsHostModule *module;
+    QjsHostModuleExport *current;
+    QjsHostModuleExport *exported;
+    size_t export_name_length;
+    int new_module = 0;
+
+    if (qjs_find_module_source(runtime, name) != NULL) {
+        return -2;
+    }
+    module = qjs_find_host_module(runtime, name);
+    if (module != NULL && module->definition != NULL) {
+        return -4;
+    }
+    if (module != NULL) {
+        for (current = module->exports; current != NULL;
+             current = current->next) {
+            if (strcmp(current->name, export_name) == 0) {
+                return -3;
+            }
+        }
+    } else {
+        size_t name_length = strlen(name);
+        module = calloc(1, sizeof(*module));
+        if (module == NULL) {
+            return -1;
+        }
+        module->name = malloc(name_length + 1);
+        if (module->name == NULL) {
+            free(module);
+            return -1;
+        }
+        memcpy(module->name, name, name_length + 1);
+        new_module = 1;
+    }
+
+    export_name_length = strlen(export_name);
+    exported = calloc(1, sizeof(*exported));
+    if (exported == NULL) {
+        if (new_module) {
+            free(module->name);
+            free(module);
+        }
+        return -1;
+    }
+    exported->name = malloc(export_name_length + 1);
+    if (exported->name == NULL) {
+        free(exported);
+        if (new_module) {
+            free(module->name);
+            free(module);
+        }
+        return -1;
+    }
+    memcpy(exported->name, export_name, export_name_length + 1);
+    exported->value = JS_DupValue(runtime->context, value->value);
+    exported->next = module->exports;
+    module->exports = exported;
+    if (new_module) {
+        module->next = runtime->host_modules;
+        runtime->host_modules = module;
+    }
+    return 0;
+}
+
+QjsValue *qjs_module_namespace(JSContext *context, const char *name) {
+    QjsRuntime *runtime = JS_GetContextOpaque(context);
+    QjsModuleSource *source;
+    QjsHostModule *host;
+    JSModuleDef *definition = NULL;
+
+    if (runtime != NULL) {
+        source = qjs_find_module_source(runtime, name);
+        host = qjs_find_host_module(runtime, name);
+        if (source != NULL) {
+            definition = source->definition;
+        } else if (host != NULL) {
+            definition = host->definition;
+        }
+    }
+    if (definition == NULL) {
+        JS_ThrowReferenceError(context, "module '%s' has not been loaded",
+                               name);
+        return NULL;
+    }
+    return qjs_box(context, JS_GetModuleNamespace(context, definition));
 }
 
 JSContext *qjs_context_new(QjsRuntime *runtime) {

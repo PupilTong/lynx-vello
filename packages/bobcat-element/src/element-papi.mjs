@@ -1,38 +1,58 @@
 // @ts-check
+import {
+  createElement,
+  createPage,
+  disableEventListener,
+  dropElement,
+  enableEventListener,
+  flushElementTree,
+  getAttribute,
+  insertBefore,
+  parentNode,
+  removeAttribute,
+  removeElement,
+  replaceElement,
+  set_node_property as setNodeProperty,
+  setAttribute,
+  stopPropagation,
+  swapElement,
+  tagName,
+} from "bobcat-internal:host";
+
 // The Lynx Element PAPI runtime.
 //
 // Preloaded as the `bobcat:element` ESM inside the QuickJS main-thread realm;
 // its Rstest suite imports the same bytes. It reaches native code only through
-// `globalThis.bobcat`, installed before the module graph runs. Named exports
-// are the MTS bindings; this module installs no Element-PAPI globals.
+// named exports of the native `bobcat-internal:host` ESM. Named exports are
+// the MTS bindings; this module installs no Element-PAPI globals.
 //
 // # Element PAPI scope
 //
 // | PAPI | Backed by |
 // | --- | --- |
-// | `__CreatePage(componentID, componentCSSID)` | `bobcat.createPage` |
-// | `__CreateElement(tag, parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateWrapperElement(parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateText(parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateImage(parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateView(parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateScrollView(parentComponentUniqueID)` | `bobcat.createElement` |
-// | `__CreateRawText(text)` | `bobcat.createElement` + `bobcat.setAttribute` |
-// | `__CreateList(parentComponentUniqueID, ...)` | `bobcat.createElement` + this runtime's own store |
-// | `__AppendElement(parent, child)` | `bobcat.insertBefore` |
-// | `__InsertElementBefore(parent, child, reference?)` | `bobcat.insertBefore` |
-// | `__RemoveElement(parent, child)` | `bobcat.removeElement` |
-// | `__ReplaceElement(newElement, oldElement)` | `bobcat.replaceElement` |
-// | `__ReplaceElements(parent, newChildren, oldChildren?)` | `bobcat.parentNode` + `bobcat.insertBefore` + `bobcat.removeElement` |
-// | `__SwapElement(childA, childB)` | `bobcat.swapElement` / `bobcat.replaceElement` |
-// | `__SetClasses(element, classNames)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
-// | `__SetID(element, id)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
-// | `__GetID(element)` | `bobcat.getAttribute` |
-// | `__GetTag(element)` | `bobcat.tagName` |
+// | `__CreatePage(componentID, componentCSSID)` | native `createPage` export |
+// | `__CreateElement(tag, parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateWrapperElement(parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateText(parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateImage(parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateView(parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateScrollView(parentComponentUniqueID)` | native `createElement` export |
+// | `__CreateRawText(text)` | native `createElement` + `setAttribute` exports |
+// | `__CreateList(parentComponentUniqueID, ...)` | native `createElement` export + this runtime's own store |
+// | `__AppendElement(parent, child)` | native `insertBefore` export |
+// | `__InsertElementBefore(parent, child, reference?)` | native `insertBefore` export |
+// | `__RemoveElement(parent, child)` | native `removeElement` export |
+// | `__ReplaceElement(newElement, oldElement)` | native `replaceElement` export |
+// | `__ReplaceElements(parent, newChildren, oldChildren?)` | native `parentNode` + `insertBefore` + `removeElement` exports |
+// | `__SwapElement(childA, childB)` | native `swapElement` / `replaceElement` exports |
+// | `__SetClasses(element, classNames)` | native `setAttribute` / `removeAttribute` exports |
+// | `__SetID(element, id)` | native `setAttribute` / `removeAttribute` exports |
+// | `__GetID(element)` | native `getAttribute` export |
+// | `__GetTag(element)` | native `tagName` export |
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
-// | `__SetInlineStyles(element, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` / `bobcat.set_node_property` |
+// | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `set_node_property` exports |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
-// | `__SetAttribute(element, name, value)` | `bobcat.setAttribute` / `bobcat.removeAttribute` |
+// | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
 // | `__AddEvent(element, type, name, handler)` | this runtime's own store |
 // | `__GetEvent(element, name, type)` | this runtime's own store |
@@ -40,9 +60,9 @@
 // | `__SetEvents(element, events)` | this runtime's own store |
 // | `__AddEventListener(element, name, callback, options?)` | this runtime's own store |
 // | `__RemoveEventListener(element, name, callback, options?)` | this runtime's own store |
-// | `__StopPropagation(event)` | `bobcat.stopPropagation` |
-// | `__StopImmediatePropagation(event)` | `bobcat.stopPropagation` + this runtime's own store |
-// | `__FlushElementTree()` | `bobcat.flushElementTree` |
+// | `__StopPropagation(event)` | native `stopPropagation` export |
+// | `__StopImmediatePropagation(event)` | native `stopPropagation` export + this runtime's own store |
+// | `__FlushElementTree()` | native `flushElementTree` export |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
 // web-core generation), `__AddClass`, `__AddInlineStyle`, the dataset,
@@ -71,15 +91,15 @@
 // capture), a second add of those four is ignored outright, and `once` and
 // capture behave as `addEventListener`'s do. What is not the standard's is
 // that the host has to be told a node is worth visiting. A list going from
-// empty to occupied calls `bobcat.enableEventListener(node, capture, name)`
-// and back to empty calls `bobcat.disableEventListener(...)`, so the host
+// empty to occupied calls the native `enableEventListener` export and back to
+// empty calls `disableEventListener`, so the host
 // keeps an index and skips every node that has nothing registered — the walk
 // crosses the boundary only where a listener actually is.
 //
 // Dispatch is the host's walk and this file's per-node work. The host
 // computes the whole event path while it holds the document, releases it, and
-// then calls `bobcat.event_listener_callback(node, target, phase, name,
-// detail, eventId, isLastCall)` once per node per pass. Releasing first is
+// then calls this module's `__BobcatDispatchEvent(node, target, phase, name,
+// detail, eventId, isLastCall)` export once per node per pass. Releasing first is
 // what lets a callback mutate the tree. `phase` is the *pass* (`0` bubble, `1`
 // capture), not the standard's `eventPhase`. They are different numbers, and
 // at the target they do not even correspond, since both passes visit it; the
@@ -98,7 +118,7 @@
 // the walk does not go on naming the node the walk stopped on.
 //
 // Propagation splits along the same line. Both stop methods call
-// `bobcat.stopPropagation`, since the standard's `stopImmediatePropagation`
+// the native `stopPropagation` export, since the standard's `stopImmediatePropagation`
 // implies `stopPropagation` and ending the walk is the host's. What stays
 // here is the immediate half — skipping the rest of *this* node's listeners —
 // because one delivery covers a whole node and the host has no finer step.
@@ -169,41 +189,12 @@
 //   against that case because it cannot arise.
 // - Collection is the only release path — web-core's model, where a swept
 //   WeakRef is what frees an element. Every non-page handle is registered
-//   with a FinalizationRegistry whose cleanup calls `bobcat.dropElement`;
+//   with a FinalizationRegistry whose cleanup calls the native `dropElement`;
 //   cleanup runs as a pending job at the host's job checkpoints, and never
 //   at realm teardown, so the last committed tree survives the bootstrap
 //   realm.
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
-
-const bobcat = globalThis.bobcat;
-if (bobcat === null || typeof bobcat !== "object") {
-  throw new Error(
-    "the element PAPI runtime requires the native bobcat object on globalThis",
-  );
-}
-
-// Captured once so later tampering with `globalThis.bobcat` cannot redirect
-// the PAPI's native calls.
-const native = {
-  createPage: bobcat.createPage,
-  createElement: bobcat.createElement,
-  setAttribute: bobcat.setAttribute,
-  setNodeProperty: bobcat.set_node_property,
-  removeAttribute: bobcat.removeAttribute,
-  getAttribute: bobcat.getAttribute,
-  tagName: bobcat.tagName,
-  parentNode: bobcat.parentNode,
-  insertBefore: bobcat.insertBefore,
-  removeElement: bobcat.removeElement,
-  replaceElement: bobcat.replaceElement,
-  swapElement: bobcat.swapElement,
-  dropElement: bobcat.dropElement,
-  flushElementTree: bobcat.flushElementTree,
-  enableEventListener: bobcat.enableEventListener,
-  disableEventListener: bobcat.disableEventListener,
-  stopPropagation: bobcat.stopPropagation,
-};
 
 const nodeIdSymbol = Symbol("nodeId");
 
@@ -322,7 +313,7 @@ const handlesByNodeId = new Map();
 const registry = new FinalizationRegistry(
   (/** @type {number} */ nodeId) => {
     handlesByNodeId.delete(nodeId);
-    native.dropElement(nodeId);
+    dropElement(nodeId);
   },
 );
 
@@ -380,7 +371,7 @@ function nodeIdOf(handle) {
 export function __CreatePage(componentID, componentCSSID) {
   void componentID;
   void componentCSSID;
-  const nodeId = native.createPage();
+  const nodeId = createPage();
   if (pageHandle === undefined) {
     // The page handle is permanent and exempt from the collection
     // backstop: the page can never be dropped. It is still indexed, because
@@ -398,7 +389,7 @@ export function __CreatePage(componentID, componentCSSID) {
  */
 export function __CreateElement(tag, parentComponentUniqueID) {
   void parentComponentUniqueID;
-  return createHandle(native.createElement(/** @type {string} */ (tag)));
+  return createHandle(createElement(/** @type {string} */ (tag)));
 }
 
 /**
@@ -408,7 +399,7 @@ export function __CreateElement(tag, parentComponentUniqueID) {
  */
 function createTag(tag, parentComponentUniqueID) {
   void parentComponentUniqueID;
-  return createHandle(native.createElement(tag));
+  return createHandle(createElement(tag));
 }
 
 /** @param {unknown} parentComponentUniqueID */
@@ -441,8 +432,8 @@ export function __CreateScrollView(parentComponentUniqueID) {
  * @returns {object}
  */
 export function __CreateRawText(text) {
-  const nodeId = native.createElement("raw-text");
-  native.setAttribute(nodeId, "text", /** @type {string} */ (text));
+  const nodeId = createElement("raw-text");
+  setAttribute(nodeId, "text", /** @type {string} */ (text));
   return createHandle(nodeId);
 }
 
@@ -469,7 +460,7 @@ export function __CreateList(
   ...rest
 ) {
   void parentComponentUniqueID;
-  const handle = createHandle(native.createElement("list"));
+  const handle = createHandle(createElement("list"));
   listCallbacks.set(handle, {
     componentAtIndex,
     enqueueComponent,
@@ -484,7 +475,7 @@ export function __CreateList(
  * @returns {object}
  */
 export function __AppendElement(parent, child) {
-  native.insertBefore(nodeIdOf(parent), nodeIdOf(child), null);
+  insertBefore(nodeIdOf(parent), nodeIdOf(child), null);
   return /** @type {object} */ (child);
 }
 
@@ -498,7 +489,7 @@ export function __InsertElementBefore(parent, child, reference) {
   if (reference === child) {
     return /** @type {object} */ (child);
   }
-  native.insertBefore(
+  insertBefore(
     nodeIdOf(parent),
     nodeIdOf(child),
     reference === undefined || reference === null
@@ -515,7 +506,7 @@ export function __InsertElementBefore(parent, child, reference) {
  */
 export function __RemoveElement(parent, child) {
   void parent;
-  native.removeElement(nodeIdOf(child));
+  removeElement(nodeIdOf(child));
   return /** @type {object} */ (child);
 }
 
@@ -535,23 +526,23 @@ export function __ReplaceElements(parent, newChildren, oldChildren) {
   if (!oldChildren || (Array.isArray(oldChildren) && oldChildren.length === 0)) {
     const parentNodeId = nodeIdOf(parent);
     for (const child of news) {
-      native.insertBefore(parentNodeId, nodeIdOf(child), null);
+      insertBefore(parentNodeId, nodeIdOf(child), null);
     }
     return undefined;
   }
   const olds = Array.isArray(oldChildren) ? oldChildren : [oldChildren];
   for (let index = 1; index < olds.length; index += 1) {
-    native.removeElement(nodeIdOf(olds[index]));
+    removeElement(nodeIdOf(olds[index]));
   }
   const first = nodeIdOf(olds[0]);
-  const actualParent = native.parentNode(first);
+  const actualParent = parentNode(first);
   if (actualParent === null) {
     return undefined;
   }
   for (const child of news) {
-    native.insertBefore(actualParent, nodeIdOf(child), first);
+    insertBefore(actualParent, nodeIdOf(child), first);
   }
-  native.removeElement(first);
+  removeElement(first);
   return undefined;
 }
 
@@ -572,14 +563,14 @@ export function __SwapElement(childA, childB) {
   if (a === b) {
     return undefined;
   }
-  const attachedA = native.parentNode(a) !== null;
-  const attachedB = native.parentNode(b) !== null;
+  const attachedA = parentNode(a) !== null;
+  const attachedB = parentNode(b) !== null;
   if (attachedA && attachedB) {
-    native.swapElement(a, b);
+    swapElement(a, b);
   } else if (attachedA) {
-    native.replaceElement(b, a);
+    replaceElement(b, a);
   } else if (attachedB) {
-    native.replaceElement(a, b);
+    replaceElement(a, b);
   }
   return undefined;
 }
@@ -593,7 +584,7 @@ export function __ReplaceElement(newElement, oldElement) {
   if (newElement === oldElement) {
     return undefined;
   }
-  native.replaceElement(nodeIdOf(newElement), nodeIdOf(oldElement));
+  replaceElement(nodeIdOf(newElement), nodeIdOf(oldElement));
   return undefined;
 }
 
@@ -627,9 +618,9 @@ function hyphenate(name) {
 export function __SetClasses(element, classNames) {
   const nodeId = nodeIdOf(element);
   if (classNames) {
-    native.setAttribute(nodeId, "class", String(classNames));
+    setAttribute(nodeId, "class", String(classNames));
   } else {
-    native.removeAttribute(nodeId, "class");
+    removeAttribute(nodeId, "class");
   }
   return undefined;
 }
@@ -642,9 +633,9 @@ export function __SetClasses(element, classNames) {
 export function __SetID(element, id) {
   const nodeId = nodeIdOf(element);
   if (id) {
-    native.setAttribute(nodeId, "id", String(id));
+    setAttribute(nodeId, "id", String(id));
   } else {
-    native.removeAttribute(nodeId, "id");
+    removeAttribute(nodeId, "id");
   }
   return undefined;
 }
@@ -654,7 +645,7 @@ export function __SetID(element, id) {
  * @returns {string | null}
  */
 export function __GetID(element) {
-  return native.getAttribute(nodeIdOf(element), "id");
+  return getAttribute(nodeIdOf(element), "id");
 }
 
 /**
@@ -666,7 +657,7 @@ export function __GetID(element) {
  * @returns {string}
  */
 export function __GetTag(element) {
-  return native.tagName(nodeIdOf(element));
+  return tagName(nodeIdOf(element));
 }
 
 /**
@@ -708,11 +699,11 @@ export function __GetElementUniqueID(element) {
 export function __SetInlineStyles(element, value) {
   const nodeId = nodeIdOf(element);
   if (!value) {
-    native.removeAttribute(nodeId, "style");
+    removeAttribute(nodeId, "style");
     return undefined;
   }
   if (typeof value === "string") {
-    native.setAttribute(nodeId, "style", value);
+    setAttribute(nodeId, "style", value);
     return undefined;
   }
   // `__SetInlineStyles` replaces the whole inline declaration block. Start
@@ -721,12 +712,12 @@ export function __SetInlineStyles(element, value) {
   // in object enumeration order so shorthand/longhand precedence is kept.
   // Keeping the empty attribute is observable for `{}` / all-nullish records
   // and matches web-core's complete-record setter.
-  native.setAttribute(nodeId, "style", "");
+  setAttribute(nodeId, "style", "");
   for (const [key, declaration] of Object.entries(value)) {
     if (declaration === null || declaration === undefined) {
       continue;
     }
-    native.setNodeProperty(
+    setNodeProperty(
       nodeId,
       hyphenate(key),
       String(declaration),
@@ -768,7 +759,7 @@ export function __SetCSSId(elements, cssId, entryName) {
  * `null`/`undefined` removes; anything else is stringified, which is what
  * web-core's `setElementPropertyOrAttribute` does for every name that is not
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
- * reach their specialized DOM paths inside `bobcat.setAttribute`.
+ * reach their specialized DOM paths inside the native `setAttribute` export.
  *
  * `update-list-info` is the one name that is not an attribute at all: it
  * drives list cell insertion and removal, and throws here rather than
@@ -789,9 +780,9 @@ export function __SetAttribute(element, name, value) {
   }
   const nodeId = nodeIdOf(element);
   if (value === null || value === undefined) {
-    native.removeAttribute(nodeId, String(name));
+    removeAttribute(nodeId, String(name));
   } else {
-    native.setAttribute(nodeId, String(name), String(value));
+    setAttribute(nodeId, String(name), String(value));
   }
   return undefined;
 }
@@ -854,9 +845,9 @@ function syncPass(handle, name, phase, wanted) {
     return undefined;
   }
   if (wanted) {
-    native.enableEventListener(nodeIdOf(handle), phase, name);
+    enableEventListener(nodeIdOf(handle), phase, name);
   } else {
-    native.disableEventListener(nodeIdOf(handle), phase, name);
+    disableEventListener(nodeIdOf(handle), phase, name);
   }
   if (state !== undefined) {
     state[phase] = wanted;
@@ -1225,7 +1216,7 @@ export function __UpdateListCallbacks(
  */
 function targetInfo(nodeId) {
   return {
-    id: native.getAttribute(nodeId, "id"),
+    id: getAttribute(nodeId, "id"),
     uid: nodeId,
     elementRefptr: handleOf(nodeId),
   };
@@ -1293,12 +1284,12 @@ function dispatchEntry(eventId, name, targetNodeId, detailJson) {
     detail: detailJson ? JSON.parse(String(detailJson)) : {},
     stopPropagation: () => {
       entry.stopped = true;
-      native.stopPropagation();
+      stopPropagation();
     },
     stopImmediatePropagation: () => {
       entry.immediate = true;
       entry.stopped = true;
-      native.stopPropagation();
+      stopPropagation();
     },
   };
   dispatches.set(eventId, entry);
@@ -1334,7 +1325,7 @@ function eventPhaseOf(node, target, phase) {
  * function owns is one node's listeners: which list the pass selects, their
  * order, `once`, and stopping the rest of them.
  *
- * Both stop methods reach `native.stopPropagation`, because the standard's
+ * Both stop methods reach `stopPropagation`, because the standard's
  * `stopImmediatePropagation` implies `stopPropagation` and ending the walk
  * is the host's to do. What does *not* leave is the immediate half — the
  * skipping of this node's remaining listeners — because one delivery covers
@@ -1571,11 +1562,11 @@ export function __StopImmediatePropagation(event) {
 
 /** @returns {undefined} */
 export function __FlushElementTree() {
-  native.flushElementTree();
+  flushElementTree();
   return undefined;
 }
 
-// The host reads this back off the object it installed and calls it per
-// node per pass. Published rather than captured, which is the one direction
-// that has to travel this way: everything else on `bobcat` is native.
-bobcat.event_listener_callback = eventListenerCallback;
+// The host calls this export once per node per pass. It is deliberately not
+// part of the entry preamble's PAPI imports; it is the module-namespace return
+// path from Rust into the realm.
+export { eventListenerCallback as __BobcatDispatchEvent };

@@ -1,8 +1,7 @@
 /**
- * The native object the host installs on `globalThis` before evaluating
- * `element-papi.mjs`. It speaks DOM vocabulary over numeric `NodeId`s and
- * owns the document and the style/layout commit; misuse crashes at this
- * boundary instead of being validated.
+ * The native functions exported by `bobcat-internal:host`. They speak DOM
+ * vocabulary over numeric `NodeId`s and own the document and style/layout
+ * commit; misuse crashes at this boundary instead of being validated.
  */
 interface BobcatNative {
   /** Marks the permanent page live and returns its `NodeId`. */
@@ -40,26 +39,27 @@ interface BobcatNative {
   disableEventListener(nodeId: number, phase: number, eventName: string): void;
   /** Ends the walk in progress after the current node. */
   stopPropagation(): void;
-  /**
-   * Assigned by this runtime, called by the host once per node per pass.
-   * Not native: it is the one member that travels the other way.
-   *
-   * `eventId` is the same for every call of one dispatch, and `isLastCall`
-   * says whether another follows, which is what lets one event object serve
-   * the whole walk.
-   */
-  event_listener_callback?: (
-    nodeId: number,
-    targetNodeId: number,
-    phaseId: number,
-    eventName: string,
-    detailJson: string,
-    eventId: number,
-    isLastCall: boolean,
-  ) => void;
 }
 
-declare var bobcat: BobcatNative;
+declare module "bobcat-internal:host" {
+  export const createPage: BobcatNative["createPage"];
+  export const createElement: BobcatNative["createElement"];
+  export const setAttribute: BobcatNative["setAttribute"];
+  export const set_node_property: BobcatNative["set_node_property"];
+  export const removeAttribute: BobcatNative["removeAttribute"];
+  export const getAttribute: BobcatNative["getAttribute"];
+  export const tagName: BobcatNative["tagName"];
+  export const parentNode: BobcatNative["parentNode"];
+  export const insertBefore: BobcatNative["insertBefore"];
+  export const removeElement: BobcatNative["removeElement"];
+  export const replaceElement: BobcatNative["replaceElement"];
+  export const swapElement: BobcatNative["swapElement"];
+  export const dropElement: BobcatNative["dropElement"];
+  export const flushElementTree: BobcatNative["flushElementTree"];
+  export const enableEventListener: BobcatNative["enableEventListener"];
+  export const disableEventListener: BobcatNative["disableEventListener"];
+  export const stopPropagation: BobcatNative["stopPropagation"];
+}
 
 /**
  * Installed on this realm by the card's own bundled worklet runtime, and only

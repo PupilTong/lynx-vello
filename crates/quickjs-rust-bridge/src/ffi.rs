@@ -73,6 +73,16 @@ unsafe extern "C" {
         source: *const u8,
         source_length: usize,
     ) -> c_int;
+    pub(crate) fn qjs_runtime_add_host_module_export(
+        runtime: *mut QjsRuntime,
+        name: *const c_char,
+        export_name: *const c_char,
+        value: *const QjsValue,
+    ) -> c_int;
+    pub(crate) fn qjs_module_namespace(
+        context: *mut JSContext,
+        name: *const c_char,
+    ) -> *mut QjsValue;
 
     pub(crate) fn qjs_new_undefined(context: *mut JSContext) -> *mut QjsValue;
     pub(crate) fn qjs_new_null(context: *mut JSContext) -> *mut QjsValue;

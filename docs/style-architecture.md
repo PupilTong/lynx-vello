@@ -9,7 +9,7 @@ bobcat-cli ───▶ bobcat-core ───▶ dom ─┬─▶ vendor/stylo
    packages/bobcat-element            └─▶ vello/wgpu
    (embedded Element PAPI runtime,
     drives bobcat-core's tree module
-    through the `bobcat` realm global)
+    through `bobcat-internal:host` ESM imports)
 ```
 
 `dom` owns the generic document, styling, invalidation, layout seam, visual
@@ -107,10 +107,10 @@ CSS supplied as text.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Opaque `LynxView`; injected resource, VM-factory, image-decoder, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; optional opaque QuickJS factory; the `bobcat` realm object and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `bobcat-core` | Opaque `LynxView`; injected resource, VM-factory, image-decoder, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; optional opaque QuickJS factory; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `packages/bobcat-element` (the script half) | The twenty-six `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; the `FinalizationRegistry` drop backstop (cleanup calls `bobcat.dropElement` at the host's job checkpoints) | Native-ID validation, style/layout/paint behavior, direct DOM access, event dispatch, or any state the native side must gate presentation on |
+| `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the `FinalizationRegistry` drop backstop (cleanup calls the imported `dropElement` at host job checkpoints) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
 | Still unowned | Lynx event dispatch/payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining Element PAPI members | — |
 
 ## Style lifecycle
@@ -185,7 +185,7 @@ What that covers, and what it does not:
   `set_inline_style_property` calls. This is the name/value subset of CSSOM
   `setProperty` (no priority argument), with no numeric style-id ABI;
 - VM-neutral Element-PAPI boot: embedders inject the public
-  `ScriptEngineFactory` / `ScriptEngine` host-function protocol; the private
+  `ScriptEngineFactory` / `ScriptEngine` ESM host-module protocol; the private
   `MainThreadRuntime` installs the callbacks and performs the same boot for
   QuickJS and external/browser factories;
 

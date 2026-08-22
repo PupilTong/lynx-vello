@@ -32,7 +32,7 @@ QuickJS preloaded ESM graph
     └──▶ await import(resolved entry MTS URL)
           ├──▶ bobcat:runtime (shape-only named compatibility exports)
           └──▶ bobcat:element (packages/bobcat-element)
-                └──▶ private bobcat host callbacks
+                └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ lynx-template-decoder + winit
@@ -145,18 +145,22 @@ there. The VM itself is intentionally not `Send`.
 
 `ScriptEngine` is a small host-integration protocol:
 
-- install a named leaf callback under a namespace;
+- register a Rust-backed named function export in a native ESM module;
 - register UTF-8 source under an exact preloaded module specifier;
 - execute an ESM entry and wait for its evaluation promise to settle;
+- call a named export of an already-loaded source module;
 - expose the VM's optional garbage-collection operation.
 
 The callback boundary carries only `HostValue` primitives. Objects, symbols,
-functions, raw VM values, and DOM handles cannot cross it. Bobcat installs the
-private `bobcat.*` callbacks and preloads three kinds of ESM source: the
-core-owned `bobcat:runtime` named compatibility exports, the embedded
-`bobcat:element` named Element-PAPI exports, and the fetched entry under its
-resolved URL. Before registering that entry, core prepends its runtime and
-Element-PAPI import declarations.
+functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
+private callbacks as named exports of the native `bobcat-internal:host` ESM,
+then preloads three kinds of ESM source: the core-owned `bobcat:runtime` named
+compatibility exports, the embedded `bobcat:element` named Element-PAPI
+exports, and the fetched entry under its resolved URL. `bobcat:element`
+imports its native operations directly; nothing is installed as
+`globalThis.bobcat`. Before registering the entry, core prepends its runtime
+and Element-PAPI import declarations. Event delivery travels back through the
+loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export.
 
 The final `bobcat:boot` module imports the flush binding from
 `bobcat:element`; the transformed entry itself statically imports both

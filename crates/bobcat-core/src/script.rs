@@ -33,19 +33,21 @@ pub type HostCallback = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, String>
 
 /// One owner-thread-bound JavaScript VM supplied to Bobcat.
 ///
-/// `register_host_function` creates the namespace when it does not exist and
-/// adds/replaces the named member; registration must retain the callback but
-/// must not invoke it. `register_module_source` adds one source to the VM's
-/// synchronous preloaded module graph. `execute_module` compiles, links, and
-/// evaluates an entry module, including its top-level-await promise, before
-/// returning. A VM with an explicitly owned job queue may drain its checkpoint
-/// at either execution boundary. The VM instance itself is deliberately not
-/// required to be `Send`.
+/// `register_host_module_function` adds one named Rust-backed function export
+/// to a native ESM module; all exports must be registered before that module
+/// first loads, names cannot be replaced, and registration must retain the
+/// callback but must not invoke it. `register_module_source` adds one source
+/// to the VM's synchronous preloaded module graph. Source modules and native
+/// host modules share one specifier namespace. `execute_module` compiles,
+/// links, and evaluates an entry module, including its top-level-await
+/// promise, before returning. A VM with an explicitly owned job queue may
+/// drain its checkpoint at either execution boundary. The VM instance itself
+/// is deliberately not required to be `Send`.
 pub trait ScriptEngine: fmt::Debug {
-    fn register_host_function(
+    fn register_host_module_function(
         &mut self,
-        namespace: &str,
-        name: &str,
+        module_specifier: &str,
+        export_name: &str,
         arity: u8,
         callback: HostCallback,
     ) -> Result<(), ScriptError>;
@@ -72,11 +74,11 @@ pub trait ScriptEngine: fmt::Debug {
         Err(module_support_required(ScriptErrorPhase::ExecuteModule))
     }
 
-    /// Calls a function the realm published on the host namespace, if it
-    /// published one.
+    /// Calls a function exported by a loaded source module, if it exported
+    /// one under that name.
     ///
-    /// `Ok(false)` means the realm installed no such member — a bundle with no
-    /// listener runtime, not a failure. `Ok(true)` means it ran and returned.
+    /// `Ok(false)` means the module exported no such function — a bundle with
+    /// no listener runtime, not a failure. `Ok(true)` means it ran and returned.
     ///
     /// The arguments are [`HostValue`]s for the same reason a host callback's
     /// are: element identity crosses as a number and nothing else crosses at
@@ -84,10 +86,10 @@ pub trait ScriptEngine: fmt::Debug {
     /// tell the host — that a walk should end — is a host call of its own, and
     /// making it a return value would mean the host could only hear it once
     /// the callee finished.
-    fn call_host_member(
+    fn call_module_export(
         &mut self,
-        namespace: &str,
-        name: &str,
+        module_specifier: &str,
+        export_name: &str,
         arguments: &[HostValue],
     ) -> Result<bool, ScriptError>;
 
@@ -147,12 +149,12 @@ pub enum ScriptErrorKind {
 #[non_exhaustive]
 pub enum ScriptErrorPhase {
     Initialize,
-    RegisterHostFunction,
+    RegisterHostModuleFunction,
     RegisterModule,
     Execute,
     ExecuteModule,
-    /// Calling a member the realm published back to the host.
-    CallHostMember,
+    /// Calling an ESM export the realm published back to the host.
+    CallModuleExport,
     CollectGarbage,
 }
 

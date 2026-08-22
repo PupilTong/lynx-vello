@@ -11,6 +11,32 @@
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
 
+rstest.mockRequire("bobcat-internal:host", () => {
+  const native = globalThis.__bobcatTestHost;
+  if (native === undefined) {
+    throw new Error("the Element PAPI test native host is not installed");
+  }
+  return {
+    createPage: native.createPage,
+    createElement: native.createElement,
+    setAttribute: native.setAttribute,
+    set_node_property: native.set_node_property,
+    removeAttribute: native.removeAttribute,
+    getAttribute: native.getAttribute,
+    tagName: native.tagName,
+    parentNode: native.parentNode,
+    insertBefore: native.insertBefore,
+    removeElement: native.removeElement,
+    replaceElement: native.replaceElement,
+    swapElement: native.swapElement,
+    dropElement: native.dropElement,
+    flushElementTree: native.flushElementTree,
+    enableEventListener: native.enableEventListener,
+    disableEventListener: native.disableEventListener,
+    stopPropagation: native.stopPropagation,
+  };
+});
+
 /**
  * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
  *   Defaults to the real boundary's shape (2, 3, 4, ...); a test that needs to
@@ -232,7 +258,8 @@ let elementModule;
 beforeEach(async () => {
   rstest.resetModules();
   mock = createMockBobcat();
-  globalThis.bobcat = mock;
+  globalThis.__bobcatTestHost = mock;
+  Reflect.deleteProperty(globalThis, "bobcat");
   // Installed by a card's own worklet runtime, never by this file; a test
   // that wants one puts it here itself.
   globalThis.runWorklet = undefined;
@@ -287,8 +314,9 @@ describe("installation", () => {
       expect(/** @type {Function} */ (papi).length, name).toBe(arity);
     }
     expect(Object.keys(elementModule).sort()).toEqual(
-      arities.map(([name]) => name).sort(),
+      [...arities.map(([name]) => name), "__BobcatDispatchEvent"].sort(),
     );
+    expect(elementModule.__BobcatDispatchEvent).toHaveLength(7);
   });
 
   it("does not install __DropElement: collection is the only release path", () => {
@@ -303,13 +331,8 @@ describe("installation", () => {
     expect(mock.calls).toEqual([]);
   });
 
-  it("fails loudly when the native object is missing", async () => {
-    rstest.resetModules();
-    // @ts-expect-error deliberately removing the native object
-    globalThis.bobcat = undefined;
-    await expect(import("../src/element-papi.mjs")).rejects.toThrow(
-      "requires the native bobcat object",
-    );
+  it("does not publish the native host on globalThis", () => {
+    expect("bobcat" in globalThis).toBe(false);
   });
 
   it("keeps working when the native object is tampered with afterwards", () => {
@@ -590,7 +613,7 @@ describe("__GetElementUniqueID", () => {
     // Anything the runtime derived itself would disagree with this sequence.
     const issued = [41, 7, 900];
     rstest.resetModules();
-    globalThis.bobcat = createMockBobcat(issued);
+    globalThis.__bobcatTestHost = createMockBobcat(issued);
     const isolatedModule = await import("../src/element-papi.mjs");
 
     const created = [
@@ -795,7 +818,7 @@ function walk(
   const eventId = nextEventId;
   nextEventId += 1;
   steps.forEach((step, index) => {
-    mock.event_listener_callback?.(
+    elementModule.__BobcatDispatchEvent(
       __GetElementUniqueID(step.node),
       __GetElementUniqueID(step.target),
       step.phase,
@@ -1010,8 +1033,8 @@ describe("event listeners", () => {
 
     // The same id twice, which the host never does — that is the point. If
     // the last call did not drop the object, the second walk would find it.
-    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 66, true);
-    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 66, true);
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 66, true);
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 66, true);
 
     const [first, firstMarker, second, secondMarker] = seen;
     expect(firstMarker).toBeUndefined();
@@ -1036,10 +1059,10 @@ describe("event listeners", () => {
     // The host aborts on the throw, so no call ever carries `isLastCall` for
     // this id. Reusing the id is how a retained object would show itself.
     expect(() =>
-      mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 77, false)
+      elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 77, false)
     ).toThrow("listener failed");
     shouldThrow = false;
-    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 77, true);
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 77, true);
 
     expect(seen).toEqual([undefined, undefined]);
   });
@@ -1055,8 +1078,8 @@ describe("event listeners", () => {
     }, {});
     const uid = __GetElementUniqueID(inner);
 
-    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 88, false);
-    mock.event_listener_callback?.(uid, uid, BUBBLE, "tap", "", 88, true);
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 88, false);
+    elementModule.__BobcatDispatchEvent(uid, uid, BUBBLE, "tap", "", 88, true);
 
     expect(seen).toEqual([undefined, undefined]);
   });
@@ -1203,7 +1226,7 @@ describe("event listeners", () => {
   it("delivers nothing for a node id no handle names", () => {
     tree();
     expect(() =>
-      mock.event_listener_callback?.(9999, 9999, BUBBLE, "tap", "", 9000, true)
+      elementModule.__BobcatDispatchEvent(9999, 9999, BUBBLE, "tap", "", 9000, true)
     ).not.toThrow();
   });
 

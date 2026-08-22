@@ -7,9 +7,10 @@
 //! removed instead of becoming a host ABI. The realm deliberately omits
 //! JavaScript shared-memory primitives (`Atomics` and `SharedArrayBuffer`);
 //! this does not disable Rust or host-side synchronization. A realm may also
-//! preload exact-name UTF-8 modules into its synchronous loader and inspect a
-//! module-evaluation `Promise` after driving the owned pending-job queue; module
-//! graph and resource policy remain its caller's responsibility.
+//! preload exact-name UTF-8 modules and Rust-backed native host modules into
+//! its synchronous loader, inspect their namespaces, and inspect a
+//! module-evaluation `Promise` after driving the owned pending-job queue;
+//! module graph and resource policy remain its caller's responsibility.
 
 #[allow(
     unsafe_code,
@@ -820,6 +821,118 @@ mod implementation {
                     "QuickJS returned an unknown module-registration status",
                 )),
             }
+        }
+
+        /// Adds one Rust-backed named export to a native ESM module.
+        ///
+        /// The module and all of its exports must be registered before the
+        /// graph first loads that specifier. Source and native modules share
+        /// one exact-name namespace and neither kind can replace the other.
+        pub fn register_host_module_function<F>(
+            &mut self,
+            module_name: &str,
+            export_name: &str,
+            arity: u32,
+            handler: F,
+        ) -> Result<(), Error>
+        where
+            F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
+        {
+            self.reclaim();
+            if module_name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is empty",
+                ));
+            }
+            if export_name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module export name is empty",
+                ));
+            }
+            let module_name = CString::new(module_name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            let export_name_c = CString::new(export_name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module export name contains a NUL byte",
+                )
+            })?;
+            let function = self
+                .function(export_name, arity, handler)
+                .map_err(|mut error| {
+                    error.phase = ErrorPhase::RegisterModule;
+                    error
+                })?;
+            let status = unsafe {
+                ffi::qjs_runtime_add_host_module_export(
+                    self.inner.runtime.as_ptr(),
+                    module_name.as_ptr(),
+                    export_name_c.as_ptr(),
+                    function.inner.raw.as_ptr(),
+                )
+            };
+            match status {
+                0 => Ok(()),
+                -1 => Err(Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS could not retain the native module export",
+                )),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered as a source module",
+                )),
+                -3 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "native module export name is already registered",
+                )),
+                -4 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "native module was already loaded",
+                )),
+                _ => Err(Error::bridge(
+                    ErrorKind::Engine,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS returned an unknown native-module registration status",
+                )),
+            }
+        }
+
+        /// Returns the namespace object of a preloaded module that has linked.
+        pub fn module_namespace(&mut self, name: &str) -> Result<Value, Error> {
+            self.reclaim();
+            if name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::ConstructValue,
+                    "module name is empty",
+                ));
+            }
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::ConstructValue,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            let context = self.inner.context.as_ptr();
+            let guard = self.inner.interrupt.begin();
+            let raw = unsafe { ffi::qjs_module_namespace(context, name.as_ptr()) };
+            let result = self.value_or_exception(raw, context, ErrorPhase::ConstructValue);
+            guard.finish(result, ErrorPhase::ConstructValue)
         }
 
         /// Replaces a named property while enforcing realm affinity and interrupts.
@@ -1735,6 +1848,127 @@ mod implementation {
 
             assert_eq!(error.kind, ErrorKind::InvalidInput);
             assert_eq!(error.phase, ErrorPhase::RegisterModule);
+        }
+
+        #[test]
+        fn native_host_modules_export_rust_functions_without_globals() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .register_host_module_function("bobcat-internal:host", "add", 2, |arguments| {
+                    let left = match arguments.first() {
+                        Some(HostValue::Number(value)) => *value,
+                        _ => return Err(HostFunctionError::new("left must be a number")),
+                    };
+                    let right = match arguments.get(1) {
+                        Some(HostValue::Number(value)) => *value,
+                        _ => return Err(HostFunctionError::new("right must be a number")),
+                    };
+                    Ok(HostValue::Number(left + right))
+                })
+                .unwrap();
+            realm
+                .register_module_source(
+                    "app:///entry.js",
+                    "import { add } from 'bobcat-internal:host';\n\
+                     export function increment(value) { return add(value, 1); }",
+                )
+                .unwrap();
+
+            let evaluation = realm
+                .evaluate(
+                    EvalSource {
+                        text: "await import('app:///entry.js');",
+                        name: Some("bobcat:boot"),
+                        line_offset: 0,
+                    },
+                    EvalOptions {
+                        source_type: SourceType::Module,
+                        ..EvalOptions::default()
+                    },
+                )
+                .expect("boot module should start");
+            realm
+                .drain_pending_jobs()
+                .expect("module jobs should settle");
+            assert!(
+                realm
+                    .settled_promise_result(&evaluation)
+                    .expect("module evaluation should fulfill")
+                    .is_some()
+            );
+
+            let namespace = realm
+                .module_namespace("app:///entry.js")
+                .expect("loaded module namespace");
+            let increment = realm.property(&namespace, "increment").unwrap();
+            let input = realm.number(41.0).unwrap();
+            let result = realm.call(&increment, None, &[input]).unwrap();
+            assert_eq!(result.as_number(), Some(42.0));
+
+            let host_namespace = realm
+                .module_namespace("bobcat-internal:host")
+                .expect("loaded native module namespace");
+            let add = realm.property(&host_namespace, "add").unwrap();
+            let left = realm.number(20.0).unwrap();
+            let right = realm.number(22.0).unwrap();
+            assert_eq!(
+                realm.call(&add, None, &[left, right]).unwrap().as_number(),
+                Some(42.0)
+            );
+
+            let late_export = realm
+                .register_host_module_function("bobcat-internal:host", "late", 0, |_| {
+                    Ok(HostValue::Undefined)
+                })
+                .expect_err("a loaded native module cannot gain an export");
+            assert_eq!(late_export.kind, ErrorKind::InvalidInput);
+            assert_eq!(late_export.phase, ErrorPhase::RegisterModule);
+
+            let leaked = realm
+                .evaluate(
+                    EvalSource::new("typeof globalThis.add"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                String::from_utf16(&leaked.to_utf16().unwrap()).unwrap(),
+                "undefined"
+            );
+        }
+
+        #[test]
+        fn native_module_exports_are_unique_and_cannot_collide_with_source() {
+            let mut realm = Realm::new().unwrap();
+            realm
+                .register_host_module_function("bobcat-internal:host", "call", 0, |_| {
+                    Ok(HostValue::Undefined)
+                })
+                .unwrap();
+            let duplicate = realm
+                .register_host_module_function("bobcat-internal:host", "call", 0, |_| {
+                    Ok(HostValue::Undefined)
+                })
+                .expect_err("an export must not be replaced");
+            assert_eq!(duplicate.kind, ErrorKind::InvalidInput);
+            assert_eq!(duplicate.phase, ErrorPhase::RegisterModule);
+
+            let collision = realm
+                .register_module_source("bobcat-internal:host", "export {};")
+                .expect_err("source and native modules share one namespace");
+            assert_eq!(collision.kind, ErrorKind::InvalidInput);
+            assert_eq!(collision.phase, ErrorPhase::RegisterModule);
+
+            let mut source_first = Realm::new().unwrap();
+            source_first
+                .register_module_source("bobcat:source", "export {};")
+                .unwrap();
+            let reverse_collision = source_first
+                .register_host_module_function("bobcat:source", "call", 0, |_| {
+                    Ok(HostValue::Undefined)
+                })
+                .expect_err("a native module cannot replace source");
+            assert_eq!(reverse_collision.kind, ErrorKind::InvalidInput);
+            assert_eq!(reverse_collision.phase, ErrorPhase::RegisterModule);
         }
 
         #[test]
