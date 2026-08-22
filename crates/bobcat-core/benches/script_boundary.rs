@@ -201,9 +201,9 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 
 /// The same path for an event name nothing listens to.
 ///
-/// The presenting side answers this from the index in the slot it already
-/// holds, so the realistic cost is one set lookup; the dispatch below is what
-/// remains if it ever crosses anyway.
+/// The presenting side answers this from the shared listener-name table, so
+/// the realistic cost is one lookup; the dispatch below is what remains if it
+/// ever crosses anyway.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
@@ -232,15 +232,19 @@ fn register_and_release_row_listeners(bencher: divan::Bencher) {
         .bench_local_refs(|harness| {
             harness.evaluate(
                 r"
+                import {
+                  disableEventListener,
+                  enableEventListener,
+                } from 'bobcat-internal:host';
                 for (let i = 0; i < rows.length; i += 1) {
                   const id = __GetElementUniqueID(rows[i]);
-                  bobcat.enableEventListener(id, 0, 'tap');
-                  bobcat.enableEventListener(id, 1, 'longpress');
+                  enableEventListener(id, 0, 'tap');
+                  enableEventListener(id, 1, 'longpress');
                 }
                 for (let i = 0; i < rows.length; i += 1) {
                   const id = __GetElementUniqueID(rows[i]);
-                  bobcat.disableEventListener(id, 0, 'tap');
-                  bobcat.disableEventListener(id, 1, 'longpress');
+                  disableEventListener(id, 0, 'tap');
+                  disableEventListener(id, 1, 'longpress');
                 }
                 ",
             );
