@@ -14,11 +14,9 @@
 //! - **Linux**: `SoftwareDecoder`, the pure-Rust reference (`png` + `zune-jpeg` + `image-webp`).
 //!   Linux has no system still-image decode API; this is the only target that compiles it.
 //!
-//! Windows (WIC, probe-per-format) and Android (NDK `AImageDecoder` via
-//! `dlopen`) reference modules were carried here for embedders that do not
-//! exist yet; the CLI never compiled them on a supported target and no CI gate
-//! reached them, so they were removed — recover `windows.rs`/`android.rs` from
-//! git history if such an embedder materializes.
+//! Those two are the whole list. On any other target `platform_decoder` returns
+//! `None` and there is no fallback behind it: an embedder shipping elsewhere
+//! implements [`Decoder`] itself and injects it.
 
 use std::sync::Arc;
 

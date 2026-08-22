@@ -15,9 +15,9 @@
 //! (WebP arrived in macOS 11 / iOS 14, AVIF in macOS 13 / iOS 16; the minimum
 //! deployment target sits above both), so [`AppleDecoder::new`] claims all six
 //! formats unconditionally and there is nothing to detect. This is a recorded
-//! decision, not an oversight: the capability probe the WIC decoder still
-//! carries answers a question — "is the codec installed on *this* machine?" —
-//! that has no analogue on Apple platforms at the supported OS floor.
+//! decision, not an oversight: a capability probe answers "is the codec
+//! installed on *this* machine?", and that question has no analogue on Apple
+//! platforms at the supported OS floor.
 //!
 //! # Recorded costs (measured 2026-08-10, Apple Silicon, 2048² photo-like fixtures)
 //!
@@ -72,8 +72,8 @@
 //! # Unsafe
 //!
 //! Every `ImageIO` and Core Graphics entry point is a raw `extern "C"` binding, so
-//! the `unsafe` in this file is unavoidable and falls into exactly four
-//! categories, each individually justified at its use site:
+//! the `unsafe` in this file is unavoidable. Every block carries a `SAFETY`
+//! comment; the four categories they draw on are:
 //!
 //! 1. Reading the `extern "C"` `CFString` constants `ImageIO` and Core Graphics export as
 //!    dictionary keys (`kCGImageProperty*`, `kCGImageSource*`, `kCGColorSpaceSRGB`).
@@ -161,6 +161,10 @@ impl Decoder for AppleDecoder {
         let stored_target = unswap(orientation, target);
 
         let image = if stored_target == stored_natural {
+            // SAFETY: `image_at_index` is `unsafe` only because it accepts an
+            // options dictionary whose generics objc2 cannot check. `None`
+            // passes no dictionary, so there is nothing to get wrong; the live
+            // source is guaranteed by the `&CGImageSource` borrow.
             unsafe { source.image_at_index(0, None) }.ok_or_else(|| {
                 ImageError::decode(format, "ImageIO produced no image for frame 0")
             })?
@@ -204,6 +208,8 @@ fn image_source(
     bytes: &[u8],
 ) -> Result<CFRetained<CGImageSource>, ImageError> {
     let data = CFData::from_bytes(bytes);
+    // SAFETY: options-dictionary binding called with `None`; see above. `data`
+    // is a `CFData` this function owns, and `CGImageSource` retains it.
     unsafe { CGImageSource::with_data(&data, None) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO could not open the byte stream"))
 }
@@ -212,8 +218,14 @@ fn frame_properties(
     source: &CGImageSource,
     format: ImageFormat,
 ) -> Result<CFRetained<CFDictionary<CFString, CFType>>, ImageError> {
+    // SAFETY: options-dictionary binding called with `None`; see
+    // `open_source`.
     let properties = unsafe { source.properties_at_index(0, None) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO returned no image properties"))?;
+    // SAFETY: `CGImageSourceCopyPropertiesAtIndex` is documented to return a
+    // dictionary keyed by `CFString` with `CFType` values, which is exactly the
+    // instantiation asserted here. The cast only names those element types; it
+    // does not reinterpret the allocation, and `CFRetained` keeps owning it.
     Ok(unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(properties) })
 }
 
@@ -224,6 +236,9 @@ fn read_header(
 ) -> Result<ImageHeader, ImageError> {
     let properties = frame_properties(source, format)?;
 
+    // SAFETY: reading three `extern "C"` `CFStringRef` constants ImageIO
+    // exports. They are immortal process-lifetime globals initialized before
+    // any ImageIO entry point can be called.
     let (width_key, height_key, alpha_key) = unsafe {
         (
             kCGImagePropertyPixelWidth,
@@ -243,6 +258,9 @@ fn read_header(
     }
 
     let (width, height) = orientation_of(source, format, bytes).apply_to_size(width, height);
+    // SAFETY: objc2 generates every ImageIO entry point as `unsafe fn`.
+    // `CGImageSourceGetCount` has no precondition beyond a live source, which
+    // the `&CGImageSource` borrow provides.
     let frames = unsafe { source.count() };
 
     Ok(ImageHeader {
@@ -275,6 +293,7 @@ fn property_orientation(source: &CGImageSource, format: ImageFormat) -> Orientat
     let Ok(properties) = frame_properties(source, format) else {
         return Orientation::Identity;
     };
+    // SAFETY: an `extern "C"` `CFStringRef` constant; see `read_header`.
     let key = unsafe { kCGImagePropertyOrientation };
     let Some(value) = properties
         .get(key)
@@ -304,6 +323,7 @@ fn scaled_image(
     target: PixelSize,
 ) -> Result<CFRetained<CGImage>, ImageError> {
     let max_pixel_size = CFNumber::new_i64(i64::from(thumbnail_cap(natural, target)));
+    // SAFETY: two `extern "C"` `CFStringRef` constants; see `read_header`.
     let (always_key, size_key) = unsafe {
         (
             kCGImageSourceCreateThumbnailFromImageAlways,
@@ -315,6 +335,10 @@ fn scaled_image(
         &[CFBoolean::new(true).as_ref(), max_pixel_size.as_ref()],
     );
 
+    // SAFETY: the options-dictionary binding, this time with a dictionary. Its
+    // safety contract is that the generics match, and `options` is built
+    // directly above as `CFDictionary<CFString, CFType>` from ImageIO's own
+    // keys and `CFType` values — the instantiation the API expects.
     unsafe { source.thumbnail_at_index(0, Some(AsRef::as_ref(&*options))) }
         .ok_or_else(|| ImageError::decode(format, "ImageIO produced no scaled image"))
 }
@@ -353,12 +377,19 @@ fn draw_rgba8(image: &CGImage, format: ImageFormat) -> Result<(Vec<u8>, u32, u32
     })?;
     let mut pixels = vec![0u8; length];
 
+    // SAFETY: an `extern "C"` `CFStringRef` constant; see `read_header`.
     let srgb = unsafe { kCGColorSpaceSRGB };
     let color_space = CGColorSpace::with_name(Some(srgb))
         .ok_or_else(|| ImageError::decode(format, "sRGB colour space unavailable"))?;
     let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
 
     {
+        // SAFETY: `CGBitmapContextCreate` borrows the pixel buffer for the
+        // context's lifetime and writes `stride * height` bytes into it.
+        // `pixels` is a live local `Vec` of exactly `expected_byte_len(width,
+        // height)` bytes — `stride` is `stored_width * 4` and both multiplies
+        // were checked above — and the enclosing block ends before `pixels` is
+        // read or dropped, so the context never outlives the buffer.
         let context = unsafe {
             CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast::<c_void>(),
@@ -395,10 +426,16 @@ fn encode_rgba(width: u32, height: u32, rgba: &[u8], uti: &str) -> Option<Vec<u8
     );
 
     let mut pixels = rgba.to_vec();
+    // SAFETY: an `extern "C"` `CFStringRef` constant; see `read_header`.
     let srgb = unsafe { kCGColorSpaceSRGB };
     let color_space = CGColorSpace::with_name(Some(srgb))?;
     let bitmap_info = CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
     let image = {
+        // SAFETY: same contract as `draw_rgba8`. `pixels` is a live local copy
+        // of `rgba`, whose length the assertion above pins to
+        // `expected_byte_len(width, height)` — exactly the `width * 4` stride
+        // times `height` rows the context writes — and the block ends before
+        // `pixels` is dropped.
         let context = unsafe {
             CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast::<c_void>(),
@@ -415,7 +452,13 @@ fn encode_rgba(width: u32, height: u32, rgba: &[u8], uti: &str) -> Option<Vec<u8
 
     let data = CFMutableData::new(None, 0)?;
     let uti = CFString::from_str(uti);
+    // SAFETY: options-dictionary binding called with `None`; see
+    // `open_source`. `data` and `uti` are owned here and outlive the
+    // destination.
     let destination = unsafe { CGImageDestination::with_data(&data, &uti, 1, None) }?;
+    // SAFETY: two more options-dictionary bindings — `add_image` takes `None`,
+    // `finalize` takes no dictionary at all. Both need only a live destination
+    // and, for `add_image`, a live image; both are owned locals.
     unsafe {
         CGImageDestination::add_image(&destination, &image, None);
         if !CGImageDestination::finalize(&destination) {

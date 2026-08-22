@@ -116,7 +116,10 @@ useful signal for currently-compatible versions of those libraries.
 
 - `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
   manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
-  template parsing only, no JS runtime, no CSS engine (yet).
+  template parsing only, no JS runtime, no CSS engine (yet). The `StyleInfo`
+  section is capped at 1 MiB and 64 levels of rule nesting, and is validated on
+  a thread with a stack sized from its length — see "Input robustness at the
+  two external-byte boundaries" for what those bounds prevent.
 - `crates/lynx-xml` — zero-dependency, zero-copy parser for the restricted
   single-file Lynx XML source envelope. The current breaking grammar uses
   `<lynx engine-version="...">` plus `<script thread="main">` or
@@ -184,7 +187,12 @@ useful signal for currently-compatible versions of those libraries.
   adapter's module operations. Workspace dependencies disable defaults
   explicitly; only an upper layer that wants the built-in engine enables
   `quickjs`.
-  The core depends on `dom` but does **not** re-export it. Its private `Engine`
+  The core depends on `dom` and re-exports exactly one narrow seam of it: the
+  `input` module republishes `dom::Point2D` and
+  `dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
+  so an embedder can name the input vocabulary without depending on `dom`
+  itself. Nothing else crosses — no document, no node, no hit-test result —
+  and that list is the whole of it. Its private `Engine`
   passes the element tree to and from its engine-owned Lynx main thread through
   the private `SharedTree` hand-off slot — one holder at any instant — and runs input
   routing, scrolling, frame production, and presentation on the thread the
@@ -480,11 +488,9 @@ useful signal for currently-compatible versions of those libraries.
   byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
   Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
   `image-webp` taken directly rather than through the crates.io `image`
-  facade). On any other target `platform_decoder()` = `None` with **no
-  fallback behind it**. The former Windows WIC and Android NDK reference
-  modules — which compiled on no supported target and had no CI gate — were
-  removed; recover `windows.rs`/`android.rs` from git history if such an
-  embedder materializes. Decoder-behaviour tests
+  facade). Those two are the whole list: on any other target
+  `platform_decoder()` = `None` with **no fallback behind it**, and an embedder
+  shipping elsewhere implements `Decoder` itself. Decoder-behaviour tests
   (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
   measured `ImageIO` API comparison that fixed the Apple decoder's choices
   (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG
@@ -963,7 +969,7 @@ useful signal for currently-compatible versions of those libraries.
   (post-flush, no `Arc` bump), geometry is the rounded layout, and the
   document Device supplies viewport/DPR so paint cannot disagree with layout.
   The authoritative paint limits are recorded in
-  `crates/dom/src/painter.rs`; DOM-aware paint tests and the paint benchmark
+  `crates/dom/src/paint/painter.rs`; DOM-aware paint tests and the paint benchmark
   live under `crates/dom/tests` and `crates/dom/benches`.
   Its `scroll` module owns CSSOM-View scrolling — scrollport/scrolling-area
   geometry off the layout engine's accumulated `content_size`, a per-node
@@ -1038,7 +1044,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `019d1fb50`): `contain` was already seeded
+  canonical `lynx` branch, tip `9e647b249`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -1062,6 +1068,17 @@ useful signal for currently-compatible versions of those libraries.
   draggable). The three non-`visible` values stay genuinely distinct:
   `scroll` is user-scrollable, `hidden` is a scroll container that moves only
   programmatically, `clip` is not a scroll container at all.
+  Three commits have landed on `lynx` since #12, and the tip above is the last
+  of them: fork PR #14 requires `Send` of `FontMetricsProvider` implementations
+  (what lets a `Document` cross to the presenting thread at all), fork PR #13
+  corrects `ElementData` reference documentation, and fork PR #21 moves the
+  `display` longhand's initial value from `inline` to `Display::initial()`,
+  which under the `lynx` feature is `flex`. Read that last one against the
+  paragraph above rather than as a contradiction of it: the *initial* value is
+  what an element computes to with no declaration reaching it at all, while
+  Lynx's `display: linear` default is a UA-sheet declaration this embedder
+  cascades. Confirm the tip with `git -C vendor/stylo rev-parse --short HEAD`
+  before trusting this line — the gitlink moves and the prose does not.
 - `crates/hughie` — the Flexbox, Grid, and
   Starlight Relative and Linear engine: trait-based host⇄engine integration
   with static dispatch only (no `dyn`), one `LayoutTree` protocol with a
@@ -1221,13 +1238,126 @@ this section is the only place the absolute paths are spelled out.
   excluded from the workspace, and the fork carries pre-existing upstream
   rustfmt drift, so it "fixes" files nobody touched. Check
   `git -C vendor/stylo status` afterwards and revert anything outside your own
-  change, or the next fork commit ships unrelated reformatting.
+  change, or the next fork commit ships unrelated reformatting. Use
+  `./.github/scripts/fmt-check.sh` instead — it is what CI runs, it names the
+  members from `cargo metadata` rather than from a list someone has to
+  remember to extend. The hand-written list it replaced had been missing
+  `lynx-xml` since that crate was added.
 
 ## Testing
 
 Integration tests decode real fixtures vendored from lynx-stack under
 `crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
+
+### Input robustness at the two external-byte boundaries
+
+`lynx-template-decoder` and `lynx-xml` are the crates fed bytes the engine did
+not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both are
+written in the `Result` style and both have grammar tests, but every input in
+those tests is one a *correct* encoder produced, which cannot establish the
+property that matters at a trust boundary: that no input takes the process
+down. The two crates answer that differently, because their exposure differs.
+
+**`lynx-xml`** carries `tests/robustness.rs`: a fixed-seed character-level
+mutator over seed documents, plus named degenerate cases for every construct
+with a terminator, asserting panic-freedom and two invariants a partial-index
+bug would break silently — the returned sections borrow from the source, and a
+`ParseError` offset lands on a real UTF-8 boundary (which keeps the crate's own
+`debug_assert!` live). It ends on a coverage floor: if a grammar change made
+*nothing* parse, the success-branch assertions would quietly stop running and
+the test would still pass, so it fails instead. 20 000 inputs in under a tenth
+of a second, in the ordinary suite.
+
+This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
+543-line zero-dependency parser over `&str` — the input is already valid UTF-8,
+there are no length fields, and nothing allocates on a source-controlled count
+— and it is not worth a separate package and a scheduled job.
+
+**`lynx-template-decoder`'s `StyleInfo` section carries two hard bounds**, and
+they are load-bearing rather than defensive. `Rule` holds `children: Vec<Rule>`
+with no depth bound and rkyv 0.7's derived `CheckBytes` recurses once per
+level, so a *well-formed* section — nothing for validation to reject — drives
+that recursion as deep as its bytes allow. Measured on aarch64: a level costs
+28 archive bytes and about 410 bytes of stack in release, 3.5 KiB in debug, so
+a **168 KB** section overflowed the 2 MiB stack Rust gives a spawned thread. It
+did so *inside* `check_archived_root`, reported as `fatal runtime error: stack
+overflow` — `SIGABRT`, not a panic, uncatchable, process gone. The largest
+`StyleInfo` section in the vendored fixtures is 24 KB.
+
+Validation therefore runs on a thread whose stack the crate sizes from the
+section length, under two caps:
+
+- **Length**, 1 MiB — about 40x the largest real section. It exists only to bound how much stack
+  that thread may be asked for. A length cap on its own cannot fix the overflow, because the safe
+  length depends on the caller's stack and a library does not know it.
+- **Nesting**, 64 levels. The format nests one level in practice (a `Keyframes` rule holds its
+  keyframe rules) and `bobcat-cli`'s converter reads exactly that one.
+
+The depth cap is the half that is easy to miss: `Rule`'s drop glue also
+recurses per level, so a deep tree returned to a small-stack caller would
+overflow on the way *out*, after decoding had already succeeded. Refusing it
+keeps the deep value on the sized thread, and nothing downstream ever sees a
+tree it cannot afford to walk or free.
+
+rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say the
+result "may be vulnerable to memory overlap and recursion" — and the 0.7 pin is
+a wire-format constraint. The alternative, a hand-written iterative
+`CheckBytes` for `ArchivedRule`, would need `unsafe` and cost the crate its
+`forbid(unsafe_code)`. `crates/lynx-template-decoder/src/style_info.rs` holds
+the constants and the regression test.
+
+### The unsafe floor
+
+`hughie`, `flashbulb`, `lynx-template-decoder` and `lynx-xml` carry
+`#![forbid(unsafe_code)]`. The workspace-wide `unsafe_code = "warn"` is a lint
+any module can silence locally; `forbid` cannot be overridden from inside the
+crate, so `unsafe` appearing in one of these four has to be a deliberate edit
+to that line.
+
+Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
+enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
+`bobcat-cli` (its fifteen ImageIO and Core Graphics blocks in
+`image_decoders/apple.rs`) and in `dom` (its two). The lint is still
+crate-local rather than workspace-wide because `quickjs-rust-bridge` (133
+blocks) is the last holdout and is being restructured separately; raising it
+there is what would let this move into `[workspace.lints.clippy]`.
+
+One trap, worth knowing before writing the comment: the lint does **not** scan
+past an intervening attribute. Where an unsafe site carries
+`#[expect(unsafe_code, reason = …)]`, as every one in `dom` does, the
+`// SAFETY:` comment has to sit *between* that attribute and the block —
+placing it above the attribute still trips the lint, and `cargo fmt` will not
+move it either way.
+
+### Benchmarks measure a debug-instrumented dom
+
+Cargo unifies the features of a package's dev-dependencies into that package's
+own library whenever dev targets are in the build. `hughie` dev-depends on
+`dom` with `layout-test-utils` for its bench harness, and `dom` depends on
+`hughie`, so the cycle turns the feature on for both libraries in any build
+that includes bench targets:
+
+```sh
+cargo build --unit-graph -Z unstable-options --workspace            # dom: []
+cargo build --unit-graph -Z unstable-options --workspace --benches  # dom: [layout-test-utils]
+```
+
+The second line is what `cargo codspeed build` and `cargo llvm-cov` resolve.
+The cost is one `test_leaf_metrics()` probe per leaf in
+`crates/dom/src/layout/host.rs` that a release build does not contain — so the
+CodSpeed numbers, which are the authority for this repo (single-run local
+walltime here is noise), describe a `dom` that is one branch away from the
+shipped one. On the `hughie` side the feature only adds the
+`compute_leaf_layout_with_measurement_for_testing` wrapper and costs nothing.
+
+**This is accepted, not fixed.** Breaking the cycle means moving hughie's
+dom-based benches into `dom`, which renumbers every CodSpeed benchmark id and
+throws away its history — a worse trade than one predictable branch.
+`.github/scripts/check-bench-feature-parity.py` runs in CI and holds the line:
+it diffs the two resolutions, prints the two recorded deviations, and fails on
+a third appearing or on a recorded one silently going away. Any new entry needs
+a written reason for the same cost the existing ones state.
 
 ### Restricted-environment troubleshooting
 
@@ -1263,6 +1393,21 @@ default explanation for a failure:
   `cargo check --workspace --all-targets`, `cargo clippy`, and the test suite
   never type-check it, so anything touching the browser embedder — or any
   `#[cfg]`-gated import it depends on — is unverified until that target builds.
+  CI's `browser` job now lints that target, so the gap is no longer silent:
+
+  ```sh
+  cargo clippy --target wasm32-unknown-unknown --lib \
+    -p bobcat-wasm -p bobcat-core -p dom -p hughie \
+    -p lynx-xml -p lynx-template-decoder -p quickjs-rust-bridge -- -D warnings
+  ```
+
+  `--lib`, not `--all-targets`: `bobcat-core` dev-depends on tokio's
+  `rt-multi-thread`, which refuses to compile for wasm32, and feature
+  unification drags it into anything that builds dev targets. The packages are
+  named rather than `--workspace` because `bobcat-cli` is a native binary. The
+  two `-Ctarget-feature` warnings `.cargo/config.toml` produces on every crate
+  are rustc codegen warnings rather than lints, so `-D warnings` leaves them
+  alone.
 
 The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and

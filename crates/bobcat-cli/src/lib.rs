@@ -10,6 +10,13 @@
 //! injected `bobcat_core::image::Decoder` contract.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+// Every `unsafe` in this crate is an ImageIO or Core Graphics binding in
+// `image_decoders::apple`, and each block states its own contract. This is what
+// keeps that true: the workspace-wide `unsafe_code = "warn"` says a block may
+// exist, and this says it must explain itself. Crate-local rather than
+// workspace-wide because `dom` and `quickjs-rust-bridge` are not at this bar
+// yet.
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;

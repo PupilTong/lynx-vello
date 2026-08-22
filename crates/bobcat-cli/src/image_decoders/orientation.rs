@@ -3,10 +3,10 @@
 //! css-images-3 makes `image-orientation: from-image` the initial value, and the
 //! stylo fork's lynx grammar has no `image-orientation` property at all — so
 //! there is no way for an author to ask for un-oriented pixels, and applying the
-//! tag is the only correct behaviour. It also happens to be the only way the
-//! backends can agree: `AImageDecoder` orients unconditionally while the
-//! software decoders and `CGImageSourceCreateImageAtIndex` do not, so a backend
-//! that skipped this would disagree with Android about what a photo looks like.
+//! tag is the only correct behaviour. Neither backend applies it for us —
+//! `CGImageSourceCreateImageAtIndex` and the software codecs both hand back
+//! un-oriented pixels — so this module is where the tag gets applied, once, for
+//! both.
 //!
 //! JPEG only. PNG's `eXIf` chunk and WebP's `EXIF` chunk are not read — both are
 //! rare in practice and neither carries the camera-capture orientation this
