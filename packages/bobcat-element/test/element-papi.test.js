@@ -29,7 +29,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     removeElement: native.removeElement,
     replaceElement: native.replaceElement,
     swapElement: native.swapElement,
-    releaseElement: native.releaseElement,
+    dropElement: native.dropElement,
     flushElementTree: native.flushElementTree,
     enableEventListener: native.enableEventListener,
     disableEventListener: native.disableEventListener,
@@ -253,8 +253,8 @@ function createMockBobcat(issuedIds) {
       calls.push(["swapElement", a, b]);
     },
     /** @param {unknown} node */
-    releaseElement: (node) => {
-      calls.push(["releaseElement", nodeId("releaseElement", node)]);
+    dropElement: (node) => {
+      calls.push(["dropElement", nodeId("dropElement", node)]);
     },
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
@@ -517,6 +517,38 @@ describe("__ReplaceElements", () => {
     __ReplaceElements(page, replacement, detached);
     expect(mock.calls).toEqual([["parentNode", 3]]);
   });
+
+  it("follows the old child to whichever parent last took it", () => {
+    const page = __CreatePage("card", 0);
+    const wrapper = __CreateView(0);
+    const moved = __CreateView(0);
+    const replacement = __CreateView(0);
+    __AppendElement(page, wrapper);
+    // Appended to the page first, then moved: the second append is what the
+    // ownership graph has to end up recording.
+    __AppendElement(page, moved);
+    __AppendElement(wrapper, moved);
+    mock.calls.length = 0;
+
+    __ReplaceElements(page, replacement, moved);
+    expect(mock.calls).toEqual([
+      ["parentNode", 4],
+      ["insertBefore", 3, 5, 4],
+      ["removeElement", 4],
+    ]);
+  });
+
+  it("treats a child whose parent let go of it as detached", () => {
+    const page = __CreatePage("card", 0);
+    const removed = __CreateView(0);
+    const replacement = __CreateView(0);
+    __AppendElement(page, removed);
+    __RemoveElement(page, removed);
+    mock.calls.length = 0;
+
+    __ReplaceElements(page, replacement, removed);
+    expect(mock.calls).toEqual([["parentNode", 3]]);
+  });
 });
 
 describe("__SwapElement", () => {
@@ -569,6 +601,37 @@ describe("__SwapElement", () => {
     expect(mock.calls).toEqual([
       ["parentNode", 4],
       ["parentNode", 5],
+    ]);
+  });
+
+  it("leaves both operands naming the parent the swap gave them", () => {
+    const page = __CreatePage("card", 0);
+    const wrapper = __CreateView(0);
+    const a = __CreateView(0);
+    const inner = __CreateView(0);
+    const replacement = __CreateView(0);
+    __AppendElement(page, wrapper);
+    __AppendElement(page, a);
+    __AppendElement(wrapper, inner);
+    // A cross-parent swap: `a` lands under the wrapper, `inner` under the
+    // page. Both parents have to be what the graph names afterwards.
+    __SwapElement(a, inner);
+    mock.calls.length = 0;
+
+    __ReplaceElements(page, replacement, a);
+    expect(mock.calls).toEqual([
+      ["parentNode", 4],
+      ["insertBefore", 3, 6, 4],
+      ["removeElement", 4],
+    ]);
+    mock.calls.length = 0;
+
+    // And `a`, detached by that replace, is the operand that moves.
+    __SwapElement(a, inner);
+    expect(mock.calls).toEqual([
+      ["parentNode", 4],
+      ["parentNode", 5],
+      ["replaceElement", 4, 5],
     ]);
   });
 });
@@ -1115,7 +1178,7 @@ describe("event listeners", () => {
     expect(seen).toEqual([undefined, undefined]);
   });
 
-  it("delivers nothing when the target has no handle", () => {
+  it("refuses a target no handle names instead of dropping the walk", () => {
     const { inner } = tree();
     /** @type {unknown[]} */
     const seen = [];
@@ -1124,11 +1187,12 @@ describe("event listeners", () => {
     }, {});
     const uid = __GetElementUniqueID(inner);
 
-    // An id no handle was ever minted for: what the host names when it
-    // routes by geometry to an element script attached and let go of. The
-    // event could not carry that target, so the listener does not run.
-    elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, false);
-    elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, true);
+    // An id no handle was ever minted for. A connected element always has
+    // one — its parent's handle holds it — so this is the ownership graph
+    // and the tree disagreeing, and it is reported rather than swallowed.
+    expect(() =>
+      elementModule.__BobcatDispatchEvent(uid, 999, BUBBLE, "tap", "", 88, false)
+    ).toThrow("ownership graph");
     expect(seen).toEqual([]);
 
     // And the walk left nothing behind: the next dispatch is a fresh one.

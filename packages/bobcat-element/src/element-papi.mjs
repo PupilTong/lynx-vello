@@ -3,7 +3,7 @@ import {
   createElement,
   createPage,
   disableEventListener,
-  releaseElement,
+  dropElement,
   enableEventListener,
   flushElementTree,
   getAttribute,
@@ -192,20 +192,52 @@ import {
 //   its handle died can only ever name something gone, never a later element
 //   that happens to sit in the freed one's storage. Nothing in this file has
 //   to guard against that case because it cannot arise.
-// - A handle is what holds an element from outside the tree; inside it, a
-//   parent holds its children and a child holds nothing. So collecting a
-//   handle frees nothing by itself: the element stays for as long as it is
-//   attached, and once it is detached as well — by the removal that detaches
-//   it or an ancestor, before or after the handle died — the host frees it
-//   at the end of the batch, together with every descendant whose handle is
-//   gone too. Collection is the only way a handle lets go, web-core's model:
-//   every non-page handle is registered with a FinalizationRegistry whose
-//   cleanup calls the native `releaseElement`; cleanup runs as a pending job
-//   at the host's job checkpoints, and never at realm teardown, so the last
-//   committed tree survives the bootstrap realm. A handle that dies while
-//   its element is attached is the routine case, not a leak: a ReactLynx
-//   list recycles cells by handing their elements from one snapshot
-//   instance to another.
+// - **A handle is the one thing that holds its element.** Collection is the
+//   only way it lets go, web-core's model: every non-page handle is
+//   registered with a FinalizationRegistry whose cleanup calls the native
+//   `dropElement`, which frees that element and nothing else — its element
+//   children are unlinked and go on as detached roots, each held by its own
+//   handle, while the text node a `raw-text` reflects goes with it, because
+//   no handle could ever name one. Cleanup runs as a pending job at the
+//   host's job checkpoints, and never at realm teardown, so the last
+//   committed tree survives the bootstrap realm.
+// - **A handle holds the handles of its children**, in the set under
+//   [`ownedChildren`], maintained by the six tree mutations. That is what
+//   makes the rule above safe: the page's handle is permanent, so every
+//   *connected* element's handle is reachable from it through this chain and
+//   cannot be collected while its element is on screen. A ReactLynx list
+//   recycling a cell — handing its elements from one snapshot instance to
+//   another, then deleting the old `__elements` array — drops the card's own
+//   references and no more; the elements stay because their parents hold
+//   them. What ends a subtree is detaching it: `__RemoveElement` takes its
+//   root out of its parent's set, and once the card lets go too, the whole
+//   subtree's handles become unreachable together and are collected as one.
+//   The set is unordered and holds nothing but membership — the tree's order
+//   is the host's, and asking this side to mirror it would be a second
+//   source of truth for the one thing the native tree already answers.
+// - The link the other way is a **number**, the owner's node id, not a
+//   reference: a child that pointed back at its parent would make every
+//   parent/child pair a cycle, which only a collection can resolve, where
+//   plain reference counting frees an unreachable subtree at once. The id is
+//   resolved through [`handlesByNodeId`], which holds handles weakly.
+// - **A handle reading as gone does not mean its element is.** QuickJS
+//   answers a `WeakRef` from the refcount, while the cleanup that calls
+//   `dropElement` is enqueued only by a collection, so between script
+//   letting go of a handle and the next collection the handle is
+//   unreachable and its element is fully allocated and fully parented. So
+//   the graph answers exactly one question — *which live handle owns this
+//   one* — and never "is this element attached", which only the host knows.
+//   The same line is what a user-agent component owes this file: it may
+//   build and tear down its own shadow content freely, but detaching one of
+//   its host's *light* children behind script's back would leave that child
+//   filed under a parent it no longer has, and held alive by it.
+//   What it does answer soundly is the contrapositive the graph is built on:
+//   an owner with no live handle cannot be connected, because a connected
+//   element's handle is held by its parent's up to the permanent page
+//   handle. So a child of one is off screen whatever the tree says, its
+//   owner's set is gone, and its owner's pending `dropElement` will unlink
+//   it — which is why filing it under nothing is safe, and why no native
+//   operation is ever chosen from this graph.
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
 
@@ -308,6 +340,32 @@ const indexedSymbol = Symbol("indexed");
 const listCallbacksSymbol = Symbol("listCallbacks");
 
 /**
+ * The handles of a handle's children: an unordered strong set, which is what
+ * keeps a connected element's handle from being collected under it.
+ *
+ * Membership only. Order is the native tree's, and the six tree mutations
+ * that maintain this set never touch it — mirroring it here would be a second
+ * answer to a question the host already answers, and the two could disagree.
+ *
+ * Created on first use, because most elements are leaves.
+ *
+ * @typedef {Set<object>} OwnedChildren
+ */
+const ownedChildrenSymbol = Symbol("ownedChildren");
+
+/**
+ * The node id of the handle whose [`ownedChildren`] holds this one.
+ *
+ * A number rather than the handle itself: a strong link back would make every
+ * parent/child pair a reference cycle, and a cycle is freed only by a
+ * collection, where an unreachable subtree of one-way links is freed by
+ * reference counting the moment script lets go of its root. Resolved through
+ * [`handlesByNodeId`], which is weak, so an owner whose handle has died reads
+ * as no owner at all — see the header.
+ */
+const ownerSymbol = Symbol("owner");
+
+/**
  * A handle as this file sees it: the node id, plus whatever it has filed
  * on the handle under its own symbols.
  *
@@ -367,14 +425,18 @@ function indexedOf(handle) {
 const handlesByNodeId = new Map();
 
 /**
- * Tells the host a handle is gone. The host decides what that frees: an
- * attached element is kept by its parent, a detached one goes at the end
- * of the batch.
+ * Frees the element of a handle that is gone.
+ *
+ * The host frees that element alone: its element children are unlinked into
+ * detached roots for their own handles, and only what no handle could name —
+ * the text node a `raw-text` reflects — goes with it. The element cannot
+ * still be connected, because a connected element's handle is held by its
+ * parent's, up to the permanent page handle.
  */
 const registry = new FinalizationRegistry(
   (/** @type {number} */ nodeId) => {
     handlesByNodeId.delete(nodeId);
-    releaseElement(nodeId);
+    dropElement(nodeId);
   },
 );
 
@@ -399,13 +461,14 @@ function createHandle(nodeId) {
  * the entry is dropped on the way past rather than waiting for the cleanup
  * job that will release the element too.
  *
- * Undefined is an answer only for dispatch: a node with no handle is
- * skipped (it can have no listeners), and a dispatch whose *target* has no
- * handle is not delivered at all, since the event could not name its
- * target. A query member that must *return* a handle (`__GetParent` and
- * its kind, none implemented) cannot mint a second one for a node whose
- * first has died, and must throw rather than answer with a fresh object:
- * the host would then be holding a node no handle names.
+ * Undefined is an answer only where a node genuinely has nothing to say: a
+ * path node with no handle is skipped, since its listeners lived on the
+ * handle and went with it. Where a handle is *required* — the target and
+ * `currentTarget` of a dispatch, or a query member that must return one
+ * (`__GetParent` and its kind, none implemented) — undefined is not an
+ * answer. No second handle is ever minted for a node whose first has died,
+ * so those must throw: the alternative is the host holding a node no handle
+ * names.
  *
  * @param {number} nodeId
  * @returns {object | undefined}
@@ -430,6 +493,96 @@ function nodeIdOf(handle) {
   return /** @type {number} */ (
     /** @type {Record<symbol, unknown>} */ (handle)[nodeIdSymbol]
   );
+}
+
+/**
+ * The live handle that owns `handle`, or undefined when none does.
+ *
+ * Undefined is **not** "detached" — see the header. It covers two cases: no
+ * owner was ever recorded, and the recorded owner's handle is gone. Only the
+ * second is subtle, and what it means is that the owner is unreachable from
+ * script and cannot be connected, so nothing this file files under it would
+ * ever be read again.
+ *
+ * @param {unknown} handle
+ * @returns {object | undefined}
+ */
+function ownerOf(handle) {
+  const owner = slotsOf(/** @type {object} */ (handle))[ownerSymbol];
+  if (owner === undefined) {
+    return undefined;
+  }
+  return handleOf(/** @type {number} */ (owner));
+}
+
+/**
+ * Takes `handle` out of its owner's child set, if it has one.
+ *
+ * @param {unknown} handle
+ * @returns {undefined}
+ */
+function disown(handle) {
+  const slots = slotsOf(/** @type {object} */ (handle));
+  const owner = slots[ownerSymbol];
+  if (owner === undefined) {
+    return undefined;
+  }
+  slots[ownerSymbol] = undefined;
+  const parent = handleOf(/** @type {number} */ (owner));
+  if (parent === undefined) {
+    // Its handle is already gone, and its child set with it.
+    return undefined;
+  }
+  /** @type {OwnedChildren | undefined} */ (
+    slotsOf(parent)[ownedChildrenSymbol]
+  )?.delete(/** @type {object} */ (handle));
+  return undefined;
+}
+
+/**
+ * Files `child` in `parent`'s child set, taking it out of whichever set held
+ * it before. Called after the native mutation, so a call the host refuses
+ * leaves this side exactly as the tree it failed to change.
+ *
+ * @param {unknown} parent
+ * @param {unknown} child
+ * @returns {undefined}
+ */
+function adopt(parent, child) {
+  disown(child);
+  const slots = slotsOf(/** @type {object} */ (parent));
+  let owned = /** @type {OwnedChildren | undefined} */ (
+    slots[ownedChildrenSymbol]
+  );
+  if (owned === undefined) {
+    owned = new Set();
+    slots[ownedChildrenSymbol] = owned;
+  }
+  owned.add(/** @type {object} */ (child));
+  slotsOf(/** @type {object} */ (child))[ownerSymbol] = nodeIdOf(parent);
+  return undefined;
+}
+
+/**
+ * Files `child` under the handle for `parentNodeId`, the host's answer for
+ * where the child now is.
+ *
+ * A parent with no live handle is one script has let go of, which cannot be
+ * connected, and whose pending `dropElement` will unlink the child anyway:
+ * there is no set to file it in and nothing is lost by not having one.
+ *
+ * @param {number} parentNodeId
+ * @param {unknown} child
+ * @returns {undefined}
+ */
+function adoptUnder(parentNodeId, child) {
+  const parent = handleOf(parentNodeId);
+  if (parent === undefined) {
+    disown(child);
+    return undefined;
+  }
+  adopt(parent, child);
+  return undefined;
 }
 
 /**
@@ -501,9 +654,13 @@ export function __CreateScrollView(parentComponentUniqueID) {
  * @returns {object}
  */
 export function __CreateRawText(text) {
-  const nodeId = createElement("raw-text");
-  setAttribute(nodeId, "text", /** @type {string} */ (text));
-  return createHandle(nodeId);
+  // The handle first, then the attribute. Nothing but a handle holds an
+  // element, so a host call that throws in between would leave a node no
+  // one could ever name or free — and `setAttribute` does throw, for a
+  // value that is not a string.
+  const handle = createHandle(createElement("raw-text"));
+  setAttribute(nodeIdOf(handle), "text", /** @type {string} */ (text));
+  return handle;
 }
 
 /**
@@ -545,6 +702,7 @@ export function __CreateList(
  */
 export function __AppendElement(parent, child) {
   insertBefore(nodeIdOf(parent), nodeIdOf(child), null);
+  adopt(parent, child);
   return /** @type {object} */ (child);
 }
 
@@ -565,6 +723,7 @@ export function __InsertElementBefore(parent, child, reference) {
       ? null
       : nodeIdOf(reference),
   );
+  adopt(parent, child);
   return /** @type {object} */ (child);
 }
 
@@ -576,6 +735,7 @@ export function __InsertElementBefore(parent, child, reference) {
 export function __RemoveElement(parent, child) {
   void parent;
   removeElement(nodeIdOf(child));
+  disown(child);
   return /** @type {object} */ (child);
 }
 
@@ -584,6 +744,12 @@ export function __RemoveElement(parent, child) {
  * them, every old child after the first is detached and the first is
  * replaced in place — under its actual parent, a no-op when detached,
  * exactly `ChildNode.replaceWith`.
+ *
+ * "Its actual parent" is the host's answer, not the ownership graph's. The
+ * graph cannot answer it — a handle script let go of reads as gone while its
+ * element is still there and still a parent (see the header) — and choosing
+ * a *different native operation* on that reading is how an element with a
+ * live handle under a let-go parent would get treated as detached.
  *
  * @param {unknown} parent
  * @param {unknown} newChildren
@@ -596,12 +762,14 @@ export function __ReplaceElements(parent, newChildren, oldChildren) {
     const parentNodeId = nodeIdOf(parent);
     for (const child of news) {
       insertBefore(parentNodeId, nodeIdOf(child), null);
+      adopt(parent, child);
     }
     return undefined;
   }
   const olds = Array.isArray(oldChildren) ? oldChildren : [oldChildren];
   for (let index = 1; index < olds.length; index += 1) {
     removeElement(nodeIdOf(olds[index]));
+    disown(olds[index]);
   }
   const first = nodeIdOf(olds[0]);
   const actualParent = parentNode(first);
@@ -610,8 +778,10 @@ export function __ReplaceElements(parent, newChildren, oldChildren) {
   }
   for (const child of news) {
     insertBefore(actualParent, nodeIdOf(child), first);
+    adoptUnder(actualParent, child);
   }
   removeElement(first);
+  disown(olds[0]);
   return undefined;
 }
 
@@ -632,14 +802,23 @@ export function __SwapElement(childA, childB) {
   if (a === b) {
     return undefined;
   }
-  const attachedA = parentNode(a) !== null;
-  const attachedB = parentNode(b) !== null;
-  if (attachedA && attachedB) {
+  // Which pattern applies is the host's answer, for the reason
+  // `__ReplaceElements` gives. Both parents are read before the swap,
+  // because the swap is what exchanges them, and answer the bookkeeping too.
+  const parentA = parentNode(a);
+  const parentB = parentNode(b);
+  if (parentA !== null && parentB !== null) {
     swapElement(a, b);
-  } else if (attachedA) {
+    adoptUnder(parentB, childA);
+    adoptUnder(parentA, childB);
+  } else if (parentA !== null) {
     replaceElement(b, a);
-  } else if (attachedB) {
+    adoptUnder(parentA, childB);
+    disown(childA);
+  } else if (parentB !== null) {
     replaceElement(a, b);
+    adoptUnder(parentB, childA);
+    disown(childB);
   }
   return undefined;
 }
@@ -653,7 +832,17 @@ export function __ReplaceElement(newElement, oldElement) {
   if (newElement === oldElement) {
     return undefined;
   }
+  // The graph is read for bookkeeping only: it never decides what the host
+  // is asked to do, so a stale-looking answer costs a filing, never a
+  // different tree. A live owner is always the real parent — the only way an
+  // element leaves one without a mutation saying so is that parent being
+  // freed, which takes its handle with it.
+  const owner = ownerOf(oldElement);
   replaceElement(nodeIdOf(newElement), nodeIdOf(oldElement));
+  if (owner !== undefined) {
+    adopt(owner, newElement);
+  }
+  disown(oldElement);
   return undefined;
 }
 
@@ -1297,14 +1486,32 @@ export function __UpdateListCallbacks(
  * absent: it is every `data-*` attribute, and the native boundary reads one
  * named attribute at a time with no way to enumerate.
  *
+ * A node the host routed an event to is connected, and a connected element's
+ * handle is held by its parent's up to the permanent page handle, so one
+ * exists. If it does not, the ownership graph and the tree disagree: the
+ * event cannot name what it happened to, and nothing this file could return
+ * would be better than saying so.
+ *
+ * The one node kind that is connected and yet unnameable is a UA component's
+ * shadow content, which script never sees. No component has a shadow root
+ * today; the first one with hit-testable chrome owes the host a retarget to
+ * its host element before the path is built, which is also what a browser
+ * reports as the target.
+ *
  * @param {number} nodeId
  * @returns {object}
  */
 function targetInfo(nodeId) {
+  const handle = handleOf(nodeId);
+  if (handle === undefined) {
+    throw new Error(
+      `no handle names element ${nodeId}: the element ownership graph and the tree disagree`,
+    );
+  }
   return {
     id: getAttribute(nodeId, "id"),
     uid: nodeId,
-    elementRefptr: handleOf(nodeId),
+    elementRefptr: handle,
   };
 }
 
@@ -1526,16 +1733,10 @@ function runEventHandler(handler, event) {
  * @returns {Dispatch | undefined}
  */
 function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
-  // The target's handle, not this node's, decides first. The host routes
-  // by geometry, so it can name an element whose handle is gone — one
-  // script attached and let go of, kept on screen by its parent. The
-  // event would have to carry that element as `target`, and there is no
-  // handle to carry it by and none is minted after the first: such a
-  // dispatch is not delivered to anyone, and the host's later calls for
-  // it find no entry to end.
-  if (handleOf(targetNodeId) === undefined) {
-    return undefined;
-  }
+  // No handle, no listeners: they lived on the handle and went with it. The
+  // host's index is maintained from here and forgets a node when its element
+  // is dropped, so this is the window between a handle becoming unreachable
+  // and its cleanup job running, not a node that was never named.
   const handle = handleOf(node);
   if (handle === undefined) {
     return dispatches.get(id);

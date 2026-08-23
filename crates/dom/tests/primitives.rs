@@ -188,7 +188,7 @@ fn drop_subtree_frees_detaches_and_returns_payloads() {
 }
 
 #[test]
-fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
+fn drop_element_frees_one_node_and_leaves_its_element_children_allocated() {
     /// A payload carrying an embedder-side id, to observe the harvest.
     #[derive(Debug, PartialEq, Eq)]
     struct Payload(i32);
@@ -197,7 +197,7 @@ fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
     let container = doc.create_element("div", Payload(10));
     let child = doc.create_element("div", Payload(11));
     doc.append_child(container, child);
-    let grandchild = doc.create_text_node("payload", Payload(12));
+    let grandchild = doc.create_element("div", Payload(12));
     doc.append_child(child, grandchild);
 
     assert_eq!(
@@ -221,6 +221,31 @@ fn drop_element_frees_one_node_and_leaves_its_children_allocated() {
 
     doc.append_child(container, grandchild);
     assert_eq!(doc.get(container).unwrap().child_ids(), &[grandchild]);
+}
+
+/// The other half of the rule: an element is what an embedder names, so it
+/// survives its parent as a detached root — a text node is not, so leaving it
+/// behind would leak it, and it goes with the node that owns it.
+#[test]
+fn drop_element_frees_the_text_nodes_under_it() {
+    let mut doc = test_document();
+    let root = doc.document_element().id();
+    let container = node(&mut doc, "div");
+    doc.append_child(root, container);
+    let run = doc.create_text_node("payload", ());
+    doc.append_child(container, run);
+    let element = node(&mut doc, "div");
+    doc.append_child(container, element);
+
+    doc.drop_element(container);
+
+    assert!(doc.get(container).is_none());
+    assert!(doc.get(run).is_none(), "the run goes with its owner");
+    assert_eq!(
+        doc.get(element).map(dom::Node::parent_id),
+        Some(None),
+        "the element child stays, detached"
+    );
 }
 
 #[test]

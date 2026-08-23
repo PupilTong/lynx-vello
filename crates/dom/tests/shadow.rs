@@ -453,11 +453,29 @@ fn removing_a_host_removes_its_shadow_tree_with_it() {
     assert!(harness.doc.dom.get(harness.host).is_none());
 }
 
+/// A host dropped on its own takes its shadow tree with it. Nothing else
+/// could: a shadow tree can be neither re-parented nor reached again, so
+/// leaving it behind would leak it — unlike a light-tree element child, which
+/// its own owner still names.
 #[test]
-#[should_panic(expected = "cannot drop a shadow host on its own")]
-fn a_host_cannot_be_dropped_without_its_shadow_tree() {
+fn dropping_a_host_takes_its_shadow_tree_and_leaves_its_light_children() {
     let mut harness = Harness::new();
+    let inside = harness.shadow_el(harness.shadow, "inside");
+    let slotted = harness.doc.el(harness.host, "slotted");
+    harness.doc.flush();
+
     harness.doc.dom.drop_element(harness.host);
+
+    assert!(harness.doc.dom.get(harness.host).is_none());
+    assert!(
+        harness.doc.dom.get(harness.shadow).is_none() && harness.doc.dom.get(inside).is_none(),
+        "the shadow tree is the host's own"
+    );
+    assert_eq!(
+        harness.doc.dom.get(slotted).map(dom::Node::parent_id),
+        Some(None),
+        "the light-tree child outlives it as a detached root"
+    );
 }
 
 #[test]

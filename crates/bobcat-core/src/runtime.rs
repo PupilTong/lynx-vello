@@ -117,12 +117,15 @@ impl fmt::Display for MainThreadError {
 
 impl std::error::Error for MainThreadError {}
 
-/// How many removals of held subtrees go by between collections.
+/// How many removals go by between collections.
 ///
 /// A removal is where a subtree's handles start dying — `ReactLynx` unmounts
-/// with `__RemoveElement` and then deletes the snapshot's element list — and
-/// nothing frees the subtree until those handles are finalized, which takes a
-/// collection. `QuickJS` collects on its own only at allocation pressure (its
+/// with `__RemoveElement` and then deletes the snapshot's element list, which
+/// drops the last reference to the detached root's handle and, through the
+/// child sets under it, to every handle in the subtree — and nothing frees
+/// the elements until those handles are finalized. A handle reachable only
+/// from a registration it captured is a cycle, which only a collection
+/// resolves. `QuickJS` collects on its own only at allocation pressure (its
 /// threshold is 1.5× the live size after each collection), so a card that
 /// detaches steadily while allocating little keeps dead subtrees for a long
 /// time: measured, a 301-node subtree outlived 30 batches at 5 elements of
@@ -135,16 +138,11 @@ const REMOVALS_PER_COLLECTION: u32 = 32;
 ///
 /// A batch is open from the first `bobcat` call that takes the document out
 /// of the hand-off slot until it goes back, at `__FlushElementTree` or at the
-/// end of the evaluation or event delivery that opened it. Putting it back is
-/// the one boundary this runtime has, so that is where the document frees
-/// what a release or removal left for it: nothing is freed while a batch is
-/// open, so a handle finalized in the middle of one never changes what the
-/// rest of the batch can reach.
+/// end of the evaluation or event delivery that opened it.
 struct TreeHandle {
     slot: SharedTree,
     taken: Option<LynxDocument>,
-    /// Removals of held subtrees since the last collection; see
-    /// [`REMOVALS_PER_COLLECTION`].
+    /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
 }
 
@@ -163,20 +161,18 @@ impl TreeHandle {
             Some(tree) => tree,
             None => self.slot.take(),
         };
-        tree.collect_unheld();
         tree.layout();
         self.slot.put(tree);
     }
 
     /// Closes the batch: returns the tree if one is held.
     fn release(&mut self) {
-        if let Some(mut tree) = self.taken.take() {
-            tree.collect_unheld();
+        if let Some(tree) = self.taken.take() {
             self.slot.put(tree);
         }
     }
 
-    /// Notes that a held subtree left the tree.
+    /// Notes that a subtree left the tree.
     fn note_removal(&mut self) {
         self.removals = self.removals.saturating_add(1);
     }
@@ -216,13 +212,13 @@ struct EventState {
     /// without touching the name again — and so an event no listener wants
     /// costs one lookup for the whole walk.
     listeners: RefCell<HashMap<Arc<str>, ListenerNodes>>,
-    /// The same registrations keyed the other way, so releasing an element
+    /// The same registrations keyed the other way, so dropping an element
     /// costs its own listeners rather than a scan of every name.
     ///
-    /// Element release is not rare — it is whatever the collector hands back
-    /// after a list update — and the forward index is keyed by name, so
-    /// without this a single release walks every registered event name and
-    /// every node registered under it.
+    /// Dropping an element is not rare — it is whatever the collector hands
+    /// back after a list update — and the forward index is keyed by name, so
+    /// without this a single drop walks every registered event name and every
+    /// node registered under it.
     by_node: RefCell<HashMap<dom::NodeId, NodeListeners>>,
     /// The presenting thread's view of which names are registered anywhere.
     ///
@@ -287,8 +283,8 @@ impl EventState {
         self.names.note_disabled(name);
     }
 
-    /// Drops every registration on a released element.
-    fn release_node(&self, node: dom::NodeId) {
+    /// Drops every registration on an element that is going away.
+    fn forget_node(&self, node: dom::NodeId) {
         let Some(registrations) = self.by_node.borrow_mut().remove(&node) else {
             return;
         };
@@ -300,8 +296,8 @@ impl EventState {
                     listeners.remove(&name);
                 }
             }
-            // A release is a removal like any other: the shared table must
-            // not keep counting a registration the element took with it.
+            // A drop is a removal like any other: the shared table must not
+            // keep counting a registration the element took with it.
             self.names.note_disabled(&name);
         }
     }
@@ -509,8 +505,8 @@ __FlushElementTree();
     }
 
     /// Runs a collection now. Dead handles are finalized inside it, so their
-    /// `releaseElement` calls reach the document before the batch boundary
-    /// at the end frees what they released.
+    /// `dropElement` calls reach the document before the batch it belongs to
+    /// ends.
     ///
     /// The explicit entry point; production collection is paced by removals
     /// through [`Self::finish_batch`] instead.
@@ -655,9 +651,8 @@ fn install_host_module(
     }
 
     // The two removals are written out rather than generated, because each
-    // also counts toward the next collection — and only when the removed
-    // subtree is held: an unheld one is freed at the boundary without any
-    // handle having to die first.
+    // also counts toward the next collection: a detached subtree is freed
+    // only once the handles naming it are finalized.
     let tree = Rc::clone(handle);
     install(engine, "removeElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.removeElement";
@@ -665,11 +660,8 @@ fn install_host_module(
         let mut handle = borrow_tree(NAME, &tree)?;
         let document = handle.tree();
         validate_removable(document, NAME, child)?;
-        let held = document.get(child).is_some_and(dom::Node::is_held);
         document.remove_element(child);
-        if held {
-            handle.note_removal();
-        }
+        handle.note_removal();
         Ok(HostValue::Undefined)
     })?;
 
@@ -685,11 +677,8 @@ fn install_host_module(
         if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
             validate_insert(document, NAME, parent, new_element, Some(old_element))?;
             document.insert_before(parent, new_element, Some(old_element));
-            let held = document.get(old_element).is_some_and(dom::Node::is_held);
             document.remove_element(old_element);
-            if held {
-                handle.note_removal();
-            }
+            handle.note_removal();
         }
         Ok(HostValue::Undefined)
     })?;
@@ -698,19 +687,38 @@ fn install_host_module(
 
     let tree = Rc::clone(handle);
     let state = Rc::clone(events);
-    // The realm's handle for `node` has been collected. Nothing is freed
-    // here: its parent holds the element for as long as it is attached, and
-    // once it is detached as well — now, or by a later removal of it or an
-    // ancestor — the document frees it at the next batch boundary. What is
-    // gone for certain is every listener the realm had on it, since those
-    // lived on the handle, so the index stops naming the node.
-    install(engine, "releaseElement", 1, move |arguments| {
-        let node = node_id_argument("bobcat-internal:host.releaseElement", arguments, 0)?;
-        let mut tree = borrow_tree("bobcat-internal:host.releaseElement", &tree)?;
+    // The realm's handle for `node` has been collected, and a handle is the
+    // one thing that holds an element: the node is freed now. Only the node —
+    // its element children are unlinked and go on as detached roots, each
+    // held by the handle that names it, while the text node a `raw-text`
+    // reflects goes with it because no handle could ever name one. The
+    // element cannot still be on screen: a connected element's handle is kept
+    // alive by its parent's, up to the permanent page handle. Every listener
+    // the realm had on it is gone too, since those lived on the handle, so
+    // the index stops naming the node.
+    install(engine, "dropElement", 1, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.dropElement";
+        let node = node_id_argument(NAME, arguments, 0)?;
+        let mut tree = borrow_tree(NAME, &tree)?;
         let document = tree.tree();
-        validate_removable(document, "bobcat-internal:host.releaseElement", node)?;
-        document.release(node);
-        state.release_node(node);
+        validate_removable(document, NAME, node)?;
+        // The one place the realm's ownership graph is checkable from here,
+        // and the check that turns a mirror bug into an error instead of a
+        // row disappearing. A connected element's handle is held by its
+        // parent's, up to the permanent page handle, so a connected element
+        // can never be the subject of a drop; if one is, the graph and the
+        // tree disagree and the realm must hear about it before the element
+        // is gone.
+        if document.is_connected(node) {
+            return Err(format!(
+                "{NAME} was given a connected element: the element ownership \
+                 graph and the tree disagree"
+            ));
+        }
+        // Before the drop, so an id that somehow fails to free still leaves
+        // the presenting thread's listener index naming nothing.
+        state.forget_node(node);
+        document.drop_element(node);
         Ok(HostValue::Undefined)
     })?;
 
@@ -1814,8 +1822,8 @@ mod tests {
         assert!(names.contains("tap"));
         assert_eq!(state.by_node.borrow()[&a].len(), 2);
 
-        // Releasing an element takes its own registrations and only those.
-        state.release_node(a);
+        // Dropping an element takes its own registrations and only those.
+        state.forget_node(a);
         assert!(!state.by_node.borrow().contains_key(&a));
         assert!(
             names.contains("tap"),
@@ -1829,7 +1837,7 @@ mod tests {
             vec![(b, false)]
         );
 
-        state.release_node(b);
+        state.forget_node(b);
         assert!(state.listeners.borrow().is_empty());
         assert!(state.by_node.borrow().is_empty());
         assert!(
@@ -2162,9 +2170,11 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   const view = __CreateView(0);
                   __AppendElement(page, view);
-                  // Deliberately unheld: this is the element a sweep collects.
+                  // Detached and let go of: this is the element a sweep
+                  // collects. Attached, the page's handle would keep it.
                   const doomed = __CreateView(0);
                   __AppendElement(page, doomed);
+                  __RemoveElement(page, doomed);
                   globalThis.doomed = __GetElementUniqueID(doomed);
                   globalThis.held = [page, view];
                   __AddEventListener(page, 'tap', () => seen.push('page'), { capture: true });
@@ -2177,11 +2187,9 @@ mod tests {
 
         let steps = steps(&elements, 3);
         // Collect the unrelated handle between building the path and running
-        // the walk. The real finalizer performs the one `releaseElement` call;
+        // the walk. The real finalizer performs the one `dropElement` call;
         // invoking it manually here would leave that finalizer armed and make
-        // its later cleanup a duplicate stale-id call. The element stays
-        // attached, held by the page; what the release takes away is its
-        // place in the listener index.
+        // its later cleanup a duplicate stale-id call.
         runtime.collect_garbage().expect("sweep");
 
         runtime
@@ -2374,13 +2382,15 @@ mod tests {
         );
     }
 
-    /// The tree is what keeps an attached element alive, not its handle: a
-    /// `ReactLynx` list hands a recycled cell's elements between snapshot
-    /// instances, so a handle dying while its element is attached is routine.
-    /// The element goes only once it is detached as well — and then takes
-    /// every descendant whose handle is gone with it.
+    /// A handle is what keeps an element alive, and while the element is
+    /// attached its handle is kept by its parent's — up to the permanent page
+    /// handle. So a `ReactLynx` list handing a recycled cell's elements
+    /// between snapshot instances, and deleting the old `__elements` array,
+    /// takes nothing away: the elements are on screen and their handles are
+    /// reachable from the page. What ends a subtree is detaching it and then
+    /// letting go.
     #[test]
-    fn a_collected_handle_leaves_an_attached_element_to_its_parent() {
+    fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -2389,9 +2399,11 @@ mod tests {
                   const page = __CreatePage('card', 0);
                   const wrapper = __CreateView(0);
                   __AppendElement(page, wrapper);
-                  let unheld = __CreateView(0);
-                  __AppendElement(wrapper, unheld);
-                  unheld = undefined;
+                  let child = __CreateView(0);
+                  __AppendElement(wrapper, child);
+                  // The snapshot instance that created it lets go; the
+                  // wrapper's handle is the one that holds it now.
+                  child = undefined;
                   globalThis.wrapper = wrapper;
                 };
                 ",
@@ -2400,14 +2412,14 @@ mod tests {
             .expect("main-thread script");
 
         runtime.collect_garbage().expect("collection");
-        let tree = elements.tree();
         assert_eq!(
-            tree.get(node_id(4)).and_then(dom::Node::parent_id),
+            elements
+                .tree()
+                .get(node_id(4))
+                .and_then(dom::Node::parent_id),
             Some(node_id(3)),
-            "the collected handle's element is still attached under its parent"
+            "the element script let go of is still attached under its parent"
         );
-        assert!(!tree.get(node_id(4)).expect("kept").is_held());
-        drop(tree);
 
         runtime
             .evaluate_module(
@@ -2420,7 +2432,7 @@ mod tests {
         let tree = elements.tree();
         assert!(
             tree.get(node_id(4)).is_some(),
-            "detached under a held parent, the element is kept by that parent"
+            "a removal frees nothing: the wrapper's handle still names both"
         );
         drop(tree);
 
@@ -2435,19 +2447,152 @@ mod tests {
         let tree = elements.tree();
         assert!(
             tree.get(node_id(3)).is_none(),
-            "the detached parent is freed once its handle dies"
+            "the detached wrapper goes once its handle does"
         );
         assert!(
             tree.get(node_id(4)).is_none(),
-            "and the unheld child goes with it: nothing else ever held it"
+            "and the child with it: the wrapper's handle held the only \
+             reference left to the child's"
         );
     }
 
-    /// Ownership runs one way. A held descendant does not keep a released,
-    /// detached ancestor allocated; it is unlinked from the freed ancestor and
-    /// goes on as a detached root script can still attach somewhere.
+    /// The whole ownership graph, through every mutation that changes a
+    /// parent. Script keeps no reference of its own to anything, so the only
+    /// thing that can survive a collection is what the page's permanent
+    /// handle holds through the chain of child sets — which must be exactly
+    /// the connected elements, and nothing more.
     #[test]
-    fn releasing_a_detached_ancestor_frees_it_and_leaves_the_held_descendant_a_root() {
+    fn every_connected_element_survives_a_collection_script_holds_nothing_through() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const a = __CreateView(0);
+                  __AppendElement(page, a);
+                  const b = __CreateView(0);
+                  __InsertElementBefore(page, b, a);
+                  // A move: b leaves the page's set for a's.
+                  __InsertElementBefore(a, b, null);
+                  const c = __CreateView(0);
+                  __ReplaceElement(c, b);
+                  const d = __CreateView(0);
+                  const e = __CreateView(0);
+                  __ReplaceElements(a, [d, e], [c]);
+                  // Within one parent, then across two.
+                  __SwapElement(d, e);
+                  const f = __CreateView(0);
+                  __AppendElement(page, f);
+                  __SwapElement(d, f);
+                  const g = __CreateView(0);
+                  __AppendElement(page, g);
+                  __RemoveElement(page, g);
+                };
+                ",
+                "app:///ownership.js",
+            )
+            .expect("main-thread script");
+
+        runtime.collect_garbage().expect("collection");
+        let tree = elements.tree();
+        // page 2, a 3, b 4, c 5, d 6, e 7, f 8, g 9.
+        for (id, parent) in [(3, 2), (6, 2), (7, 3), (8, 3)] {
+            assert_eq!(
+                tree.get(node_id(id)).and_then(dom::Node::parent_id),
+                Some(node_id(parent)),
+                "node {id} is connected, so its handle is reachable from the page's"
+            );
+        }
+        for id in [4, 5, 9] {
+            assert!(
+                tree.get(node_id(id)).is_none(),
+                "node {id} was left detached and unreferenced, so its handle went"
+            );
+        }
+    }
+
+    /// The invariant, checked rather than argued: a connected element's
+    /// handle is held by its parent's, so a drop can never name one. If it
+    /// does, the realm's ownership graph has diverged from the tree, and the
+    /// element must not quietly disappear from the screen.
+    #[test]
+    fn dropping_a_connected_element_is_refused() {
+        let (mut runtime, elements) = runtime();
+        let error = runtime
+            .run_main_thread_script(
+                r"
+                import { dropElement } from 'bobcat-internal:host';
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  dropElement(__GetElementUniqueID(view));
+                };
+                ",
+                "app:///connected-drop.js",
+            )
+            .expect_err("a connected element cannot be dropped");
+        assert!(error.to_string().contains("ownership graph"), "{error}");
+        assert!(
+            elements.tree().get(node_id(3)).is_some(),
+            "and the element is still there"
+        );
+    }
+
+    /// A handle that script has let go of reads as gone at once — `QuickJS`
+    /// answers a `WeakRef` from the refcount — while its element stays
+    /// allocated and stays a parent until the collection that finalizes it.
+    /// So the ownership graph must never be what decides which native
+    /// operation runs: a child of a let-go parent is still attached, and
+    /// treating it as detached turns this swap into a silent deletion of the
+    /// element it was swapped with.
+    #[test]
+    fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const visible = __CreateView(0);
+                  __AppendElement(page, visible);
+                  globalThis.cell = (function () {
+                    const wrapper = __CreateWrapperElement(0);
+                    const cell = __CreateView(0);
+                    __AppendElement(wrapper, cell);
+                    // The wrapper's handle is unreachable from here on, and
+                    // no collection has run: its element is still `cell`'s
+                    // parent.
+                    return cell;
+                  })();
+                  __SwapElement(globalThis.cell, visible);
+                };
+                ",
+                "app:///let-go-parent.js",
+            )
+            .expect("main-thread script");
+
+        // page 2, visible 3, wrapper 4, cell 5.
+        let tree = elements.tree();
+        assert_eq!(
+            tree.get(node_id(5)).and_then(dom::Node::parent_id),
+            Some(node_id(2)),
+            "the swap moved the cell under the page"
+        );
+        assert_eq!(
+            tree.get(node_id(3)).and_then(dom::Node::parent_id),
+            Some(node_id(4)),
+            "and moved the visible element under the wrapper, rather than \
+             deleting it as a replace would have"
+        );
+    }
+
+    /// A drop frees one node. A descendant script still names is unlinked
+    /// from the freed ancestor and goes on as a detached root it can attach
+    /// somewhere else — the ancestor's handle dying does not take it.
+    #[test]
+    fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -2471,11 +2616,11 @@ mod tests {
         let tree = elements.tree();
         assert!(
             tree.get(node_id(3)).is_none(),
-            "the released detached ancestor is freed"
+            "the detached ancestor is freed with its handle"
         );
         let inner = tree
             .get(node_id(4))
-            .expect("the held descendant stays allocated");
+            .expect("the descendant script still names stays allocated");
         assert_eq!(inner.parent_id(), None, "as a detached root of its own");
         drop(tree);
 
@@ -2540,11 +2685,12 @@ mod tests {
         }
     }
 
-    /// A released element that is removed later is freed at the end of the
-    /// batch that removes it — the last of the two events is what makes it
-    /// garbage, whichever it is — without waiting for another collection.
+    /// `__ReplaceElement` detaches what it replaces, and the detached
+    /// element is kept by the handle script still holds — together with the
+    /// subtree under it, whose handles that one holds in turn. Both go when
+    /// script lets go.
     #[test]
-    fn removing_a_released_element_frees_it_by_the_end_of_that_batch() {
+    fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -2552,10 +2698,10 @@ mod tests {
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const holder = __CreateView(0);
-                  let gone = __CreateView(0);
+                  let inner = __CreateView(0);
                   __AppendElement(page, holder);
-                  __AppendElement(holder, gone);
-                  gone = undefined;
+                  __AppendElement(holder, inner);
+                  inner = undefined;
                   globalThis.holder = holder;
                 };
                 ",
@@ -2577,11 +2723,11 @@ mod tests {
         assert_eq!(
             tree.get(node_id(3)).and_then(dom::Node::parent_id),
             None,
-            "the replaced holder is detached, and held by its live handle"
+            "the replaced holder is detached, and live: its handle names it"
         );
         assert!(
             tree.get(node_id(4)).is_some(),
-            "the holder's unheld child is kept by the held holder"
+            "and it holds the handle of the child under it"
         );
         drop(tree);
 
@@ -2605,38 +2751,32 @@ mod tests {
         assert!(tree.get(node_id(3)).is_none() && tree.get(node_id(4)).is_none());
     }
 
-    /// Nothing is freed while a batch is open. A release arriving in the
-    /// middle of one — here, called directly, where a finalizer would — leaves
-    /// the detached element readable until the batch ends, and the boundary
-    /// is where it goes.
+    /// A drop is immediate and final: the element is gone the moment the
+    /// finalizer's call lands, and the id it used names nothing afterwards.
     #[test]
-    fn a_release_inside_a_batch_frees_nothing_until_the_batch_ends() {
+    fn a_drop_frees_the_element_at_once_and_retires_its_id() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
-                import { releaseElement, tagName } from 'bobcat-internal:host';
+                import { dropElement, tagName } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const gone = __CreateView(0);
                   __AppendElement(page, gone);
                   __RemoveElement(page, gone);
                   globalThis.goneId = __GetElementUniqueID(gone);
-                  releaseElement(goneId);
-                  // Released and detached, yet still there for the rest of
-                  // the batch: the read below would throw on a freed id.
                   if (tagName(goneId) !== 'view') {
-                    throw new Error('the released element is gone mid-batch');
+                    throw new Error('the detached element is gone before its drop');
                   }
+                  // Called directly, where a finalizer would.
+                  dropElement(goneId);
                 };
                 ",
-                "app:///mid-batch.js",
+                "app:///drop.js",
             )
             .expect("main-thread script");
-        assert!(
-            elements.tree().get(node_id(3)).is_none(),
-            "the boundary at the end of the evaluation freed it"
-        );
+        assert!(elements.tree().get(node_id(3)).is_none());
         runtime
             .evaluate_module(
                 "import { tagName } from 'bobcat-internal:host';
@@ -2696,7 +2836,7 @@ mod tests {
         }
     }
 
-    /// Removals pace collection: once enough held subtrees have been removed,
+    /// Removals pace collection: once enough subtrees have been removed,
     /// the batch that crosses the count ends with a collection, so the
     /// handles those subtrees left behind are finalized and the subtrees freed
     /// without any allocation pressure or explicit collection.
@@ -2756,54 +2896,52 @@ mod tests {
         }
     }
 
-    /// An element script attached and let go of stays on screen, held by its
-    /// parent, so hit testing can name it as a target. The event would have to
-    /// carry it, and no handle exists to carry it by: the realm drops the
-    /// dispatch at its first callback, and the ancestor's listener never runs.
-    /// The same listener still runs for a target that has a handle.
+    /// Every element on an event path carries a handle — a connected one is
+    /// held by its parent's, up to the permanent page handle — so a target
+    /// always resolves to one. A target that does not is the ownership graph
+    /// and the tree disagreeing, and the realm says so instead of inventing
+    /// an `Event` that cannot name what it happened to.
+    ///
+    /// Routing cannot produce one today: it targets elements, and a hit on a
+    /// text run maps to its element in `hit.rs`. This builds the path by hand
+    /// against the run itself, the one node no handle ever names. The case
+    /// that *will* produce one is a UA component with hit-testable shadow
+    /// chrome — `first_element_at` answers with the flat-tree element it
+    /// hits, shadow tree included, and script names no shadow node — so the
+    /// first such component owes the event path a retarget to its host, the
+    /// same one `event_path` already performs for every step outside the
+    /// tree. `raw-text`, the only component today, has no shadow root.
     #[test]
-    fn an_event_targeted_at_an_element_without_a_handle_is_not_delivered() {
+    fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
-                globalThis.seen = [];
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
-                  const wrapper = __CreateView(0);
-                  __AppendElement(page, wrapper);
-                  __AppendElement(wrapper, __CreateView(0));
-                  __AddEventListener(wrapper, 'tap', (event) => seen.push(event.target.uid), {});
-                  globalThis.wrapper = wrapper;
+                  const text = __CreateText(0);
+                  __AppendElement(page, text);
+                  __AppendElement(text, __CreateRawText('hello'));
+                  __AddEventListener(text, 'tap', () => {}, {});
                 };
                 ",
-                "app:///unhandled-target.js",
+                "app:///run-target.js",
             )
             .expect("main-thread script");
-        runtime.collect_garbage().expect("collection");
-        assert_eq!(
-            elements.tree().get(node_id(4)).map(dom::Node::is_held),
-            Some(false),
-            "the child is attached, kept by its parent, and has no handle"
+        // page 2, text 3, raw-text 4, and the run the component reflects, 5.
+        assert!(
+            elements
+                .tree()
+                .get(node_id(5))
+                .is_some_and(|node| !node.is_element()),
+            "the run is the node the realm mints no handle for"
         );
 
-        let at_child = steps(&elements, 4);
-        runtime
-            .dispatch_event(&at_child, &tap(), &no_detail())
-            .expect("dispatch");
-        let at_wrapper = steps(&elements, 3);
-        runtime
-            .dispatch_event(&at_wrapper, &tap(), &no_detail())
-            .expect("dispatch");
-        runtime
-            .evaluate_module(
-                "import { __GetElementUniqueID } from 'bobcat:element';
-                 if (seen.join('|') !== String(__GetElementUniqueID(globalThis.wrapper))) \
-                   throw new Error('delivered: ' + seen.join('|'));",
-                "app:///verify.js",
-                "verifying",
-            )
-            .expect("only the dispatch whose target has a handle was delivered");
+        let at_run = steps(&elements, 5);
+        let error = runtime
+            .dispatch_event(&at_run, &tap(), &no_detail())
+            .expect_err("a target no handle names cannot be delivered");
+        assert!(error.to_string().contains("ownership graph"), "{error}");
     }
 
     #[test]

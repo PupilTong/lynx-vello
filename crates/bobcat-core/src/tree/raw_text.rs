@@ -98,9 +98,9 @@ fn owned_text_node(document: &LynxDocument, element: NodeId) -> Option<NodeId> {
 fn reflect_text(document: &mut LynxDocument, element: NodeId, text: &str) {
     match (owned_text_node(document, element), text.is_empty()) {
         (Some(node), false) => document.set_text_node_data(node, text),
-        // Freed now rather than left for the batch boundary: the run is the
-        // component's own, nothing else can reach it, and freeing it here is
-        // what evicts its retained shaping and layout state at once.
+        // Freed rather than merely unlinked: the run is the component's own,
+        // nothing else can reach it, and freeing it is what evicts its
+        // retained shaping and layout state.
         (Some(node), true) => {
             document.drop_element(node);
         }
@@ -111,12 +111,10 @@ fn reflect_text(document: &mut LynxDocument, element: NodeId, text: &str) {
                 .and_then(dom::Node::first_child)
                 .map(dom::Node::id);
             document.insert_before(element, node, first);
-            // No handle could ever name the run — the realm mints none for a
-            // text node — so nothing outside the tree holds it: its carrier
-            // does, and it is freed with the carrier or when the value
-            // empties. Released after the insert, so the release finds it
-            // attached and leaves nothing for the batch boundary.
-            document.release(node);
+            // Nothing holds the run but its carrier: no handle could ever
+            // name it — the realm mints none for a text node — so
+            // `Document::drop_element` on the carrier frees it too, and the
+            // line above is the only place it is ever created.
         }
         (None, true) => {}
     }
@@ -230,42 +228,28 @@ mod tests {
         );
     }
 
-    /// The run is held by nothing but its carrier, so it goes wherever the
-    /// carrier goes: kept while the released carrier is attached, freed with
-    /// it at the boundary after the carrier is both released and detached —
-    /// in either order.
+    /// Nothing but its carrier holds the run, so it goes wherever the carrier
+    /// goes: a removal keeps both, and the drop that follows the carrier's
+    /// handle takes the run with it.
     #[test]
-    fn a_run_is_freed_with_its_carrier_whichever_of_release_and_removal_comes_last() {
+    fn a_run_is_freed_with_the_carrier_whose_handle_died() {
         let mut document = document();
         let text = text_element(&mut document);
 
         let raw = raw_text(&mut document, text, "hello");
         let run = run_of(&document, raw);
-        document.release(raw);
-        document.collect_unheld();
+        document.remove_element(raw);
         assert!(
             document.get(run).is_some(),
-            "an attached carrier keeps its run even after its handle is gone"
+            "a removal frees nothing: the carrier's handle still names it"
         );
-        document.remove_element(raw);
-        assert_eq!(document.collect_unheld(), 2, "the carrier and its run");
+
+        document.drop_element(raw);
         assert!(document.get(raw).is_none());
         assert!(
             document.get(run).is_none(),
             "the run's node dies with its carrier: nothing else would ever free it"
         );
-
-        let raw = raw_text(&mut document, text, "again");
-        let run = run_of(&document, raw);
-        document.remove_element(raw);
-        document.collect_unheld();
-        assert!(
-            document.get(run).is_some(),
-            "a detached carrier whose handle is live keeps its run"
-        );
-        document.release(raw);
-        assert_eq!(document.collect_unheld(), 2);
-        assert!(document.get(raw).is_none() && document.get(run).is_none());
     }
 
     #[test]

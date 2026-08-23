@@ -57,9 +57,9 @@ CSS supplied as text.
   `remove_element_state`, `set_inline_style`, `set_inline_style_property`,
   `insert_before`,
   `remove_element`, `drop_element`, and `drop_subtree` record their own
-  pre-mutation snapshots or scoped restyle hints before changing the tree;
-  `release` and `collect_unheld` record nothing, because they change only
-  what is allocated, never what is rendered.
+  pre-mutation snapshots or scoped restyle hints before changing the tree.
+  A `drop_element` of an already-detached node records nothing and moves no
+  visual epoch: what it frees was not rendered.
   Stylesheet and device operations schedule the document root in the same call.
   Embedders cannot set, clear, or query internal traversal dirty state.
 - **Payloads are opaque.** The payload arena retains the `T` supplied for
@@ -112,7 +112,7 @@ CSS supplied as text.
 | `bobcat-core` | Opaque `LynxView`; injected resource, VM-factory, image-decoder, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; optional opaque QuickJS factory; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
-| `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the `FinalizationRegistry` release path (cleanup calls the imported `releaseElement` at host job checkpoints; the node is freed by the document at the next batch boundary, once it is detached too) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
+| `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
 | Still unowned | Lynx event dispatch/payload; decoded `StyleInfo` lowering and CSS-scope policy; `rpx` view units; the remaining Element PAPI members | — |
 
 ## Style lifecycle
@@ -170,11 +170,11 @@ What that covers, and what it does not:
   script misuse surfaces as a JavaScript exception before entering `dom`;
 - plain JavaScript handle objects minted by the Element PAPI runtime, with
   `FinalizationRegistry` collection as the one way a handle lets go of its
-  node (`Document::release`); the tree holds its own — a parent keeps its
-  children, a child keeps nothing — so a node that is both released and
-  detached is freed, together with every unheld descendant, by
-  `Document::collect_unheld` at the next batch boundary, never in the middle
-  of a batch;
+  node (`Document::drop_element`, which frees that node and unlinks its
+  element children into detached roots); which handles stay alive is the
+  script layer's own graph — each holds a strong set of its children's
+  handles, rooted at the permanent page handle — so an element cannot be
+  freed while it is connected;
 - every ReactLynx Snapshot constructor except `__CreateFrame`, all six tree
   mutation calls (`__AppendElement`, `__InsertElementBefore`, `__RemoveElement`,
   `__ReplaceElement`, `__ReplaceElements`, `__SwapElement`),
