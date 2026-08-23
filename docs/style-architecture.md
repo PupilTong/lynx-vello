@@ -155,7 +155,8 @@ Private `bobcat_core::tree` composes the native operations over
 the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
 `LynxView::execute_script(url)` fetches an entry MTS module through the
 injected resource contract; the QuickJS boot module awaits that resolved URL
-before it calls `renderPage` against this composition.
+before it calls a present `globalThis.renderPage` or dispatches the
+`__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:
 
 **Landed**

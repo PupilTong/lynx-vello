@@ -1,13 +1,14 @@
-// The shape-only `bobcat:runtime` ESM imported by each transformed MTS entry.
+// The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // Bobcat does not have the background-thread realm, cross-context transport,
-// native-module registry, error reporter, or lifecycle delivery path yet. A
-// compiled main-thread chunk still probes those APIs while it installs the
-// ReactLynx snapshot runtime, so this module exports explicit sinks for that
-// bootstrap surface. They intentionally keep no listeners, deliver no
-// messages, expose no native modules, and report no lifecycle events. None of
-// these bindings is installed on `globalThis`; the entry receives them only
-// through the import declarations Bobcat prepends to its source.
+// native-module registry, error reporter, or general lifecycle delivery path
+// yet. A compiled main-thread chunk still probes those APIs while it installs
+// the ReactLynx snapshot runtime, so this module exports explicit sinks for
+// that bootstrap surface. The one local delivery path is `lynx.getEngine()`:
+// its stable EventTarget retains realm-local listeners so `bobcat:boot` can
+// dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
+// None of these bindings is installed on `globalThis`; the entry receives them
+// only through the import declarations Bobcat prepends to its source.
 //
 // This is not an Element PAPI implementation. Every `__*` element member,
 // including the scoped-style sink `__SetCSSId`, belongs to element-papi.mjs.
@@ -16,6 +17,149 @@
 
 function noop() {
   return undefined;
+}
+
+const eventTargetListeners = Symbol("eventTargetListeners");
+
+/**
+ * The capture bit participates in EventTarget listener identity even though a
+ * standalone target has no ancestor path on which capture could change order.
+ *
+ * @param {unknown} options
+ * @returns {boolean}
+ */
+function captureOf(options) {
+  return typeof options === "boolean"
+    ? options
+    : Boolean(options && typeof options === "object" && options.capture);
+}
+
+/**
+ * The in-realm EventTarget used by `lynx.getEngine()`.
+ *
+ * It deliberately stays JavaScript-owned: callbacks never cross the host
+ * boundary, and the preloaded runtime module's single evaluation gives the
+ * entry and `bobcat:boot` the same target. Registration identity and mutation
+ * during dispatch follow EventTarget's `(type, callback, capture)` rules.
+ */
+class EventTarget {
+  constructor() {
+    this[eventTargetListeners] = new Map();
+  }
+
+  /**
+   * @param {unknown} eventName
+   * @param {unknown} callback
+   * @param {unknown} options
+   * @returns {undefined}
+   */
+  addEventListener(eventName, callback, options) {
+    if (callback === null || callback === undefined) {
+      return undefined;
+    }
+    if (typeof callback !== "function" && typeof callback !== "object") {
+      throw new TypeError("an event listener must be a function or object");
+    }
+
+    const name = String(eventName);
+    const capture = captureOf(options);
+    let listeners = this[eventTargetListeners].get(name);
+    if (listeners === undefined) {
+      listeners = [];
+      this[eventTargetListeners].set(name, listeners);
+    }
+    if (
+      listeners.some(
+        (listener) =>
+          listener.callback === callback && listener.capture === capture,
+      )
+    ) {
+      return undefined;
+    }
+    listeners.push({
+      callback,
+      capture,
+      once: Boolean(
+        options && typeof options === "object" && options.once,
+      ),
+    });
+    return undefined;
+  }
+
+  /**
+   * @param {unknown} eventName
+   * @param {unknown} callback
+   * @param {unknown} options
+   * @returns {undefined}
+   */
+  removeEventListener(eventName, callback, options) {
+    if (callback === null || callback === undefined) {
+      return undefined;
+    }
+    const name = String(eventName);
+    const listeners = this[eventTargetListeners].get(name);
+    if (listeners === undefined) {
+      return undefined;
+    }
+    const capture = captureOf(options);
+    const index = listeners.findIndex(
+      (listener) =>
+        listener.callback === callback && listener.capture === capture,
+    );
+    if (index !== -1) {
+      listeners.splice(index, 1);
+      if (listeners.length === 0) {
+        this[eventTargetListeners].delete(name);
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * @param {unknown} event
+   * @returns {boolean}
+   */
+  dispatchEvent(event) {
+    if (
+      event === null ||
+      (typeof event !== "object" && typeof event !== "function")
+    ) {
+      throw new TypeError("dispatchEvent requires an event object");
+    }
+
+    const name = String(event.type);
+    const listeners = this[eventTargetListeners].get(name);
+    if (listeners === undefined) {
+      return true;
+    }
+
+    // A snapshot prevents a listener added during this dispatch from running
+    // in it. Looking each entry up in the live list also honors removals made
+    // by an earlier callback.
+    for (const listener of listeners.slice()) {
+      const live = this[eventTargetListeners].get(name);
+      if (live === undefined || !live.includes(listener)) {
+        continue;
+      }
+      if (listener.once) {
+        this.removeEventListener(name, listener.callback, listener.capture);
+      }
+
+      if (typeof listener.callback === "function") {
+        listener.callback.call(this, event);
+      } else {
+        const handleEvent = listener.callback.handleEvent;
+        if (typeof handleEvent === "function") {
+          handleEvent.call(listener.callback, event);
+        }
+      }
+    }
+    return event.defaultPrevented !== true;
+  }
+
+  get [Symbol.toStringTag]() {
+    return "EventTarget";
+  }
 }
 
 function createContextSink() {
@@ -33,6 +177,7 @@ function createContextSink() {
 const coreContext = createContextSink();
 const jsContext = createContextSink();
 const nativeContext = createContextSink();
+const engineContext = new EventTarget();
 
 const globalEventEmitter = {
   addListener: noop,
@@ -94,6 +239,9 @@ export const lynx = {
   },
   getNative: function () {
     return nativeContext;
+  },
+  getEngine: function () {
+    return engineContext;
   },
   getJSModule: function (name) {
     return name === "GlobalEventEmitter" ? globalEventEmitter : undefined;

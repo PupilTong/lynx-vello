@@ -43,6 +43,7 @@
 }
 </style>
 <script thread="main">
+const engine = lynx.getEngine();
 const tapOptions = {};
 
 let count = 0;
@@ -74,32 +75,34 @@ Object.assign(globalThis, {
   processData(data) {
     return data;
   },
-
-  renderPage() {
-    const page = __CreatePage("0", 0);
-    const pageId = __GetElementUniqueID(page);
-    __SetClasses(page, "page");
-
-    const counter = __CreateView(pageId);
-    __SetClasses(counter, "counter");
-
-    const countNode = createText(pageId, "count", String(count));
-    countText = countNode.text;
-    countRawText = countNode.rawText;
-    __AppendElement(counter, countText);
-
-    button = __CreateView(pageId);
-    __SetClasses(button, "button");
-    __SetAttribute(button, "aria-label", "Increment counter");
-    __AppendElement(
-      button,
-      createText(pageId, "button-text", "Add one").text,
-    );
-    __AddEventListener(button, "tap", increment, tapOptions);
-    __AppendElement(counter, button);
-
-    __AppendElement(page, counter);
-  },
 });
+
+function renderPage() {
+  const page = __CreatePage("0", 0);
+  const pageId = __GetElementUniqueID(page);
+  __SetClasses(page, "page");
+
+  const counter = __CreateView(pageId);
+  __SetClasses(counter, "counter");
+
+  const countNode = createText(pageId, "count", String(count));
+  countText = countNode.text;
+  countRawText = countNode.rawText;
+  __AppendElement(counter, countText);
+
+  button = __CreateView(pageId);
+  __SetClasses(button, "button");
+  __SetAttribute(button, "aria-label", "Increment counter");
+  __AppendElement(
+    button,
+    createText(pageId, "button-text", "Add one").text,
+  );
+  __AddEventListener(button, "tap", increment, tapOptions);
+  __AppendElement(counter, button);
+
+  __AppendElement(page, counter);
+}
+
+engine.addEventListener("__RenderPage", renderPage);
 </script>
 </lynx>

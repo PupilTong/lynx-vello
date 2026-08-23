@@ -103,11 +103,13 @@ ids, and host callbacks are not surfaced by the npm facade.
 Startup is one synchronous host boundary over an asynchronous ESM evaluation.
 QuickJS preloads `bobcat:runtime`, `bobcat:element`, and the resolved entry URL;
 the `bobcat:boot` module uses top-level await to import the entry before it
-calls `renderPage`. QuickJS drains its owned pending-job queue until that
+calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
+realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
+element tree. QuickJS drains its owned pending-job queue until that
 module-evaluation promise settles, so boot completion is exactly the
-`ScriptFinished` engine event. No browser microtask checkpoint, timer
-interception, or JavaScript callback-retention protocol participates in
-completion.
+`ScriptFinished` engine event. No browser microtask checkpoint or timer
+interception participates in completion; the fallback listener is retained
+inside the preloaded runtime ESM rather than by the browser.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named

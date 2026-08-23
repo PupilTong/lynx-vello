@@ -65,8 +65,8 @@ impl ScriptHarness {
         }
     }
 
-    /// Runs a main-thread script and its `renderPage` boot, as the engine
-    /// does for a card's entry script.
+    /// Runs a main-thread script and its global-function or engine-event boot,
+    /// as the engine does for a card's entry script.
     ///
     /// # Panics
     ///

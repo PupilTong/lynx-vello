@@ -26,8 +26,9 @@ element layer directly over `dom`, exposed to the Element PAPI as named
 functions in the native `bobcat-internal:host` ESM. QuickJS preloads
 `bobcat:runtime`, `bobcat:element`, and the resolved entry MTS URL. The
 `bobcat:boot` ESM uses top-level await to import that URL,
-then calls `processData`, `renderPage`, and `__FlushElementTree` inside
-JavaScript before reporting startup completion.
+then calls `processData`, invokes a present `globalThis.renderPage` or
+dispatches `__RenderPage` on `lynx.getEngine()`, and finally calls
+`__FlushElementTree` inside JavaScript before reporting startup completion.
 
 See [`docs/runtime-architecture.md`](docs/runtime-architecture.md) for the
 dependency graph, feature boundary, private paint pipeline, and frame walkthrough.
