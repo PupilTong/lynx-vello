@@ -252,3 +252,74 @@ async fn registrations_survive_the_tree_mutations_a_rerender_makes() {
     .await
     .expect("main-thread boot");
 }
+
+#[tokio::test]
+async fn tree_and_attribute_queries_answer_over_the_real_document() {
+    run(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const text = __CreateText(0);
+          const raw = __CreateRawText('hello');
+          __AppendElement(text, raw);
+          __AppendElement(page, text);
+
+          // The raw-text reflects its content into a DOM text node, which no
+          // handle names. Element children is what keeps it out of the answer.
+          const children = __GetChildren(text);
+          if (children.length !== 1 || children[0] !== raw) {
+            throw new Error('a text element has exactly its raw-text child');
+          }
+          if (__GetChildren(raw).length !== 0) {
+            throw new Error('a reflected text node is not an element child');
+          }
+
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          __SetClasses(view, 'panel wide');
+          __SetID(view, 'header');
+          __SetAttribute(view, 'aria-label', 'Add one');
+
+          // `class`, `id` and `style` reach the DOM through paths of their
+          // own, and both inline-style paths take a different one again. Each
+          // still writes the attribute, which is what makes the name list
+          // whole rather than the leftovers.
+          __SetInlineStyles(view, 'color: red');
+          const fromString = __GetAttributeNames(view);
+          __SetInlineStyles(view, { backgroundColor: 'blue' });
+          const fromRecord = __GetAttributeNames(view);
+
+          for (const names of [fromString, fromRecord]) {
+            for (const name of ['class', 'id', 'aria-label', 'style']) {
+              if (!names.includes(name)) {
+                throw new Error('__GetAttributeNames dropped ' + name);
+              }
+            }
+            if (new Set(names).size !== names.length) {
+              throw new Error('__GetAttributeNames repeated a name');
+            }
+          }
+
+          if (__GetAttributeByName(view, 'class') !== 'panel wide') {
+            throw new Error('class does not read back');
+          }
+          if (__GetAttributeByName(view, 'id') !== __GetID(view)) {
+            throw new Error('id disagrees with __GetID');
+          }
+          if (__GetAttributeByName(view, 'aria-label') !== 'Add one') {
+            throw new Error('a plain attribute does not read back');
+          }
+          if (__GetAttributeByName(view, 'never-set') !== null) {
+            throw new Error('an absent attribute must read as null');
+          }
+
+          if (__GetChildren(page).length !== 2) {
+            throw new Error('the page has both of its element children');
+          }
+        };
+        ",
+        "app:///queries.js",
+    )
+    .await
+    .expect("main-thread boot");
+}
