@@ -257,10 +257,15 @@ useful signal for currently-compatible versions of those libraries.
   registers the native QuickJS ESM `bobcat-internal:host` (one Rust-backed
   named function export per member — `createPage`, `createElement`,
   `setAttribute`, `setInlineStyles`, `removeAttribute`, `getAttribute`,
-  `tagName`, `parentNode`, `insertBefore`, `removeElement`, `replaceElement`,
+  `tagName`, `attributeNames`, `childElementIds`, `parentNode`,
+  `insertBefore`, `removeElement`, `replaceElement`,
   `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
   `disableEventListener`, and `stopPropagation` — all speaking DOM vocabulary
-  over numeric `NodeId`s), then registers the
+  over numeric `NodeId`s; the two that answer with a list encode it in the
+  return string, since the boundary's value type carries no array —
+  `attributeNames` as the same length-prefixed record `setInlineStyles`
+  accepts, and `childElementIds` as comma-joined ids, which need no length
+  prefix because a decimal id cannot contain the separator), then registers the
   core-owned compatibility shell as `bobcat:runtime` and the embedded Element
   PAPI runtime (`packages/bobcat-element`) as `bobcat:element` in QuickJS's
   synchronous preloaded ESM loader. The Element module imports native

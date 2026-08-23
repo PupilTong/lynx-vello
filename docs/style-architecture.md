@@ -184,7 +184,10 @@ What that covers, and what it does not:
 - the property surface a Snapshot writes through — `__SetClasses`, `__SetID`,
   `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
   read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
-  `__GetEvents`). Classes, ids, attributes, and inline styles reach stylo
+  `__GetEvents`, `__GetAttributeByName`, `__GetAttributeNames`, and
+  `__GetChildren`, which answers in element children so the text node a
+  `raw-text` reflects — the one child no handle names — stays out of it).
+  Classes, ids, attributes, and inline styles reach stylo
   through the ordinary `Document` setters, so they cascade and lay out on the
   next flush. A string-valued inline style uses the whole-attribute setter;
   a record crosses in one call as a length-prefixed payload and the host

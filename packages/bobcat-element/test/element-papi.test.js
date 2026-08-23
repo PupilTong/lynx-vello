@@ -24,6 +24,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     removeAttribute: native.removeAttribute,
     getAttribute: native.getAttribute,
     tagName: native.tagName,
+    attributeNames: native.attributeNames,
+    childElementIds: native.childElementIds,
     parentNode: native.parentNode,
     insertBefore: native.insertBefore,
     removeElement: native.removeElement,
@@ -80,6 +82,43 @@ function createMockBobcat(issuedIds) {
   };
   /** @type {Map<number, number>} */
   const parents = new Map();
+  // The real boundary keeps its own child order and reports element children
+  // in it, so a mock that only knew parent links could not stand in for the
+  // one member whose whole contract is that order.
+  /** @type {Map<number, number[]>} */
+  const childOrder = new Map();
+  /**
+   * @param {number} parent
+   * @returns {number[]}
+   */
+  const siblingsOf = (parent) => {
+    let list = childOrder.get(parent);
+    if (list === undefined) {
+      list = [];
+      childOrder.set(parent, list);
+    }
+    return list;
+  };
+  /** @param {number} child */
+  const unlink = (child) => {
+    const parent = parents.get(child);
+    if (parent === undefined) {
+      return;
+    }
+    const list = siblingsOf(parent);
+    const at = list.indexOf(child);
+    if (at !== -1) {
+      list.splice(at, 1);
+    }
+  };
+  /**
+   * @param {number} node
+   * @returns {number}
+   */
+  const positionOf = (node) => {
+    const parent = parents.get(node);
+    return parent === undefined ? -1 : siblingsOf(parent).indexOf(node);
+  };
   /** @type {Map<number, Map<string, string>>} */
   const attributes = new Map();
   /** @type {Map<number, string>} */
@@ -190,6 +229,25 @@ function createMockBobcat(issuedIds) {
       return tag;
     },
     /** @param {unknown} node */
+    attributeNames: (node) => {
+      const id = nodeId("attributeNames", node);
+      calls.push(["attributeNames", id]);
+      let record = "";
+      for (const name of attributes.get(id)?.keys() ?? []) {
+        record += `${name.length}:${name}`;
+      }
+      return record;
+    },
+    /** @param {unknown} node */
+    childElementIds: (node) => {
+      const id = nodeId("childElementIds", node);
+      calls.push(["childElementIds", id]);
+      // No filtering: this mock has no node kind but the element, which is
+      // exactly why the text node a `raw-text` reflects cannot be pinned
+      // here — crates/bobcat-core/tests/main_thread.rs covers that.
+      return (childOrder.get(id) ?? []).join(",");
+    },
+    /** @param {unknown} node */
     parentNode: (node) => {
       const id = nodeId("parentNode", node);
       calls.push(["parentNode", id]);
@@ -203,7 +261,17 @@ function createMockBobcat(issuedIds) {
     insertBefore: (parent, child, reference) => {
       const parentId = nodeId("insertBefore", parent);
       const childId = nodeId("insertBefore", child);
+      unlink(childId);
       parents.set(childId, parentId);
+      const list = siblingsOf(parentId);
+      const at = reference === null
+        ? -1
+        : list.indexOf(nodeId("insertBefore", reference));
+      if (at === -1) {
+        list.push(childId);
+      } else {
+        list.splice(at, 0, childId);
+      }
       calls.push([
         "insertBefore",
         parentId,
@@ -214,6 +282,7 @@ function createMockBobcat(issuedIds) {
     /** @param {unknown} child */
     removeElement: (child) => {
       const childId = nodeId("removeElement", child);
+      unlink(childId);
       parents.delete(childId);
       calls.push(["removeElement", childId]);
     },
@@ -226,8 +295,12 @@ function createMockBobcat(issuedIds) {
       const oldId = nodeId("replaceElement", oldElement);
       const parent = parents.get(oldId);
       if (parent !== undefined) {
+        const at = positionOf(oldId);
+        unlink(newId);
+        unlink(oldId);
         parents.set(newId, parent);
         parents.delete(oldId);
+        siblingsOf(parent).splice(at, 0, newId);
       }
       calls.push(["replaceElement", newId, oldId]);
     },
@@ -240,13 +313,17 @@ function createMockBobcat(issuedIds) {
       const b = nodeId("swapElement", childB);
       const parentA = parents.get(a);
       const parentB = parents.get(b);
+      const positionA = positionOf(a);
+      const positionB = positionOf(b);
       if (parentA !== undefined) {
         parents.set(b, parentA);
+        siblingsOf(parentA)[positionA] = b;
       } else {
         parents.delete(b);
       }
       if (parentB !== undefined) {
         parents.set(a, parentB);
+        siblingsOf(parentB)[positionB] = a;
       } else {
         parents.delete(a);
       }
@@ -325,6 +402,9 @@ describe("installation", () => {
       ["__SetID", 2],
       ["__GetID", 1],
       ["__GetTag", 1],
+      ["__GetChildren", 1],
+      ["__GetAttributeByName", 2],
+      ["__GetAttributeNames", 1],
       ["__GetElementUniqueID", 1],
       ["__SetInlineStyles", 2],
       ["__SetCSSId", 3],
@@ -691,6 +771,113 @@ describe("__GetTag", () => {
     expect(__GetTag(__CreateRawText("x"))).toBe("raw-text");
     expect(__GetTag(__CreateList(0, () => {}, () => {}))).toBe("list");
     expect(__GetTag(__CreateElement("custom-widget", 0))).toBe("custom-widget");
+  });
+});
+
+describe("__GetAttributeByName", () => {
+  it("reads one attribute back, and null for one never set", () => {
+    const view = __CreateView(0);
+    expect(__GetAttributeByName(view, "role")).toBe(null);
+    __SetAttribute(view, "role", "button");
+    expect(__GetAttributeByName(view, "role")).toBe("button");
+  });
+
+  it("names the attribute by its string form, as __SetAttribute does", () => {
+    const view = __CreateView(0);
+    __SetAttribute(view, 7, "seven");
+    expect(__GetAttributeByName(view, 7)).toBe("seven");
+    expect(__GetAttributeByName(view, "7")).toBe("seven");
+  });
+
+  it("agrees with __GetID on the id attribute", () => {
+    const view = __CreateView(0);
+    __SetID(view, "header");
+    expect(__GetAttributeByName(view, "id")).toBe(__GetID(view));
+  });
+});
+
+describe("__GetAttributeNames", () => {
+  it("is empty for an element carrying nothing", () => {
+    expect(__GetAttributeNames(__CreateView(0))).toEqual([]);
+  });
+
+  it("reports every name once, in the order the element acquired them", () => {
+    const view = __CreateView(0);
+    __SetAttribute(view, "role", "button");
+    __SetAttribute(view, "aria-label", "Add one");
+    __SetAttribute(view, "role", "link");
+    expect(__GetAttributeNames(view)).toEqual(["role", "aria-label"]);
+  });
+
+  it("carries a name through whatever it contains", () => {
+    const view = __CreateView(0);
+    // The length prefix is the whole reason the record can hold these: a
+    // delimiter, and an astral character whose UTF-16 length is not its
+    // code-point count.
+    __SetAttribute(view, "a:b,c", "1");
+    __SetAttribute(view, "d\u{1F600}e", "2");
+    expect(__GetAttributeNames(view)).toEqual(["a:b,c", "d\u{1F600}e"]);
+  });
+});
+
+describe("__GetChildren", () => {
+  it("is empty for an element with no children", () => {
+    expect(__GetChildren(__CreateView(0))).toEqual([]);
+  });
+
+  it("returns the same handles the constructors did, in tree order", () => {
+    const parent = __CreateView(0);
+    const first = __CreateView(0);
+    const second = __CreateText(0);
+    __AppendElement(parent, first);
+    __AppendElement(parent, second);
+    expect(__GetChildren(parent)).toEqual([first, second]);
+  });
+
+  it("follows an insert before an existing child", () => {
+    const parent = __CreateView(0);
+    const first = __CreateView(0);
+    const second = __CreateView(0);
+    const middle = __CreateView(0);
+    __AppendElement(parent, first);
+    __AppendElement(parent, second);
+    __InsertElementBefore(parent, middle, second);
+    expect(__GetChildren(parent)).toEqual([first, middle, second]);
+  });
+
+  it("follows a removal and a reparent", () => {
+    const parent = __CreateView(0);
+    const other = __CreateView(0);
+    const moved = __CreateView(0);
+    const staying = __CreateView(0);
+    __AppendElement(parent, moved);
+    __AppendElement(parent, staying);
+    __RemoveElement(parent, moved);
+    expect(__GetChildren(parent)).toEqual([staying]);
+    __AppendElement(other, moved);
+    expect(__GetChildren(other)).toEqual([moved]);
+  });
+
+  it("follows a swap of two siblings", () => {
+    const parent = __CreateView(0);
+    const a = __CreateView(0);
+    const b = __CreateView(0);
+    __AppendElement(parent, a);
+    __AppendElement(parent, b);
+    __SwapElement(a, b);
+    expect(__GetChildren(parent)).toEqual([b, a]);
+  });
+
+  it("reports the tree, not the order handles were adopted", () => {
+    // Adoption order and tree order diverge here: `late` is adopted last and
+    // placed first. Reading the JavaScript-side child set instead of the
+    // native one would answer [early, late].
+    const parent = __CreateView(0);
+    const early = __CreateView(0);
+    const late = __CreateView(0);
+    __AppendElement(parent, early);
+    __InsertElementBefore(parent, late, early);
+    expect(__GetChildren(parent)).toEqual([late, early]);
   });
 });
 

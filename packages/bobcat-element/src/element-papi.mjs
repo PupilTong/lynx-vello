@@ -1,5 +1,7 @@
 // @ts-check
 import {
+  attributeNames,
+  childElementIds,
   createElement,
   createPage,
   disableEventListener,
@@ -49,6 +51,9 @@ import {
 // | `__SetID(element, id)` | native `setAttribute` / `removeAttribute` exports |
 // | `__GetID(element)` | native `getAttribute` export |
 // | `__GetTag(element)` | native `tagName` export |
+// | `__GetChildren(element)` | native `childElementIds` export + this runtime's handle index |
+// | `__GetAttributeByName(element, name)` | native `getAttribute` export |
+// | `__GetAttributeNames(element)` | native `attributeNames` export |
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
 // | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `setInlineStyles` exports |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
@@ -66,7 +71,9 @@ import {
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
 // web-core generation), `__AddClass`, `__AddInlineStyle`, the dataset,
-// component-info, config, template-part and animation members, tree and
+// component-info, config, template-part and animation members, the rest of
+// tree querying (`__GetParent`, `__FirstElement`, `__LastElement`,
+// `__NextElement`, `__ElementIsEqual`, `__GetPageElement`, `__GetAttributes`),
 // selector querying, and list cell recycling — is not implemented. A bundle
 // that reaches for another member fails at the missing global, not silently.
 //
@@ -919,6 +926,71 @@ export function __GetTag(element) {
 }
 
 /**
+ * One attribute's value, or null when the element does not carry it.
+ *
+ * `__GetID` is this member with the name fixed, and both read the same
+ * native export: an id is an attribute here, not a field beside them.
+ *
+ * @param {unknown} element
+ * @param {unknown} name
+ * @returns {string | null}
+ */
+export function __GetAttributeByName(element, name) {
+  return getAttribute(nodeIdOf(element), String(name));
+}
+
+/**
+ * Every attribute name the element carries, in the order it acquired them —
+ * `getAttributeNames()`' order, and the order `attributes()` reports.
+ *
+ * `class`, `id` and `style` are in it. They reach the DOM through paths of
+ * their own — a class list, an id atom, a parsed declaration block — but each
+ * of those paths also writes the attribute itself, so the list this reads is
+ * the whole list rather than the leftovers.
+ *
+ * @param {unknown} element
+ * @returns {string[]}
+ */
+export function __GetAttributeNames(element) {
+  return splitRecord(attributeNames(nodeIdOf(element)));
+}
+
+/**
+ * The element's element children, in tree order.
+ *
+ * Element children, not child nodes: a `raw-text`'s content is a DOM text
+ * node, and no handle names it, so reporting it could only ever produce a
+ * hole. Filtering to elements is therefore what keeps the "every child has a
+ * handle" invariant below true for an ordinary tree rather than a lucky one.
+ *
+ * A child of a live parent has a live handle: a connected element's handle is
+ * held by its parent's, up to the permanent page handle, and the caller had
+ * to hold the parent's handle to make this call. So the throw is a statement
+ * about the invariant, not a case a card can reach — and it is a throw rather
+ * than a hole because minting a second handle for a node whose first has died
+ * would leave the host holding a node no handle names.
+ *
+ * @param {unknown} element
+ * @returns {object[]}
+ */
+export function __GetChildren(element) {
+  const record = childElementIds(nodeIdOf(element));
+  if (record === "") {
+    return [];
+  }
+  return record.split(",").map((field) => {
+    const nodeId = Number(field);
+    const handle = handleOf(nodeId);
+    if (handle === undefined) {
+      throw new Error(
+        `__GetChildren found no live handle for child element ${nodeId}`,
+      );
+    }
+    return handle;
+  });
+}
+
+/**
  * The element's Lynx `unique_id`, which is the same number as its native
  * node id — the handle carries one value and this reads it back, rather
  * than mapping between two id spaces.
@@ -936,6 +1008,34 @@ export function __GetElementUniqueID(element) {
     return -1;
   }
   return nodeIdOf(element) ?? -1;
+}
+
+/**
+ * Reads a record the native side wrote back — the same
+ * `<utf16Length>:<text>` fields [`styleField`] writes, in the other
+ * direction, so a field may contain any character including the delimiter.
+ * `String.prototype.slice` counts the units the writer counted, so each
+ * field costs one slice and no scan.
+ *
+ * Nothing here validates the payload. The writer is Bobcat, not a card: a
+ * malformed record would be an engine bug, and reporting it as a JavaScript
+ * error would only move it further from where it happened.
+ *
+ * @param {string} record
+ * @returns {string[]}
+ */
+function splitRecord(record) {
+  /** @type {string[]} */
+  const fields = [];
+  let rest = record;
+  while (rest !== "") {
+    const separator = rest.indexOf(":");
+    const units = Number(rest.slice(0, separator));
+    const body = rest.slice(separator + 1);
+    fields.push(body.slice(0, units));
+    rest = body.slice(units);
+  }
+  return fields;
 }
 
 /**

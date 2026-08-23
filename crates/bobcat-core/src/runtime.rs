@@ -65,6 +65,9 @@ import {
   __SetID,
   __GetID,
   __GetTag,
+  __GetChildren,
+  __GetAttributeByName,
+  __GetAttributeNames,
   __GetElementUniqueID,
   __SetInlineStyles,
   __SetCSSId,
@@ -830,6 +833,29 @@ fn install_attribute_members(
                 })?;
             Ok(HostValue::String(Arc::from(tag)))
         }
+        fn attributeNames(node: node_id_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            let mut record = String::new();
+            if let Some(element) = document.get(node) {
+                for (name, _) in element.attributes() {
+                    write_record_field(&mut record, name);
+                }
+            }
+            Ok(HostValue::String(Arc::from(record)))
+        }
+        fn childElementIds(node: node_id_argument) |document| {
+            validate_live_element(document, NAME, node)?;
+            let mut ids = String::new();
+            if let Some(element) = document.get(node) {
+                for child in element.children().filter(|child| child.is_element()) {
+                    if !ids.is_empty() {
+                        ids.push(',');
+                    }
+                    ids.push_str(&child.id().to_bits().to_string());
+                }
+            }
+            Ok(HostValue::String(Arc::from(ids)))
+        }
     }
 
     Ok(())
@@ -886,6 +912,21 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
         return Err(malformed());
     }
     Ok((&body[..end], &body[end..]))
+}
+
+/// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse.
+///
+/// The same encoding runs both ways because the same reason holds both ways:
+/// a field can contain any character, the delimiter included, so its extent
+/// has to be counted rather than searched for. Only the reader changes sides
+/// — here the count is what JavaScript's `String.prototype.slice` consumes,
+/// so it is in UTF-16 code units for the same reason `String.prototype.length`
+/// produces them on the way in.
+fn write_record_field(record: &mut String, text: &str) {
+    let units: usize = text.chars().map(char::len_utf16).sum();
+    record.push_str(&units.to_string());
+    record.push(':');
+    record.push_str(text);
 }
 
 fn borrow_tree<'a>(

@@ -20,6 +20,20 @@ interface BobcatNative {
   getAttribute(nodeId: number, name: string): string | null;
   /** The element's local name, verbatim as it was created. */
   tagName(nodeId: number): string;
+  /**
+   * Every attribute name the element carries, in acquisition order, as one
+   * record payload: a flat sequence of `<utf16Length>:<text>` fields, one per
+   * name. Empty when the element carries none.
+   */
+  attributeNames(nodeId: number): string;
+  /**
+   * The `NodeId`s of the element's element children, in tree order, joined by
+   * commas — no length prefix, because a decimal id cannot contain the
+   * separator. Empty when the element has no element children. Child *nodes*
+   * that are not elements, such as the text node a `raw-text` reflects, are
+   * not in it.
+   */
+  childElementIds(nodeId: number): string;
   /** The parent's `NodeId`, or null for a detached element. */
   parentNode(nodeId: number): number | null;
   /** Reparenting insert; appends when `reference` is null. */
@@ -63,6 +77,8 @@ declare module "bobcat-internal:host" {
   export const removeAttribute: BobcatNative["removeAttribute"];
   export const getAttribute: BobcatNative["getAttribute"];
   export const tagName: BobcatNative["tagName"];
+  export const attributeNames: BobcatNative["attributeNames"];
+  export const childElementIds: BobcatNative["childElementIds"];
   export const parentNode: BobcatNative["parentNode"];
   export const insertBefore: BobcatNative["insertBefore"];
   export const removeElement: BobcatNative["removeElement"];
@@ -130,6 +146,12 @@ declare var __SetClasses: (
 declare var __SetID: (element?: unknown, id?: unknown) => undefined;
 declare var __GetID: (element?: unknown) => string | null;
 declare var __GetTag: (element?: unknown) => string;
+declare var __GetChildren: (element?: unknown) => object[];
+declare var __GetAttributeByName: (
+  element?: unknown,
+  name?: unknown,
+) => string | null;
+declare var __GetAttributeNames: (element?: unknown) => string[];
 declare var __GetElementUniqueID: (element?: unknown) => number;
 declare var __SetInlineStyles: (
   element?: unknown,
