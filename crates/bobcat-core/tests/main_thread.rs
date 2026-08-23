@@ -61,6 +61,25 @@ async fn public_view_boots_element_papi_without_exposing_the_tree() {
 }
 
 #[tokio::test]
+async fn public_view_boots_through_the_engine_render_event() {
+    run(
+        r"
+        globalThis.processData = function () { return 'processed'; };
+        const engine = lynx.getEngine();
+        engine.addEventListener('__RenderPage', function (event) {
+          if (this !== engine || event.data !== 'processed') {
+            throw new Error('invalid engine render event');
+          }
+          __AppendElement(__CreatePage('card', 0), __CreateView(0));
+        });
+        ",
+        "app:///engine-render.js",
+    )
+    .await
+    .expect("engine render-event boot");
+}
+
+#[tokio::test]
 async fn script_finished_waits_for_the_tla_entry_and_javascript_boot() {
     run(
         r"

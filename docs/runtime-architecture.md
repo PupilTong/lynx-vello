@@ -30,7 +30,7 @@ QuickJS preloaded ESM graph
   bobcat:boot
     ├──▶ bobcat:element (flush binding)
     └──▶ await import(resolved entry MTS URL)
-          ├──▶ bobcat:runtime (shape-only named compatibility exports)
+          ├──▶ bobcat:runtime (named compatibility exports + engine EventTarget)
           └──▶ bobcat:element (packages/bobcat-element)
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
@@ -162,26 +162,33 @@ imports its native operations directly; nothing is installed as
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export.
 
-The final `bobcat:boot` module imports the flush binding from
-`bobcat:element`; the transformed entry itself statically imports both
-built-ins. Boot then runs:
+The final `bobcat:boot` module imports `lynx` and the flush binding from the
+two built-ins; the transformed entry itself statically imports both built-ins.
+Boot then runs:
 
 ```js
 await import(entryMtsUrl);
 const data = globalThis.processData?.(undefined);
-globalThis.renderPage(data);
+if (typeof globalThis.renderPage === "function") {
+  globalThis.renderPage(data);
+} else {
+  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
+}
 __FlushElementTree();
 ```
 
-`renderPage` is therefore a JavaScript boot responsibility. Rust evaluates one
-boot module; it does not issue a second native lifecycle call after evaluating
-the entry.
+The global `renderPage` function remains a compatibility path, not a boot
+requirement. An entry may instead register its renderer on the stable,
+realm-local EventTarget returned by `lynx.getEngine()`. Rust evaluates one boot
+module; it does not issue a second native lifecycle call after evaluating the
+entry.
 
-Those sinks retain and deliver nothing. They make compiled main-thread chunks
-installable before Bobcat has the corresponding runtime subsystems; they do
-not install runtime bindings on `globalThis`, create a background
-`lynxCoreInject` realm, or hide missing Element PAPI members such as
-`__AddClass`.
+The engine EventTarget retains JavaScript listeners and receives only the boot
+fallback's `__RenderPage` delivery today. The other context sinks retain and
+deliver nothing. They make compiled main-thread chunks installable before
+Bobcat has the corresponding runtime subsystems; they do not install runtime
+bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide
+missing Element PAPI members such as `__AddClass`.
 
 The host-facing boot boundary is synchronous, but the graph is fully ESM and
 supports top-level await. QuickJS drains its owned pending-job queue until the

@@ -268,19 +268,23 @@ useful signal for currently-compatible versions of those libraries.
   function is installed on `globalThis`. A `.web.bundle`'s `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `__FlushElementTree` from `bobcat:element`, uses top-level await on
-  `import(entry_url)`, and then runs
-  `processData` → `renderPage` → `__FlushElementTree` inside JavaScript; Rust
-  no longer follows entry evaluation with a separate render-page evaluation.
-  The runtime module is deliberately shape-only: it directly exports a stub
-  `lynx` object, an empty
+  `lynx` from `bobcat:runtime` and `__FlushElementTree` from
+  `bobcat:element`, uses top-level await on `import(entry_url)`, and then runs
+  `processData` → (`globalThis.renderPage` when present, otherwise the
+  `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
+  JavaScript; the global function is a compatibility path, not a boot
+  requirement. The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, init/global props, context sinks, the native-module
   sentinel and empty JS event module,
   performance/error hooks, and
   `__OnLifecycleEvent`; transformed entries receive every binding through the
-  prepended import, and the module installs none of them on `globalThis`. It
-  retains no listener, delivers no message or lifecycle event, and does not
-  invent the background-only `lynxCoreInject` realm. The PAPI runtime exports
+  prepended import, and the module installs none of them on `globalThis`.
+  `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
+  listeners never cross the host boundary and its only engine-driven delivery
+  today is the boot fallback's `__RenderPage` event, whose `data` is the
+  `processData` result. The other context sinks retain and deliver nothing,
+  and the module does not invent the background-only `lynxCoreInject` realm.
+  The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries
   receive them through the prepended import:
   every ReactLynx Snapshot

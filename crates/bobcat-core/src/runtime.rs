@@ -488,7 +488,8 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+            r#"import {{ lynx }} from "{RUNTIME_MODULE_SPECIFIER}";
+import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 
 await import({entry_specifier});
 
@@ -496,10 +497,11 @@ let data = undefined;
 if (typeof globalThis.processData === "function") {{
   data = globalThis.processData(data);
 }}
-if (typeof globalThis.renderPage !== "function") {{
-  throw new Error("the MTS entry did not assign globalThis.renderPage");
+if (typeof globalThis.renderPage === "function") {{
+  globalThis.renderPage(data);
+}} else {{
+  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
-globalThis.renderPage(data);
 __FlushElementTree();
 "#
         );
@@ -1180,6 +1182,47 @@ mod tests {
     }
 
     #[test]
+    fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                const engine = lynx.getEngine();
+                const page = __CreatePage('card', 0);
+                globalThis.processData = function () {
+                  return 42;
+                };
+                engine.addEventListener('__RenderPage', function (event) {
+                  if (this !== engine || event.type !== '__RenderPage' || event.data !== 42) {
+                    throw new Error('the engine render event lost its target or processed data');
+                  }
+                  __AppendElement(page, __CreateView(0));
+                });
+                ",
+                "app:///engine-render.js",
+            )
+            .expect("engine render-event boot");
+
+        assert!(elements.tree().get(node_id(3)).is_some());
+    }
+
+    #[test]
+    fn boot_allows_an_entry_with_neither_render_path() {
+        let (mut runtime, elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                "if ('renderPage' in globalThis) throw new Error('unexpected global');",
+                "app:///no-render.js",
+            )
+            .expect("an entry is not required to assign renderPage or register a listener");
+
+        assert!(
+            elements.tree().document_element().child_ids().is_empty(),
+            "an unhandled render event must leave the permanent page empty"
+        );
+    }
+
+    #[test]
     fn boot_awaits_the_esm_entry_before_rendering_once() {
         let (mut runtime, elements) = runtime();
         runtime
@@ -1190,6 +1233,9 @@ mod tests {
                 if (typeof globalThis.__CreateView !== 'undefined') {
                   throw new Error('Element PAPI must be ESM-only');
                 }
+                lynx.getEngine().addEventListener('__RenderPage', function () {
+                  throw new Error('the fallback event must not accompany a global renderPage');
+                });
                 let renderCount = 0;
                 globalThis.renderPage = function () {
                   renderCount += 1;
@@ -1208,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_runtime_bindings_supply_shape_only_bridges_without_globals() {
+    fn imported_runtime_bindings_supply_bridges_without_globals() {
         let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
@@ -1295,7 +1341,59 @@ mod tests {
                 ",
                 "app:///runtime-imports.mjs",
             )
-            .expect("shape-only imported runtime bindings");
+            .expect("imported runtime bindings");
+    }
+
+    #[test]
+    fn get_engine_returns_one_event_target_with_standard_listener_identity() {
+        let (mut runtime, _elements) = runtime();
+        runtime
+            .run_main_thread_script(
+                r"
+                const engine = lynx.getEngine();
+                if (engine !== lynx.getEngine() ||
+                    Object.prototype.toString.call(engine) !== '[object EventTarget]') {
+                  throw new Error('getEngine must return one stable EventTarget');
+                }
+                const probe = { type: 'probe', data: 7 };
+                const calls = [];
+                function listener(event) {
+                  if (this !== engine || event !== probe) {
+                    throw new Error('function listeners need EventTarget receiver semantics');
+                  }
+                  calls.push('function');
+                }
+                const objectListener = {
+                  handleEvent(event) {
+                    if (this !== objectListener || event !== probe) {
+                      throw new Error('listener objects need handleEvent receiver semantics');
+                    }
+                    calls.push('object');
+                  }
+                };
+                engine.addEventListener('probe', listener);
+                engine.addEventListener('probe', listener);
+                engine.addEventListener('probe', listener, { capture: true, once: true });
+                engine.addEventListener('probe', objectListener, { once: true });
+                if (engine.dispatchEvent(probe) !== true ||
+                    calls.join(',') !== 'function,function,object') {
+                  throw new Error('engine listener identity or first dispatch is wrong: ' + calls);
+                }
+                calls.length = 0;
+                engine.dispatchEvent(probe);
+                if (calls.join(',') !== 'function') {
+                  throw new Error('once listeners must leave only the persistent listener');
+                }
+                engine.removeEventListener('probe', listener);
+                calls.length = 0;
+                engine.dispatchEvent(probe);
+                if (calls.length !== 0) {
+                  throw new Error('removeEventListener must remove the matching listener');
+                }
+                ",
+                "app:///engine-event-target.mjs",
+            )
+            .expect("engine EventTarget behavior");
     }
 
     #[test]
