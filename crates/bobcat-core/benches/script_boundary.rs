@@ -216,13 +216,16 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
         });
 }
 
-/// Registering a listener on every row, then dropping every row.
+/// Registering a listener on every row, then unmounting every row.
 ///
-/// A list update that discards its cells does exactly this: the collector
-/// calls `dropElement` for every handle it takes, and that call has to forget
-/// the node's registrations — the path the reverse index exists for, which
-/// used to scan every registered event name. Each iteration gets its own
-/// booted realm, because a drop is final: the ids the previous one used name
+/// A list update that discards its cells does exactly this, in this order:
+/// `__RemoveElement` detaches the cell, and the collector then calls
+/// `dropElement` for the handle it takes — which has to forget the node's
+/// registrations, the path the reverse index exists for and the one that used
+/// to scan every registered event name. The removal is not decoration: a
+/// connected element cannot be dropped, because its handle cannot be
+/// collected while its parent's holds it. Each iteration gets its own booted
+/// realm, because a drop is final — the ids the previous one used name
 /// nothing.
 #[divan::bench]
 fn register_then_drop_row_listeners(bencher: divan::Bencher) {
@@ -251,6 +254,7 @@ fn register_then_drop_row_listeners(bencher: divan::Bencher) {
                 // unlinks it rather than freeing it, and its own handle
                 // carries it on.
                 for (let i = 0; i < rows.length; i += 1) {
+                  __RemoveElement(list, rows[i]);
                   dropElement(__GetElementUniqueID(rows[i]));
                 }
                 ",
