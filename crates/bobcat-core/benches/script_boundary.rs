@@ -216,12 +216,19 @@ fn dispatch_with_no_listener(bencher: divan::Bencher) {
         });
 }
 
-/// Registering and releasing a listener on every row.
+/// Registering a listener on every row, then unmounting every row.
 ///
-/// A list that rebuilds its rows does exactly this, and the release path is
-/// the one that used to scan every registered event name.
+/// A list update that discards its cells does exactly this, in this order:
+/// `__RemoveElement` detaches the cell, and the collector then calls
+/// `dropElement` for the handle it takes — which has to forget the node's
+/// registrations, the path the reverse index exists for and the one that used
+/// to scan every registered event name. The removal is not decoration: a
+/// connected element cannot be dropped, because its handle cannot be
+/// collected while its parent's holds it. Each iteration gets its own booted
+/// realm, because a drop is final — the ids the previous one used name
+/// nothing.
 #[divan::bench]
-fn register_and_release_row_listeners(bencher: divan::Bencher) {
+fn register_then_drop_row_listeners(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);
     bencher
         .with_inputs(|| {
@@ -229,27 +236,29 @@ fn register_and_release_row_listeners(bencher: divan::Bencher) {
             harness.boot(&source);
             harness
         })
-        .bench_local_refs(|harness| {
+        .bench_local_values(|mut harness| {
             harness.evaluate(
                 r"
                 import {
                   enableEventListener,
-                  releaseElement,
+                  dropElement,
                 } from 'bobcat-internal:host';
                 for (let i = 0; i < rows.length; i += 1) {
                   const id = __GetElementUniqueID(rows[i]);
                   enableEventListener(id, 0, 'tap');
                   enableEventListener(id, 1, 'longpress');
                 }
-                // `releaseElement`, not `disableEventListener`: this is the
-                // call the collector makes for every handle a list update
-                // drops, and the one the reverse index exists for. The rows
-                // stay attached, so their parent keeps them alive and the
-                // next iteration re-registers on the same elements.
+                // `dropElement`, not `disableEventListener`: this is the call
+                // the collector makes for every handle a list update drops.
+                // The label under each row is an element child, so the drop
+                // unlinks it rather than freeing it, and its own handle
+                // carries it on.
                 for (let i = 0; i < rows.length; i += 1) {
-                  releaseElement(__GetElementUniqueID(rows[i]));
+                  __RemoveElement(list, rows[i]);
+                  dropElement(__GetElementUniqueID(rows[i]));
                 }
                 ",
             );
+            harness
         });
 }

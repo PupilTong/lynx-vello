@@ -258,7 +258,7 @@ useful signal for currently-compatible versions of those libraries.
   named function export per member — `createPage`, `createElement`,
   `setAttribute`, `setInlineStyles`, `removeAttribute`, `getAttribute`,
   `tagName`, `parentNode`, `insertBefore`, `removeElement`, `replaceElement`,
-  `swapElement`, `releaseElement`, `flushElementTree`, `enableEventListener`,
+  `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
   `disableEventListener`, and `stopPropagation` — all speaking DOM vocabulary
   over numeric `NodeId`s), then registers the
   core-owned compatibility shell as `bobcat:runtime` and the embedded Element
@@ -357,39 +357,44 @@ useful signal for currently-compatible versions of those libraries.
   Creation calls return plain JavaScript handle objects minted by the PAPI
   runtime; each carries its DOM `NodeId` under a realm-local symbol and is
   registered with a `FinalizationRegistry` whose cleanup calls the imported
-  native `releaseElement`. Ownership inside the tree runs one way — a parent
-  holds its children, a child holds nothing — and a handle is the one holder
-  outside it, so a collected handle frees nothing by itself: `Document::release`
-  clears the node's `held` bit and the element stays for as long as it is
-  attached. A node that is both released and detached (by the removal that
-  detaches it or an ancestor, whichever of release and removal comes last)
-  is freed by `Document::collect_unheld`, which the runtime calls at the
-  one boundary it has — where the document goes back into the hand-off
-  slot, at `__FlushElementTree` and at the end of each evaluation or event
-  delivery — so nothing is freed while a batch is open. The free takes every
-  descendant whose handle is gone, while a descendant whose handle is live is
-  unlinked and goes on as a detached root. The text node a `raw-text`
-  reflects is released the moment it is minted, since no handle could ever
-  name it, and so lives exactly as long as its carrier. A handle dying while
-  its element is attached is routine (a ReactLynx list hands a recycled
-  cell's elements between snapshot instances), not a release. Cleanup runs
-  as a pending job at the job checkpoints, and pending jobs never run at
-  realm teardown, which preserves the last committed tree. A collection
-  comes from QuickJS's allocation pressure, or from the runtime itself:
-  every `REMOVALS_PER_COLLECTION` removals of held subtrees, the batch that
-  crosses the count ends with one, so the handles an unmount left behind are
-  finalized and the subtree freed without waiting for allocation to reach
-  the threshold. Per-handle realm state (listeners, `__AddEvent` handlers,
-  the index bookkeeping, list callbacks) lives on the handle object under
-  realm-local symbols rather than in a `WeakMap` keyed by it: QuickJS's
-  `WeakMap` marks its values unconditionally, so a closure that captured its
-  own element would otherwise keep the handle, and through it the whole
-  subtree, alive for the life of the realm. No handle is ever minted after
-  the first and there is no `retain`: a future query member that has to
-  answer with a handle for a node whose handle has died must fail loudly,
-  and an event whose target is such a node — reachable by hit testing,
-  since its parent keeps it on screen — is dropped by the realm at its
-  first callback, before any listener on the path runs.
+  native `dropElement`. **The handle is the one thing that holds its
+  element**, and what keeps a handle alive while its element is on screen is
+  the handle above it: every handle carries an unordered strong `Set` of its
+  children's handles, maintained by the six tree mutations, and the page's
+  handle is permanent, so every *connected* element's handle is reachable
+  from it. The link the other way is the owner's node id, a number resolved
+  through the same weak `NodeId`→handle index the dispatch side uses, so no
+  parent/child pair is a reference cycle and an unreachable subtree is freed
+  by plain reference counting. The set holds membership only: order is the
+  native tree's, and mirroring it here would be a second answer to a question
+  the tree already answers. `Document::drop_element` frees exactly the node
+  the collected handle named — its **element** children are unlinked and go
+  on as detached roots, each held by its own handle, while what no handle
+  could ever name goes with it: the text node a `raw-text` reflects, and a
+  host's shadow tree in full. So an unmount is `__RemoveElement` on the
+  snapshot's root, which takes it out of its parent's set, and then the
+  card's own references going away; the whole subtree's handles become
+  unreachable together and each finalizes into one free. A ReactLynx list
+  handing a recycled cell's elements between snapshot instances and deleting
+  the old `__elements` array takes nothing away — those elements are
+  connected, so their handles are held above them. Cleanup runs as a pending
+  job at the job checkpoints, and pending jobs never run at realm teardown,
+  which preserves the last committed tree. A collection comes from QuickJS's
+  allocation pressure, or from the runtime itself: every
+  `REMOVALS_PER_COLLECTION` removals, the batch that crosses the count ends
+  with one, so the handles an unmount left behind are finalized — including
+  any caught in a cycle, which reference counting cannot free — without
+  waiting for allocation to reach the threshold. Per-handle realm state
+  (listeners, `__AddEvent` handlers, the index bookkeeping, list callbacks)
+  lives on the handle object under realm-local symbols rather than in a
+  `WeakMap` keyed by it: QuickJS's `WeakMap` marks its values
+  unconditionally, so a closure that captured its own element would otherwise
+  keep the handle, and through it the whole subtree, alive for the life of
+  the realm. No handle is ever minted after the first and there is no
+  `retain`: a future query member that has to answer with a handle for a node
+  whose handle has died must fail loudly, and so must a dispatch whose target
+  has none — a connected element always has one, so a target without one is
+  the ownership graph and the tree disagreeing.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
   `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
   the components the engine defines (`tree::raw_text`, one file per
@@ -660,10 +665,11 @@ useful signal for currently-compatible versions of those libraries.
   free: truthiness-not-null clearing for classes, ids, and inline styles,
   `String(value)` for every attribute, and camelCase-to-kebab hyphenation of a
   record-shaped inline style. It also owns the event half: a handle is an `EventTarget`, its
-  listeners are closures held in a `WeakMap` keyed by the handle — so a
-  registration can never keep its element alive — and the per-node dispatch,
-  the standard's `eventPhase`, and `once` are all resolved here, with only
-  enable/disable and `stopPropagation` crossing to the host.
+  listeners are closures filed on the handle itself under a realm-local
+  symbol — so a registration can never keep its element alive, and QuickJS's
+  non-ephemeron `WeakMap` never gets the chance to — and the per-node
+  dispatch, the standard's `eventPhase`, and `once` are all resolved here,
+  with only enable/disable and `stopPropagation` crossing to the host.
   An element handle is a plain object carrying its DOM `NodeId`
   under a realm-local symbol (web-core's `uniqueIdSymbol` shape) — one
   object per element for its whole life, so every PAPI return of an element
@@ -673,10 +679,11 @@ useful signal for currently-compatible versions of those libraries.
   lets go of its element — web-core's model, where a swept `WeakRef` is
   what ends a wrapper. Every non-page handle is registered with a
   `FinalizationRegistry` whose cleanup calls the imported native
-  `releaseElement`; cleanup runs as a pending job at the host's job
-  checkpoints, and never at realm teardown, which preserves the last
-  committed tree. What the release frees, and when, is the tree's decision
-  (above): an attached element is kept by its parent. The JavaScript layer
+  `dropElement`, which frees that element and nothing else; cleanup runs as
+  a pending job at the host's job checkpoints, and never at realm teardown,
+  which preserves the last committed tree. Keeping a connected element's
+  handle alive is this layer's own job, through the per-handle child set
+  described above. The JavaScript layer
   deliberately does
   not validate handles: a foreign handle resolves to `undefined`, which the
   private native boundary rejects as a JavaScript error before entering

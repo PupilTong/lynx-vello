@@ -25,24 +25,23 @@ interface BobcatNative {
   /** Reparenting insert; appends when `reference` is null. */
   insertBefore(parent: number, child: number, reference: number | null): void;
   /**
-   * Detaches `child` from its parent; a no-op when already detached. A
-   * child whose handle is gone is freed at the end of the batch.
+   * Detaches `child` from its parent; a no-op when already detached. Frees
+   * nothing: the handle that names the child still holds it.
    */
   removeElement(child: number): void;
   /**
-   * Replaces `oldElement` in place, leaving it detached — and live while its
-   * handle is.
+   * Replaces `oldElement` in place, leaving it detached — and live, held by
+   * its handle.
    */
   replaceElement(newElement: number, oldElement: number): void;
   /** Exchanges two distinct attached elements, in or across parents. */
   swapElement(childA: number, childB: number): void;
   /**
-   * Declares the handle for `nodeId` gone. Frees nothing by itself: the
-   * element stays while attached, and once it is detached as well it is freed
-   * at the end of the batch together with every descendant whose handle is
-   * gone.
+   * Frees the element of a collected handle, and only it: its element
+   * children are unlinked into detached roots, and what no handle could name
+   * — the text node a `raw-text` reflects — goes with it.
    */
-  releaseElement(nodeId: number): void;
+  dropElement(nodeId: number): void;
   /** Commits pending mutations through style and layout. */
   flushElementTree(): void;
   /**
@@ -69,7 +68,7 @@ declare module "bobcat-internal:host" {
   export const removeElement: BobcatNative["removeElement"];
   export const replaceElement: BobcatNative["replaceElement"];
   export const swapElement: BobcatNative["swapElement"];
-  export const releaseElement: BobcatNative["releaseElement"];
+  export const dropElement: BobcatNative["dropElement"];
   export const flushElementTree: BobcatNative["flushElementTree"];
   export const enableEventListener: BobcatNative["enableEventListener"];
   export const disableEventListener: BobcatNative["disableEventListener"];

@@ -1,22 +1,20 @@
-//! Node lifecycle benchmarks: what holding, releasing, and freeing cost.
+//! Node lifecycle benchmarks: what removing and freeing cost.
 //!
-//! A node is kept allocated by its parent or by a holder outside the tree
-//! (`Document::release` declares that holder gone), and a node that is both
-//! released and detached is freed by the next `Document::collect_unheld`,
-//! which Bobcat runs at the end of every script batch. The numbers that
+//! A node is kept allocated by the one owner outside the tree that names it —
+//! in Bobcat, its script handle. A removal only unlinks; a `Document::drop_element`
+//! frees exactly the node it names, unlinking its element children into detached
+//! roots for their own owners, so unmounting an N-node subtree is N drops in
+//! whatever order the collector delivers the handle deaths. The numbers that
 //! matter:
 //!
-//! * `remove_held_subtree` — the hot path: detaching a subtree whose root is still held frees
-//!   nothing, and the only thing the lifecycle adds to it is one bit read on the root. Paired
-//!   against re-attaching it, so the tree is the same shape every iteration.
-//! * `release_*` — the same detached subtree let go in the two orders a finalizer can deliver, then
-//!   collected at the boundary: leaves first, so only the root is queued and one walk frees
-//!   everything, or root first, so the root is queued at once and every later release finds its
-//!   node attached to a queued ancestor. `drop_subtree` of the same subtree is the floor both are
-//!   measured against.
-//! * `remove_released_subtree` — the other ending: every handle died while the subtree was
-//!   attached, so the removal queues it and the boundary frees it.
-//! * `collect_unheld_with_nothing_queued` — what every boundary pays when there is nothing to free.
+//! * `remove_subtree` — the hot path: detaching a subtree frees nothing and touches nothing under
+//!   its root. Paired against re-attaching it, so the tree is the same shape every iteration.
+//! * `drop_*` — the same detached subtree freed one node at a time, in the two orders a finalizer
+//!   can deliver: leaves first, so every drop finds its node still linked to a live parent, or root
+//!   first, so each drop unlinks the children it is about to orphan. `drop_subtree` of the same
+//!   subtree — one walk, no per-node unlink — is the floor both are measured against, and the
+//!   difference between them is what the handle-per-node model costs.
+//! * `drop_element_one_node` — a single leaf freed: what one finalizer pays.
 
 use divan::black_box;
 use divan::counter::ItemsCount;
@@ -134,7 +132,7 @@ fn page_with_detached_subtree() -> (Document<()>, Vec<NodeId>) {
 }
 
 #[divan::bench]
-fn remove_held_subtree(bencher: divan::Bencher) {
+fn remove_subtree(bencher: divan::Bencher) {
     let (mut doc, ids) = populated_page();
     let page_root = doc.document_element().id();
     let root = ids[0];
@@ -145,29 +143,27 @@ fn remove_held_subtree(bencher: divan::Bencher) {
 }
 
 #[divan::bench]
-fn release_leaves_first_then_root(bencher: divan::Bencher) {
+fn drop_leaves_first(bencher: divan::Bencher) {
     bencher
         .with_inputs(page_with_detached_subtree)
         .counter(ItemsCount::new(SUBTREE))
         .bench_local_values(|(mut doc, ids)| {
             for &id in ids.iter().rev() {
-                doc.release(id);
+                doc.drop_element(id);
             }
-            doc.collect_unheld();
             black_box(doc)
         });
 }
 
 #[divan::bench]
-fn release_root_first_then_descendants(bencher: divan::Bencher) {
+fn drop_root_first(bencher: divan::Bencher) {
     bencher
         .with_inputs(page_with_detached_subtree)
         .counter(ItemsCount::new(SUBTREE))
         .bench_local_values(|(mut doc, ids)| {
             for &id in &ids {
-                doc.release(id);
+                doc.drop_element(id);
             }
-            doc.collect_unheld();
             black_box(doc)
         });
 }
@@ -183,26 +179,13 @@ fn drop_subtree_floor(bencher: divan::Bencher) {
         });
 }
 
+/// One finalizer's worth: a leaf still linked to a live parent.
 #[divan::bench]
-fn remove_released_subtree(bencher: divan::Bencher) {
+fn drop_element_one_node(bencher: divan::Bencher) {
     bencher
-        .with_inputs(|| {
-            let (mut doc, ids) = populated_page();
-            for &id in &ids {
-                doc.release(id);
-            }
-            (doc, ids)
-        })
-        .counter(ItemsCount::new(SUBTREE))
+        .with_inputs(populated_page)
         .bench_local_values(|(mut doc, ids)| {
-            doc.remove_element(ids[0]);
-            doc.collect_unheld();
+            doc.drop_element(black_box(ids[SUBTREE - 1]));
             black_box(doc)
         });
-}
-
-#[divan::bench]
-fn collect_unheld_with_nothing_queued(bencher: divan::Bencher) {
-    let (mut doc, _ids) = populated_page();
-    bencher.bench_local(|| black_box(doc.collect_unheld()));
 }
