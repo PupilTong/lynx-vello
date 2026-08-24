@@ -1,6 +1,6 @@
 [package]
 name = "bobcat-core"
-description = "Native Lynx runtime core with injectable script engines"
+description = "Native Lynx runtime core and its built-in QuickJS script engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,17 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-default = ["quickjs"]
-quickjs = ["dep:quickjs-rust-bridge"]
-
 [dependencies]
 bytes = { workspace = true }
 data-url = { workspace = true }
 dom = { workspace = true }
 http = { workspace = true }
 pollster = { workspace = true }
-quickjs-rust-bridge = { workspace = true, optional = true }
+quickjs-rust-bridge = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
@@ -43,12 +39,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 [[bench]]
 name = "script_boundary"
 harness = false
-# The harness it drives needs a script engine, and `quickjs` is a *default*
-# feature — so `cargo bench` and `cargo codspeed build` both satisfy this and
-# run the benchmark, while `--no-default-features` skips it instead of failing
-# to compile. A non-default required feature would be the silent-skip hazard
-# `bench_support` warns about; this is not one.
-required-features = ["quickjs"]
 
 [lints]
 workspace = true

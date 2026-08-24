@@ -136,9 +136,12 @@ useful signal for currently-compatible versions of those libraries.
   crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
-  `ResourceFetcher`, `ScriptEngineFactory`, `ScriptEngine`, image-codec
-  `Decoder`, draw-target, OS-input, and lifecycle-wakeup capabilities, plus
-  narrow view-level font and decoded-image registration. A host may select a
+  `ResourceFetcher`, image-codec `Decoder`, draw-target, OS-input, and
+  lifecycle-wakeup capabilities, plus narrow view-level font and
+  decoded-image registration. The script engine is deliberately *not* one of
+  them: core owns its `QuickJS` realm outright, and the only script surface an
+  embedder sees is the sanitized `script::ScriptError` a failure is reported
+  with. A host may select a
   registered family as the view's platform default; this prepends that family
   to the `system-ui`, `sans-serif`, and `serif` generic maps, which lets a Wasm
   embedder supply its otherwise-absent system-font backend without baking a
@@ -167,26 +170,21 @@ useful signal for currently-compatible versions of those libraries.
   fragment mounts globally, which is what web-core itself emits for a
   `enableRemoveCSSScope = true` bundle. The document, tree, engine, and realm
   cannot be borrowed or decomposed from the facade.
-  `ScriptEngineFactory` is `Send + Sync` and creates the owner-thread-bound,
-  non-`Send` `ScriptEngine` only after the factory reaches the engine-owned
-  Lynx main thread. The VM contract installs named host callbacks, registers
-  named preloaded ESM source, evaluates a module through its TLA completion
-  promise, and provides the optional GC seam; `HostValue` is primitives-only,
-  so realm values and DOM handles never cross it. The default `quickjs`
-  feature adds a private QuickJS adapter and exposes only
-  `quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. The private
+  The crate-private `quickjs::ScriptEngine` is the whole script surface: it
+  installs named host callbacks, registers named preloaded ESM source,
+  evaluates a module through its TLA completion promise, calls an export the
+  realm published back, and provides the GC seam. It is created on the
+  engine-owned Lynx main thread and never leaves it, which is why nothing
+  about it is `Send`. Values crossing it are `quickjs-rust-bridge`'s
+  primitives-only `HostValue`/`HostArgument`, so realm values and DOM handles
+  never cross as themselves. The private
   `MainThreadRuntime` owns the realm integration: a
   batch's first `bobcat` call takes the document out of its hand-off
   slot, every call after that is a plain `&mut` mutation with no
   synchronization, and `__FlushElementTree` runs the style + layout commit
   on the taken document, puts it back, and notifies the presenter through
   the callback injected at construction — locks are touched twice per
-  batch, never per call;
-  `default-features = false` excludes QuickJS while preserving the external
-  injection contracts, but ESM startup currently requires the built-in
-  adapter's module operations. Workspace dependencies disable defaults
-  explicitly; only an upper layer that wants the built-in engine enables
-  `quickjs`.
+  batch, never per call.
   The core depends on `dom` and re-exports exactly one narrow seam of it: the
   `input` module republishes `dom::Point2D` and
   `dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
@@ -343,8 +341,8 @@ useful signal for currently-compatible versions of those libraries.
   `disableEventListener`, keyed by a weak
   `NodeId`→handle index cleared by the same sweep that drops the element. The
   host walks and calls the Element module's `__BobcatDispatchEvent` export
-  through `ScriptEngine::call_module_export`, the one Rust-to-JS path in the
-  tree, once per node per pass, carrying an id naming the dispatch and whether
+  through `quickjs::ScriptEngine::call_module_export`, the one Rust-to-JS path
+  in the tree, once per node per pass, carrying an id naming the dispatch and whether
   the call is its last. Those two let the realm keep one event object for the
   whole walk, so a property one listener writes is there for the next, while
   the host retains nothing of the realm's. `stopImmediatePropagation` never
@@ -440,7 +438,7 @@ useful signal for currently-compatible versions of those libraries.
   bridge owns only the generic synchronous preloaded source/native-module
   loader, loaded-module namespace access, and settled Promise inspection;
   Bobcat's specifiers, entry transform, graph membership, and boot policy stay
-  in the feature-gated core adapter.
+  in the core adapter.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
   the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
@@ -497,7 +495,7 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
-  `bobcat-core`'s `quickjs` feature. Its workspace dependencies are
+  `bobcat-core`. Its workspace dependencies are
   `bobcat-core`, the sibling `lynx-template-decoder` utility, and the
   `lynx-xml` source parser; the
   per-OS codec crates it consumes are target-scoped, for `image_decoders`
@@ -570,9 +568,8 @@ useful signal for currently-compatible versions of those libraries.
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
   nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
   there with `wasm_thread` as its browser thread spawner, leaving the vendored
-  Stylo sources unchanged. The embedder passes `quickjs_engine_factory()`
-  directly to core, which creates the owner-thread-bound QuickJS realm inside
-  that Worker; Element-PAPI
+  Stylo sources unchanged. Core creates its owner-thread-bound QuickJS realm
+  inside that Worker; Element-PAPI
   batches, Stylo/Rayon, layout, and
   render hand-off then synchronize through Rust channels, mutexes, atomics,
   and the shared Wasm memory exactly as in a native embedder. JavaScript
@@ -625,8 +622,7 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
-  The module enables `bobcat-core`'s `quickjs` feature and uses its opaque
-  QuickJS factory. Browser `fetch` remains outside Wasm: the Render Worker
+  Browser `fetch` remains outside Wasm: the Render Worker
   registers raw fetched entry-MTS bytes in its `ResourceFetcher`, core performs
   strict UTF-8 validation, and the worker calls `execute_script(url)`; the
   final response URL is the ESM specifier imported by `bobcat:boot`.
@@ -1208,7 +1204,7 @@ useful signal for currently-compatible versions of those libraries.
   `docs/tracking/` for the behavior surface each will need to cover before
   scaffolding begins, and `.claude/agents/` for the subsystem-scoped agent
   personas already set up for this work. `packages/bobcat-element` with
-  `bobcat-core`'s `tree` and feature-gated `quickjs` modules are the first
+  `bobcat-core`'s `tree` and `quickjs` modules are the first
   pieces of this layer to land, joined by `StyleInfo` ingestion; the background
   thread, the event model, css-id scoping, and the remaining Element PAPI
   members are still ahead.

@@ -11,7 +11,7 @@ repository = "https://github.com/akiwah/lynx-vello"
 rust-version = "1.95"
 
 [workspace.dependencies]
-bobcat-core = { path = "crates/bobcat-core", default-features = false }
+bobcat-core = { path = "crates/bobcat-core" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-xml = { path = "crates/lynx-xml" }
 hughie = { path = "crates/hughie" }

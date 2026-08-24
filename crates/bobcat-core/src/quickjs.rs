@@ -1,4 +1,10 @@
-//! Built-in `QuickJS` adapter for Bobcat's injected VM contract.
+//! Bobcat's script engine: one `QuickJS` realm, and the policy around it.
+//!
+//! The realm itself lives in `quickjs-rust-bridge`. What this module adds is
+//! everything the runtime needs and the bridge deliberately leaves open: when
+//! the promise-job queue is drained, how many jobs one checkpoint may run,
+//! how a bridge failure becomes a sanitized [`ScriptError`], and how a module
+//! namespace caches the atoms an export is looked up by.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,16 +15,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use quickjs_rust_bridge as quickjs;
-use smallvec::SmallVec;
 
-use crate::script::{
-    HostCallback, HostValue, ScriptEngine, ScriptEngineFactory, ScriptError, ScriptErrorKind,
-    ScriptErrorPhase, ScriptSourceLocation,
-};
+use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase, ScriptSourceLocation};
 
-/// Arguments a host-to-realm call carries without touching the heap. The
-/// widest member the runtime calls is `event_listener_callback`, with seven.
-const INLINE_CALL_ARGUMENTS: usize = 8;
+/// A leaf host callback Bobcat installs in the realm.
+///
+/// The realm turns a returned message into a JavaScript exception. Values
+/// crossing either way are [`quickjs::HostValue`] primitives, so no realm
+/// handle and no DOM identity ever crosses as itself.
+pub(crate) type HostCallback =
+    Box<dyn FnMut(&[quickjs::HostValue]) -> Result<quickjs::HostValue, String> + 'static>;
 
 const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
     NonZeroUsize::new(1_024).expect("the default job limit is non-zero");
@@ -51,26 +57,6 @@ impl Default for QuickJsConfig {
     }
 }
 
-#[derive(Debug)]
-struct QuickJsFactory;
-
-impl ScriptEngineFactory for QuickJsFactory {
-    fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError> {
-        QuickJsScriptEngine::new()
-            .map(|engine| Box::new(engine) as Box<dyn ScriptEngine>)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))
-    }
-}
-
-/// Returns Bobcat's opaque built-in `QuickJS` VM factory.
-///
-/// The returned capability is `Send + Sync`; each owner-thread-bound realm is
-/// allocated only when [`ScriptEngineFactory::create`] is called.
-#[must_use]
-pub fn engine_factory() -> Arc<dyn ScriptEngineFactory> {
-    Arc::new(QuickJsFactory)
-}
-
 /// One loaded module's namespace object, plus the export names already
 /// interned in it.
 ///
@@ -83,7 +69,11 @@ struct ModuleNamespace {
     exports: HashMap<Box<str>, Rc<quickjs::Member>>,
 }
 
-struct QuickJsScriptEngine {
+/// One owner-thread-bound `QuickJS` realm, with Bobcat's job policy on it.
+///
+/// Created on the thread that will own it — the engine-owned Lynx main
+/// thread — and never moved off it, which is why nothing here is `Send`.
+pub(crate) struct ScriptEngine {
     realm: quickjs::Realm,
     module_namespaces: HashMap<String, ModuleNamespace>,
     config: QuickJsConfig,
@@ -91,9 +81,10 @@ struct QuickJsScriptEngine {
     deferred_checkpoint_error: Option<ScriptError>,
 }
 
-impl QuickJsScriptEngine {
-    fn new() -> Result<Self, quickjs::Error> {
+impl ScriptEngine {
+    pub(crate) fn new() -> Result<Self, ScriptError> {
         Self::with_config(QuickJsConfig::default())
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))
     }
 
     fn with_config(config: QuickJsConfig) -> Result<Self, quickjs::Error> {
@@ -157,20 +148,6 @@ impl QuickJsScriptEngine {
         Ok((object, member))
     }
 
-    fn execute_raw(
-        &mut self,
-        source: quickjs::EvalSource<'_>,
-        phase: ScriptErrorPhase,
-    ) -> Result<(), ScriptError> {
-        self.resume_incomplete_checkpoint(phase)?;
-        let result = self
-            .realm
-            .evaluate(source, quickjs::EvalOptions::default())
-            .map(|_| ())
-            .map_err(|error| map_quickjs_error(error, phase));
-        self.finish_operation(result, phase)
-    }
-
     fn finish_operation<T>(
         &mut self,
         result: Result<T, ScriptError>,
@@ -222,20 +199,14 @@ impl QuickJsScriptEngine {
         }
         Ok(())
     }
-}
 
-impl fmt::Debug for QuickJsScriptEngine {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuickJsScriptEngine")
-            .field("config", &self.config)
-            .field("checkpoint_incomplete", &self.checkpoint_incomplete)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ScriptEngine for QuickJsScriptEngine {
-    fn register_host_module_function(
+    /// Installs one Rust-backed function as a named export of a native ESM
+    /// module.
+    ///
+    /// Every export must be registered before that module first loads, and a
+    /// name cannot be replaced. Registration retains the callback without
+    /// invoking it.
+    pub(crate) fn register_host_module_function(
         &mut self,
         module_specifier: &str,
         export_name: &str,
@@ -248,37 +219,54 @@ impl ScriptEngine for QuickJsScriptEngine {
                 module_specifier,
                 export_name,
                 u32::from(arity),
-                move |arguments| {
-                    let arguments = arguments
-                        .iter()
-                        .map(host_value_from_quickjs)
-                        .collect::<Result<Vec<_>, _>>()?;
-                    callback(&arguments)
-                        .map(host_value_to_quickjs)
-                        .map_err(quickjs::HostFunctionError::new)
-                },
+                move |arguments| callback(arguments).map_err(quickjs::HostFunctionError::new),
             )
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterHostModuleFunction))
     }
 
+    /// Evaluates classic source, which the runtime never does: every entry and
+    /// every built-in is a module. It survives so this module's own tests can
+    /// state a realm invariant in a snippet and let a throw fail the test.
+    #[cfg(test)]
     fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
-        self.execute_raw(
-            quickjs::EvalSource {
-                name: Some(source_name),
-                ..quickjs::EvalSource::new(source)
-            },
-            ScriptErrorPhase::Execute,
-        )
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::Execute;
+        self.resume_incomplete_checkpoint(PHASE)?;
+        let result = self
+            .realm
+            .evaluate(
+                quickjs::EvalSource {
+                    name: Some(source_name),
+                    ..quickjs::EvalSource::new(source)
+                },
+                quickjs::EvalOptions::default(),
+            )
+            .map(|_| ())
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        self.finish_operation(result, PHASE)
     }
 
-    fn register_module_source(&mut self, specifier: &str, source: &str) -> Result<(), ScriptError> {
+    /// Registers one exact, normalized module name and its UTF-8 source in
+    /// the synchronous preloaded module graph.
+    ///
+    /// Source modules and native host modules share one specifier namespace.
+    pub(crate) fn register_module_source(
+        &mut self,
+        specifier: &str,
+        source: &str,
+    ) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterModule)?;
         self.realm
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
 
-    fn execute_module(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError> {
+    /// Compiles, links, and evaluates one ESM entry, waiting for its
+    /// evaluation promise — top-level await included — to settle.
+    pub(crate) fn execute_module(
+        &mut self,
+        source: &str,
+        source_name: &str,
+    ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
         self.resume_incomplete_checkpoint(PHASE)?;
         let evaluation = self
@@ -309,29 +297,37 @@ impl ScriptEngine for QuickJsScriptEngine {
         }
     }
 
-    fn call_module_export(
+    /// Calls a function a loaded source module exported, if it exported one
+    /// under that name.
+    ///
+    /// `Ok(false)` means the module exported no such function — a bundle with
+    /// no listener runtime, not a failure. `Ok(true)` means it ran and
+    /// returned.
+    ///
+    /// There is no return value, because the one thing a callee needs to tell
+    /// the host — that a walk should end — is a host call of its own, and
+    /// making it a return value would mean the host could only hear it once
+    /// the callee finished.
+    pub(crate) fn call_module_export(
         &mut self,
         module_specifier: &str,
         export_name: &str,
-        arguments: &[HostValue],
+        arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
         self.resume_incomplete_checkpoint(PHASE)?;
         let (object, member) = self.module_export(module_specifier, export_name)?;
         // One crossing carries the lookup and every argument, and nothing
-        // here allocates: the primitives are described in place and
-        // a string is lent, not copied — the caller holds it for the whole
-        // walk, and the realm needs it only for the length of this call.
-        let arguments = arguments
-            .iter()
-            .map(host_argument)
-            .collect::<SmallVec<[quickjs::HostArgument<'_>; INLINE_CALL_ARGUMENTS]>>();
+        // here allocates: the primitives are described in place and a string
+        // is lent, not copied — the caller holds it for the whole walk, and
+        // the realm needs it only for the length of this call.
+        //
         // The checkpoint runs through `finish_operation`, never inline: an
         // execution guard is alive for the whole call, and QuickJS refuses to
         // nest one — draining jobs here would begin a second.
         let result = self
             .realm
-            .call_member(&object, &member, &arguments)
+            .call_member(&object, &member, arguments)
             .map(|outcome| match outcome {
                 // The realm published nothing here. Not an error: a bundle
                 // with no listener runtime simply has no member to call.
@@ -342,7 +338,9 @@ impl ScriptEngine for QuickJsScriptEngine {
         self.finish_operation(result, PHASE)
     }
 
-    fn collect_garbage(&mut self) -> Result<(), ScriptError> {
+    /// Runs a collection now, so a dead handle's finalizer reaches the
+    /// document before the batch it belongs to ends.
+    pub(crate) fn collect_garbage(&mut self) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::CollectGarbage)?;
         self.realm.run_gc();
         self.checkpoint(ScriptErrorPhase::CollectGarbage)
@@ -350,45 +348,13 @@ impl ScriptEngine for QuickJsScriptEngine {
     }
 }
 
-fn host_value_from_quickjs(
-    value: &quickjs::HostValue,
-) -> Result<HostValue, quickjs::HostFunctionError> {
-    match value {
-        quickjs::HostValue::Undefined => Ok(HostValue::Undefined),
-        quickjs::HostValue::Null => Ok(HostValue::Null),
-        quickjs::HostValue::Boolean(value) => Ok(HostValue::Boolean(*value)),
-        quickjs::HostValue::Number(value) => Ok(HostValue::Number(*value)),
-        quickjs::HostValue::String(value) => Ok(HostValue::String(Arc::from(value.as_str()))),
-        _ => Err(quickjs::HostFunctionError::new(
-            "this QuickJS value cannot cross Bobcat's host boundary",
-        )),
-    }
-}
-
-/// The outbound twin of [`host_value_from_quickjs`], for an argument the
-/// runtime passes into the realm.
-///
-/// Borrowing rather than owning is what makes a call copy-free: the runtime
-/// holds an event's name and detail as `Arc<str>` for the length of the whole
-/// walk, and the realm needs them only for the length of one call.
-fn host_argument(value: &HostValue) -> quickjs::HostArgument<'_> {
-    match value {
-        HostValue::Undefined => quickjs::HostArgument::Undefined,
-        HostValue::Null => quickjs::HostArgument::Null,
-        HostValue::Boolean(value) => quickjs::HostArgument::Boolean(*value),
-        HostValue::Number(value) => quickjs::HostArgument::Number(*value),
-        HostValue::String(value) => quickjs::HostArgument::String(value),
-    }
-}
-
-/// What a host callback returned, on its way back into the realm.
-fn host_value_to_quickjs(value: HostValue) -> quickjs::HostValue {
-    match value {
-        HostValue::Undefined => quickjs::HostValue::Undefined,
-        HostValue::Null => quickjs::HostValue::Null,
-        HostValue::Boolean(value) => quickjs::HostValue::Boolean(value),
-        HostValue::Number(value) => quickjs::HostValue::Number(value),
-        HostValue::String(value) => quickjs::HostValue::String(value.to_string()),
+impl fmt::Debug for ScriptEngine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScriptEngine")
+            .field("config", &self.config)
+            .field("checkpoint_incomplete", &self.checkpoint_incomplete)
+            .finish_non_exhaustive()
     }
 }
 
@@ -446,10 +412,8 @@ mod tests {
 
     use super::*;
 
-    fn assert_transferable<T: Send + Sync>() {}
-
-    fn engine_with(config: QuickJsConfig) -> QuickJsScriptEngine {
-        QuickJsScriptEngine::with_config(config).expect("QuickJS realm")
+    fn engine_with(config: QuickJsConfig) -> ScriptEngine {
+        ScriptEngine::with_config(config).expect("QuickJS realm")
     }
 
     /// Runs `operation` on its own thread so a wedged interrupt fails the test
@@ -484,15 +448,8 @@ mod tests {
     }
 
     #[test]
-    fn factory_capability_is_transferable_while_realms_remain_owner_thread_bound() {
-        assert_transferable::<Arc<dyn ScriptEngineFactory>>();
-        let _factory = engine_factory();
-    }
-
-    #[test]
-    fn factory_delays_realm_creation_and_executes_named_scripts() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+    fn a_realm_executes_named_scripts() {
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         engine
             .execute_script("globalThis.answer = 42", "app:///main.js")
             .expect("execute");
@@ -500,8 +457,7 @@ mod tests {
 
     #[test]
     fn preloaded_entry_modules_finish_before_execute_module_returns() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         engine
             .register_module_source(
                 "app:///entry.js",
@@ -521,8 +477,7 @@ mod tests {
 
     #[test]
     fn a_missing_preloaded_module_is_a_named_module_error() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         let error = engine
             .execute_module("await import('app:///missing.mjs');", "bobcat:boot")
             .expect_err("the loader must reject an unknown module");
@@ -534,14 +489,13 @@ mod tests {
 
     #[test]
     fn host_functions_are_native_module_exports_not_globals() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         engine
             .register_host_module_function(
                 "bobcat-internal:test",
                 "answer",
                 0,
-                Box::new(|_| Ok(HostValue::Number(42.0))),
+                Box::new(|_| Ok(quickjs::HostValue::Number(42.0))),
             )
             .expect("register");
         engine
@@ -557,8 +511,7 @@ mod tests {
 
     #[test]
     fn rust_calls_back_through_a_loaded_source_module_export() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         engine
             .register_module_source(
                 "bobcat:callback",
@@ -574,7 +527,7 @@ mod tests {
                 .call_module_export(
                     "bobcat:callback",
                     "receive",
-                    &[HostValue::String(Arc::from("from Rust"))],
+                    &[quickjs::HostArgument::String("from Rust")],
                 )
                 .expect("call callback export")
         );
@@ -593,8 +546,7 @@ mod tests {
 
     #[test]
     fn execute_runs_a_microtask_checkpoint() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         engine
             .execute_script(
                 "globalThis.answer = 0; Promise.resolve().then(() => answer = 42)",
@@ -611,8 +563,7 @@ mod tests {
 
     #[test]
     fn source_name_is_preserved_in_sanitized_errors() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         let error = engine
             .execute_script("const = 1", "app:///broken.js")
             .expect_err("syntax error");
@@ -625,8 +576,7 @@ mod tests {
 
     #[test]
     fn a_thrown_error_keeps_its_constructor_name_and_stays_an_exception() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
 
         let error = engine
             .execute_script("throw new TypeError('invalid receiver')", "throw.js")
@@ -646,10 +596,9 @@ mod tests {
     }
 
     #[test]
-    fn realms_from_one_factory_do_not_share_globals() {
-        let factory = engine_factory();
-        let mut first = factory.create().expect("QuickJS realm");
-        let mut second = factory.create().expect("QuickJS realm");
+    fn two_realms_do_not_share_globals() {
+        let mut first = ScriptEngine::new().expect("QuickJS realm");
+        let mut second = ScriptEngine::new().expect("QuickJS realm");
 
         first
             .execute_script("globalThis.answer = 42", "first.js")
@@ -664,9 +613,8 @@ mod tests {
 
     #[test]
     fn every_boundary_primitive_round_trips_through_a_host_function() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
-        let seen: Arc<Mutex<Vec<HostValue>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
+        let seen: Arc<Mutex<Vec<quickjs::HostValue>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = Arc::clone(&seen);
         engine
             .register_host_module_function(
@@ -674,7 +622,10 @@ mod tests {
                 "echo",
                 1,
                 Box::new(move |arguments| {
-                    let value = arguments.first().cloned().unwrap_or(HostValue::Undefined);
+                    let value = arguments
+                        .first()
+                        .cloned()
+                        .unwrap_or(quickjs::HostValue::Undefined);
                     recorder
                         .lock()
                         .expect("the recorder is not poisoned")
@@ -702,77 +653,16 @@ mod tests {
             .expect("every primitive crosses in both directions unchanged");
 
         let seen = seen.lock().expect("the recorder is not poisoned");
-        assert!(matches!(seen[0], HostValue::Undefined));
-        assert!(matches!(seen[1], HostValue::Null));
-        assert!(matches!(seen[2], HostValue::Boolean(true)));
-        assert!(matches!(seen[3], HostValue::Number(value) if value.is_sign_negative()));
-        assert!(matches!(&seen[4], HostValue::String(value) if value.as_ref() == "a🦀b"));
-    }
-
-    #[test]
-    fn a_non_primitive_argument_is_refused_at_the_host_boundary() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
-        engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "echo",
-                1,
-                Box::new(|_| Ok(HostValue::Undefined)),
-            )
-            .expect("register");
-
-        // The refusal is a JavaScript exception the script can observe, not a
-        // lossy conversion: an object never reaches the callback at all.
-        engine
-            .execute_module(
-                r"
-                import { echo } from 'bobcat-internal:test';
-                let refused = '';
-                try { echo({ answer: 42 }); } catch (error) { refused = String(error); }
-                if (!refused.includes('String arguments only')) {
-                    throw new Error('an object was not refused at the boundary: ' + refused);
-                }
-                ",
-                "non-primitive.mjs",
-            )
-            .expect("the script observes the refusal and continues");
-    }
-
-    #[test]
-    fn an_ill_formed_string_is_refused_at_the_host_boundary() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
-        engine
-            .register_host_module_function(
-                "bobcat-internal:test",
-                "echo",
-                1,
-                Box::new(|_| Ok(HostValue::Undefined)),
-            )
-            .expect("register");
-
-        // `HostValue::String` is an `Arc<str>`, so a lone surrogate has no
-        // representation on the Rust side; it is refused rather than replaced.
-        engine
-            .execute_module(
-                r"
-                import { echo } from 'bobcat-internal:test';
-                let refused = '';
-                try { echo('\uD800'); } catch (error) { refused = String(error); }
-                if (!refused.includes('ill-formed UTF-16')) {
-                    throw new Error('a lone surrogate was not refused: ' + refused);
-                }
-                ",
-                "surrogate.mjs",
-            )
-            .expect("the script observes the refusal");
+        assert!(matches!(seen[0], quickjs::HostValue::Undefined));
+        assert!(matches!(seen[1], quickjs::HostValue::Null));
+        assert!(matches!(seen[2], quickjs::HostValue::Boolean(true)));
+        assert!(matches!(seen[3], quickjs::HostValue::Number(value) if value.is_sign_negative()));
+        assert!(matches!(&seen[4], quickjs::HostValue::String(value) if value == "a🦀b"));
     }
 
     #[test]
     fn an_unhandled_rejection_fails_the_checkpoint_that_follows_the_script() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         let error = engine
             .execute_script(
                 "Promise.reject(new Error('microtask rejection'))",
@@ -787,8 +677,7 @@ mod tests {
 
     #[test]
     fn a_checkpoint_error_beside_a_primary_one_is_reported_before_the_next_script() {
-        let factory = engine_factory();
-        let mut engine = factory.create().expect("QuickJS realm");
+        let mut engine = ScriptEngine::new().expect("QuickJS realm");
         let primary = engine
             .execute_script(
                 "Promise.reject(new Error('deferred')); throw new Error('primary')",

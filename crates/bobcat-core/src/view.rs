@@ -20,7 +20,6 @@ use crate::resource::{
     ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
     ResourceRequest, RetryAdvice, StyleSheetPayload,
 };
-use crate::script::ScriptEngineFactory;
 use crate::tree::PageConfig;
 
 /// Names a resource kind in a message a host reads.
@@ -38,11 +37,10 @@ static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 /// A running Lynx view.
 ///
 /// The document, element tree, script realm, and presentation engine are all
-/// private implementation state. Embedders provide resources, a JavaScript VM
-/// factory, a draw target, and normalized OS events.
+/// private implementation state. Embedders provide resources, a draw target,
+/// and normalized OS events.
 pub struct LynxView<'window, W: Window = NoWindow, C: AnimationClock = SystemClock> {
     resource_fetcher: Arc<dyn ResourceFetcher>,
-    script_engine_factory: Arc<dyn ScriptEngineFactory>,
     engine: Engine<'window, W, C>,
     script_started: bool,
     request_namespace: u64,
@@ -81,7 +79,6 @@ impl<W: Window> LynxView<'_, W, SystemClock> {
     pub fn new(
         config: PageConfig,
         resource_fetcher: Arc<dyn ResourceFetcher>,
-        script_engine_factory: Arc<dyn ScriptEngineFactory>,
         event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
@@ -90,7 +87,6 @@ impl<W: Window> LynxView<'_, W, SystemClock> {
         Self::with_animation_clock(
             config,
             resource_fetcher,
-            script_engine_factory,
             event_requester,
             width,
             height,
@@ -112,7 +108,6 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
     pub fn with_animation_clock(
         config: PageConfig,
         resource_fetcher: Arc<dyn ResourceFetcher>,
-        script_engine_factory: Arc<dyn ScriptEngineFactory>,
         event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
@@ -121,7 +116,6 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
     ) -> Result<Self, LynxViewError> {
         Ok(Self {
             resource_fetcher,
-            script_engine_factory,
             engine: Engine::new(
                 config,
                 event_requester,
@@ -209,11 +203,7 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
             )
             .into());
         }
-        self.engine.spawn_script(
-            source.to_owned(),
-            source_name,
-            Arc::clone(&self.script_engine_factory),
-        )?;
+        self.engine.spawn_script(source.to_owned(), source_name)?;
         self.script_started = true;
         Ok(())
     }

@@ -1,5 +1,3 @@
-#![cfg(feature = "quickjs")]
-
 mod support;
 
 use std::sync::Arc;
@@ -8,7 +6,6 @@ use std::time::{Duration, Instant};
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
     EngineError, EngineEvent, LynxView, LynxViewError, NoWindow, PageConfig, ScriptRunError,
-    quickjs_engine_factory,
 };
 use support::FetcherDouble;
 
@@ -18,7 +15,6 @@ async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptRunError> {
     let mut view = LynxView::<NoWindow>::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,
@@ -124,7 +120,6 @@ async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
     let mut view = LynxView::<NoWindow>::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,
@@ -153,7 +148,6 @@ async fn a_view_accepts_only_one_entry_script() {
     let mut view = LynxView::<NoWindow>::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,

@@ -17,7 +17,6 @@ use std::sync::{Arc, OnceLock};
 use bobcat_core::input::{DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
-    quickjs_engine_factory,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -184,7 +183,6 @@ impl<'window> MacApplication<'window> {
         let mut view = LynxView::new(
             program.config,
             program.resource_fetcher,
-            quickjs_engine_factory(),
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
