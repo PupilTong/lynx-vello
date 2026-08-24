@@ -6,7 +6,6 @@ use std::{fmt, str};
 
 use http::HeaderMap;
 
-use crate::clock::{AnimationClock, SystemClock};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::engine::Screenshot;
 use crate::engine::{
@@ -39,18 +38,18 @@ static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 /// The document, element tree, script realm, and presentation engine are all
 /// private implementation state. Embedders provide resources, a draw target,
 /// and normalized OS events.
-pub struct LynxView<'window, W: Window = NoWindow, C: AnimationClock = SystemClock> {
+pub struct LynxView<'window, W: Window = NoWindow> {
     resource_fetcher: Arc<dyn ResourceFetcher>,
-    engine: Engine<'window, W, C>,
+    engine: Engine<'window, W>,
     script_started: bool,
     request_namespace: u64,
     next_request_sequence: u64,
 }
 
 /// The offscreen composition of [`LynxView`].
-pub type OffscreenLynxView<C = SystemClock> = LynxView<'static, NoWindow, C>;
+pub type OffscreenLynxView = LynxView<'static, NoWindow>;
 
-impl<W: Window, C: AnimationClock> fmt::Debug for LynxView<'_, W, C> {
+impl<W: Window> fmt::Debug for LynxView<'_, W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("LynxView").finish_non_exhaustive()
     }
@@ -70,12 +69,13 @@ pub enum LynxViewError {
     InvalidStyleSheetEncoding { url: String, message: String },
 }
 
-impl<W: Window> LynxView<'_, W, SystemClock> {
-    /// Creates a view at the supplied CSS viewport and device-pixel ratio, on
-    /// the platform's monotonic clock.
+impl<'window, W: Window> LynxView<'window, W> {
+    /// Creates a view at the supplied CSS viewport and device-pixel ratio.
     ///
-    /// [`Self::with_animation_clock`] is the constructor for a host that has a
-    /// better reading of a frame's time, or wants a reproducible one.
+    /// The animation timeline is the engine's own: a host neither names one
+    /// nor drives it. Frames are paced by the swap chain, and the engine
+    /// samples its clock once per frame, after the acquire that waits on
+    /// vsync.
     pub fn new(
         config: PageConfig,
         resource_fetcher: Arc<dyn ResourceFetcher>,
@@ -84,46 +84,9 @@ impl<W: Window> LynxView<'_, W, SystemClock> {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<Self, LynxViewError> {
-        Self::with_animation_clock(
-            config,
-            resource_fetcher,
-            event_requester,
-            width,
-            height,
-            device_pixel_ratio,
-            SystemClock::new(),
-        )
-    }
-}
-
-impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
-    /// Creates a view whose animations run on `clock`.
-    ///
-    /// The timeline is part of the view's type and cannot be replaced later.
-    /// A host that drives the reading — a browser writing
-    /// `requestAnimationFrame`'s timestamp, a test stepping a
-    /// [`crate::ManualClock`] — keeps its own handle and passes a clone, since
-    /// a shared clock is itself a clock.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_animation_clock(
-        config: PageConfig,
-        resource_fetcher: Arc<dyn ResourceFetcher>,
-        event_requester: Arc<dyn EventRequester>,
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-        clock: C,
-    ) -> Result<Self, LynxViewError> {
         Ok(Self {
             resource_fetcher,
-            engine: Engine::new(
-                config,
-                event_requester,
-                width,
-                height,
-                device_pixel_ratio,
-                clock,
-            )?,
+            engine: Engine::new(config, event_requester, width, height, device_pixel_ratio)?,
             script_started: false,
             request_namespace: NEXT_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             next_request_sequence: 0,
@@ -464,7 +427,7 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
+impl<'window, W: Window> LynxView<'window, W> {
     pub fn attach_window(
         &mut self,
         window: &'window W,
@@ -474,7 +437,7 @@ impl<'window, W: Window, C: AnimationClock> LynxView<'window, W, C> {
     }
 }
 
-impl<C: AnimationClock> LynxView<'static, NoWindow, C> {
+impl LynxView<'static, NoWindow> {
     pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
         self.engine.attach_offscreen()
     }
@@ -484,7 +447,7 @@ impl<C: AnimationClock> LynxView<'static, NoWindow, C> {
     }
 }
 
-impl<W: Window, C: AnimationClock> LynxView<'_, W, C> {
+impl<W: Window> LynxView<'_, W> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         self.engine.capture()

@@ -35,7 +35,7 @@
 //!   — name-level, a recorded approximation).
 //!
 //! The router owns no clock and holds no document: time arrives as the
-//! engine's `AnimationClock` reading, and every document fact arrives through
+//! engine's own frame-clock reading, and every document fact arrives through
 //! the borrowed [`RouterHost`] queries. That keeps the core a plain state
 //! machine a test can drive without an engine.
 //!

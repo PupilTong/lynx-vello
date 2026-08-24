@@ -146,12 +146,12 @@ shares the same ordered Worker queue as reset and resize, so it cannot re-enter
 the Wasm wrapper while an asynchronous view replacement owns it and a pointer
 following resize is interpreted in the metrics installed before it.
 
-Immediately before dispatch, the Render Worker stamps the event with its own
-`performance.now()`. `BobcatRenderer::dispatchPointer` writes that reading into
-the same `ManualClock` used by Worker rAF, constructs core's `InputEvent`, and
-calls the opaque `LynxView::dispatch_input`. This prevents a press after a long
-idle period from deriving its `longpress` deadline from the last rendered
-frame. Reset releases active captures before replacing the view; disposal
+No timestamp crosses the seam. `BobcatRenderer::dispatchPointer` constructs
+core's `InputEvent` and calls the opaque `LynxView::dispatch_input`, which
+stamps the event's arrival from the engine's own clock — the same clock its
+frames read — so a press after a long idle period cannot derive its `longpress`
+deadline from the last rendered frame, and nothing has to agree on a time
+origin. Reset releases active captures before replacing the view; disposal
 stops input before terminating the Worker. Wheel input is not connected yet.
 
 ## Synchronization and rendering
@@ -160,7 +160,12 @@ The private document moves through core's `SharedTree` slot. A PAPI batch
 takes the document; the Render Worker only tries a non-blocking borrow. An
 open batch therefore cannot expose partial mutation or stall the last retained
 frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
-Worker to the Render Worker, whose animation loop calls `renderIfRequested`.
+Worker to the Render Worker, whose animation loop calls `renderIfRequested`
+with no argument: the animation timeline is core's own `web_time` clock, read
+once per frame on the Render Worker after the canvas surface hands over an
+image. `requestAnimationFrame`'s `DOMHighResTimeStamp` is taken on the page's
+main thread, before this Worker is woken and on a different time origin than
+its `performance.now()`, so it is not the better reading it appears to be.
 A separate lost-wake-safe event signal wakes a Promise whenever core queues an
 engine event. Script completion therefore does not poll and does not depend on
 rAF, so a hidden page cannot strand an `executeScript` Promise merely by

@@ -8,12 +8,12 @@ capabilities and OS facts:
 - a `ResourceFetcher`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
-- optionally an `AnimationClock` type, when the host has a better reading of a
-  frame's time than the platform clock, or wants a reproducible one;
 - owned font bytes or already-decoded image pixels when those resources are
   registered explicitly;
 - viewport/device metrics and normalized input events;
-- platform initialization, worker bootstrap, clocks, and file/network IO.
+- platform initialization, worker bootstrap, and file/network IO.
+
+No clock is among them: the animation timeline is engine-owned.
 
 The dependency graph is:
 
@@ -39,32 +39,42 @@ bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 
 ## Animation timeline
 
-A view is generic over its timeline and names one at construction, the same way
-it is generic over its `Window`: `LynxView<'window, W, C>`, where `C` is an
-`AnimationClock`. Every reading is a direct call, there is no trait object, and
-no timeline can be swapped in after the view exists.
+The engine owns it. `crate::clock::FrameClock` is private to `bobcat-core`,
+concrete, and constructed by `Engine::new`: there is no trait, no type
+parameter, and no constructor that takes one. It reads the platform's monotonic
+clock — `std::time::Instant` natively and `web_time::Instant` on Wasm, the same
+split `quickjs-rust-bridge` already uses — with the epoch at view construction.
+A host that arranges nothing gets running animations, because arranging nothing
+is the only option.
 
-`LynxView::new` names `SystemClock` — the platform's monotonic clock,
-`std::time::Instant` natively and `web_time::Instant` on Wasm, the same split
-`quickjs-rust-bridge` already uses. A host that arranges nothing therefore gets
-running animations, and `bobcat-cli` names no clock at all.
+No host has a better reading to offer. Presentation runs on
+`PresentMode::AutoVsync`, so the swap chain paces frames, and the engine
+samples *after* the acquire that waits on it (below). A browser's
+`requestAnimationFrame` timestamp is not the improvement it looks like: it is
+taken on the page's main thread, before the Render Worker is woken, and on a
+different time origin than the Worker's own `performance.now()`.
 
-`LynxView::with_animation_clock` is the constructor for a host that names its
-own, and two do. A browser has a better reading than it could take itself:
-`requestAnimationFrame` hands over the frame's timestamp, the instant the frame
-is *for*, where reading a clock partway through producing the frame drifts and
-jitters — so the Render Worker builds its view on an `Arc<ManualClock>` and
-writes that `DOMHighResTimeStamp` into it each frame. Tests and scripted
-offscreen capture do the same with their own `ManualClock`, for a reproducible
-sequence. Both work because a shared clock is itself a clock: `AnimationClock`
-is implemented for `Arc<T>`, so the host keeps a handle to the very clock its
-view reads without the view holding a trait object.
+**The frame's one reading.** `notify_redraw` and `tick` each call
+`FrameClock::now_seconds` exactly once and pass that `f64` to everything the
+frame resolves — `service_gesture_clock` for armed `longpress` deadlines and
+`advance_animations` for the timeline — so a gesture and an animation in the
+same frame cannot disagree about when the frame is. Input arrival is the one
+other reading, taken in `dispatch_input` at the moment the event arrives, which
+is what keeps a sequence buffered behind a busy document at its real duration.
 
-Whichever is installed, the engine samples it once per frame on the presenting
-side and hands that one value to the document, so every animation in a frame is
-sampled at the same instant. `dom` itself still reads no clock — `now` is a
-parameter to `Document::advance_animations`, which is what keeps the timeline
-substitutable at all.
+**Where the reading is taken.** A window frame is `WindowGraphics::acquire`,
+then `render_to_target`, then `present`. Acquiring first is deliberate: under
+`AutoVsync` the swap chain hands over an image only once one is free, so
+`acquire` is the call that blocks, and every image in flight is another display
+refresh between that wait and scan-out. Sampling the clock after it puts the
+whole frame on the near side of the pipeline — what is sampled is the frame
+being produced for the next refresh, not one produced a pipeline-depth earlier.
+The wait still happens outside the tree borrow, so it blocks nobody. An
+offscreen `tick` has no swap chain and samples immediately.
+
+`dom` itself reads no clock: `now` is a parameter to
+`Document::advance_animations`. That is what lets the presenting side decide
+the instant, not the document.
 
 Advancing an animation never crosses to the Lynx main thread. The presenting
 side already holds the document between frames, and the tick is a Stylo
@@ -315,7 +325,7 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 4. `__FlushElementTree` performs style/layout commit, returns the document,
    and asks `FrameRequester` for a frame.
 5. The presenting side non-blockingly drains buffered input and resize, then
-   samples the installed `AnimationClock` once and advances every running
+   samples the engine's `FrameClock` once and advances every running
    animation to that instant, then renders the retained document scene and
    submits it to its attached target. An animation that is still running makes
    the presenting side ask for the next frame itself, so the loop sustains

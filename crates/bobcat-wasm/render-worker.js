@@ -42,16 +42,18 @@ function scheduleFrame(callback) {
   }
 }
 
-function renderFrame(now) {
+function renderFrame() {
   if (!running) {
     return
   }
   if (!resettingNativeView) {
     try {
-      // `requestAnimationFrame` hands over the frame's timestamp; the
-      // `setTimeout` fallback does not, so read one. This is the engine's
-      // animation timeline — Rust reads no clock on wasm32.
-      renderer.renderIfRequested(typeof now === 'number' ? now : performance.now())
+      // No timestamp crosses here. The animation timeline is core's own
+      // clock, read on this Worker once per frame after the canvas surface
+      // hands over an image; `requestAnimationFrame`'s timestamp is taken on
+      // the page's main thread, on a different time origin, before this
+      // Worker is even woken.
+      renderer.renderIfRequested()
     } catch (error) {
       reportFatal(error)
       return
@@ -314,8 +316,8 @@ self.addEventListener('message', (event) => {
         return
       }
       try {
-        // Take the timestamp here, on the same Worker timeline as rAF. Window
-        // PointerEvent timestamps need not share this Worker's time origin.
+        // No timestamp: core stamps the event's arrival from the same clock
+        // its frames read, so nothing has to agree on a time origin.
         renderer.dispatchPointer(
           message.x,
           message.y,
@@ -323,7 +325,6 @@ self.addEventListener('message', (event) => {
           message.device,
           message.phase,
           message.defaultPrevented,
-          performance.now(),
         )
       } catch (error) {
         reportFatal(error)
