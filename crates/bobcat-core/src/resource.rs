@@ -89,37 +89,10 @@ pub struct ResourceLocator {
     pub base_url: Option<Url>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceKind {
-    Generic,
-    Image,
-    Font,
-    Lottie,
-    Audio,
-    Video,
-    Svg,
-    StyleSheet,
-    Template,
-    LazyBundle,
-    Frame,
-    SsrData,
-    LynxCoreJs,
-    ExternalJs,
-    ExternalBytecode,
-    Asset,
-    I18nText,
-    Graphics,
-    Theme,
-    Fetch,
-    Other(Arc<str>),
-}
-
-/// A locator plus its semantic category and transport-selection hints.
+/// A locator plus transport-selection hints.
 #[derive(Clone, Debug)]
 pub struct ResourceDescriptor {
     pub locator: ResourceLocator,
-    pub kind: ResourceKind,
     pub hints: ResourceHints,
 }
 
@@ -418,7 +391,6 @@ pub enum ResourceErrorKind {
     InvalidRequest,
     InvalidUrl,
     UnsupportedScheme,
-    UnsupportedKind,
     UnsupportedOperation,
     NotFound,
     PermissionDenied,

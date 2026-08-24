@@ -122,7 +122,10 @@ engine enqueues every event before invoking the construction-time
 `load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
 resolves and fetches through the same `ResourceFetcher`, which answers with
 either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
-the result as author-origin rules. Load order is cascade order.
+the result as author-origin rules. Load order is cascade order. Requests carry
+a URL locator plus transport hints, not a semantic resource kind. The embedder
+locates bytes by normalized resolved URL; `fetch_style_sheet` selects the
+stylesheet payload contract, while other buffered loads use `fetch_resource`.
 
 ## Public and private boundaries
 

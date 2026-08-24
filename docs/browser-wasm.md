@@ -128,6 +128,9 @@ registers the bytes, and mounts them as author-origin rules through the same
 resource boundary the entry MTS module uses; sheets cascade in load order. The
 stylesheet contract has a second arm for a host that already parsed its CSS,
 but a browser host never does, so this embedder always takes the text arm.
+The browser registry is one normalized-URL-to-bytes map. Script and stylesheet
+registration populate that same map; `fetch_resource` and `fetch_style_sheet`
+decide how the selected bytes are interpreted.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
 may execute suitable JavaScript by URL or load a raw Lynx XML source card;

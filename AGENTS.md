@@ -162,10 +162,14 @@ useful signal for currently-compatible versions of those libraries.
   pseudo-classes as text and stylo builds specified values only through its
   value parsers. Decoding a container stays embedder work: core owns the
   `PreparsedStyleSheet` vocabulary, and the embedder fills it. Load order is
-  cascade order. Per-component css-id scoping is **not** implemented — every
-  fragment mounts globally, which is what web-core itself emits for a
-  `enableRemoveCSSScope = true` bundle. The document, tree, engine, and realm
-  cannot be borrowed or decomposed from the facade.
+  cascade order. A request carries a URL locator plus transport hints, not a
+  semantic resource kind: the embedder locates bytes by normalized resolved
+  URL, while `fetch_style_sheet` selects the stylesheet payload contract and
+  other buffered loads use `fetch_resource`. Per-component css-id scoping is
+  **not** implemented — every fragment mounts globally, which is what
+  web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
+  document, tree, engine, and realm cannot be borrowed or decomposed from the
+  facade.
   The crate-private `quickjs::ScriptEngine` is the whole script surface: it
   installs named host callbacks, registers named preloaded ESM source,
   evaluates a module through its TLA completion promise, calls an export the
