@@ -1,3 +1,5 @@
+// @ts-check
+
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // Bobcat does not have the background-thread realm, cross-context transport,
@@ -22,6 +24,26 @@ function noop() {
 const eventTargetListeners = Symbol("eventTargetListeners");
 
 /**
+ * @typedef {object} RuntimeEventListener
+ * @property {Function | object} callback
+ * @property {boolean} capture
+ * @property {boolean} once
+ */
+
+/**
+ * Reads one object-shaped listener option without widening the public input.
+ *
+ * @param {unknown} options
+ * @param {string} name
+ * @returns {unknown}
+ */
+function listenerOption(options, name) {
+  return options && typeof options === "object"
+    ? Reflect.get(options, name)
+    : undefined;
+}
+
+/**
  * The capture bit participates in EventTarget listener identity even though a
  * standalone target has no ancestor path on which capture could change order.
  *
@@ -31,7 +53,7 @@ const eventTargetListeners = Symbol("eventTargetListeners");
 function captureOf(options) {
   return typeof options === "boolean"
     ? options
-    : Boolean(options && typeof options === "object" && options.capture);
+    : Boolean(listenerOption(options, "capture"));
 }
 
 /**
@@ -44,6 +66,7 @@ function captureOf(options) {
  */
 class EventTarget {
   constructor() {
+    /** @type {Map<string, RuntimeEventListener[]>} */
     this[eventTargetListeners] = new Map();
   }
 
@@ -79,9 +102,7 @@ class EventTarget {
     listeners.push({
       callback,
       capture,
-      once: Boolean(
-        options && typeof options === "object" && options.once,
-      ),
+      once: Boolean(listenerOption(options, "once")),
     });
     return undefined;
   }
@@ -127,7 +148,7 @@ class EventTarget {
       throw new TypeError("dispatchEvent requires an event object");
     }
 
-    const name = String(event.type);
+    const name = String(Reflect.get(event, "type"));
     const listeners = this[eventTargetListeners].get(name);
     if (listeners === undefined) {
       return true;
@@ -148,13 +169,13 @@ class EventTarget {
       if (typeof listener.callback === "function") {
         listener.callback.call(this, event);
       } else {
-        const handleEvent = listener.callback.handleEvent;
+        const handleEvent = Reflect.get(listener.callback, "handleEvent");
         if (typeof handleEvent === "function") {
           handleEvent.call(listener.callback, event);
         }
       }
     }
-    return event.defaultPrevented !== true;
+    return Reflect.get(event, "defaultPrevented") !== true;
   }
 
   get [Symbol.toStringTag]() {
@@ -243,6 +264,9 @@ export const lynx = {
   getEngine: function () {
     return engineContext;
   },
+  /**
+   * @param {unknown} name
+   */
   getJSModule: function (name) {
     return name === "GlobalEventEmitter" ? globalEventEmitter : undefined;
   },

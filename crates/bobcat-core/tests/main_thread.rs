@@ -1,15 +1,13 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{
-    EngineError, EngineEvent, LynxView, LynxViewError, NoWindow, PageConfig, ScriptRunError,
-};
-use support::FetcherDouble;
+use bobcat_core::script::ScriptError;
+use bobcat_core::{EngineError, LynxView, LynxViewError, NoWindow, PageConfig};
+use support::{FetcherDouble, wait_for_script};
 
-async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptRunError> {
+async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptError> {
     let resources: Arc<dyn ResourceFetcher> =
         Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = LynxView::<NoWindow>::new(
@@ -25,17 +23,7 @@ async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptRunError> {
         .await
         .expect("fetch and start");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(result) => Some(result),
-            _ => None,
-        }) {
-            return result;
-        }
-        assert!(Instant::now() < deadline, "script thread did not finish");
-        std::thread::yield_now();
-    }
+    wait_for_script(&mut view)
 }
 
 #[tokio::test]
@@ -110,6 +98,7 @@ async fn resolved_script_url_is_preserved_in_errors() {
         .await
         .expect_err("syntax error");
     let message = error.to_string();
+    assert!(message.contains("booting the MTS entry"), "{message}");
     assert!(message.contains("app:///broken.js:"), "{message}");
 }
 

@@ -83,10 +83,14 @@ fn booted() -> OffscreenEngine {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if engine.pump().into_iter().any(
-            |event| matches!(event, crate::EngineEvent::ScriptFinished(result) if result.is_ok()),
-        ) {
-            return engine;
+        for event in engine.pump() {
+            match event {
+                crate::EngineEvent::ScriptFinished => return engine,
+                crate::EngineEvent::ScriptRunError(error) => {
+                    panic!("the entry module failed: {error}")
+                }
+                _ => {}
+            }
         }
         assert!(Instant::now() < deadline, "the entry module did not finish");
         std::thread::yield_now();

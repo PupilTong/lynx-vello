@@ -7,14 +7,13 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
-    EngineEvent, LynxView, LynxViewError, NoWindow, PageConfig, PreparsedDeclaration,
-    PreparsedRule, PreparsedStyleSheet,
+    LynxView, LynxViewError, NoWindow, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet,
 };
-use support::FetcherDouble;
+use support::{FetcherDouble, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main-thread.js";
 const SHEET_URL: &str = "app:///author.css";
@@ -77,18 +76,7 @@ async fn run_script(view: &mut LynxView<'static, NoWindow>) {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start");
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(result) => Some(result),
-            _ => None,
-        }) {
-            result.expect("script execution");
-            return;
-        }
-        assert!(Instant::now() < deadline, "script thread did not finish");
-        std::thread::yield_now();
-    }
+    wait_for_script(view).expect("script execution");
 }
 
 #[tokio::test]

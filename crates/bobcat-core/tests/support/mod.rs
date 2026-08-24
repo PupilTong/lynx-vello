@@ -4,8 +4,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use bobcat_core::PreparsedStyleSheet;
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, CancellationToken, HttpRequest, HttpResponse, RequestId,
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind,
@@ -13,8 +13,26 @@ use bobcat_core::resource::{
     ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload,
     StyleSheetResponse,
 };
+use bobcat_core::script::ScriptError;
+use bobcat_core::{EngineEvent, OffscreenLynxView, PreparsedStyleSheet};
 use bytes::Bytes;
 use url::Url;
+
+/// Waits for the engine-owned script thread to report its terminal boot event.
+pub fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => return Ok(()),
+                EngineEvent::ScriptRunError(error) => return Err(error),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "script thread did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Which transports the double advertises, and what it hands back.
 #[derive(Debug)]

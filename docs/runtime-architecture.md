@@ -28,8 +28,9 @@ QuickJS preloaded ESM graph
   bobcat:boot
     ├──▶ bobcat:element (flush binding)
     └──▶ await import(resolved entry MTS URL)
-          ├──▶ bobcat:runtime (named compatibility exports + engine EventTarget)
-          └──▶ bobcat:element (packages/bobcat-element)
+          ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
+          │     └── named compatibility exports + engine EventTarget
+          └──▶ bobcat:element (packages/bobcat-element/src/element-papi.mjs)
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
 
@@ -113,12 +114,15 @@ background-thread realm; both report that limitation explicitly.
 `execute_script` resolves and fetches the UTF-8 entry MTS module through the
 injected resource contract, then starts the engine-owned Lynx main thread. The
 resolved URL becomes the entry's exact module specifier. Boot completion is
-reported by `LynxView::pump` as
-`EngineEvent::ScriptFinished`; the engine enqueues that event before invoking
-the construction-time `EventRequester`, so the host can pump immediately
-without polling. `execute_script_with_cancellation` accepts a public resource
-`CancellationToken`; dropping the returned future cancels that same token and
-unblocks cooperative resolver/fetcher work. `load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
+reported by `LynxView::pump` as `EngineEvent::ScriptFinished` on success or
+`EngineEvent::ScriptRunError` on a fatal boot-time failure. A platform failure
+on the script owner thread may also report `ScriptRunError` after boot. The
+engine enqueues every event before invoking the construction-time
+`EventRequester`, so the host can pump immediately without polling.
+`execute_script_with_cancellation` accepts a
+public resource `CancellationToken`; dropping the returned future cancels that
+same token and unblocks cooperative resolver/fetcher work.
+`load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
 resolves and fetches through the same `ResourceFetcher`, which answers with
 either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
 the result as author-origin rules. Load order is cascade order.

@@ -9,17 +9,16 @@ mod support;
 use std::future::Future;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
     CancellationToken, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
 };
 use bobcat_core::{
-    EngineEvent, LynxViewError, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet, ScriptRunError,
+    LynxViewError, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet,
 };
 use flashbulb::{Image, Screenshots};
-use support::FetcherDouble;
+use support::{FetcherDouble, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main.js";
 const MAIN_THREAD_SCRIPT: &str = r"
@@ -188,20 +187,6 @@ async fn dropping_entry_request_cancels_the_token_seen_by_the_host() {
     assert!(host_token.is_cancelled());
 }
 
-async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunError> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(result) => Some(result),
-            _ => None,
-        }) {
-            return result;
-        }
-        assert!(Instant::now() < deadline, "script thread did not finish");
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-}
-
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
     let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
@@ -210,7 +195,7 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
 
     let shot = view.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
@@ -234,7 +219,7 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
     view.load_image(IMAGE_URL).await.expect("published source");
 
     let shot = view.capture().expect("capture the committed image");
@@ -260,7 +245,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
 
     let shot = view.capture().expect("capture the committed page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
@@ -325,7 +310,7 @@ globalThis.renderPage = function renderPage() {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
 
     let shot = view.capture().expect("capture the restyled page");
     let count = |wanted: [u8; 4]| {
@@ -390,7 +375,7 @@ async fn a_preparsed_author_sheet_paints() {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
 
     let shot = view.capture().expect("capture the styled page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)

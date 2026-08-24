@@ -85,7 +85,7 @@ pub enum CliError {
     Script {
         input: String,
         #[source]
-        source: bobcat_core::ScriptRunError,
+        source: bobcat_core::script::ScriptError,
     },
     #[error("could not load the author stylesheet of input `{input}`: {source}")]
     LoadStyleSheet {

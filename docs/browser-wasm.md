@@ -106,9 +106,17 @@ calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
 element tree. QuickJS drains its owned pending-job queue until that
 module-evaluation promise settles, so boot completion is exactly the
-`ScriptFinished` engine event. No browser microtask checkpoint or timer
-interception participates in completion; the fallback listener is retained
-inside the preloaded runtime ESM rather than by the browser.
+`ScriptFinished` or `ScriptRunError` engine event. No browser microtask
+checkpoint or timer interception participates in completion; the fallback
+listener is retained inside the preloaded runtime ESM rather than by the
+browser.
+
+After a successful boot, the Render Worker keeps an independent lifecycle
+waiter active instead of tying `pump` to animation frames. `ListenerFailed`
+is written to the browser console without stopping the page, while a later
+script-Worker failure remains fatal even when `requestAnimationFrame` is
+paused for a hidden document. Reset advances the waiter's generation before
+replacing the native view, so an old page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named

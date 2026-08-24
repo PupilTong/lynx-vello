@@ -1,11 +1,11 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{EngineEvent, LynxView, NoWindow, PageConfig, ScriptRunError};
-use support::FetcherDouble;
+use bobcat_core::script::ScriptError;
+use bobcat_core::{LynxView, NoWindow, PageConfig};
+use support::{FetcherDouble, wait_for_script};
 
 const FIXTURES: &[(&str, &[u8])] = &[
     (
@@ -28,7 +28,7 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
     }
 }
 
-async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptRunError> {
+async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptError> {
     let resources: Arc<dyn ResourceFetcher> =
         Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = LynxView::<NoWindow>::new(config, resources, Arc::new(|| {}), 393.0, 727.0, 1.0)
@@ -37,17 +37,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
         .await
         .expect("fetch and start");
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(result) => Some(result),
-            _ => None,
-        }) {
-            return result;
-        }
-        assert!(Instant::now() < deadline, "script thread did not finish");
-        std::thread::yield_now();
-    }
+    wait_for_script(&mut view)
 }
 
 #[test]
@@ -66,7 +56,7 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
 /// `ReactLynx` installs an error boundary around the render it drives, so a
 /// missing PAPI surfaces as a call to `_ReportError` rather than as a thrown
 /// exception. The realm's shim swallows that call by design; rethrowing is what
-/// makes the boundary's report reach `ScriptFinished`, and what keeps this test
+/// makes the boundary's report reach `ScriptRunError`, and what keeps this test
 /// from passing on a card that failed quietly.
 fn with_fatal_reporter(root: &str) -> String {
     format!("globalThis._ReportError = function (error) {{ throw error; }};\n{root}")

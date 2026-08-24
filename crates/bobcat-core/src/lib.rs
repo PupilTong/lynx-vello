@@ -33,7 +33,7 @@ mod view;
 /// this boundary.
 pub mod input {
     pub use dom::Point2D;
-    pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
+    pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
 pub use dom::{ImageFuture, ImageStore, ImageStoreError};
@@ -41,7 +41,7 @@ pub use dom::{ImageFuture, ImageStore, ImageStoreError};
 pub use engine::configure_wasm_workers;
 pub use engine::{
     EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, NoWindow, Screenshot,
-    ScriptRunError, Window, WindowTarget,
+    Window, WindowTarget,
 };
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 pub use tree::PageConfig;

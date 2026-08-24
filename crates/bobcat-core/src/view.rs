@@ -101,7 +101,8 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// Fetches a UTF-8 entry MTS module through the injected resource provider
     /// and boots it on the engine-owned Lynx main thread.
     ///
-    /// Completion is reported through [`EngineEvent::ScriptFinished`].
+    /// Completion is reported through [`EngineEvent::ScriptFinished`] or
+    /// [`EngineEvent::ScriptRunError`].
     /// The resolved URL is the module specifier imported by Bobcat's ESM boot
     /// module. A view currently accepts one entry module; a second call is
     /// rejected.

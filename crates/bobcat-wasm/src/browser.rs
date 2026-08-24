@@ -26,6 +26,12 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(value: &JsValue);
+}
+
 const MAX_RENDER_DIMENSION: f64 = 16_384.0;
 const MAX_STYLE_THREADS: u32 = 6;
 const POINTER_DEVICE_MOUSE: u8 = 0;
@@ -528,6 +534,10 @@ impl BobcatRenderer {
         self.resources.clear();
         self.frames.take();
         self.events.take();
+        // Release the old page's post-boot waiter. The Render Worker advances
+        // its generation before calling reset, so it exits without pumping
+        // the replacement view.
+        self.events.request_event();
         self.script_finished = false;
 
         let mut view = create_browser_view(
@@ -699,11 +709,12 @@ impl BobcatRenderer {
     /// Drain script engine events independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
-        if !self.script_finished && self.events.take() {
+        if self.events.take() {
             for event in self.view_mut()?.pump() {
                 match event {
-                    EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
-                    EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
+                    EngineEvent::ScriptFinished => self.script_finished = true,
+                    EngineEvent::ScriptRunError(error) => return Err(js_error(error)),
+                    EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
                     _ => {}
                 }
             }
@@ -799,6 +810,7 @@ impl BobcatRenderer {
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;
+        self.events.request_event();
         drop(self.view.take());
     }
 }
