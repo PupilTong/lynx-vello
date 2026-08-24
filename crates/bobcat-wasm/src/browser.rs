@@ -17,8 +17,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, ManualClock, PageConfig,
-    Window, WindowTarget, configure_wasm_workers,
+    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
+    WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -139,7 +139,7 @@ impl Window for BrowserWindow {
     }
 }
 
-type BrowserLynxView = LynxView<'static, BrowserWindow, Arc<ManualClock>>;
+type BrowserLynxView = LynxView<'static, BrowserWindow>;
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
@@ -438,10 +438,6 @@ pub struct BobcatRenderer {
     /// The last successfully selected embedder default is stable wrapper
     /// state too; a replacement document gets the same generic-family map.
     default_font_family: Option<String>,
-    /// The same clock the view reads. Frame callbacks write their sample time;
-    /// browser input writes the Render Worker's current time before core stamps
-    /// the sequence. Both readings therefore use one Worker-local timeline.
-    clock: Arc<ManualClock>,
     script_finished: bool,
     disposed: bool,
 }
@@ -498,10 +494,6 @@ impl BobcatRenderer {
                 default_overflow_visible,
                 enable_css_selector,
             };
-            // Frame and input entry points write one Worker-local timeline into
-            // this clock. Naming it here makes it part of the view's type; the
-            // handle below is the same clock, since a shared clock is a clock.
-            let clock = Arc::new(ManualClock::new());
             let frames = FrameSignal::default();
             let view = create_browser_view(
                 config,
@@ -509,7 +501,6 @@ impl BobcatRenderer {
                 events.clone(),
                 &canvas,
                 frames.clone(),
-                clock.clone(),
                 width,
                 height,
                 device_pixel_ratio,
@@ -528,7 +519,6 @@ impl BobcatRenderer {
                 device_pixel_ratio,
                 font_sources: Vec::new(),
                 default_font_family: None,
-                clock,
                 script_finished: false,
                 disposed: false,
             })
@@ -542,7 +532,7 @@ impl BobcatRenderer {
 
     /// Drop the current native `LynxView` and attach a fresh one to the same
     /// Worker-owned `OffscreenCanvas`. The Wasm instance, configured Stylo pool,
-    /// browser resource provider, page configuration, current metrics, clock,
+    /// browser resource provider, page configuration, current metrics,
     /// registered font containers, and the selected default font family remain
     /// owned by this wrapper. Transient script and stylesheet bytes from the
     /// old page are cleared.
@@ -565,7 +555,6 @@ impl BobcatRenderer {
             self.events.clone(),
             &self.canvas,
             self.frames.clone(),
-            self.clock.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
@@ -744,10 +733,9 @@ impl BobcatRenderer {
     /// Route one browser `PointerEvent` into the opaque native view.
     ///
     /// The JavaScript facade owns pointer capture and converts client
-    /// coordinates into viewport CSS px. The Render Worker supplies `now_ms`
-    /// from its own `performance` timeline immediately before this call, so a
-    /// long idle period cannot make a new `longpress` deadline start from the
-    /// last rendered frame.
+    /// coordinates into viewport CSS px. Core stamps the event's arrival from
+    /// its own clock as it takes it, so a long idle period cannot make a new
+    /// `longpress` deadline start from the last rendered frame.
     #[wasm_bindgen(js_name = dispatchPointer)]
     #[allow(
         clippy::too_many_arguments,
@@ -761,16 +749,10 @@ impl BobcatRenderer {
         device: u8,
         phase: u8,
         default_prevented: bool,
-        now_ms: f64,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
         if !x.is_finite() || !y.is_finite() {
             return Err(js_error("pointer coordinates must be finite"));
-        }
-        if !now_ms.is_finite() || now_ms < 0.0 {
-            return Err(js_error(
-                "the browser pointer timestamp must be finite and non-negative",
-            ));
         }
         let device = match device {
             POINTER_DEVICE_MOUSE => PointerKind::Mouse,
@@ -787,7 +769,6 @@ impl BobcatRenderer {
         };
         let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
             .with_default_prevented(default_prevented);
-        self.clock.set(now_ms / 1000.0);
         self.view_mut()?.dispatch_input(event);
         Ok(())
     }
@@ -795,17 +776,17 @@ impl BobcatRenderer {
     /// Present a requested frame without exposing the engine or document to
     /// the browser host.
     ///
-    /// `now_ms` is `requestAnimationFrame`'s `DOMHighResTimeStamp`, which is
-    /// also the animation timeline: every animation in the frame is sampled
-    /// at the instant the host says the frame is for.
+    /// The browser hands over no timestamp: the animation timeline is core's
+    /// own `web_time` clock, read once per frame on this Worker after the
+    /// canvas surface has handed over an image. `requestAnimationFrame`'s
+    /// `DOMHighResTimeStamp` is taken on the page's main thread, before this
+    /// Worker is woken and on a different time origin than its
+    /// `performance.now()`, so it is not the better reading it looks like.
     #[wasm_bindgen(js_name = renderIfRequested)]
-    pub fn render_if_requested(&mut self, now_ms: f64) -> Result<bool, JsValue> {
+    pub fn render_if_requested(&mut self) -> Result<bool, JsValue> {
         self.view()?;
         if !self.frames.take() {
             return Ok(false);
-        }
-        if now_ms.is_finite() {
-            self.clock.set(now_ms / 1000.0);
         }
         self.view_mut()?.notify_redraw().map_err(js_error)?;
         Ok(true)
@@ -872,20 +853,18 @@ async fn create_browser_view(
     events: Arc<EventSignal>,
     canvas: &OffscreenCanvas,
     frames: FrameSignal,
-    clock: Arc<ManualClock>,
     width: f32,
     height: f32,
     device_pixel_ratio: f32,
 ) -> Result<BrowserLynxView, JsValue> {
     let resource_fetcher: Arc<dyn ResourceFetcher> = resources;
-    let mut view = LynxView::with_animation_clock(
+    let mut view = LynxView::new(
         config,
         resource_fetcher,
         events,
         width,
         height,
         device_pixel_ratio,
-        clock,
     )
     .map_err(js_error)?;
     set_canvas_size(canvas, view.frame_size());

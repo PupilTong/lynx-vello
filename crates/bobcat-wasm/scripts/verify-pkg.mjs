@@ -269,7 +269,6 @@ for (const requiredPointerStep of [
   "message?.type === 'bobcat-pointer'",
   'renderer.dispatchPointer(',
   'message.defaultPrevented',
-  'performance.now()',
 ]) {
   if (!renderWorker.includes(requiredPointerStep)) {
     throw new Error(

@@ -36,10 +36,14 @@
 //! its own schedule regardless of `__FlushElementTree`.
 //!
 //! The law: the main thread waits only on its own batch boundaries; the
-//! presenting side never waits on the main thread; present's vsync wait
-//! happens outside any borrow, so it blocks no one.
+//! presenting side never waits on the main thread; the frame's vsync wait —
+//! the swap-chain acquire that opens a window frame — happens outside any
+//! borrow, so it blocks no one.
 
 mod graphics;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod animation_tests;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
@@ -64,9 +68,9 @@ use dom::vello::peniko::Color;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
-use crate::clock::{AnimationClock, SystemClock};
+use self::graphics::{FrameAcquisition, WindowGraphics};
+use crate::clock::FrameClock;
 use crate::gesture::{EmitEvent, GestureRouter, InputDecision, RouterHost};
 use crate::image::DecodedImage;
 use crate::script::ScriptError;
@@ -359,7 +363,7 @@ impl FrameRequester for NoWindow {
 }
 
 #[cfg(test)]
-pub(crate) type OffscreenEngine<C = SystemClock> = Engine<'static, NoWindow, C>;
+pub(crate) type OffscreenEngine = Engine<'static, NoWindow>;
 
 /// The hand-off slot for the one document.
 #[derive(Clone)]
@@ -534,7 +538,7 @@ enum ScriptCommand {
 /// [`crate::OffscreenLynxView`].
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
-pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
+pub(crate) struct Engine<'window, W: Window> {
     /// The only `Sender`, dropped first so this view's detached script thread
     /// wakes and releases its owner-thread-bound realm. It must never be cloned
     /// anywhere the script thread can reach: a surviving clone would leave the
@@ -562,10 +566,10 @@ pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     /// Which event names the realm has listeners for; written by the script
     /// thread's registration members, read when gestures resolve.
     listener_names: Arc<SharedListenerNames>,
-    /// The animation timeline, named by the host at construction. Every
-    /// reading is a direct call; there is no trait object and no way to swap
-    /// one in after the fact.
-    clock: C,
+    /// The animation timeline. Engine-owned and concrete: an embedder cannot
+    /// name one, drive one, or observe this one. Sampled once per frame, on
+    /// the presenting thread, after the swap-chain acquire has waited.
+    clock: FrameClock,
     /// Whether the last frame left an animation running. Read without the
     /// document, because the frame request has to be made whether or not the
     /// slot was free this frame.
@@ -573,7 +577,7 @@ pub(crate) struct Engine<'window, W: Window, C: AnimationClock = SystemClock> {
     thread_bound: PhantomData<Rc<()>>,
 }
 
-impl<W: Window, C: AnimationClock> fmt::Debug for Engine<'_, W, C> {
+impl<W: Window> fmt::Debug for Engine<'_, W> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Engine")
@@ -584,16 +588,14 @@ impl<W: Window, C: AnimationClock> fmt::Debug for Engine<'_, W, C> {
     }
 }
 
-impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
-    /// Builds the engine and its element tree at the given CSS viewport, on
-    /// the supplied animation timeline.
+impl<'window, W: Window> Engine<'window, W> {
+    /// Builds the engine and its element tree at the given CSS viewport.
     pub(crate) fn new(
         config: PageConfig,
         event_requester: Arc<dyn EventRequester>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
-        clock: C,
     ) -> Result<Self, EngineError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
@@ -616,7 +618,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             pending_resize: None,
             gesture: GestureRouter::default(),
             listener_names: Arc::new(SharedListenerNames::default()),
-            clock,
+            clock: FrameClock::new(),
             animating: false,
             thread_bound: PhantomData,
         })
@@ -652,7 +654,8 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         self.animating || self.gesture.needs_frame()
     }
 
-    /// Samples the clock once and advances the document's animations to it.
+    /// Advances the document's animations to `now` — the frame's one clock
+    /// reading, the same instant its gesture deadlines resolve against.
     ///
     /// Runs on the presenting thread, inside the borrow that is about to
     /// produce the frame: no script, no DOM mutation, and no hand-off to the
@@ -660,11 +663,10 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
     /// geometry re-cascades only the elements it touches and never reaches
     /// layout.
     ///
-    /// Takes the clock rather than `&self` so it can run while the attached
+    /// Takes the reading rather than `&self` so it can run while the attached
     /// output is mutably borrowed.
-    fn advance_animations(clock: &C, tree: &mut LynxDocument) -> bool {
-        tree.advance_animations(clock.now_seconds())
-            .needs_next_frame
+    fn advance_animations(now: f64, tree: &mut LynxDocument) -> bool {
+        tree.advance_animations(now).needs_next_frame
     }
 
     /// The current physical render-target size in device pixels.
@@ -1027,6 +1029,25 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             return Ok(());
         };
         let size = self.frame_size;
+        let frames = frames
+            .as_deref()
+            .expect("a window output always installs its frame capability");
+        // Take the swap-chain image before doing any of the frame's work.
+        // `AutoVsync` makes this the call that waits, and everything after it
+        // then belongs to the frame that image will display — including the
+        // clock reading, which would otherwise be a whole swap-chain pipeline
+        // stale by the time the pixels it produced reach the screen.
+        let acquired = match graphics.acquire(size)? {
+            FrameAcquisition::Ready(acquired) => acquired,
+            FrameAcquisition::Retry => {
+                frames.request_frame();
+                return Ok(());
+            }
+        };
+        // The frame's one instant. Gesture deadlines and animations resolve
+        // against the same reading, so nothing in a frame disagrees about
+        // when the frame is.
+        let now = self.clock.now_seconds();
         let tree_was_busy = match self.elements.try_tree() {
             Some(mut tree) => {
                 Self::drain_deferred(
@@ -1042,13 +1063,13 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                     &self.listener_names,
                     &mut tree,
                     self.script_commands.as_ref(),
-                    self.clock.now_seconds(),
+                    now,
                 );
                 // Input and resize first, then the timeline, so a scroll and
                 // an animation compose in one defined order under one truth;
                 // then render, so an animation that just ended relayouts in
                 // the same frame it ended.
-                self.animating = Self::advance_animations(&self.clock, &mut tree);
+                self.animating = Self::advance_animations(now, &mut tree);
                 let produced = tree.render();
                 if produced || !graphics.rendered_at(size) {
                     graphics.render_to_target(&tree.scene(), size)?;
@@ -1057,17 +1078,17 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             }
             None => true,
         };
-        let frames = frames
-            .as_deref()
-            .expect("a window output always installs its frame capability");
         // A script/DOM batch can take the slot after requesting this frame.
         // Keep the request alive so event-driven embedders retry instead of
         // losing the only wakeup while presenting the retained target.
         if tree_was_busy || self.animating || self.gesture.needs_frame() {
             frames.request_frame();
         }
+        // Nothing rendered at this size means the tree was busy — a rendering
+        // pass always leaves one — so the request above already fired and the
+        // acquired image goes back unpresented, to be re-taken next frame.
         if graphics.rendered_at(size) {
-            graphics.present(frames)?;
+            graphics.present(acquired, frames);
         }
         Ok(())
     }
@@ -1089,14 +1110,18 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
             &mut tree,
             self.script_commands.as_ref(),
         );
+        // One reading for the whole frame, as in `notify_redraw`. An
+        // offscreen target has no swap chain to wait on, so there is nothing
+        // for the sample to sit behind.
+        let now = self.clock.now_seconds();
         Self::service_gesture_clock(
             &mut self.gesture,
             &self.listener_names,
             &mut tree,
             self.script_commands.as_ref(),
-            self.clock.now_seconds(),
+            now,
         );
-        self.animating = Self::advance_animations(&self.clock, &mut tree);
+        self.animating = Self::advance_animations(now, &mut tree);
         let changed = tree.render();
         if !changed && !force {
             return Ok(false);
@@ -1403,7 +1428,6 @@ mod tests {
             393.0,
             727.0,
             1.0,
-            crate::clock::SystemClock::new(),
         )
         .expect("engine")
     }
@@ -1490,7 +1514,7 @@ mod tests {
         let mut gesture = GestureRouter::default();
         let names = super::SharedListenerNames::default();
         names.note_enabled(TAP_EVENT);
-        super::OffscreenEngine::<crate::clock::SystemClock>::execute_decisions(
+        super::OffscreenEngine::execute_decisions(
             &mut decisions,
             &mut gesture,
             &names,
@@ -1578,7 +1602,7 @@ mod tests {
                 position: dom::Point2D::new(1.0, 1.0),
                 wheel: None,
             })];
-            OffscreenEngine::<crate::clock::SystemClock>::execute_decisions(
+            OffscreenEngine::execute_decisions(
                 &mut decisions,
                 &mut gesture,
                 names,
@@ -1682,7 +1706,6 @@ mod event_loop_tests {
     use dom::input::{InputEvent, PointerKind, PointerPhase};
 
     use super::OffscreenEngine;
-    use crate::clock::AnimationClock;
 
     /// The handle a packed id names, the way script spells one.
     fn node_id(bits: u64) -> dom::NodeId {
@@ -1692,19 +1715,12 @@ mod event_loop_tests {
     /// Boots a script and waits for it to finish, leaving the script thread
     /// parked on its command channel.
     fn booted(source: &str) -> OffscreenEngine {
-        booted_with(source, crate::clock::SystemClock::new())
-    }
-
-    /// [`booted`], on a caller-supplied timeline — how the gesture tests hold
-    /// a [`crate::clock::ManualClock`] the engine also reads.
-    fn booted_with<C: crate::clock::AnimationClock>(source: &str, clock: C) -> OffscreenEngine<C> {
-        let mut engine = OffscreenEngine::<C>::new(
+        let mut engine = OffscreenEngine::new(
             crate::tree::PageConfig::default(),
             Arc::new(|| {}),
             393.0,
             727.0,
             1.0,
-            clock,
         )
         .expect("engine");
         engine
@@ -1952,10 +1968,7 @@ mod event_loop_tests {
     /// the wait by showing up in the actual value. The deadline is generous
     /// because the whole suite's realm boots share the machine with this
     /// spin.
-    fn wait_for_log<W: super::Window, C: crate::clock::AnimationClock>(
-        engine: &mut super::Engine<'_, W, C>,
-        expected: &str,
-    ) {
+    fn wait_for_log<W: super::Window>(engine: &mut super::Engine<'_, W>, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let log = engine.elements.try_tree().and_then(|tree| {
@@ -2014,8 +2027,7 @@ mod event_loop_tests {
     /// `long_press_consumed` rule. The fence tap pins the suppression.
     #[test]
     fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
-        let clock = Arc::new(crate::clock::ManualClock::new());
-        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        let mut engine = booted(&gesture_page(true));
         engine
             .elements
             .try_tree()
@@ -2023,7 +2035,7 @@ mod event_loop_tests {
             .render();
 
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-        clock.set(0.6);
+        engine.clock.pin(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
         wait_for_log(&mut engine, "longpress:10");
 
@@ -2038,8 +2050,7 @@ mod event_loop_tests {
     /// through the shared name table.
     #[test]
     fn a_long_hold_without_longpress_listener_still_taps() {
-        let clock = Arc::new(crate::clock::ManualClock::new());
-        let mut engine = booted_with(&gesture_page(false), Arc::clone(&clock));
+        let mut engine = booted(&gesture_page(false));
         engine
             .elements
             .try_tree()
@@ -2047,7 +2058,7 @@ mod event_loop_tests {
             .render();
 
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-        clock.set(0.6);
+        engine.clock.pin(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
         wait_for_log(&mut engine, "tap:10");
     }
@@ -2165,8 +2176,7 @@ mod event_loop_tests {
     /// do, without needing a GPU output.
     #[test]
     fn a_stationary_hold_longpresses_on_the_frame_clock() {
-        let clock = Arc::new(crate::clock::ManualClock::new());
-        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        let mut engine = booted(&gesture_page(true));
         engine
             .elements
             .try_tree()
@@ -2179,13 +2189,13 @@ mod event_loop_tests {
             "the down arms a deadline, which is what keeps frames coming"
         );
 
-        clock.set(0.6);
+        engine.clock.pin(0.6);
         {
             let mut tree = engine
                 .elements
                 .try_tree()
                 .expect("the script thread is parked");
-            OffscreenEngine::<Arc<crate::clock::ManualClock>>::service_gesture_clock(
+            OffscreenEngine::service_gesture_clock(
                 &mut engine.gesture,
                 &engine.listener_names,
                 &mut tree,
@@ -2206,8 +2216,7 @@ mod event_loop_tests {
     /// the tap — drain-time stamping would deliver a plain tap instead.
     #[test]
     fn buffered_input_keeps_its_arrival_time_across_a_busy_batch() {
-        let clock = Arc::new(crate::clock::ManualClock::new());
-        let mut engine = booted_with(&gesture_page(true), Arc::clone(&clock));
+        let mut engine = booted(&gesture_page(true));
         engine
             .elements
             .try_tree()
@@ -2217,12 +2226,12 @@ mod event_loop_tests {
         // Open the batch state by hand: the slot is empty, input buffers.
         let tree = engine.elements.take();
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-        clock.set(0.6);
+        engine.clock.pin(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
         engine.elements.put(tree);
 
         // The next event drains the buffer under the returned document.
-        clock.set(0.61);
+        engine.clock.pin(0.61);
         engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
         engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
         wait_for_log(&mut engine, "longpress:10,tap:30");

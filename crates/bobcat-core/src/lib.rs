@@ -17,7 +17,7 @@
 /// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
-pub mod clock;
+mod clock;
 mod engine;
 mod gesture;
 pub mod image;
@@ -36,7 +36,6 @@ pub mod input {
     pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use clock::{AnimationClock, ManualClock, SystemClock};
 #[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{

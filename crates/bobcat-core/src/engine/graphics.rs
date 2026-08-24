@@ -6,6 +6,17 @@
 //! re-rendered only when a new scene was produced, while surface
 //! invalidation and re-exposure re-present the retained target with a blit
 //! alone.
+//!
+//! A frame is three calls in order: [`WindowGraphics::acquire`], then
+//! [`WindowGraphics::render_to_target`] if a new scene was produced, then
+//! [`WindowGraphics::present`]. Acquiring first is deliberate. On
+//! `PresentMode::AutoVsync` the swap chain hands over an image only once one
+//! is free, so `acquire` is where a frame's back-pressure lands, and every
+//! swap-chain image in flight is another display refresh between the wait and
+//! the scan-out. Doing the wait up front puts the whole frame — the clock
+//! reading included — on the near side of that pipeline, so what is sampled
+//! is the frame being produced for the next refresh, not one produced a
+//! pipeline-depth earlier.
 
 #[cfg(not(target_arch = "wasm32"))]
 use dom::render::gpu::read_texture;
@@ -17,6 +28,24 @@ use dom::vello::util::{RenderContext, RenderSurface};
 use super::{EngineError, FrameRequester, FrameSize};
 
 pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
+
+/// The swap-chain image a frame will be presented in, taken before the frame
+/// is produced. Dropping it without [`WindowGraphics::present`] discards it,
+/// which is what an abandoned frame does.
+pub(super) struct AcquiredFrame {
+    texture: vello::wgpu::SurfaceTexture,
+    /// The surface handed over a suboptimal image and wants reconfiguring
+    /// once this frame is on screen.
+    reconfigure_after: bool,
+}
+
+/// What the surface had to give this frame.
+pub(super) enum FrameAcquisition {
+    Ready(AcquiredFrame),
+    /// Nothing available — transiently, so the caller asks for another frame
+    /// rather than treating it as a failure.
+    Retry,
+}
 
 pub(super) struct WindowGraphics<'window> {
     context: RenderContext,
@@ -80,11 +109,9 @@ impl<'window> WindowGraphics<'window> {
         self.rendered == Some(size)
     }
 
-    pub(super) fn render_to_target(
-        &mut self,
-        scene: &vello::Scene,
-        size: FrameSize,
-    ) -> Result<(), EngineError> {
+    /// Reconfigures the surface when the target size moved, discarding the
+    /// retained frame with it — it was rendered for the old size.
+    fn configure_for(&mut self, size: FrameSize) {
         if size.width != 0
             && size.height != 0
             && (self.surface.config.width != size.width
@@ -94,6 +121,52 @@ impl<'window> WindowGraphics<'window> {
                 .resize_surface(&mut self.surface, size.width, size.height);
             self.rendered = None;
         }
+    }
+
+    /// Takes the swap-chain image this frame will be presented in, before any
+    /// of the frame's work is done.
+    ///
+    /// The surface is brought to `size` first, so the image handed back is the
+    /// one the coming render actually fits. This call is the frame's vsync
+    /// wait; a caller that gets [`FrameAcquisition::Retry`] has no image this
+    /// frame and must ask for another.
+    pub(super) fn acquire(&mut self, size: FrameSize) -> Result<FrameAcquisition, EngineError> {
+        self.configure_for(size);
+        let Self {
+            context, surface, ..
+        } = self;
+        let (texture, reconfigure_after) = match surface.surface.get_current_texture() {
+            vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+            vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            vello::wgpu::CurrentSurfaceTexture::Timeout
+            | vello::wgpu::CurrentSurfaceTexture::Occluded => return Ok(FrameAcquisition::Retry),
+            vello::wgpu::CurrentSurfaceTexture::Outdated => {
+                context.configure_surface(surface);
+                return Ok(FrameAcquisition::Retry);
+            }
+            vello::wgpu::CurrentSurfaceTexture::Lost => {
+                return Err(EngineError::Render(
+                    "the window surface was lost".to_owned(),
+                ));
+            }
+            vello::wgpu::CurrentSurfaceTexture::Validation => {
+                return Err(EngineError::Render(
+                    "surface acquisition raised a wgpu validation error".to_owned(),
+                ));
+            }
+        };
+        Ok(FrameAcquisition::Ready(AcquiredFrame {
+            texture,
+            reconfigure_after,
+        }))
+    }
+
+    pub(super) fn render_to_target(
+        &mut self,
+        scene: &vello::Scene,
+        size: FrameSize,
+    ) -> Result<(), EngineError> {
+        self.configure_for(size);
         let handle = &self.context.devices[self.surface.dev_id];
         self.renderer
             .render_to_texture(
@@ -108,37 +181,17 @@ impl<'window> WindowGraphics<'window> {
         Ok(())
     }
 
-    /// Presents the retained target: acquires the surface texture, blits,
-    /// notifies the window just before presenting, and presents. Called
-    /// outside the tree lock — the vsync wait must not block anyone.
-    pub(super) fn present(&mut self, frames: &impl FrameRequester) -> Result<(), EngineError> {
+    /// Presents the retained target into the image [`Self::acquire`] took:
+    /// blits, notifies the window just before presenting, and presents.
+    /// Called outside the tree lock — nobody is blocked behind this.
+    pub(super) fn present(&mut self, acquired: AcquiredFrame, frames: &impl FrameRequester) {
+        let AcquiredFrame {
+            texture: surface_texture,
+            reconfigure_after,
+        } = acquired;
         let Self {
             context, surface, ..
         } = self;
-        let (surface_texture, reconfigure_after) = match surface.surface.get_current_texture() {
-            vello::wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
-            vello::wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            vello::wgpu::CurrentSurfaceTexture::Timeout
-            | vello::wgpu::CurrentSurfaceTexture::Occluded => {
-                frames.request_frame();
-                return Ok(());
-            }
-            vello::wgpu::CurrentSurfaceTexture::Outdated => {
-                context.configure_surface(surface);
-                frames.request_frame();
-                return Ok(());
-            }
-            vello::wgpu::CurrentSurfaceTexture::Lost => {
-                return Err(EngineError::Render(
-                    "the window surface was lost".to_owned(),
-                ));
-            }
-            vello::wgpu::CurrentSurfaceTexture::Validation => {
-                return Err(EngineError::Render(
-                    "surface acquisition raised a wgpu validation error".to_owned(),
-                ));
-            }
-        };
         let handle = &context.devices[surface.dev_id];
         let output_view = surface_texture
             .texture
@@ -161,7 +214,6 @@ impl<'window> WindowGraphics<'window> {
         if reconfigure_after {
             context.configure_surface(surface);
         }
-        Ok(())
     }
 
     /// Reads back the frame most recently rendered into the surface's target
