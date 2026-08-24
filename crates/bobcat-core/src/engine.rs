@@ -14,8 +14,8 @@
 //! The document has exactly one holder at any instant; [`SharedTree`] is
 //! the slot it changes hands through:
 //!
-//! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the injected
-//!   JavaScript VM and its job loop. A batch's first `bobcat` call takes the document out of the
+//! - **The Lynx main thread** (engine-owned, spawned by [`Engine::spawn_script`]): the core's
+//!   `QuickJS` realm and its job loop. A batch's first `bobcat` call takes the document out of the
 //!   slot; every call after that is a plain `&mut` mutation with no synchronization at all;
 //!   `__FlushElementTree` runs the style + layout commit on the taken document, puts it back, and
 //!   asks for a frame. Locks are touched twice per batch, not per call.
@@ -1152,14 +1152,13 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
         }
     }
 
-    /// Spawns the Lynx main thread and creates its injected JavaScript VM on
-    /// that owner thread before registering `source` at its resolved entry URL
-    /// and running Bobcat's ESM boot module.
+    /// Spawns the Lynx main thread and creates its `QuickJS` realm on that
+    /// owner thread before registering `source` at its resolved entry URL and
+    /// running Bobcat's ESM boot module.
     pub(crate) fn spawn_script(
         &mut self,
         source: String,
         source_name: String,
-        factory: Arc<dyn crate::script::ScriptEngineFactory>,
     ) -> Result<(), EngineError> {
         let elements = self.take_script_tree()?;
         let events = self.event_sender.clone();
@@ -1177,7 +1176,6 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     (|| {
                         let mut runtime = crate::runtime::MainThreadRuntime::new(
-                            factory.as_ref(),
                             elements,
                             listener_names,
                             move || {
@@ -1195,7 +1193,7 @@ impl<'window, W: Window, C: AnimationClock> Engine<'window, W, C> {
                 }))
                 .unwrap_or_else(|payload| {
                     Err(ScriptRunError::Platform(format!(
-                        "the injected VM panicked: {}",
+                        "the script realm panicked: {}",
                         panic_payload(payload.as_ref())
                     )))
                 });
@@ -1617,7 +1615,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "quickjs")]
     #[test]
     fn a_spawned_script_mutates_the_shared_tree() {
         use std::sync::mpsc;
@@ -1641,7 +1638,6 @@ mod tests {
                 "
                 .to_owned(),
                 "test-entry.js".to_owned(),
-                crate::quickjs::engine_factory(),
             )
             .expect("script thread");
 
@@ -1677,7 +1673,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "quickjs"))]
+#[cfg(test)]
 mod event_loop_tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -1712,11 +1708,7 @@ mod event_loop_tests {
         )
         .expect("engine");
         engine
-            .spawn_script(
-                source.to_owned(),
-                "app:///main.js".to_owned(),
-                crate::quickjs::engine_factory(),
-            )
+            .spawn_script(source.to_owned(), "app:///main.js".to_owned())
             .expect("spawn");
 
         let deadline = Instant::now() + Duration::from_secs(5);

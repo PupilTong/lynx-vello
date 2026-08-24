@@ -18,7 +18,7 @@ use bobcat_core::resource::{
 };
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, ManualClock, PageConfig,
-    Window, WindowTarget, configure_wasm_workers, quickjs_engine_factory,
+    Window, WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -881,7 +881,6 @@ async fn create_browser_view(
     let mut view = LynxView::with_animation_clock(
         config,
         resource_fetcher,
-        quickjs_engine_factory(),
         events,
         width,
         height,

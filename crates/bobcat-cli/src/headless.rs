@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::{EngineEvent, EventRequester, OffscreenLynxView, quickjs_engine_factory};
+use bobcat_core::{EngineEvent, EventRequester, OffscreenLynxView};
 
 use crate::CliError;
 use crate::args::Options;
@@ -30,7 +30,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let mut view = OffscreenLynxView::new(
         program.config,
         program.resource_fetcher,
-        quickjs_engine_factory(),
         event_requester,
         options.viewport_width,
         options.viewport_height,

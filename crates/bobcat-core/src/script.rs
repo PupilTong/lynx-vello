@@ -1,106 +1,14 @@
-//! Host-injected JavaScript virtual-machine contracts.
+//! The script-failure vocabulary the engine reports to its embedder.
 //!
-//! The embedder supplies a [`ScriptEngineFactory`], while Bobcat owns every
-//! script executed in the resulting VM and every host function installed in
-//! it.  The VM is intentionally created by the factory on the caller's
-//! thread: factories are transferable, VM instances need not be.
+//! Bobcat owns its script engine outright: it creates the realm, owns every
+//! script executed in it, and installs every host function it exposes. None of
+//! that crosses the public boundary. What does cross is failure — a bundle
+//! that will not parse, a listener that throws — and these are the sanitized
+//! details that carry it, reached through [`crate::ScriptRunError`] and
+//! [`crate::EngineEvent`].
 
 use std::fmt;
 use std::sync::Arc;
-
-/// A value allowed across a Bobcat host-function boundary.
-///
-/// Objects, functions, symbols and VM handles deliberately have no
-/// representation here. This keeps an injected VM from exposing its realm to
-/// the runtime and keeps DOM identity private to Bobcat's callbacks.
-#[derive(Clone, Debug, PartialEq)]
-#[non_exhaustive]
-pub enum HostValue {
-    Undefined,
-    Null,
-    Boolean(bool),
-    Number(f64),
-    String(Arc<str>),
-}
-
-/// A leaf host callback installed by Bobcat in an injected VM.
-///
-/// The VM must turn a returned message into a JavaScript exception and must
-/// not invoke the callback re-entrantly. On unwind-capable targets it should
-/// also translate a caught callback panic; an abort-only platform treats an
-/// unexpected panic as a fatal VM-owner failure instead.
-pub type HostCallback = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, String> + 'static>;
-
-/// One owner-thread-bound JavaScript VM supplied to Bobcat.
-///
-/// `register_host_module_function` adds one named Rust-backed function export
-/// to a native ESM module; all exports must be registered before that module
-/// first loads, names cannot be replaced, and registration must retain the
-/// callback but must not invoke it. `register_module_source` adds one source
-/// to the VM's synchronous preloaded module graph. Source modules and native
-/// host modules share one specifier namespace. `execute_module` compiles,
-/// links, and evaluates an entry module, including its top-level-await
-/// promise, before returning. A VM with an explicitly owned job queue may
-/// drain its checkpoint at either execution boundary. The VM instance itself
-/// is deliberately not required to be `Send`.
-pub trait ScriptEngine: fmt::Debug {
-    fn register_host_module_function(
-        &mut self,
-        module_specifier: &str,
-        export_name: &str,
-        arity: u8,
-        callback: HostCallback,
-    ) -> Result<(), ScriptError>;
-
-    /// Evaluates auxiliary classic source. Bobcat's startup path does not call
-    /// this operation; entries and built-ins use the ESM operations below.
-    fn execute_script(&mut self, source: &str, source_name: &str) -> Result<(), ScriptError>;
-
-    /// Registers one exact, normalized module name and its UTF-8 source.
-    ///
-    /// Bobcat's ESM runtime currently requires the built-in `QuickJS` adapter;
-    /// the default keeps older injected test VMs source-compatible while
-    /// rejecting module startup precisely.
-    fn register_module_source(
-        &mut self,
-        _specifier: &str,
-        _source: &str,
-    ) -> Result<(), ScriptError> {
-        Err(module_support_required(ScriptErrorPhase::RegisterModule))
-    }
-
-    /// Evaluates one ESM entry and waits for its evaluation promise to settle.
-    fn execute_module(&mut self, _source: &str, _source_name: &str) -> Result<(), ScriptError> {
-        Err(module_support_required(ScriptErrorPhase::ExecuteModule))
-    }
-
-    /// Calls a function exported by a loaded source module, if it exported
-    /// one under that name.
-    ///
-    /// `Ok(false)` means the module exported no such function — a bundle with
-    /// no listener runtime, not a failure. `Ok(true)` means it ran and returned.
-    ///
-    /// The arguments are [`HostValue`]s for the same reason a host callback's
-    /// are: element identity crosses as a number and nothing else crosses at
-    /// all. There is no return value, because the one thing a callee needs to
-    /// tell the host — that a walk should end — is a host call of its own, and
-    /// making it a return value would mean the host could only hear it once
-    /// the callee finished.
-    fn call_module_export(
-        &mut self,
-        module_specifier: &str,
-        export_name: &str,
-        arguments: &[HostValue],
-    ) -> Result<bool, ScriptError>;
-
-    fn collect_garbage(&mut self) -> Result<(), ScriptError>;
-}
-
-/// Transferable capability for constructing a VM on its eventual owner
-/// thread.
-pub trait ScriptEngineFactory: fmt::Debug + Send + Sync {
-    fn create(&self) -> Result<Box<dyn ScriptEngine>, ScriptError>;
-}
 
 /// Sanitized script failure details that are safe to expose outside a realm.
 #[derive(Clone, Debug)]
@@ -135,13 +43,11 @@ impl std::error::Error for ScriptError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ScriptErrorKind {
-    EvaluationDenied,
     ModuleLoad,
     ModuleEvaluate,
     Syntax,
     Exception,
     InvalidBoundaryValue,
-    Terminated,
     Other,
 }
 
@@ -156,18 +62,6 @@ pub enum ScriptErrorPhase {
     /// Calling an ESM export the realm published back to the host.
     CallModuleExport,
     CollectGarbage,
-}
-
-fn module_support_required(phase: ScriptErrorPhase) -> ScriptError {
-    ScriptError {
-        kind: match phase {
-            ScriptErrorPhase::RegisterModule => ScriptErrorKind::ModuleLoad,
-            _ => ScriptErrorKind::ModuleEvaluate,
-        },
-        phase,
-        message: Arc::from("the script engine does not support Bobcat's ESM module graph"),
-        location: None,
-    }
 }
 
 /// Sanitized source location for a [`ScriptError`].

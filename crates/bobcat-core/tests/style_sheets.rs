@@ -4,8 +4,6 @@
 //! a [`PreparsedStyleSheet`] it decoded itself; both mount on the document, in
 //! load order, and both are visible to the script that runs afterwards.
 
-#![cfg(feature = "quickjs")]
-
 mod support;
 
 use std::sync::Arc;
@@ -14,7 +12,7 @@ use std::time::{Duration, Instant};
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
     EngineEvent, LynxView, LynxViewError, NoWindow, PageConfig, PreparsedDeclaration,
-    PreparsedRule, PreparsedStyleSheet, quickjs_engine_factory,
+    PreparsedRule, PreparsedStyleSheet,
 };
 use support::FetcherDouble;
 
@@ -67,7 +65,6 @@ fn view_with(fetcher: FetcherDouble) -> LynxView<'static, NoWindow> {
     LynxView::<NoWindow>::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,
@@ -169,7 +166,6 @@ async fn every_load_issues_its_own_stylesheet_request() {
     let mut view = LynxView::<NoWindow>::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,

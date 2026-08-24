@@ -6,7 +6,6 @@ tree hand-off protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
 - a `ResourceFetcher`;
-- a transferable `ScriptEngineFactory`;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
 - optionally an `AnimationClock` type, when the host has a better reading of a
@@ -24,7 +23,6 @@ bobcat-cli  ─┐
 bobcat-wasm ─┘          │              ├─▶ vendor/stylo
                         │              └─▶ vello/wgpu
                         └──▶ quickjs-rust-bridge
-                             [feature = "quickjs"; native adapter]
 
 QuickJS preloaded ESM graph
   bobcat:boot
@@ -137,21 +135,23 @@ beside JavaScript, retaining a document during presentation, submitting a
 scene independently of the view, or evaluating code directly in the view's
 realm.
 
-## Injected JavaScript VM
+## The core-owned JavaScript engine
 
-`ScriptEngineFactory` is `Debug + Send + Sync`. It crosses to the eventual
-Lynx main thread and creates one owner-thread-bound `Box<dyn ScriptEngine>`
-there. The VM itself is intentionally not `Send`.
+The script engine is not an injected capability. `bobcat-core` owns one
+`QuickJS` realm outright, behind the crate-private `quickjs::ScriptEngine`,
+which is created on the engine-owned Lynx main thread and never leaves it —
+it is deliberately not `Send`, and nothing outside the crate can name it.
 
-`ScriptEngine` is a small host-integration protocol:
+Its whole surface is five operations:
 
 - register a Rust-backed named function export in a native ESM module;
 - register UTF-8 source under an exact preloaded module specifier;
 - execute an ESM entry and wait for its evaluation promise to settle;
 - call a named export of an already-loaded source module;
-- expose the VM's optional garbage-collection operation.
+- run a collection.
 
-The callback boundary carries only `HostValue` primitives. Objects, symbols,
+The callback boundary carries only `quickjs-rust-bridge`'s primitive
+`HostValue`/`HostArgument`. Objects, symbols,
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
 private callbacks as named exports of the native `bobcat-internal:host` ESM,
 then preloads three kinds of ESM source: the core-owned `bobcat:runtime` named
@@ -196,14 +196,11 @@ boot module's evaluation promise settles before returning. An entry whose TLA
 remains pending without another queued job is rejected rather than reported as
 finished; a persistent JavaScript event loop remains a later runtime feature.
 
-The default `quickjs` feature contributes only
-`quickjs_engine_factory() -> Arc<dyn ScriptEngineFactory>`. QuickJS realm,
-configuration, values, and runtime entry points remain private. ESM startup is
-currently implemented only by this adapter; a factory that does not implement
-the module operations is rejected precisely. The browser embedder enables
-QuickJS explicitly and passes this factory directly to `LynxView`.
-The built-in factory has no execution deadline; the underlying bridge retains
-an opt-in timeout for its direct users and tests.
+The realm, its configuration, its values, and its entry points are all
+private; the only script surface an embedder sees is the sanitized
+`script::ScriptError` a failure is reported with. The engine sets no execution
+deadline; the underlying bridge retains an opt-in timeout for its direct users
+and tests.
 
 ## Document and rendering ownership
 
@@ -302,10 +299,9 @@ style pool; each live view's Lynx-main Worker is separate.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns
-the Wasm `LynxView`, Vello/wgpu objects, resource provider, and a thin
-lifecycle wrapper around core's QuickJS `ScriptEngineFactory`; the factory
-creates its owner-thread-bound realm inside the nested Lynx main Worker. No
-direct create/append/drop/flush DOM API is exposed to JavaScript.
+the Wasm `LynxView`, Vello/wgpu objects, and resource provider; core creates
+its owner-thread-bound realm inside the nested Lynx main Worker. No direct
+create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
@@ -313,7 +309,7 @@ direct create/append/drop/flush DOM API is exposed to JavaScript.
    metrics.
 2. `execute_script(url)` fetches the entry MTS source through
    `ResourceFetcher` and spawns the target-specific Lynx main task.
-3. The task creates the injected VM, installs Bobcat callbacks, preloads
+3. The task creates the QuickJS realm, installs Bobcat callbacks, preloads
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module.
 4. `__FlushElementTree` performs style/layout commit, returns the document,
@@ -332,9 +328,8 @@ direct create/append/drop/flush DOM API is exposed to JavaScript.
 ## Validation matrix
 
 ```sh
-cargo check -p bobcat-core --no-default-features
-cargo check -p bobcat-core --all-features
-cargo check -p bobcat-core --target wasm32-unknown-unknown --no-default-features
+cargo check -p bobcat-core
+cargo check -p bobcat-core --target wasm32-unknown-unknown
 cargo check -p bobcat-cli
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets

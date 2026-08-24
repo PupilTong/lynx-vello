@@ -1,5 +1,3 @@
-#![cfg(feature = "quickjs")]
-
 //! The `@keyframes` timeline, end to end: a host-decoded keyframes rule
 //! reaches Stylo, the presenting side advances it against the host's clock,
 //! and the committed frame moves.
@@ -13,7 +11,6 @@ use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
     AnimationClock, EngineEvent, LynxView, ManualClock, NoWindow, OffscreenLynxView, PageConfig,
     PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet, ScriptRunError,
-    quickjs_engine_factory,
 };
 use support::FetcherDouble;
 
@@ -82,7 +79,6 @@ async fn booted(sheet: Option<PreparsedStyleSheet>) -> OffscreenLynxView {
     let view = OffscreenLynxView::new(
         PageConfig::default(),
         resources(sheet),
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         32.0,
         24.0,
@@ -100,7 +96,6 @@ async fn booted_on<C: AnimationClock>(
     let view = LynxView::<'static, NoWindow, C>::with_animation_clock(
         PageConfig::default(),
         resources(sheet),
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         32.0,
         24.0,

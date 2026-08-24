@@ -1,4 +1,4 @@
-//! Engine-owned Lynx main-thread runtime over an injected JavaScript VM.
+//! Engine-owned Lynx main-thread runtime over the core's `QuickJS` realm.
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
@@ -7,10 +7,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::event::EventSteps;
+use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 
 use crate::engine::{SharedListenerNames, SharedTree};
-use crate::script::{HostValue, ScriptEngine, ScriptEngineFactory, ScriptError};
+use crate::quickjs::ScriptEngine;
+use crate::script::ScriptError;
 use crate::tree::LynxDocument;
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
@@ -319,7 +321,7 @@ impl EventState {
 
 /// The private main-thread runtime used by the engine pipeline.
 pub(crate) struct MainThreadRuntime {
-    engine: Box<dyn ScriptEngine>,
+    engine: ScriptEngine,
     tree: Rc<RefCell<TreeHandle>>,
     events: Rc<EventState>,
     /// Names one dispatch, so the realm can keep one event object alive across
@@ -345,16 +347,14 @@ impl Drop for MainThreadRuntime {
 
 impl MainThreadRuntime {
     pub(crate) fn new(
-        factory: &dyn ScriptEngineFactory,
         elements: SharedTree,
         listener_names: Arc<SharedListenerNames>,
         on_flush: impl Fn() + 'static,
     ) -> Result<Self, MainThreadError> {
-        let mut engine = factory
-            .create()
-            .map_err(|error| MainThreadError::from_engine("creating the script VM", error))?;
+        let mut engine = ScriptEngine::new()
+            .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(listener_names));
-        let tree = install_bobcat(engine.as_mut(), elements, on_flush, &events)?;
+        let tree = install_bobcat(&mut engine, elements, on_flush, &events)?;
         Ok(Self {
             engine,
             tree,
@@ -439,13 +439,13 @@ impl MainThreadRuntime {
                 break;
             }
             let arguments = [
-                node_id_value(node),
-                node_id_value(target),
-                HostValue::Number(f64::from(u8::from(capture))),
-                HostValue::String(Arc::clone(name)),
-                HostValue::String(Arc::clone(detail_json)),
-                HostValue::Number(f64::from(event_id)),
-                HostValue::Boolean(index == last),
+                HostArgument::Number(packed_node_id(node)),
+                HostArgument::Number(packed_node_id(target)),
+                HostArgument::Number(f64::from(u8::from(capture))),
+                HostArgument::String(name),
+                HostArgument::String(detail_json),
+                HostArgument::Number(f64::from(event_id)),
+                HostArgument::Boolean(index == last),
             ];
             let called = self.engine.call_module_export(
                 ELEMENT_MODULE_SPECIFIER,
@@ -556,7 +556,7 @@ __FlushElementTree();
 }
 
 fn install_bobcat(
-    engine: &mut dyn ScriptEngine,
+    engine: &mut ScriptEngine,
     elements: SharedTree,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
@@ -584,7 +584,7 @@ fn install_bobcat(
 }
 
 fn install(
-    engine: &mut dyn ScriptEngine,
+    engine: &mut ScriptEngine,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
@@ -621,7 +621,7 @@ macro_rules! tree_members {
 }
 
 fn install_host_module(
-    engine: &mut dyn ScriptEngine,
+    engine: &mut ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
     on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
@@ -743,7 +743,7 @@ fn install_host_module(
 /// into the realm, and re-entering the realm from a host function would nest
 /// an execution guard, which `QuickJS` refuses.
 fn install_event_members(
-    engine: &mut dyn ScriptEngine,
+    engine: &mut ScriptEngine,
     events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
@@ -780,10 +780,10 @@ fn install_event_members(
 /// specialized DOM/style invalidation paths. `setInlineStyles` is the one
 /// wider primitive: a whole record in one crossing, because a record is a
 /// whole-block replacement and building it from empty is what the setter
-/// means. Neither the Element PAPI nor an injected VM receives a document
-/// handle.
+/// means. Nothing in the realm — the Element PAPI included — receives a
+/// document handle.
 fn install_attribute_members(
-    engine: &mut dyn ScriptEngine,
+    engine: &mut ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
@@ -820,7 +820,7 @@ fn install_attribute_members(
             let value = document
                 .get(node)
                 .and_then(|node| node.attribute(name))
-                .map(Arc::<str>::from);
+                .map(str::to_owned);
             Ok(value.map_or(HostValue::Null, HostValue::String))
         }
         fn tagName(node: node_id_argument) |document| {
@@ -831,7 +831,7 @@ fn install_attribute_members(
                 .ok_or_else(|| {
                     "bobcat-internal:host.tagName requires a live element tag".to_owned()
                 })?;
-            Ok(HostValue::String(Arc::from(tag)))
+            Ok(HostValue::String(tag.to_owned()))
         }
         fn attributeNames(node: node_id_argument) |document| {
             validate_live_element(document, NAME, node)?;
@@ -841,7 +841,7 @@ fn install_attribute_members(
                     write_record_field(&mut record, name);
                 }
             }
-            Ok(HostValue::String(Arc::from(record)))
+            Ok(HostValue::String(record))
         }
         fn childElementIds(node: node_id_argument) |document| {
             validate_live_element(document, NAME, node)?;
@@ -854,7 +854,7 @@ fn install_attribute_members(
                     ids.push_str(&child.id().to_bits().to_string());
                 }
             }
-            Ok(HostValue::String(Arc::from(ids)))
+            Ok(HostValue::String(ids))
         }
     }
 
@@ -1044,8 +1044,14 @@ const MAX_EXACT_INTEGER: f64 = 9_007_199_254_740_992.0;
     clippy::cast_precision_loss,
     reason = "a packed handle is built to stay inside f64's exact-integer range"
 )]
+fn packed_node_id(node: dom::NodeId) -> f64 {
+    node.to_bits() as f64
+}
+
+/// The same handle as a value a host callback returns, rather than as an
+/// argument the runtime lends into a call.
 fn node_id_value(node: dom::NodeId) -> HostValue {
-    HostValue::Number(node.to_bits() as f64)
+    HostValue::Number(packed_node_id(node))
 }
 
 #[allow(
@@ -1102,52 +1108,10 @@ fn string_argument<'a>(
     }
 }
 
-#[cfg(all(test, feature = "quickjs"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::script::HostCallback;
     use crate::tree::{PageConfig, Viewport, new_document};
-
-    type RecordedCalls = Vec<(String, String, Vec<HostValue>)>;
-
-    #[derive(Debug)]
-    struct RecordingEngine {
-        calls: Arc<std::sync::Mutex<RecordedCalls>>,
-    }
-
-    impl ScriptEngine for RecordingEngine {
-        fn register_host_module_function(
-            &mut self,
-            _module_specifier: &str,
-            _export_name: &str,
-            _arity: u8,
-            _callback: HostCallback,
-        ) -> Result<(), ScriptError> {
-            Ok(())
-        }
-
-        fn execute_script(&mut self, _source: &str, _source_name: &str) -> Result<(), ScriptError> {
-            Ok(())
-        }
-
-        fn call_module_export(
-            &mut self,
-            module_specifier: &str,
-            export_name: &str,
-            arguments: &[HostValue],
-        ) -> Result<bool, ScriptError> {
-            self.calls.lock().expect("call recorder").push((
-                module_specifier.to_owned(),
-                export_name.to_owned(),
-                arguments.to_vec(),
-            ));
-            Ok(true)
-        }
-
-        fn collect_garbage(&mut self) -> Result<(), ScriptError> {
-            Ok(())
-        }
-    }
 
     /// The handle a packed id names. A handle carries a generation as well as
     /// an arena key, so a test spells one the way script sees it — and for a
@@ -1200,15 +1164,9 @@ mod tests {
         document: LynxDocument,
     ) -> (MainThreadRuntime, SharedTree, Arc<SharedListenerNames>) {
         let elements = SharedTree::new(document);
-        let factory = crate::quickjs::engine_factory();
         let names = Arc::new(SharedListenerNames::default());
-        let runtime = MainThreadRuntime::new(
-            factory.as_ref(),
-            elements.clone(),
-            Arc::clone(&names),
-            || {},
-        )
-        .expect("main-thread runtime");
+        let runtime = MainThreadRuntime::new(elements.clone(), Arc::clone(&names), || {})
+            .expect("main-thread runtime");
         (runtime, elements, names)
     }
 
@@ -2096,12 +2054,18 @@ mod tests {
         );
     }
 
+    /// The id and the last-call flag are the two things a delivery carries
+    /// beyond the path itself, and both are observable from the realm: the id
+    /// is what makes one walk hold one event object, and the flag is what ends
+    /// the dispatch — which the standard makes visible by resetting
+    /// `eventPhase` and `currentTarget` on an event a listener kept.
     #[test]
     fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
         let (mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
+                globalThis.seen = [];
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const outer = __CreateView(0);
@@ -2109,20 +2073,16 @@ mod tests {
                   __AppendElement(page, outer);
                   __AppendElement(outer, inner);
                   globalThis.held = [page, outer, inner];
-                  __AddEventListener(page, 'tap', () => {}, { capture: true });
-                  __AddEventListener(inner, 'tap', () => {}, {});
+                  const record = (where) => (event) => {
+                    seen.push({ where, event, phase: event.eventPhase });
+                  };
+                  __AddEventListener(page, 'tap', record('page'), { capture: true });
+                  __AddEventListener(inner, 'tap', record('inner'), {});
                 };
                 ",
                 "app:///listeners.js",
             )
             .expect("main-thread script");
-
-        // Swap only the VM boundary for a recorder. The path and listener
-        // index are still the ones the real Element module registered above.
-        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
-        runtime.engine = Box::new(RecordingEngine {
-            calls: Arc::clone(&calls),
-        });
 
         for _ in 0..2 {
             assert!(
@@ -2132,36 +2092,42 @@ mod tests {
             );
         }
 
-        let calls = calls.lock().expect("call recorder");
-        assert!(calls.iter().all(|(module, export, _)| {
-            module == ELEMENT_MODULE_SPECIFIER && export == EVENT_DISPATCH_EXPORT
-        }));
-        let shape: Vec<_> = calls
-            .iter()
-            .map(|(_, _, arguments)| {
-                let HostValue::Number(node) = arguments[0] else {
-                    panic!("node id must be numeric")
-                };
-                let HostValue::Number(event_id) = arguments[5] else {
-                    panic!("event id must be numeric")
-                };
-                let HostValue::Boolean(is_last) = arguments[6] else {
-                    panic!("last-call flag must be boolean")
-                };
-                (node, event_id, is_last)
-            })
-            .collect();
-        // Two deliveries per walk: `outer` registered nothing, so the flag
-        // lands on the last delivered step, not the last path step.
-        assert_eq!(
-            shape,
-            [
-                (2.0, 0.0, false),
-                (4.0, 0.0, true),
-                (2.0, 1.0, false),
-                (4.0, 1.0, true),
-            ]
-        );
+        runtime
+            .evaluate_module(
+                r"
+                // Two deliveries per walk: `outer` registered nothing, so it
+                // is on the path but never reached.
+                const order = seen.map((step) => step.where).join('|');
+                if (order !== 'page|inner|page|inner') {
+                  throw new Error('deliveries: ' + order);
+                }
+                // One id, one event object — which is what lets a property one
+                // listener writes reach the next.
+                if (seen[0].event !== seen[1].event || seen[2].event !== seen[3].event) {
+                  throw new Error('a walk minted more than one event');
+                }
+                if (seen[0].event === seen[2].event) {
+                  throw new Error('two walks shared one event');
+                }
+                // Read while the dispatch was live: capturing at the ancestor,
+                // at-target on the target itself.
+                const phases = seen.map((step) => step.phase).join('|');
+                if (phases !== '1|2|1|2') {
+                  throw new Error('phases: ' + phases);
+                }
+                // The last delivery of each walk was flagged, so the realm
+                // ended the dispatch rather than leaving the kept event still
+                // naming whichever node it stopped on.
+                for (const { event } of seen) {
+                  if (event.eventPhase !== 0 || event.currentTarget !== null) {
+                    throw new Error('a dispatch outlived its walk');
+                  }
+                }
+                ",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("verification");
     }
 
     #[test]

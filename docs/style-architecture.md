@@ -20,10 +20,10 @@ The Lynx runtime element layer is split across the boundary it crosses:
 `packages/bobcat-element` is the script half, owning Element-PAPI member
 policy, tag vocabulary, and handle lifecycle, without moving any of those
 concerns into the standards core.
-`bobcat-core` composes that tree with runtime protocols and optionally
-supplies QuickJS, but re-exports no DOM/GPU or renderer conveniences.
+`bobcat-core` composes that tree with runtime protocols and owns QuickJS, but
+re-exports no DOM/GPU or renderer conveniences.
 `bobcat-cli` is an independent product that embeds `bobcat-core` only through
-the opaque `LynxView` facade and its resource, draw-target, VM, and OS host
+the opaque `LynxView` facade and its resource, draw-target, and OS host
 contracts. `dom`'s `render` module remains the internal DOM-free resource/GPU
 floor; `bobcat-core` does not re-export it.
 
@@ -109,7 +109,7 @@ CSS supplied as text.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, `ImageStore`, and retained Vello scene | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Opaque `LynxView`; injected resource, VM-factory, image-decoder, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; optional opaque QuickJS factory; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `bobcat-core` | Opaque `LynxView`; injected resource, image-decoder, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | Opaque `ImageStore`; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
@@ -197,10 +197,10 @@ What that covers, and what it does not:
   name/value subset of CSSOM `setProperty` (no priority argument), with no
   numeric style-id ABI, so an unknown name or invalid value drops that
   declaration and nothing else;
-- VM-neutral Element-PAPI boot: embedders inject the public
-  `ScriptEngineFactory` / `ScriptEngine` ESM host-module protocol; the private
-  `MainThreadRuntime` installs the callbacks and performs the same boot for
-  QuickJS and external/browser factories;
+- Core-owned Element-PAPI boot: the private `MainThreadRuntime` creates the
+  crate's own `QuickJS` realm on the Lynx main thread, installs the native
+  host-module callbacks in it, and boots the preloaded ESM graph. No part of
+  it is an embedder-visible protocol;
 
 - `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
   `bobcat_core::style::PreparsedStyleSheet` and loads it through
@@ -265,8 +265,6 @@ absorbed into `dom` or `hughie`.
 - Core tests: `cargo test -p dom`
 - Element-layer tests: `cargo test -p bobcat-core` and
   `pnpm --filter bobcat-element test`
-- Runtime feature checks: `cargo check -p bobcat-core --no-default-features`
-  and `cargo check -p bobcat-core --features quickjs`
 - Core benchmarks: `cargo bench -p dom --bench css` and
   `cargo bench -p dom --bench paint`
 - Workspace checks: `cargo fmt --check`, `cargo clippy --all-targets`, and

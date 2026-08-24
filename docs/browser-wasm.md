@@ -2,8 +2,8 @@
 
 `crates/bobcat-wasm` is the `wasm-bindgen` browser embedder and npm facade for
 `wasm32-unknown-unknown`. It builds with shared memory and uses crates.io
-Vello 0.9/wgpu 29. The browser build enables Bobcat's QuickJS feature and uses
-the same built-in `ScriptEngineFactory` as native Bobcat.
+Vello 0.9/wgpu 29. It runs the same core-owned QuickJS engine as native
+Bobcat.
 
 ## Execution and ownership
 
@@ -94,9 +94,8 @@ the embedding document's `document.baseURI` before crossing the Worker boundary.
 The Render Worker accepts only absolute URLs: resolving there against
 `self.location` would incorrectly use the npm package/Worker URL as the base.
 
-The browser passes `quickjs_engine_factory()` directly to `LynxView`. Core
-moves the transferable factory into the Lynx main Worker and calls `create`
-there, so the resulting realm remains owner-thread-bound and uses Bobcat's
+The browser names no script engine at all. Core creates its realm inside the
+Lynx main Worker, so the realm remains owner-thread-bound and uses Bobcat's
 primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 

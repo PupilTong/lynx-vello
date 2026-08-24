@@ -1,5 +1,3 @@
-#![cfg(feature = "quickjs")]
-
 //! Public-facade coverage for the offscreen render path.
 //!
 //! CSS, document, image-store, and tree mutation are deliberately absent from
@@ -19,7 +17,7 @@ use bobcat_core::resource::{
 };
 use bobcat_core::{
     EngineEvent, LynxViewError, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet, ScriptRunError, quickjs_engine_factory,
+    PreparsedStyleSheet, ScriptRunError,
 };
 use flashbulb::{Image, Screenshots};
 use support::FetcherDouble;
@@ -107,7 +105,6 @@ fn view(source: &[u8]) -> OffscreenLynxView {
     OffscreenLynxView::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,
@@ -166,7 +163,6 @@ async fn dropping_entry_request_cancels_the_token_seen_by_the_host() {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         resources.clone(),
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,
@@ -309,7 +305,6 @@ globalThis.renderPage = function renderPage() {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         32.0,
         24.0,
@@ -375,7 +370,6 @@ async fn a_preparsed_author_sheet_paints() {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         resources,
-        quickjs_engine_factory(),
         Arc::new(|| {}),
         393.0,
         727.0,

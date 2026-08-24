@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-bobcat-core = { workspace = true, features = ["quickjs"] }
+bobcat-core = { workspace = true }
 http.workspace = true
 js-sys = { workspace = true }
 lynx-xml.workspace = true
