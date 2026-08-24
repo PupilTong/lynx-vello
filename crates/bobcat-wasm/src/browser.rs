@@ -260,15 +260,6 @@ impl ResourceFetcher for BrowserResources {
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         let request_id = request.context.id;
         let locator = request.resource.locator.specifier.clone();
-        if request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "script resolution was cancelled",
-            );
-        }
         let kind = request.resource.kind.clone();
         let Some(registry) = self.registry(&kind) else {
             return Self::error(
@@ -331,15 +322,6 @@ impl ResourceFetcher for BrowserResources {
     ) -> ResourceFuture<'_, ResourceResponse> {
         let request_id = request.request.context.id;
         let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        if request.request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "script loading was cancelled",
-            );
-        }
 
         let kind = request.request.resource.resource.kind.clone();
         let media_type = Self::media_type(&kind);
@@ -396,10 +378,6 @@ impl ResourceFetcher for BrowserResources {
 
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
-    }
-
-    fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()> {
-        Self::unsupported(Some(request_id), ResourceErrorPhase::Cancel)
     }
 }
 

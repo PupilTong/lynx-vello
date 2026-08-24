@@ -54,7 +54,6 @@ slab = "0.4"
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
-tokio-util = "0.7"
 url = "2"
 js-sys = "0.3"
 rayon = "1"

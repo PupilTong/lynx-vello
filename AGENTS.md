@@ -150,9 +150,6 @@ useful signal for currently-compatible versions of those libraries.
   entry MTS URL through `LynxView::execute_script`, resolves/fetches its UTF-8
   source through the injected `ResourceFetcher`, registers the resolved URL in
   QuickJS's preloaded ESM graph, and reports boot completion through `pump`.
-  `execute_script_with_cancellation` accepts the resource
-  protocol's public `CancellationToken`; dropping its future cancels the same
-  token observed by pending resolution/fetch work.
   `load_style_sheet(url)` loads author CSS through the same fetcher and mounts
   it on the document; the protocol's `fetch_style_sheet` answers with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed

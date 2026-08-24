@@ -119,9 +119,6 @@ reported by `LynxView::pump` as `EngineEvent::ScriptFinished` on success or
 on the script owner thread may also report `ScriptRunError` after boot. The
 engine enqueues every event before invoking the construction-time
 `EventRequester`, so the host can pump immediately without polling.
-`execute_script_with_cancellation` accepts a
-public resource `CancellationToken`; dropping the returned future cancels that
-same token and unblocks cooperative resolver/fetcher work.
 `load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
 resolves and fetches through the same `ResourceFetcher`, which answers with
 either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
@@ -131,8 +128,9 @@ the result as author-origin rules. Load order is cascade order.
 
 The public facade is `LynxView<'window, W>`, with
 `OffscreenLynxView` as its windowless alias. It relays input, resize, redraw,
-frame-pump, target attachment, offscreen ticks, capture, cancellable script
-startup, owned-font registration, and image-store installation and loads. It exposes no
+frame-pump, target attachment, offscreen ticks, capture, script
+startup, owned-font registration, and image-store installation and loads. It
+exposes no
 tree getter, document getter, renderer getter, script-realm handle, or
 decomposition method.
 

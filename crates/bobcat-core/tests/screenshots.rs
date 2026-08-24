@@ -6,16 +6,11 @@
 
 mod support;
 
-use std::future::Future;
 use std::sync::Arc;
-use std::task::Poll;
 
-use bobcat_core::resource::{
-    CancellationToken, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-};
+use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    LynxViewError, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet,
+    OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -132,59 +127,6 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
     let images = Arc::new(flashbulb::TestImages::new());
     images.insert_rgba8(IMAGE_URL, 4, 4, rgba);
     images
-}
-
-#[tokio::test]
-async fn a_pre_cancelled_entry_request_returns_a_typed_error() {
-    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
-    let cancellation = CancellationToken::new();
-    cancellation.cancel();
-
-    let error = view
-        .execute_script_with_cancellation(SCRIPT_URL, cancellation)
-        .await
-        .expect_err("pre-cancelled request");
-    let LynxViewError::Resource(error) = error else {
-        panic!("expected resource cancellation, got {error:?}");
-    };
-    assert_eq!(error.kind, ResourceErrorKind::Cancelled);
-    assert_eq!(error.phase, ResourceErrorPhase::Resolve);
-    assert_eq!(error.locator.as_deref(), Some(SCRIPT_URL));
-    assert!(error.request_id.is_some());
-}
-
-#[tokio::test]
-async fn dropping_entry_request_cancels_the_token_seen_by_the_host() {
-    let resources = Arc::new(
-        FetcherDouble::new(MAIN_THREAD_SCRIPT.as_bytes().to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_hung_resolve(),
-    );
-    let mut view = OffscreenLynxView::new(
-        PageConfig::default(),
-        resources.clone(),
-        Arc::new(|| {}),
-        393.0,
-        727.0,
-        1.0,
-    )
-    .expect("view");
-    let external = CancellationToken::new();
-    let mut execution =
-        Box::pin(view.execute_script_with_cancellation(SCRIPT_URL, external.clone()));
-    std::future::poll_fn(|context| match execution.as_mut().poll(context) {
-        Poll::Pending => Poll::Ready(()),
-        Poll::Ready(result) => panic!("hung resolver unexpectedly completed: {result:?}"),
-    })
-    .await;
-    let host_token = resources
-        .request_cancellation()
-        .expect("resource provider observed request context");
-
-    drop(execution);
-
-    assert!(external.is_cancelled());
-    assert!(host_token.is_cancelled());
 }
 
 #[tokio::test]

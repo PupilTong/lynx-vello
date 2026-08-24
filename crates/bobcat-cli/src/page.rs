@@ -143,15 +143,6 @@ impl ResourceFetcher for ProgramResourceFetcher {
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         let request_id = request.context.id;
         let locator = request.resource.locator.specifier.clone();
-        if request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "resource resolution was cancelled",
-            );
-        }
 
         let resolved_url = Url::parse(&locator).or_else(|_| {
             request
@@ -207,15 +198,6 @@ impl ResourceFetcher for ProgramResourceFetcher {
     ) -> ResourceFuture<'_, ResourceResponse> {
         let request_id = request.request.context.id;
         let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        if request.request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "resource fetch was cancelled",
-            );
-        }
         let source = if request.request.resource.url == self.script_url {
             self.source.clone()
         } else if let Some((_, source)) = self
@@ -268,15 +250,6 @@ impl ResourceFetcher for ProgramResourceFetcher {
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         let request_id = request.request.context.id;
         let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        if request.request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "stylesheet fetch was cancelled",
-            );
-        }
         let Some(sheet) = self
             .style_sheet
             .clone()
@@ -329,10 +302,6 @@ impl ResourceFetcher for ProgramResourceFetcher {
 
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
-    }
-
-    fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()> {
-        Self::unsupported(Some(request_id), ResourceErrorPhase::Cancel)
     }
 }
 
