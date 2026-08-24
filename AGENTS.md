@@ -421,19 +421,22 @@ useful signal for currently-compatible versions of those libraries.
   speaks the text node. So `tree::raw_text` defines a `dom::CustomElement`
   observing `text`, reflecting its current value into one text node the way web-core's
   `RawTextAttributes` does, updating that node in place rather than replacing
-  it (a run keeps its retained Parley layout under its own id), and carrying
-  no node at all for an empty value. The UA sheet carries the other half,
-  again from `web-elements`: `text` is a flex container whatever
-  `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
+  it, and carrying no node at all for an empty value. The UA sheet carries the
+  other half: `text` establishes the one internal block-flow paragraph
+  (`display: block` is accepted at UA origin only), `wrapper` is
+  `display: contents`, and
   `raw-text` dissolves into the `text` it is written inside
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
-  newline. **Not implemented**: an inline formatting context, so sibling runs
-  in one `text` are separate flex items rather than one wrapped paragraph, a
-  nested `text` is a flex item rather than an inline box, and `text-maxline`
-  truncation is still absent — `docs/text-measurement-and-ifc.md` records the
-  retained-layout and eviction contracts those would build on, and the open
-  design decisions (brush, artifact ownership, truncation ordering).
+  newline. That paragraph collects sibling runs across transparent wrappers
+  and treats `inline-flex`/`inline-grid`/`inline-linear`/`inline-relative`
+  children as indivisible Parley inline boxes whose inner layout still uses
+  the corresponding Hughie algorithm. The `text` UA rules make direct and
+  one-wrapper-deep `view`/`image`/nested-`text` children `inline-flex` by
+  default. A nested `text` is therefore an atomic paragraph, not yet a
+  transparent rich-text span; run-level paint identity and `text-maxline`
+  truncation are also absent. `docs/text-measurement-and-ifc.md` records the
+  retained-layout, invalidation, and remaining paint/truncation decisions.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -1175,11 +1178,12 @@ useful signal for currently-compatible versions of those libraries.
   surface, `rpx`-aware view/device policy, per-component css-id scoping,
   sticky lowering,
   component-specific staggered layout, and the rest of the Lynx text policy —
-  `text-maxline`/`text-maxlength` truncation, `tail-color-convert`, and the
-  inline formatting context sibling runs in one `text` would need. The
+  `text-maxline`/`text-maxlength` truncation, `tail-color-convert`, transparent
+  rich-text spans, and run-level paint/hit identity. Mixed sibling runs and
+  the four atomic inline layout modes now share one Flow paragraph; the
   `raw-text` attribute-to-text-node reflection and its UA display/newline
-  policy have landed in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C
-  text style, document context, and artifact storage already live in `dom`.
+  policy live in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C text
+  style, document context, and artifact storage live in `dom`.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =
   false`, dev-dependency everywhere). It owns RGBA `Image` + PNG codec, a

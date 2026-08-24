@@ -48,9 +48,9 @@ subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
 replaced leaves reading their node-owned `NaturalSize`, plus W3C text nodes
-using a dedicated text-only inherited-style view, a lazily-created
-boxed `TextContext` in `DocumentLayoutState`, and per-node lazily boxed
-retained artifacts in that same state. Keeping
+and Flow-owned mixed inline paragraphs using dedicated container/run style
+views, a lazily-created boxed `TextContext` in `DocumentLayoutState`, and
+per-owner lazily boxed retained artifacts in that same state. Keeping
 the text-only view separate leaves the box-algorithm style view at two words.
 Literal text and natural-size metadata reuse the node's existing nullable
 content pointer, while retained Parley artifacts stay phase-local in layout
@@ -58,11 +58,11 @@ state. Updating replaced metadata automatically invalidates the affected cache
 path. It is public on `Document` (`set_natural_size`/`natural_size`) because
 the decoder that produces it is a separate crate, but it is not exposed
 through any Element PAPI.
-Text truncation, inline boxes, element-backed raw text, and
-Lynx-specific text attribute policy are not implemented yet;
+The four atomic inline layout modes and element-backed `raw-text` are
+implemented; text truncation, transparent rich-text spans, run-level paint
+identity, and the remaining Lynx-specific text attributes are not.
 [`docs/text-measurement-and-ifc.md`](text-measurement-and-ifc.md) carries the
-retained-layout and eviction contracts they build on, and the open design
-decisions ahead of an inline formatting context. Crate
+retained-layout and eviction contracts plus the remaining design decisions. Crate
 rustdoc is the API reference; this document is the rationale, performance
 architecture, and remaining plan.
 

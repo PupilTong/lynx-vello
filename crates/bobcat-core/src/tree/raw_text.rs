@@ -255,6 +255,7 @@ mod tests {
     #[test]
     fn the_ua_sheet_dissolves_a_raw_text_only_inside_the_text_it_is_written_in() {
         use dom::stylo::values::computed::Display;
+        use dom::stylo::values::specified::box_::{DisplayInside, DisplayOutside};
 
         let mut document = document();
         let page = document.document_element().id();
@@ -268,7 +269,9 @@ mod tests {
         let stray = raw_text(&mut document, view, "stray");
         document.layout();
 
-        assert_eq!(display(&document, text), Display::Flex);
+        let text_display = display(&document, text);
+        assert_eq!(text_display.outside(), DisplayOutside::Block);
+        assert_eq!(text_display.inside(), DisplayInside::Flow);
         assert_eq!(display(&document, wrapper), Display::Contents);
         assert_eq!(display(&document, direct), Display::Contents);
         assert_eq!(display(&document, inside), Display::Contents);
@@ -291,16 +294,15 @@ mod tests {
             .rounded_layout(run_of(&document, raw))
             .expect("the run is laid out");
         assert!(
-            (run.size.width - 100.0).abs() < f32::EPSILON
-                && (run.size.height - 20.0).abs() < f32::EPSILON,
-            "five Ahem em squares at 20px, got {:?}",
+            run.size.width.abs() < f32::EPSILON && run.size.height.abs() < f32::EPSILON,
+            "the source run is represented by the text paragraph, got {:?}",
             run.size
         );
 
         let box_ = document.rounded_layout(text).expect("the text is laid out");
         assert!(
-            (box_.size.height - 20.0).abs() < f32::EPSILON,
-            "the text element takes the run's height, got {:?}",
+            box_.size.width >= 100.0 && (box_.size.height - 20.0).abs() < f32::EPSILON,
+            "the text paragraph contains five Ahem em squares, got {:?}",
             box_.size
         );
     }
@@ -316,11 +318,49 @@ mod tests {
         let run = document
             .rounded_layout(run_of(&document, raw))
             .expect("the run is laid out");
+        assert_eq!((run.size.width, run.size.height), (0.0, 0.0));
+        let box_ = document.rounded_layout(text).expect("the text is laid out");
         assert!(
-            (run.size.width - 40.0).abs() < f32::EPSILON
-                && (run.size.height - 40.0).abs() < f32::EPSILON,
+            box_.size.width >= 40.0 && (box_.size.height - 40.0).abs() < f32::EPSILON,
             "two lines of two em squares, got {:?}",
-            run.size
+            box_.size
         );
+    }
+
+    #[test]
+    fn raw_text_and_an_inline_child_share_one_wrapping_paragraph() {
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "width: 100px; font-family: Ahem; font-size: 10px; line-height: 10px",
+        );
+        let before = raw_text(&mut document, text, "aaaaaaa");
+        let atom = document.create_element("view", ());
+        document.set_inline_style(atom, "width: 40px; height: 20px");
+        document.append_child(text, atom);
+        let after = raw_text(&mut document, text, "bb");
+
+        document.layout();
+
+        let atom_box = document
+            .rounded_layout(atom)
+            .expect("the inline box is laid out");
+        assert_eq!((atom_box.size.width, atom_box.size.height), (40.0, 20.0));
+        assert!(
+            atom_box.location.y > 0.0,
+            "the atom wraps after seven glyphs"
+        );
+        let text_box = document
+            .rounded_layout(text)
+            .expect("the paragraph is laid out");
+        assert!(text_box.size.height >= atom_box.location.y + atom_box.size.height);
+        for carrier in [before, after] {
+            let run = document
+                .rounded_layout(run_of(&document, carrier))
+                .expect("the source run is live");
+            assert!(run.size.width == 0.0 && run.size.height == 0.0);
+        }
     }
 }

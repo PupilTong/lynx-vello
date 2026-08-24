@@ -34,9 +34,9 @@ impl Default for PageConfig {
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
 /// have to be `!important`, so it is a recorded deviation instead
-/// (`docs/tracking/deviations.md`). `text` is a flex container whatever the
-/// switch says, and `wrapper` generates no box — both from `web-elements`'
-/// own sheet, where the linear toggle covers container tags only.
+/// (`docs/tracking/deviations.md`). `text` owns a flow paragraph whatever the
+/// switch says, and `wrapper` generates no box — both are per-tag policy,
+/// while the linear toggle covers container tags only.
 /// `defaultOverflowVisible` reaches `page` and `view` alone, the way web-core
 /// spends it on `x-view` alone; a scroller carries its own axes regardless.
 ///

@@ -219,9 +219,13 @@ element) while everything downstream — Parley shaping, line breaking, the
 glyph painter — speaks the W3C text node, so the component observes `text` and
 reflects its value into one text node, updating that node in place and
 carrying none at all for an empty value. The UA sheet supplies the display
-policy the reflection needs: `text` is a flex container, `wrapper` is
-`display: contents`, and a `raw-text` dissolves into the `text` it is written
-inside and generates no box anywhere else.
+policy the reflection needs: `text` establishes an internal block-flow
+paragraph, `wrapper` is `display: contents`, and a `raw-text` dissolves into
+the `text` it is written inside and generates no box anywhere else. Sibling
+runs are shaped and broken as one retained paragraph; direct or wrapped
+`view`/`image`/nested-`text` children are atomic `inline-flex` boxes by UA
+default, and authored `inline-grid`/`inline-linear`/`inline-relative` select
+the corresponding inner Hughie algorithm without leaving that paragraph.
 
 ```text
 private Document<()>

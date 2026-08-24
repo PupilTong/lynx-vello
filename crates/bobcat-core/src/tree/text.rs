@@ -17,18 +17,19 @@
 /// finds. The reset therefore also stops an ancestor's gradient at the text
 /// root, where web-core stops it with the same declaration.
 ///
-/// A `text` renders text: anything else written directly inside one generates
-/// no box, and the tags that are content opt back in. `wrapper` dissolves,
-/// `view` and `image` stay boxes — flex ones, not the `inline-flex` and
-/// `contents` web-elements can hand a real inline formatting context, which
-/// this engine does not have. `raw-text` opts back in from
+/// A `text` renders one flow paragraph: anything else written directly inside
+/// one generates no box, and the tags that are content opt back in. `wrapper`
+/// dissolves; `view`, `image`, and nested `text` become atomic inline flex
+/// boxes. `block` is a private UA-origin entry to Stylo's internal block-flow
+/// encoding, not part of Lynx's author-facing display grammar. `raw-text` opts back in from
 /// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
 /// lives.
 pub(super) const UA_RULES: &str = "\
-text { box-sizing: border-box; display: flex; color: initial; }
+text { box-sizing: border-box; display: block; color: initial; }
 text > * { display: none; }
 text > wrapper { display: contents; }
-text > view, text > image, text > text { display: flex; }
+text > view, text > image, text > text,
+text > wrapper > view, text > wrapper > image, text > wrapper > text { display: inline-flex; }
 text > text, text > wrapper > text { color: inherit; }
 ";
 
@@ -36,6 +37,7 @@ text > text, text > wrapper > text { color: inherit; }
 mod tests {
     use dom::stylo::color::AbsoluteColor;
     use dom::stylo::values::computed::{ColorPropertyValue, Display};
+    use dom::stylo::values::specified::box_::{DisplayInside, DisplayOutside};
 
     use crate::tree::test_support::{child, display, document, element_under, style_of};
 
@@ -119,11 +121,14 @@ mod tests {
         let outside = child(&mut document, "x-foreign", "");
         document.layout();
 
+        let text_display = display(&document, text);
+        assert_eq!(text_display.outside(), DisplayOutside::Block);
+        assert_eq!(text_display.inside(), DisplayInside::Flow);
         for (tag, content) in boxes {
-            assert_eq!(display(&document, content), Display::Flex, "{tag}");
+            assert_eq!(display(&document, content), Display::InlineFlex, "{tag}");
         }
         assert_eq!(display(&document, wrapper), Display::Contents);
-        assert_eq!(display(&document, through_wrapper), Display::Linear);
+        assert_eq!(display(&document, through_wrapper), Display::InlineFlex);
         assert_eq!(
             display(&document, foreign),
             Display::None,
