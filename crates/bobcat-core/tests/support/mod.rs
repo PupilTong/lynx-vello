@@ -4,17 +4,34 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use bobcat_core::PreparsedStyleSheet;
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, CancellationToken, HttpRequest, HttpResponse, RequestId,
-    ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind,
-    ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata,
-    ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload,
-    StyleSheetResponse,
+    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
+    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
+use bobcat_core::script::ScriptError;
+use bobcat_core::{EngineEvent, OffscreenLynxView, PreparsedStyleSheet};
 use bytes::Bytes;
 use url::Url;
+
+/// Waits for the engine-owned script thread to report its terminal boot event.
+pub fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptError> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => return Ok(()),
+                EngineEvent::ScriptRunError(error) => return Err(error),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "script thread did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// Which transports the double advertises, and what it hands back.
 #[derive(Debug)]
@@ -25,13 +42,8 @@ pub struct FetcherDouble {
     /// without a real network.
     pub resolve_to: Mutex<Option<String>>,
     pub cache_key: Option<String>,
-    /// Makes `resolve_locator` never complete, standing in for embedder code blocked on a network
-    /// round trip or a lock.
-    pub hang_resolve: bool,
     pub resolves: AtomicUsize,
     pub fetches: AtomicUsize,
-    pub cancels: AtomicUsize,
-    pub observed_cancellation: Mutex<Option<CancellationToken>>,
     /// When set, stylesheet requests are answered pre-parsed instead of as
     /// CSS text — the arm a bundle-decoding embedder uses.
     pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
@@ -46,11 +58,8 @@ impl FetcherDouble {
             capabilities: vec![ResourceCapability::BufferedResource],
             resolve_to: Mutex::new(None),
             cache_key: None,
-            hang_resolve: false,
             resolves: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
-            cancels: AtomicUsize::new(0),
-            observed_cancellation: Mutex::new(None),
             style_sheet: None,
             style_sheet_fetches: AtomicUsize::new(0),
         }
@@ -82,12 +91,6 @@ impl FetcherDouble {
     }
 
     #[must_use]
-    pub fn with_hung_resolve(mut self) -> Self {
-        self.hang_resolve = true;
-        self
-    }
-
-    #[must_use]
     pub fn with_cache_key(mut self, key: &str) -> Self {
         self.cache_key = Some(key.to_owned());
         self
@@ -99,13 +102,6 @@ impl FetcherDouble {
 
     pub fn resolve_count(&self) -> usize {
         self.resolves.load(Ordering::Relaxed)
-    }
-
-    pub fn request_cancellation(&self) -> Option<CancellationToken> {
-        self.observed_cancellation
-            .lock()
-            .expect("observed cancellation")
-            .clone()
     }
 
     fn metadata(&self, resource: ResolvedLocator, id: RequestId) -> ResourceMetadata {
@@ -161,17 +157,9 @@ impl ResourceFetcher for FetcherDouble {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
-        *self
-            .observed_cancellation
-            .lock()
-            .expect("observed cancellation") = Some(request.context.cancellation.clone());
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
-        let hang = self.hang_resolve;
         Box::pin(async move {
-            if hang {
-                std::future::pending::<()>().await;
-            }
             let text = override_url.unwrap_or_else(|| {
                 format!(
                     "https://example.test/{}",
@@ -214,10 +202,5 @@ impl ResourceFetcher for FetcherDouble {
 
     fn fetch_http(&self, _request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Box::pin(async { Err(unsupported(ResourceErrorPhase::SendRequest)) })
-    }
-
-    fn cancel_request(&self, _request_id: RequestId) -> ResourceFuture<'_, ()> {
-        self.cancels.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { Ok(()) })
     }
 }

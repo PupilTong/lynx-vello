@@ -106,9 +106,17 @@ calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
 element tree. QuickJS drains its owned pending-job queue until that
 module-evaluation promise settles, so boot completion is exactly the
-`ScriptFinished` engine event. No browser microtask checkpoint or timer
-interception participates in completion; the fallback listener is retained
-inside the preloaded runtime ESM rather than by the browser.
+`ScriptFinished` or `ScriptRunError` engine event. No browser microtask
+checkpoint or timer interception participates in completion; the fallback
+listener is retained inside the preloaded runtime ESM rather than by the
+browser.
+
+After a successful boot, the Render Worker keeps an independent lifecycle
+waiter active instead of tying `pump` to animation frames. `ListenerFailed`
+is written to the browser console without stopping the page, while a later
+script-Worker failure remains fatal even when `requestAnimationFrame` is
+paused for a hidden document. Reset advances the waiter's generation before
+replacing the native view, so an old page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
@@ -120,6 +128,9 @@ registers the bytes, and mounts them as author-origin rules through the same
 resource boundary the entry MTS module uses; sheets cascade in load order. The
 stylesheet contract has a second arm for a host that already parsed its CSS,
 but a browser host never does, so this embedder always takes the text arm.
+The browser registry is one normalized-URL-to-bytes map. Script and stylesheet
+registration populate that same map; `fetch_resource` and `fetch_style_sheet`
+decide how the selected bytes are interpreted.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
 may execute suitable JavaScript by URL or load a raw Lynx XML source card;

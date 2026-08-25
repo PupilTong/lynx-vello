@@ -150,9 +150,6 @@ useful signal for currently-compatible versions of those libraries.
   entry MTS URL through `LynxView::execute_script`, resolves/fetches its UTF-8
   source through the injected `ResourceFetcher`, registers the resolved URL in
   QuickJS's preloaded ESM graph, and reports boot completion through `pump`.
-  `execute_script_with_cancellation` accepts the resource
-  protocol's public `CancellationToken`; dropping its future cancels the same
-  token observed by pending resolution/fetch work.
   `load_style_sheet(url)` loads author CSS through the same fetcher and mounts
   it on the document; the protocol's `fetch_style_sheet` answers with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
@@ -165,10 +162,14 @@ useful signal for currently-compatible versions of those libraries.
   pseudo-classes as text and stylo builds specified values only through its
   value parsers. Decoding a container stays embedder work: core owns the
   `PreparsedStyleSheet` vocabulary, and the embedder fills it. Load order is
-  cascade order. Per-component css-id scoping is **not** implemented — every
-  fragment mounts globally, which is what web-core itself emits for a
-  `enableRemoveCSSScope = true` bundle. The document, tree, engine, and realm
-  cannot be borrowed or decomposed from the facade.
+  cascade order. A request carries a URL locator plus transport hints, not a
+  semantic resource kind: the embedder locates bytes by normalized resolved
+  URL, while `fetch_style_sheet` selects the stylesheet payload contract and
+  other buffered loads use `fetch_resource`. Per-component css-id scoping is
+  **not** implemented — every fragment mounts globally, which is what
+  web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
+  document, tree, engine, and realm cannot be borrowed or decomposed from the
+  facade.
   The crate-private `quickjs::ScriptEngine` is the whole script surface: it
   installs named host callbacks, registers named preloaded ESM source,
   evaluates a module through its TLA completion promise, calls an export the
@@ -186,9 +187,11 @@ useful signal for currently-compatible versions of those libraries.
   batch, never per call.
   The core depends on `dom` and re-exports exactly one narrow seam of it: the
   `input` module republishes `dom::Point2D` and
-  `dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
+  `dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
   so an embedder can name the input vocabulary without depending on `dom`
-  itself. Nothing else crosses — no document, no node, no hit-test result —
+  itself. Wheel deltas crossing that seam are always viewport CSS pixels;
+  conversion from physical-pixel, line, or page units is embedder policy.
+  Nothing else crosses — no document, no node, no hit-test result —
   and that list is the whole of it. Its private `Engine`
   passes the element tree to and from its engine-owned Lynx main thread through
   the private `SharedTree` hand-off slot — one holder at any instant — and runs input
@@ -205,10 +208,12 @@ useful signal for currently-compatible versions of those libraries.
   OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
-  `ScriptFinished` reports the entry-module boot and `ListenerFailed` reports a
-  listener that threw during event delivery — separate because the second is
-  not fatal: the walk continues, the realm stays usable, and later events are
-  delivered as normal;
+  `ScriptFinished` reports a successful entry-module boot,
+  `ScriptRunError` reports a fatal script-runtime failure during boot or later
+  owner-thread work, and `ListenerFailed` reports a listener that threw during
+  event delivery — separate because the last is not fatal:
+  the walk continues, the realm stays usable, and later events are delivered
+  as normal;
   drawing is scheduled through the public `Window` capability borrowed at
   attach time (`target`, `frames`).
   The private `Engine` is generic over that trait; the draw target is a GAT,
@@ -246,9 +251,10 @@ useful signal for currently-compatible versions of those libraries.
   `attributeNames` as the same length-prefixed record `setInlineStyles`
   accepts, and `childElementIds` as comma-joined ids, which need no length
   prefix because a decimal id cannot contain the separator), then registers the
-  core-owned compatibility shell as `bobcat:runtime` and the embedded Element
-  PAPI runtime (`packages/bobcat-element`) as `bobcat:element` in QuickJS's
-  synchronous preloaded ESM loader. The Element module imports native
+  core-owned compatibility shell as `bobcat:runtime` and the Element PAPI
+  runtime as `bobcat:element` in QuickJS's synchronous preloaded ESM loader.
+  Both JavaScript sources live together in `packages/bobcat-element/src` and
+  are embedded by core with `include_str!`. The Element module imports native
   operations directly from `bobcat-internal:host`; no host object or host
   function is installed on `globalThis`. A `.web.bundle`'s `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
@@ -495,7 +501,7 @@ useful signal for currently-compatible versions of those libraries.
   `request_redraw`, `pre_present_notify`); lifecycle events wake the event
   loop through the separately injected `EventRequester`. The CLI starts the
   entry MTS URL with `execute_script(url)` and observes the complete TLA boot
-  through `ScriptFinished` and `pump`. Headed
+  through `ScriptFinished`/`ScriptRunError` and `pump`. Headed
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
@@ -622,10 +628,12 @@ useful signal for currently-compatible versions of those libraries.
   XML URL. Synchronous GPU
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
-- `packages/bobcat-element` — the dependency-free `bobcat:element` ESM
-  (`src/element-papi.mjs`) that `bobcat-core` embeds with `include_str!` and
-  registers in QuickJS's preloaded graph before any entry code; its Rstest
-  suite imports the same bytes and verifies every named export. It owns the
+- `packages/bobcat-element` — the dependency-free JavaScript sources for the
+  two ESMs `bobcat-core` preloads into the QuickJS main-thread realm:
+  `src/main-thread-runtime.mjs` provides `bobcat:runtime`, while
+  `src/element-papi.mjs` provides `bobcat:element`. Core embeds both with
+  `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
+  and verifies every named export. The package owns the
   supported `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
@@ -1431,9 +1439,10 @@ The Element PAPI runtime has two suites over the same file:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
 while `crates/bobcat-core/tests/main_thread.rs` drives the identical bytes
-through the real QuickJS realm, `bobcat` object, and collector. Changing
-`packages/bobcat-element/src/element-papi.mjs` triggers a `bobcat-core` rebuild
-through `include_str!` — there is no generated artifact to refresh.
+through the real QuickJS realm, `bobcat` object, and collector. The type suite
+also checks the colocated `main-thread-runtime.mjs`, whose behavior is covered
+by the core main-thread tests. Changing either source triggers a `bobcat-core`
+rebuild through `include_str!` — there is no generated artifact to refresh.
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
 siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with

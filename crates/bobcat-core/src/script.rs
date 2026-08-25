@@ -4,8 +4,7 @@
 //! script executed in it, and installs every host function it exposes. None of
 //! that crosses the public boundary. What does cross is failure — a bundle
 //! that will not parse, a listener that throws — and these are the sanitized
-//! details that carry it, reached through [`crate::ScriptRunError`] and
-//! [`crate::EngineEvent`].
+//! details carried by [`crate::EngineEvent`].
 
 use std::fmt;
 use std::sync::Arc;

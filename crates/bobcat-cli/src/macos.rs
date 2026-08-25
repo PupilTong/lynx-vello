@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use bobcat_core::input::{DeltaMode, InputEvent, Point2D, PointerKind, PointerPhase};
+use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
 };
@@ -37,6 +37,10 @@ enum UserEvent {
 }
 
 const MOUSE_POINTER_ID: u32 = u32::MAX;
+
+/// The native reference embedder's policy for winit's abstract line wheel
+/// unit. Core accepts wheel deltas in CSS pixels only.
+const WHEEL_LINE_CSS_PX: f32 = 40.0;
 
 struct MacWindow {
     os: Arc<Window>,
@@ -305,23 +309,8 @@ impl<'window> MacApplication<'window> {
         let Some(point) = self.css_point(position) else {
             return;
         };
-        let event = match delta {
-            MouseScrollDelta::PixelDelta(pixels) => {
-                let scale = self.window().map_or(1.0, |window| window.os.scale_factor());
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "wheel deltas are far inside f32 range"
-                )]
-                InputEvent::wheel(
-                    point,
-                    (-(pixels.x / scale) as f32, -(pixels.y / scale) as f32),
-                )
-            }
-            MouseScrollDelta::LineDelta(x, y) => {
-                InputEvent::wheel_with_mode(point, (-x, -y), DeltaMode::Line)
-            }
-        };
-        self.dispatch(event);
+        let scale = self.window().map_or(1.0, |window| window.os.scale_factor());
+        self.dispatch(InputEvent::wheel(point, wheel_delta_css(delta, scale)));
     }
 
     fn touch_event(&mut self, touch: Touch) {
@@ -366,11 +355,11 @@ impl<'window> MacApplication<'window> {
             return;
         };
         let error = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(Err(source)) => Some(source),
+            EngineEvent::ScriptRunError(source) => Some(source),
             // Not fatal — the realm survives it and later events are still
             // delivered — so it is reported and the window stays up.
             EngineEvent::ListenerFailed(error) => {
-                eprintln!("event listener failed: {}", error.message);
+                eprintln!("event listener failed: {error}");
                 None
             }
             _ => None,
@@ -482,6 +471,20 @@ fn non_empty_size(size: PhysicalSize<u32>) -> PhysicalSize<u32> {
 
 #[allow(
     clippy::cast_possible_truncation,
+    reason = "wheel deltas are far inside f32 range"
+)]
+fn wheel_delta_css(delta: MouseScrollDelta, scale_factor: f64) -> (f32, f32) {
+    match delta {
+        MouseScrollDelta::PixelDelta(pixels) => (
+            -(pixels.x / scale_factor) as f32,
+            -(pixels.y / scale_factor) as f32,
+        ),
+        MouseScrollDelta::LineDelta(x, y) => (-x * WHEEL_LINE_CSS_PX, -y * WHEEL_LINE_CSS_PX),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
     reason = "stylo and layout use f32 CSS coordinates; winit's finite display scale and the \
               16384px target cap are far inside f32's useful range"
 )]
@@ -491,4 +494,24 @@ fn viewport_metrics(size: PhysicalSize<u32>, scale_factor: f64) -> (f32, f32, f3
         (f64::from(size.height) / scale_factor) as f32,
         scale_factor as f32,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_deltas_are_normalized_to_css_pixels() {
+        assert_eq!(
+            wheel_delta_css(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(20.0, -10.0)),
+                2.0,
+            ),
+            (-10.0, 5.0)
+        );
+        assert_eq!(
+            wheel_delta_css(MouseScrollDelta::LineDelta(2.0, -3.0), 2.0),
+            (-80.0, 120.0)
+        );
+    }
 }

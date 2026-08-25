@@ -104,15 +104,6 @@ pub enum PointerPhase {
     Cancel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
-pub enum DeltaMode {
-    #[default]
-    Pixel,
-    Line,
-    Page,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum InputKind {
@@ -122,8 +113,9 @@ pub enum InputKind {
         phase: PointerPhase,
     },
     Wheel {
+        /// Scroll delta in viewport CSS pixels. Embedders must normalize any
+        /// platform-specific physical-pixel, line, or page units first.
         delta: Vector2D<f32>,
-        mode: DeltaMode,
     },
 }
 
@@ -156,24 +148,17 @@ impl InputEvent {
         }
     }
 
-    /// A wheel event at `position` with a pixel `delta` — the common case.
-    /// Use [`Self::wheel_with_mode`] for line- or page-quantized wheels.
+    /// A wheel event at `position` with `delta` in viewport CSS pixels.
+    ///
+    /// The embedder owns conversion from platform-specific physical-pixel,
+    /// line, or page units; the runtime input protocol has one coordinate
+    /// vocabulary only.
     #[must_use]
     pub fn wheel(position: impl Into<Point2D<f32>>, delta: impl Into<Vector2D<f32>>) -> Self {
-        Self::wheel_with_mode(position, delta, DeltaMode::Pixel)
-    }
-
-    #[must_use]
-    pub fn wheel_with_mode(
-        position: impl Into<Point2D<f32>>,
-        delta: impl Into<Vector2D<f32>>,
-        mode: DeltaMode,
-    ) -> Self {
         Self {
             position: position.into(),
             kind: InputKind::Wheel {
                 delta: delta.into(),
-                mode,
             },
             default_prevented: false,
         }
@@ -193,7 +178,7 @@ impl InputEvent {
         let position = self.position.x.is_finite() && self.position.y.is_finite();
         let payload = match self.kind {
             InputKind::Pointer { .. } => true,
-            InputKind::Wheel { delta, .. } => delta.x.is_finite() && delta.y.is_finite(),
+            InputKind::Wheel { delta } => delta.x.is_finite() && delta.y.is_finite(),
         };
         position && payload
     }

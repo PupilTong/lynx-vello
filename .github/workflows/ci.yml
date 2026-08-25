@@ -196,7 +196,7 @@ jobs:
           shared-key: linux-cli
 
       - name: Clippy
-        run: cargo clippy -p bobcat-cli --all-targets -- -D warnings
+        run: cargo clippy -p bobcat-cli --all-targets --no-deps -- -D warnings
 
   element-papi:
     name: Element PAPI runtime tests (Ubuntu)

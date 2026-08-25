@@ -72,7 +72,8 @@ pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::FrameClock;
 use crate::gesture::{EmitEvent, GestureRouter, InputDecision, RouterHost};
-use crate::script::ScriptError;
+use crate::runtime::MainThreadError;
+use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::style::PreparsedStyleSheet;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
@@ -165,37 +166,20 @@ pub fn configure_wasm_workers(
         })
 }
 
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ScriptRunError {
-    #[error("could not initialize the main-thread runtime: {0}")]
-    Initialization(#[source] crate::script::ScriptError),
-    #[error("main-thread module failed: {0}")]
-    Script(#[source] crate::script::ScriptError),
-    #[error("could not initialize the script thread: {0}")]
-    Platform(String),
-}
-
-/// A message crossing from an engine-owned thread.
-enum EngineMessage {
-    /// The entry MTS module and Bobcat boot completed (or failed) on their thread.
-    ScriptDone(Result<(), ScriptRunError>),
-    /// A listener failed while an event was being delivered.
-    ListenerFailed(ScriptError),
-}
-
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    ScriptFinished(Result<(), ScriptRunError>),
+    /// The entry MTS module and Bobcat boot completed successfully.
+    ScriptFinished,
+    /// The script runtime failed fatally during boot or later owner-thread work.
+    ScriptRunError(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ///
-    /// Reported rather than swallowed, and separate from
-    /// [`Self::ScriptFinished`] because it is not fatal: the walk goes on, the
-    /// realm stays usable, and every later event is delivered as normal. An
-    /// embedder that logs it gets the same visibility over its own handlers
-    /// that it has over its entry module; one that ignores it loses nothing
-    /// but the message.
+    /// Reported rather than swallowed, and separate from [`Self::ScriptRunError`]
+    /// because it is not fatal: the walk goes on, the realm stays usable, and
+    /// every later event is delivered as normal. An embedder that logs it gets
+    /// the same visibility over its own handlers that it has over its entry
+    /// module; one that ignores it loses nothing but the message.
     ListenerFailed(ScriptError),
 }
 
@@ -270,13 +254,13 @@ where
 
 #[derive(Clone)]
 struct EngineEventSender {
-    sender: mpsc::Sender<EngineMessage>,
+    sender: mpsc::Sender<EngineEvent>,
     requester: Arc<dyn EventRequester>,
 }
 
 impl EngineEventSender {
-    fn send(&self, message: EngineMessage) {
-        if self.sender.send(message).is_ok() {
+    fn send(&self, event: EngineEvent) {
+        if self.sender.send(event).is_ok() {
             // Enqueue first: after this wakeup, pump must be able to observe
             // the event without a polling race.
             self.requester.request_event();
@@ -503,12 +487,6 @@ impl RouterHost for EngineRouterHost<'_> {
         self.tree.get(node).is_some()
     }
 
-    fn scrollport_size(&self, node: dom::NodeId) -> Option<(f32, f32)> {
-        self.tree
-            .scroll_box(node)
-            .map(|scroll_box| (scroll_box.scrollport.width, scroll_box.scrollport.height))
-    }
-
     fn has_listener(&self, name: &str) -> bool {
         self.listener_names.contains(name)
     }
@@ -547,7 +525,7 @@ pub(crate) struct Engine<'window, W: Window> {
     script_owner_available: bool,
     viewport: Viewport,
     frame_size: FrameSize,
-    messages: mpsc::Receiver<EngineMessage>,
+    messages: mpsc::Receiver<EngineEvent>,
     event_sender: EngineEventSender,
     output: Output<'window>,
     /// The window's frame-request handle, behind `Arc` so the Lynx main
@@ -967,18 +945,7 @@ impl<'window, W: Window> Engine<'window, W> {
 
     /// Drains lifecycle messages from engine-owned threads.
     pub(crate) fn pump(&mut self) -> Vec<EngineEvent> {
-        let mut events = Vec::new();
-        while let Ok(message) = self.messages.try_recv() {
-            match message {
-                EngineMessage::ListenerFailed(error) => {
-                    events.push(EngineEvent::ListenerFailed(error));
-                }
-                EngineMessage::ScriptDone(result) => {
-                    events.push(EngineEvent::ScriptFinished(result));
-                }
-            }
-        }
-        events
+        self.messages.try_iter().collect()
     }
 
     /// Attaches an offscreen GPU target.
@@ -1217,36 +1184,32 @@ impl<'window, W: Window> Engine<'window, W> {
                 set_script_panic_reporter(Some(events.clone()));
                 let on_flush = Arc::clone(&frame_requesters);
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    (|| {
-                        let mut runtime = crate::runtime::MainThreadRuntime::new(
-                            elements,
-                            listener_names,
-                            move || {
-                                request_current_frame(&on_flush);
-                            },
-                        )
-                        .map_err(|error| {
-                            ScriptRunError::Initialization(error.into_script_error())
-                        })?;
-                        runtime
-                            .run_main_thread_script(&source, &source_name)
-                            .map_err(|error| ScriptRunError::Script(error.into_script_error()))?;
-                        Ok(runtime)
-                    })()
+                    let mut runtime = crate::runtime::MainThreadRuntime::new(
+                        elements,
+                        listener_names,
+                        move || {
+                            request_current_frame(&on_flush);
+                        },
+                    )
+                    .map_err(MainThreadError::into_script_error)?;
+                    runtime
+                        .run_main_thread_script(&source, &source_name)
+                        .map_err(MainThreadError::into_script_error)?;
+                    Ok(runtime)
                 }))
                 .unwrap_or_else(|payload| {
-                    Err(ScriptRunError::Platform(format!(
+                    Err(platform_script_error(format!(
                         "the script realm panicked: {}",
                         panic_payload(payload.as_ref())
                     )))
                 });
                 let runtime = match result {
                     Ok(runtime) => {
-                        events.send(EngineMessage::ScriptDone(Ok(())));
+                        events.send(EngineEvent::ScriptFinished);
                         Some(runtime)
                     }
                     Err(error) => {
-                        events.send(EngineMessage::ScriptDone(Err(error)));
+                        events.send(EngineEvent::ScriptRunError(error));
                         None
                     }
                 };
@@ -1305,7 +1268,7 @@ fn serve_script_commands<F: FrameRequester>(
                     // any of them ran — so nothing else will notice.
                     Ok(Ok(true)) => request_current_frame(frames),
                     Ok(Err(error)) => {
-                        events.send(EngineMessage::ListenerFailed(error.into_script_error()));
+                        events.send(EngineEvent::ListenerFailed(error.into_script_error()));
                     }
                     // A panic is already the crate's unspecified-state
                     // contract, and the unwind carries no `ScriptError` to
@@ -1338,11 +1301,9 @@ fn install_script_panic_hook() {
                     let location = info
                         .location()
                         .map_or_else(String::new, |location| format!(" at {location}"));
-                    reporter.send(EngineMessage::ScriptDone(Err(ScriptRunError::Platform(
-                        format!(
-                            "the script Worker aborted after a panic{location}: {}",
-                            panic_payload(info.payload())
-                        ),
+                    reporter.send(EngineEvent::ScriptRunError(platform_script_error(format!(
+                        "the script Worker aborted after a panic{location}: {}",
+                        panic_payload(info.payload())
                     ))));
                 }
             });
@@ -1354,6 +1315,18 @@ fn install_script_panic_hook() {
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 fn set_script_panic_reporter(reporter: Option<EngineEventSender>) {
     WASM_SCRIPT_PANIC_REPORTER.with(|slot| *slot.borrow_mut() = reporter);
+}
+
+fn platform_script_error(message: String) -> ScriptError {
+    ScriptError {
+        // A panic ends this runtime rather than reporting an ordinary script
+        // exception. The abort hook cannot identify the active VM boundary,
+        // so `Execute` denotes owner-thread execution generally.
+        kind: ScriptErrorKind::Other,
+        phase: ScriptErrorPhase::Execute,
+        message: Arc::from(message),
+        location: None,
+    }
 }
 
 fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
@@ -1686,12 +1659,14 @@ mod tests {
         let finished = engine
             .pump()
             .into_iter()
-            .find_map(|event| match event {
-                EngineEvent::ScriptFinished(result) => Some(result),
-                EngineEvent::ListenerFailed(_) => None,
+            .find(|event| {
+                matches!(
+                    event,
+                    EngineEvent::ScriptFinished | EngineEvent::ScriptRunError(_)
+                )
             })
             .expect("the event must be enqueued before the wakeup");
-        finished.expect("the script must boot");
+        assert!(matches!(finished, EngineEvent::ScriptFinished));
 
         let elements = engine.elements();
         let page = elements.document_element().id();
@@ -1744,9 +1719,11 @@ mod event_loop_tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if engine.pump().into_iter().any(|event| {
-                matches!(event, crate::EngineEvent::ScriptFinished(result) if result.is_ok())
-            }) {
+            if engine
+                .pump()
+                .into_iter()
+                .any(|event| matches!(event, crate::EngineEvent::ScriptFinished))
+            {
                 return engine;
             }
             assert!(Instant::now() < deadline, "the entry module did not finish");

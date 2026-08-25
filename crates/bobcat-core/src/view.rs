@@ -14,20 +14,11 @@ use crate::engine::{
 };
 use crate::input::InputEvent;
 use crate::resource::{
-    BufferedResourceRequest, CachePolicy, CancellationToken, RequestContext, RequestId,
-    ResolveRequest, ResourceDescriptor, ResourceError, ResourceErrorKind, ResourceErrorPhase,
-    ResourceFetcher, ResourceHints, ResourceKind, ResourceLocator, ResourcePriority,
-    ResourceRequest, RetryAdvice, StyleSheetPayload,
+    BufferedResourceRequest, CachePolicy, RequestContext, RequestId, ResolveRequest,
+    ResourceDescriptor, ResourceFetcher, ResourceHints, ResourceLocator, ResourcePriority,
+    ResourceRequest, StyleSheetPayload,
 };
 use crate::tree::PageConfig;
-
-/// Names a resource kind in a message a host reads.
-fn cancelled_what(kind: &ResourceKind) -> &'static str {
-    match kind {
-        ResourceKind::StyleSheet => "stylesheet",
-        _ => "script",
-    }
-}
 
 const MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STYLE_SHEET_BYTES: u64 = 16 * 1024 * 1024;
@@ -101,100 +92,26 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// Fetches a UTF-8 entry MTS module through the injected resource provider
     /// and boots it on the engine-owned Lynx main thread.
     ///
-    /// Completion is reported through [`EngineEvent::ScriptFinished`].
+    /// Completion is reported through [`EngineEvent::ScriptFinished`] or
+    /// [`EngineEvent::ScriptRunError`].
     /// The resolved URL is the module specifier imported by Bobcat's ESM boot
     /// module. A view currently accepts one entry module; a second call is
     /// rejected.
     pub async fn execute_script(&mut self, url: &str) -> Result<(), LynxViewError> {
-        self.execute_script_with_cancellation(url, CancellationToken::new())
-            .await
-    }
-
-    /// Fetches and starts an entry MTS module with host-controlled cancellation.
-    ///
-    /// Dropping the returned future cancels `cancellation`; retain a clone to
-    /// cancel it from another task. The same token is carried in every
-    /// [`RequestContext`] passed to the resource provider.
-    pub async fn execute_script_with_cancellation(
-        &mut self,
-        url: &str,
-        cancellation: CancellationToken,
-    ) -> Result<(), LynxViewError> {
-        let cancellation_guard = cancellation.clone().drop_guard();
-        let result = self.execute_script_inner(url, cancellation).await;
-        cancellation_guard.disarm();
-        result
-    }
-
-    async fn execute_script_inner(
-        &mut self,
-        url: &str,
-        cancellation: CancellationToken,
-    ) -> Result<(), LynxViewError> {
         if self.script_started {
             return Err(EngineError::ScriptAlreadyStarted.into());
         }
-        let (request, source_name) = self
-            .resolve_for_fetch(
-                url,
-                ResourceKind::ExternalJs,
-                MAX_SCRIPT_BYTES,
-                &cancellation,
-            )
-            .await?;
-        let request_id = request.request.context.id;
-        let response = cancellation
-            .run_until_cancelled(self.resource_fetcher.fetch_resource(request))
-            .await;
-        if cancellation.is_cancelled() || response.is_none() {
-            return Err(Self::cancelled_resource_error(
-                request_id,
-                &ResourceKind::ExternalJs,
-                ResourceErrorPhase::ReadBody,
-                Arc::from(source_name.as_str()),
-            )
-            .into());
-        }
-        let response = response.expect("checked above")?;
+        let (request, source_name) = self.resolve_for_fetch(url, MAX_SCRIPT_BYTES).await?;
+        let response = self.resource_fetcher.fetch_resource(request).await?;
         let source = str::from_utf8(&response.bytes).map_err(|error| {
             LynxViewError::InvalidScriptEncoding {
                 url: source_name.clone(),
                 message: error.to_string(),
             }
         })?;
-        if cancellation.is_cancelled() {
-            return Err(Self::cancelled_resource_error(
-                request_id,
-                &ResourceKind::ExternalJs,
-                ResourceErrorPhase::ReadBody,
-                Arc::from(source_name.as_str()),
-            )
-            .into());
-        }
         self.engine.spawn_script(source.to_owned(), source_name)?;
         self.script_started = true;
         Ok(())
-    }
-
-    fn cancelled_resource_error(
-        request_id: RequestId,
-        kind: &ResourceKind,
-        phase: ResourceErrorPhase,
-        locator: Arc<str>,
-    ) -> ResourceError {
-        ResourceError {
-            request_id: Some(request_id),
-            kind: ResourceErrorKind::Cancelled,
-            phase,
-            locator: Some(locator),
-            status: None,
-            message: format!(
-                "the {} resource request was cancelled",
-                cancelled_what(kind)
-            )
-            .into(),
-            retry: RetryAdvice::Never,
-        }
     }
 
     /// Registers owned font bytes with the private text engine.
@@ -282,59 +199,8 @@ impl<'window, W: Window> LynxView<'window, W> {
     ///
     /// Mount order is cascade order: sheets loaded later win ties.
     pub async fn load_style_sheet(&mut self, url: &str) -> Result<(), LynxViewError> {
-        self.load_style_sheet_with_cancellation(url, CancellationToken::new())
-            .await
-    }
-
-    /// Loads an author stylesheet with host-controlled cancellation.
-    ///
-    /// Dropping the returned future cancels `cancellation`, the same way
-    /// [`Self::execute_script_with_cancellation`] does.
-    pub async fn load_style_sheet_with_cancellation(
-        &mut self,
-        url: &str,
-        cancellation: CancellationToken,
-    ) -> Result<(), LynxViewError> {
-        let cancellation_guard = cancellation.clone().drop_guard();
-        let result = self.load_style_sheet_inner(url, cancellation).await;
-        cancellation_guard.disarm();
-        result
-    }
-
-    async fn load_style_sheet_inner(
-        &mut self,
-        url: &str,
-        cancellation: CancellationToken,
-    ) -> Result<(), LynxViewError> {
-        let (request, source_name) = self
-            .resolve_for_fetch(
-                url,
-                ResourceKind::StyleSheet,
-                MAX_STYLE_SHEET_BYTES,
-                &cancellation,
-            )
-            .await?;
-        let request_id = request.request.context.id;
-        let cancelled = || {
-            LynxViewError::from(Self::cancelled_resource_error(
-                request_id,
-                &ResourceKind::StyleSheet,
-                ResourceErrorPhase::ReadBody,
-                Arc::from(source_name.as_str()),
-            ))
-        };
-        let response = cancellation
-            .run_until_cancelled(self.resource_fetcher.fetch_style_sheet(request))
-            .await;
-        if cancellation.is_cancelled() || response.is_none() {
-            return Err(cancelled());
-        }
-        let response = response.expect("checked above")?;
-        // A sheet cancelled after its bytes arrived must not still mount, the
-        // same way a cancelled script does not still start.
-        if cancellation.is_cancelled() {
-            return Err(cancelled());
-        }
+        let (request, source_name) = self.resolve_for_fetch(url, MAX_STYLE_SHEET_BYTES).await?;
+        let response = self.resource_fetcher.fetch_style_sheet(request).await?;
         match &response.payload {
             StyleSheetPayload::Preparsed(sheet) => self.engine.add_preparsed_style_sheet(sheet)?,
             StyleSheetPayload::Text(bytes) => {
@@ -355,37 +221,24 @@ impl<'window, W: Window> LynxView<'window, W> {
     async fn resolve_for_fetch(
         &mut self,
         url: &str,
-        kind: ResourceKind,
         max_bytes: u64,
-        cancellation: &CancellationToken,
     ) -> Result<(BufferedResourceRequest, String), LynxViewError> {
-        let context = self.next_request_context(cancellation.clone());
-        let original_locator: Arc<str> = Arc::from(url);
+        let context = self.next_request_context();
         let descriptor = ResourceDescriptor {
             locator: ResourceLocator {
-                specifier: Arc::clone(&original_locator),
+                specifier: Arc::from(url),
                 base_url: None,
             },
-            kind,
             hints: ResourceHints::None,
         };
-        let resolved = cancellation
-            .run_until_cancelled(self.resource_fetcher.resolve_locator(ResolveRequest {
+        let resolved = self
+            .resource_fetcher
+            .resolve_locator(ResolveRequest {
                 context: context.clone(),
-                resource: descriptor.clone(),
+                resource: descriptor,
                 percent_decode: false,
-            }))
-            .await;
-        if cancellation.is_cancelled() || resolved.is_none() {
-            return Err(Self::cancelled_resource_error(
-                context.id,
-                &descriptor.kind,
-                ResourceErrorPhase::Resolve,
-                original_locator,
-            )
-            .into());
-        }
-        let resolved = resolved.expect("checked above")?;
+            })
+            .await?;
         let source_name = resolved.url.to_string();
         Ok((
             BufferedResourceRequest {
@@ -452,7 +305,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         self.engine.is_animating()
     }
 
-    fn next_request_context(&mut self, cancellation: CancellationToken) -> RequestContext {
+    fn next_request_context(&mut self) -> RequestContext {
         let sequence = self.next_request_sequence;
         self.next_request_sequence = self
             .next_request_sequence
@@ -463,7 +316,6 @@ impl<'window, W: Window> LynxView<'window, W> {
                 namespace: self.request_namespace,
                 sequence,
             },
-            cancellation,
             priority: ResourcePriority::Critical,
         }
     }

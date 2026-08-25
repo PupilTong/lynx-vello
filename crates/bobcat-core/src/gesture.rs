@@ -20,11 +20,11 @@
 //!   beside them.
 //! - **User-agent scrolling.** The drag recognizer (touch/pen, latched at the down on the nearest
 //!   user-scrollable, 8px slop with the slop subtracted from the first movement, per-pointer
-//!   independent) and wheel scrolling (per-event nearest scrollable filtered by the delta's axes,
-//!   line/page delta modes resolved against the scroller). Both were `dom`'s default action; the
-//!   engine now routes with `default_prevented` set so `dom` performs none, and this router is the
-//!   one decision point. The scroll *primitives* (`scroll_chain`'s remainder chaining, clamping,
-//!   the containing-block walk) stay in `dom`.
+//!   independent) and wheel scrolling (per-event nearest scrollable filtered by the CSS-pixel
+//!   delta's axes). Both were `dom`'s default action; the engine now routes with
+//!   `default_prevented` set so `dom` performs none, and this router is the one decision point. The
+//!   scroll *primitives* (`scroll_chain`'s remainder chaining, clamping, the containing-block walk)
+//!   stay in `dom`.
 //! - **Gesture synthesis** per the 2026-08-21 ruling (recorded in `docs/tracking/deviations.md`):
 //!   `tap` fires at release, targeted at the down-routed node, unless the sequence travelled past
 //!   the 50px radial [`TAP_SLOP`], the drag recognizer's scroll consumed (reported back by the
@@ -46,7 +46,7 @@
 //! follow-ups. Scroll *events* (`scroll`/`scrolltolower`…) are component
 //! events above this layer.
 
-use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerPhase};
+use dom::input::{InputEvent, InputKind, PointerId, PointerPhase};
 use dom::scroll::ScrollAxes;
 use dom::{NodeId, Point2D, Vector2D};
 
@@ -68,9 +68,6 @@ pub(crate) const LONG_PRESS_MOVE_SLOP: f32 = 8.0;
 /// How far a touch/pen drag travels before it starts scrolling, in viewport
 /// CSS px. The first movement subtracts the slop instead of jumping.
 pub(crate) const DRAG_SLOP: f32 = 8.0;
-
-/// How many CSS px one wheel "line" scrolls ([`DeltaMode::Line`]).
-pub(crate) const WHEEL_LINE_PX: f32 = 40.0;
 
 /// How long a pointer must stay down before `longpress` fires.
 ///
@@ -95,9 +92,6 @@ pub(crate) trait RouterHost {
     /// freed mid-gesture; its id is retired rather than reissued, so this is
     /// a plain liveness question and the drag simply ends.
     fn contains_node(&self, node: NodeId) -> bool;
-
-    /// The scroller's visible area, for resolving [`DeltaMode::Page`].
-    fn scrollport_size(&self, node: NodeId) -> Option<(f32, f32)>;
 
     /// Whether any listener for `name` exists anywhere in the document.
     fn has_listener(&self, name: &str) -> bool;
@@ -248,12 +242,12 @@ impl GestureRouter {
                 }
                 self.synthesize(event, target, id, phase, at, out);
             }
-            InputKind::Wheel { delta, mode } => {
+            InputKind::Wheel { delta } => {
                 let Some(target) = target else {
                     return;
                 };
                 if !event.default_prevented {
-                    Self::wheel_scroll(target, delta, mode, host, out);
+                    Self::wheel_scroll(target, delta, host, out);
                 }
                 out.push(InputDecision::Emit(EmitEvent {
                     name: "wheel",
@@ -375,12 +369,11 @@ impl GestureRouter {
     }
 
     /// The wheel half of the default action: per-event nearest scrollable on
-    /// the delta's axes, line/page modes resolved against that scroller.
-    /// Stateless — a wheel latches nothing.
+    /// the delta's axes. The embedder has already normalized the delta to
+    /// viewport CSS pixels. Stateless — a wheel latches nothing.
     fn wheel_scroll(
         target: NodeId,
         delta: Vector2D<f32>,
-        mode: DeltaMode,
         host: &impl RouterHost,
         out: &mut Vec<InputDecision>,
     ) {
@@ -391,22 +384,10 @@ impl GestureRouter {
         let Some(scroller) = host.nearest_user_scrollable(target, axes) else {
             return;
         };
-        let pixels = match mode {
-            DeltaMode::Line => delta * WHEEL_LINE_PX,
-            DeltaMode::Page => host
-                .scrollport_size(scroller)
-                .map_or(delta, |(width, height)| {
-                    Vector2D::new(delta.x * width, delta.y * height)
-                }),
-            // `Pixel` is already CSS px, and `DeltaMode` is
-            // `#[non_exhaustive]` — an unknown mode scrolls by its raw value
-            // rather than guessing a unit.
-            _ => delta,
-        };
         out.push(InputDecision::Scroll {
             pointer: None,
             from: scroller,
-            delta: pixels,
+            delta,
         });
     }
 
@@ -537,7 +518,6 @@ mod tests {
     struct MockHost {
         scroller: Option<NodeId>,
         live: bool,
-        scrollport: (f32, f32),
         longpress_bound: bool,
     }
 
@@ -546,7 +526,6 @@ mod tests {
             Self {
                 scroller: None,
                 live: true,
-                scrollport: (200.0, 200.0),
                 longpress_bound: true,
             }
         }
@@ -559,10 +538,6 @@ mod tests {
 
         fn contains_node(&self, _node: NodeId) -> bool {
             self.live
-        }
-
-        fn scrollport_size(&self, _node: NodeId) -> Option<(f32, f32)> {
-            Some(self.scrollport)
         }
 
         fn has_listener(&self, name: &str) -> bool {
@@ -942,38 +917,6 @@ mod tests {
                 format!("wheel@{}", target().to_bits()),
             ],
             "the default action precedes the dispatch"
-        );
-    }
-
-    #[test]
-    fn wheel_line_and_page_modes_resolve_against_the_scroller() {
-        let mut harness = Harness::new();
-        harness.host.scroller = Some(scroller());
-        harness.host.scrollport = (300.0, 500.0);
-        let line = InputEvent::wheel_with_mode(
-            Point2D::new(10.0, 10.0),
-            Vector2D::new(0.0, 2.0),
-            DeltaMode::Line,
-        );
-        let page = InputEvent::wheel_with_mode(
-            Point2D::new(10.0, 10.0),
-            Vector2D::new(0.0, 1.0),
-            DeltaMode::Page,
-        );
-        harness.feed(line, 0.0);
-        harness.feed(page, 0.1);
-        let scrolls: Vec<Vector2D<f32>> = harness
-            .out
-            .iter()
-            .filter_map(|decision| match decision {
-                InputDecision::Scroll { delta, .. } => Some(*delta),
-                InputDecision::Emit(_) => None,
-            })
-            .collect();
-        assert!((scrolls[0].y - 80.0).abs() < 1e-4, "2 lines × 40px");
-        assert!(
-            (scrolls[1].y - 500.0).abs() < 1e-4,
-            "1 page × scrollport height"
         );
     }
 

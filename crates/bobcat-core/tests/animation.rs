@@ -10,14 +10,14 @@
 mod support;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    EngineEvent, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe,
-    PreparsedRule, PreparsedStyleSheet, ScriptRunError,
+    OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
+    PreparsedStyleSheet,
 };
-use support::FetcherDouble;
+use support::{FetcherDouble, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main.js";
 const STYLE_URL: &str = "app:///author.css";
@@ -98,22 +98,8 @@ async fn booted() -> OffscreenLynxView {
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
-    wait_for_script(&mut view).await.expect("script execution");
+    wait_for_script(&mut view).expect("script execution");
     view
-}
-
-async fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptRunError> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        if let Some(result) = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptFinished(result) => Some(result),
-            _ => None,
-        }) {
-            return result;
-        }
-        assert!(Instant::now() < deadline, "script thread did not finish");
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
 }
 
 /// The x of the leftmost red pixel in the committed frame.

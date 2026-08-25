@@ -72,7 +72,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
             match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(HostEvent::Command(command)) => Some(command),
                 Ok(HostEvent::Pump) => {
-                    if !script.is_finished() && check_script(&mut view, &program.input)? {
+                    if check_script(&mut view, &program.input)? {
                         script.finish();
                     }
                     None
@@ -88,7 +88,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
             match receiver.recv() {
                 Ok(HostEvent::Command(command)) => Some(command),
                 Ok(HostEvent::Pump) => {
-                    if !script.is_finished() && check_script(&mut view, &program.input)? {
+                    if check_script(&mut view, &program.input)? {
                         script.finish();
                     }
                     None
@@ -170,8 +170,8 @@ fn check_script(view: &mut OffscreenLynxView, input: &str) -> Result<bool, CliEr
     let mut finished = false;
     for event in view.pump() {
         match event {
-            EngineEvent::ScriptFinished(Ok(())) => finished = true,
-            EngineEvent::ScriptFinished(Err(source)) => {
+            EngineEvent::ScriptFinished => finished = true,
+            EngineEvent::ScriptRunError(source) => {
                 return Err(CliError::Script {
                     input: input.to_owned(),
                     source,
@@ -181,7 +181,7 @@ fn check_script(view: &mut OffscreenLynxView, input: &str) -> Result<bool, CliEr
             // this is reported the way a browser console reports one rather
             // than by stopping the run.
             EngineEvent::ListenerFailed(error) => {
-                eprintln!("event listener failed: {}", error.message);
+                eprintln!("event listener failed: {error}");
             }
             _ => {}
         }
@@ -202,10 +202,6 @@ struct ScriptGate {
 }
 
 impl ScriptGate {
-    const fn is_finished(&self) -> bool {
-        self.finished
-    }
-
     fn finish(&mut self) {
         self.finished = true;
     }

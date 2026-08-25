@@ -35,7 +35,8 @@ const INLINE_DELIVERIES: usize = 8;
 
 const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
-const RUNTIME_MODULE_SOURCE: &str = include_str!("main-thread-runtime.mjs");
+const RUNTIME_MODULE_SOURCE: &str =
+    include_str!("../../../packages/bobcat-element/src/main-thread-runtime.mjs");
 
 pub(crate) const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
@@ -100,23 +101,15 @@ impl MainThreadError {
         Self { context, source }
     }
 
-    pub(crate) fn into_script_error(self) -> ScriptError {
+    pub(crate) fn into_script_error(mut self) -> ScriptError {
+        self.source.message = Arc::from(format!("{}: {}", self.context, self.source.message));
         self.source
     }
 }
 
 impl fmt::Display for MainThreadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}: {}", self.context, self.source.message)?;
-        if let Some(location) = &self.source.location {
-            let source = location.source.as_deref().unwrap_or("<unknown>");
-            match (location.line, location.column) {
-                (Some(line), Some(column)) => write!(formatter, " (at {source}:{line}:{column})")?,
-                (Some(line), None) => write!(formatter, " (at {source}:{line})")?,
-                _ => write!(formatter, " (at {source})")?,
-            }
-        }
-        Ok(())
+        write!(formatter, "{}: {}", self.context, self.source)
     }
 }
 

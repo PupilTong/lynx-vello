@@ -6,6 +6,7 @@ let resettingNativeView = false
 let initialized = false
 let entryScriptStarted = false
 let scriptCompletion
+let engineEventGeneration = 0
 let requestQueue = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
@@ -190,11 +191,25 @@ async function waitForScriptCompletion() {
   }
 }
 
+async function reportPostBootEvents(generation) {
+  const isCurrent = () =>
+    running && renderer !== undefined && generation === engineEventGeneration
+  while (isCurrent()) {
+    await renderer.waitForEngineEvent()
+    if (isCurrent()) {
+      renderer.pollScript()
+    }
+  }
+}
+
 function trackScriptCompletion(request) {
   const completion = waitForScriptCompletion()
   scriptCompletion = completion
   void completion.then(
-    () => postResponse(request, true),
+    () => {
+      postResponse(request, true)
+      void reportPostBootEvents(engineEventGeneration).catch(reportFatal)
+    },
     (error) => postResponse(request, false, error),
   )
 }
@@ -260,6 +275,7 @@ async function dispatchRequest(message) {
       }
       entryScriptStarted = false
       scriptCompletion = undefined
+      engineEventGeneration += 1
       resettingNativeView = true
       try {
         await renderer.reset()

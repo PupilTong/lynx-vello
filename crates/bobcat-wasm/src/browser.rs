@@ -12,8 +12,8 @@ use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
     BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
     ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
-    ResourceFetcher, ResourceFuture, ResourceKind, ResourceLocality, ResourceMetadata,
-    ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
+    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
@@ -25,6 +25,12 @@ use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
 use web_sys::OffscreenCanvas;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(value: &JsValue);
+}
 
 const MAX_RENDER_DIMENSION: f64 = 16_384.0;
 const MAX_STYLE_THREADS: u32 = 6;
@@ -146,69 +152,49 @@ type BrowserResourceRegistry = Mutex<HashMap<String, Arc<[u8]>>>;
 
 #[derive(Debug, Default)]
 struct BrowserResources {
-    scripts: BrowserResourceRegistry,
-    style_sheets: BrowserResourceRegistry,
+    resources: BrowserResourceRegistry,
 }
 
 impl BrowserResources {
     fn clear(&self) {
-        self.scripts
+        self.resources
             .lock()
-            .unwrap_or_else(|error| panic!("the browser script map is poisoned: {error}"))
-            .clear();
-        self.style_sheets
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser stylesheet map is poisoned: {error}"))
+            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
             .clear();
     }
 
     fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
-        Self::register(&self.scripts, "script", url, bytes)
+        self.register("script", url, bytes)
     }
 
     fn register_style_sheet(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
-        Self::register(&self.style_sheets, "stylesheet", url, bytes)
+        self.register("stylesheet", url, bytes)
     }
 
-    fn register(
-        registry: &BrowserResourceRegistry,
-        kind: &str,
-        url: &str,
-        bytes: Vec<u8>,
-    ) -> Result<String, JsValue> {
+    fn register(&self, label: &str, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
         let url = Url::parse(url)
-            .map_err(|error| js_error(format!("the {kind} URL `{url}` is invalid: {error}")))?;
+            .map_err(|error| js_error(format!("the {label} URL `{url}` is invalid: {error}")))?;
         let normalized = url.to_string();
-        registry
+        self.resources
             .lock()
             .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
             .insert(normalized.clone(), Arc::from(bytes));
         Ok(normalized)
     }
 
-    /// How a request of this kind is named in a message a host reads.
-    fn label(kind: &ResourceKind) -> &'static str {
-        match kind {
-            ResourceKind::StyleSheet => "stylesheet",
-            _ => "script",
-        }
+    fn contains_url(&self, url: &Url) -> bool {
+        self.resources
+            .lock()
+            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+            .contains_key(url.as_str())
     }
 
-    /// The media type a response of this kind is stamped with.
-    fn media_type(kind: &ResourceKind) -> &'static str {
-        match kind {
-            ResourceKind::StyleSheet => "text/css; charset=utf-8",
-            _ => "text/javascript; charset=utf-8",
-        }
-    }
-
-    /// The registry a request of this kind is answered from.
-    fn registry(&self, kind: &ResourceKind) -> Option<&BrowserResourceRegistry> {
-        match kind {
-            ResourceKind::ExternalJs => Some(&self.scripts),
-            ResourceKind::StyleSheet => Some(&self.style_sheets),
-            _ => None,
-        }
+    fn registered_bytes(&self, url: &Url) -> Option<Arc<[u8]>> {
+        self.resources
+            .lock()
+            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+            .get(url.as_str())
+            .cloned()
     }
 
     fn error<T>(
@@ -254,25 +240,6 @@ impl ResourceFetcher for BrowserResources {
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         let request_id = request.context.id;
         let locator = request.resource.locator.specifier.clone();
-        if request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "script resolution was cancelled",
-            );
-        }
-        let kind = request.resource.kind.clone();
-        let Some(registry) = self.registry(&kind) else {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::UnsupportedKind,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "the browser source registry only contains external scripts and stylesheets",
-            );
-        };
 
         let parsed = Url::parse(&locator).or_else(|_| {
             request
@@ -289,14 +256,10 @@ impl ResourceFetcher for BrowserResources {
                 ResourceErrorKind::InvalidUrl,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
-                format!("the {} locator is not a valid URL", Self::label(&kind)),
+                "resource locator is not a valid URL",
             );
         };
-        let present = registry
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .contains_key(url.as_str());
-        if !present {
+        if !self.contains_url(&url) {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
@@ -325,35 +288,14 @@ impl ResourceFetcher for BrowserResources {
     ) -> ResourceFuture<'_, ResourceResponse> {
         let request_id = request.request.context.id;
         let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        if request.request.context.cancellation.is_cancelled() {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::Cancelled,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "script loading was cancelled",
-            );
-        }
-
-        let kind = request.request.resource.resource.kind.clone();
-        let media_type = Self::media_type(&kind);
-        let source = self.registry(&kind).and_then(|registry| {
-            registry
-                .lock()
-                .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-                .get(request.request.resource.url.as_str())
-                .cloned()
-        });
+        let source = self.registered_bytes(&request.request.resource.url);
         let Some(source) = source else {
             return Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
-                format!(
-                    "the registered {} disappeared before it was loaded",
-                    Self::label(&kind)
-                ),
+                "the registered resource disappeared before it was loaded",
             );
         };
         let content_length = source.len() as u64;
@@ -363,10 +305,7 @@ impl ResourceFetcher for BrowserResources {
                 ResourceErrorKind::ResponseTooLarge,
                 ResourceErrorPhase::ReadBody,
                 Some(locator),
-                format!(
-                    "the registered {} exceeds Bobcat's buffered-resource limit",
-                    Self::label(&kind)
-                ),
+                "the registered resource exceeds Bobcat's buffered-resource limit",
             );
         }
 
@@ -378,7 +317,7 @@ impl ResourceFetcher for BrowserResources {
                     resource,
                     headers: HeaderMap::default(),
                     content_length: Some(content_length),
-                    media_type: Some(Arc::from(media_type)),
+                    media_type: None,
                     source: ResourceSource::MemoryCache,
                     cache_status: CacheStatus::default(),
                     timing: ResourceTiming::default(),
@@ -390,10 +329,6 @@ impl ResourceFetcher for BrowserResources {
 
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
-    }
-
-    fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()> {
-        Self::unsupported(Some(request_id), ResourceErrorPhase::Cancel)
     }
 }
 
@@ -528,6 +463,10 @@ impl BobcatRenderer {
         self.resources.clear();
         self.frames.take();
         self.events.take();
+        // Release the old page's post-boot waiter. The Render Worker advances
+        // its generation before calling reset, so it exits without pumping
+        // the replacement view.
+        self.events.request_event();
         self.script_finished = false;
 
         let mut view = create_browser_view(
@@ -699,11 +638,12 @@ impl BobcatRenderer {
     /// Drain script engine events independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
-        if !self.script_finished && self.events.take() {
+        if self.events.take() {
             for event in self.view_mut()?.pump() {
                 match event {
-                    EngineEvent::ScriptFinished(Ok(())) => self.script_finished = true,
-                    EngineEvent::ScriptFinished(Err(error)) => return Err(js_error(error)),
+                    EngineEvent::ScriptFinished => self.script_finished = true,
+                    EngineEvent::ScriptRunError(error) => return Err(js_error(error)),
+                    EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
                     _ => {}
                 }
             }
@@ -799,6 +739,7 @@ impl BobcatRenderer {
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;
+        self.events.request_event();
         drop(self.view.take());
     }
 }

@@ -10,7 +10,6 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use thiserror::Error;
 use tokio::io::AsyncRead;
-pub use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::style::PreparsedStyleSheet;
@@ -45,8 +44,6 @@ pub trait ResourceFetcher: Send + Sync + 'static {
     }
 
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse>;
-
-    fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()>;
 }
 
 /// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as
@@ -78,11 +75,10 @@ pub struct RequestId {
     pub sequence: u64,
 }
 
-/// Scheduling and cancellation state shared by every operation for a request.
+/// Scheduling state shared by every operation for a request.
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     pub id: RequestId,
-    pub cancellation: CancellationToken,
     pub priority: ResourcePriority,
 }
 
@@ -93,37 +89,10 @@ pub struct ResourceLocator {
     pub base_url: Option<Url>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceKind {
-    Generic,
-    Image,
-    Font,
-    Lottie,
-    Audio,
-    Video,
-    Svg,
-    StyleSheet,
-    Template,
-    LazyBundle,
-    Frame,
-    SsrData,
-    LynxCoreJs,
-    ExternalJs,
-    ExternalBytecode,
-    Asset,
-    I18nText,
-    Graphics,
-    Theme,
-    Fetch,
-    Other(Arc<str>),
-}
-
-/// A locator plus its semantic category and transport-selection hints.
+/// A locator plus transport-selection hints.
 #[derive(Clone, Debug)]
 pub struct ResourceDescriptor {
     pub locator: ResourceLocator,
-    pub kind: ResourceKind,
     pub hints: ResourceHints,
 }
 
@@ -419,11 +388,9 @@ pub struct ResourceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ResourceErrorKind {
-    Cancelled,
     InvalidRequest,
     InvalidUrl,
     UnsupportedScheme,
-    UnsupportedKind,
     UnsupportedOperation,
     NotFound,
     PermissionDenied,
@@ -452,7 +419,6 @@ pub enum ResourceErrorPhase {
     SendRequest,
     ReceiveHeaders,
     ReadBody,
-    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
