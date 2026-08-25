@@ -80,48 +80,13 @@ pub struct RequestContext {
 }
 
 /// Relative or absolute resource input before host resolution.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceLocator {
+#[derive(Clone, Debug)]
+pub struct ResourceDescriptor {
     pub specifier: Arc<str>,
     pub base_url: Option<Url>,
 }
 
-/// A locator plus transport-selection hints.
-#[derive(Clone, Debug)]
-pub struct ResourceDescriptor {
-    pub locator: ResourceLocator,
-    pub hints: ResourceHints,
-}
-
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub enum ResourceHints {
-    #[default]
-    None,
-    Bundle(BundleHints),
-    Media(MediaHints),
-}
-
-/// Template/build-artifact selection hints.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BundleHints {
-    pub entry_name: Option<Arc<str>>,
-}
-
-/// Streaming-media selection hints.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MediaHints {
-    pub byte_range: Option<ByteRange>,
-}
-
-/// An inclusive byte range; `end = None` means through end-of-resource.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ByteRange {
-    pub start: u64,
-    pub end: Option<u64>,
-}
-
-/// Input for resolving a resource locator before loading it.
+/// Input for resolving a resource descriptor before loading it.
 #[derive(Clone, Debug)]
 pub struct ResolveRequest {
     pub context: RequestContext,

@@ -15,7 +15,7 @@ use crate::engine::{
 use crate::input::InputEvent;
 use crate::resource::{
     CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
-    ResourceHints, ResourceLocator, ResourcePriority, ResourceRequest, StyleSheetPayload,
+    ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
 use crate::tree::PageConfig;
 
@@ -221,11 +221,8 @@ impl<'window, W: Window> LynxView<'window, W> {
     ) -> Result<(ResourceRequest, String), LynxViewError> {
         let context = self.next_request_context();
         let descriptor = ResourceDescriptor {
-            locator: ResourceLocator {
-                specifier: Arc::from(url),
-                base_url: None,
-            },
-            hints: ResourceHints::None,
+            specifier: Arc::from(url),
+            base_url: None,
         };
         let resolved = self
             .resource_fetcher

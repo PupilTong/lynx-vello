@@ -160,17 +160,13 @@ impl ResourceFetcher for FetcherDouble {
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
         Box::pin(async move {
-            let text = override_url.unwrap_or_else(|| {
-                format!(
-                    "https://example.test/{}",
-                    request.resource.locator.specifier
-                )
-            });
+            let text = override_url
+                .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
             let url = Url::parse(&text).map_err(|error| ResourceError {
                 request_id: Some(request.context.id),
                 kind: ResourceErrorKind::InvalidUrl,
                 phase: ResourceErrorPhase::Resolve,
-                locator: Some(request.resource.locator.specifier.clone()),
+                locator: Some(request.resource.specifier.clone()),
                 status: None,
                 message: error.to_string().into(),
                 retry: RetryAdvice::Never,

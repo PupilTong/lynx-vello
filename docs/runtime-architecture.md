@@ -123,11 +123,11 @@ engine enqueues every event before invoking the construction-time
 resolves and fetches through the same `ResourceFetcher`, which answers with
 either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
 the result as author-origin rules. Load order is cascade order. Requests carry
-a URL locator plus transport hints, not a semantic resource kind. The embedder
-locates bytes by normalized resolved URL; `fetch_style_sheet` selects the
-stylesheet payload contract, while other buffered loads use `fetch_resource`.
-`ResourceRequest` carries no response-size limit; each fetcher owns the memory
-bound for the response it materializes.
+a specifier plus its optional base URL, not a semantic resource kind or
+transport hints. The embedder locates bytes by normalized resolved URL;
+`fetch_style_sheet` selects the stylesheet payload contract. Other buffered
+loads use `fetch_resource`, and a `ResourceRequest` carries no response-size
+limit; each fetcher owns the memory bound for the response it materializes.
 
 ## Public and private boundaries
 

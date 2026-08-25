@@ -142,12 +142,11 @@ impl ResourceFetcher for ProgramResourceFetcher {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
         let request_id = request.context.id;
-        let locator = request.resource.locator.specifier.clone();
+        let locator = request.resource.specifier.clone();
 
         let resolved_url = Url::parse(&locator).or_else(|_| {
             request
                 .resource
-                .locator
                 .base_url
                 .as_ref()
                 .ok_or(url::ParseError::RelativeUrlWithoutBase)
