@@ -14,14 +14,11 @@ use crate::engine::{
 };
 use crate::input::InputEvent;
 use crate::resource::{
-    BufferedResourceRequest, CachePolicy, RequestContext, RequestId, ResolveRequest,
-    ResourceDescriptor, ResourceFetcher, ResourceHints, ResourceLocator, ResourcePriority,
-    ResourceRequest, StyleSheetPayload,
+    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
+    ResourceHints, ResourceLocator, ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
 use crate::tree::PageConfig;
 
-const MAX_SCRIPT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_STYLE_SHEET_BYTES: u64 = 16 * 1024 * 1024;
 static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 /// A running Lynx view.
@@ -101,7 +98,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         if self.script_started {
             return Err(EngineError::ScriptAlreadyStarted.into());
         }
-        let (request, source_name) = self.resolve_for_fetch(url, MAX_SCRIPT_BYTES).await?;
+        let (request, source_name) = self.resolve_for_fetch(url).await?;
         let response = self.resource_fetcher.fetch_resource(request).await?;
         let source = str::from_utf8(&response.bytes).map_err(|error| {
             LynxViewError::InvalidScriptEncoding {
@@ -199,7 +196,7 @@ impl<'window, W: Window> LynxView<'window, W> {
     ///
     /// Mount order is cascade order: sheets loaded later win ties.
     pub async fn load_style_sheet(&mut self, url: &str) -> Result<(), LynxViewError> {
-        let (request, source_name) = self.resolve_for_fetch(url, MAX_STYLE_SHEET_BYTES).await?;
+        let (request, source_name) = self.resolve_for_fetch(url).await?;
         let response = self.resource_fetcher.fetch_style_sheet(request).await?;
         match &response.payload {
             StyleSheetPayload::Preparsed(sheet) => self.engine.add_preparsed_style_sheet(sheet)?,
@@ -216,13 +213,12 @@ impl<'window, W: Window> LynxView<'window, W> {
         Ok(())
     }
 
-    /// Resolves a locator and builds the buffered request for it — the
-    /// prologue every URL-shaped load shares.
+    /// Resolves a locator and builds the request for it — the prologue every
+    /// URL-shaped load shares.
     async fn resolve_for_fetch(
         &mut self,
         url: &str,
-        max_bytes: u64,
-    ) -> Result<(BufferedResourceRequest, String), LynxViewError> {
+    ) -> Result<(ResourceRequest, String), LynxViewError> {
         let context = self.next_request_context();
         let descriptor = ResourceDescriptor {
             locator: ResourceLocator {
@@ -241,14 +237,11 @@ impl<'window, W: Window> LynxView<'window, W> {
             .await?;
         let source_name = resolved.url.to_string();
         Ok((
-            BufferedResourceRequest {
-                request: ResourceRequest {
-                    context,
-                    resource: resolved,
-                    headers: HeaderMap::new(),
-                    cache_policy: CachePolicy::Default,
-                },
-                max_bytes,
+            ResourceRequest {
+                context,
+                resource: resolved,
+                headers: HeaderMap::new(),
+                cache_policy: CachePolicy::Default,
             },
             source_name,
         ))

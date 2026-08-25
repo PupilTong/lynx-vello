@@ -126,6 +126,8 @@ the result as author-origin rules. Load order is cascade order. Requests carry
 a URL locator plus transport hints, not a semantic resource kind. The embedder
 locates bytes by normalized resolved URL; `fetch_style_sheet` selects the
 stylesheet payload contract, while other buffered loads use `fetch_resource`.
+`ResourceRequest` carries no response-size limit; each fetcher owns the memory
+bound for the response it materializes.
 
 ## Public and private boundaries
 

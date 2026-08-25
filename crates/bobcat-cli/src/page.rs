@@ -9,9 +9,9 @@
 use std::sync::Arc;
 
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
-    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
-    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
+    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::{PageConfig, PreparsedStyleSheet};
@@ -192,18 +192,15 @@ impl ResourceFetcher for ProgramResourceFetcher {
         })
     }
 
-    fn fetch_resource(
-        &self,
-        request: BufferedResourceRequest,
-    ) -> ResourceFuture<'_, ResourceResponse> {
-        let request_id = request.request.context.id;
-        let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        let source = if request.request.resource.url == self.script_url {
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        let request_id = request.context.id;
+        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
+        let source = if request.resource.url == self.script_url {
             self.source.clone()
         } else if let Some((_, source)) = self
             .background_script
             .as_ref()
-            .filter(|(url, _)| &request.request.resource.url == url)
+            .filter(|(url, _)| &request.resource.url == url)
         {
             source.clone()
         } else {
@@ -216,17 +213,8 @@ impl ResourceFetcher for ProgramResourceFetcher {
             );
         };
         let content_length = source.len() as u64;
-        if content_length > request.max_bytes {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::ResponseTooLarge,
-                ResourceErrorPhase::ReadBody,
-                Some(locator),
-                "script exceeds the caller's buffered-resource limit",
-            );
-        }
 
-        let resource = request.request.resource;
+        let resource = request.resource;
         Box::pin(async move {
             Ok(ResourceResponse {
                 metadata: ResourceMetadata {
@@ -246,14 +234,14 @@ impl ResourceFetcher for ProgramResourceFetcher {
 
     fn fetch_style_sheet(
         &self,
-        request: BufferedResourceRequest,
+        request: ResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
-        let request_id = request.request.context.id;
-        let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
+        let request_id = request.context.id;
+        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
         let Some(sheet) = self
             .style_sheet
             .clone()
-            .filter(|_| Some(&request.request.resource.url) == self.style_sheet_url.as_ref())
+            .filter(|_| Some(&request.resource.url) == self.style_sheet_url.as_ref())
         else {
             return Self::error(
                 Some(request_id),
@@ -266,15 +254,6 @@ impl ResourceFetcher for ProgramResourceFetcher {
         let (content_length, payload) = match sheet {
             ProgramStyleSheet::Text(source) => {
                 let content_length = source.len() as u64;
-                if content_length > request.max_bytes {
-                    return Self::error(
-                        Some(request_id),
-                        ResourceErrorKind::ResponseTooLarge,
-                        ResourceErrorPhase::ReadBody,
-                        Some(locator),
-                        "author stylesheet exceeds the caller's buffered-resource limit",
-                    );
-                }
                 (
                     Some(content_length),
                     StyleSheetPayload::Text(source.as_bytes().to_vec().into()),
@@ -282,7 +261,7 @@ impl ResourceFetcher for ProgramResourceFetcher {
             }
             ProgramStyleSheet::Preparsed(sheet) => (None, StyleSheetPayload::Preparsed(sheet)),
         };
-        let resource = request.request.resource;
+        let resource = request.resource;
         Box::pin(async move {
             Ok(StyleSheetResponse {
                 metadata: ResourceMetadata {

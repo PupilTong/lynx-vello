@@ -24,10 +24,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator>;
 
-    fn fetch_resource(
-        &self,
-        request: BufferedResourceRequest,
-    ) -> ResourceFuture<'_, ResourceResponse>;
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse>;
 
     /// Loads a stylesheet in whichever form this host has it.
     ///
@@ -38,7 +35,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
     /// overrides this to return [`StyleSheetPayload::Preparsed`].
     fn fetch_style_sheet(
         &self,
-        request: BufferedResourceRequest,
+        request: ResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         fetch_style_sheet_as_text(self, request)
     }
@@ -54,7 +51,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 /// rest, rather than re-implementing the byte path.
 pub fn fetch_style_sheet_as_text<F>(
     fetcher: &F,
-    request: BufferedResourceRequest,
+    request: ResourceRequest,
 ) -> ResourceFuture<'_, StyleSheetResponse>
 where
     F: ResourceFetcher + ?Sized,
@@ -151,21 +148,16 @@ pub enum ResourceLocality {
     Unknown,
 }
 
-/// The resolved half of a resource load, shared by every request shape built
-/// on it.
+/// A resolved resource load.
+///
+/// It carries no response-size budget. The fetcher owns any memory limit for
+/// the response it materializes.
 #[derive(Clone, Debug)]
 pub struct ResourceRequest {
     pub context: RequestContext,
     pub resource: ResolvedLocator,
     pub headers: HeaderMap,
     pub cache_policy: CachePolicy,
-}
-
-/// A resource request that must be materialized in bounded memory.
-#[derive(Clone, Debug)]
-pub struct BufferedResourceRequest {
-    pub request: ResourceRequest,
-    pub max_bytes: u64,
 }
 
 /// Metadata shared by every non-Fetch resource response form.

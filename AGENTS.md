@@ -165,7 +165,9 @@ useful signal for currently-compatible versions of those libraries.
   cascade order. A request carries a URL locator plus transport hints, not a
   semantic resource kind: the embedder locates bytes by normalized resolved
   URL, while `fetch_style_sheet` selects the stylesheet payload contract and
-  other buffered loads use `fetch_resource`. Per-component css-id scoping is
+  other buffered loads use `fetch_resource`. `ResourceRequest` carries no
+  response-size limit; each fetcher owns the memory bound for the response it
+  materializes. Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
   document, tree, engine, and realm cannot be borrowed or decomposed from the

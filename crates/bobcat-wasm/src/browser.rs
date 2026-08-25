@@ -10,9 +10,9 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
-    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
-    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
+    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
@@ -282,13 +282,10 @@ impl ResourceFetcher for BrowserResources {
         })
     }
 
-    fn fetch_resource(
-        &self,
-        request: BufferedResourceRequest,
-    ) -> ResourceFuture<'_, ResourceResponse> {
-        let request_id = request.request.context.id;
-        let locator: Arc<str> = Arc::from(request.request.resource.url.as_str());
-        let source = self.registered_bytes(&request.request.resource.url);
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        let request_id = request.context.id;
+        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
+        let source = self.registered_bytes(&request.resource.url);
         let Some(source) = source else {
             return Self::error(
                 Some(request_id),
@@ -299,17 +296,8 @@ impl ResourceFetcher for BrowserResources {
             );
         };
         let content_length = source.len() as u64;
-        if content_length > request.max_bytes {
-            return Self::error(
-                Some(request_id),
-                ResourceErrorKind::ResponseTooLarge,
-                ResourceErrorPhase::ReadBody,
-                Some(locator),
-                "the registered resource exceeds Bobcat's buffered-resource limit",
-            );
-        }
 
-        let resource = request.request.resource;
+        let resource = request.resource;
         Box::pin(async move {
             Ok(ResourceResponse {
                 metadata: ResourceMetadata {
