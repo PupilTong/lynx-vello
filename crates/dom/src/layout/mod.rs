@@ -79,6 +79,43 @@ impl<T> Document<T> {
             .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
 
+    /// Sets the source the paint walk presents to the installed
+    /// [`ImageStore`](crate::ImageStore) for this replaced element.
+    ///
+    /// A replaced element's geometry comes from [`Self::set_natural_size`],
+    /// which the caller sets separately once the store reports the image's
+    /// own dimensions — the two halves arrive independently and in either
+    /// order. Changing the source of an element that is already replaced
+    /// therefore invalidates only the scene, but the call that *makes* an
+    /// element replaced also invalidates layout: being replaced forces
+    /// `DisplayMode::Leaf`, which sizes the box from its natural size and
+    /// hides every child, so a source arriving before any natural size is a
+    /// layout change on its own.
+    pub fn set_image_source(&mut self, id: crate::NodeId, source: Option<&str>) {
+        let (changed, became_replaced) = {
+            let node = self
+                .arenas_mut()
+                .get_mut(id)
+                .expect("stale NodeId passed to Document::set_image_source");
+            assert!(
+                node.is_element(),
+                "non-element NodeId passed to Document::set_image_source"
+            );
+            let was_replaced = node.is_replaced();
+            (node.set_image_source(source), !was_replaced)
+        };
+        if changed && became_replaced {
+            self.invalidate_layout(id);
+        } else if changed {
+            self.note_visual_mutation();
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn image_source(&self, id: crate::NodeId) -> Option<&str> {
+        self.get(id).and_then(crate::Node::image_source)
+    }
+
     #[cfg(feature = "layout-test-utils")]
     #[doc(hidden)]
     pub fn set_leaf_metrics_for_testing(
@@ -537,6 +574,75 @@ mod tests {
         for id in [DOCUMENT_NODE_ID, root, image] {
             assert_eq!(document.layout_cache_is_empty(id), Some(true));
         }
+    }
+
+    /// Becoming replaced is a layout change, not just a paint change:
+    /// `is_replaced` forces `DisplayMode::Leaf`, which sizes the box from its
+    /// natural size and hides every child. A source that arrives before any
+    /// natural size — the ordinary order, because the source comes from an
+    /// attribute and the size only from a completed load — must therefore
+    /// invalidate layout, or the document keeps laying the node out as a
+    /// container while painting it as an image.
+    #[test]
+    fn the_source_that_makes_an_element_replaced_invalidates_layout() {
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        let root = document.document_element().id();
+        let image = document.create_element("image", ());
+        document.append_child(root, image);
+
+        let prime = |document: &mut Document<()>| {
+            let input = LayoutInput::default();
+            for id in [DOCUMENT_NODE_ID, root, image] {
+                let slot = document.live_slot(id);
+                document
+                    .layout_state_mut()
+                    .at_mut(slot)
+                    .slot
+                    .store_cached_layout(input, LayoutOutput::default());
+            }
+        };
+
+        prime(&mut document);
+        document.set_image_source(image, Some("app:///a.png"));
+        for id in [DOCUMENT_NODE_ID, root, image] {
+            assert_eq!(
+                document.layout_cache_is_empty(id),
+                Some(true),
+                "the first source flips the node to replaced, which layout reads",
+            );
+        }
+
+        // A later source only changes which pixels the same replaced box
+        // draws, so the retained boxes survive and only the scene is rebuilt.
+        prime(&mut document);
+        let epoch = document.visual_epoch();
+        document.set_image_source(image, Some("app:///b.png"));
+        assert_ne!(document.visual_epoch(), epoch);
+        for id in [DOCUMENT_NODE_ID, root, image] {
+            assert_eq!(
+                document.layout_cache_is_empty(id),
+                Some(false),
+                "swapping one image for another changes no layout input",
+            );
+        }
+    }
+
+    /// Clearing a source an element never had must stay a no-op. Writing
+    /// `Replaced` for it would turn an ordinary container into a childless
+    /// zero-sized leaf, which is not what "there is no image here" means.
+    #[test]
+    fn clearing_a_source_never_set_leaves_the_element_alone() {
+        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
+        let root = document.document_element().id();
+        let view = document.create_element("view", ());
+        document.append_child(root, view);
+        document.layout();
+        let epoch = document.visual_epoch();
+
+        document.set_image_source(view, None);
+
+        assert!(!document.get(view).expect("live element").is_replaced());
+        assert_eq!(document.visual_epoch(), epoch, "nothing changed");
     }
 
     /// Whether the node's committing parent proved its input survives any

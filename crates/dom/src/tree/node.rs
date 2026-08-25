@@ -72,7 +72,14 @@ impl Default for StylingData {
 
 enum NodeContent {
     Text(String),
-    Replaced(NaturalSize),
+    Replaced {
+        natural_size: NaturalSize,
+        /// The image source the paint walk presents to the document's
+        /// [`ImageStore`](crate::ImageStore), independent of `natural_size`:
+        /// the two arrive from different places and neither waits for the
+        /// other.
+        source: Option<Box<str>>,
+    },
     #[cfg(feature = "layout-test-utils")]
     Test(LeafMetrics),
 }
@@ -604,21 +611,64 @@ impl<T> Node<T> {
     #[must_use]
     pub(crate) fn natural_size(&self) -> NaturalSize {
         match self.content.as_deref() {
-            Some(NodeContent::Replaced(natural_size)) => *natural_size,
+            Some(NodeContent::Replaced { natural_size, .. }) => *natural_size,
             _ => NaturalSize::NONE,
         }
     }
 
+    #[must_use]
+    pub(crate) fn image_source(&self) -> Option<&str> {
+        match self.content.as_deref() {
+            Some(NodeContent::Replaced { source, .. }) => source.as_deref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_replaced(&self) -> bool {
-        matches!(self.content.as_deref(), Some(NodeContent::Replaced(_)))
+        matches!(self.content.as_deref(), Some(NodeContent::Replaced { .. }))
     }
 
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
         if self.natural_size() == natural_size && self.is_replaced() {
             return false;
         }
-        self.content = Some(Box::new(NodeContent::Replaced(natural_size)));
+        let source = self.take_image_source();
+        self.content = Some(Box::new(NodeContent::Replaced {
+            natural_size,
+            source,
+        }));
         true
+    }
+
+    /// Sets this element's image source, making it replaced content.
+    ///
+    /// Clearing a source a node never had is a no-op rather than a
+    /// conversion: `is_replaced` is a layout input — it forces
+    /// `DisplayMode::Leaf` and hides every child — so turning an ordinary
+    /// element into a childless replaced box is not what "there is no image
+    /// here" should mean.
+    pub(crate) fn set_image_source(&mut self, source: Option<&str>) -> bool {
+        if !self.is_replaced() && source.is_none() {
+            return false;
+        }
+        if self.image_source() == source && self.is_replaced() {
+            return false;
+        }
+        let natural_size = self.natural_size();
+        self.content = Some(Box::new(NodeContent::Replaced {
+            natural_size,
+            source: source.map(Box::from),
+        }));
+        true
+    }
+
+    /// Moves the source out of the current content, so setting the other half
+    /// of a replaced element's state neither copies the string nor drops it.
+    fn take_image_source(&mut self) -> Option<Box<str>> {
+        match self.content.as_deref_mut() {
+            Some(NodeContent::Replaced { source, .. }) => source.take(),
+            _ => None,
+        }
     }
 
     #[cfg(feature = "layout-test-utils")]

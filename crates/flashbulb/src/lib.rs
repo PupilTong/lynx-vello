@@ -69,6 +69,8 @@ mod golden;
 mod image;
 #[cfg(feature = "render")]
 mod render;
+#[cfg(feature = "render")]
+mod store;
 
 #[cfg(feature = "render")]
 pub use dom::vello;
@@ -83,3 +85,5 @@ pub use crate::render::{
     CaptureError, capture_document, capture_document_sized, capture_scene, capture_scene_sized,
     frame_size, headless,
 };
+#[cfg(feature = "render")]
+pub use crate::store::{TestImages, rgba8};

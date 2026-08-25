@@ -10,8 +10,10 @@
 
 mod paint_common;
 
+use std::sync::Arc;
+
 use dom::layout::{NaturalSize, Size};
-use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use flashbulb::TestImages;
 use paint_common::Doc;
 
 const PAGE: &str = "page { display: flex; position: relative; width: 800px; height: 600px; }
@@ -45,13 +47,16 @@ fn checker_png(side: u32) -> Vec<u8> {
 
 struct Harness {
     doc: Doc,
+    images: Arc<TestImages>,
 }
 
 impl Harness {
     fn new(css: &str) -> Self {
-        Self {
-            doc: Doc::with_css(&format!("{PAGE} {css}")),
-        }
+        let mut doc = Doc::with_css(&format!("{PAGE} {css}"));
+        let images = Arc::new(TestImages::new());
+        doc.dom
+            .set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
+        Self { doc, images }
     }
 
     fn img(&mut self, class: &str, bytes: &[u8]) -> dom::NodeId {
@@ -65,17 +70,11 @@ impl Harness {
         let node = self.doc.el_tag(root, "img", class);
         #[allow(clippy::cast_precision_loss)]
         let natural = NaturalSize::from_size(Size::new(info.width as f32, info.height as f32));
+        let source = format!("app:///{}.png", node.to_bits());
+        self.images
+            .insert_rgba8(&source, info.width, info.height, rgba);
         self.doc.dom.set_natural_size(node, natural);
-        self.doc.dom.images_mut().insert_node(
-            node.to_bits(),
-            ImageData {
-                data: Blob::from(rgba),
-                format: ImageFormat::Rgba8,
-                alpha_type: ImageAlphaType::Alpha,
-                width: info.width,
-                height: info.height,
-            },
-        );
+        self.doc.dom.set_image_source(node, Some(&source));
         node
     }
 

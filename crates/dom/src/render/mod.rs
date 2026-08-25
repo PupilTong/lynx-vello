@@ -1,4 +1,4 @@
-//! The DOM-free render floor: decoded image resources and wgpu
+//! The DOM-free render floor: the embedder's image contract and wgpu
 //! submission/readback over the one workspace [`vello`] version.
 //!
 //! Nothing here knows about nodes, computed styles, layout, or paint order —
@@ -7,6 +7,6 @@
 //! through the crate-root [`crate::vello`] re-export.
 
 pub mod gpu;
-pub(crate) mod images;
+pub(crate) mod image;
 
-pub use crate::render::images::{ImageKey, MAX_RENDERABLE_DIMENSION, OversizedImage};
+pub use crate::render::image::MAX_RENDERABLE_DIMENSION;

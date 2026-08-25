@@ -21,7 +21,6 @@ mod shape;
 mod text;
 mod walker;
 
-use crate::NodeId;
 use crate::layout::{Edges, Layout, TextLayout};
 use crate::paint::shape::ReferenceBoxes;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
@@ -53,7 +52,6 @@ pub(crate) struct PathScratch {
 /// to device px (root scale included).
 #[derive(Debug, Clone)]
 pub(crate) struct BoxFragment {
-    pub node: NodeId,
     pub transform: Affine,
     pub border_box: Rect,
     pub padding_box: Rect,
@@ -65,7 +63,6 @@ pub(crate) struct BoxFragment {
 
 impl BoxFragment {
     pub(crate) fn new(
-        node: NodeId,
         transform: Affine,
         size: crate::Size2D<f32>,
         radii: CornerRadii,
@@ -87,7 +84,6 @@ impl BoxFragment {
             (padding_box.y1 - padding.bottom as f64).max(padding_box.y0 + padding.top as f64),
         );
         Self {
-            node,
             transform,
             border_box,
             padding_box,

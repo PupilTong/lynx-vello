@@ -36,7 +36,7 @@ pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &ImageStore,
+    images: &dyn ImageStore,
 ) {
     let svg = style.get_svg();
     let layers = svg.mask_image.0.as_slice();

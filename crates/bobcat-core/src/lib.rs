@@ -6,10 +6,11 @@
 //! runtime outright, and the engine, document, and Element-PAPI tree hand-off
 //! remain private runtime implementation.
 //!
-//! [`image`] is the replaced-content decode contract and private loader — the
-//! engine owns that pipeline, while the codec itself is a host-implemented
-//! contract ([`image::Decoder`]; `bobcat-cli` carries reference codecs).
-//! Wiring the codec into the future Lynx `<image>` element remains pending.
+//! Decoded images are one of those injected resources. The core neither
+//! fetches, decodes, caches nor retains a single pixel: an embedder installs a
+//! [`ImageStore`] with [`LynxView::set_image_store`], and the view asks it for
+//! images by source string. Wiring the store into the future Lynx `<image>`
+//! element remains pending.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -20,7 +21,6 @@ pub mod bench_support;
 mod clock;
 mod engine;
 mod gesture;
-pub mod image;
 mod quickjs;
 pub mod resource;
 mod runtime;
@@ -36,6 +36,7 @@ pub mod input {
     pub use dom::input::{DeltaMode, InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
+pub use dom::{ImageFuture, ImageStore, ImageStoreError};
 #[cfg(target_arch = "wasm32")]
 pub use engine::configure_wasm_workers;
 pub use engine::{

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use bobcat_core::image::{AlphaType, DecodedImage, ImageFormat};
 use bobcat_core::resource::{
     CancellationToken, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
 };
@@ -117,7 +116,8 @@ fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn checker_image() -> DecodedImage {
+/// A store carrying the one checker the image page draws.
+fn checker_store() -> Arc<flashbulb::TestImages> {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
         for x in 0..4 {
@@ -130,8 +130,9 @@ fn checker_image() -> DecodedImage {
             rgba.extend_from_slice(&pixel);
         }
     }
-    DecodedImage::from_rgba8(4, 4, AlphaType::Straight, rgba, ImageFormat::Png)
-        .expect("valid checker image")
+    let images = Arc::new(flashbulb::TestImages::new());
+    images.insert_rgba8(IMAGE_URL, 4, 4, rgba);
+    images
 }
 
 #[tokio::test]
@@ -220,22 +221,26 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
     );
 }
 
+/// Requirement: an embedder-owned store reaches the private painter through
+/// the whole public path — install the store, load the source through it, and
+/// the `background-image: url(...)` layer the script wrote draws those pixels.
 #[tokio::test]
-async fn decoded_image_url_reaches_the_private_painter() {
+async fn an_embedder_image_store_reaches_the_private_painter() {
     let mut view = view(IMAGE_SCRIPT.as_bytes());
-    view.register_image_url(IMAGE_URL, &checker_image())
-        .expect("available private image registry");
+    view.set_image_store(checker_store() as Arc<dyn bobcat_core::ImageStore>)
+        .expect("available document");
     view.attach_offscreen()
         .expect("GPU initialization for the offscreen target");
     view.execute_script(SCRIPT_URL)
         .await
         .expect("fetch and start script");
     wait_for_script(&mut view).await.expect("script execution");
+    view.load_image(IMAGE_URL).await.expect("published source");
 
     let shot = view.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
-    screenshots().assert_matches(&["retained-image-store"], &image);
+    screenshots().assert_matches(&["embedder-image-store"], &image);
 }
 
 /// Requirement: text written the only way Lynx can write it — a `raw-text`

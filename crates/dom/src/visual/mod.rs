@@ -90,6 +90,7 @@ mod tests;
 mod transform;
 
 use std::cell::Ref;
+use std::sync::Arc;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
@@ -364,24 +365,30 @@ impl<T> Document<T> {
         out
     }
 
-    /// Reads decoded images without invalidating the retained scene.
+    /// The embedder's decoded-image owner.
     ///
-    /// Separate from [`Self::images_mut`] because that one has to invalidate:
-    /// registering pixels changes what a frame draws. Reading how many bytes
-    /// the registry holds, or which registrations were refused, changes
-    /// nothing, and going through the mutable accessor to ask would turn a
-    /// static page into one that rebuilds its scene on every poll.
+    /// Cloning the returned handle is how the layer above this crate reaches
+    /// [`ImageStore::get`] and [`ImageStore::prefetch`] without holding the
+    /// document across the await.
     #[must_use]
-    pub fn images(&self) -> Ref<'_, ImageStore> {
-        Ref::map(
-            self.painter.borrow(),
-            crate::paint::painter::Painter::images,
-        )
+    pub fn image_store(&self) -> &Arc<dyn ImageStore> {
+        &self.image_store
     }
 
-    /// Mutably accesses decoded images and invalidates the retained scene.
-    pub fn images_mut(&mut self) -> &mut ImageStore {
+    /// Installs the store every later frame reads, and invalidates the
+    /// retained scene, because a different store draws different pixels.
+    pub fn set_image_store(&mut self, store: Arc<dyn ImageStore>) {
+        self.image_store = store;
         self.note_visual_mutation();
-        self.painter.get_mut().images_mut()
+    }
+
+    /// Invalidates the retained scene because the installed store's answers
+    /// changed — pixels arrived, or entries were dropped.
+    ///
+    /// The document cannot observe an embedder-owned store changing under it,
+    /// and the retained scene is only rebuilt when the visual epoch moves, so
+    /// a load that completes without this call paints on no frame at all.
+    pub fn note_images_changed(&mut self) {
+        self.note_visual_mutation();
     }
 }

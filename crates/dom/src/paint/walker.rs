@@ -130,7 +130,7 @@ struct Extents {
 struct Painting<'a, T> {
     document: &'a Document<T>,
     frame: &'a PaintOrder,
-    images: &'a ImageStore,
+    images: &'a dyn ImageStore,
     /// The document's device scale, applied once at the root: the paint order
     /// is in viewport CSS px and the scene is in device px.
     scale: Affine,
@@ -159,7 +159,7 @@ pub(crate) fn walk<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &ImageStore,
+    images: &dyn ImageStore,
 ) {
     let device = document.device();
     let ratio = f64::from(device.device_pixel_ratio().get());
@@ -178,7 +178,7 @@ pub(crate) fn walk_uncultured<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &ImageStore,
+    images: &dyn ImageStore,
 ) {
     let ratio = f64::from(document.device().device_pixel_ratio().get());
     walk_within(scene, scratch, document, frame, images, ratio, None);
@@ -191,7 +191,7 @@ fn walk_within<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &ImageStore,
+    images: &dyn ImageStore,
     ratio: f64,
     cull: Option<Rect>,
 ) {
@@ -364,7 +364,6 @@ fn open_scope<T>(
     let local = convert::item_affine(&layer.transform, layer.size);
     let fragment = document.rounded_layout(layer.node).map(|layout| {
         BoxFragment::new(
-            layer.node,
             scale * local.unwrap_or_default(),
             layer.size,
             layer.radii,
@@ -469,19 +468,22 @@ fn paint_item<T>(
             let Some(layout) = document.rounded_layout(item.node) else {
                 return;
             };
-            let fragment = BoxFragment::new(item.node, transform, item.size, item.radii, layout);
+            let fragment = BoxFragment::new(transform, item.size, item.radii, layout);
             let text_clip =
                 background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
             shadow::paint_outset(scene, &mut scratch.paths, style, &fragment);
             background::paint(scene, style, &fragment, images, text_clip.as_ref());
             shadow::paint_inset(scene, &mut scratch.paths, style, &fragment);
-            background::paint_replaced_content(
-                scene,
-                style,
-                &fragment,
-                images,
-                document.natural_size(item.node),
-            );
+            if let Some(source) = document.image_source(item.node) {
+                background::paint_replaced_content(
+                    scene,
+                    style,
+                    &fragment,
+                    images,
+                    source,
+                    document.natural_size(item.node),
+                );
+            }
             border::paint(scene, &mut scratch.paths, style, &fragment);
             border::paint_outline(scene, &mut scratch.paths, style, &fragment);
         }
@@ -872,10 +874,11 @@ mod tests {
         PaintItem, PaintItemKind, Rect, Scene, Scratch, can_reach, cull_rect, item_bounds, walk,
         walk_uncultured,
     };
+    use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
+    use crate::render::image::NoImages;
     use crate::test_common::Doc;
     use crate::visual::CornerRadii;
-    use crate::{ImageStore, Size2D};
 
     const VIEWPORT: (f32, f32) = (800.0, 600.0);
 
@@ -897,7 +900,7 @@ mod tests {
 
     fn walk_twice(doc: &mut Doc) -> Frames {
         let frame = doc.dom.build_paint_order();
-        let images = ImageStore::default();
+        let images = NoImages;
         let mut cultured = Scene::default();
         let mut cultured_scratch = Scratch::default();
         walk(

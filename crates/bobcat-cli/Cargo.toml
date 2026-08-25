@@ -14,7 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 bobcat-core = { workspace = true }
-fast_image_resize = { workspace = true }
 http = { workspace = true }
 lynx-template-decoder = { workspace = true }
 lynx-xml = { workspace = true }
@@ -25,15 +24,6 @@ url = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-image-webp = { workspace = true }
-zune-jpeg = { workspace = true }
-
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-objc2-core-foundation = { workspace = true }
-objc2-core-graphics = { workspace = true }
-objc2-image-io = { workspace = true }
 
 [dev-dependencies]
 flashbulb = { workspace = true, features = ["render"] }

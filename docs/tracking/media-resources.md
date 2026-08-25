@@ -34,22 +34,29 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 
 `auto-size` triggers a genuine **post-decode relayout**: `AutoSizeImage.measure()` (`lynx/platform/android/.../image/AutoSizeImage.java`) returns the *previous/placeholder* measured size until the real bitmap dimensions are known, then `justSizeIfNeeded()` calls `markDirty()`/relayout once decode completes and the intrinsic aspect ratio differs meaningfully (>0.05) from the current box — i.e. native Lynx has the same "layout jank on late-arriving intrinsic size" behavior as an `<img>` without explicit `width`/`height`, and a bitmap-size cache (`ILynxViewRuntimeCacheManager.setBitmapSizeCache`) is used to avoid the jank on repeat mounts of the same URL. web-platform sidesteps this entirely by keeping `auto-size` a pure-CSS affair (`x-image.css:55-81`: `display:contents` + `width/height: inherit`/`max-width/max-height:100%` on the inner `<img>`), relying on the browser's native intrinsic-size layout — no JS remeasurement needed.
 
-lynx-vello has both halves of that handoff now. Replaced content carries a
-`NaturalSize` that `Document::set_natural_size` installs, invalidating the
-node-to-root layout-cache path; and `bobcat_core::image` owns fetch, the injected
-`Decoder` seam (reference implementations in the reference embedder,
-`bobcat-cli`'s `image_decoders` module: Apple ImageIO, Windows WIC, Android
-`AImageDecoder`, a Linux-only pure-Rust reference — an embedder with its own
-image pipeline, native's Fresco/`imageFetcher` analogue, implements the trait
-instead), and the bounded decode/header caches, depending
-on neither `dom` nor `pulsar` so the decoder never reaches the DOM. `HeaderCache` is this project's
-equivalent of native's bitmap-size cache: a second mount of a known URL can
-publish its natural size in the commit that creates the node, so the first frame
-lays out final. The Lynx `<image>` element surface — `mode`, `placeholder`, the
-src/placeholder race, `cap-insets`, `blur-radius`, the `load`/`error` events —
-remains above this layer and unimplemented; what exists today is the W3C `<img>`
-path: natural size into layout, `object-fit`/`object-position`/`image-rendering`
-at paint. The metadata must not be encoded as
+lynx-vello takes the opposite position from the one sketched above: it builds
+no Fresco/UIImage equivalent at all. Fetch, decode, memory cache, disk cache
+and eviction are the embedder's, behind the `dom::ImageStore` trait an
+embedder installs with `LynxView::set_image_store` — which is the same seam
+native reaches through `LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
+one layer lower so the engine never owns a byte. The workspace holds no codec,
+no container sniffing and no cache policy.
+
+Both halves of the replaced-content handoff exist on the `dom` side.
+`Document::set_natural_size` installs the `NaturalSize`, invalidating the
+node-to-root layout-cache path, and `Document::set_image_source` installs the
+source string the paint walk presents to the store; neither waits for the
+other, so a frame between them paints no image and lays out at the size it
+has. Native's bitmap-size cache — a second mount of a known URL publishing its
+natural size in the commit that creates the node — is now the store's to
+provide, since only the store knows what it has already decoded.
+
+The Lynx `<image>` element surface — `mode`, `placeholder`, the src/placeholder
+race, `cap-insets`, `blur-radius`, the `load`/`error` events — remains above
+this layer and unimplemented, as does the loop that would set the two halves
+from an element's `src`; what exists today is the W3C `<img>` paint path:
+natural size into layout, `object-fit`/`object-position`/`image-rendering` at
+paint. The metadata must not be encoded as
 `contain-*`/`contain-intrinsic-size`, because natural replaced size is content
 data rather than CSS size containment.
 

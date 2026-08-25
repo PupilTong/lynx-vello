@@ -91,6 +91,9 @@ fn object_fit_matrix_matches_reference() {
         ("r4 c2 fill rounded bordered", &small),
     ];
 
+    let images = std::sync::Arc::new(flashbulb::TestImages::new());
+    doc.dom
+        .set_image_store(std::sync::Arc::clone(&images) as std::sync::Arc<dyn dom::ImageStore>);
     let root = doc.root;
     for (class, (width, height, rgba)) in cells {
         let node = doc.el_tag(root, "img", class);
@@ -102,9 +105,9 @@ fn object_fit_matrix_matches_reference() {
                 *height as f32,
             )),
         );
-        doc.dom
-            .images_mut()
-            .insert_node(node.to_bits(), image_data(*width, *height, rgba.clone()));
+        let source = format!("app:///{}.png", node.to_bits());
+        images.insert_rgba8(&source, *width, *height, rgba.clone());
+        doc.dom.set_image_source(node, Some(&source));
     }
 
     let actual =
@@ -133,15 +136,4 @@ fn decode_checker(width: u32, height: u32) -> Checker {
         }
     }
     (width, height, rgba)
-}
-
-fn image_data(width: u32, height: u32, rgba: Vec<u8>) -> flashbulb::vello::peniko::ImageData {
-    use flashbulb::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-    ImageData {
-        data: Blob::from(rgba),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width,
-        height,
-    }
 }

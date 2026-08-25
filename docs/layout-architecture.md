@@ -325,13 +325,12 @@ without a basis (a documented behavior delta of the vocabulary swap).
 content currently means images and enters `compute_leaf_layout` as a Copy
 `NaturalSize`: independently optional natural dimensions plus a natural
 width/height ratio. Before image metadata is decoded the value is
-`NaturalSize::NONE`; the engine's image pipeline (`bobcat_core::image` plus the injected
-decoder) decodes the metadata and installs it
-through `Document::set_natural_size`, which invalidates the node-to-root
-box-cache path. That split is deliberate: decoded intrinsic metadata is W3C
-replaced-content state and belongs on the document, while fetch/decode
-transport stays outside the generic DOM API entirely — the image pipeline does
-not depend on `dom`, and `dom` learns nothing about `<img>` or any
+`NaturalSize::NONE`; the embedder's `ImageStore` reports the metadata and the
+layer above installs it through `Document::set_natural_size`, which
+invalidates the node-to-root box-cache path. That split is deliberate:
+intrinsic metadata is W3C replaced-content state and belongs on the document,
+while fetch and decode stay outside this workspace entirely — no image
+pipeline exists below the store, and `dom` learns nothing about `<img>` or any
 other tag. Setting an equal value is a structural no-op, which is why there is
 no aspect-ratio epsilon here unlike native Lynx. This state does **not**
 mutate `contain-*` or `contain-intrinsic-size`: natural replaced size is

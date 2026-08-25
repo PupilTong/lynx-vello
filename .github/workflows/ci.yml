@@ -169,11 +169,11 @@ jobs:
       CXX: clang++-22
     steps:
       # bobcat-cli is the one workspace member no job compiles on Linux. The
-      # macOS job builds its Apple decoder; the Ubuntu benchmark job builds
+      # macOS job builds it there; the Ubuntu benchmark job builds
       # dom/hughie/quickjs-rust-bridge through their bench targets but never
-      # reaches the CLI, which nothing depends on. So
-      # `src/image_decoders/software.rs` — the pure-Rust reference decoder that
-      # exists *for* headless Linux — had no gate compiling it at all.
+      # reaches the CLI, which nothing depends on. Without this job the
+      # headless runner — the mode Linux hosts actually run — has no gate
+      # compiling it at all.
       #
       # No tests: the CLI's dev-dependencies pull in flashbulb's GPU capture,
       # and a hosted runner has no adapter.
