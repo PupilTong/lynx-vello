@@ -72,6 +72,7 @@ pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::FrameClock;
 use crate::gesture::{EmitEvent, GestureRouter, InputDecision, RouterHost};
+use crate::runtime::MainThreadError;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::style::PreparsedStyleSheet;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
@@ -1190,10 +1191,10 @@ impl<'window, W: Window> Engine<'window, W> {
                             request_current_frame(&on_flush);
                         },
                     )
-                    .map_err(|error| error.into_script_error())?;
+                    .map_err(MainThreadError::into_script_error)?;
                     runtime
                         .run_main_thread_script(&source, &source_name)
-                        .map_err(|error| error.into_script_error())?;
+                        .map_err(MainThreadError::into_script_error)?;
                     Ok(runtime)
                 }))
                 .unwrap_or_else(|payload| {
