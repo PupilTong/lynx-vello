@@ -72,7 +72,6 @@ pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::FrameClock;
 use crate::gesture::{EmitEvent, GestureRouter, InputDecision, RouterHost};
-use crate::image::DecodedImage;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
@@ -731,17 +730,36 @@ impl<'window, W: Window> Engine<'window, W> {
         Ok(())
     }
 
-    /// Installs decoded pixels under their CSS URL without publishing the
-    /// paint registry itself.
-    pub(crate) fn register_image_url(
+    /// Installs the embedder's image store on the document.
+    pub(crate) fn set_image_store(
         &mut self,
-        url: impl Into<String>,
-        image: &DecodedImage,
+        store: Arc<dyn dom::ImageStore>,
     ) -> Result<(), EngineError> {
         let Some(mut tree) = self.elements.try_tree() else {
             return Err(EngineError::ResourceUpdateBusy);
         };
-        tree.images_mut().insert_url(url, image.to_image_data());
+        tree.set_image_store(store);
+        drop(tree);
+        self.refresh();
+        Ok(())
+    }
+
+    /// A handle on the installed store, for a caller that must reach it
+    /// without holding the document across an await.
+    pub(crate) fn image_store(&self) -> Result<Arc<dyn dom::ImageStore>, EngineError> {
+        let Some(tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        Ok(Arc::clone(tree.image_store()))
+    }
+
+    /// Rebuilds the next frame's scene because the installed store's answers
+    /// changed, and asks for that frame.
+    pub(crate) fn note_images_changed(&mut self) -> Result<(), EngineError> {
+        let Some(mut tree) = self.elements.try_tree() else {
+            return Err(EngineError::ResourceUpdateBusy);
+        };
+        tree.note_images_changed();
         drop(tree);
         self.refresh();
         Ok(())
@@ -1462,33 +1480,30 @@ mod tests {
         assert_eq!(engine.register_fonts(blob).expect("available tree"), 0);
     }
 
+    /// The store an embedder installs is the one the paint walk reads, and the
+    /// pixels reach it without a copy: the buffer identity that comes back out
+    /// of the document is the one that went in.
     #[test]
-    fn decoded_image_registration_reaches_the_private_url_registry() {
-        use crate::image::{AlphaType, DecodedImage, ImageFormat};
-
+    fn the_installed_image_store_is_the_one_the_document_reads() {
         let mut engine = engine();
-        let image = DecodedImage::from_rgba8(
-            1,
-            1,
-            AlphaType::Straight,
-            vec![1, 2, 3, 255],
-            ImageFormat::Png,
-        )
-        .expect("image");
-        let image_id = image.id();
+        let images = Arc::new(flashbulb::TestImages::new());
+        let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
+        let pixel_id = pixels.data.id();
+        images.insert("app:///pixel.png", pixels);
         engine
-            .register_image_url("app:///pixel.png", &image)
+            .set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>)
             .expect("available tree");
 
-        let mut tree = engine.elements();
+        let tree = engine.elements();
         assert_eq!(
-            tree.images_mut()
-                .url("app:///pixel.png")
-                .expect("registered URL")
+            tree.image_store()
+                .peek("app:///pixel.png")
+                .expect("published source")
                 .data
                 .id(),
-            image_id
+            pixel_id
         );
+        assert!(tree.image_store().peek("app:///missing.png").is_none());
     }
 
     /// An emit decision whose target was freed before execution must be

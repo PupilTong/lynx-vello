@@ -11,8 +11,8 @@
 //! - Then image layers **last-specified first** (CSS lists the first layer topmost): for each
 //!   non-`None` layer resolve origin box (`background-origin`), positioning area, `background-size`
 //!   (`auto`/`cover`/`contain`/lengths), `background-position`, and `background-repeat` per axis.
-//!   `url(…)` layers look up [`ImageStore::url`] (missing → skip); gradients resolve via
-//!   [`gradient_brush`].
+//!   `url(…)` layers look up [`ImageStore::peek`] (missing, zero-area, or past the atlas bound →
+//!   skip); gradients resolve via [`gradient_brush`].
 //! - Repeat via `peniko::Extend::Repeat` on the image sampler where the tile grid is uniform;
 //!   gradients restart per tile, so when more than one tile is visible they are drawn as an
 //!   explicit tile loop. `space` is approximated as `repeat` (recorded v1 limit) and `round`
@@ -47,6 +47,7 @@ use crate::layout::NaturalSize;
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::{BoxFragment, TextClip};
+use crate::render::image::is_renderable;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::vello::peniko::{
@@ -71,7 +72,7 @@ pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &ImageStore,
+    images: &dyn ImageStore,
     text_clip: Option<&TextClip<'_>>,
 ) {
     let background = style.get_background();
@@ -187,15 +188,13 @@ pub(crate) fn paint_replaced_content(
     scene: &mut Scene,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &ImageStore,
+    images: &dyn ImageStore,
+    source: &str,
     natural: NaturalSize,
 ) {
-    let Some(image) = images.node(fragment.node.to_bits()) else {
+    let Some(image) = images.peek(source).filter(is_renderable) else {
         return;
     };
-    if image.width == 0 || image.height == 0 {
-        return;
-    }
     let content = fragment.content_box;
     if content.width() <= 0.0 || content.height() <= 0.0 {
         return;
@@ -233,7 +232,7 @@ pub(crate) fn paint_replaced_content(
             destination.height() / f64::from(image.height),
         );
     let brush = BrushRef::Image(ImageBrush {
-        image,
+        image: &image,
         sampler: ImageSampler::default().with_quality(image_quality(style)),
     });
     fill_area(
@@ -347,7 +346,7 @@ pub(super) fn paint_pattern_layer(
     scene: &mut Scene,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &ImageStore,
+    images: &dyn ImageStore,
     layer: &PatternLayer<'_>,
 ) {
     let clip_bounds = layer.clip.bounding_box();
@@ -357,7 +356,7 @@ pub(super) fn paint_pattern_layer(
     let Some(source) = resolve_source(style, images, layer.image) else {
         return;
     };
-    let intrinsic = match source {
+    let intrinsic = match &source {
         Source::Raster(data) => Some((f64::from(data.width), f64::from(data.height))),
         Source::Gradient(_) | Source::Solid(_) => None,
     };
@@ -382,7 +381,7 @@ pub(super) fn paint_pattern_layer(
         repeat_y: !matches!(layer.repeat.1, BackgroundRepeatKeyword::NoRepeat),
     };
 
-    match source {
+    match &source {
         Source::Raster(data) => {
             let sampler = ImageSampler {
                 x_extend: extend_for(grid.repeat_x),
@@ -413,7 +412,7 @@ pub(super) fn paint_pattern_layer(
             fragment.transform,
             &layer.clip,
             grid.draw_rect(clip_bounds),
-            BrushRef::Solid(color),
+            BrushRef::Solid(*color),
             None,
         ),
         Source::Gradient(gradient) => match gradient_brush(style, gradient, grid.tile) {
@@ -479,21 +478,24 @@ fn image_url(url: &ComputedUrl) -> &str {
 }
 
 enum Source<'a> {
-    Raster(&'a ImageData),
+    /// Owned, because the store hands out a reference-counted handle to its
+    /// own buffer rather than lending one: no pixels are copied, and the draw
+    /// stays valid if the store drops its entry mid-frame.
+    Raster(ImageData),
     Gradient(&'a Gradient),
     Solid(Color),
 }
 
 fn resolve_source<'a>(
     style: &ComputedValues,
-    images: &'a ImageStore,
+    images: &dyn ImageStore,
     image: &'a Image,
 ) -> Option<Source<'a>> {
     match image {
-        Image::Url(url) => {
-            let data = images.url(image_url(url))?;
-            (data.width > 0 && data.height > 0).then_some(Source::Raster(data))
-        }
+        Image::Url(url) => images
+            .peek(image_url(url))
+            .filter(is_renderable)
+            .map(Source::Raster),
         Image::Gradient(gradient) => Some(Source::Gradient(gradient)),
         Image::Image(color) => {
             let color = resolve_color(style, color);

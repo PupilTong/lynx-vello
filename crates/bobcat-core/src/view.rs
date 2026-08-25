@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{fmt, str};
 
+use dom::ImageStore;
 use http::HeaderMap;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -11,7 +12,6 @@ use crate::engine::Screenshot;
 use crate::engine::{
     Engine, EngineError, EngineEvent, EventRequester, FrameSize, NoWindow, Window, WindowTarget,
 };
-use crate::image::DecodedImage;
 use crate::input::InputEvent;
 use crate::resource::{
     BufferedResourceRequest, CachePolicy, CancellationToken, RequestContext, RequestId,
@@ -67,6 +67,11 @@ pub enum LynxViewError {
     InvalidScriptEncoding { url: String, message: String },
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
+    #[error("the image store could not load `{image_source}`: {message}")]
+    Image {
+        image_source: String,
+        message: String,
+    },
 }
 
 impl<'window, W: Window> LynxView<'window, W> {
@@ -218,14 +223,52 @@ impl<'window, W: Window> LynxView<'window, W> {
         self.engine.set_default_font_family(family)
     }
 
-    /// Installs decoded pixels under a CSS image URL in the private paint
-    /// registry, replacing an earlier registration for the same URL.
-    pub fn register_image_url(
-        &mut self,
-        url: impl Into<String>,
-        image: &DecodedImage,
-    ) -> Result<(), EngineError> {
-        self.engine.register_image_url(url, image)
+    /// Installs the [`ImageStore`] every later frame reads.
+    ///
+    /// The store owns every decoded pixel this view draws: the engine holds
+    /// none of its own, asks for one image at a time by source string, and
+    /// never decides when a buffer is dropped. A view without a store paints
+    /// no images at all.
+    ///
+    /// If a script batch currently owns the document, the update is rejected
+    /// with [`EngineError::ResourceUpdateBusy`].
+    pub fn set_image_store(&mut self, store: Arc<dyn ImageStore>) -> Result<(), EngineError> {
+        self.engine.set_image_store(store)
+    }
+
+    /// Loads one image through the installed store and repaints with it.
+    ///
+    /// Reaching the store and invalidating the scene each need the document
+    /// for the length of one call, and neither holds it across the await, so
+    /// a load cannot deadlock a script batch. Both are refused with
+    /// [`EngineError::ResourceUpdateBusy`] while a batch owns the document:
+    /// refused before the fetch nothing has started, and refused after it the
+    /// pixels are already in the store, so asking again costs no transfer.
+    pub async fn load_image(&mut self, source: &str) -> Result<(), LynxViewError> {
+        let store = self.engine.image_store()?;
+        store
+            .get(source)
+            .await
+            .map_err(|error| LynxViewError::Image {
+                image_source: source.to_owned(),
+                message: error.to_string(),
+            })?;
+        self.engine.note_images_changed()?;
+        Ok(())
+    }
+
+    /// Asks the installed store to start loading `source` without waiting for
+    /// it, discarding both the pixels and any failure.
+    ///
+    /// The pixels reach the screen on the first frame after they land only if
+    /// something else invalidates the scene; a prefetch is a warm-up, not a
+    /// load. Use [`Self::load_image`] for an image the next frame must draw.
+    ///
+    /// Refused with [`EngineError::ResourceUpdateBusy`] while a script batch
+    /// owns the document, because reaching the store needs it.
+    pub fn prefetch_image(&self, source: &str) -> Result<(), EngineError> {
+        self.engine.image_store()?.prefetch(source);
+        Ok(())
     }
 
     /// Loads an author stylesheet through the injected resource provider and

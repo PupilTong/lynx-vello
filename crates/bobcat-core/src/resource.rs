@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,13 +44,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
         fetch_style_sheet_as_text(self, request)
     }
 
-    fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream>;
-
-    fn fetch_resource_path(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourcePath>;
-
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse>;
-
-    fn prefetch(&self, request: PrefetchRequest) -> ResourceFuture<'_, PrefetchReceipt>;
 
     fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()>;
 }
@@ -139,24 +132,8 @@ pub struct ResourceDescriptor {
 pub enum ResourceHints {
     #[default]
     None,
-    Image(ImageHints),
     Bundle(BundleHints),
     Media(MediaHints),
-}
-
-/// Encoded-image selection hints; decoding remains an upper-layer concern.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ImageHints {
-    pub target_size_px: Option<PixelSize>,
-    pub device_scale: Option<f32>,
-    pub allow_animation: bool,
-}
-
-/// A two-dimensional physical-pixel size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PixelSize {
-    pub width: u32,
-    pub height: u32,
 }
 
 /// Template/build-artifact selection hints.
@@ -205,7 +182,8 @@ pub enum ResourceLocality {
     Unknown,
 }
 
-/// Input shared by streaming, filesystem-path and prefetch resource loads.
+/// The resolved half of a resource load, shared by every request shape built
+/// on it.
 #[derive(Clone, Debug)]
 pub struct ResourceRequest {
     pub context: RequestContext,
@@ -260,33 +238,6 @@ pub enum StyleSheetPayload {
 pub struct StyleSheetResponse {
     pub metadata: ResourceMetadata,
     pub payload: StyleSheetPayload,
-}
-
-/// An encoded resource whose body remains asynchronous.
-pub struct ResourceStream {
-    pub metadata: ResourceMetadata,
-    pub reader: ResourceReader,
-}
-
-impl fmt::Debug for ResourceStream {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ResourceStream")
-            .field("metadata", &self.metadata)
-            .field("reader", &"<tokio::io::AsyncRead>")
-            .finish()
-    }
-}
-
-pub trait ResourcePathLease: fmt::Debug + Send + Sync + 'static {}
-
-/// A filesystem-backed encoded resource.
-#[derive(Clone, Debug)]
-pub struct ResourcePath {
-    pub metadata: ResourceMetadata,
-    pub path: PathBuf,
-    pub fallback_paths: Vec<PathBuf>,
-    pub lease: Option<Arc<dyn ResourcePathLease>>,
 }
 
 /// Input to the HTTP transport behind `lynx.fetch` and `EventSource`.
@@ -368,23 +319,6 @@ impl fmt::Debug for HttpResponse {
     }
 }
 
-/// A raw encoded-resource prefetch request.
-#[derive(Clone, Debug)]
-pub struct PrefetchRequest {
-    pub request: ResourceRequest,
-    pub target: CacheTarget,
-    pub max_bytes: u64,
-}
-
-/// Confirmation that a prefetch reached its requested cache target.
-#[derive(Clone, Debug)]
-pub struct PrefetchReceipt {
-    pub request_id: RequestId,
-    pub resource: ResolvedLocator,
-    pub cache_status: CacheStatus,
-    pub transferred_bytes: Option<u64>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ResourceCapability {
@@ -392,11 +326,8 @@ pub enum ResourceCapability {
     /// Answering a stylesheet request with a host-decoded
     /// [`PreparsedStyleSheet`] instead of CSS text.
     PreparsedStyleSheet,
-    ResourceStream,
-    ResourcePath,
     Http,
     StreamingUpload,
-    Prefetch,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -419,16 +350,6 @@ pub enum CachePolicy {
     NoCache,
     ForceCache,
     OnlyIfCached,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CacheTarget {
-    #[default]
-    Automatic,
-    Memory,
-    Disk,
-    MemoryAndDisk,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -531,8 +452,6 @@ pub enum ResourceErrorPhase {
     SendRequest,
     ReceiveHeaders,
     ReadBody,
-    MaterializePath,
-    Prefetch,
     Cancel,
 }
 

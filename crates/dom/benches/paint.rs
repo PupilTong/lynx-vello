@@ -62,11 +62,14 @@
 //!    colors opaque, both transforms non-`none`, both images the same size — so the two frames
 //!    encode the same draw count and the mean is one number rather than an average of two shapes.
 
+use std::sync::Arc;
+
 use divan::counter::ItemsCount;
 use dom::layout::{NaturalSize, Size};
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use dom::{Document, NodeId, StylesheetOrigin, Vector2D};
 use euclid::{Scale, Size2D};
+use flashbulb::TestImages;
 use stylo::device::servo::FontMetricsProvider;
 use stylo::font_metrics::FontMetrics;
 use stylo::media_queries::MediaType;
@@ -403,22 +406,27 @@ fn tile_pixels(shade: u8) -> ImageData {
     }
 }
 
-/// A grid of replaced-content tiles, all inside the viewport, and the id of the
-/// one whose pixels the benchmark republishes.
+/// The source every tile in [`tile_page`] draws, and the one the republish
+/// benchmark rewrites.
+const TILE_SOURCE: &str = "app:///tile.png";
+
+/// A grid of replaced-content tiles, all inside the viewport, plus the store
+/// holding their pixels.
 ///
-/// Keyed by node rather than by `url(…)`: the node key is the replaced-content
-/// path (`ImageStore::insert_node`), it needs no URL resolution against the
-/// document's `about:blank` base, and it is the path the engine drives for
-/// `<image>` content.
+/// Every tile draws the same source, which is what a page of identical
+/// replaced boxes does: the store answers one `peek` per tile per frame and
+/// hands back the same reference-counted buffer each time.
 #[allow(
     clippy::cast_precision_loss,
     reason = "tile indices are small constants"
 )]
-fn tile_page() -> (Document<()>, NodeId) {
+fn tile_page() -> (Document<()>, Arc<TestImages>) {
     let mut dom = page_document(TILE_CSS);
+    let images = Arc::new(TestImages::new());
+    images.insert(TILE_SOURCE, tile_pixels(0x30));
+    dom.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
     let root = dom.document_element().id();
     let natural = NaturalSize::from_size(Size::new(TILE_PIXELS as f32, TILE_PIXELS as f32));
-    let mut first = root;
     for index in 0..TILES {
         let tile = dom.create_element("view", ());
         dom.add_class(tile, "tile");
@@ -432,13 +440,9 @@ fn tile_page() -> (Document<()>, NodeId) {
         );
         dom.append_child(root, tile);
         dom.set_natural_size(tile, natural);
-        dom.images_mut()
-            .insert_node(tile.to_bits(), tile_pixels(0x30));
-        if index == 0 {
-            first = tile;
-        }
+        dom.set_image_source(tile, Some(TILE_SOURCE));
     }
-    (dom, first)
+    (dom, images)
 }
 
 // ---------------------------------------------------------------------------
@@ -696,20 +700,24 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
 // Image frames
 // ---------------------------------------------------------------------------
 
-/// Republishing one tile's decoded pixels on a page of `TILES` replaced boxes.
+/// Republishing one source's decoded pixels on a page of `TILES` replaced
+/// boxes that all draw it.
 ///
-/// `Document::images_mut` invalidates the retained scene unconditionally, so
-/// one arriving image costs a rebuild of every image draw on the page — the
-/// shape of a page whose images decode one at a time. Both phases publish the
-/// same dimensions and the same byte count, so the store's occupancy and the
-/// encoded geometry are identical between them.
+/// `Document::note_images_changed` invalidates the retained scene
+/// unconditionally, so one arriving image costs a rebuild of every image draw
+/// on the page — the shape of a page whose images decode one at a time. Both
+/// phases publish the same dimensions and the same byte count, so the encoded
+/// geometry is identical between them.
 #[divan::bench]
 fn frame_image_republish(bencher: divan::Bencher<'_, '_>) {
-    let (page, tile) = tile_page();
+    let (page, images) = tile_page();
     let dark = tile_pixels(0x30);
     let light = tile_pixels(0xc0);
     bench_frames(bencher, page, Staleness::Repaints, move |dom, phase| {
-        let pixels = if phase { &light } else { &dark };
-        dom.images_mut().insert_node(tile.to_bits(), pixels.clone());
+        images.insert(
+            TILE_SOURCE,
+            if phase { light.clone() } else { dark.clone() },
+        );
+        dom.note_images_changed();
     });
 }

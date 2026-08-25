@@ -5,17 +5,16 @@
 //! loop, the debugger-like command prompt), device metrics, input relay, the
 //! draw target, and PNG output. The pipeline — tree, commits, style, layout,
 //! paint, frame scheduling, the script and render threads — is the engine's;
-//! every CLI event handler is a relay into it. The [`image_decoders`] module
-//! is embedder work too: the reference implementations of the engine's
-//! injected `bobcat_core::image::Decoder` contract.
+//! every CLI event handler is a relay into it.
+//!
+//! It installs no `bobcat_core::ImageStore`, so a page's images paint as
+//! nothing: fetching and decoding them is embedder work this runner does not
+//! do.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
-// Every `unsafe` in this crate is an ImageIO or Core Graphics binding in
-// `image_decoders::apple`, and each block states its own contract. This is what
-// keeps that true: the workspace-wide `unsafe_code = "warn"` says a block may
-// exist, and this says it must explain itself. Crate-local rather than
-// workspace-wide because `dom` and `quickjs-rust-bridge` are not at this bar
-// yet.
+// The workspace-wide `unsafe_code = "warn"` says a block may exist; this says
+// it must explain itself. Crate-local rather than workspace-wide because `dom`
+// and `quickjs-rust-bridge` are not at this bar yet.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 use std::ffi::OsString;
@@ -24,7 +23,6 @@ use std::path::PathBuf;
 mod args;
 mod command;
 mod headless;
-pub mod image_decoders;
 #[cfg(target_os = "macos")]
 mod macos;
 mod page;

@@ -29,12 +29,12 @@
 //! - Replaced content honors `object-fit`, `object-position`, and `image-rendering`. Concrete size
 //!   comes from the node's natural size; `auto` maps to bilinear and `crisp-edges`/`pixelated` to
 //!   nearest sampling.
-//! - The grammar has no `image-orientation`; decoders apply EXIF orientation before publishing
-//!   pixels and natural size.
+//! - The grammar has no `image-orientation`; the embedder's `ImageStore` is expected to apply EXIF
+//!   orientation before it publishes pixels and natural size.
 
+use crate::Document;
 use crate::vello::Scene;
 use crate::visual::PaintOrder;
-use crate::{Document, ImageStore};
 
 /// Reusable document-owned scene builder state.
 #[derive(Default)]
@@ -42,7 +42,6 @@ pub(crate) struct Painter {
     scene: Scene,
     scratch: crate::paint::walker::Scratch,
     build_scratch: crate::visual::BuildScratch,
-    images: ImageStore,
     scene_epoch: Option<u64>,
     frame: Option<PaintOrder>,
     /// Storage reclaimed from the frame this painter last retired, held for
@@ -61,50 +60,17 @@ impl std::fmt::Debug for Painter {
     }
 }
 
-/// Painted frames between two replaced-content liveness sweeps.
-///
-/// The sweep is what bounds `ImageStore`'s node key space: an entry whose
-/// owner node no longer exists can never be looked up again, because the
-/// arena retires that handle for good. Running it on every frame would cost
-/// one arena probe per registered image per frame to reclaim bytes nothing is
-/// waiting on, so it runs on one frame in this many instead.
-const NODE_SWEEP_INTERVAL_FRAMES: u64 = 64;
-
 impl Painter {
     pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: PaintOrder) {
         self.scene_epoch = None;
         self.scene.reset();
-        self.images.begin_frame();
         crate::paint::walker::walk(
             &mut self.scene,
             &mut self.scratch,
             document,
             &frame,
-            &self.images,
+            document.image_store().as_ref(),
         );
-        // The sweep reads the document while the painter is mutably borrowed
-        // (`Document::render` calls this through `painter.borrow_mut()`), the
-        // same way the walk above reads styles and layouts. Nothing it calls
-        // may reach back into `Document::painter`: the walk would fail on
-        // every frame, but the sweep would fail on one frame in
-        // `NODE_SWEEP_INTERVAL_FRAMES`, which is the harder failure to find.
-        if self
-            .images
-            .frame_index()
-            .is_multiple_of(NODE_SWEEP_INTERVAL_FRAMES)
-        {
-            self.images.retain_nodes(|owner| {
-                // An owner key that does not decode is kept, not dropped. The
-                // registry's key space is opaque `u64`, and `NodeId::from_bits`
-                // also refuses a key whose generation field has outgrown its
-                // 21 bits, which a long-lived document that recycles one arena
-                // slot enough times will reach. Reading either as "the node is
-                // gone" would blank a live element's pixels for good, whereas
-                // keeping an undecodable key costs only the bytes, and the
-                // embedder can still drop it through `remove_node`.
-                crate::NodeId::from_bits(owner).is_none_or(|node| document.contains_node(node))
-            });
-        }
         self.scene_epoch = Some(frame.visual_epoch());
         // Reclaiming here, past the point where the walk can fail, is what
         // keeps a frame retained at every instant.
@@ -143,14 +109,6 @@ impl Painter {
     pub(crate) const fn scene(&self) -> &Scene {
         &self.scene
     }
-
-    pub(crate) const fn images(&self) -> &ImageStore {
-        &self.images
-    }
-
-    pub(crate) const fn images_mut(&mut self) -> &mut ImageStore {
-        &mut self.images
-    }
 }
 
 #[cfg(test)]
@@ -179,56 +137,5 @@ mod tests {
 
         assert!(result.is_err(), "the stale frame must fail closed");
         assert!(painter.needs_render(current_epoch));
-    }
-
-    #[test]
-    fn a_freed_replaced_element_stops_retaining_its_pixels() {
-        use crate::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-
-        let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
-        document.add_stylesheet(
-            "page { width: 20px; height: 20px; } img { width: 2px; height: 2px; }",
-            StylesheetOrigin::Author,
-        );
-        let page = document.document_element().id();
-        let image = document.create_element("img", ());
-        document.insert_before(page, image, None);
-        document.images_mut().insert_node(
-            image.to_bits(),
-            ImageData {
-                data: Blob::from(vec![0_u8; 16]),
-                format: ImageFormat::Rgba8,
-                alpha_type: ImageAlphaType::Alpha,
-                width: 2,
-                height: 2,
-            },
-        );
-        document.render();
-        assert_eq!(document.painter.borrow().images.node_bytes(), 16);
-
-        document.drop_element(image);
-        // The sweep is paced, so the pixels must still be there right up to
-        // the frame it runs on. Asserting that pins the interval: an
-        // implementation that swept every frame would pass the final
-        // assertion on its own.
-        let interval = super::NODE_SWEEP_INTERVAL_FRAMES;
-        let start = document.painter.borrow().images.frame_index();
-        for _ in 0..(interval - 1 - start % interval) {
-            document.images_mut();
-            document.render();
-            assert_eq!(
-                document.painter.borrow().images.node_bytes(),
-                16,
-                "the sweep must not run before its frame",
-            );
-        }
-        document.images_mut();
-        document.render();
-
-        assert_eq!(
-            document.painter.borrow().images.node_bytes(),
-            0,
-            "an owner key the arena retired can never be looked up again"
-        );
     }
 }

@@ -4,9 +4,8 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::image::{AlphaType, DecodedImage, ImageFormat};
 use bobcat_core::resource::ResourceFetcher;
-use bobcat_core::{LynxView, NoWindow, PageConfig};
+use bobcat_core::{ImageStore, LynxView, NoWindow, PageConfig};
 use support::FetcherDouble;
 
 #[test]
@@ -35,14 +34,13 @@ fn host_capabilities_compose_into_the_opaque_view() {
             .set_default_font_family("missing")
             .expect("available document")
     );
-    let image = DecodedImage::from_rgba8(
-        1,
-        1,
-        AlphaType::Straight,
-        vec![0, 0, 0, 255],
-        ImageFormat::Png,
-    )
-    .expect("decoded image");
-    view.register_image_url("app:///pixel.png", &image)
+    let images = Arc::new(flashbulb::TestImages::new());
+    images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
+    view.set_image_store(Arc::clone(&images) as Arc<dyn ImageStore>)
         .expect("available document");
+    view.prefetch_image("app:///pixel.png")
+        .expect("available document");
+    pollster::block_on(view.load_image("app:///pixel.png")).expect("published source");
+    pollster::block_on(view.load_image("app:///missing.png"))
+        .expect_err("a source the store does not carry cannot load");
 }

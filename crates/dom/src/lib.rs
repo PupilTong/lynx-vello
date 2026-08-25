@@ -35,7 +35,7 @@ pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
 
-pub use crate::render::images::ImageStore;
+pub use crate::render::image::{ImageFuture, ImageStore, ImageStoreError};
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]

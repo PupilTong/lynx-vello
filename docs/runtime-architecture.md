@@ -6,10 +6,10 @@ tree hand-off protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
 - a `ResourceFetcher`;
+- an `ImageStore`, which owns every decoded image the view draws;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
-- owned font bytes or already-decoded image pixels when those resources are
-  registered explicitly;
+- owned font bytes when fonts are registered explicitly;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -128,7 +128,7 @@ the result as author-origin rules. Load order is cascade order.
 The public facade is `LynxView<'window, W>`, with
 `OffscreenLynxView` as its windowless alias. It relays input, resize, redraw,
 frame-pump, target attachment, offscreen ticks, capture, cancellable script
-startup, owned-font registration, and decoded-image URL registration. It exposes no
+startup, owned-font registration, and image-store installation and loads. It exposes no
 tree getter, document getter, renderer getter, script-realm handle, or
 decomposition method.
 
@@ -137,8 +137,7 @@ The following types are private to `bobcat-core`:
 - `Engine`, `SharedTree`, and `TreeGuard`;
 - `MainThreadRuntime` and its Element-PAPI host implementation;
 - `LynxDocument`, `Viewport`, and `new_document`;
-- the concrete QuickJS realm adapter;
-- image caches and the fetch→decode→cache loader.
+- the concrete QuickJS realm adapter.
 
 This prevents an embedder from bypassing commit ordering, mutating the tree
 beside JavaScript, retaining a document during presentation, submitting a
@@ -214,8 +213,9 @@ and tests.
 
 ## Document and rendering ownership
 
-`dom::Document<T>` privately owns its style/layout state, retained painter,
-Vello scene, and image store. In Bobcat the payload is `()` and the core adds
+`dom::Document<T>` privately owns its style/layout state, retained painter and
+Vello scene, and holds the embedder's image store behind an `Arc`. In Bobcat
+the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
 It also defines the one component the engine owns, `raw-text`, in its own
@@ -234,10 +234,10 @@ inside and generates no box anywhere else.
 private Document<()>
   ├── DOM + Stylo arenas
   ├── layout/text state
+  ├── Arc<dyn ImageStore>   (the embedder's; the document holds no pixels)
   └── private Painter
         ├── retained vello::Scene
-        ├── reusable walk scratch
-        └── ImageStore
+        └── reusable walk scratch
 ```
 
 The presenting side alone runs input routing, retained-scene production, GPU
@@ -245,14 +245,17 @@ submission, presentation, and capture. The public `EventRequester`, `Window`,
 and `FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
 scheduling capabilities; they do not expose the engine that consumes them.
 
-Image codecs are represented by the host-implemented `image::Decoder`
-contract. Container sniffing, framing checks, decoded pixels, and sanitized
-metadata are public; the resource-driven loader and its caches are
-engine-owned and not publicly constructible. The `<image>` element has not yet
-wired that decoder into automatic loading. Current reference decoders exercise
-the standalone decode contract, and an embedder may install completed pixels
-under a CSS URL through `LynxView::register_image_url`; the private engine owns
-the corresponding `ImageStore` update and retained-scene refresh.
+Images are the host-implemented `ImageStore` contract and nothing else. No
+container sniffing, codec, cache, byte budget or eviction policy exists in this
+workspace: an embedder installs a store with `LynxView::set_image_store`, and
+the engine asks it for one image at a time by source string. The paint walk
+calls only the store's non-blocking `peek`, because it runs on the presenting
+thread between a swap-chain acquire and a present and can neither block nor
+suspend; a miss paints nothing that frame, the same not-yet-loaded state a
+browser shows. `LynxView::load_image` awaits the store's `get` outside the
+frame and then invalidates the retained scene, and `prefetch_image` starts the
+same work without waiting. The `<image>` element has not yet wired the store
+into automatic loading.
 
 ## Tree hand-off and visibility
 

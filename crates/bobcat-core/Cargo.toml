@@ -10,7 +10,6 @@ publish = false
 
 [dependencies]
 bytes = { workspace = true }
-data-url = { workspace = true }
 dom = { workspace = true }
 http = { workspace = true }
 pollster = { workspace = true }
@@ -33,7 +32,6 @@ web-time = { workspace = true }
 divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
-png = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [[bench]]

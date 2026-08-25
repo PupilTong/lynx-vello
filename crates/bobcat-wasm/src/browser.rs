@@ -10,11 +10,10 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
-    PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceKind,
-    ResourceLocality, ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceStream, ResourceTiming, RetryAdvice,
+    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
+    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, ResourceFuture, ResourceKind, ResourceLocality, ResourceMetadata,
+    ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
     EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
@@ -389,26 +388,8 @@ impl ResourceFetcher for BrowserResources {
         })
     }
 
-    fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Open)
-    }
-
-    fn fetch_resource_path(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourcePath> {
-        Self::unsupported(
-            Some(request.context.id),
-            ResourceErrorPhase::MaterializePath,
-        )
-    }
-
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
-    }
-
-    fn prefetch(&self, request: PrefetchRequest) -> ResourceFuture<'_, PrefetchReceipt> {
-        Self::unsupported(
-            Some(request.request.context.id),
-            ResourceErrorPhase::Prefetch,
-        )
     }
 
     fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()> {

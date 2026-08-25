@@ -9,11 +9,10 @@
 use std::sync::Arc;
 
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, PrefetchReceipt,
-    PrefetchRequest, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
-    ResourceMetadata, ResourcePath, ResourceRequest, ResourceResponse, ResourceSource,
-    ResourceStream, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
+    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
+    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::{PageConfig, PreparsedStyleSheet};
 use http::HeaderMap;
@@ -328,26 +327,8 @@ impl ResourceFetcher for ProgramResourceFetcher {
         })
     }
 
-    fn open_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceStream> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Open)
-    }
-
-    fn fetch_resource_path(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourcePath> {
-        Self::unsupported(
-            Some(request.context.id),
-            ResourceErrorPhase::MaterializePath,
-        )
-    }
-
     fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
         Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
-    }
-
-    fn prefetch(&self, request: PrefetchRequest) -> ResourceFuture<'_, PrefetchReceipt> {
-        Self::unsupported(
-            Some(request.request.context.id),
-            ResourceErrorPhase::Prefetch,
-        )
     }
 
     fn cancel_request(&self, request_id: RequestId) -> ResourceFuture<'_, ()> {

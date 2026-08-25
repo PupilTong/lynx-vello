@@ -136,9 +136,8 @@ useful signal for currently-compatible versions of those libraries.
   crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
-  `ResourceFetcher`, image-codec `Decoder`, draw-target, OS-input, and
-  lifecycle-wakeup capabilities, plus narrow view-level font and
-  decoded-image registration. The script engine is deliberately *not* one of
+  `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
+  lifecycle-wakeup capabilities, plus narrow view-level font registration. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
   embedder sees is the sanitized `script::ScriptError` a failure is reported
   with. A host may select a
@@ -219,35 +218,18 @@ useful signal for currently-compatible versions of those libraries.
   `attach_target`; `FrameRequester` owns both redraw requests and the optional
   presenting-side `pre_present` hook. `OffscreenLynxView` is the public
   windowless facade over the uninhabited `NoWindow`.
-  The `image` module contains the replaced-content decode **contract** and a
-  private engine pipeline:
-  container identification from magic bytes (PNG, JPEG, WebP, GIF, HEIC,
-  AVIF), per-container framing/truncation checks, the injected `Decoder`
-  trait, plus the internal fetch→decode→cache loader over the resource
-  protocol. Cache keys, caches, loader configuration, and `ImageLoader` are
-  not public. **No codec ships in the engine**: the engine only designs the
-  contract, and the embedder implements a `Decoder` (the reference embedder's
-  `image_decoders::platform_decoder()`, or its own implementation over an
-  existing app image pipeline — that seam is the point). Automatic
-  decode/loading for the Lynx `<image>` element remains unwired; current
-  callers may use the standalone decode contract and install finished pixels
-  under a CSS URL through `LynxView::register_image_url`. The private engine
-  writes that registration into its `ImageStore` and refreshes the retained
-  scene without exposing either object. The engine's own
-  contract tests inject a PNG decoder double the same way
-  (`src/image/loader_test_support.rs`'s `PngDouble`). A sniffed format the injected decoder does not claim is
-  `ImageError::Unsupported`, distinct from `UnknownFormat`. **Static only.**
-  `Acceleration` reports codec *provenance* (`Software`/`PlatformSoftware`),
-  never a claim about silicon — no still-image API on any supported platform
-  exposes an acceleration query or reaches a decode ASIC, so
-  `DedicatedHardware` is reserved and unreported. The module never touches
-  `dom` node types: it returns an `ImageHeader` and a `DecodedImage`
-  (internally `to_image_data` reaches peniko through `dom`), and installing
-  those on a node and in an `ImageStore` is
-  the engine loop's job. The **authoritative** recorded-limits list is
-  `crates/bobcat-core/src/image/mod.rs`'s module docs. The Lynx `<image>`
-  element surface (`mode`, `placeholder` racing, `cap-insets`, `blur-radius`,
-  `load`/`error` events) belongs above this module and is not implemented.
+  **Images are entirely the embedder's.** The core fetches, decodes, caches
+  and retains no pixel of its own: a host installs an `ImageStore`
+  (re-exported from `dom`) with `LynxView::set_image_store`, and the engine
+  asks it for one image at a time by source string — the `url(…)` value CSS
+  produced, or a replaced element's source. No container sniffing, no codec
+  contract, no cache policy and no byte budget lives in this workspace, and
+  the resource protocol carries no image request. `LynxView::load_image`
+  awaits `ImageStore::get` outside the frame and then invalidates the retained
+  scene; `LynxView::prefetch_image` starts the same work without waiting.
+  Automatic loading for the Lynx `<image>` element remains unwired, as does
+  its element surface (`mode`, `placeholder` racing, `cap-insets`,
+  `blur-radius`, `load`/`error` events).
   `Engine`, `SharedTree`, `TreeGuard`, `LynxDocument`,
   `Viewport`, `new_document`, `MainThreadRuntime`, and the concrete QuickJS
   adapter are all crate-private.
@@ -497,9 +479,7 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
   `bobcat-core`, the sibling `lynx-template-decoder` utility, and the
-  `lynx-xml` source parser; the
-  per-OS codec crates it consumes are target-scoped, for `image_decoders`
-  below.
+  `lynx-xml` source parser.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
   raw Lynx XML source card; other URL schemes remain rejected at the boundary.
   The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
@@ -519,24 +499,11 @@ useful signal for currently-compatible versions of those libraries.
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
-  The `image_decoders` module carries the **reference implementations** of
-  the engine's `bobcat_core::image::Decoder` contract — implementing the
-  decoder is embedder work, so they live in the reference embedder. One per
-  OS at compile time: Apple (macOS/iOS) `ImageIO`, claiming all six
-  identified formats **unconditionally** (the workspace assumes an OS floor
-  above every needed codec — WebP macOS 11/iOS 14, AVIF macOS 13/iOS 16 — so
-  there is no runtime probe; JPEG EXIF orientation from the module's own
-  byte parser, HEIC/AVIF orientation from `kCGImagePropertyOrientation`);
-  Linux **only**, the pure-Rust reference decoder (`png` + `zune-jpeg` +
-  `image-webp` taken directly rather than through the crates.io `image`
-  facade). Those two are the whole list: on any other target
-  `platform_decoder()` = `None` with **no fallback behind it**, and an embedder
-  shipping elsewhere implements `Decoder` itself. Decoder-behaviour tests
-  (real JPEG/WebP/EXIF fixtures) live in `tests/image_decoders.rs`; the
-  measured `ImageIO` API comparison that fixed the Apple decoder's choices
-  (thumbnail path, never `ShouldCacheImmediately`, the accepted ~30% PNG
-  cost) is recorded in `apple.rs`'s module docs, and the one-off bench
-  harness that produced it was deliberately not kept.
+  The CLI installs **no** `ImageStore`, so a page's `url(…)` layers and
+  replaced content paint as nothing. Fetching and decoding images is embedder
+  work, and this runner does not do it: its in-memory `ResourceFetcher` serves
+  the entry script, the background script and the one stylesheet, and rejects
+  every other URL.
   Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -741,17 +708,18 @@ useful signal for currently-compatible versions of those libraries.
   comment stating the invariant they rest on, and a crate-local
   `#![warn(clippy::undocumented_unsafe_blocks)]` keeps that true.
   `Document<T>` also owns one private concrete `Painter`, including its
-  reusable walk scratch, retained `vello::Scene`, and `ImageStore`.
+  reusable walk scratch and retained `vello::Scene`, plus the
+  embedder-installed `Arc<dyn ImageStore>` the walk reads.
   `render` privately builds `PaintOrder` and invokes that painter
   only for a dirty scene. The Painter records which private visual epoch its
   scene represents, so `render`/`needs_render` own retained-scene scheduling without
   publishing that epoch. `scene` lends a guarded shared borrow, while
-  `images_mut` is the narrow resource-update seam and invalidates the scene
-  conservatively. There is no renderer type parameter,
+  `set_image_store` and `note_images_changed` are the narrow image seams and
+  invalidate the scene conservatively. There is no renderer type parameter,
   `DocumentRenderer` trait, `with_renderer`, public Painter, public visual
   epoch, or public paint-order constructor. The crate also owns the DOM-free
   render floor absorbed from the former `pulsar` crate (2026-08-04): the
-  `render` module holds the decoded `ImageStore` (re-exported at the crate
+  `render` module holds the `ImageStore` trait (re-exported at the crate
   root) and the `render::gpu` wgpu render-to-texture/readback backend
   (`gpu::Headless`, plus the `read_texture`/`renderer_options`/`render_params`
   seams windowed embedders build against); the crate root re-exports the one
@@ -966,11 +934,16 @@ useful signal for currently-compatible versions of those libraries.
   node content; its internal update path automatically invalidates the
   affected cache path. Mutually exclusive literal text, natural size, and
   test-only leaf metadata reuse the node's single nullable content pointer.
-  `Document::set_natural_size` is the public replaced-content update seam
-  (public because decoding lives above `dom`, in `bobcat_core::image` and the
-  injected decoder); the
-  getter stays paint/layout-internal, setting an equal value is a structural
-  no-op, and the DOM core still knows no tag names.
+  `Document::set_natural_size` and `Document::set_image_source` are the public
+  replaced-content update seams (public because both halves arrive from above
+  `dom`, out of the embedder's `ImageStore`, independently and in either
+  order). The natural size always invalidates layout; a source invalidates only
+  the scene *unless* it is the call that makes the element replaced, because
+  being replaced forces `DisplayMode::Leaf` and hides every child — a layout
+  input, not a paint one. Both getters stay paint/layout-internal, setting an
+  equal value is a structural no-op, clearing a source an element never had is
+  a no-op rather than a conversion to a replaced leaf, and the DOM core still
+  knows no tag names.
   Each `DocumentLayoutState` entry owns one `LayoutSlot` containing the
   measurement cache, static position, and durable rounded/unrounded results;
   `Document::rounded_layout` is the public geometry query; unrounded geometry
@@ -1192,10 +1165,11 @@ useful signal for currently-compatible versions of those libraries.
   scene up by that ratio, so anything smaller is a crop. Playwright instead
   downsamples to CSS pixels; the two coincide at a ratio of 1, which is what
   lynx-stack pins for determinism and what every viewport here uses.
-  Replaced images are registered through `Document::images_mut` before
-  capture. `capture_document` cannot accept or default a second store: it
-  necessarily renders from the document-owned registry, and a raster-image
-  golden guards that ownership path. `headless` requires a usable GPU adapter and panics when one is
+  Its `TestImages` is the in-memory `dom::ImageStore` the image suites install
+  on a document before capture — the only image store in this workspace, and
+  deliberately a test double: it fetches nothing, decodes nothing and evicts
+  nothing. `capture_document` takes no store of its own, because the document
+  it renders already carries the one an embedder installed. `headless` requires a usable GPU adapter and panics when one is
   unavailable, so local and CI test runs obey the same mandatory-GPU policy.
   DOM-aware screenshot suites live in `dom`, which also keeps the direct GPU
   smoke tests. Goldens are not platform-suffixed: cross-platform
@@ -1361,8 +1335,8 @@ to that line.
 
 Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
 enforced by a crate-local `#![warn(clippy::undocumented_unsafe_blocks)]` in
-`bobcat-cli` (its fifteen ImageIO and Core Graphics blocks in
-`image_decoders/apple.rs`) and in `dom` (its two). The lint is still
+`bobcat-cli` (which now holds no `unsafe` at all, the lint standing as a bar
+for any that arrives) and in `dom` (its two). The lint is still
 crate-local rather than workspace-wide because `quickjs-rust-bridge` (133
 blocks) is the last holdout and is being restructured separately; raising it
 there is what would let this move into `[workspace.lints.clippy]`.
