@@ -15,9 +15,9 @@
 
 use euclid::default::{Point2D, Rect, Vector2D};
 
-use super::{PaintItem, PaintItemKind, PaintOrder, ScrollSlot, geometry};
+use super::{AnimationSample, PaintItem, PaintItemKind, PaintOrder, ScrollSlot, geometry};
 use crate::NodeId;
-use crate::paint::compose::chain_translation;
+use crate::paint::compose::{animation_deltas, chain_translation};
 use crate::tree::document::Document;
 
 /// Where a hit query's scroll offsets come from: `None` falls back to the
@@ -45,8 +45,9 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Vec<NodeId> {
+        let samples = self.sample_animations(None);
         let mut elements = Vec::new();
-        for node in self.hits_at(document, point, offsets, ratio) {
+        for node in self.hits_at(document, point, offsets, &samples, ratio) {
             if !elements.contains(&node) {
                 elements.push(node);
             }
@@ -62,7 +63,9 @@ impl PaintOrder {
         offsets: &OffsetSource<'_>,
         ratio: f32,
     ) -> Option<NodeId> {
-        self.hits_at(document, point, offsets, ratio).next()
+        let samples = self.sample_animations(None);
+        self.hits_at(document, point, offsets, &samples, ratio)
+            .next()
     }
 
     /// Items whose node died since the frame was built are skipped, not
@@ -73,12 +76,13 @@ impl PaintOrder {
         document: &'frame Document<T>,
         point: Point2D<f32>,
         offsets: &'frame OffsetSource<'frame>,
+        samples: &'frame [AnimationSample],
         ratio: f32,
     ) -> impl Iterator<Item = NodeId> + 'frame {
         self.items
             .iter()
             .rev()
-            .filter_map(move |item| self.item_hit(item, point, offsets, ratio))
+            .filter_map(move |item| self.item_hit(item, point, offsets, samples, ratio))
             .filter(move |&node| document.contains_node(node))
     }
 
@@ -87,20 +91,37 @@ impl PaintOrder {
         item: &PaintItem,
         point: Point2D<f32>,
         offsets: &OffsetSource<'_>,
+        samples: &[AnimationSample],
         ratio: f32,
     ) -> Option<NodeId> {
         if !item.hit_testable {
             return None;
         }
+        let screen = point;
         // The frame is baked unscrolled: carry the screen point into the
-        // item's scrolled space before inverting its transform.
+        // item's scrolled space — the scroll translation first, then the
+        // inverse of the animation deltas moving the item — before inverting
+        // its transform.
         let translation = chain_translation(
             &self.slots,
             self.item_translation_chain(item),
             ratio,
             offsets,
         );
-        let point = point + translation;
+        let mut point = point + translation;
+        if item.animation.is_some() {
+            let delta = animation_deltas(samples, item.animation);
+            if delta.determinant().abs() < f64::EPSILON {
+                // A degenerate delta paints the item collapsed; nothing to hit.
+                return None;
+            }
+            let unmoved = delta.inverse()
+                * crate::vello::kurbo::Point::new(f64::from(point.x), f64::from(point.y));
+            #[allow(clippy::cast_possible_truncation, reason = "CSS px fit f32")]
+            {
+                point = Point2D::new(unmoved.x as f32, unmoved.y as f32);
+            }
+        }
         let local = item.transform.inverse()?.transform_point2d(point)?;
         if local.x >= item.size.width || local.y >= item.size.height {
             return None;
@@ -108,7 +129,7 @@ impl PaintOrder {
         if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local) {
             return None;
         }
-        if !self.point_passes_clips(item.clip, point - translation, offsets, ratio) {
+        if !self.point_passes_clips(item.clip, screen, offsets, ratio) {
             return None;
         }
         Some(match item.kind {

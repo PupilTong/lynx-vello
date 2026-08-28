@@ -84,6 +84,7 @@
 //!   would key on, but nothing on this path reads them today.
 
 mod build;
+pub(crate) mod curves;
 pub(crate) mod frame;
 mod geometry;
 mod hit;
@@ -98,7 +99,7 @@ use std::sync::Arc;
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
-pub use self::frame::{CommittedFrame, HitTarget, ScrollSlot};
+pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
@@ -109,7 +110,19 @@ pub(crate) struct PaintOrder {
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
+    animations: Vec<AnimationSlot>,
     visual_epoch: u64,
+}
+
+/// One animation slot's compose-time values, sampled at one instant: the
+/// CSS-px delta from the committed geometry, and the opacity replacing the
+/// committed one on the element's effect layer. `parent` mirrors the slot
+/// table so a chain walk needs only this table.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AnimationSample {
+    pub(crate) parent: Option<u32>,
+    pub(crate) delta: crate::vello::kurbo::Affine,
+    pub(crate) alpha: Option<f32>,
 }
 
 /// The four growable tables a [`PaintOrder`] is made of, emptied of one
@@ -126,16 +139,18 @@ pub(crate) struct FrameBuffers {
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
+    animations: Vec<AnimationSlot>,
 }
 
 impl FrameBuffers {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 4] {
+    pub(crate) fn capacities(&self) -> [usize; 5] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
             self.slots.capacity(),
+            self.animations.capacity(),
         ]
     }
 }
@@ -150,21 +165,24 @@ impl PaintOrder {
         self.clips.clear();
         self.layers.clear();
         self.slots.clear();
+        self.animations.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
             layers: self.layers,
             slots: self.slots,
+            animations: self.animations,
         }
     }
 
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 4] {
+    fn capacities(&self) -> [usize; 5] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
             self.slots.capacity(),
+            self.animations.capacity(),
         ]
     }
 
@@ -189,6 +207,21 @@ impl PaintOrder {
     }
 
     #[must_use]
+    pub(crate) fn animations(&self) -> &[AnimationSlot] {
+        &self.animations
+    }
+
+    /// Every animation slot's compose values sampled at `now` — the
+    /// committed values (identity delta, committed opacity) for a slot with
+    /// no exported curve, or when `now` is `None`.
+    pub(crate) fn sample_animations(&self, now: Option<f64>) -> Vec<AnimationSample> {
+        self.animations
+            .iter()
+            .map(|slot| slot.sample(now))
+            .collect()
+    }
+
+    #[must_use]
     pub(crate) const fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
@@ -198,6 +231,21 @@ impl PaintOrder {
     /// differ in exactly one case: a scroll container's own box carries its
     /// own slot for recognition (the box is a scroll target) but is moved
     /// only by the scrollers around it.
+    /// The full compose chain moving this item's content: the scroll
+    /// translation chain plus the animation chain — an element's own box
+    /// moves with its own animation delta, so the animation side has no
+    /// recognition split.
+    #[must_use]
+    pub(crate) fn item_compose_chain(
+        &self,
+        item: &PaintItem,
+    ) -> crate::paint::compose::ComposeChain {
+        crate::paint::compose::ComposeChain {
+            scroll: self.item_translation_chain(item),
+            animation: item.animation,
+        }
+    }
+
     #[must_use]
     pub(crate) fn item_translation_chain(&self, item: &PaintItem) -> Option<u32> {
         let slot = item.slot?;
@@ -234,6 +282,11 @@ pub(crate) struct PaintItem {
     /// [`Self::transform`] — are this slot's parent chain for a container's
     /// own item and this very chain for everything else.
     pub(crate) slot: Option<u32>,
+    /// The nearest ancestor-or-self animation slot moving this item, as an
+    /// index into [`PaintOrder::animations`]. Unlike the scroll chain, an
+    /// element's own box rides its own slot: the animated transform moves
+    /// the element itself.
+    pub(crate) animation: Option<u32>,
 }
 
 /// A stacking context rendered as a composited group.
@@ -253,6 +306,10 @@ pub(crate) struct RenderLayer {
     /// box, so the group and its clip move with the scrollers *around* the
     /// root, never with the root's own content.
     pub(crate) slot: Option<u32>,
+    /// The nearest ancestor-or-self animation slot moving this group's own
+    /// frame — ancestor-or-self, because an animated element's group moves
+    /// with the element.
+    pub(crate) animation: Option<u32>,
     /// The contiguous run of [`PaintOrder::items`] this group encloses. A
     /// stacking context paints atomically, so its members are always
     /// contiguous; an empty run is not recorded at all (the layer is popped).
@@ -327,12 +384,14 @@ impl<T: Sync> Document<T> {
         self.layout_state_mut().ensure_covers(bound);
         let frame = self.build_paint_order();
         let animations_active = self.animations().is_active();
+        let needs_main_ticks = animations_active && self.animation_needs_main_ticks(&frame);
         let viewport = self.viewport_size();
         let device_pixel_ratio = self.device_pixel_ratio();
         self.painter.borrow_mut().paint(
             self,
             frame,
             animations_active,
+            needs_main_ticks,
             viewport,
             device_pixel_ratio,
         );
@@ -458,7 +517,7 @@ impl<T> Document<T> {
         let painter = self.painter.borrow();
         let mut out = painter
             .frame()
-            .map_or([0, 0, 0, 0], |frame| frame.order.capacities())
+            .map_or([0, 0, 0, 0, 0], |frame| frame.order.capacities())
             .to_vec();
         let (spare, scratch) = painter.storage_capacities();
         out.extend_from_slice(&spare);

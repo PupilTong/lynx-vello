@@ -17,11 +17,12 @@
 
 use euclid::default::{Point2D, Size2D, Vector2D};
 
-use super::PaintOrder;
+use super::{AnimationSample, PaintOrder};
 use crate::NodeId;
 use crate::paint::compose::{self, ComposeOp};
 use crate::scroll::ScrollAxes;
 use crate::vello::Scene;
+use crate::vello::kurbo::Affine;
 
 /// One scroll container in the committed frame, linked to the nearest scroll
 /// container on its containing-block chain.
@@ -86,6 +87,46 @@ impl ScrollSlot {
 /// the encode covers — the compose headroom before a refill commit is due.
 pub const ENCODE_WINDOW_SCROLLPORTS: f32 = 1.0;
 
+/// One composite-animated element in the committed frame: the target of the
+/// compose-time retargeting that lets its animation play without commits.
+///
+/// A slot with no exported curve still tags its subtree — the element's
+/// animation was found ineligible after the slot was allocated — and samples
+/// as the committed values, so composition draws exactly the committed frame
+/// and the element rides main-thread ticks instead.
+#[derive(Debug)]
+pub struct AnimationSlot {
+    /// The animated element.
+    pub node: NodeId,
+    /// The nearest enclosing animation slot, when animated elements nest.
+    pub(crate) parent: Option<u32>,
+    /// The exported curve, absent when the element's animation was found
+    /// ineligible after the slot was allocated — the slot then samples as
+    /// the committed values and the element rides main-thread ticks.
+    pub(crate) curve: Option<crate::visual::curves::CompositeCurve>,
+}
+
+impl AnimationSlot {
+    /// This slot's compose values at `now`: `None` — or no exported curve —
+    /// samples the committed values (identity delta, committed opacity).
+    pub(crate) fn sample(&self, now: Option<f64>) -> AnimationSample {
+        let committed = AnimationSample {
+            parent: self.parent,
+            delta: Affine::IDENTITY,
+            alpha: None,
+        };
+        let (Some(curve), Some(now)) = (&self.curve, now) else {
+            return committed;
+        };
+        let sample = curve.sample(now);
+        AnimationSample {
+            parent: self.parent,
+            delta: sample.delta,
+            alpha: sample.alpha,
+        }
+    }
+}
+
 /// What a frame hit test reports: the element to act on, plus the scroll
 /// slot recognition starts its chain walk from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +151,7 @@ pub struct CommittedFrame {
     pub(crate) order: PaintOrder,
     pub(crate) presentation: Presentation,
     pub(crate) animations_active: bool,
+    pub(crate) needs_main_ticks: bool,
     pub(crate) viewport: Size2D<f32>,
     pub(crate) device_pixel_ratio: f32,
 }
@@ -201,12 +243,15 @@ impl CommittedFrame {
         &self,
         scene: &mut Scene,
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        animation_now: Option<f64>,
     ) {
+        let samples = self.order.sample_animations(animation_now);
         compose::replay(
             scene,
             &self.presentation.fragments,
             &self.presentation.program,
             self.order.slots(),
+            &samples,
             self.device_pixel_ratio,
             offset_of,
         );
@@ -220,10 +265,41 @@ impl CommittedFrame {
     }
 
     /// Whether the document had a running animation at commit time — the
-    /// compositor's cue to keep asking the committer for frames.
+    /// compositor's cue to keep producing frames.
     #[must_use]
     pub const fn animations_active(&self) -> bool {
         self.animations_active
+    }
+
+    /// Whether something animating still needs per-frame main-thread ticks:
+    /// an animation or transition this frame could not export as a curve.
+    /// The compositor sends one `BeginFrame` per frame while this holds.
+    #[must_use]
+    pub const fn needs_main_ticks(&self) -> bool {
+        self.needs_main_ticks
+    }
+
+    /// Whether the frame carries any exported curve — the compositor then
+    /// recomposes each frame at its clock reading instead of reusing the
+    /// drawn frame.
+    #[must_use]
+    pub fn has_live_curves(&self) -> bool {
+        self.order
+            .animations()
+            .iter()
+            .any(|slot| slot.curve.is_some())
+    }
+
+    /// Whether any exported curve has run past its domain at `now`: the cue
+    /// to send one `BeginFrame` so the main thread runs the finish restyle
+    /// and commits the animation's end state.
+    #[must_use]
+    pub fn animation_boundary_passed(&self, now: f64) -> bool {
+        self.order.animations().iter().any(|slot| {
+            slot.curve
+                .as_ref()
+                .is_some_and(|curve| curve.expired_at(now))
+        })
     }
 
     /// The CSS-px viewport this frame was committed for.
@@ -265,10 +341,18 @@ impl CommittedFrame {
         &self,
         point: Point2D<f32>,
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+        animation_now: Option<f64>,
     ) -> Option<HitTarget> {
+        let samples = self.order.sample_animations(animation_now);
         self.order
-            .raw_hits_at(point, offset_of, self.device_pixel_ratio)
+            .raw_hits_at(point, offset_of, &samples, self.device_pixel_ratio)
             .next()
+    }
+
+    /// The frame's composite-animated elements; see [`AnimationSlot`].
+    #[must_use]
+    pub fn animation_slots(&self) -> &[AnimationSlot] {
+        self.order.animations()
     }
 
     /// The first slot on the chain from `from` (inclusive) the user may
@@ -295,10 +379,11 @@ impl PaintOrder {
         &'frame self,
         point: Point2D<f32>,
         offset_of: &'frame (dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'frame),
+        samples: &'frame [AnimationSample],
         ratio: f32,
     ) -> impl Iterator<Item = HitTarget> + 'frame {
         self.items().iter().rev().filter_map(move |item| {
-            let node = self.item_hit(item, point, offset_of, ratio)?;
+            let node = self.item_hit(item, point, offset_of, samples, ratio)?;
             Some(HitTarget {
                 node,
                 scroll: item.slot,
@@ -353,11 +438,11 @@ mod tests {
         assert!((slots[0].max_offset.y - 800.0).abs() < 0.5);
 
         let inside = frame
-            .hit(Point2D::new(50.0, 50.0), &|_| None)
+            .hit(Point2D::new(50.0, 50.0), &|_| None, None)
             .expect("content hit");
         assert_eq!(inside.scroll, Some(0), "content carries its scroller");
         let outside = frame
-            .hit(Point2D::new(500.0, 500.0), &|_| None)
+            .hit(Point2D::new(500.0, 500.0), &|_| None, None)
             .expect("page hit");
         assert_eq!(outside.node, root);
         assert_eq!(outside.scroll, None, "the page is no scroll container");
@@ -423,7 +508,7 @@ mod tests {
         // ancestor), so its item must carry no slot at all — it neither
         // scrolls with the inner scroller nor chains into it.
         let hit = frame
-            .hit(Point2D::new(15.0, 15.0), &|_| None)
+            .hit(Point2D::new(15.0, 15.0), &|_| None, None)
             .expect("escapee hit");
         assert_eq!(hit.node, escapee);
         assert_eq!(hit.scroll, None, "the escapee left both scrollers");

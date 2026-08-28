@@ -138,3 +138,24 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
         "the animation advances on real time, with the host naming nothing"
     );
 }
+
+/// The slider's `translateX` keyframes export as a curve, so the square
+/// moves between two captures with no tick in between — no `BeginFrame`,
+/// no restyle, no commit: the same committed frame composed at two clock
+/// readings.
+#[tokio::test]
+async fn an_exported_curve_moves_pixels_between_commits() {
+    let mut view = booted().await;
+    // The synchronizing tick promotes the pending animation to running,
+    // which is when the commit exports its curve.
+    view.tick(true).expect("first frame");
+
+    let first = red_left_edge(&mut view);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let later = red_left_edge(&mut view);
+
+    assert_ne!(
+        later, first,
+        "an exported curve animates in composition, between commits"
+    );
+}
