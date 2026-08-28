@@ -153,10 +153,9 @@ CSS supplied as text.
 Private `bobcat_core::tree` composes the native operations over
 `Document<()>`, and the embedded `packages/bobcat-element` runtime exposes
 the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
-`LynxView::new` fetches the `ViewSources`' stylesheets and its one entry MTS
-module through the injected resource contract, mounts the sheets, and starts
-the Lynx main thread over the document; the QuickJS boot module awaits that
-resolved entry URL before calling a present `globalThis.renderPage` or the
+`LynxView::new` fetches the `ViewSources`' stylesheets and entry module through
+the injected resource contract; the QuickJS boot module awaits that resolved
+entry URL before calling a present `globalThis.renderPage` or the
 `__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:
 
@@ -204,11 +203,9 @@ What that covers, and what it does not:
   it is an embedder-visible protocol;
 
 - `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
-  `bobcat_core::style::PreparsedStyleSheet`, serves it from its
-  `ResourceFetcher`, and names its URL in `ViewSources::style_sheets`, in
-  cascade order; `LynxView::new` mounts every sheet as author-origin rules
-  built directly, before the entry module runs, so the first commit is already
-  styled and no sheet is re-tokenized into text. The
+  `bobcat_core::style::PreparsedStyleSheet` and names its URL among
+  `ViewSources::style_sheets`, in cascade order; `LynxView::new` mounts each as
+  author-origin rules built directly — no stylesheet text, no re-tokenizing. The
   CSS parser still owns one selector-list parse per rule and one value parse
   per declaration, because the wire format keeps attribute selectors and
   functional pseudo-classes as text and stylo builds specified values only

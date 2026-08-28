@@ -609,8 +609,8 @@ useful signal for currently-compatible versions of those libraries.
   raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
   exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
   a host may still deliberately override them.
-  The optional background body is retained and reported as not executed,
-  matching the runtime limitation above.
+  The optional background body is reported by URL and neither retained nor
+  executed, matching the runtime limitation above.
   Transferring the canvas does not transfer its DOM event target, so the
   `BobcatCanvas` facade retains that element and automatically forwards active
   `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims
