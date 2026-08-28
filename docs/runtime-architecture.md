@@ -252,8 +252,10 @@ private Document<()>
   ├── layout/text state
   ├── Arc<dyn ImageStore>   (the embedder's; the document holds no pixels)
   └── private Painter
-        ├── retained Arc<CommittedFrame>   (paint tables + encoded Scene +
-        │                                   scroll-slot table; the publish unit)
+        ├── retained Arc<CommittedFrame>   (paint tables + scroll-slot table +
+        │                                   the split scene: per-chain fragments
+        │                                   and the compose program over them;
+        │                                   the publish unit)
         └── reusable walk/build scratch
 ```
 
@@ -302,6 +304,32 @@ at other times. A half-applied JavaScript turn is still unobservable, because
 the main thread only serves commands between evaluations. The presenting
 side never blocks and never skips a frame: it always has the latest published
 frame to compose and hit-test, however busy the main thread is.
+
+## Scroll composes; a refill recommits
+
+The frame is baked *unscrolled*: the walker's layer-stack pushes become a
+compose program tagged with the scroll chain each shape rides, the content
+between them lands in per-chain scene fragments, and replaying the program
+with a set of per-slot offsets reproduces exactly what a monolithic encode at
+those offsets would have produced. A user scroll therefore never waits for a
+commit. The presenting side arbitrates consumption against the published
+slot table, keeps the consumed offsets as *scroll intents* (each stamped
+with its `ScrollBy` command's sequence number), recomposes and re-hit-tests
+at those offsets immediately, and sends the same `ScrollBy` to the main
+thread, whose document applies it without dirtying anything. A published
+frame echoes the highest sequence applied, so intents a frame already
+incorporates are dropped and the rest re-clamp to its bounds.
+
+The encode is windowed: each slot's fragments cover one scrollport past its
+committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an
+intent moves past half its remaining window headroom, the engine sends one
+`Refill` command per committed frame; the main thread marks the paint stale
+and its next commit re-bakes the windows centered on the current offsets —
+no script involvement anywhere. Programmatic scrolls need no refill today
+because every scroll reaching the document rides a `ScrollBy` the intents
+already display; a future script-facing scroll API must either dirty the
+paint or publish its offsets, since the compositor only knows what crossed
+the channel.
 
 ## Native and Wasm spawning
 

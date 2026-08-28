@@ -35,6 +35,9 @@ impl Harness {
         self.doc.dom.build_paint_order()
     }
 
+    /// The on-screen origin of `id`'s box: the baked (unscrolled) transform
+    /// with the compose-time chain translation applied at the document's
+    /// live offsets — exactly what composition and hit testing see.
     fn origin(&mut self, id: NodeId) -> Point2D<f32> {
         let frame = self.paint();
         let item = frame
@@ -42,9 +45,19 @@ impl Harness {
             .iter()
             .find(|item| item.node == id && item.kind == PaintItemKind::ElementBox)
             .expect("node paints an element box");
-        item.transform
+        let baked = item
+            .transform
             .transform_point2d(Point2D::zero())
-            .expect("a paintable item has a non-singular matrix")
+            .expect("a paintable item has a non-singular matrix");
+        let offsets =
+            |slot: &crate::visual::ScrollSlot| Some(self.doc.dom.scroll_offset(slot.node));
+        let translation = crate::paint::compose::chain_translation(
+            frame.slots(),
+            frame.item_translation_chain(item),
+            self.doc.dom.device_pixel_ratio(),
+            &offsets,
+        );
+        baked - translation
     }
 
     fn hit(&mut self, x: f32, y: f32) -> Option<NodeId> {

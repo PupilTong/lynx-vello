@@ -65,6 +65,7 @@ use std::time::Duration;
 use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
 use dom::scroll::ScrollAxes;
+use dom::vello::Scene;
 use dom::vello::peniko::Color;
 use dom::{CommittedFrame, FontBlob, HitTarget, ImageStore, NodeId, Vector2D};
 use http::HeaderMap;
@@ -94,6 +95,9 @@ pub struct FrameSize {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
+/// What one drawn frame is a function of: the commit epoch and the
+/// scroll-intents generation composed with it. Same key, same pixels.
+type ComposeKey = (u64, u64);
 #[cfg(target_arch = "wasm32")]
 static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
@@ -505,6 +509,9 @@ struct ScrollIntents {
     offsets: HashMap<NodeId, Vector2D<f32>>,
     /// The commit epoch last rebased against, so one publish rebases once.
     epoch: Option<u64>,
+    /// Bumped whenever a chain step lands, so composition can key on
+    /// "this frame at these offsets" instead of the frame epoch alone.
+    generation: u64,
 }
 
 impl ScrollIntents {
@@ -580,7 +587,48 @@ impl ScrollIntents {
                 break;
             }
         }
+        if consumed {
+            self.generation += 1;
+        }
         consumed
+    }
+
+    /// The intent offset for one scroller, if a scroll is in flight on it —
+    /// the compositor's and hit tester's override over the committed one.
+    fn offset_for(&self, node: NodeId) -> Option<Vector2D<f32>> {
+        self.offsets.get(&node).copied()
+    }
+
+    /// Whether any offset is currently overridden — when none is, the
+    /// frame's own committed composition is exact.
+    fn overrides_any(&self) -> bool {
+        !self.offsets.is_empty()
+    }
+
+    /// Whether an in-flight offset has consumed more than half of its slot's
+    /// remaining encode-window headroom on the side it is moving toward —
+    /// the cue to ask for a refill commit before the window runs out.
+    fn refill_due(&self, frame: &CommittedFrame) -> bool {
+        self.offsets.iter().any(|(node, offset)| {
+            frame.slot_of(*node).is_some_and(|index| {
+                let slot = &frame.scroll_slots()[index as usize];
+                let (low, high) = slot.encode_window();
+                axis_refill_due(offset.x, slot.offset.x, low.x, high.x)
+                    || axis_refill_due(offset.y, slot.offset.y, low.y, high.y)
+            })
+        })
+    }
+}
+
+/// One axis of [`ScrollIntents::refill_due`]: past halfway between the
+/// committed offset and the window edge being approached.
+fn axis_refill_due(pending: f32, committed: f32, low: f32, high: f32) -> bool {
+    if pending < committed {
+        pending - low < (committed - low) / 2.0
+    } else if pending > committed {
+        high - pending < (high - committed) / 2.0
+    } else {
+        false
     }
 }
 
@@ -592,10 +640,38 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
     }
 }
 
+/// The scene to draw for `frame`: when scrolls are in flight, the frame
+/// recomposed into `buffer` at their offsets; otherwise the frame's own
+/// committed composition, materialized once and shared.
+///
+/// A free function over the exact fields it reads, so callers holding a
+/// mutable borrow of the output can still call it.
+fn scene_for<'frame>(
+    intents: &ScrollIntents,
+    buffer: &'frame mut Scene,
+    frame: &'frame CommittedFrame,
+) -> &'frame Scene {
+    if intents.overrides_any() {
+        buffer.reset();
+        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node));
+        buffer
+    } else {
+        frame.scene()
+    }
+}
+
 /// Routes one input event against the published frame: the topmost
 /// hit-testable element and its scroll slot, or nothing before the first
 /// commit or outside every element.
-fn route_published(frame: Option<&CommittedFrame>, event: &InputEvent) -> Option<HitTarget> {
+///
+/// The frame is baked unscrolled; `intents` supplies the offsets scrolls in
+/// flight have already moved to, so a point lands on what the screen shows,
+/// not on where the last commit left things.
+fn route_published(
+    frame: Option<&CommittedFrame>,
+    intents: &ScrollIntents,
+    event: &InputEvent,
+) -> Option<HitTarget> {
     let finite = event.position.x.is_finite()
         && event.position.y.is_finite()
         && match event.kind {
@@ -606,7 +682,7 @@ fn route_published(frame: Option<&CommittedFrame>, event: &InputEvent) -> Option
         debug_assert!(false, "host input events must be finite, got {event:?}");
         return None;
     }
-    frame?.hit(event.position)
+    frame?.hit(event.position, &|slot| intents.offset_for(slot.node))
 }
 
 /// Everything one view is built from.
@@ -722,6 +798,12 @@ pub(crate) enum MainCommand {
     /// [`FrameHub::note_begin_frame_serviced`] so a synchronizing caller can
     /// wait for this specific tick.
     BeginFrame { now: f64, seq: u64 },
+    /// The presenting side's compose offsets have consumed most of a slot's
+    /// committed encode window: repaint so the next commit re-centers the
+    /// windows on the current offsets. The offsets themselves are already
+    /// authoritative on the main thread — the `ScrollBy` commands that moved
+    /// them are ordered ahead of this on the same channel.
+    Refill,
     /// The installed store's answers changed; repaint with them.
     NoteImagesChanged,
     /// Run a closure against the document, for tests that observe main-thread
@@ -782,8 +864,14 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     clock: FrameClock,
     /// Between-commits scroll offsets, for consumption arbitration.
     scroll_intents: ScrollIntents,
-    /// The commit epoch last composed to the offscreen target.
-    composed: Option<u64>,
+    /// The compose key last drawn to the offscreen target.
+    composed: Option<ComposeKey>,
+    /// The buffer frames are composed into when in-flight scroll offsets
+    /// override the committed ones; reused across frames.
+    composed_scene: Scene,
+    /// The frame epoch a refill was already requested for, so a long scroll
+    /// asks once per commit instead of once per event.
+    refill_requested_for: Option<u64>,
     /// `BeginFrame` sequence numbers, acknowledged through the hub.
     begin_frames_sent: u64,
     thread_bound: PhantomData<Rc<()>>,
@@ -921,6 +1009,8 @@ impl<'window, W: Window> LynxView<'window, W> {
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::default(),
             composed: None,
+            composed_scene: Scene::new(),
+            refill_requested_for: None,
             begin_frames_sent: 0,
             thread_bound: PhantomData,
         };
@@ -1027,8 +1117,12 @@ impl<'window, W: Window> LynxView<'window, W> {
     pub fn dispatch_input(&mut self, event: InputEvent) {
         let at = self.clock.now_seconds();
         let published = self.hub.latest();
+        if let Some(frame) = &published {
+            self.scroll_intents.rebase(frame);
+        }
+        let generation = self.scroll_intents.generation;
         let frame = published.as_deref();
-        let target = route_published(frame, &event);
+        let target = route_published(frame, &self.scroll_intents, &event);
         let mut decisions = Vec::new();
         {
             let host = FrameRouterHost {
@@ -1039,11 +1133,28 @@ impl<'window, W: Window> LynxView<'window, W> {
                 .on_input(&event, target, at, &host, &mut decisions);
         }
         self.execute_decisions(&mut decisions, published.as_ref());
-        // A commit requests its own frame; an armed long-press deadline
-        // needs the frame clock even when nothing is dirty.
-        if self.gesture.needs_frame() {
+        if let Some(frame) = &published {
+            self.maybe_request_refill(frame);
+        }
+        // A consumed scroll changes what composition shows; an armed
+        // long-press deadline needs the frame clock even when nothing is
+        // dirty. Either way the next frame is this side's to produce.
+        if self.gesture.needs_frame() || self.scroll_intents.generation != generation {
             self.refresh();
         }
+    }
+
+    /// Asks the main thread for a refill commit when in-flight offsets have
+    /// consumed most of a slot's encode window — once per committed frame,
+    /// because only the next commit re-centers the windows.
+    fn maybe_request_refill(&mut self, frame: &CommittedFrame) {
+        if self.refill_requested_for == Some(frame.epoch())
+            || !self.scroll_intents.refill_due(frame)
+        {
+            return;
+        }
+        self.refill_requested_for = Some(frame.epoch());
+        let _ = self.commands.send(MainCommand::Refill);
     }
 
     /// Executes the router's decisions in order — which is the delivery
@@ -1278,17 +1389,22 @@ impl<'window, W: Window> LynxView<'window, W> {
         let latest = self.hub.latest();
         if let Some(frame) = &latest {
             self.scroll_intents.rebase(frame);
+            self.maybe_request_refill(frame);
         }
         let animating = latest
             .as_ref()
             .is_some_and(|frame| frame.animations_active());
+        let key = latest
+            .as_ref()
+            .map(|frame| (frame.epoch(), self.scroll_intents.generation));
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
-        if let Some(frame) = &latest
-            && graphics.needs_paint(frame.epoch(), size)
+        if let (Some(frame), Some(key)) = (&latest, key)
+            && graphics.needs_paint(key, size)
         {
-            graphics.render_to_target(frame.scene(), size, frame.epoch())?;
+            let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+            graphics.render_to_target(scene, size, key)?;
         }
         if animating || self.gesture.needs_frame() {
             frames.request_frame();
@@ -1310,15 +1426,19 @@ impl<'window, W: Window> LynxView<'window, W> {
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         let latest = self.hub.latest();
+        let key = latest
+            .as_ref()
+            .map(|frame| (frame.epoch(), self.scroll_intents.generation));
         match &mut self.output {
             Output::None => Err(EngineError::NoDrawTarget),
             Output::Offscreen(gpu) => {
-                if let Some(frame) = &latest
-                    && self.composed != Some(frame.epoch())
+                if let (Some(frame), Some(key)) = (&latest, key)
+                    && self.composed != Some(key)
                 {
-                    gpu.render_frame(frame.scene(), size.width, size.height, Color::WHITE)
+                    let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+                    gpu.render_frame(scene, size.width, size.height, Color::WHITE)
                         .map_err(|error| EngineError::Gpu(error.to_string()))?;
-                    self.composed = Some(frame.epoch());
+                    self.composed = Some(key);
                 }
                 let pixels = gpu
                     .read_pixels()
@@ -1326,10 +1446,11 @@ impl<'window, W: Window> LynxView<'window, W> {
                 Ok(Screenshot { size, pixels })
             }
             Output::Window(graphics) => {
-                if let Some(frame) = &latest
-                    && graphics.needs_paint(frame.epoch(), size)
+                if let (Some(frame), Some(key)) = (&latest, key)
+                    && graphics.needs_paint(key, size)
                 {
-                    graphics.render_to_target(frame.scene(), size, frame.epoch())?;
+                    let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+                    graphics.render_to_target(scene, size, key)?;
                 }
                 if !graphics.rendered_at(size) {
                     return Err(EngineError::Render(
@@ -1504,6 +1625,7 @@ fn apply_main_command(
             runtime.begin_frame(now);
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
+        MainCommand::Refill => runtime.refill_scroll_windows(),
         MainCommand::NoteImagesChanged => runtime.note_images_changed(),
         #[cfg(test)]
         MainCommand::Probe(probe) => runtime.with_document(probe),
@@ -1747,14 +1869,17 @@ impl OffscreenLynxView {
             return Ok(false);
         };
         self.scroll_intents.rebase(&frame);
-        if self.composed == Some(frame.epoch()) && !force {
+        self.maybe_request_refill(&frame);
+        let key = (frame.epoch(), self.scroll_intents.generation);
+        if self.composed == Some(key) && !force {
             return Ok(false);
         }
+        let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, &frame);
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
         };
         gpu.render_frame(
-            frame.scene(),
+            scene,
             self.frame_size.width,
             self.frame_size.height,
             Color::WHITE,
@@ -1762,7 +1887,7 @@ impl OffscreenLynxView {
         .map_err(|error| EngineError::Gpu(error.to_string()))?;
         gpu.wait_idle()
             .map_err(|error| EngineError::Gpu(error.to_string()))?;
-        self.composed = Some(frame.epoch());
+        self.composed = Some(key);
         Ok(true)
     }
 }
@@ -2445,6 +2570,143 @@ mod event_loop_tests {
         assert!(
             !engine.gesture.needs_frame(),
             "a resolved deadline stops asking for frames"
+        );
+    }
+
+    /// A 200x200 scroller over two 200px rows, each logging its own tap into
+    /// its own attribute — so a hit's row is observable from out here.
+    const TWO_ROW_SCROLLER_PAGE: &str = r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          const first = __CreateView(0);
+          const second = __CreateView(0);
+          __AppendElement(page, view);
+          __AppendElement(view, first);
+          __AppendElement(view, second);
+          globalThis.held = [page, view, first, second];
+          __SetInlineStyles(view,
+            'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
+          for (const row of [first, second]) {
+            __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:200px');
+          }
+          __AddEventListener(first, 'tap', () => __SetAttribute(first, 'tapped', 'yes'), {});
+          __AddEventListener(second, 'tap', () => __SetAttribute(second, 'tapped', 'yes'), {});
+          __FlushElementTree();
+        };
+        ";
+
+    /// The composed-scroll law, from the engine's side: a user scroll inside
+    /// the encode window updates the document's offsets and the presenting
+    /// side's intents but commits nothing — and hit testing follows the
+    /// intent offsets, not the committed ones, so a tap lands on what the
+    /// screen shows.
+    #[test]
+    fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
+        let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
+        let boot_epoch = engine
+            .published_frame()
+            .expect("boot published a frame")
+            .epoch();
+
+        // 30px is inside half the encode-window headroom (the 200px
+        // scrollport), so no refill commit is due either.
+        engine.dispatch_input(InputEvent::wheel(
+            Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 30.0),
+        ));
+        let offset = scroll_offset_of(&mut engine, 3);
+        assert!(
+            (offset.y - 30.0).abs() < 0.5,
+            "the wheel scrolled the document, got {offset:?}"
+        );
+        // The probe round-tripped the main thread, so its round's
+        // commit-if-dirty has already run — and found nothing.
+        assert_eq!(
+            engine.published_frame().expect("still published").epoch(),
+            boot_epoch,
+            "a windowed scroll must not recommit"
+        );
+        let scroller = node_id(3);
+        assert_eq!(
+            engine.scroll_intents.offset_for(scroller),
+            Some(dom::Vector2D::new(0.0, 30.0)),
+            "the intent carries the offset composition draws at"
+        );
+
+        // Screen y=180 plus the 30px intent offset is content y=210: the
+        // second row. Routed against the committed offsets it would be the
+        // first.
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(100.0, 180.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(100.0, 180.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Up,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let second = attribute_of(&mut engine, 5, "tapped");
+            if second.as_deref() == Some("yes") {
+                break;
+            }
+            assert!(
+                attribute_of(&mut engine, 4, "tapped").is_none(),
+                "the tap landed on the unscrolled row: hits ignored the intent offsets"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "the tap never delivered, second row saw {second:?}"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            attribute_of(&mut engine, 4, "tapped").is_none(),
+            "only the row under the scrolled point may see the tap"
+        );
+    }
+
+    /// A scroll past half the encode-window headroom asks the main thread
+    /// for a refill: the next commit re-centers the windows and publishes
+    /// the scrolled offsets, all without any script involvement.
+    #[test]
+    fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
+        let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
+        let boot_epoch = engine
+            .published_frame()
+            .expect("boot published a frame")
+            .epoch();
+
+        // max_offset is 200 (400px of rows in a 200px scrollport), so the
+        // window tops out at 200 and 150 is past half its headroom.
+        engine.dispatch_input(InputEvent::wheel(
+            Point2D::new(100.0, 100.0),
+            dom::Vector2D::new(0.0, 150.0),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let frame = loop {
+            let frame = engine.published_frame().expect("still published");
+            if frame.epoch() > boot_epoch {
+                break frame;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the refill commit never published"
+            );
+            std::thread::yield_now();
+        };
+        let scroller = node_id(3);
+        let slot = frame.slot_of(scroller).expect("the scroller has a slot");
+        let published = frame.scroll_slots()[slot as usize].offset;
+        assert!(
+            (published.y - 150.0).abs() < 0.5,
+            "the refill commit publishes the scrolled offset, got {published:?}"
         );
     }
 

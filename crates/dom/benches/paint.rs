@@ -16,12 +16,14 @@
 //!
 //! What the `frame_*` set is arranged to expose:
 //!
-//! - **Nothing is incremental yet.** [`dom::Document::render`] is gated on one `u64` visual epoch,
-//!   so any visual mutation rebuilds the whole paint order and re-encodes the whole scene. Every
-//!   `frame_*` number here is therefore roughly the same constant, whatever the mutation touched.
-//!   That is the point: the constant is the baseline the tiered-damage work has to break, and the
-//!   benchmarks are shaped so that breaking it shows up as divergence between paired cases rather
-//!   than as one number moving.
+//! - **Almost nothing is incremental yet.** [`dom::Document::render`] is gated on one `u64` visual
+//!   epoch, so any visual mutation rebuilds the whole paint order and re-encodes the whole scene.
+//!   Every `frame_*` number here is therefore roughly the same constant, whatever the mutation
+//!   touched. That is the point: the constant is the baseline the tiered-damage work has to break,
+//!   and the benchmarks are shaped so that breaking it shows up as divergence between paired cases
+//!   rather than as one number moving. The one mutation already off that path is a windowed scroll:
+//!   the frame is baked unscrolled and a scroll tick only replays the compose program, so
+//!   `frame_scroll_tick` times composition, not `render`.
 //! - **Paired by reach.** `frame_visible_row_flip` and `frame_offscreen_row_flip` differ only in
 //!   whether the repainted row is inside the scrollport; `frame_with_text_runs` and
 //!   `frame_without_text_runs` differ only in whether the same boxes carry text. Today each pair
@@ -47,12 +49,13 @@
 //!
 //! 1. **The mutation must be real.** After a successful render a second `render` with no mutation
 //!    returns `false` immediately without building anything. A benchmark whose step writes a value
-//!    that is already there measures that early return and nothing else. Three of `dom`'s mutators
-//!    silently skip when the value does not change — `Document::scroll_to` only notes a visual
-//!    mutation when the clamped offset differs, `Document::add_class`/`remove_class` return early
-//!    when the class is already present/absent, and `Document::set_inline_style_property` returns
-//!    early when the declaration block would not change. [`Staleness::Repaints`] runs both phases
-//!    before timing and asserts at least one produced a frame.
+//!    that is already there measures that early return and nothing else. Several of `dom`'s
+//!    mutators silently skip when the value does not change — `Document::add_class`/`remove_class`
+//!    return early when the class is already present/absent, and
+//!    `Document::set_inline_style_property` returns early when the declaration block would not
+//!    change. [`Staleness::Repaints`] runs both phases before timing and asserts at least one
+//!    produced a frame. (`Document::scroll_to` never invalidates a frame that carries the
+//!    scroller's slot at all — which is why `frame_scroll_tick` times composition instead.)
 //! 2. **The mutation must not drift.** Every step takes a `phase` and *writes from* it rather than
 //!    accumulating: two colors, two transforms, two scroll offsets, two image buffers. Iteration N
 //!    therefore starts where iteration 0 started. A step that scrolled one more pixel each time
@@ -607,16 +610,19 @@ fn frame_inert_attribute(bencher: divan::Bencher<'_, '_>) {
 /// One pixel of scroll on a list whose rows mostly sit outside the scrollport.
 ///
 /// The offset alternates between two values a pixel apart around the list's
-/// midpoint instead of advancing. Advancing would walk the list down to the
-/// clamp, where `scroll_to` stops noting a visual mutation and the benchmark
-/// quietly stops measuring a frame; it would also change how many rows are
-/// inside the scrollport as it went.
+/// midpoint instead of advancing. Advancing would eventually leave the
+/// committed encode window, where the production path recommits; it would
+/// also change how many rows are inside the scrollport as it went.
 ///
-/// The clamp is checked here rather than left to [`Staleness::Repaints`],
-/// because the two assertions catch different things: `Repaints` asks whether
-/// the render path still has work, which a damage tier may legitimately
-/// change, while this asks whether the scroll offset actually moves, which
-/// nothing may change without the benchmark ceasing to be a scroll.
+/// Deliberately not [`bench_frames`]: a windowed scroll no longer touches
+/// the retained frame at all — the frame is baked unscrolled, and a scroll
+/// tick's whole cost is replaying its compose program at the live offsets,
+/// which is exactly what the presenting side does per frame. The loop times
+/// that path: move the document's offset, recompose into a reused scene
+/// buffer. The guard is the inverse of `Staleness::Repaints`: a scroll that
+/// starts invalidating the retained frame again is a regression this
+/// benchmark must fail on, because it would silently go back to timing a
+/// full rebuild.
 #[divan::bench(args = ROW_ARGS)]
 fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
     let mut page = list_page(rows);
@@ -631,8 +637,30 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         scroll_to(&mut page.dom, false),
         "both scroll phases clamped to the same offset, so the step scrolls nothing",
     );
-    bench_frames(bencher, page.dom, Staleness::Repaints, move |dom, phase| {
-        scroll_to(dom, phase);
+
+    let mut dom = page.dom;
+    dom.render();
+    scroll_to(&mut dom, true);
+    assert!(
+        !dom.needs_render(),
+        "a windowed scroll must stay compose-only; invalidating the retained \
+         frame here means this benchmark is back to timing a full rebuild"
+    );
+    let frame = dom
+        .committed_frame()
+        .expect("render always leaves a committed frame retained");
+    assert!(
+        frame.slot_of(list).is_some(),
+        "the committed frame must carry the list's scroll slot"
+    );
+    let mut scene = dom::vello::Scene::new();
+    let mut phase = false;
+    bencher.bench_local(move || {
+        phase = !phase;
+        scroll_to(&mut dom, phase);
+        scene.reset();
+        frame.compose_into(&mut scene, &|slot| Some(dom.scroll_offset(slot.node)));
+        divan::black_box(scene.encoding().draw_tags.len());
     });
 }
 

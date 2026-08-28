@@ -1609,6 +1609,21 @@ fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) 
     );
 }
 
+/// Invalidates the retained frame with a mutation that leaves every table's
+/// size unchanged, so a reuse round rebuilds without growing anything.
+///
+/// A scroll no longer serves: a composable scroll deliberately invalidates
+/// nothing. A background flip does — color reaches only the encode, never
+/// the tables, so a round at the same state fingerprints identically.
+fn nudge(document: &mut crate::Document<()>, scroller: NodeId, alternate: bool) {
+    let color = if alternate { "navy" } else { "teal" };
+    document.set_inline_style(scroller, &format!("background-color: {color}"));
+    assert!(
+        document.needs_render(),
+        "the nudge must invalidate the frame"
+    );
+}
+
 /// The fingerprint of the frame a document currently retains.
 fn retained_fingerprint(document: &crate::Document<()>) -> String {
     let painter = document.painter.borrow();
@@ -1623,15 +1638,14 @@ fn retained_fingerprint(document: &crate::Document<()>) -> String {
 #[test]
 fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     let (mut h, scroller) = reuse_harness();
-    let rest = crate::Vector2D::new(0.0, 37.0);
-    let nudge = crate::Vector2D::new(0.0, 38.0);
 
     // Only `Painter::paint` retires a frame into the spare buffers, so the
     // rounds below render rather than build: a loop of bare builds would
-    // exercise the working scratch and never the three frame tables, which are
+    // exercise the working scratch and never the frame tables, which are
     // the buffers carrying the node ids, clip links and layer ranges this
-    // fingerprint checks.
-    scroll_to(&mut h.doc.dom, scroller, rest.y);
+    // fingerprint checks. A composable scroll invalidates nothing any more,
+    // so the rounds alternate a background nudge instead.
+    nudge(&mut h.doc.dom, scroller, false);
     h.doc.dom.render();
     let cold = retained_fingerprint(&h.doc.dom);
     assert!(cold.contains("layer"), "the fixture must exercise a group");
@@ -1643,13 +1657,13 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     );
 
     for round in 1..4 {
-        scroll_to(&mut h.doc.dom, scroller, nudge.y);
+        nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
         assert!(
             h.doc.dom.paint_storage_capacities()[4] > 0,
             "round {round} must have a retired frame to build into",
         );
-        scroll_to(&mut h.doc.dom, scroller, rest.y);
+        nudge(&mut h.doc.dom, scroller, false);
         h.doc.dom.render();
         assert_eq!(
             cold,
@@ -1667,8 +1681,8 @@ fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
     // the previous one only when the next commit replaces it — exactly the
     // publish flow, under which immediate reclamation can never succeed.
     let mut published = h.doc.dom.committed_frame();
-    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
-        scroll_to(&mut h.doc.dom, scroller, offset);
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
         h.doc.dom.render();
         published = h.doc.dom.committed_frame();
     }
@@ -1683,16 +1697,18 @@ fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
 fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     let (mut h, scroller) = reuse_harness();
     scroll_to(&mut h.doc.dom, scroller, 37.0);
+    nudge(&mut h.doc.dom, scroller, false);
     h.doc.dom.render();
     let cold = h.doc.dom.scene().clone();
 
-    // A repaint of an unchanged document is refused, so each round moves the
-    // scroll offset and moves it back. The second render of each pair sees the
-    // recycled buffers and must land on the same encoding as the first.
+    // A repaint of an unchanged document is refused, so each round flips the
+    // nudge and flips it back. The second render of each pair sees the
+    // recycled buffers and must land on the same composed encoding as the
+    // first — at the same scrolled offset, which stays applied throughout.
     for _ in 0..3 {
-        scroll_to(&mut h.doc.dom, scroller, 38.0);
+        nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
-        scroll_to(&mut h.doc.dom, scroller, 37.0);
+        nudge(&mut h.doc.dom, scroller, false);
         h.doc.dom.render();
     }
     crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene());
@@ -1702,14 +1718,14 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
 fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
     let (mut h, scroller) = reuse_harness();
     h.doc.dom.render();
-    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
-        scroll_to(&mut h.doc.dom, scroller, offset);
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
         h.doc.dom.render();
     }
     let settled = h.doc.dom.paint_storage_capacities();
 
-    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
-        scroll_to(&mut h.doc.dom, scroller, offset);
+    for round in [true, false, true, false] {
+        nudge(&mut h.doc.dom, scroller, round);
         h.doc.dom.render();
     }
 

@@ -25,7 +25,7 @@ use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{EngineError, FrameRequester, FrameSize};
+use super::{ComposeKey, EngineError, FrameRequester, FrameSize};
 
 pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
 
@@ -53,8 +53,8 @@ pub(super) struct WindowGraphics<'window> {
     renderer: vello::Renderer,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
-    /// The commit epoch and size last rendered into the retained target.
-    rendered: Option<(u64, FrameSize)>,
+    /// The compose key and size last rendered into the retained target.
+    rendered: Option<(ComposeKey, FrameSize)>,
 }
 
 /// A `COPY_SRC` twin of the surface's render target, on the same device, so
@@ -110,9 +110,10 @@ impl<'window> WindowGraphics<'window> {
         self.rendered.is_some_and(|(_, rendered)| rendered == size)
     }
 
-    /// Whether the retained target is stale for this commit at this size.
-    pub(super) fn needs_paint(&self, epoch: u64, size: FrameSize) -> bool {
-        self.rendered != Some((epoch, size))
+    /// Whether the retained target is stale for this compose key at this
+    /// size.
+    pub(super) fn needs_paint(&self, key: ComposeKey, size: FrameSize) -> bool {
+        self.rendered != Some((key, size))
     }
 
     /// Reconfigures the surface when the target size moved, discarding the
@@ -171,7 +172,7 @@ impl<'window> WindowGraphics<'window> {
         &mut self,
         scene: &vello::Scene,
         size: FrameSize,
-        epoch: u64,
+        key: ComposeKey,
     ) -> Result<(), EngineError> {
         self.configure_for(size);
         let handle = &self.context.devices[self.surface.dev_id];
@@ -184,7 +185,7 @@ impl<'window> WindowGraphics<'window> {
                 &render_params(Color::WHITE, size.width, size.height),
             )
             .map_err(|error| EngineError::Render(error.to_string()))?;
-        self.rendered = Some((epoch, size));
+        self.rendered = Some((key, size));
         Ok(())
     }
 

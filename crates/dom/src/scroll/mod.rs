@@ -190,6 +190,13 @@ impl<T> Document<T> {
     }
 
     /// Scrolls to a clamped offset and returns the applied offset.
+    ///
+    /// A moved offset does not invalidate the retained frame when that frame
+    /// already carries this container as a scroll slot: the frame is baked
+    /// unscrolled and composes offsets at use, so painting and hit testing
+    /// both see the move with no rebuild. Only a container the retained
+    /// frame does not know — no frame yet, or one built before this box
+    /// became a scroll container — falls back to invalidating.
     pub fn scroll_to(&mut self, id: NodeId, offset: Vector2D<f32>) -> Vector2D<f32> {
         debug_assert!(
             offset.x.is_finite() && offset.y.is_finite(),
@@ -200,7 +207,12 @@ impl<T> Document<T> {
         };
         let clamped = clamp_to(offset, scroll_box.max_offset());
         if clamped != scroll_box.offset {
-            self.note_visual_mutation();
+            let composable = self
+                .committed_frame()
+                .is_some_and(|frame| frame.slot_of(id).is_some());
+            if !composable {
+                self.note_visual_mutation();
+            }
         }
         let slot = self
             .slot(id)
