@@ -10,6 +10,7 @@
 
 mod background;
 mod border;
+pub(crate) mod compose;
 mod convert;
 #[cfg(test)]
 pub(crate) mod equivalence;

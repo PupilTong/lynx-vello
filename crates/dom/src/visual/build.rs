@@ -28,7 +28,7 @@
 //! in their containing-block chain. Both escapes are the same rule, which is
 //! why one struct carries both.
 
-use euclid::default::{Point2D, Rect, Size2D, Transform3D, Vector2D};
+use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 use hughie::style::containment::effective_containment;
 use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
 use hughie::tree::{Layout, LayoutTree};
@@ -61,12 +61,10 @@ pub(crate) fn build<T>(
     scratch: BuildScratch,
     buffers: FrameBuffers,
 ) -> (PaintOrder, BuildScratch) {
-    let scale = document.device().device_pixel_ratio().get();
     let (tree, state) = document.visual_parts();
     let mut builder = Builder {
         tree,
         state,
-        scale,
         items: buffers.items,
         clips: buffers.clips,
         layers: buffers.layers,
@@ -237,40 +235,21 @@ impl Collection<'_> {
     }
 }
 
-/// What a box inherits from its containing-block chain: the innermost clip,
-/// the translation the scroll containers along that chain have applied to
-/// their contents, and the nearest of those containers as a scroll-slot
-/// index.
+/// What a box inherits from its containing-block chain: the innermost clip
+/// and the nearest scroll container on that chain as a scroll-slot index.
+///
+/// Scroll translations are no longer folded into item transforms here: the
+/// frame is baked in *unscrolled* coordinates, and every consumer — the
+/// composed scene, hit testing, culling — applies the chain's translations
+/// at use time from the slot table. What the escape rule used to do for the
+/// folded translation it now does for `chain`: a member keyed `absolute` or
+/// `fixed` swaps in its containing block's context, and its slot chain swaps
+/// with it (the containing-block escape of CSS2 §11.1.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
-    scroll: Vector2D<f32>,
     /// The nearest scroll container on this chain, in the frame's slot table.
-    /// Carried beside `scroll` under the same escape rule: a member keyed
-    /// `absolute` or `fixed` swaps in its containing block's context, and its
-    /// slot chain swaps with it.
     chain: Option<u32>,
-}
-
-impl FlowContext {
-    /// The translation that carries an offset measured in this context's
-    /// scrolled frame into `into`'s.
-    ///
-    /// Every scroll translation the paint order folds into an item transform
-    /// passes through here, in one of two directions. Descending into a
-    /// scroll container adds that container's own content translation, since
-    /// `Builder::enter_element` is the only writer of `scroll` and adds
-    /// exactly one term. A member keyed `absolute` or `fixed` swaps in its
-    /// containing block's context instead, and so subtracts every translation
-    /// accumulated between that block and here — the containing-block escape
-    /// of CSS2 §11.1.1.
-    ///
-    /// One function because `scroll` is written in one place and read in this
-    /// one: when scrolling stops being folded into the frame and starts being
-    /// carried beside it, this is the edit.
-    fn scroll_delta(self, into: Self) -> Vector2D<f32> {
-        into.scroll - self.scroll
-    }
 }
 
 /// The flow contexts visible at one point of the walk: the in-flow one plus
@@ -325,7 +304,6 @@ enum MemberPayload {
 struct Builder<'doc, T> {
     tree: &'doc TreeArenas<T>,
     state: &'doc DocumentLayoutState,
-    scale: f32,
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
@@ -341,18 +319,6 @@ impl<'doc, T> Builder<'doc, T> {
 
     fn rounded(&self, id: NodeId) -> &'doc Layout {
         &self.state.at(self.tree.live_slot(id)).slot.rounded
-    }
-
-    fn scroll_translation(&self, id: NodeId, style: &ComputedValues) -> Vector2D<f32> {
-        let state = self.state.at(self.tree.live_slot(id));
-        let Some(scroll_box) = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)
-        else {
-            return Vector2D::zero();
-        };
-        Vector2D::new(
-            -(scroll_box.offset.x * self.scale).round() / self.scale,
-            -(scroll_box.offset.y * self.scale).round() / self.scale,
-        )
     }
 
     /// Records `node` in the frame's scroll-slot table when it is a scroll
@@ -377,6 +343,7 @@ impl<'doc, T> Builder<'doc, T> {
             user_scrollable: scroll_box.user_scrollable,
             offset: scroll_box.offset,
             max_offset: scroll_box.max_offset(),
+            scrollport: scroll_box.scrollport,
         });
         Some(
             u32::try_from(self.slots.len() - 1)
@@ -400,7 +367,7 @@ impl<'doc, T> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
-        let layer = self.open_layer(root, values, &world, size);
+        let layer = self.open_layer(root, values, &world, size, seed.current.chain);
 
         let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain);
         let (visible, hit_testable) = item_flags(values);
@@ -437,7 +404,7 @@ impl<'doc, T> Builder<'doc, T> {
         self.collect(
             Cursor {
                 node: root,
-                offset: seed.current.scroll_delta(ctx.current).to_point(),
+                offset: Point2D::zero(),
                 is_item_container: matches!(mode, DisplayMode::Flex | DisplayMode::Grid),
                 ctx: &ctx,
             },
@@ -489,6 +456,7 @@ impl<'doc, T> Builder<'doc, T> {
         values: &ComputedValues,
         world: &Transform3D<f32>,
         size: Size2D<f32>,
+        slot: Option<u32>,
     ) -> Option<usize> {
         if !stacking::needs_group_rendering(values) {
             return None;
@@ -500,6 +468,7 @@ impl<'doc, T> Builder<'doc, T> {
             transform: *world,
             size,
             radii: resolve_corner_radii(values, size),
+            slot,
             items: start..start,
         });
         let index = self.layers.len() - 1;
@@ -599,7 +568,7 @@ impl<'doc, T> Builder<'doc, T> {
         );
         let node = child_node.id();
         let style = view.values();
-        let (mut offset, size) = {
+        let (offset, size) = {
             let layout = self.rounded(node);
             (
                 Point2D::new(
@@ -611,7 +580,6 @@ impl<'doc, T> Builder<'doc, T> {
         };
         let position = style.clone_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
-        offset += cursor.ctx.current.scroll_delta(clips.current);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
         Some(ChildBox {
             node,
@@ -721,7 +689,7 @@ impl<'doc, T> Builder<'doc, T> {
             self.collect(
                 Cursor {
                     node: child.node,
-                    offset: child.offset + outer.current.scroll_delta(inner.current),
+                    offset: child.offset,
                     is_item_container,
                     ctx: &inner,
                 },
@@ -830,10 +798,10 @@ impl<'doc, T> Builder<'doc, T> {
                 transform: *transform,
                 rect,
                 radii,
+                slot: inner.current.chain,
             });
             inner.current.clip = Some(self.clips.len() - 1);
         }
-        inner.current.scroll += self.scroll_translation(node, style);
         if own_slot.is_some() {
             inner.current.chain = own_slot;
         }

@@ -192,6 +192,22 @@ impl PaintOrder {
     pub(crate) const fn visual_epoch(&self) -> u64 {
         self.visual_epoch
     }
+
+    /// The chain whose scroll translations move this item — the *content*
+    /// chain, as opposed to [`PaintItem::slot`]'s recognition chain. They
+    /// differ in exactly one case: a scroll container's own box carries its
+    /// own slot for recognition (the box is a scroll target) but is moved
+    /// only by the scrollers around it.
+    #[must_use]
+    pub(crate) fn item_translation_chain(&self, item: &PaintItem) -> Option<u32> {
+        let slot = item.slot?;
+        let entry = self.slots[slot as usize];
+        if matches!(item.kind, PaintItemKind::ElementBox) && entry.node == item.node {
+            entry.parent
+        } else {
+            Some(slot)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +249,10 @@ pub(crate) struct RenderLayer {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
+    /// The scroll chain this group's own frame rides — the chain of its root
+    /// box, so the group and its clip move with the scrollers *around* the
+    /// root, never with the root's own content.
+    pub(crate) slot: Option<u32>,
     /// The contiguous run of [`PaintOrder::items`] this group encloses. A
     /// stacking context paints atomically, so its members are always
     /// contiguous; an empty run is not recorded at all (the layer is popped).
@@ -249,6 +269,10 @@ pub(crate) struct ClipNode {
     pub(crate) transform: Transform3D<f32>,
     pub(crate) rect: Rect<f32>,
     pub(crate) radii: CornerRadii,
+    /// The scroll chain the clip's own rect rides: the chain *outside* the
+    /// establishing element, captured before that element's own slot enters
+    /// the flow — a scroller's clip does not move with its own content.
+    pub(crate) slot: Option<u32>,
 }
 
 /// Per-corner elliptical radii, in CSS px: `width` is the horizontal radius,
@@ -369,9 +393,15 @@ impl<T> Document<T> {
     }
 
     /// Returns rendered elements under a point from front to back.
+    ///
+    /// The frame is baked unscrolled; document-side queries apply the
+    /// document's *live* scroll offsets, so a scroll is observable here the
+    /// moment it lands, without a rebuild.
     #[must_use]
     pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
-        self.with_rendered_frame(|frame| frame.elements_at(self, point))
+        let offsets = |slot: &ScrollSlot| Some(self.scroll_offset(slot.node));
+        let ratio = self.device_pixel_ratio();
+        self.with_rendered_frame(|frame| frame.elements_at(self, point, &offsets, ratio))
             .unwrap_or_default()
     }
 
@@ -380,17 +410,21 @@ impl<T> Document<T> {
     /// contract: before the first render every answer is empty.
     #[must_use]
     pub fn elements_from_points(&self, points: &[Point2D<f32>]) -> Vec<Vec<NodeId>> {
+        let offsets = |slot: &ScrollSlot| Some(self.scroll_offset(slot.node));
+        let ratio = self.device_pixel_ratio();
         self.with_rendered_frame(|frame| {
             points
                 .iter()
-                .map(|point| frame.elements_at(self, *point))
+                .map(|point| frame.elements_at(self, *point, &offsets, ratio))
                 .collect()
         })
         .unwrap_or_else(|| vec![Vec::new(); points.len()])
     }
 
     pub(crate) fn rendered_element_at(&self, point: Point2D<f32>) -> Option<NodeId> {
-        self.with_rendered_frame(|frame| frame.first_element_at(self, point))
+        let offsets = |slot: &ScrollSlot| Some(self.scroll_offset(slot.node));
+        let ratio = self.device_pixel_ratio();
+        self.with_rendered_frame(|frame| frame.first_element_at(self, point, &offsets, ratio))
             .flatten()
     }
 
@@ -456,6 +490,16 @@ impl<T> Document<T> {
     /// and the retained scene is only rebuilt when the visual epoch moves, so
     /// a load that completes without this call paints on no frame at all.
     pub fn note_images_changed(&mut self) {
+        self.note_visual_mutation();
+    }
+
+    /// Invalidates the retained frame because composition has moved a scroll
+    /// slot far through its committed encode window: the next commit must
+    /// repaint so the windows re-center on the current offsets.
+    ///
+    /// The offsets themselves are already this document's — scroll writes
+    /// land here first — so only the paint is stale, never the geometry.
+    pub fn note_scroll_windows_stale(&mut self) {
         self.note_visual_mutation();
     }
 }

@@ -358,6 +358,13 @@ impl MainThreadRuntime {
         }
     }
 
+    /// Repaints because composition has moved a scroll slot far through its
+    /// committed encode window; the commit at the end of this round bakes
+    /// windows re-centered on the current offsets.
+    pub(crate) fn refill_scroll_windows(&mut self) {
+        self.tree.borrow_mut().tree().note_scroll_windows_stale();
+    }
+
     /// Applies new device metrics.
     pub(crate) fn apply_resize(&mut self, width: f32, height: f32, device_pixel_ratio: f32) {
         let mut handle = self.tree.borrow_mut();
