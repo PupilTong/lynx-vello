@@ -59,7 +59,8 @@ and registers the raw entry-MTS bytes in its `BrowserResources`
 implementation under the final response URL, then calls the opaque Rust
 view's `execute_script(url)`. The view resolves and reads the bytes through
 `ResourceFetcher`, performs strict UTF-8 validation, and uses that final URL as
-the ESM entry specifier; it never receives a bundle decoder.
+the ESM entry specifier; it never receives a bundle decoder. The 16 MiB bound
+is browser-embedder policy and does not cross in `ResourceRequest`.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's

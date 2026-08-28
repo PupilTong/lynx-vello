@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    BufferedResourceRequest, CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest,
-    ResolvedLocator, ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase,
-    ResourceFetcher, ResourceFuture, ResourceLocality, ResourceMetadata, ResourceResponse,
+    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
+    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
@@ -137,7 +137,7 @@ impl ResourceFetcher for FetcherDouble {
 
     fn fetch_style_sheet(
         &self,
-        request: BufferedResourceRequest,
+        request: ResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
         let Some(sheet) = self.style_sheet.clone() else {
@@ -146,7 +146,7 @@ impl ResourceFetcher for FetcherDouble {
             // a browser embedder takes in production.
             return bobcat_core::resource::fetch_style_sheet_as_text(self, request);
         };
-        let metadata = self.metadata(request.request.resource.clone(), request.request.context.id);
+        let metadata = self.metadata(request.resource.clone(), request.context.id);
         Box::pin(async move {
             Ok(StyleSheetResponse {
                 metadata,
@@ -160,17 +160,13 @@ impl ResourceFetcher for FetcherDouble {
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
         Box::pin(async move {
-            let text = override_url.unwrap_or_else(|| {
-                format!(
-                    "https://example.test/{}",
-                    request.resource.locator.specifier
-                )
-            });
+            let text = override_url
+                .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
             let url = Url::parse(&text).map_err(|error| ResourceError {
                 request_id: Some(request.context.id),
                 kind: ResourceErrorKind::InvalidUrl,
                 phase: ResourceErrorPhase::Resolve,
-                locator: Some(request.resource.locator.specifier.clone()),
+                locator: Some(request.resource.specifier.clone()),
                 status: None,
                 message: error.to_string().into(),
                 retry: RetryAdvice::Never,
@@ -185,13 +181,10 @@ impl ResourceFetcher for FetcherDouble {
         })
     }
 
-    fn fetch_resource(
-        &self,
-        request: BufferedResourceRequest,
-    ) -> ResourceFuture<'_, ResourceResponse> {
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
-        let id = request.request.context.id;
-        let resource = request.request.resource;
+        let id = request.context.id;
+        let resource = request.resource;
         Box::pin(async move {
             Ok(ResourceResponse {
                 metadata: self.metadata(resource, id),

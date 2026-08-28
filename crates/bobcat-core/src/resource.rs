@@ -24,10 +24,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator>;
 
-    fn fetch_resource(
-        &self,
-        request: BufferedResourceRequest,
-    ) -> ResourceFuture<'_, ResourceResponse>;
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse>;
 
     /// Loads a stylesheet in whichever form this host has it.
     ///
@@ -38,7 +35,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
     /// overrides this to return [`StyleSheetPayload::Preparsed`].
     fn fetch_style_sheet(
         &self,
-        request: BufferedResourceRequest,
+        request: ResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         fetch_style_sheet_as_text(self, request)
     }
@@ -54,7 +51,7 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 /// rest, rather than re-implementing the byte path.
 pub fn fetch_style_sheet_as_text<F>(
     fetcher: &F,
-    request: BufferedResourceRequest,
+    request: ResourceRequest,
 ) -> ResourceFuture<'_, StyleSheetResponse>
 where
     F: ResourceFetcher + ?Sized,
@@ -83,48 +80,13 @@ pub struct RequestContext {
 }
 
 /// Relative or absolute resource input before host resolution.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct ResourceLocator {
+#[derive(Clone, Debug)]
+pub struct ResourceDescriptor {
     pub specifier: Arc<str>,
     pub base_url: Option<Url>,
 }
 
-/// A locator plus transport-selection hints.
-#[derive(Clone, Debug)]
-pub struct ResourceDescriptor {
-    pub locator: ResourceLocator,
-    pub hints: ResourceHints,
-}
-
-#[derive(Clone, Debug, Default)]
-#[non_exhaustive]
-pub enum ResourceHints {
-    #[default]
-    None,
-    Bundle(BundleHints),
-    Media(MediaHints),
-}
-
-/// Template/build-artifact selection hints.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BundleHints {
-    pub entry_name: Option<Arc<str>>,
-}
-
-/// Streaming-media selection hints.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MediaHints {
-    pub byte_range: Option<ByteRange>,
-}
-
-/// An inclusive byte range; `end = None` means through end-of-resource.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ByteRange {
-    pub start: u64,
-    pub end: Option<u64>,
-}
-
-/// Input for resolving a resource locator before loading it.
+/// Input for resolving a resource descriptor before loading it.
 #[derive(Clone, Debug)]
 pub struct ResolveRequest {
     pub context: RequestContext,
@@ -151,21 +113,16 @@ pub enum ResourceLocality {
     Unknown,
 }
 
-/// The resolved half of a resource load, shared by every request shape built
-/// on it.
+/// A resolved resource load.
+///
+/// It carries no response-size budget. The fetcher owns any memory limit for
+/// the response it materializes.
 #[derive(Clone, Debug)]
 pub struct ResourceRequest {
     pub context: RequestContext,
     pub resource: ResolvedLocator,
     pub headers: HeaderMap,
     pub cache_policy: CachePolicy,
-}
-
-/// A resource request that must be materialized in bounded memory.
-#[derive(Clone, Debug)]
-pub struct BufferedResourceRequest {
-    pub request: ResourceRequest,
-    pub max_bytes: u64,
 }
 
 /// Metadata shared by every non-Fetch resource response form.
