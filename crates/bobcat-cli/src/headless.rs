@@ -19,39 +19,30 @@ use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
-pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
+pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     program.warn_about_compatibility_limits();
     let (sender, receiver) = mpsc::channel();
     let event_sender = sender.clone();
     let event_requester: std::sync::Arc<dyn EventRequester> = std::sync::Arc::new(move || {
         let _ = event_sender.send(HostEvent::Pump);
     });
-    let style_sheet_url = program.resource_fetcher.style_sheet_url().cloned();
-    let mut view = OffscreenLynxView::new(
+    // One construction: the input's author CSS and its entry MTS module are
+    // this view's sources, so the first commit is already styled and the Lynx
+    // main thread is running before anything else here happens.
+    let mut view = pollster::block_on(OffscreenLynxView::new(
         program.config,
-        program.resource_fetcher,
+        &program.resource_fetcher,
         event_requester,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
-    )?;
-    view.attach_offscreen()?;
-    // Author CSS mounts before the script builds its tree, so the first
-    // commit is already styled.
-    if let Some(url) = style_sheet_url.as_ref() {
-        pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
-            CliError::LoadStyleSheet {
-                input: program.input.clone(),
-                source,
-            }
-        })?;
-    }
-    pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
-        CliError::StartScript {
-            input: program.input.clone(),
-            source,
-        }
+        program.sources(),
+    ))
+    .map_err(|source| CliError::StartView {
+        input: program.input.clone(),
+        source,
     })?;
+    view.attach_offscreen()?;
 
     view.tick(true)?;
     let console = Console::start(move |command| sender.send(HostEvent::Command(command)).is_ok())

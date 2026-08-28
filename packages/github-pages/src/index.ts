@@ -490,18 +490,10 @@ class PreviewRenderer {
       };
 
       try {
-        const registered = await view.registerFonts(this.#fontBytes);
-        if (registered === 0) {
-          throw new Error(
-            'The demo font container did not contain a usable font face',
-          );
-        }
-        const defaultFontConfigured = await view.setDefaultFontFamily('Roboto');
-        if (!defaultFontConfigured) {
-          throw new Error(
-            'The registered demo font did not expose the Roboto family',
-          );
-        }
+        // Retained by the canvas and applied to every page it loads; a
+        // container without the Roboto family makes the first load reject.
+        await view.registerFonts(this.#fontBytes);
+        await view.setDefaultFontFamily('Roboto');
       } catch (error) {
         if (this.#view === view) {
           this.#view = undefined;
@@ -517,13 +509,10 @@ class PreviewRenderer {
         }
         throw error;
       }
-    } else {
-      await view.reset();
-      if (generation !== this.#generation) {
-        return;
-      }
     }
 
+    // Each load builds a fresh native view from the new page's sources, so
+    // there is nothing to clear first.
     const sourceUrl = URL.createObjectURL(sourceBlob);
     try {
       await view.loadLynxXml(sourceUrl);

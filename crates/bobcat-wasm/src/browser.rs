@@ -16,8 +16,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, PageConfig, Window,
-    WindowTarget, configure_wasm_workers,
+    EngineEvent, EventRequester, FontBlob, FrameRequester, FrameSize, LynxView, PageConfig,
+    ViewSources, Window, WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -321,12 +321,13 @@ impl ResourceFetcher for BrowserResources {
 
 /// A complete browser embedder, permanently owned by the explicit Render
 /// Worker that constructs it. Its canvas, Wasm instance, resource provider,
-/// and Stylo pool survive a native-view reset; each document, element tree,
-/// `QuickJS` realm, and engine still stays behind one opaque `LynxView`.
+/// and Stylo pool outlive every page it shows; each document, element tree,
+/// `QuickJS` realm, and engine stays behind one opaque `LynxView`, built by
+/// [`BobcatRenderer::load`] and replaced wholesale by the next load.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
     view: Option<BrowserLynxView>,
-    resources: Arc<BrowserResources>,
+    resources: BrowserResources,
     canvas: OffscreenCanvas,
     frames: FrameSignal,
     events: Arc<EventSignal>,
@@ -334,12 +335,12 @@ pub struct BobcatRenderer {
     width: f32,
     height: f32,
     device_pixel_ratio: f32,
-    /// Owned font containers are part of the stable browser wrapper, so a
-    /// replacement native view receives the same registered faces without
+    /// Owned font containers are part of the stable browser wrapper, so every
+    /// view this renderer builds receives the same registered faces without
     /// another UI-to-Worker transfer.
-    font_sources: Vec<Arc<[u8]>>,
-    /// The last successfully selected embedder default is stable wrapper
-    /// state too; a replacement document gets the same generic-family map.
+    fonts: Vec<FontBlob>,
+    /// The selected embedder default is stable wrapper state too; every view
+    /// this renderer builds gets the same generic-family map.
     default_font_family: Option<String>,
     script_finished: bool,
     disposed: bool,
@@ -359,6 +360,8 @@ impl fmt::Debug for BobcatRenderer {
 impl BobcatRenderer {
     /// Construct the browser embedder on its explicit Render Worker and give
     /// core the Worker bootstrap it will use for the main-thread VM and Stylo.
+    ///
+    /// No native view exists until [`Self::load`] builds one.
     #[wasm_bindgen(js_name = create)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
@@ -383,14 +386,14 @@ impl BobcatRenderer {
         }
         if RENDERER_CREATED.swap(true, Ordering::AcqRel) {
             return Err(js_error(
-                "one Bobcat Wasm instance supports exactly one renderer; reset the existing renderer to replace its native view",
+                "one Bobcat Wasm instance supports exactly one renderer; load another page into the existing renderer to replace its native view",
             ));
         }
 
         let result = async move {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
-            let resources = Arc::new(BrowserResources::default());
+            let resources = BrowserResources::default();
             let events = Arc::new(EventSignal::default());
             let config = PageConfig {
                 default_display_linear,
@@ -398,20 +401,9 @@ impl BobcatRenderer {
                 enable_css_selector,
             };
             let frames = FrameSignal::default();
-            let view = create_browser_view(
-                config,
-                resources.clone(),
-                events.clone(),
-                &canvas,
-                frames.clone(),
-                width,
-                height,
-                device_pixel_ratio,
-            )
-            .await?;
 
             Ok(Self {
-                view: Some(view),
+                view: None,
                 resources,
                 canvas,
                 frames,
@@ -420,7 +412,7 @@ impl BobcatRenderer {
                 width,
                 height,
                 device_pixel_ratio,
-                font_sources: Vec::new(),
+                fonts: Vec::new(),
                 default_font_family: None,
                 script_finished: false,
                 disposed: false,
@@ -433,51 +425,59 @@ impl BobcatRenderer {
         result
     }
 
-    /// Drop the current native `LynxView` and attach a fresh one to the same
-    /// Worker-owned `OffscreenCanvas`. The Wasm instance, configured Stylo pool,
-    /// browser resource provider, page configuration, current metrics,
-    /// registered font containers, and the selected default font family remain
-    /// owned by this wrapper. Transient script and stylesheet bytes from the
-    /// old page are cleared.
-    #[wasm_bindgen(js_name = reset)]
-    pub async fn reset(&mut self) -> Result<(), JsValue> {
+    /// Build the native `LynxView` for one page and attach it to the
+    /// Worker-owned `OffscreenCanvas`.
+    ///
+    /// A view is its page, so loading a second one replaces the view rather
+    /// than mutating the running one. The Wasm instance, Stylo pool, resource
+    /// provider, page configuration, metrics, font containers, and default
+    /// family are this wrapper's and are reapplied to each new view.
+    #[wasm_bindgen(js_name = load)]
+    pub async fn load(
+        &mut self,
+        entry_url: String,
+        style_sheet_urls: Vec<String>,
+    ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Dropping the view closes its sole command sender. The detached
-        // Lynx-main Worker then drops its thread-bound realm and exits
-        // naturally; an independent replacement does not need to join it.
+        // Dropping the previous view closes its sole command sender. The
+        // detached Lynx-main Worker then drops its thread-bound realm and
+        // exits naturally; an independent replacement does not join it.
         drop(self.view.take());
-        self.resources.clear();
         self.frames.take();
-        self.events.take();
         // Release the old page's post-boot waiter. The Render Worker advances
-        // its generation before calling reset, so it exits without pumping
-        // the replacement view.
+        // its generation before calling load, so it exits without pumping the
+        // replacement view.
         self.events.request_event();
         self.script_finished = false;
 
-        let mut view = create_browser_view(
+        let sources = ViewSources {
+            fonts: self.fonts.clone(),
+            default_font_family: self.default_font_family.clone(),
+            style_sheets: style_sheet_urls,
+            ..ViewSources::new(entry_url)
+        };
+        let built = LynxView::new(
             self.config,
-            self.resources.clone(),
+            &self.resources,
             self.events.clone(),
-            &self.canvas,
-            self.frames.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
+            sources,
         )
-        .await?;
-        for source in &self.font_sources {
-            view.register_fonts(source.clone()).map_err(js_error)?;
-        }
-        if let Some(family) = &self.default_font_family {
-            let configured = view.set_default_font_family(family).map_err(js_error)?;
-            if !configured {
-                return Err(js_error(format!(
-                    "the restored font containers no longer expose the `{family}` family"
-                )));
-            }
-        }
+        .await;
+        // Construction copied every byte it needed and retains no fetcher, so
+        // this page's registered bytes are dead either way. Clearing here is
+        // what keeps a Render Worker that loads page after page from growing
+        // a registry of them.
+        self.resources.clear();
+        let mut view = built.map_err(js_error)?;
+        set_canvas_size(&self.canvas, view.frame_size());
+        let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(self.canvas.clone());
+        view.attach_target(target, self.frames.clone(), view.frame_size())
+            .await
+            .map_err(js_error)?;
         self.view = Some(view);
         Ok(())
     }
@@ -498,9 +498,9 @@ impl BobcatRenderer {
     /// logical template sections as fixed fragments of the final response URL.
     ///
     /// The returned array is `[main, styleOrNull, backgroundOrNull]`. The
-    /// Render Worker loads a present stylesheet before executing `main` and
-    /// retains a present background script without executing it until Bobcat
-    /// implements the background-thread runtime.
+    /// Render Worker hands `main` and a present style URL to [`Self::load`];
+    /// a background section is reported by URL only, and neither retained nor
+    /// executed until Bobcat implements the background-thread runtime.
     #[wasm_bindgen(js_name = registerLynxXml)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -534,13 +534,11 @@ impl BobcatRenderer {
                     .register_style_sheet(&style_section_url, style.as_bytes().to_vec())
             })
             .transpose()?;
+        // The background body is named, not retained: nothing executes it, and
+        // a view's construction copies only what it loads.
         let background_url = parsed
             .background_thread_script
-            .map(|script| {
-                self.resources
-                    .register_script(&background_section_url, script.as_bytes().to_vec())
-            })
-            .transpose()?;
+            .map(|_| background_section_url);
 
         let registration = Array::new();
         registration.push(&JsValue::from(main_url));
@@ -549,31 +547,12 @@ impl BobcatRenderer {
         Ok(registration)
     }
 
-    /// Start the registered main-thread script through `LynxView`'s resource
-    /// boundary. The Render Worker awaits completion independently from drawing.
-    #[wasm_bindgen(js_name = executeScript)]
-    pub async fn execute_script(&mut self, url: String) -> Result<(), JsValue> {
-        self.view_mut()?
-            .execute_script(&url)
-            .await
-            .map_err(js_error)
-    }
-
-    /// Load an author stylesheet through `LynxView`'s resource boundary.
+    /// Register CSS bytes the browser host fetched, under a URL [`Self::load`]
+    /// will name among its stylesheets.
     ///
     /// A browser embedder never decodes a `.web.bundle`, so the bytes it
     /// registers are CSS text and core takes the text arm of the stylesheet
     /// contract.
-    #[wasm_bindgen(js_name = loadStyleSheet)]
-    pub async fn load_style_sheet(&mut self, url: String) -> Result<(), JsValue> {
-        self.view_mut()?
-            .load_style_sheet(&url)
-            .await
-            .map_err(js_error)
-    }
-
-    /// Register CSS bytes the browser host fetched, under the URL
-    /// [`Self::load_style_sheet`] will ask for.
     #[wasm_bindgen(js_name = registerStyleSheet)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -584,37 +563,33 @@ impl BobcatRenderer {
         self.resources.register_style_sheet(&url, bytes)
     }
 
-    /// Register every usable face in an embedder-provided font container.
+    /// Retain a font container for every view this renderer builds. Faces are
+    /// registered at construction, so call this before [`Self::load`].
     #[wasm_bindgen(js_name = registerFonts)]
-    pub fn register_fonts(&mut self, bytes: Vec<u8>) -> Result<usize, JsValue> {
-        let source: Arc<[u8]> = Arc::from(bytes);
-        let registered = self
-            .view_mut()?
-            .register_fonts(source.clone())
-            .map_err(js_error)?;
-        if registered != 0 {
-            self.font_sources.push(source);
-        }
-        Ok(registered)
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen owns JavaScript Uint8Array arguments"
+    )]
+    pub fn register_fonts(&mut self, bytes: Vec<u8>) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        self.fonts.push(FontBlob::new(bytes));
+        Ok(())
     }
 
-    /// Map CSS's default generic families to an embedder-selected font family.
+    /// Map CSS's default generic families to an embedder-selected family for
+    /// every view this renderer builds. The name is checked at construction:
+    /// [`Self::load`] fails if nothing provides it.
     #[wasm_bindgen(js_name = setDefaultFontFamily)]
-    pub fn set_default_font_family(&mut self, family: String) -> Result<bool, JsValue> {
-        let configured = self
-            .view_mut()?
-            .set_default_font_family(&family)
-            .map_err(js_error)?;
-        if configured {
-            self.default_font_family = Some(family);
-        }
-        Ok(configured)
+    pub fn set_default_font_family(&mut self, family: String) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        self.default_font_family = Some(family);
+        Ok(())
     }
 
     /// Await the next durable engine wakeup without timer polling.
     #[wasm_bindgen(js_name = waitForEngineEvent)]
     pub fn wait_for_engine_event(&self) -> Result<Promise, JsValue> {
-        self.view()?;
+        self.ensure_running()?;
         let wait = self.events.wait();
         Ok(future_to_promise(async move {
             wait.await;
@@ -625,8 +600,11 @@ impl BobcatRenderer {
     /// Drain script engine events independently of animation frames.
     #[wasm_bindgen(js_name = pollScript)]
     pub fn poll_script(&mut self) -> Result<bool, JsValue> {
-        if self.events.take() {
-            for event in self.view_mut()?.pump() {
+        self.ensure_running()?;
+        if self.events.take()
+            && let Some(view) = self.view.as_mut()
+        {
+            for event in view.pump() {
                 match event {
                     EngineEvent::ScriptFinished => self.script_finished = true,
                     EngineEvent::ScriptRunError(error) => return Err(js_error(error)),
@@ -677,7 +655,11 @@ impl BobcatRenderer {
         };
         let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
             .with_default_prevented(default_prevented);
-        self.view_mut()?.dispatch_input(event);
+        // A pointer that arrives before any page is loaded has nothing to
+        // reach; there is no view to route it against and nothing to buffer.
+        if let Some(view) = self.view.as_mut() {
+            view.dispatch_input(event);
+        }
         Ok(())
     }
 
@@ -692,15 +674,19 @@ impl BobcatRenderer {
     /// `performance.now()`, so it is not the better reading it looks like.
     #[wasm_bindgen(js_name = renderIfRequested)]
     pub fn render_if_requested(&mut self) -> Result<bool, JsValue> {
-        self.view()?;
+        self.ensure_running()?;
         if !self.frames.take() {
             return Ok(false);
         }
-        self.view_mut()?.notify_redraw().map_err(js_error)?;
+        let Some(view) = self.view.as_mut() else {
+            return Ok(false);
+        };
+        view.notify_redraw().map_err(js_error)?;
         Ok(true)
     }
 
     /// Apply browser device metrics and resize the Worker-owned surface.
+    /// Metrics that arrive before a page is loaded become the next view's.
     #[wasm_bindgen(js_name = resize)]
     pub fn resize(
         &mut self,
@@ -708,15 +694,17 @@ impl BobcatRenderer {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<(), JsValue> {
+        self.ensure_running()?;
         validate_metrics(width, height, device_pixel_ratio)?;
-        self.view_mut()?
-            .resize(width, height, device_pixel_ratio)
-            .map_err(js_error)?;
         self.width = width;
         self.height = height;
         self.device_pixel_ratio = device_pixel_ratio;
-        let frame_size = self.view()?.frame_size();
-        set_canvas_size(&self.canvas, frame_size);
+        if let Some(view) = self.view.as_mut() {
+            view.resize(width, height, device_pixel_ratio)
+                .map_err(js_error)?;
+            let frame_size = view.frame_size();
+            set_canvas_size(&self.canvas, frame_size);
+        }
         Ok(())
     }
 
@@ -739,49 +727,6 @@ impl BobcatRenderer {
             Ok(())
         }
     }
-
-    fn view(&self) -> Result<&BrowserLynxView, JsValue> {
-        self.ensure_running()?;
-        self.view
-            .as_ref()
-            .ok_or_else(|| js_error("the native Lynx view is unavailable"))
-    }
-
-    fn view_mut(&mut self) -> Result<&mut BrowserLynxView, JsValue> {
-        self.ensure_running()?;
-        self.view
-            .as_mut()
-            .ok_or_else(|| js_error("the native Lynx view is unavailable"))
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn create_browser_view(
-    config: PageConfig,
-    resources: Arc<BrowserResources>,
-    events: Arc<EventSignal>,
-    canvas: &OffscreenCanvas,
-    frames: FrameSignal,
-    width: f32,
-    height: f32,
-    device_pixel_ratio: f32,
-) -> Result<BrowserLynxView, JsValue> {
-    let resource_fetcher: Arc<dyn ResourceFetcher> = resources;
-    let mut view = LynxView::new(
-        config,
-        resource_fetcher,
-        events,
-        width,
-        height,
-        device_pixel_ratio,
-    )
-    .map_err(js_error)?;
-    set_canvas_size(canvas, view.frame_size());
-    let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(canvas.clone());
-    view.attach_target(target, frames, view.frame_size())
-        .await
-        .map_err(js_error)?;
-    Ok(view)
 }
 
 fn validate_metrics(width: f32, height: f32, ratio: f32) -> Result<(), JsValue> {

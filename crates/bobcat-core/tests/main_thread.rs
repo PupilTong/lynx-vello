@@ -2,24 +2,30 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::script::ScriptError;
-use bobcat_core::{EngineError, LynxView, LynxViewError, NoWindow, PageConfig};
+use bobcat_core::{LynxView, LynxViewError, NoWindow, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
-async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptError> {
-    let resources: Arc<dyn ResourceFetcher> =
-        Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
-    let mut view = LynxView::<NoWindow>::new(
+/// The one way to build a view: hand it its sources and it comes back with
+/// its Lynx main thread already running the entry module.
+async fn view(
+    source: &[u8],
+    resolved_url: &str,
+) -> Result<LynxView<'static, NoWindow>, LynxViewError> {
+    LynxView::<NoWindow>::new(
         PageConfig::default(),
-        resources,
+        &FetcherDouble::new(source.to_vec()).resolving_to(resolved_url),
         Arc::new(|| {}),
         393.0,
         727.0,
         1.0,
+        ViewSources::new("main.js"),
     )
-    .expect("view");
-    view.execute_script("main.js")
+    .await
+}
+
+async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptError> {
+    let mut view = view(source.as_bytes(), resolved_url)
         .await
         .expect("fetch and start");
 
@@ -102,56 +108,16 @@ async fn resolved_script_url_is_preserved_in_errors() {
     assert!(message.contains("app:///broken.js:"), "{message}");
 }
 
+/// Invalid UTF-8 fails the construction outright: no view exists, so no realm
+/// was created and no main thread is running.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
-    let resources: Arc<dyn ResourceFetcher> =
-        Arc::new(FetcherDouble::new(vec![0xff, 0xfe]).resolving_to("app:///invalid.js"));
-    let mut view = LynxView::<NoWindow>::new(
-        PageConfig::default(),
-        resources,
-        Arc::new(|| {}),
-        393.0,
-        727.0,
-        1.0,
-    )
-    .expect("view");
-
-    let error = view
-        .execute_script("invalid.js")
+    let error = view(&[0xff, 0xfe], "app:///invalid.js")
         .await
         .expect_err("invalid UTF-8 must not reach the VM");
     assert!(matches!(
         error,
         LynxViewError::InvalidScriptEncoding { ref url, .. } if url == "app:///invalid.js"
-    ));
-}
-
-#[tokio::test]
-async fn a_view_accepts_only_one_entry_script() {
-    let resources: Arc<dyn ResourceFetcher> = Arc::new(
-        FetcherDouble::new(
-            b"globalThis.renderPage = function () { __CreatePage('card', 0); };".to_vec(),
-        )
-        .resolving_to("app:///main.js"),
-    );
-    let mut view = LynxView::<NoWindow>::new(
-        PageConfig::default(),
-        resources,
-        Arc::new(|| {}),
-        393.0,
-        727.0,
-        1.0,
-    )
-    .expect("view");
-    view.execute_script("main.js").await.expect("first script");
-
-    let error = view
-        .execute_script("main.js")
-        .await
-        .expect_err("a second entry script must be rejected");
-    assert!(matches!(
-        error,
-        LynxViewError::Engine(EngineError::ScriptAlreadyStarted)
     ));
 }
 

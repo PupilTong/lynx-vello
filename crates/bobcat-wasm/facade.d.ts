@@ -30,45 +30,31 @@ export declare class BobcatCanvas {
   dispose(): Promise<void>
 
   /**
-   * Fetches and runs the main-thread entry script. This resolves after the
-   * script boot sequence finishes and rejects on loading or evaluation error.
-   * Relative URLs use the embedding document's base URL. The embedded QuickJS
-   * realm and the browser facade do not impose a loading, startup, or execution
-   * deadline. The current native view accepts exactly one entry-script
-   * operation; `reset()` installs a fresh view.
+   * Fetches a page's author stylesheets and its main-thread entry script and
+   * shows it. A native view is its page, so each load builds a fresh one and
+   * drops the view before it. Stylesheets cascade in the order given and all
+   * mount before the entry script runs. Resolves after the script boot
+   * sequence finishes and rejects on loading or evaluation error, leaving the
+   * previous page running if the fetch was what failed. Relative URLs use the
+   * embedding document's base URL. Nothing imposes a deadline.
    */
-  executeScript(url: string | URL): Promise<void>
+  load(url: string | URL, styleSheetUrls?: readonly (string | URL)[]): Promise<void>
 
   /**
-   * Fetches an author stylesheet and mounts it on the document. Sheets
-   * cascade in load order. Relative URLs use the embedding document's base
-   * URL.
-   */
-  loadStyleSheet(url: string | URL): Promise<void>
-
-  /**
-   * Fetches and parses a Lynx XML source envelope, mounts its optional
-   * stylesheet, and then runs its main-thread script. The Promise resolves
-   * after the script boot sequence finishes. A background-thread script is
-   * retained but not executed and produces a console warning. This is a
-   * one-shot entry-script operation for the current native view; a repeated
-   * call rejects before fetch or stylesheet mounting unless `reset()` ran
-   * first.
+   * Fetches and parses a Lynx XML source envelope and shows it: the same load
+   * as `load()`, with the envelope's sections as the sources. A
+   * background-thread script produces a console warning and is not executed.
    */
   loadLynxXml(url: string | URL): Promise<void>
 
+  /** Retains font faces for every page this canvas loads; call before a load. */
+  registerFonts(data: ArrayBuffer | Uint8Array): Promise<void>
+
   /**
-   * Drops and rebuilds the native Lynx view while retaining the Render Worker,
-   * transferred canvas, Wasm instance, page configuration, current metrics,
-   * registered font containers, and selected default font family.
+   * Maps CSS system-ui, sans-serif, and serif to a family for every page this
+   * canvas loads. An unknown family makes the next load reject.
    */
-  reset(): Promise<void>
-
-  /** Registers all font faces and restores them after each reset. */
-  registerFonts(data: ArrayBuffer | Uint8Array): Promise<number>
-
-  /** Maps CSS system-ui, sans-serif, and serif to a registered family. */
-  setDefaultFontFamily(family: string): Promise<boolean>
+  setDefaultFontFamily(family: string): Promise<void>
   resize(
     width: number,
     height: number,

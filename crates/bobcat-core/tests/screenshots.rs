@@ -8,9 +8,9 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
-    OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet,
+    FontBlob, ImageStore, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -92,18 +92,57 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     }
 }
 
-fn view(source: &[u8]) -> OffscreenLynxView {
-    let resources: Arc<dyn ResourceFetcher> =
-        Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
-    OffscreenLynxView::new(
+/// A booted, offscreen-attached view over `source`, waited out so the frame
+/// it captured is the one its entry module committed.
+async fn booted(source: &[u8], sources: ViewSources) -> OffscreenLynxView {
+    let mut view = OffscreenLynxView::new(
         PageConfig::default(),
-        resources,
+        &FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL),
         Arc::new(|| {}),
         393.0,
         727.0,
         1.0,
+        sources,
     )
-    .expect("view")
+    .await
+    .expect("view");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    wait_for_script(&mut view).expect("script execution");
+    view
+}
+
+/// A view whose stylesheet request the double answers pre-parsed.
+async fn booted_with_sheet(source: &[u8], sheet: PreparsedStyleSheet) -> OffscreenLynxView {
+    booted_with_sheet_at(source, sheet, 393.0, 727.0).await
+}
+
+async fn booted_with_sheet_at(
+    source: &[u8],
+    sheet: PreparsedStyleSheet,
+    width: f32,
+    height: f32,
+) -> OffscreenLynxView {
+    let mut view = OffscreenLynxView::new(
+        PageConfig::default(),
+        &FetcherDouble::new(source.to_vec())
+            .resolving_to(SCRIPT_URL)
+            .with_preparsed_style_sheet(sheet),
+        Arc::new(|| {}),
+        width,
+        height,
+        1.0,
+        ViewSources {
+            style_sheets: vec!["app:///author.css".to_owned()],
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await
+    .expect("view");
+    view.attach_offscreen()
+        .expect("GPU initialization for the offscreen target");
+    wait_for_script(&mut view).expect("script execution");
+    view
 }
 
 fn screenshots() -> Screenshots {
@@ -131,13 +170,7 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
 
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
-    let mut view = view(MAIN_THREAD_SCRIPT.as_bytes());
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
-    wait_for_script(&mut view).expect("script execution");
+    let mut view = booted(MAIN_THREAD_SCRIPT.as_bytes(), ViewSources::new(SCRIPT_URL)).await;
 
     let shot = view.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
@@ -153,15 +186,14 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 /// the `background-image: url(...)` layer the script wrote draws those pixels.
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
-    let mut view = view(IMAGE_SCRIPT.as_bytes());
-    view.set_image_store(checker_store() as Arc<dyn bobcat_core::ImageStore>)
-        .expect("available document");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
-    wait_for_script(&mut view).expect("script execution");
+    let mut view = booted(
+        IMAGE_SCRIPT.as_bytes(),
+        ViewSources {
+            image_store: Some(checker_store() as Arc<dyn ImageStore>),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await;
     view.load_image(IMAGE_URL).await.expect("published source");
 
     let shot = view.capture().expect("capture the committed image");
@@ -176,18 +208,17 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
 async fn raw_text_reaches_the_private_painter_as_glyphs() {
     const ROBOTO: &[u8] = include_bytes!("../../hughie/tests/fixtures/Roboto-Regular.ttf");
 
-    let mut view = view(TEXT_SCRIPT.as_bytes());
-    assert_eq!(
-        view.register_fonts(ROBOTO).expect("an idle document"),
-        1,
-        "the vendored Roboto fixture must register exactly one face"
-    );
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
-    wait_for_script(&mut view).expect("script execution");
+    // Selecting the face by name is what proves the container registered: an
+    // unknown default family fails the construction.
+    let mut view = booted(
+        TEXT_SCRIPT.as_bytes(),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await;
 
     let shot = view.capture().expect("capture the committed page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
@@ -218,41 +249,24 @@ globalThis.renderPage = function renderPage() {
             declaration("background-color", color),
         ]
     };
-    let resources: Arc<dyn ResourceFetcher> = Arc::new(
-        FetcherDouble::new(SWAP_SCRIPT.as_bytes().to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_preparsed_style_sheet(PreparsedStyleSheet {
-                rules: vec![
-                    PreparsedRule::Style {
-                        selectors: ".before".to_owned(),
-                        declarations: sized("#ff0000"),
-                    },
-                    PreparsedRule::Style {
-                        selectors: ".after".to_owned(),
-                        declarations: sized("#00ff00"),
-                    },
-                ],
-            }),
-    );
-    let mut view = OffscreenLynxView::new(
-        PageConfig::default(),
-        resources,
-        Arc::new(|| {}),
+    let mut view = booted_with_sheet_at(
+        SWAP_SCRIPT.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![
+                PreparsedRule::Style {
+                    selectors: ".before".to_owned(),
+                    declarations: sized("#ff0000"),
+                },
+                PreparsedRule::Style {
+                    selectors: ".after".to_owned(),
+                    declarations: sized("#00ff00"),
+                },
+            ],
+        },
         32.0,
         24.0,
-        1.0,
     )
-    .expect("view");
-
-    view.load_style_sheet("app:///author.css")
-        .await
-        .expect("the pre-parsed sheet mounts");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
-    wait_for_script(&mut view).expect("script execution");
+    .await;
 
     let shot = view.capture().expect("capture the restyled page");
     let count = |wanted: [u8; 4]| {
@@ -274,50 +288,31 @@ globalThis.renderPage = function renderPage() {
 /// and the committed frame is compared against a golden.
 #[tokio::test]
 async fn a_preparsed_author_sheet_paints() {
-    let resources: Arc<dyn ResourceFetcher> = Arc::new(
-        FetcherDouble::new(STYLED_SCRIPT.as_bytes().to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_preparsed_style_sheet(PreparsedStyleSheet {
-                rules: vec![
-                    PreparsedRule::Style {
-                        selectors: ".card".to_owned(),
-                        declarations: vec![
-                            declaration("width", "200px"),
-                            declaration("height", "120px"),
-                            declaration("background-color", "rebeccapurple"),
-                            declaration("margin", "40px"),
-                        ],
-                    },
-                    PreparsedRule::Style {
-                        selectors: ".card > .badge".to_owned(),
-                        declarations: vec![
-                            declaration("width", "60px"),
-                            declaration("height", "60px"),
-                            declaration("background-color", "gold"),
-                        ],
-                    },
-                ],
-            }),
-    );
-    let mut view = OffscreenLynxView::new(
-        PageConfig::default(),
-        resources,
-        Arc::new(|| {}),
-        393.0,
-        727.0,
-        1.0,
+    let mut view = booted_with_sheet(
+        STYLED_SCRIPT.as_bytes(),
+        PreparsedStyleSheet {
+            rules: vec![
+                PreparsedRule::Style {
+                    selectors: ".card".to_owned(),
+                    declarations: vec![
+                        declaration("width", "200px"),
+                        declaration("height", "120px"),
+                        declaration("background-color", "rebeccapurple"),
+                        declaration("margin", "40px"),
+                    ],
+                },
+                PreparsedRule::Style {
+                    selectors: ".card > .badge".to_owned(),
+                    declarations: vec![
+                        declaration("width", "60px"),
+                        declaration("height", "60px"),
+                        declaration("background-color", "gold"),
+                    ],
+                },
+            ],
+        },
     )
-    .expect("view");
-
-    view.load_style_sheet("app:///author.css")
-        .await
-        .expect("the pre-parsed sheet mounts");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
-    wait_for_script(&mut view).expect("script execution");
+    .await;
 
     let shot = view.capture().expect("capture the styled page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)

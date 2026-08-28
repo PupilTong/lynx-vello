@@ -117,9 +117,20 @@ class CanvasPointerInput {
     this.#height = height
   }
 
+  /** Ends every live sequence, so a page that survives keeps no stale one. */
   reset() {
-    for (const pointerId of this.#active.keys()) {
+    for (const [pointerId, active] of this.#active) {
       this.#releaseCapture(pointerId)
+      if (!this.#disposed) {
+        this.#send({
+          defaultPrevented: false,
+          device: active.device,
+          phase: POINTER_PHASE_CANCEL,
+          pointerId,
+          x: active.x,
+          y: active.y,
+        })
+      }
     }
     this.#active.clear()
   }
@@ -367,7 +378,7 @@ class RenderWorkerClient {
     }
     this.#pending.delete(message.request)
     if (message.ok) {
-      pending.resolve(message.value)
+      pending.resolve()
     } else {
       pending.reject(new Error(message.error))
     }
@@ -551,63 +562,56 @@ export class BobcatCanvas {
   }
 
   /**
-   * Fetch and run the main-thread script at `url`.
+   * Fetch a page's author stylesheets and its main-thread entry script, then
+   * show it.
    *
-   * The Promise resolves after Bobcat's boot sequence and rejects on fetch,
-   * VM initialization, or evaluation failure. Relative URLs are resolved
-   * against this document's base URL before they cross the Worker boundary.
-   * The current native view accepts exactly one entry-script operation;
-   * `reset()` installs a fresh view. Loading, VM startup, and execution have
-   * no facade-imposed deadline.
+   * A native view is its page, so this builds a fresh one and drops the view
+   * before it. Stylesheets cascade in the order given and all mount before the
+   * entry script runs. The Promise resolves after Bobcat's boot sequence and
+   * rejects on fetch, VM initialization, or evaluation failure, leaving the
+   * previous page running if the fetch was what failed. Relative URLs resolve
+   * against this document's base URL. Nothing here imposes a deadline.
    */
-  async executeScript(url) {
-    await this.#request('executeScript', { url: documentUrl(url) })
-  }
-
-  /** Fetch and mount an author stylesheet at `url`. */
-  async loadStyleSheet(url) {
-    await this.#request('loadStyleSheet', { url: documentUrl(url) })
+  async load(url, styleSheetUrls = []) {
+    if (!Array.isArray(styleSheetUrls)) {
+      throw new TypeError('BobcatCanvas.load styleSheetUrls must be an array')
+    }
+    this.#pointerInput.reset()
+    await this.#request('load', {
+      styleSheetUrls: styleSheetUrls.map(documentUrl),
+      url: documentUrl(url),
+    })
   }
 
   /**
-   * Fetch, parse, and run a single-file Lynx XML source envelope.
-   *
-   * A present stylesheet is mounted before its main-thread script starts. A
-   * background-thread section is retained, but currently produces a console
-   * warning because Bobcat does not execute it yet. Page configuration remains
-   * the host's `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies
-   * web-core's raw-loader defaults when the host does not need overrides. This
-   * is a one-shot operation for the current native view; a repeated call
-   * rejects before fetch or stylesheet mounting unless `reset()` ran first.
+   * Fetch, parse, and show a single-file Lynx XML source envelope: the same
+   * load as `load()`, with the envelope's sections as the sources. A
+   * background-thread section is reported by a console warning and neither
+   * retained nor executed. Page configuration remains the host's
+   * `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's
+   * raw-loader defaults.
    */
   async loadLynxXml(url) {
+    this.#pointerInput.reset()
     await this.#request('loadLynxXml', { url: documentUrl(url) })
   }
 
-  /**
-   * Replace the native Lynx view while retaining this Render Worker, its
-   * transferred canvas, initialized Wasm instance, page configuration,
-   * current device metrics, registered font containers, and selected default
-   * font family.
-   */
-  async reset() {
-    this.#pointerInput.reset()
-    await this.#request('reset')
-  }
-
-  /** Register one or more font faces and restore them after each reset. */
+  /** Retain font faces for every page this canvas loads. Call before a load. */
   async registerFonts(data) {
-    return await this.#request('registerFonts', { bytes: fontBytes(data) })
+    await this.#request('registerFonts', { bytes: fontBytes(data) })
   }
 
-  /** Map CSS system-ui, sans-serif, and serif to a registered family. */
+  /**
+   * Map CSS system-ui, sans-serif, and serif to a family for every page this
+   * canvas loads. A name nothing provides makes the next load reject.
+   */
   async setDefaultFontFamily(family) {
     if (typeof family !== 'string' || family.trim() === '') {
       throw new TypeError(
         'BobcatCanvas.setDefaultFontFamily requires a non-empty family name',
       )
     }
-    return await this.#request('setDefaultFontFamily', {
+    await this.#request('setDefaultFontFamily', {
       family: family.trim(),
     })
   }

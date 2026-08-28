@@ -12,10 +12,9 @@ mod support;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::{
     OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
-    PreparsedStyleSheet,
+    PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -71,33 +70,31 @@ fn slider_sheet() -> PreparsedStyleSheet {
     }
 }
 
-fn resources(sheet: PreparsedStyleSheet) -> Arc<dyn ResourceFetcher> {
-    Arc::new(
-        FetcherDouble::new(SLIDER_SCRIPT.as_bytes().to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_preparsed_style_sheet(sheet),
-    )
+fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
+    FetcherDouble::new(SLIDER_SCRIPT.as_bytes().to_vec())
+        .resolving_to(SCRIPT_URL)
+        .with_preparsed_style_sheet(sheet)
 }
 
-/// A view built the only way there is to build one.
+/// A view built the only way there is to build one: its sheet and its entry
+/// module are its construction inputs.
 async fn booted() -> OffscreenLynxView {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
-        resources(slider_sheet()),
+        &resources(slider_sheet()),
         Arc::new(|| {}),
         32.0,
         24.0,
         1.0,
+        ViewSources {
+            style_sheets: vec![STYLE_URL.to_owned()],
+            ..ViewSources::new(SCRIPT_URL)
+        },
     )
+    .await
     .expect("view");
-    view.load_style_sheet(STYLE_URL)
-        .await
-        .expect("the pre-parsed sheet mounts");
     view.attach_offscreen()
         .expect("GPU initialization for the offscreen target");
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start script");
     wait_for_script(&mut view).expect("script execution");
     view
 }

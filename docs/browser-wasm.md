@@ -26,24 +26,24 @@ Render Worker
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
-limited to view creation with `PageConfig`, URL-based script, stylesheet, and
-Lynx XML requests, font registration, resize, error observation, disposal, and
+limited to canvas creation with `PageConfig`, URL-based page loads, font and
+default-family registration, resize, error observation, disposal, and
 automatic pointer forwarding from the attached HTML canvas.
 
-The Render Worker constructs `LynxView`, attaches the transferred canvas, and
-calls `configure_wasm_workers` once. That core API configures the worker
+The Render Worker calls `configure_wasm_workers` once, then builds a `LynxView`
+and attaches the canvas on each `load`. That core API configures the worker
 bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
-pool, while that renderer may own a sequence of non-overlapping native views.
-`BobcatCanvas.reset()` drops the current view, closing its sole command sender,
-and immediately constructs its replacement. The detached per-view Lynx-main
-Worker drops its thread-bound realm and exits naturally; the independent
-replacement does not join it. The process-wide pool adopts the persistent
-Render Worker as index zero and remains valid across resets. The configured
-count covers that owner plus at least one managed Stylo Worker; each live view's
-Lynx-main Worker is separate. The public facade still creates one fresh Render
-Worker and Wasm instance per `BobcatCanvas`, not per reset.
+pool; that renderer owns a sequence of non-overlapping native views, none
+until the first load, each later load dropping the current view and closing
+its sole command sender. The detached per-view Lynx-main Worker drops its
+thread-bound realm and exits naturally; the replacement does not join it. The
+process-wide pool adopts the persistent Render Worker as index zero and
+remains valid across loads. The configured count covers that owner plus at
+least one managed Stylo Worker; each live view's Lynx-main Worker is separate.
+The public facade still creates one fresh Render Worker and Wasm instance per
+`BobcatCanvas`, not per load.
 
 The transient Lynx-main Worker invokes Stylo from outside its Rayon pool, so
 Stylo transfers that traversal's root closure onto a managed worker. The Render
@@ -53,13 +53,13 @@ service style work.
 
 ## Resource and script boundaries
 
-Browser fetch policy stays in JavaScript. For `executeScript(url)`, the Render
-Worker uses browser `fetch`, reads the response stream with a 16 MiB bound,
-and registers the raw entry-MTS bytes in its `BrowserResources`
-implementation under the final response URL, then calls the opaque Rust
-view's `execute_script(url)`. The view resolves and reads the bytes through
-`ResourceFetcher`, performs strict UTF-8 validation, and uses that final URL as
-the ESM entry specifier; it never receives a bundle decoder. The 16 MiB bound
+Browser fetch policy stays in JavaScript. For `load(url, styleSheetUrls)`, the
+Render Worker uses browser `fetch`, reads each response stream with a 16 MiB
+bound, and registers the raw stylesheet and entry-MTS bytes in its
+`BrowserResources` under their final response URLs, then calls
+`BobcatRenderer::load(entry_url, style_sheet_urls)`. Core reads them through
+`ResourceFetcher`, validates UTF-8 strictly, and uses the entry's final URL as
+the ESM entry specifier; it never receives a bundle decoder. That 16 MiB bound
 is browser-embedder policy and does not cross in `ResourceRequest`.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
@@ -68,27 +68,26 @@ raw XML loader. Rust's `lynx-xml` parser validates and extracts the sections in
 the Render Worker. The source uses `<lynx engine-version="...">` and
 `<script thread="main">` / `<script thread="background">`; legacy
 attribute spellings are rejected. A present stylesheet is registered as CSS
-text and mounted before the main-thread section is started; the returned
-Promise uses the same engine-event completion path as `executeScript`. The
+text and mounted as the view's one sheet before the main-thread section starts;
+the returned Promise uses the same engine-event completion path as `load`. The
 exported `LYNX_XML_PAGE_CONFIG` supplies the source format's fixed
 `false`/`false`/`true` display/overflow/selector defaults, while callers may
 still pass an intentional host override to `BobcatCanvas.create`.
 
-Like `executeScript`, `loadLynxXml` is a one-shot entry-script operation for
-the current native view. Once either entry point has started a script, another
-call rejects before fetching or mounting XML CSS, so a failed repeated load
-cannot mutate the running page's cascade. A caller that wants a new page first
-calls `reset()`, which preserves the outer Worker, OffscreenCanvas, initialized
-Wasm module, page configuration, latest device metrics, resource provider, and
-registered font containers while replacing the private view, Lynx-main Worker,
-VM, and document. A successfully selected embedder default font family is
-restored after those font containers are registered on the replacement view.
-The provider clears the old page's transient script and stylesheet bytes
-during reset so repeated Blob-URL submissions do not accumulate stale sources.
+Both entry points are repeatable: a page's sources are its view's construction
+inputs, so each call builds a fresh view and drops the one before it rather
+than mutating a running page. Every source is fetched and registered before
+that replacement, so a load that cannot fetch leaves the running page and its
+cascade untouched. The outer Worker, OffscreenCanvas, Wasm module, page
+configuration, latest device metrics, resource provider, font containers, and
+default font family are the renderer's own and are reapplied to each view it
+builds; the view, Lynx-main Worker, VM, and document are replaced. The
+provider clears the registered bytes once construction has copied them, so
+repeated Blob-URL submissions do not accumulate stale sources.
 
-The optional XML background section is retained under a URL derived from the
-final XML response URL but is not executed. Bobcat does not yet have a
-background-thread realm, so the browser reports this limitation explicitly.
+The optional XML background section is reported under a URL derived from the
+final XML response URL, but neither retained nor executed: Bobcat has no
+background-thread realm yet, and says so explicitly.
 
 The UI facade resolves relative script, stylesheet, and Lynx XML URLs against
 the embedding document's `document.baseURI` before crossing the Worker boundary.
@@ -116,17 +115,17 @@ After a successful boot, the Render Worker keeps an independent lifecycle
 waiter active instead of tying `pump` to animation frames. `ListenerFailed`
 is written to the browser console without stopping the page, while a later
 script-Worker failure remains fatal even when `requestAnimationFrame` is
-paused for a hidden document. Reset advances the waiter's generation before
+paused for a hidden document. A load advances the waiter's generation before
 replacing the native view, so an old page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
-exports of `bobcat:element`. `registerFonts(bytes)` is a narrow resource
-capability: it registers every usable face in an OpenType container through
-the opaque view and returns the number accepted, without exposing the document
-or text engine. `loadStyleSheet(url)` fetches CSS in the Render Worker,
-registers the bytes, and mounts them as author-origin rules through the same
-resource boundary the entry MTS module uses; sheets cascade in load order. The
+exports of `bobcat:element`. `registerFonts(bytes)` and
+`setDefaultFontFamily(family)` retain wrapper state: faces are registered, and
+the family checked against them, when a view is built, so both must precede a
+load, and a family nothing provides makes that load reject. Author stylesheets
+reach core the way the entry module does — fetched and registered by the Render
+Worker, named in the load, mounted as author-origin rules in cascade order. The
 stylesheet contract has a second arm for a host that already parsed its CSS,
 but a browser host never does, so this embedder always takes the text arm.
 The browser registry is one normalized-URL-to-bytes map. Script and stylesheet
@@ -134,7 +133,7 @@ registration populate that same map; `fetch_resource` and `fetch_style_sheet`
 decide how the selected bytes are interpreted.
 
 The browser facade still does not decode `.web.bundle` containers. A caller
-may execute suitable JavaScript by URL or load a raw Lynx XML source card;
+may load suitable JavaScript by URL or a raw Lynx XML source card;
 bundle retrieval, decode, `PageConfig` parsing, and `StyleInfo` lowering remain
 external work, exactly as in the native CLI — where the CLI does perform them
 and hands core the pre-parsed arm.
@@ -154,7 +153,7 @@ restores the previous inline value and removes every listener.
 Client coordinates are mapped through the canvas's current bounding rectangle
 into the latest logical viewport size, in CSS pixels. The UI sends that small,
 flat input record to the Render Worker without waiting for a response. Input
-shares the same ordered Worker queue as reset and resize, so it cannot re-enter
+shares the same ordered Worker queue as load and resize, so it cannot re-enter
 the Wasm wrapper while an asynchronous view replacement owns it and a pointer
 following resize is interpreted in the metrics installed before it.
 
@@ -163,7 +162,7 @@ core's `InputEvent` and calls the opaque `LynxView::dispatch_input`, which
 stamps the event's arrival from the engine's own clock — the same clock its
 frames read — so a press after a long idle period cannot derive its `longpress`
 deadline from the last rendered frame, and nothing has to agree on a time
-origin. Reset releases active captures before replacing the view; disposal
+origin. Each load releases active captures before replacing the view; disposal
 stops input before terminating the Worker. Wheel input is not connected yet.
 
 ## Synchronization and rendering
@@ -180,7 +179,7 @@ main thread, before this Worker is woken and on a different time origin than
 its `performance.now()`, so it is not the better reading it appears to be.
 A separate lost-wake-safe event signal wakes a Promise whenever core queues an
 engine event. Script completion therefore does not poll and does not depend on
-rAF, so a hidden page cannot strand an `executeScript` Promise merely by
+rAF, so a hidden page cannot strand a `load` Promise merely by
 suspending drawing. The UI facade, nested VM Worker startup, and built-in
 QuickJS adapter impose no wall-clock deadline on loading or execution. Fetch,
 VM initialization, and script errors are still reported normally; work that
@@ -229,8 +228,9 @@ and tail calls. Generated glue and Wasm live under
 `crates/bobcat-wasm/pkg/` and are not checked in. The verification script
 checks that optimization removed the debugging name section while preserving
 `target_features`, shared imported/exported memory, the Worker-only Wasm
-import, the URL execution/XML and private pointer-dispatch methods, and the
-absence of the removed direct DOM API.
+import, the facade's four page and font declarations and their dispatches, that
+a load registers a page's sources before building the view, and the absence of
+the private pointer method and the removed direct DOM API.
 
 The `wasm32` target disables Parley's `complex-scripts` feature, while native
 targets retain it. This keeps grapheme segmentation, shaping, and ordinary
@@ -259,10 +259,10 @@ resources must satisfy CORS or a compatible Cross-Origin-Resource-Policy.
 The Pages shell exposes its Canvas and Lynx XML workspace views through the
 `tab` query parameter. The XML view loads `demo.lynx.xml` into a text editor and
 submits edits through a same-origin Blob URL. It creates and transfers the DOM
-canvas only for the first render. Every later submit calls `reset()` to drop
-and rebuild only native `LynxView`, then loads the new source through the same
-warm `BobcatCanvas`; the Render Worker, transferred OffscreenCanvas, Wasm
-instance, Stylo pool, and cached font bytes remain in place. The Blob URL is
+canvas only for the first render, registering its font container and default
+family once. Every submit is one `loadLynxXml` on that warm canvas, rebuilding
+only the native `LynxView`; the Render Worker, OffscreenCanvas, Wasm instance,
+Stylo pool, and retained font bytes stay. The Blob URL is
 revoked only after `loadLynxXml` settles.
 
 Synchronous GPU readback remains absent because browser WebGPU map completion

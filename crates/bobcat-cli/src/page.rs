@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
     ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
-use bobcat_core::{PageConfig, PreparsedStyleSheet};
+use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
 use http::HeaderMap;
 use url::Url;
 
@@ -23,14 +23,14 @@ use crate::CliError;
 #[derive(Debug)]
 pub(crate) struct Program {
     pub(crate) input: String,
-    pub(crate) script_url: Url,
+    script_url: Url,
     /// The conventional background chunk URL for raw XML that contains a
     /// background section. Its presence is retained even when the source is
     /// empty; the current runtime does not execute it.
     background_script_url: Option<Url>,
     /// The non-global CSS fragment ids a decoded bundle carries, if any.
     scoped_css_ids: Vec<i32>,
-    pub(crate) resource_fetcher: Arc<ProgramResourceFetcher>,
+    pub(crate) resource_fetcher: ProgramResourceFetcher,
     pub(crate) config: PageConfig,
 }
 
@@ -90,7 +90,7 @@ impl ProgramResourceFetcher {
     /// The registration is the single source of truth: an input whose sheet
     /// was never registered has no URL to load, and one that was cannot be
     /// missed.
-    pub(crate) fn style_sheet_url(&self) -> Option<&Url> {
+    fn style_sheet_url(&self) -> Option<&Url> {
         self.style_sheet_url.as_ref()
     }
 
@@ -349,7 +349,7 @@ impl Program {
             script_url,
             background_script_url: None,
             scoped_css_ids,
-            resource_fetcher: Arc::new(fetcher),
+            resource_fetcher: fetcher,
             config,
         })
     }
@@ -388,13 +388,27 @@ impl Program {
             script_url,
             background_script_url,
             scoped_css_ids: Vec::new(),
-            resource_fetcher: Arc::new(fetcher),
+            resource_fetcher: fetcher,
             config: PageConfig {
                 default_display_linear: false,
                 default_overflow_visible: false,
                 enable_css_selector: true,
             },
         })
+    }
+
+    /// The sources a view for this input is built from: the author CSS this
+    /// input carried, if any, and its entry MTS module.
+    pub(crate) fn sources(&self) -> ViewSources {
+        ViewSources {
+            style_sheets: self
+                .resource_fetcher
+                .style_sheet_url()
+                .map(Url::to_string)
+                .into_iter()
+                .collect(),
+            ..ViewSources::new(self.script_url.to_string())
+        }
     }
 
     /// Reports input features the current runtime retains only approximately

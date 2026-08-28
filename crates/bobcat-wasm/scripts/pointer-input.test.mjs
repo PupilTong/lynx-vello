@@ -280,7 +280,7 @@ test('ignores secondary mouse buttons and cancels lost capture', async () => {
   await view.dispose()
 })
 
-test('reset releases active pointers before replacing the native view', async () => {
+test('a load releases active pointers before replacing the native view', async () => {
   FakeWorker.instances.length = 0
   const canvas = new FakeCanvas({ height: 100, left: 0, top: 0, width: 100 })
   const view = await BobcatCanvas.create(
@@ -297,10 +297,13 @@ test('reset releases active pointers before replacing the native view', async ()
     clientY: 50,
     pointerId: 12,
   })
-  await view.reset()
-  const beforeUp = worker.messages.filter(
-    ({ type }) => type === 'bobcat-pointer',
-  ).length
+  await view.load('https://example.test/main.js')
+  const pointerMessages = () =>
+    worker.messages.filter(({ type }) => type === 'bobcat-pointer')
+  // The sequence is ended, not dropped: a load that fails leaves the previous
+  // page running, and a pointer it never saw released would wedge its router.
+  assert.equal(pointerMessages().at(-1).phase, 3)
+  const beforeUp = pointerMessages().length
   canvas.emit('pointerup', {
     clientX: 50,
     clientY: 50,
@@ -309,7 +312,7 @@ test('reset releases active pointers before replacing the native view', async ()
 
   assert.deepEqual(canvas.released, [12])
   assert.equal(
-    worker.messages.filter(({ type }) => type === 'bobcat-pointer').length,
+    pointerMessages().length,
     beforeUp,
   )
 

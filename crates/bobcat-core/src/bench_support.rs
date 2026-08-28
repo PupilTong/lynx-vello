@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use dom::event::EventSteps;
 
-use crate::engine::{SharedListenerNames, SharedTree};
 use crate::runtime::{ENTRY_PREAMBLE, MainThreadRuntime};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::view::{SharedListenerNames, SharedTree};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///

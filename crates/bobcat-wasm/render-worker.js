@@ -2,9 +2,8 @@ import initWasm, { BobcatRenderer } from './pkg/bobcat_wasm.js'
 
 let renderer
 let running = false
-let resettingNativeView = false
+let loadingNativeView = false
 let initialized = false
-let entryScriptStarted = false
 let scriptCompletion
 let engineEventGeneration = 0
 let requestQueue = Promise.resolve()
@@ -17,13 +16,13 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
 }
 
-function postResponse(request, ok, value) {
+function postResponse(request, ok, error) {
   if (ok) {
-    self.postMessage({ type: 'bobcat-response', ok, request, value })
+    self.postMessage({ type: 'bobcat-response', ok, request })
   } else {
     self.postMessage({
       type: 'bobcat-response',
-      error: errorMessage(value),
+      error: errorMessage(error),
       ok,
       request,
     })
@@ -47,7 +46,7 @@ function renderFrame() {
   if (!running) {
     return
   }
-  if (!resettingNativeView) {
+  if (!loadingNativeView) {
     try {
       // No timestamp crosses here. The animation timeline is core's own
       // clock, read on this Worker once per frame after the canvas surface
@@ -92,33 +91,19 @@ function absoluteUrl(input) {
 }
 
 // The Render Worker applies the browser's URL, fetch, CORS, cache and
-// credentials policy, then hands raw bytes to the engine's resource registry.
-async function fetchAndRegister(kind, url, limit, register) {
+// credentials policy; registration is the caller's, so a page's bytes reach
+// the engine's registry only once every one of its sources has arrived.
+async function fetchSource(kind, url, limit) {
   const response = await fetch(absoluteUrl(url))
   if (!response.ok) {
     throw new Error(
       `Could not fetch ${kind} ${response.url || url}: ${String(response.status)} ${response.statusText}`,
     )
   }
-  const bytes = await readBoundedBytes(response, limit)
-  return register(response.url || absoluteUrl(url), bytes)
-}
-
-function fetchScript(url) {
-  return fetchAndRegister('script', url, MAX_SCRIPT_BYTES, (registered, bytes) =>
-    renderer.registerScript(registered, bytes),
-  )
-}
-
-// A browser host never decodes a `.web.bundle`, so the bytes it registers are
-// CSS text; core takes the text arm of the stylesheet contract.
-function fetchStyleSheet(url) {
-  return fetchAndRegister(
-    'stylesheet',
-    url,
-    MAX_STYLE_SHEET_BYTES,
-    (registered, bytes) => renderer.registerStyleSheet(registered, bytes),
-  )
+  return {
+    bytes: await readBoundedBytes(response, limit),
+    url: response.url || absoluteUrl(url),
+  }
 }
 
 // Fetch the complete source once, then use the platform default decoder:
@@ -214,10 +199,27 @@ function trackScriptCompletion(request) {
   )
 }
 
-function ensureEntryScriptNotStarted() {
-  if (entryScriptStarted) {
-    throw new Error('This Bobcat Canvas has already started its entry script')
+// A view is its page: its sources are construction inputs, so loading a page
+// builds a fresh native view and drops the previous one. Sources are fetched
+// and registered before that happens, so a load that cannot fetch leaves the
+// running page untouched.
+async function replaceNativeView(request, entryUrl, styleSheetUrls) {
+  if (scriptCompletion !== undefined) {
+    try {
+      await scriptCompletion
+    } catch {
+      // A failed page is still replaceable by the next submission.
+    }
   }
+  scriptCompletion = undefined
+  engineEventGeneration += 1
+  loadingNativeView = true
+  try {
+    await renderer.load(entryUrl, styleSheetUrls)
+  } finally {
+    loadingNativeView = false
+  }
+  trackScriptCompletion(request)
 }
 
 async function dispatchRequest(message) {
@@ -227,73 +229,44 @@ async function dispatchRequest(message) {
 
   const { operation, request } = message
   switch (operation) {
-    case 'executeScript': {
-      ensureEntryScriptNotStarted()
-      const registeredUrl = await fetchScript(message.url)
-      await renderer.executeScript(registeredUrl)
-      entryScriptStarted = true
-      trackScriptCompletion(request)
-      break
-    }
-    case 'loadStyleSheet': {
-      const registeredUrl = await fetchStyleSheet(message.url)
-      await renderer.loadStyleSheet(registeredUrl)
-      postResponse(request, true)
+    case 'load': {
+      const sheets = []
+      for (const url of message.styleSheetUrls) {
+        sheets.push(await fetchSource('stylesheet', url, MAX_STYLE_SHEET_BYTES))
+      }
+      const entry = await fetchSource('script', message.url, MAX_SCRIPT_BYTES)
+      // A browser host never decodes a `.web.bundle`, so the bytes it
+      // registers are CSS text; core takes the text arm of the contract.
+      const styleSheetUrls = sheets.map((sheet) =>
+        renderer.registerStyleSheet(sheet.url, sheet.bytes),
+      )
+      const entryUrl = renderer.registerScript(entry.url, entry.bytes)
+      await replaceNativeView(request, entryUrl, styleSheetUrls)
       break
     }
     case 'loadLynxXml': {
-      // Core accepts exactly one entry script. Reject before fetching or
-      // mounting the XML stylesheet so a failed repeated load is side-effect
-      // free for the page that is already running.
-      ensureEntryScriptNotStarted()
       const { source, url } = await fetchLynxXml(message.url)
       const [mainThreadScriptUrl, styleSheetUrl, backgroundThreadScriptUrl] =
         renderer.registerLynxXml(url, source)
-      if (styleSheetUrl !== null) {
-        await renderer.loadStyleSheet(styleSheetUrl)
-      }
       if (backgroundThreadScriptUrl !== null) {
         console.warn(
           `Bobcat preserved the Lynx XML background-thread script at ${backgroundThreadScriptUrl}, but background-thread execution is not implemented`,
         )
       }
-      await renderer.executeScript(mainThreadScriptUrl)
-      entryScriptStarted = true
-      trackScriptCompletion(request)
-      break
-    }
-    case 'reset': {
-      // A reset replaces the native view and its Lynx-main Worker, not this
-      // Render Worker. Let a started entry evaluation publish its own response
-      // first, then rebuild LynxView inside the existing Wasm instance/canvas.
-      if (scriptCompletion !== undefined) {
-        try {
-          await scriptCompletion
-        } catch {
-          // A failed page is still replaceable by the next submission.
-        }
-      }
-      entryScriptStarted = false
-      scriptCompletion = undefined
-      engineEventGeneration += 1
-      resettingNativeView = true
-      try {
-        await renderer.reset()
-      } finally {
-        resettingNativeView = false
-      }
-      postResponse(request, true)
+      await replaceNativeView(
+        request,
+        mainThreadScriptUrl,
+        styleSheetUrl === null ? [] : [styleSheetUrl],
+      )
       break
     }
     case 'registerFonts':
-      postResponse(request, true, renderer.registerFonts(message.bytes))
+      renderer.registerFonts(message.bytes)
+      postResponse(request, true)
       break
     case 'setDefaultFontFamily':
-      postResponse(
-        request,
-        true,
-        renderer.setDefaultFontFamily(message.family),
-      )
+      renderer.setDefaultFontFamily(message.family)
+      postResponse(request, true)
       break
     case 'resize':
       renderer.resize(
@@ -347,7 +320,7 @@ self.addEventListener('message', (event) => {
       }
     }
     // Input shares the facade-operation queue so it cannot re-enter the Wasm
-    // wrapper while an async native-view reset owns its mutable borrow.
+    // wrapper while an async native-view load owns its mutable borrow.
     requestQueue = requestQueue.then(dispatch)
   } else if (message?.type === 'bobcat-request') {
     const dispatch = async () => {
@@ -358,7 +331,7 @@ self.addEventListener('message', (event) => {
       }
     }
     // Every facade operation shares one queue. In particular, resize and font
-    // requests must not re-enter an async native reset while it temporarily
+    // requests must not re-enter an async native load while it temporarily
     // owns `&mut BobcatRenderer` across WebGPU surface attachment.
     requestQueue = requestQueue.then(dispatch)
   }
