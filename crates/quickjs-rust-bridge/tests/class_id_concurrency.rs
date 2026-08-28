@@ -4,7 +4,7 @@
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use quickjs_rust_bridge::{EvalOptions, EvalSource, HostValue, Realm};
+use quickjs_rust_bridge::{EvalOptions, EvalSource, HostValue, Runtime};
 
 #[test]
 fn concurrent_realms_share_one_safely_allocated_host_class_id() {
@@ -17,7 +17,7 @@ fn concurrent_realms_share_one_safely_allocated_host_class_id() {
             thread::spawn(move || {
                 barrier.wait();
                 for _ in 0..100 {
-                    let mut realm = Realm::new().unwrap();
+                    let mut realm = Runtime::new().unwrap().create_context().unwrap();
                     realm
                         .define_global_function("answer", 0, |_| Ok(HostValue::Number(42.0)))
                         .unwrap();

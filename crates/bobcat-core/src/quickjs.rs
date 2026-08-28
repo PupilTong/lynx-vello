@@ -1,6 +1,7 @@
-//! Bobcat's script engine: one `QuickJS` realm, and the policy around it.
+//! Bobcat's script engine: one `QuickJS` runtime, the one realm on it, and
+//! the policy around them.
 //!
-//! The realm itself lives in `quickjs-rust-bridge`. What this module adds is
+//! Runtime and realm live in `quickjs-rust-bridge`. What this module adds is
 //! everything the runtime needs and the bridge deliberately leaves open: when
 //! the promise-job queue is drained, how many jobs one checkpoint may run,
 //! how a bridge failure becomes a sanitized [`ScriptError`], and how a module
@@ -31,7 +32,7 @@ const DEFAULT_MAX_JOBS_PER_CHECKPOINT: NonZeroUsize =
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct QuickJsConfig {
-    realm_options: quickjs::RealmOptions,
+    runtime_options: quickjs::RuntimeOptions,
     max_jobs_per_checkpoint: NonZeroUsize,
 }
 
@@ -39,7 +40,7 @@ struct QuickJsConfig {
 impl QuickJsConfig {
     #[must_use]
     const fn with_execution_timeout(mut self, execution_timeout: Option<Duration>) -> Self {
-        self.realm_options.execution_timeout = execution_timeout;
+        self.runtime_options.execution_timeout = execution_timeout;
         self
     }
 }
@@ -47,7 +48,7 @@ impl QuickJsConfig {
 impl Default for QuickJsConfig {
     fn default() -> Self {
         Self {
-            realm_options: quickjs::RealmOptions {
+            runtime_options: quickjs::RuntimeOptions {
                 memory_limit: None,
                 max_stack_size: None,
                 execution_timeout: None,
@@ -69,12 +70,18 @@ struct ModuleNamespace {
     exports: HashMap<Box<str>, Rc<quickjs::Member>>,
 }
 
-/// One owner-thread-bound `QuickJS` realm, with Bobcat's job policy on it.
+/// One owner-thread-bound `QuickJS` runtime and its single realm, with
+/// Bobcat's job policy on them.
+///
+/// The runtime could carry more realms — a bundle's main-thread and
+/// background scripts are the obvious pair — but Bobcat runs one, and the
+/// job queue and execution limits it owns are shared by whatever it carries.
 ///
 /// Created on the thread that will own it — the engine-owned Lynx main
 /// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
-    realm: quickjs::Realm,
+    runtime: quickjs::Runtime,
+    realm: quickjs::Context,
     module_namespaces: HashMap<String, ModuleNamespace>,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
@@ -88,8 +95,11 @@ impl ScriptEngine {
     }
 
     fn with_config(config: QuickJsConfig) -> Result<Self, quickjs::Error> {
+        let runtime = quickjs::Runtime::with_options(config.runtime_options)?;
+        let realm = runtime.create_context()?;
         Ok(Self {
-            realm: quickjs::Realm::with_options(config.realm_options)?,
+            runtime,
+            realm,
             module_namespaces: HashMap::new(),
             config,
             checkpoint_incomplete: false,
@@ -170,7 +180,7 @@ impl ScriptEngine {
 
     fn checkpoint(&mut self, phase: ScriptErrorPhase) -> Result<usize, ScriptError> {
         let drain = match self
-            .realm
+            .runtime
             .drain_pending_jobs_up_to(self.config.max_jobs_per_checkpoint.get())
         {
             Ok(drain) => drain,
@@ -255,7 +265,7 @@ impl ScriptEngine {
         source: &str,
     ) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterModule)?;
-        self.realm
+        self.runtime
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
@@ -322,9 +332,9 @@ impl ScriptEngine {
         // is lent, not copied — the caller holds it for the whole walk, and
         // the realm needs it only for the length of this call.
         //
-        // The checkpoint runs through `finish_operation`, never inline: an
-        // execution guard is alive for the whole call, and QuickJS refuses to
-        // nest one — draining jobs here would begin a second.
+        // The checkpoint runs through `finish_operation`, never inline:
+        // draining the job queue while this call is still on the stack would
+        // run promise jobs re-entrantly, inside the very walk they belong to.
         let result = self
             .realm
             .call_member(&object, &member, arguments)
@@ -342,7 +352,7 @@ impl ScriptEngine {
     /// document before the batch it belongs to ends.
     pub(crate) fn collect_garbage(&mut self) -> Result<(), ScriptError> {
         self.resume_incomplete_checkpoint(ScriptErrorPhase::CollectGarbage)?;
-        self.realm.run_gc();
+        self.runtime.run_gc();
         self.checkpoint(ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
     }
@@ -437,11 +447,11 @@ mod tests {
     #[test]
     fn execution_timeout_policy_is_opt_in() {
         let default = QuickJsConfig::default();
-        assert_eq!(default.realm_options.execution_timeout, None);
+        assert_eq!(default.runtime_options.execution_timeout, None);
         assert_eq!(
             default
                 .with_execution_timeout(Some(Duration::from_millis(20)))
-                .realm_options
+                .runtime_options
                 .execution_timeout,
             Some(Duration::from_millis(20))
         );

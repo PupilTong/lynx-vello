@@ -8,21 +8,23 @@
 
 use divan::black_box;
 use divan::counter::ItemsCount;
-use quickjs_rust_bridge::{EvalOptions, EvalSource, Realm, Value};
+use quickjs_rust_bridge::{Context, EvalOptions, EvalSource, Runtime, Value};
 
 fn main() {
     divan::main();
 }
 
 struct Driver {
-    realm: Realm,
+    runtime: Runtime,
+    realm: Context,
     run: Value,
     undefined: Value,
 }
 
 impl Driver {
     fn compile(body: &str) -> Self {
-        let mut realm = Realm::new().expect("realm");
+        let runtime = Runtime::new().expect("runtime");
+        let mut realm = runtime.create_context().expect("realm");
         let source = format!("globalThis.run = function run() {{\n{body}\n}};\nglobalThis.run;");
         let run = realm
             .evaluate(
@@ -36,6 +38,7 @@ impl Driver {
             .expect("compile benchmark driver");
         let undefined = realm.undefined().expect("undefined");
         Self {
+            runtime,
             realm,
             run,
             undefined,
@@ -261,7 +264,7 @@ fn promise_job_checkpoint(bencher: divan::Bencher) {
             drop(driver.call());
             black_box(
                 driver
-                    .realm
+                    .runtime
                     .drain_pending_jobs()
                     .expect("drain benchmark promise jobs"),
             )

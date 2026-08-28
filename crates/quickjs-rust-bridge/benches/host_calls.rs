@@ -13,7 +13,7 @@
 //! boundary as plain numbers; handle objects never leave JavaScript.
 
 use quickjs_rust_bridge::{
-    EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm, Value,
+    Context, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Runtime, Value,
 };
 
 fn main() {
@@ -22,8 +22,11 @@ fn main() {
 
 const CALLS: usize = 20_000;
 
-fn driver(install: impl FnOnce(&mut Realm), call_expression: &str) -> (Realm, Value, Value) {
-    let mut realm = Realm::new().expect("realm");
+fn driver(install: impl FnOnce(&mut Context), call_expression: &str) -> (Context, Value, Value) {
+    let mut realm = Runtime::new()
+        .expect("runtime")
+        .create_context()
+        .expect("realm");
     install(&mut realm);
     realm
         .evaluate(
@@ -128,8 +131,11 @@ fn string_return(bencher: divan::Bencher) {
 /// event's name and JSON detail as arguments. Unlike the cases above, the
 /// driver is the host, so each iteration is `CALLS` boundary crossings made
 /// from Rust rather than from JavaScript.
-fn member_driver(body: &str) -> (Realm, Value, quickjs_rust_bridge::Member) {
-    let mut realm = Realm::new().expect("realm");
+fn member_driver(body: &str) -> (Context, Value, quickjs_rust_bridge::Member) {
+    let mut realm = Runtime::new()
+        .expect("runtime")
+        .create_context()
+        .expect("realm");
     let host = realm
         .evaluate(
             EvalSource::new(&format!(
