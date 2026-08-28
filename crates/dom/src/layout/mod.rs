@@ -615,9 +615,12 @@ mod tests {
         // A later source only changes which pixels the same replaced box
         // draws, so the retained boxes survive and only the scene is rebuilt.
         prime(&mut document);
-        let epoch = document.visual_epoch();
+        document.render();
         document.set_image_source(image, Some("app:///b.png"));
-        assert_ne!(document.visual_epoch(), epoch);
+        assert!(
+            document.needs_render(),
+            "a new source invalidates the retained frame"
+        );
         for id in [DOCUMENT_NODE_ID, root, image] {
             assert_eq!(
                 document.layout_cache_is_empty(id),
@@ -637,12 +640,12 @@ mod tests {
         let view = document.create_element("view", ());
         document.append_child(root, view);
         document.layout();
-        let epoch = document.visual_epoch();
+        document.render();
 
         document.set_image_source(view, None);
 
         assert!(!document.get(view).expect("live element").is_replaced());
-        assert_eq!(document.visual_epoch(), epoch, "nothing changed");
+        assert!(!document.needs_render(), "nothing changed");
     }
 
     /// Whether the node's committing parent proved its input survives any
