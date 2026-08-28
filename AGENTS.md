@@ -137,21 +137,24 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
-  lifecycle-wakeup capabilities, plus narrow view-level font registration. The script engine is deliberately *not* one of
+  lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
   embedder sees is the sanitized `script::ScriptError` a failure is reported
-  with. A host may select a
-  registered family as the view's platform default; this prepends that family
-  to the `system-ui`, `sans-serif`, and `serif` generic maps, which lets a Wasm
-  embedder supply its otherwise-absent system-font backend without baking a
-  particular font into core. `PageConfig` is
-  supplied when the view is constructed. Bundle retrieval, `.web.bundle`
-  decoding, and config parsing are embedder responsibilities; core accepts an
-  entry MTS URL through `LynxView::execute_script`, resolves/fetches its UTF-8
-  source through the injected `ResourceFetcher`, registers the resolved URL in
-  QuickJS's preloaded ESM graph, and reports boot completion through `pump`.
-  `load_style_sheet(url)` loads author CSS through the same fetcher and mounts
-  it on the document; the protocol's `fetch_style_sheet` answers with either
+  with. A view is built from one `ViewSources` — owned font containers, an
+  optional default font family, an optional `ImageStore`, author stylesheet URLs
+  in cascade order, and the one entry MTS module URL — passed to the async
+  `LynxView::new` with `PageConfig` and the device metrics. It borrows the fetcher
+  only for that call, fetches every source, applies it to a fresh document, and
+  starts the engine-owned Lynx main thread before returning; a failure yields
+  `LynxViewError` and no view, and nothing later mounts a stylesheet or starts a
+  second entry. The default family is prepended to the `system-ui`, `sans-serif`,
+  and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
+  system-font backend without baking a particular font into core; a name neither
+  the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
+  Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
+  responsibilities; core validates the entry module's source as UTF-8, registers
+  its resolved URL in QuickJS's preloaded ESM graph, and reports boot completion
+  through `pump`. The protocol's `fetch_style_sheet` answers with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
   itself, since a `.web.bundle` ships CSS a build step already tokenized and
   re-serializing it to a sheet blob is the startup cost the design rules out.
@@ -161,13 +164,13 @@ useful signal for currently-compatible versions of those libraries.
   the floor, because the wire format keeps attribute selectors and functional
   pseudo-classes as text and stylo builds specified values only through its
   value parsers. Decoding a container stays embedder work: core owns the
-  `PreparsedStyleSheet` vocabulary, and the embedder fills it. Load order is
-  cascade order. A request carries a specifier plus its optional base URL, not
-  a semantic resource kind or transport hints: the embedder locates bytes by
-  normalized resolved URL, while `fetch_style_sheet` selects the stylesheet
-  payload contract. Other buffered loads use `fetch_resource`, and a
-  `ResourceRequest` carries no response-size limit; each fetcher owns the
-  memory bound for the response it materializes. Per-component css-id scoping is
+  `PreparsedStyleSheet` vocabulary, and the embedder fills it. A request
+  carries a specifier plus its optional base URL, not a semantic resource kind
+  or transport hints: the embedder locates bytes by normalized resolved URL,
+  while `fetch_style_sheet` selects the stylesheet payload contract. Other
+  buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
+  response-size limit; each fetcher owns the memory bound for the response it
+  materializes. Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
   document, tree, engine, and realm cannot be borrowed or decomposed from the
@@ -226,8 +229,8 @@ useful signal for currently-compatible versions of those libraries.
   presenting-side `pre_present` hook. `OffscreenLynxView` is the public
   windowless facade over the uninhabited `NoWindow`.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
-  and retains no pixel of its own: a host installs an `ImageStore`
-  (re-exported from `dom`) with `LynxView::set_image_store`, and the engine
+  and retains no pixel of its own: a host supplies an `ImageStore`
+  (re-exported from `dom`) as its `ViewSources::image_store`, and the engine
   asks it for one image at a time by source string — the `url(…)` value CSS
   produced, or a replaced element's source. No container sniffing, no codec
   contract, no cache policy and no byte budget lives in this workspace, and
@@ -501,8 +504,9 @@ useful signal for currently-compatible versions of those libraries.
   script and render threads. Frame callbacks go through the `MacWindow` it
   borrows at attach time (the winit window as the draw target,
   `request_redraw`, `pre_present_notify`); lifecycle events wake the event
-  loop through the separately injected `EventRequester`. The CLI starts the
-  entry MTS URL with `execute_script(url)` and observes the complete TLA boot
+  loop through the separately injected `EventRequester`. The CLI gives one
+  `LynxView::new` its author CSS and entry MTS URL as a `ViewSources`, reports
+  any failure as `CliError::StartView`, and observes the complete TLA boot
   through `ScriptFinished`/`ScriptRunError` and `pump`. Headed
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
@@ -525,8 +529,8 @@ useful signal for currently-compatible versions of those libraries.
   remains a precise `bobcat-core` QuickJS error. Its `style_info` module lowers
   a decoded `StyleInfo` into `bobcat_core::PreparsedStyleSheet` — flattening
   every `css_id` fragment in reverse-topological order, imported before
-  importing — and registers it in the fetcher so both runners load it before
-  the first script batch. A bundle carrying non-zero fragment ids warns that
+  importing — and registers it in the fetcher under the URL both runners name in
+  `ViewSources::style_sheets`. A bundle carrying non-zero fragment ids warns that
   per-component scoping is not implemented rather than claiming compatibility.
   For XML, a present `<style>` body instead uses the fetcher's raw CSS-text arm
   and the fixed page configuration is `false`/`false`/`true` for default
@@ -537,8 +541,8 @@ useful signal for currently-compatible versions of those libraries.
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
   embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
-  Wasm or owns engine state. That Worker initializes the module, constructs
-  the complete opaque `LynxView`, permanently owns
+  Wasm or owns engine state. That Worker initializes the module, constructs one
+  opaque `LynxView` per page through `BobcatRenderer::load`, permanently owns
   every thread-affine GPU object — crates.io Vello 0.9/wgpu 29 Device, Queue,
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
   nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
@@ -552,10 +556,9 @@ useful signal for currently-compatible versions of those libraries.
   URL-based script requests/results, resize/input/lifecycle) or a library's
   Worker bootstrap control plane; it is not a DOM/render reconciliation
   protocol. URL requests are serialized, and a lost-wake-safe `EventSignal`
-  Promise wakes script
-  completion independently of Worker rAF, so a hidden page may pause drawing
-  without stranding the `executeScript` Promise. The UI facade, nested VM
-  Worker startup, and built-in QuickJS configuration impose no wall-clock
+  Promise wakes script completion independently of Worker rAF, so a hidden page
+  may pause drawing without stranding the `load` Promise. The UI facade, nested
+  VM Worker startup, and built-in QuickJS configuration impose no wall-clock
   deadline on loading or execution. QuickJS drains its owned pending jobs and
   waits for the TLA boot module's evaluation Promise to settle at its host
   checkpoint; there is no browser microtask-completion protocol. The
@@ -564,14 +567,14 @@ useful signal for currently-compatible versions of those libraries.
   A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
   its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
   native view does. Every public `BobcatCanvas` gets a separate Render Worker
-  and Wasm instance; `BobcatCanvas.reset()` drops the current native `LynxView`
-  and constructs a replacement in that same warm session. Closing the view's
+  and Wasm instance; a renderer holds no view until `BobcatRenderer::load` builds
+  one, and each later load replaces the current native `LynxView`. Closing the view's
   sole command sender makes its detached Lynx-main Worker drop the thread-bound
   QuickJS realm and exit naturally; replacement creation does not join it. The
-  transferred OffscreenCanvas, module instance,
-  configuration, latest metrics, resource provider, registered font
-  containers, selected default font family, and Stylo pool survive; reset
-  clears the old page's transient registered script and stylesheet bytes. The
+  transferred OffscreenCanvas, module instance, configuration, latest metrics,
+  resource provider, registered font containers, selected default font family,
+  and Stylo pool are the renderer's own, reapplied to each view it builds; a
+  load clears the registered script and stylesheet bytes once copied. The
   persistent Render Worker is
   Stylo's Rayon index-zero owner; the pool also contains managed style Workers.
   A per-view script owner enters traversal from outside that pool, and Stylo
@@ -598,15 +601,12 @@ useful signal for currently-compatible versions of those libraries.
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
   Browser `fetch` remains outside Wasm: the Render Worker
-  registers raw fetched entry-MTS bytes in its `ResourceFetcher`, core performs
-  strict UTF-8 validation, and the worker calls `execute_script(url)`; the
+  registers raw fetched stylesheet and entry-MTS bytes in its `ResourceFetcher`
+  and calls `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's
   final response URL is the ESM specifier imported by `bobcat:boot`.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
-  loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, mounts
-  a present raw stylesheet, and starts its main-thread body through the same
-  URL-shaped contracts. Like `executeScript`, it is a one-shot entry operation
-  for the current native view; a repeated call is rejected before fetching or
-  mounting XML CSS until the host calls `reset()`. The
+  loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, and hands any
+  raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
   exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
   a host may still deliberately override them.
   The optional background body is retained and reported as not executed,
@@ -616,11 +616,11 @@ useful signal for currently-compatible versions of those libraries.
   `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims
   each accepted pointer, maps client coordinates through the canvas bounds
   into viewport CSS px, and sends compact fire-and-forget records through the
-  same ordered Render-Worker queue as reset/resize. The Worker stamps input
+  same ordered Render-Worker queue as load/resize. The Worker stamps input
   with its own `performance.now()` before `BobcatRenderer` writes the shared
   manual clock and calls `LynxView::dispatch_input`; this keeps gesture time on
   the Worker rAF timeline and prevents an idle frame clock from making
-  `longpress` fire immediately. Reset clears active captures, disposal removes
+  `longpress` fire immediately. Each load clears active captures, disposal removes
   all listeners and restores the canvas's prior inline `touch-action`, and
   unexpected capture loss becomes `pointercancel`. Hover moves, secondary
   mouse buttons, and wheel input do not cross the boundary.

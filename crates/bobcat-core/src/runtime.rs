@@ -10,10 +10,10 @@ use dom::event::EventSteps;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 
-use crate::engine::{SharedListenerNames, SharedTree};
 use crate::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 use crate::tree::LynxDocument;
+use crate::view::{SharedListenerNames, SharedTree};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";

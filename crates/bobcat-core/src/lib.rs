@@ -6,11 +6,12 @@
 //! runtime outright, and the engine, document, and Element-PAPI tree hand-off
 //! remain private runtime implementation.
 //!
-//! Decoded images are one of those injected resources. The core neither
-//! fetches, decodes, caches nor retains a single pixel: an embedder installs a
-//! [`ImageStore`] with [`LynxView::set_image_store`], and the view asks it for
-//! images by source string. Wiring the store into the future Lynx `<image>`
-//! element remains pending.
+//! A view boots once, at construction: [`ViewSources`] carries everything it
+//! runs on and [`LynxView::new`] does the rest. Decoded images are one of
+//! those sources — the core neither fetches, decodes, caches nor retains a
+//! single pixel, and asks an embedder-supplied [`ImageStore`] for them by
+//! source string. Wiring that store into the future Lynx `<image>` element
+//! remains pending.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -19,7 +20,6 @@
 #[doc(hidden)]
 pub mod bench_support;
 mod clock;
-mod engine;
 mod gesture;
 mod quickjs;
 pub mod resource;
@@ -36,13 +36,12 @@ pub mod input {
     pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use dom::{ImageFuture, ImageStore, ImageStoreError};
-#[cfg(target_arch = "wasm32")]
-pub use engine::configure_wasm_workers;
-pub use engine::{
-    EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, NoWindow, Screenshot,
-    Window, WindowTarget,
-};
+pub use dom::{FontBlob, ImageFuture, ImageStore, ImageStoreError};
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 pub use tree::PageConfig;
-pub use view::{LynxView, LynxViewError, OffscreenLynxView};
+#[cfg(target_arch = "wasm32")]
+pub use view::configure_wasm_workers;
+pub use view::{
+    EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, LynxViewError,
+    NoWindow, OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
+};

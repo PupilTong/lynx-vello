@@ -5,11 +5,12 @@ The document, Element-PAPI tree, script realm, renderer scheduler, and the
 tree hand-off protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
-- a `ResourceFetcher`;
-- an `ImageStore`, which owns every decoded image the view draws;
+- a `ResourceFetcher`, borrowed for construction only;
+- a `ViewSources`: owned font bytes, an optional default font family, an
+  optional `ImageStore` — which owns every decoded image the view draws —
+  author stylesheet URLs in cascade order, and the one entry MTS module URL;
 - an `EventRequester` for lifecycle wakeups;
 - a draw target plus `FrameRequester`;
-- owned font bytes when fonts are registered explicitly;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -100,44 +101,43 @@ For the native product, `bobcat-cli`:
 2. decodes a bundle with `lynx-template-decoder`, or parses XML with
    `lynx-xml`, then produces the corresponding `PageConfig`;
 3. retains `lepusCode.root` or the XML main-thread body as an entry MTS module
-   in its own `ResourceFetcher` under a URL;
-4. constructs `LynxView` with the `PageConfig` and injected capabilities;
-5. mounts bundle `StyleInfo` through the pre-parsed stylesheet arm or XML
-   `<style>` through the CSS-text arm, then calls
-   `LynxView::execute_script(url)`.
+   in its own `ResourceFetcher` under a URL, alongside bundle `StyleInfo` on
+   the pre-parsed stylesheet arm or an XML `<style>` body on the CSS-text arm;
+4. names both URLs in a `ViewSources` and awaits one `LynxView::new` with the
+   `PageConfig` and the remaining injected capabilities, where any failure is
+   one `CliError::StartView`.
 
 The browser reference embedder performs the same XML section mapping inside
 its Render Worker after fetching one XML URL. Neither embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 
-`execute_script` resolves and fetches the UTF-8 entry MTS module through the
-injected resource contract, then starts the engine-owned Lynx main thread. The
-resolved URL becomes the entry's exact module specifier. Boot completion is
+`LynxView::new` fetches every `ViewSources` URL through the injected resource
+contract — the author stylesheets first, each answered with CSS text or a
+host-decoded `PreparsedStyleSheet`, then the UTF-8 entry MTS module — mounts them
+as author-origin rules on a fresh document, and starts the engine-owned Lynx main
+thread over it before returning. The resolved entry URL becomes its exact module
+specifier; a source that will not load, or a thread that will not start, yields
+`LynxViewError` and no view. A default family neither the containers nor the
+platform has fails with `EngineError::UnknownFontFamily`. Boot completion is
 reported by `LynxView::pump` as `EngineEvent::ScriptFinished` on success or
-`EngineEvent::ScriptRunError` on a fatal boot-time failure. A platform failure
-on the script owner thread may also report `ScriptRunError` after boot. The
-engine enqueues every event before invoking the construction-time
-`EventRequester`, so the host can pump immediately without polling.
-`load_style_sheet(url)` is the matching URL-shaped API for author CSS: it
-resolves and fetches through the same `ResourceFetcher`, which answers with
-either CSS text or a `PreparsedStyleSheet` the host decoded itself, and mounts
-the result as author-origin rules. Load order is cascade order. Requests carry
-a specifier plus its optional base URL, not a semantic resource kind or
-transport hints. The embedder locates bytes by normalized resolved URL;
-`fetch_style_sheet` selects the stylesheet payload contract. Other buffered
-loads use `fetch_resource`, and a `ResourceRequest` carries no response-size
-limit; each fetcher owns the memory bound for the response it materializes.
+`EngineEvent::ScriptRunError` on a fatal boot-time failure. A platform failure on
+the Lynx main thread may also report `ScriptRunError` after boot. The engine
+enqueues every event before invoking the construction-time `EventRequester`, so
+the host can pump immediately without polling. Requests carry a specifier plus
+its optional base URL, not a semantic resource kind or transport hints. The
+embedder locates bytes by normalized resolved URL; `fetch_style_sheet` selects
+the stylesheet payload contract. Other buffered loads use `fetch_resource`, and
+a `ResourceRequest` carries no response-size limit; each fetcher owns the memory
+bound for the response it materializes.
 
 ## Public and private boundaries
 
-The public facade is `LynxView<'window, W>`, with
-`OffscreenLynxView` as its windowless alias. It relays input, resize, redraw,
-frame-pump, target attachment, offscreen ticks, capture, script
-startup, owned-font registration, and image-store installation and loads. It
-exposes no
-tree getter, document getter, renderer getter, script-realm handle, or
-decomposition method.
+The public facade is `LynxView<'window, W>`, with `OffscreenLynxView` as its
+windowless alias. It relays input, resize, redraw, frame-pump, target
+attachment, offscreen ticks, capture, and image loads. It exposes no tree
+getter, document getter, renderer getter, script-realm handle, decomposition
+method, or way to mount a stylesheet or start a second entry module.
 
 The following types are private to `bobcat-core`:
 
@@ -254,7 +254,7 @@ scheduling capabilities; they do not expose the engine that consumes them.
 
 Images are the host-implemented `ImageStore` contract and nothing else. No
 container sniffing, codec, cache, byte budget or eviction policy exists in this
-workspace: an embedder installs a store with `LynxView::set_image_store`, and
+workspace: an embedder supplies a store as its `ViewSources::image_store`, and
 the engine asks it for one image at a time by source string. The paint walk
 calls only the store's non-blocking `peek`, because it runs on the presenting
 thread between a swap-chain acquire and a present and can neither block nor
@@ -286,7 +286,7 @@ live-DOM visibility.
 
 ## Native and Wasm spawning
 
-`LynxView::execute_script` always delegates VM creation and module boot to an
+`LynxView::new` always delegates VM creation and module boot to an
 engine-owned task. The core selects the thread builder at compile time:
 
 ```text
@@ -303,10 +303,10 @@ not the browser facade.
 Wasm follows the native ownership model: every `LynxView` spawns and owns one
 Lynx-main Worker, and dropping that view closes its command channel so the
 Worker drops its QuickJS realm and exits. Independent views are not a
-process-global singleton. The npm facade keeps one live view in each
-`BobcatRenderer`; `BobcatCanvas.reset()` drops that view and constructs a
-replacement while retaining the Render Worker, transferred canvas, Wasm
-instance, and resource state. It does not join the detached script Worker: the
+process-global singleton. The npm facade keeps at most one live view per
+`BobcatRenderer`: `create` builds none, and each `load` replaces the view
+before it, retaining the Render Worker, transferred canvas, Wasm instance, and
+wrapper state. It does not join the detached script Worker: the
 closed command channel makes that Worker drop its thread-bound realm and exit
 naturally, and independent views may overlap during that brief teardown.
 
@@ -325,10 +325,10 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `LynxView::new` builds the private document from `PageConfig` and device
-   metrics.
-2. `execute_script(url)` fetches the entry MTS source through
-   `ResourceFetcher` and spawns the target-specific Lynx main task.
+1. `LynxView::new` fetches the `ViewSources`' stylesheets and entry MTS source
+   through `ResourceFetcher`.
+2. It builds the private document from `PageConfig`, device metrics, and those
+   sheets, then spawns the target-specific Lynx main task over it.
 3. The task creates the QuickJS realm, installs Bobcat callbacks, preloads
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module.

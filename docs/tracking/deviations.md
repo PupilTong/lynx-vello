@@ -321,9 +321,10 @@ consequential choice about whether to follow the spec or the quirk.
   into a rule through `Document::build_font_face_rule`, `dom` parses the
   descriptor block with stylo's own `parse_font_face_block`, and
   `append_rules` mounts the result in the stylist. Nothing then reads it.
-  Fonts reach Parley by exactly one route — the embedder handing
-  `View::register_fonts` a `FontBlob`, which `hughie`'s `TextContext` passes
-  to Parley with no alias, so the families come from inside the font file —
+  Fonts reach Parley by exactly one route — the embedder listing `FontBlob`s
+  in the `ViewSources::fonts` it builds a view from, which `hughie`'s
+  `TextContext` passes to Parley with no alias, so the families come from
+  inside the font file —
   and family matching never consults a font-face rule. So `src` is never
   fetched, a `font-family` descriptor never names anything, and `font-display`,
   `unicode-range`, and the descriptor-level weight/style/stretch ranges have no

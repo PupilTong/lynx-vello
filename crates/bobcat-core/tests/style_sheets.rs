@@ -1,8 +1,9 @@
-//! `LynxView::load_style_sheet` over both accepted stylesheet forms.
+//! The stylesheet half of [`ViewSources`], over both accepted forms.
 //!
 //! The resource provider answers a stylesheet request with either CSS text or
-//! a [`PreparsedStyleSheet`] it decoded itself; both mount on the document, in
-//! load order, and both are visible to the script that runs afterwards.
+//! a [`PreparsedStyleSheet`] it decoded itself; both mount on the document
+//! before the entry module runs, in the order the sources list them, and both
+//! are visible to that script.
 
 mod support;
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
     LynxView, LynxViewError, NoWindow, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet,
+    PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -59,51 +60,53 @@ fn basic_sheet() -> PreparsedStyleSheet {
     }
 }
 
-fn view_with(fetcher: FetcherDouble) -> LynxView<'static, NoWindow> {
-    let resources: Arc<dyn ResourceFetcher> = Arc::new(fetcher.resolving_to(SCRIPT_URL));
+fn sources(style_sheets: &[&str]) -> ViewSources {
+    ViewSources {
+        style_sheets: style_sheets.iter().map(|url| (*url).to_owned()).collect(),
+        ..ViewSources::new(SCRIPT_URL)
+    }
+}
+
+async fn view_with(
+    fetcher: &dyn ResourceFetcher,
+    sources: ViewSources,
+) -> Result<LynxView<'static, NoWindow>, LynxViewError> {
     LynxView::<NoWindow>::new(
         PageConfig::default(),
-        resources,
+        fetcher,
         Arc::new(|| {}),
         393.0,
         727.0,
         1.0,
+        sources,
     )
-    .expect("view")
-}
-
-async fn run_script(view: &mut LynxView<'static, NoWindow>) {
-    view.execute_script(SCRIPT_URL)
-        .await
-        .expect("fetch and start");
-    wait_for_script(view).expect("script execution");
+    .await
 }
 
 #[tokio::test]
-async fn a_preparsed_sheet_loads_through_the_resource_provider() {
+async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
     let fetcher = FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
-        .with_preparsed_style_sheet(basic_sheet());
+        .with_preparsed_style_sheet(basic_sheet())
+        .resolving_to(SCRIPT_URL);
     assert!(
         fetcher.supports_capability(ResourceCapability::PreparsedStyleSheet),
         "a decoding host advertises the pre-parsed arm"
     );
-    let mut view = view_with(fetcher);
 
-    view.load_style_sheet(SHEET_URL)
+    let mut view = view_with(&fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the pre-parsed arm mounts");
-    run_script(&mut view).await;
+    wait_for_script(&mut view).expect("script execution");
 }
 
 #[tokio::test]
-async fn a_css_text_sheet_loads_through_the_same_entry_point() {
+async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
     // No pre-parsed sheet registered, so the request falls through to the
     // byte path — the arm a browser embedder that only moves bytes uses.
-    let mut view = view_with(FetcherDouble::new(
-        b".basic { width: 100px; height: 100px; }".to_vec(),
-    ));
+    let fetcher = FetcherDouble::new(b".basic { width: 100px; height: 100px; }".to_vec())
+        .resolving_to(SCRIPT_URL);
 
-    view.load_style_sheet(SHEET_URL)
+    view_with(&fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the text arm mounts");
 }
@@ -112,22 +115,23 @@ async fn a_css_text_sheet_loads_through_the_same_entry_point() {
 /// (That the rule it prefixes still matches is asserted where computed style
 /// is observable, in `bobcat_core::style`.)
 #[tokio::test]
-async fn a_byte_order_mark_prefixed_sheet_loads() {
+async fn a_byte_order_mark_prefixed_sheet_mounts() {
     let mut css = "\u{feff}".as_bytes().to_vec();
     css.extend_from_slice(b".basic { width: 100px; }");
-    let mut view = view_with(FetcherDouble::new(css));
+    let fetcher = FetcherDouble::new(css).resolving_to(SCRIPT_URL);
 
-    view.load_style_sheet(SHEET_URL)
+    view_with(&fetcher, sources(&[SHEET_URL]))
         .await
         .expect("a BOM-prefixed sheet mounts");
 }
 
+/// A stylesheet that will not decode fails the construction, so no document
+/// and no main thread outlive it.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
-    let mut view = view_with(FetcherDouble::new(vec![0xff, 0xfe, 0x00]));
+    let fetcher = FetcherDouble::new(vec![0xff, 0xfe, 0x00]).resolving_to(SCRIPT_URL);
 
-    let error = view
-        .load_style_sheet(SHEET_URL)
+    let error = view_with(&fetcher, sources(&[SHEET_URL]))
         .await
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
     // The reported URL is the resolved one, as it is for a script.
@@ -140,49 +144,25 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     );
 }
 
-/// Each load is a separate stylesheet request, so repeated loads accumulate
-/// sheets rather than replacing one. (That the later sheet wins a cascade tie
-/// is asserted where computed style is observable, in `bobcat_core::style`.)
+/// Each listed sheet is a separate stylesheet request, so a repeated URL
+/// accumulates sheets rather than collapsing to one. (That the later sheet
+/// wins a cascade tie is asserted where computed style is observable, in
+/// `bobcat_core::style`.)
 #[tokio::test]
-async fn every_load_issues_its_own_stylesheet_request() {
-    let fetcher = Arc::new(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
-            .with_preparsed_style_sheet(basic_sheet())
-            .resolving_to(SCRIPT_URL),
-    );
-    let resources: Arc<dyn ResourceFetcher> = fetcher.clone();
-    let mut view = LynxView::<NoWindow>::new(
-        PageConfig::default(),
-        resources,
-        Arc::new(|| {}),
-        393.0,
-        727.0,
-        1.0,
-    )
-    .expect("view");
+async fn every_listed_sheet_issues_its_own_stylesheet_request() {
+    let fetcher = FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
+        .with_preparsed_style_sheet(basic_sheet())
+        .resolving_to(SCRIPT_URL);
 
-    view.load_style_sheet(SHEET_URL).await.expect("first sheet");
-    view.load_style_sheet(SHEET_URL)
+    let mut view = view_with(&fetcher, sources(&[SHEET_URL, SHEET_URL]))
         .await
-        .expect("second sheet");
+        .expect("both sheets mount");
     assert_eq!(fetcher.style_sheet_fetch_count(), 2);
     assert_eq!(
         fetcher.fetch_count(),
-        0,
-        "a stylesheet must not be fetched through the byte path when the host answers it pre-parsed"
+        1,
+        "a stylesheet must not be fetched through the byte path when the host answers it \
+         pre-parsed; the one byte fetch is the entry module"
     );
-    run_script(&mut view).await;
-}
-
-#[tokio::test]
-async fn a_sheet_loads_after_the_script_has_finished() {
-    let mut view = view_with(
-        FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
-            .with_preparsed_style_sheet(basic_sheet()),
-    );
-
-    run_script(&mut view).await;
-    view.load_style_sheet(SHEET_URL)
-        .await
-        .expect("a sheet mounts against an existing tree");
+    wait_for_script(&mut view).expect("script execution");
 }

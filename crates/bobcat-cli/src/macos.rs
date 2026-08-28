@@ -183,15 +183,22 @@ impl<'window> MacApplication<'window> {
             .expect("the program is consumed by the first window only");
         program.warn_about_compatibility_limits();
 
-        let style_sheet_url = program.resource_fetcher.style_sheet_url().cloned();
-        let mut view = LynxView::new(
+        // One construction: the input's author CSS and its entry MTS module are
+        // this view's sources, so the first commit is already styled and the
+        // Lynx main thread is running before the window is attached.
+        let mut view = pollster::block_on(LynxView::new(
             program.config,
-            program.resource_fetcher,
+            &program.resource_fetcher,
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
-        )?;
+            program.sources(),
+        ))
+        .map_err(|source| CliError::StartView {
+            input: program.input,
+            source,
+        })?;
         view.attach_window(
             window,
             FrameSize {
@@ -199,22 +206,6 @@ impl<'window> MacApplication<'window> {
                 height: physical_size.height,
             },
         )?;
-        // Author CSS mounts before the script builds its tree, so the first
-        // commit is already styled.
-        if let Some(url) = style_sheet_url.as_ref() {
-            pollster::block_on(view.load_style_sheet(url.as_str())).map_err(|source| {
-                CliError::LoadStyleSheet {
-                    input: program.input.clone(),
-                    source,
-                }
-            })?;
-        }
-        pollster::block_on(view.execute_script(program.script_url.as_str())).map_err(|source| {
-            CliError::StartScript {
-                input: program.input,
-                source,
-            }
-        })?;
 
         self.view = Some(view);
         Ok(())

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::OffscreenEngine;
+use super::{EntryModule, OffscreenLynxView};
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
 /// One 8x8 red square, animated by an author `@keyframes` rule.
@@ -64,22 +64,22 @@ fn slider_sheet() -> PreparsedStyleSheet {
 }
 
 /// A 32x24 offscreen engine with the sheet mounted and the page built.
-fn booted() -> OffscreenEngine {
-    let mut engine = OffscreenEngine::new(
-        crate::tree::PageConfig::default(),
+fn booted() -> OffscreenLynxView {
+    let viewport = crate::tree::Viewport::new(32.0, 24.0);
+    let mut document = crate::tree::new_document(viewport, crate::tree::PageConfig::default());
+    crate::style::add_preparsed_style_sheet(&mut document, &slider_sheet());
+    let mut engine = OffscreenLynxView::start(
+        document,
+        viewport,
+        super::frame_size(32.0, 24.0, 1.0).expect("a bounded target"),
         Arc::new(|| {}),
-        32.0,
-        24.0,
-        1.0,
+        EntryModule {
+            source: SLIDER_SCRIPT.to_owned(),
+            url: "app:///main.js".to_owned(),
+        },
     )
-    .expect("engine");
-    engine
-        .add_preparsed_style_sheet(&slider_sheet())
-        .expect("the pre-parsed sheet mounts");
+    .expect("view");
     engine.attach_offscreen().expect("offscreen GPU target");
-    engine
-        .spawn_script(SLIDER_SCRIPT.to_owned(), "app:///main.js".to_owned())
-        .expect("spawn");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -98,7 +98,7 @@ fn booted() -> OffscreenEngine {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(engine: &mut OffscreenEngine) -> usize {
+fn red_left_edge(engine: &mut OffscreenLynxView) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels

@@ -87,20 +87,12 @@ pub enum CliError {
         #[source]
         source: bobcat_core::script::ScriptError,
     },
-    #[error("could not load the author stylesheet of input `{input}`: {source}")]
-    LoadStyleSheet {
-        input: String,
-        #[source]
-        source: bobcat_core::LynxViewError,
-    },
     #[error("could not start input `{input}`: {source}")]
-    StartScript {
+    StartView {
         input: String,
         #[source]
         source: bobcat_core::LynxViewError,
     },
-    #[error(transparent)]
-    View(#[from] bobcat_core::LynxViewError),
     #[error(transparent)]
     Engine(#[from] bobcat_core::EngineError),
     #[error("could not start the command console: {0}")]
@@ -152,7 +144,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
         args::Invocation::Run(options) => {
             let program = page::Program::load(&options.input)?;
             if options.headless {
-                headless::run(program, &options)
+                headless::run(&program, &options)
             } else {
                 run_headed(program, &options)
             }

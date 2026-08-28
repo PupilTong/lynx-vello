@@ -34,11 +34,9 @@ for (const requiredMethod of [
   'registerScript(',
   'registerStyleSheet(',
   'registerLynxXml(',
-  'executeScript(',
-  'loadStyleSheet(',
+  'bobcatrenderer_load(',
   'pollScript(',
   'registerFonts(',
-  'reset(',
   'setDefaultFontFamily(',
   'waitForEngineEvent(',
 ]) {
@@ -56,6 +54,9 @@ for (const removedExport of [
   'parallelChecksum',
   'pollDomCommand',
   'pollResponse',
+  'bobcatrenderer_executeScript',
+  'bobcatrenderer_loadStyleSheet',
+  'bobcatrenderer_reset',
   'scriptStarted',
   'waitForResponse',
   'wasmMemory',
@@ -79,11 +80,9 @@ if (facade.includes('./pkg/bobcat_wasm.js')) {
 for (const requiredDeclaration of [
   'pageConfig: PageConfig',
   'LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>',
-  'executeScript(url: string | URL)',
-  'loadStyleSheet(url: string | URL)',
+  'load(url: string | URL, styleSheetUrls?: readonly (string | URL)[])',
   'loadLynxXml(url: string | URL)',
   'registerFonts(data: ArrayBuffer | Uint8Array)',
-  'reset(): Promise<void>',
   'setDefaultFontFamily(family: string)',
 ]) {
   if (!declarations.includes(requiredDeclaration)) {
@@ -130,7 +129,7 @@ if (declarations.includes('dispatchPointer')) {
   throw new Error('browser declarations expose the private pointer bridge')
 }
 for (const [operation, method, message] of [
-  ['reset', 'async reset()', 'native-view reset'],
+  ['load', 'async load(url, styleSheetUrls = [])', 'a page load'],
   [
     'setDefaultFontFamily',
     'async setDefaultFontFamily(family)',
@@ -160,33 +159,33 @@ if (engineConstruction === -1 || !renderWorker.includes('message.threadCount')) 
 if (renderWorker.includes('initThreadPool')) {
   throw new Error('Render Worker still initializes wasm-bindgen-rayon')
 }
-if (!renderWorker.includes('await renderer.executeScript(registeredUrl)')) {
-  throw new Error('Render Worker must route fetched URLs through executeScript')
-}
-if (
-  !renderWorker.includes('function ensureEntryScriptNotStarted()') ||
-  !renderWorker.includes('if (entryScriptStarted)')
-) {
-  throw new Error('Render Worker is missing its one-shot entry-script guard')
-}
-const executeScriptDispatch = renderWorker.slice(
-  renderWorker.indexOf("case 'executeScript':"),
-  renderWorker.indexOf("case 'loadStyleSheet':"),
+// A view is its page, so every load registers its sources first and then
+// builds one native view from them.
+const loadDispatch = renderWorker.slice(
+  renderWorker.indexOf("case 'load': {"),
+  renderWorker.indexOf("case 'loadLynxXml':"),
 )
-for (const requiredEntryGuardStep of [
-  'ensureEntryScriptNotStarted()',
-  'entryScriptStarted = true',
+if (loadDispatch === '') {
+  throw new Error('Render Worker is missing the page-load dispatch case')
+}
+for (const requiredLoadStep of [
+  "await fetchSource('stylesheet', url, MAX_STYLE_SHEET_BYTES)",
+  "await fetchSource('script', message.url, MAX_SCRIPT_BYTES)",
+  'renderer.registerStyleSheet(sheet.url, sheet.bytes)',
+  'renderer.registerScript(entry.url, entry.bytes)',
+  'await replaceNativeView(request, entryUrl, styleSheetUrls)',
 ]) {
-  if (!executeScriptDispatch.includes(requiredEntryGuardStep)) {
-    throw new Error(
-      `Render Worker script dispatch is missing ${requiredEntryGuardStep}`,
-    )
+  if (!loadDispatch.includes(requiredLoadStep)) {
+    throw new Error(`Render Worker page load is missing ${requiredLoadStep}`)
   }
 }
-if (!renderWorker.includes('await renderer.loadStyleSheet(registeredUrl)')) {
-  throw new Error(
-    'Render Worker must register fetched stylesheet bytes before loading them',
-  )
+// Registration is what a failed load would leave behind, so every fetch must
+// complete before the first one.
+if (
+  loadDispatch.indexOf("await fetchSource('script'") >
+  loadDispatch.indexOf('renderer.registerStyleSheet(')
+) {
+  throw new Error('Render Worker must fetch every page source before registering any')
 }
 if (
   !renderWorker.includes("case 'setDefaultFontFamily':") ||
@@ -216,13 +215,10 @@ for (const requiredLynxXmlLoaderStep of [
   }
 }
 for (const requiredLynxXmlDispatchStep of [
-  'ensureEntryScriptNotStarted()',
   'renderer.registerLynxXml(url, source)',
-  'await renderer.loadStyleSheet(styleSheetUrl)',
   'console.warn(',
-  'await renderer.executeScript(mainThreadScriptUrl)',
-  'entryScriptStarted = true',
-  'trackScriptCompletion(request)',
+  'await replaceNativeView(',
+  'styleSheetUrl === null ? [] : [styleSheetUrl]',
 ]) {
   if (!lynxXmlDispatch.includes(requiredLynxXmlDispatchStep)) {
     throw new Error(
@@ -231,35 +227,34 @@ for (const requiredLynxXmlDispatchStep of [
   }
 }
 if (
-  lynxXmlDispatch.indexOf('ensureEntryScriptNotStarted()') >
-  lynxXmlDispatch.indexOf('await fetchLynxXml(message.url)')
+  lynxXmlDispatch.indexOf('renderer.registerLynxXml(url, source)') >
+  lynxXmlDispatch.indexOf('await replaceNativeView(')
 ) {
-  throw new Error('Render Worker must reject repeated Lynx XML loads before fetch')
-}
-if (
-  lynxXmlDispatch.indexOf('await renderer.loadStyleSheet(styleSheetUrl)') >
-  lynxXmlDispatch.indexOf('await renderer.executeScript(mainThreadScriptUrl)')
-) {
-  throw new Error('Render Worker must load Lynx XML styles before its main script')
+  throw new Error('Render Worker must register Lynx XML sections before it loads them')
 }
 if (renderWorker.includes('DOMParser')) {
   throw new Error('Render Worker must leave Lynx XML parsing to Rust')
 }
-const resetDispatchStart = renderWorker.indexOf("case 'reset':")
-const resetDispatchEnd = renderWorker.indexOf("case 'registerFonts':")
-if (resetDispatchStart === -1 || resetDispatchEnd === -1) {
-  throw new Error('Render Worker is missing the native-view reset case')
+const replaceStart = renderWorker.indexOf('async function replaceNativeView(')
+if (replaceStart === -1) {
+  throw new Error('Render Worker is missing its native-view replacement step')
 }
-const resetDispatch = renderWorker.slice(resetDispatchStart, resetDispatchEnd)
-for (const requiredResetStep of [
+const replaceView = renderWorker.slice(
+  replaceStart,
+  renderWorker.indexOf('async function dispatchRequest('),
+)
+for (const requiredReplaceStep of [
   'await scriptCompletion',
-  'entryScriptStarted = false',
-  'resettingNativeView = true',
-  'await renderer.reset()',
-  'resettingNativeView = false',
+  'engineEventGeneration += 1',
+  'loadingNativeView = true',
+  'await renderer.load(entryUrl, styleSheetUrls)',
+  'loadingNativeView = false',
+  'trackScriptCompletion(request)',
 ]) {
-  if (!resetDispatch.includes(requiredResetStep)) {
-    throw new Error(`Render Worker reset is missing ${requiredResetStep}`)
+  if (!replaceView.includes(requiredReplaceStep)) {
+    throw new Error(
+      `Render Worker native-view replacement is missing ${requiredReplaceStep}`,
+    )
   }
 }
 if (!renderWorker.includes('requestQueue = requestQueue.then(dispatch)')) {

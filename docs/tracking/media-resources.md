@@ -37,8 +37,9 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 lynx-vello takes the opposite position from the one sketched above: it builds
 no Fresco/UIImage equivalent at all. Fetch, decode, memory cache, disk cache
 and eviction are the embedder's, behind the `dom::ImageStore` trait an
-embedder installs with `LynxView::set_image_store` — which is the same seam
-native reaches through `LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
+embedder hands to `LynxView::new` as `ViewSources::image_store` — which is the
+same seam native reaches through
+`LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
 one layer lower so the engine never owns a byte. The workspace holds no codec,
 no container sniffing and no cache policy.
 
