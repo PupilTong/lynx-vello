@@ -1651,7 +1651,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     assert!(cold.contains("layer"), "the fixture must exercise a group");
     assert!(cold.contains("clip"), "the fixture must exercise a clip");
     assert_eq!(
-        h.doc.dom.paint_storage_capacities()[4],
+        h.doc.dom.paint_storage_capacities()[5],
         0,
         "the first build has nothing to recycle",
     );
@@ -1660,7 +1660,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
         nudge(&mut h.doc.dom, scroller, true);
         h.doc.dom.render();
         assert!(
-            h.doc.dom.paint_storage_capacities()[4] > 0,
+            h.doc.dom.paint_storage_capacities()[5] > 0,
             "round {round} must have a retired frame to build into",
         );
         nudge(&mut h.doc.dom, scroller, false);
@@ -1688,7 +1688,7 @@ fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
     }
     let _ = published;
     assert!(
-        h.doc.dom.paint_storage_capacities()[4] > 0,
+        h.doc.dom.paint_storage_capacities()[5] > 0,
         "a frame retired while published must still come back as spare storage",
     );
 }
@@ -1734,8 +1734,13 @@ fn the_builder_stops_growing_its_buffers_once_the_page_shape_settles() {
         h.doc.dom.paint_storage_capacities(),
         "a settled page must reuse every buffer instead of growing a new one",
     );
+    // Indices 4 and 9 are the retained and spare animation-slot tables,
+    // which this fixture — animating nothing — never fills.
     assert!(
-        settled.iter().all(|&capacity| capacity > 0),
+        settled
+            .iter()
+            .enumerate()
+            .all(|(index, &capacity)| capacity > 0 || matches!(index, 4 | 9)),
         "the fixture must exercise every buffer at least once, got {settled:?}",
     );
     assert!(
@@ -1792,5 +1797,132 @@ fn culling_does_not_change_the_retained_frame() {
     assert_eq!(
         built, retained,
         "the frame carries every item, painted or not"
+    );
+}
+
+/// A document whose root runs `animation`, with `extra` CSS alongside,
+/// advanced past the pending promotion so the animation is `Running` at the
+/// second commit — the state the exporter requires.
+fn animated_document(animation_css: &str) -> crate::Document<()> {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(animation_css, crate::StylesheetOrigin::Author);
+    document.render();
+    let tick = document.advance_animations(0.25);
+    assert!(tick.needs_next_frame, "the fixture animation must be live");
+    document.render();
+    document
+}
+
+#[test]
+fn an_opacity_animation_exports_a_curve_and_frees_the_main_thread() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; background-color: red;
+                animation: fade 1s linear infinite; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.animations_active());
+    assert!(
+        !frame.needs_main_ticks(),
+        "an exported curve animates without main-thread ticks"
+    );
+    assert!(frame.has_live_curves());
+    let slots = frame.animation_slots();
+    assert_eq!(slots.len(), 1);
+    let sampled = slots[0]
+        .sample(Some(0.5))
+        .alpha
+        .expect("the slot exports an opacity curve");
+    assert!(
+        (sampled - 0.5).abs() < 1e-4,
+        "halfway through the fade, opacity is 0.5, got {sampled}"
+    );
+    assert!(
+        !frame.animation_boundary_passed(1e6),
+        "an infinite animation never hands back to the main thread"
+    );
+}
+
+#[test]
+fn a_transform_animation_composes_and_hits_at_the_sampled_position() {
+    let mut document: crate::Document<()> =
+        crate::Document::new(crate::tree::document::tests::device(), "page", ());
+    document.add_stylesheet(
+        "page { width: 200px; height: 200px; }
+         .mover { position: absolute; left: 0; top: 0; width: 50px; height: 50px;
+                  background-color: blue; animation: slide 1s linear infinite; }
+         @keyframes slide { from { transform: translateX(0px); }
+                            to { transform: translateX(100px); } }",
+        crate::StylesheetOrigin::Author,
+    );
+    let page = document.document_element().id();
+    let mover = document.create_element("view", ());
+    document.set_attribute(mover, "class", "mover");
+    document.append_child(page, mover);
+    document.render();
+    let tick = document.advance_animations(0.30);
+    assert!(tick.needs_next_frame, "the slide must be live");
+    document.render();
+
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(
+        frame.has_live_curves(),
+        "the slide exports a transform curve"
+    );
+    assert!(!frame.needs_main_ticks());
+
+    // Sampled at 0.5s the element sits at x = 50; the frame was baked at
+    // the 0.30s commit (x = 30), so the hit must follow the sample, not
+    // the bake.
+    let sampled_hit = frame
+        .hit(crate::Point2D::new(70.0, 25.0), &|_| None, Some(0.5))
+        .expect("something is hit");
+    assert_eq!(
+        sampled_hit.node, mover,
+        "the sampled position is where it hits"
+    );
+    let vacated = frame
+        .hit(crate::Point2D::new(10.0, 25.0), &|_| None, Some(0.5))
+        .expect("the page is behind");
+    assert_eq!(vacated.node, page, "the vacated position falls through");
+    // At the commit instant the delta is the identity: the baked position.
+    let at_commit = frame
+        .hit(crate::Point2D::new(35.0, 25.0), &|_| None, Some(0.30))
+        .expect("something is hit");
+    assert_eq!(at_commit.node, mover);
+}
+
+#[test]
+fn an_inexportable_animation_keeps_main_thread_ticks() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; background-color: red;
+                animation: recolor 1s linear infinite; }
+         @keyframes recolor { from { background-color: red; } to { background-color: blue; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(frame.animations_active());
+    assert!(
+        frame.needs_main_ticks(),
+        "a non-composite animation still ticks on the main thread"
+    );
+    assert!(!frame.has_live_curves());
+}
+
+#[test]
+fn a_scroll_container_inside_an_animated_subtree_falls_back_to_ticks() {
+    let document = animated_document(
+        "page { width: 100px; height: 100px; overflow: scroll;
+                animation: fade 1s linear infinite; }
+         @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+    );
+    let frame = document.committed_frame().expect("a frame is committed");
+    assert!(
+        frame.needs_main_ticks(),
+        "an animated scroll container cannot ride a sampled delta"
+    );
+    assert!(
+        !frame.has_live_curves(),
+        "the allocated slot was set back to the committed values"
     );
 }

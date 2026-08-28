@@ -86,6 +86,7 @@ impl Painter {
         document: &Document<T>,
         frame: PaintOrder,
         animations_active: bool,
+        needs_main_ticks: bool,
         viewport: Size2D<f32>,
         device_pixel_ratio: f32,
     ) {
@@ -112,20 +113,22 @@ impl Painter {
         // encoding it already holds.
         let committed = if matches!(
             program.as_slice(),
-            [crate::paint::compose::ComposeOp::Fragment {
-                index: 0,
-                chain: None
-            }]
+            [crate::paint::compose::ComposeOp::Fragment { index: 0, chain }]
+                if *chain == crate::paint::compose::ComposeChain::default()
         ) {
             crate::visual::frame::CommittedScene::Whole
         } else {
             let mut scene = self.spare_scenes.pop().unwrap_or_default();
             scene.reset();
+            // Committed values throughout: no offset overrides, and every
+            // animation slot sampled as the committed instant.
+            let samples = frame.sample_animations(None);
             crate::paint::compose::replay(
                 &mut scene,
                 &fragments,
                 &program,
                 frame.slots(),
+                &samples,
                 device_pixel_ratio,
                 &|_| None,
             );
@@ -135,6 +138,7 @@ impl Painter {
             order: frame,
             presentation: crate::visual::frame::Presentation::new(fragments, program, committed),
             animations_active,
+            needs_main_ticks,
             viewport,
             device_pixel_ratio,
         });
@@ -175,7 +179,7 @@ impl Painter {
     /// The spare frame buffers' and the build scratch's capacities, for the
     /// reuse tests.
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> ([usize; 4], Vec<usize>) {
+    pub(crate) fn storage_capacities(&self) -> ([usize; 5], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
     }
 
@@ -223,7 +227,14 @@ mod tests {
 
         let mut painter = document.painter.take();
         let result = catch_unwind(AssertUnwindSafe(|| {
-            painter.paint(&document, stale, false, document.viewport_size(), 1.0);
+            painter.paint(
+                &document,
+                stale,
+                false,
+                false,
+                document.viewport_size(),
+                1.0,
+            );
         }));
 
         assert!(result.is_err(), "the stale frame must fail closed");

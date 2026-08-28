@@ -33,13 +33,13 @@ use hughie::style::containment::effective_containment;
 use hughie::style::{Contain, CoreStyle, Overflow, PositionProperty, visibility};
 use hughie::tree::{Layout, LayoutTree};
 use stylo::properties::ComputedValues;
-use stylo::values::computed::PointerEvents;
+use stylo::values::computed::{CSSPixelLength, PointerEvents};
 
 use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
-    ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind, PaintOrder, RenderLayer,
-    ScrollSlot, stacking,
+    AnimationSlot, ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind, PaintOrder,
+    RenderLayer, ScrollSlot, stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
@@ -48,6 +48,7 @@ use crate::layout::{
 use crate::scroll::ScrollAxes;
 use crate::tree::document::{Document, DocumentLayoutState, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
+use crate::vello::kurbo::Affine;
 use crate::{NodeId, scroll};
 
 /// Builds one frame's paint order into `buffers`, using and returning
@@ -56,19 +57,21 @@ use crate::{NodeId, scroll};
 /// Both come from the painter: `buffers` is the storage of the frame it last
 /// retired and `scratch` is the working set of the last build, so a document
 /// whose page shape has stopped growing allocates nothing here per frame.
-pub(crate) fn build<T>(
+pub(crate) fn build<T: Sync>(
     document: &Document<T>,
     scratch: BuildScratch,
     buffers: FrameBuffers,
 ) -> (PaintOrder, BuildScratch) {
     let (tree, state) = document.visual_parts();
     let mut builder = Builder {
+        document,
         tree,
         state,
         items: buffers.items,
         clips: buffers.clips,
         layers: buffers.layers,
         slots: buffers.slots,
+        animations: buffers.animations,
         current_layer: None,
         scratch,
     };
@@ -76,7 +79,8 @@ pub(crate) fn build<T>(
         builder.items.is_empty()
             && builder.clips.is_empty()
             && builder.layers.is_empty()
-            && builder.slots.is_empty(),
+            && builder.slots.is_empty()
+            && builder.animations.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
     );
     builder.scratch.assert_settled();
@@ -104,6 +108,7 @@ pub(crate) fn build<T>(
             clips: builder.clips,
             layers: builder.layers,
             slots: builder.slots,
+            animations: builder.animations,
             visual_epoch,
         },
         builder.scratch,
@@ -250,6 +255,10 @@ struct FlowContext {
     clip: Option<usize>,
     /// The nearest scroll container on this chain, in the frame's slot table.
     chain: Option<u32>,
+    /// The nearest composite-animated ancestor-or-self, in the frame's
+    /// animation-slot table. Content under it composes through that slot's
+    /// sampled delta.
+    animation: Option<u32>,
 }
 
 /// The flow contexts visible at one point of the walk: the in-flow one plus
@@ -274,6 +283,7 @@ struct ItemRecord {
     radii: CornerRadii,
     hit_testable: bool,
     slot: Option<u32>,
+    animation: Option<u32>,
 }
 
 /// One member of a stacking context, awaiting the `(level, seq)` sort.
@@ -302,17 +312,19 @@ enum MemberPayload {
 }
 
 struct Builder<'doc, T> {
+    document: &'doc Document<T>,
     tree: &'doc TreeArenas<T>,
     state: &'doc DocumentLayoutState,
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
+    animations: Vec<AnimationSlot>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
 }
 
-impl<'doc, T> Builder<'doc, T> {
+impl<'doc, T: Sync> Builder<'doc, T> {
     fn node(&self, id: NodeId) -> &'doc Node<T> {
         self.tree.live(id)
     }
@@ -351,6 +363,131 @@ impl<'doc, T> Builder<'doc, T> {
         )
     }
 
+    /// Records `node` in the frame's animation-slot table when it carries a
+    /// composite-exportable animation, linked to the nearest animated
+    /// ancestor.
+    ///
+    /// Structural refusals live here beside the geometric attach: an
+    /// element inside a composited group cannot export (the group's bounds
+    /// were computed for the committed geometry), and a transform track
+    /// needs a 2D, invertible decomposition of the element's world matrix
+    /// with no individual transforms, motion path, or inherited
+    /// perspective in the way. A refusal allocates nothing; the element
+    /// keeps animating through main-thread ticks.
+    fn allocate_animation_slot(
+        &mut self,
+        node: NodeId,
+        style: &ComputedValues,
+        world: &Transform3D<f32>,
+        size: Size2D<f32>,
+        parent_perspective: Option<ParentPerspective>,
+        parent: Option<u32>,
+    ) -> Option<u32> {
+        let node_ref = self.node(node);
+        if !node_ref.may_have_animations() || self.current_layer.is_some() {
+            return None;
+        }
+        let export = self.document.composite_export(node_ref)?;
+        let mut curve = export.curve;
+        if let Some(track) = export.transform_track {
+            curve.transform = Some(self.attach_transform_track(
+                track,
+                style,
+                world,
+                size,
+                parent_perspective,
+                &export.committed_transform,
+            )?);
+        }
+        self.animations.push(AnimationSlot {
+            node,
+            parent,
+            curve: Some(curve),
+        });
+        Some(
+            u32::try_from(self.animations.len() - 1)
+                .expect("a frame cannot hold 2^32 animation slots"),
+        )
+    }
+
+    /// Attaches the geometry a transform track's delta needs: with the
+    /// element's world `W = pre · L · origin⁻¹` — which holds exactly when
+    /// nothing but the transform list and origin contribute — the constant
+    /// factor is `pre = W · origin · Lc⁻¹`, and the compose-time delta is
+    /// `pre · L(t) · Lc⁻¹ · pre⁻¹`.
+    #[expect(
+        clippy::unused_self,
+        reason = "kept beside the slot allocation it completes"
+    )]
+    fn attach_transform_track(
+        &self,
+        track: crate::visual::curves::Track<crate::visual::curves::TransformList>,
+        style: &ComputedValues,
+        world: &Transform3D<f32>,
+        size: Size2D<f32>,
+        parent_perspective: Option<ParentPerspective>,
+        committed: &crate::visual::curves::TransformList,
+    ) -> Option<crate::visual::curves::TransformTrack> {
+        use crate::visual::curves::transform_list_matrix;
+        let box_style = style.get_box();
+        let individual_transforms_present =
+            !matches!(box_style.scale, stylo::values::computed::Scale::None)
+                || !matches!(box_style.rotate, stylo::values::computed::Rotate::None)
+                || !matches!(
+                    box_style.translate,
+                    stylo::values::computed::Translate::None
+                );
+        if parent_perspective.is_some()
+            || individual_transforms_present
+            || super::motion::offset_sample(style, size).is_some()
+        {
+            return None;
+        }
+        let origin = &box_style.transform_origin;
+        if origin.depth.px() != 0.0 {
+            return None;
+        }
+        let origin_affine = Affine::translate((
+            f64::from(
+                origin
+                    .horizontal
+                    .resolve(CSSPixelLength::new(size.width))
+                    .px(),
+            ),
+            f64::from(
+                origin
+                    .vertical
+                    .resolve(CSSPixelLength::new(size.height))
+                    .px(),
+            ),
+        ));
+        let world = affine_2d(world)?;
+        let committed_matrix = transform_list_matrix(committed);
+        if committed_matrix.determinant().abs() < 1e-9 || world.determinant().abs() < 1e-9 {
+            return None;
+        }
+        let committed_inverse = committed_matrix.inverse();
+        let pre = world * origin_affine * committed_inverse;
+        Some(crate::visual::curves::TransformTrack {
+            track,
+            pre,
+            pre_inverse: pre.inverse(),
+            committed_inverse,
+        })
+    }
+
+    /// Sets every slot on `chain` back to the committed values: something
+    /// under the animated subtree — a clip, a scroll container — cannot ride
+    /// a sampled delta, so the whole chain falls back to main-thread ticks.
+    fn kill_animation_chain(&mut self, chain: Option<u32>) {
+        let mut current = chain;
+        while let Some(index) = current {
+            let slot = &mut self.animations[index as usize];
+            slot.curve = None;
+            current = slot.parent;
+        }
+    }
+
     fn build_stacking_context(
         &mut self,
         root: NodeId,
@@ -367,9 +504,38 @@ impl<'doc, T> Builder<'doc, T> {
         };
         let world = stacking_context_matrix(values, size, offset_in_parent, parent_perspective)
             .then(parent_world);
-        let layer = self.open_layer(root, values, &world, size, seed.current.chain);
+        let own_animation = self.allocate_animation_slot(
+            root,
+            values,
+            &world,
+            size,
+            parent_perspective,
+            seed.current.animation,
+        );
+        let animation = own_animation.or(seed.current.animation);
+        let force_group = own_animation.is_some_and(|index| {
+            self.animations[index as usize]
+                .curve
+                .as_ref()
+                .is_some_and(|curve| curve.opacity.is_some())
+        });
+        let layer = self.open_layer(
+            root,
+            values,
+            &world,
+            size,
+            seed.current.chain,
+            animation,
+            force_group,
+        );
 
         let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain);
+        if own_slot.is_some() {
+            // The animated element is itself a scroll container: its own
+            // clip and its content's scroll translation cannot ride a
+            // sampled delta.
+            self.kill_animation_chain(animation);
+        }
         let (visible, hit_testable) = item_flags(values);
         if visible {
             self.items.push(PaintItem {
@@ -381,6 +547,7 @@ impl<'doc, T> Builder<'doc, T> {
                 radii: resolve_corner_radii(values, size),
                 hit_testable,
                 slot: own_slot.or(seed.current.chain),
+                animation,
             });
         }
 
@@ -389,7 +556,7 @@ impl<'doc, T> Builder<'doc, T> {
             self.close_layer(layer);
             return;
         }
-        let ctx = self.enter_element(root, values, &world, seed, own_slot);
+        let ctx = self.enter_element(root, values, &world, seed, own_slot, own_animation);
 
         // This context's members and in-flow records occupy the tail of the
         // two shared stacks. Anything a nested context pushes lands above
@@ -450,6 +617,11 @@ impl<'doc, T> Builder<'doc, T> {
         self.close_layer(layer);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a group captures exactly the element facts the stacking \
+                  walk already holds"
+    )]
     fn open_layer(
         &mut self,
         node: NodeId,
@@ -457,8 +629,10 @@ impl<'doc, T> Builder<'doc, T> {
         world: &Transform3D<f32>,
         size: Size2D<f32>,
         slot: Option<u32>,
+        animation: Option<u32>,
+        force_group: bool,
     ) -> Option<usize> {
-        if !stacking::needs_group_rendering(values) {
+        if !force_group && !stacking::needs_group_rendering(values) {
             return None;
         }
         let start = self.items.len();
@@ -469,6 +643,7 @@ impl<'doc, T> Builder<'doc, T> {
             size,
             radii: resolve_corner_radii(values, size),
             slot,
+            animation,
             items: start..start,
         });
         let index = self.layers.len() - 1;
@@ -581,9 +756,16 @@ impl<'doc, T> Builder<'doc, T> {
         let position = style.clone_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
+        // An element whose running animation moves only composite
+        // properties paints as a stacking context even where its committed
+        // style would not make one — the same rule browsers apply to
+        // animated `opacity`/`transform` — so its subtree is one atomic,
+        // retargetable unit.
+        let forced_context = child_node.may_have_animations()
+            && self.document.animates_composite_properties(child_node);
         Some(ChildBox {
             node,
-            level: stacking::establishes_stacking_context(style, z_applies)
+            level: (stacking::establishes_stacking_context(style, z_applies) || forced_context)
                 .then(|| stacking::stack_level(style, z_applies)),
             offset,
             size,
@@ -664,6 +846,11 @@ impl<'doc, T> Builder<'doc, T> {
         };
 
         let own_slot = self.allocate_scroll_slot(child.node, style, outer.current.chain);
+        if own_slot.is_some() {
+            // A scroll container inside an animated subtree: its content's
+            // scroll translation cannot compose inside a sampled delta.
+            self.kill_animation_chain(outer.current.animation);
+        }
         if visible {
             self.push_stream(
                 target,
@@ -675,6 +862,7 @@ impl<'doc, T> Builder<'doc, T> {
                     outer.current.clip,
                     hit_testable,
                     own_slot.or(outer.current.chain),
+                    outer.current.animation,
                 ),
             );
         }
@@ -685,6 +873,7 @@ impl<'doc, T> Builder<'doc, T> {
                 &translated(collection.world, child.offset),
                 outer,
                 own_slot,
+                None,
             );
             self.collect(
                 Cursor {
@@ -766,6 +955,7 @@ impl<'doc, T> Builder<'doc, T> {
         transform: &Transform3D<f32>,
         ctx: ClipContexts,
         own_slot: Option<u32>,
+        own_animation: Option<u32>,
     ) -> ClipContexts {
         let mut inner = ctx;
         let clipped = clipped_axes(style);
@@ -801,9 +991,15 @@ impl<'doc, T> Builder<'doc, T> {
                 slot: inner.current.chain,
             });
             inner.current.clip = Some(self.clips.len() - 1);
+            // A clip rect never rides a sampled delta; anything animated
+            // around it falls back to main-thread ticks.
+            self.kill_animation_chain(own_animation.or(ctx.current.animation));
         }
         if own_slot.is_some() {
             inner.current.chain = own_slot;
+        }
+        if own_animation.is_some() {
+            inner.current.animation = own_animation;
         }
         let node_ref = self.node(node);
         if establishes_absolute_containing_block(node_ref, style) {
@@ -841,8 +1037,24 @@ impl<'doc, T> Builder<'doc, T> {
             radii: CornerRadii::ZERO,
             hit_testable,
             slot: ctx.current.chain,
+            animation: ctx.current.animation,
         })
     }
+}
+
+/// The 2D affine of a world matrix, if it is one.
+fn affine_2d(matrix: &Transform3D<f32>) -> Option<Affine> {
+    if !matrix.is_2d() {
+        return None;
+    }
+    Some(Affine::new([
+        f64::from(matrix.m11),
+        f64::from(matrix.m12),
+        f64::from(matrix.m21),
+        f64::from(matrix.m22),
+        f64::from(matrix.m41),
+        f64::from(matrix.m42),
+    ]))
 }
 
 /// The rounded layout of a node the walk already holds a slot for. The paint
@@ -867,9 +1079,14 @@ fn push_record(items: &mut Vec<PaintItem>, record: &ItemRecord, world: &Transfor
         radii: record.radii,
         hit_testable: record.hit_testable,
         slot: record.slot,
+        animation: record.animation,
     });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a record is a flat capture of the walk's per-item state"
+)]
 fn element_record(
     node: NodeId,
     style: &ComputedValues,
@@ -878,6 +1095,7 @@ fn element_record(
     clip: Option<usize>,
     hit_testable: bool,
     slot: Option<u32>,
+    animation: Option<u32>,
 ) -> ItemRecord {
     ItemRecord {
         node,
@@ -888,6 +1106,7 @@ fn element_record(
         radii: resolve_corner_radii(style, size),
         hit_testable,
         slot,
+        animation,
     }
 }
 
