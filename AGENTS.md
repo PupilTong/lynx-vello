@@ -433,7 +433,14 @@ useful signal for currently-compatible versions of those libraries.
   Bobcat's specifiers, entry transform, graph membership, and boot policy stay
   in the core adapter.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
-  the pinned `vendor/quickjs` submodule. It owns the QuickJS C build and the
+  the pinned `vendor/quickjs` submodule. It exposes QuickJS's two objects as
+  two types: a `Runtime` (heap, atom table, job queue, execution limits,
+  registered module source) and the `Context` realms created on it, as many
+  as the host wants, all on the owning thread. Realms share what the runtime
+  owns and nothing else — a `Value` never crosses between them, one
+  registered module source compiles into a separate instance per realm, and
+  native host modules are installed per realm under one runtime-wide
+  specifier namespace. It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, pending-job pump,
   synchronous preloaded source/native-module loader, loaded-module namespace

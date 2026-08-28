@@ -12,21 +12,27 @@ use std::thread;
 use std::time::Duration;
 
 use quickjs_rust_bridge::{
-    CallOutcome, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue, Realm,
-    RealmOptions,
+    CallOutcome, Context, EvalOptions, EvalSource, HostArgument, HostFunctionError, HostValue,
+    Runtime, RuntimeOptions,
 };
 
-fn tight_realm() -> Realm {
-    Realm::with_options(RealmOptions {
+fn realm() -> Context {
+    Runtime::new().unwrap().create_context().unwrap()
+}
+
+fn tight_realm() -> Context {
+    Runtime::with_options(RuntimeOptions {
         memory_limit: Some(2 * 1024 * 1024),
-        ..RealmOptions::default()
+        ..RuntimeOptions::default()
     })
+    .unwrap()
+    .create_context()
     .unwrap()
 }
 
 #[test]
 fn javascript_shared_memory_is_not_exposed() {
-    let mut realm = Realm::new().unwrap();
+    let mut realm = realm();
     let value = realm
         .evaluate(
             EvalSource::new(
@@ -214,7 +220,7 @@ fn many_arguments_do_not_leak() {
 
 #[test]
 fn a_dropped_function_value_stays_callable_once_installed() {
-    let mut realm = Realm::new().unwrap();
+    let mut realm = realm();
     let global = realm.global_object().unwrap();
     let function = realm
         .function("f", 0, |_| Ok(HostValue::Number(5.0)))
@@ -232,7 +238,7 @@ fn a_dropped_function_value_stays_callable_once_installed() {
 #[test]
 fn a_realm_with_live_host_functions_drops_cleanly() {
     for _ in 0..50 {
-        let mut realm = Realm::new().unwrap();
+        let mut realm = realm();
         realm
             .define_global_function("f", 1, |arguments| {
                 Ok(arguments.first().cloned().unwrap_or(HostValue::Null))
@@ -246,10 +252,12 @@ fn a_realm_with_live_host_functions_drops_cleanly() {
 fn set_property_honors_the_execution_timeout() {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut realm = Realm::with_options(RealmOptions {
+        let mut realm = Runtime::with_options(RuntimeOptions {
             execution_timeout: Some(Duration::from_millis(20)),
-            ..RealmOptions::default()
+            ..RuntimeOptions::default()
         })
+        .unwrap()
+        .create_context()
         .unwrap();
         let target = realm
             .evaluate(
@@ -269,7 +277,7 @@ fn set_property_honors_the_execution_timeout() {
 
 #[test]
 fn set_property_runs_a_proxy_trap_and_reports_refusal() {
-    let mut realm = Realm::new().unwrap();
+    let mut realm = realm();
     let accepting = realm
         .evaluate(
             EvalSource::new(
@@ -302,10 +310,12 @@ fn set_property_runs_a_proxy_trap_and_reports_refusal() {
 
 #[test]
 fn a_name_that_cannot_be_allocated_fails_construction_cleanly() {
-    let mut realm = Realm::with_options(RealmOptions {
+    let mut realm = Runtime::with_options(RuntimeOptions {
         memory_limit: Some(300_000),
-        ..RealmOptions::default()
+        ..RuntimeOptions::default()
     })
+    .unwrap()
+    .create_context()
     .unwrap();
 
     let huge = "n".repeat(200_000);
@@ -326,7 +336,15 @@ mod release {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use quickjs_rust_bridge::{EvalOptions, EvalSource, HostFunctionError, HostValue, Realm};
+    use quickjs_rust_bridge::{
+        Context, EvalOptions, EvalSource, HostFunctionError, HostValue, Runtime,
+    };
+
+    fn runtime_and_realm() -> (Runtime, Context) {
+        let runtime = Runtime::new().unwrap();
+        let realm = runtime.create_context().unwrap();
+        (runtime, realm)
+    }
 
     struct Tracked(Rc<Cell<u32>>);
 
@@ -349,24 +367,24 @@ mod release {
     #[test]
     fn dropping_an_uninstalled_function_releases_its_closure() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (mut runtime, mut realm) = runtime_and_realm();
 
         let function = realm.function("gone", 0, tracking(&drops)).unwrap();
         assert_eq!(drops.get(), 0, "still referenced");
         drop(function);
         assert_eq!(drops.get(), 0, "finalized, but the drop is deferred");
 
-        realm.run_gc();
+        runtime.run_gc();
         assert_eq!(drops.get(), 1, "reclaimed at the next operation");
 
-        realm.run_gc();
+        runtime.run_gc();
         assert_eq!(drops.get(), 1, "and not released twice");
     }
 
     #[test]
     fn a_handler_owning_a_value_is_released_without_re_entering_the_collector() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (mut runtime, mut realm) = runtime_and_realm();
 
         let rooted = realm
             .evaluate(EvalSource::new("({})"), EvalOptions::default())
@@ -381,7 +399,7 @@ mod release {
             .unwrap();
 
         drop(function);
-        realm.run_gc();
+        runtime.run_gc();
         assert_eq!(drops.get(), 1, "released outside the collector");
 
         let value = realm
@@ -393,7 +411,7 @@ mod release {
     #[test]
     fn replacing_an_installed_global_releases_the_old_closure() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (mut runtime, mut realm) = runtime_and_realm();
 
         realm
             .define_global_function("handler", 0, tracking(&drops))
@@ -404,19 +422,19 @@ mod release {
                 EvalOptions::default(),
             )
             .unwrap();
-        realm.run_gc();
+        runtime.run_gc();
         assert_eq!(drops.get(), 1, "the replaced handler must release");
     }
 
     #[test]
     fn a_reachable_function_is_not_released() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (mut runtime, mut realm) = runtime_and_realm();
 
         realm
             .define_global_function("kept", 0, tracking(&drops))
             .unwrap();
-        realm.run_gc();
+        runtime.run_gc();
         assert_eq!(drops.get(), 0, "a live global must survive collection");
 
         realm
@@ -427,12 +445,12 @@ mod release {
     #[test]
     fn released_slots_are_reused_rather_than_accumulating() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (mut runtime, mut realm) = runtime_and_realm();
 
         for _ in 0..1000 {
             let function = realm.function("churn", 0, tracking(&drops)).unwrap();
             drop(function);
-            realm.run_gc();
+            runtime.run_gc();
         }
         assert_eq!(drops.get(), 1000, "every discarded closure must release");
 
@@ -450,12 +468,14 @@ mod release {
     #[test]
     fn realm_teardown_releases_still_rooted_closures() {
         let drops = Rc::new(Cell::new(0));
-        let mut realm = Realm::new().unwrap();
+        let (_runtime, mut realm) = runtime_and_realm();
         realm
             .define_global_function("rooted", 0, tracking(&drops))
             .unwrap();
         assert_eq!(drops.get(), 0);
 
+        // The runtime outlives the realm here, so this asserts what releasing
+        // one realm does, not what tearing the runtime down does.
         drop(realm);
         assert_eq!(drops.get(), 1, "teardown must release the remainder");
     }

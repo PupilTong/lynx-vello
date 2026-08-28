@@ -154,9 +154,13 @@ realm.
 ## The core-owned JavaScript engine
 
 The script engine is not an injected capability. `bobcat-core` owns one
-`QuickJS` realm outright, behind the crate-private `quickjs::ScriptEngine`,
-which is created on the engine-owned Lynx main thread and never leaves it —
-it is deliberately not `Send`, and nothing outside the crate can name it.
+`QuickJS` runtime and the single realm on it outright, behind the
+crate-private `quickjs::ScriptEngine`, which is created on the engine-owned
+Lynx main thread and never leaves it — it is deliberately not `Send`, and
+nothing outside the crate can name it. The bridge would carry more realms on
+that one runtime, which is the shape a background-thread realm would take:
+its own global object and native modules, sharing the runtime's heap, job
+queue, and execution limits, with no value crossing between the two.
 
 Its whole surface is five operations:
 

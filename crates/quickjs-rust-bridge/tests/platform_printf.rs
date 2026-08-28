@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_int, c_longlong, c_uint};
 use std::ptr;
 
-use quickjs_rust_bridge::{EvalOptions, EvalSource, Realm};
+use quickjs_rust_bridge::{Context, EvalOptions, EvalSource, Runtime};
 
 unsafe extern "C" {
     fn qjs_platform_snprintf(
@@ -26,7 +26,7 @@ fn buffer_text(buffer: &[u8]) -> String {
     String::from_utf8(buffer[..end].to_vec()).expect("the test formats contain ASCII only")
 }
 
-fn evaluate_string(realm: &mut Realm, source: &str) -> String {
+fn evaluate_string(realm: &mut Context, source: &str) -> String {
     let value = realm
         .evaluate(EvalSource::new(source), EvalOptions::default())
         .expect("string expression should evaluate");
@@ -188,7 +188,10 @@ fn snprintf_writeback_consumes_its_pointer_and_preserves_later_arguments() {
 
 #[test]
 fn quickjs_date_formatting_uses_the_private_formatter() {
-    let mut realm = Realm::new().expect("realm should initialize");
+    let mut realm = Runtime::new()
+        .expect("runtime should initialize")
+        .create_context()
+        .expect("realm should initialize");
     let formatted = evaluate_string(
         &mut realm,
         "(() => [
@@ -208,7 +211,10 @@ fn quickjs_date_formatting_uses_the_private_formatter() {
 
 #[test]
 fn quickjs_errors_preserve_formatted_arguments() {
-    let mut realm = Realm::new().expect("realm should initialize");
+    let mut realm = Runtime::new()
+        .expect("runtime should initialize")
+        .create_context()
+        .expect("realm should initialize");
     let error = realm
         .evaluate(
             EvalSource::new("null.formattedProperty"),
@@ -224,7 +230,10 @@ fn quickjs_errors_preserve_formatted_arguments() {
 
 #[test]
 fn quickjs_regexp_errors_preserve_formatted_characters() {
-    let mut realm = Realm::new().expect("realm should initialize");
+    let mut realm = Runtime::new()
+        .expect("runtime should initialize")
+        .create_context()
+        .expect("realm should initialize");
     let error = realm
         .evaluate(
             EvalSource::new("new RegExp('(?i:a')"),
@@ -237,7 +246,10 @@ fn quickjs_regexp_errors_preserve_formatted_characters() {
 
 #[test]
 fn quickjs_backtrace_expands_past_dbufs_stack_buffer() {
-    let mut realm = Realm::new().expect("realm should initialize");
+    let mut realm = Runtime::new()
+        .expect("runtime should initialize")
+        .create_context()
+        .expect("realm should initialize");
     let source_name = format!("bundle://{}.js", "long-name-".repeat(40));
     assert!(source_name.len() > 128);
     let error = realm
