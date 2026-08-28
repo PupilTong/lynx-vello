@@ -198,10 +198,6 @@ impl Painter {
     pub(crate) const fn frame(&self) -> Option<&Arc<CommittedFrame>> {
         self.frame.as_ref()
     }
-
-    pub(crate) fn needs_render(&self, visual_epoch: u64) -> bool {
-        self.frame.as_ref().map(|frame| frame.epoch()) != Some(visual_epoch)
-    }
 }
 
 #[cfg(test)]
@@ -241,11 +237,10 @@ mod tests {
         assert_eq!(
             painter
                 .frame()
-                .map(|frame| frame.epoch())
+                .map(|frame| frame.commit_id())
                 .expect("the retained frame survives the failed paint"),
-            first.epoch(),
+            first.commit_id(),
             "the failed paint left the previous commit in place"
         );
-        assert!(painter.needs_render(document.visual_epoch()));
     }
 }

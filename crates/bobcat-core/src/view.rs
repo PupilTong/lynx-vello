@@ -95,7 +95,7 @@ pub struct FrameSize {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
-/// What one drawn frame is a function of: the commit epoch and the
+/// What one drawn frame is a function of: the commit id and the
 /// scroll-intents generation composed with it. Same key, same pixels.
 type ComposeKey = (u64, u64);
 #[cfg(target_arch = "wasm32")]
@@ -507,19 +507,19 @@ impl RouterHost for FrameRouterHost<'_> {
 #[derive(Debug, Default)]
 struct ScrollIntents {
     offsets: HashMap<NodeId, Vector2D<f32>>,
-    /// The commit epoch last rebased against, so one publish rebases once.
-    epoch: Option<u64>,
+    /// The commit id last rebased against, so one publish rebases once.
+    rebased_commit: Option<u64>,
     /// Bumped whenever a chain step lands, so composition can key on
-    /// "this frame at these offsets" instead of the frame epoch alone.
+    /// "this frame at these offsets" instead of the commit id alone.
     generation: u64,
 }
 
 impl ScrollIntents {
     fn rebase(&mut self, frame: &CommittedFrame) {
-        if self.epoch == Some(frame.epoch()) {
+        if self.rebased_commit == Some(frame.commit_id()) {
             return;
         }
-        self.epoch = Some(frame.epoch());
+        self.rebased_commit = Some(frame.commit_id());
         self.offsets.retain(|node, offset| {
             let Some(slot) = frame.slot_of(*node) else {
                 return false;
@@ -875,7 +875,7 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     /// The buffer frames are composed into when in-flight scroll offsets
     /// override the committed ones; reused across frames.
     composed_scene: Scene,
-    /// The frame epoch a refill was already requested for, so a long scroll
+    /// The commit id a refill was already requested for, so a long scroll
     /// asks once per commit instead of once per event.
     refill_requested_for: Option<u64>,
     /// `BeginFrame` sequence numbers, acknowledged through the hub.
@@ -1155,12 +1155,12 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// consumed most of a slot's encode window — once per committed frame,
     /// because only the next commit re-centers the windows.
     fn maybe_request_refill(&mut self, frame: &CommittedFrame) {
-        if self.refill_requested_for == Some(frame.epoch())
+        if self.refill_requested_for == Some(frame.commit_id())
             || !self.scroll_intents.refill_due(frame)
         {
             return;
         }
-        self.refill_requested_for = Some(frame.epoch());
+        self.refill_requested_for = Some(frame.commit_id());
         let _ = self.commands.send(MainCommand::Refill);
     }
 
@@ -1406,7 +1406,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             .is_some_and(|frame| frame.animations_active());
         let key = latest
             .as_ref()
-            .map(|frame| (frame.epoch(), self.scroll_intents.generation));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
@@ -1447,7 +1447,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         let latest = self.hub.latest();
         let key = latest
             .as_ref()
-            .map(|frame| (frame.epoch(), self.scroll_intents.generation));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
@@ -1902,7 +1902,7 @@ impl OffscreenLynxView {
         };
         self.scroll_intents.rebase(&frame);
         self.maybe_request_refill(&frame);
-        let key = (frame.epoch(), self.scroll_intents.generation);
+        let key = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
@@ -2143,7 +2143,7 @@ mod tests {
         let frame = view
             .published_frame()
             .expect("the boot's flush published a committed frame");
-        assert!(frame.epoch() > 0);
+        assert!(frame.commit_id() > 0);
 
         let (views, connected, laid_out) = view
             .probe_document(|tree| {
@@ -2642,10 +2642,10 @@ mod event_loop_tests {
     #[test]
     fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
-        let boot_epoch = engine
+        let boot_commit = engine
             .published_frame()
             .expect("boot published a frame")
-            .epoch();
+            .commit_id();
 
         // 30px is inside half the encode-window headroom (the 200px
         // scrollport), so no refill commit is due either.
@@ -2661,8 +2661,11 @@ mod event_loop_tests {
         // The probe round-tripped the main thread, so its round's
         // commit-if-dirty has already run — and found nothing.
         assert_eq!(
-            engine.published_frame().expect("still published").epoch(),
-            boot_epoch,
+            engine
+                .published_frame()
+                .expect("still published")
+                .commit_id(),
+            boot_commit,
             "a windowed scroll must not recommit"
         );
         let scroller = node_id(3);
@@ -2715,10 +2718,10 @@ mod event_loop_tests {
     #[test]
     fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
         let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
-        let boot_epoch = engine
+        let boot_commit = engine
             .published_frame()
             .expect("boot published a frame")
-            .epoch();
+            .commit_id();
 
         // max_offset is 200 (400px of rows in a 200px scrollport), so the
         // window tops out at 200 and 150 is past half its headroom.
@@ -2730,7 +2733,7 @@ mod event_loop_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let frame = loop {
             let frame = engine.published_frame().expect("still published");
-            if frame.epoch() > boot_epoch {
+            if frame.commit_id() > boot_commit {
                 break frame;
             }
             assert!(

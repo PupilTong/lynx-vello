@@ -66,7 +66,13 @@ pub struct Document<T> {
     shadow_roots: usize,
     pub(crate) custom_elements: CustomElementRegistry<T>,
     animations: crate::style::animation::AnimationDriver,
-    visual_epoch: u64,
+    /// The id the most recently built frame carries; monotone per build, so
+    /// it orders commits for every consumer of published frames.
+    commit_id: u64,
+    /// Whether anything visually observable changed since the retained
+    /// frame was built. This is the whole invalidation state: one bit, not
+    /// a counter — a frame's identity is its commit id.
+    visual_dirty: bool,
     layout_dirty: bool,
     layout_root_dirty: bool,
     last_layout_inputs: Option<(Size<f32>, f32)>,
@@ -111,7 +117,8 @@ impl<T> Document<T> {
             shadow_roots: 0,
             custom_elements: CustomElementRegistry::default(),
             animations: crate::style::animation::AnimationDriver::default(),
-            visual_epoch: 0,
+            commit_id: 0,
+            visual_dirty: true,
             layout_dirty: false,
             layout_root_dirty: false,
             last_layout_inputs: None,
@@ -247,13 +254,32 @@ impl<T> Document<T> {
         (&self.tree, &self.layout)
     }
 
+    /// The id of the most recently built frame.
     #[must_use]
-    pub(crate) fn visual_epoch(&self) -> u64 {
-        self.visual_epoch
+    pub(crate) fn commit_id(&self) -> u64 {
+        self.commit_id
     }
 
+    /// Claims the next commit id for the frame about to be built, clearing
+    /// the dirty bit with it: mutations from here on belong to the *next*
+    /// frame. A build or paint that panics leaves the previously retained
+    /// frame carrying an older id, which is what keeps `needs_render`
+    /// reporting stale without a counter.
+    pub(crate) fn next_commit_id(&mut self) -> u64 {
+        self.commit_id += 1;
+        self.visual_dirty = false;
+        self.commit_id
+    }
+
+    #[must_use]
+    pub(crate) fn visual_dirty(&self) -> bool {
+        self.visual_dirty
+    }
+
+    /// Notes that the retained frame is painted for a state that no longer
+    /// exists.
     pub(crate) fn note_visual_mutation(&mut self) {
-        self.visual_epoch += 1;
+        self.visual_dirty = true;
     }
 
     /// Every live node's layout state, in arena order. The keys are arena
@@ -1148,10 +1174,10 @@ pub(crate) mod tests {
 
     /// Freeing what is already detached changes no frame, so it must cost no
     /// frame: no layout is scheduled, least of all a whole-document one, and
-    /// the visual epoch does not move. The unlink that detached the subtree
+    /// the retained frame stays valid. The unlink that detached the subtree
     /// is what recorded all of that, once, for the subtree as a whole.
     #[test]
-    fn dropping_a_detached_node_schedules_no_layout_and_moves_no_epoch() {
+    fn dropping_a_detached_node_schedules_no_layout_and_invalidates_nothing() {
         let mut document: Document<()> = Document::new(device(), "page", ());
         let page = document.document_element().id();
         let root = document.create_element("view", ());
@@ -1166,14 +1192,17 @@ pub(crate) mod tests {
         document.mark_layout_complete(hughie::geometry::Size::new(800.0, 600.0), 1.0);
         document.remove_element(root);
         document.mark_layout_complete(hughie::geometry::Size::new(800.0, 600.0), 1.0);
-        let epoch = document.visual_epoch();
+        document.render();
         document.drop_element(root);
         assert!(
             !document.layout_root_dirty,
             "freeing a detached node must not schedule a whole-document layout"
         );
         assert!(!document.layout_dirty, "nor any layout at all");
-        assert_eq!(epoch, document.visual_epoch(), "nor move the visual epoch");
+        assert!(
+            !document.needs_render(),
+            "nor invalidate the retained frame"
+        );
     }
 
     #[test]

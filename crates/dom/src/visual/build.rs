@@ -85,7 +85,7 @@ pub(crate) fn build<T: Sync>(
     );
     builder.scratch.assert_settled();
 
-    let visual_epoch = document.visual_epoch();
+    let commit_id = document.commit_id();
     let root = document.document_element();
     if let Some(style) = StyleView::try_of(root)
         && display_mode(style.display()) != DisplayMode::None
@@ -109,7 +109,7 @@ pub(crate) fn build<T: Sync>(
             layers: builder.layers,
             slots: builder.slots,
             animations: builder.animations,
-            visual_epoch,
+            commit_id,
         },
         builder.scratch,
     )
