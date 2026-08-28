@@ -349,20 +349,20 @@ impl MainThreadRuntime {
         let _ = self.tree.borrow_mut().tree().advance_animations(now);
     }
 
-    /// Drives the user-agent scroll chain the presenting side decided.
-    pub(crate) fn apply_scroll(&mut self, from: dom::NodeId, delta: dom::Vector2D<f32>) {
+    /// Writes the presenting side's scroll offsets into the document and
+    /// repaints: the commit at the end of this round bakes windows
+    /// re-centered on them. This is the only way a user scroll reaches the
+    /// document — between refills the offsets live on the presenting side
+    /// alone.
+    pub(crate) fn refill_scroll_windows(&mut self, offsets: &[(dom::NodeId, dom::Vector2D<f32>)]) {
         let mut handle = self.tree.borrow_mut();
         let document = handle.tree();
-        if document.get(from).is_some() {
-            let _ = document.scroll_chain(from, delta);
+        for (node, offset) in offsets {
+            if document.get(*node).is_some() {
+                document.scroll_to(*node, *offset);
+            }
         }
-    }
-
-    /// Repaints because composition has moved a scroll slot far through its
-    /// committed encode window; the commit at the end of this round bakes
-    /// windows re-centered on the current offsets.
-    pub(crate) fn refill_scroll_windows(&mut self) {
-        self.tree.borrow_mut().tree().note_scroll_windows_stale();
+        document.note_scroll_windows_stale();
     }
 
     /// Applies new device metrics.

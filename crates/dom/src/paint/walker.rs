@@ -46,11 +46,6 @@
 //! document's own viewport, so an item that reaches neither the viewport nor
 //! anything its clip chain admits contributes nothing at any device scale.
 //!
-//! This extends a rule the walker already applied rather than inventing one:
-//! every group's effect layer is pushed clipped to bounds already intersected
-//! with the viewport, so an item inside any `opacity` or `mask` group has been
-//! viewport-culled at layer granularity since group compositing landed.
-//!
 //! Three disciplines keep it sound.
 //!
 //! - **Only the encode is skipped.** Scope open and close are driven by item index, and the group
@@ -89,10 +84,8 @@ use crate::{Document, ImageStore};
 
 /// Where one walk's output goes.
 ///
-/// The walker's traversal, scope, and clip logic is identical either way;
-/// only the destination of each operation differs. `Monolithic` is the
-/// pre-compose shape — one scene, everything inline — kept for the
-/// equivalence tests; production encodes through `Compose`, where
+/// `Monolithic` is the pre-compose shape — one scene, everything inline —
+/// kept for the equivalence tests; production encodes through `Compose`, where
 /// walker-level pushes become program ops and content between them lands in
 /// per-chain fragments.
 pub(crate) enum WalkSink<'s> {
@@ -264,9 +257,8 @@ const VIEWPORT_SLACK_DEVICE_PX: f64 = 2.0;
 
 /// The two reaches around one item's box, in CSS px.
 ///
-/// `layer` is what the group bounds are accumulated from and is exactly what
-/// this pass computed before it gained a second job. `cull` is never smaller,
-/// and is infinite when the reach cannot be established at all.
+/// `layer` is what the group bounds are accumulated from. `cull` is never
+/// smaller, and is infinite when the reach cannot be established at all.
 #[derive(Clone, Copy, Debug)]
 struct Extents {
     layer: f64,
@@ -350,8 +342,7 @@ pub(crate) fn walk_compose<T>(
     );
 }
 
-/// [`walk`] with culling switched off entirely, which is what this walker did
-/// before culling existed.
+/// [`walk`] with culling switched off entirely.
 ///
 /// The tests encode one frame both ways and compare, which is the statement
 /// that culling changes nothing an observer of the viewport can see.
@@ -744,10 +735,6 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
 }
 
 /// Paints one item with the matrix [`plan_frame`] resolved for it.
-///
-/// The matrix is handed in rather than recomputed so that the culler's
-/// geometry and the painter's are the same value by construction, not by
-/// convention.
 fn paint_item<T>(
     sink: &mut WalkSink<'_>,
     scratch: &mut Scratch,
@@ -981,10 +968,6 @@ fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
 
 /// Per-frame prepass: the bounds every group's effect layer is pushed with,
 /// and one plan entry per item saying whether it paints and with what matrix.
-///
-/// The group bounds this produces are exactly what they were before the pass
-/// gained a second job. Narrowing them by the cull decision would move every
-/// `push_layer` rect and change the encoding of content nothing is culling.
 fn plan_frame<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
@@ -998,9 +981,8 @@ fn plan_frame<T>(
     scratch.item_plan.clear();
     scratch.item_plan.resize(items.len(), None);
     scratch.layer_bounds.resize(layers.len(), Rect::ZERO);
-    // CSS px, not device px: `Device::viewport_size` is `Size2D<f32, CSSPixel>`, and the paint
-    // order this is intersected against carries CSS-px transforms — the device scale is applied
-    // once, separately, as the root `scale` affine.
+    // CSS px, not device px: the paint order this is intersected against carries CSS-px
+    // transforms — the device scale is applied once, separately, as the root `scale` affine.
     let viewport_size = document.device().viewport_size();
     let viewport = Rect::new(
         0.0,
@@ -1031,8 +1013,7 @@ fn plan_frame<T>(
         // the items no group has already clipped to the viewport, which are
         // the ones culling exists for.
         let Some(local) = convert::item_affine(&item.transform, item.size) else {
-            // `paint_item` drew nothing for a singular transform either; the
-            // decision has only moved.
+            // A singular transform encodes nothing.
             continue;
         };
         let top = scratch.open_layers.last().copied();
@@ -1049,11 +1030,8 @@ fn plan_frame<T>(
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
-        // that box. Establishing the reach reads the item's computed style, so
-        // taking the answer without it is worth a comparison — and this is the
-        // case on a page whose content is on screen, which is most of them.
-        // Items inside a group are excluded: their reach is needed for the
-        // group's bounds regardless of what the cull test decides.
+        // that box. Items inside a group are excluded: their reach is needed
+        // for the group's bounds regardless of what the cull test decides.
         if top.is_none()
             && admitted.is_none_or(|admitted| can_reach(item_bounds(item, local, 0.0), admitted))
         {

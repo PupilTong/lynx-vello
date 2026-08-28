@@ -103,9 +103,7 @@ pub struct AnimationSlot {
     pub node: NodeId,
     /// The nearest enclosing animation slot, when animated elements nest.
     pub(crate) parent: Option<u32>,
-    /// The exported curve, absent when the element's animation was found
-    /// ineligible after the slot was allocated — the slot then samples as
-    /// the committed values and the element rides main-thread ticks.
+    /// The exported curve, absent in the ineligible case described above.
     pub(crate) curve: Option<crate::visual::curves::CompositeCurve>,
 }
 
@@ -147,9 +145,7 @@ pub struct HitTarget {
 /// one to draw and route input from.
 ///
 /// The scene is carried *split*: per-chain fragments plus the compose
-/// program over them, so scroll offsets apply at composition. The
-/// [`Self::scene`] accessor materializes the frame at its committed offsets
-/// once, on demand, for consumers that want the whole picture.
+/// program over them, so scroll offsets apply at composition.
 pub struct CommittedFrame {
     pub(crate) order: PaintOrder,
     pub(crate) presentation: Presentation,
@@ -160,63 +156,11 @@ pub struct CommittedFrame {
 }
 
 /// The split scene: fragments, the program that assembles them, and the
-/// frame already composed at its committed offsets.
+/// layer plan when scroller content bakes into retained planes.
 pub(crate) struct Presentation {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
-    committed: CommittedScene,
-}
-
-/// How the committed-offset composition is stored.
-///
-/// The common frame shape — no scroll containers, no group effects — has no
-/// walker-level ops and nothing to translate: its program is one untranslated
-/// fragment append, so the composition *is* that fragment and borrowing it
-/// costs nothing. A frame with scroller content carries a composite plan
-/// instead — its scroller runs live in retained GPU textures between
-/// commits, and materializing a second whole-frame encoding beside the
-/// fragments would double the content-proportional memory for nothing that
-/// path reads. Every other shape is composed once, at commit, into a scene
-/// from the painter's pool.
-#[allow(
-    clippy::large_enum_variant,
-    reason = "one value per frame, and boxing the scene would reintroduce \
-              the very allocation this type exists to avoid; `allow`, not \
-              `expect` - the lint's size threshold is target-dependent and \
-              an expectation unfulfilled on wasm32 fails that build"
-)]
-pub(crate) enum CommittedScene {
-    /// `fragments[0]` is the whole composed frame.
-    Whole,
-    /// Composed at commit into a pooled scene.
-    Composed(Scene),
-    /// Layered: drawn from the plan's retained planes plus raw replay.
-    Planned(crate::paint::plan::CompositePlan),
-}
-
-impl Presentation {
-    pub(crate) fn new(
-        fragments: Vec<Scene>,
-        program: Vec<ComposeOp>,
-        committed: CommittedScene,
-    ) -> Self {
-        Self {
-            fragments,
-            program,
-            committed,
-        }
-    }
-
-    /// Dismantles the presentation for the painter's pools: the fragment
-    /// scenes and their container, the program's storage, and the composed
-    /// scene when one was built.
-    pub(crate) fn into_parts(self) -> (Vec<Scene>, Vec<ComposeOp>, Option<Scene>) {
-        let composed = match self.committed {
-            CommittedScene::Whole | CommittedScene::Planned(_) => None,
-            CommittedScene::Composed(scene) => Some(scene),
-        };
-        (self.fragments, self.program, composed)
-    }
+    pub(crate) plan: Option<crate::paint::plan::CompositePlan>,
 }
 
 impl std::fmt::Debug for CommittedFrame {
@@ -230,30 +174,27 @@ impl std::fmt::Debug for CommittedFrame {
 }
 
 impl CommittedFrame {
-    /// The frame composed at its committed offsets, valid for
-    /// [`Self::viewport`] at [`Self::device_pixel_ratio`] — the frame's one
-    /// fragment when that is the whole program, otherwise the composition
-    /// built at commit. `None` for a layered frame: its scroller content
-    /// lives in retained planes, and no whole-frame composition is
-    /// materialized beside the fragments — compose one with
-    /// [`Self::compose_into`] where a flat scene is genuinely needed.
+    /// The frame's one fragment when that is the whole program — the common
+    /// shape with no scroll containers or group effects, borrowable at no
+    /// cost. `None` otherwise: no whole-frame composition is materialized
+    /// beside the fragments (it would double the content-proportional
+    /// memory); compose one with [`Self::compose_into`] where a flat scene
+    /// is genuinely needed.
     #[must_use]
     pub fn scene(&self) -> Option<&Scene> {
-        match &self.presentation.committed {
-            CommittedScene::Whole => Some(&self.presentation.fragments[0]),
-            CommittedScene::Composed(scene) => Some(scene),
-            CommittedScene::Planned(_) => None,
-        }
+        matches!(
+            self.presentation.program.as_slice(),
+            [ComposeOp::Fragment { index: 0, chain }]
+                if *chain == crate::paint::compose::ComposeChain::default()
+        )
+        .then(|| &self.presentation.fragments[0])
     }
 
     /// The frame's layer decomposition, present when its scroller content
     /// bakes into retained planes a GPU target keeps between commits.
     #[must_use]
     pub fn composite_plan(&self) -> Option<&crate::paint::plan::CompositePlan> {
-        match &self.presentation.committed {
-            CommittedScene::Planned(plan) => Some(plan),
-            _ => None,
-        }
+        self.presentation.plan.as_ref()
     }
 
     /// Encodes plane `index` of the frame's plan into `scene`, translated so
@@ -469,9 +410,7 @@ impl CommittedFrame {
     ///
     /// The frame is baked unscrolled; `offset_of` supplies each slot's
     /// current offset (the compositor's between-commit values), falling back
-    /// to the committed ones. No liveness filter: this type has no document.
-    /// Ids never alias, so a consumer acting on the node re-validates where
-    /// it acts.
+    /// to the committed ones. No liveness filter — see the module doc.
     #[must_use]
     pub fn hit(
         &self,

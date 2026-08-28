@@ -16,8 +16,7 @@
 //! inside fragments untouched.
 //!
 //! Translation per chain is the sum of the chain's slot offsets, each
-//! snapped to the device pixel grid — the same snapping the old offset
-//! folding applied per scroller, so composed edges stay crisp.
+//! snapped to the device pixel grid so composed edges stay crisp.
 
 use euclid::default::Vector2D;
 
@@ -39,10 +38,6 @@ pub(crate) struct ComposeChain {
 }
 
 /// A shape captured at encode time, replayable without the document.
-///
-/// Every walker-level push carries either a plain bounds rect or a
-/// [`BoxShape`]; the shape value itself is captured, so a replay pushes the
-/// identical path elements the monolithic walk would have.
 #[derive(Debug)]
 pub(crate) enum CapturedShape {
     Rect(Rect),
@@ -198,8 +193,7 @@ pub(crate) fn animation_deltas(samples: &[AnimationSample], chain: Option<u32>) 
 }
 
 /// One chain's compose translation in CSS px: the sum of its slots' offsets,
-/// each snapped to the device pixel grid — the snapping the folded encode
-/// used to apply per scroller.
+/// each snapped to the device pixel grid.
 pub(crate) fn chain_translation(
     slots: &[ScrollSlot],
     chain: Option<u32>,
@@ -230,11 +224,6 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 
 /// Replays the program into `scene` with each chain translated by the
 /// offsets `offset_of` reports (falling back to the committed ones).
-///
-/// The output is the same operation sequence the monolithic walk would have
-/// encoded at those offsets: this function only pushes, appends, and pops —
-/// it never encodes raw geometry between appends, which is what keeps
-/// vello's append-time state merging sound.
 pub(crate) fn replay(
     scene: &mut Scene,
     fragments: &[Scene],
