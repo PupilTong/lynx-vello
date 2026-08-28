@@ -17,10 +17,11 @@ pub(crate) mod equivalence;
 mod filters;
 mod mask;
 pub(crate) mod painter;
+pub(crate) mod plan;
 mod shadow;
 mod shape;
 mod text;
-mod walker;
+pub(crate) mod walker;
 
 use crate::layout::{Edges, Layout, TextLayout};
 use crate::paint::shape::ReferenceBoxes;

@@ -20,7 +20,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use dom::render::gpu::read_texture;
-use dom::render::gpu::{render_params, renderer_options};
+use dom::render::gpu::{PlaneBank, render_params, renderer_options};
 use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
@@ -51,6 +51,9 @@ pub(super) struct WindowGraphics<'window> {
     context: RenderContext,
     surface: RenderSurface<'window>,
     renderer: vello::Renderer,
+    /// Retained plane textures for layered frames; see
+    /// [`dom::render::gpu::PlaneBank`].
+    planes: PlaneBank,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
     /// The compose key and size last rendered into the retained target.
@@ -100,10 +103,28 @@ impl<'window> WindowGraphics<'window> {
             context,
             surface,
             renderer,
+            planes: PlaneBank::default(),
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
             rendered: None,
         })
+    }
+
+    /// Brings the retained plane textures up to a layered frame's plan;
+    /// call before composing the frame for [`Self::render_to_target`].
+    pub(super) fn prepare_planes(
+        &mut self,
+        frame: &dom::CommittedFrame,
+    ) -> Result<(), EngineError> {
+        let handle = &self.context.devices[self.surface.dev_id];
+        self.planes
+            .prepare(&mut self.renderer, &handle.device, &handle.queue, frame)
+            .map_err(|error| EngineError::Gpu(error.to_string()))
+    }
+
+    /// The retained planes' registered images.
+    pub(super) fn plane_images(&self) -> &[vello::peniko::ImageData] {
+        self.planes.images()
     }
 
     pub(super) fn rendered_at(&self, size: FrameSize) -> bool {

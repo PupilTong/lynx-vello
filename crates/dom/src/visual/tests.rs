@@ -99,6 +99,29 @@ fn negative_z_index_paints_below_in_flow_content() {
 }
 
 #[test]
+fn a_scroll_container_paints_as_one_atomic_stacking_context() {
+    // A scroll container is a forced stacking context (its subtree is one
+    // compose run a retained layer can carry), so a `z-index` inside it
+    // compares against nothing outside it: the whole scroller stays below a
+    // positioned sibling with any positive level.
+    let mut h = Harness::new(&format!(
+        "{PAGE}
+         .scroller {{ display: flex; position: absolute; left: 0; top: 0;
+                      overflow: scroll; width: 200px; height: 200px; }}
+         .content {{ display: flex; flex-shrink: 0; position: relative; z-index: 10;
+                     width: 200px; height: 300px; }}
+         .above {{ display: flex; position: absolute; left: 0; top: 0;
+                   width: 100px; height: 100px; z-index: 5; }}"
+    ));
+    let root = h.root();
+    let scroller = h.el(root, "view.scroller");
+    let content = h.el(scroller, "view.content");
+    let above = h.el(root, "view.above");
+    assert_eq!(h.element_order(), vec![root, scroller, content, above]);
+    assert_eq!(h.hit(50.0, 50.0), Some(above));
+}
+
+#[test]
 fn z_index_compares_only_within_the_same_stacking_context() {
     let mut h = Harness::new(&format!(
         "{PAGE} {}",

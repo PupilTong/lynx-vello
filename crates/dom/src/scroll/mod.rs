@@ -109,7 +109,7 @@ impl ScrollBox {
 }
 
 #[must_use]
-fn is_scroll_container(style: &ComputedValues) -> bool {
+pub(crate) fn is_scroll_container(style: &ComputedValues) -> bool {
     style.clone_overflow_x().is_scrollable() || style.clone_overflow_y().is_scrollable()
 }
 
