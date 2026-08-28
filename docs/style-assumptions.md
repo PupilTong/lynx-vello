@@ -138,10 +138,10 @@ the semantics are stylo's.** Everything below refines that sentence.
     `transform`/`opacity`/`filter` is the per-frame interpolation and
     rasterization, and what they throttle is the per-frame *restyle* — never
     the cascade. So: every animated property cascades, and the per-frame work
-    runs on the presenting thread rather than the thread that owns the script
-    realm, as a stylo animation-only traversal over just the animating
-    elements, with no selector matching and no layout for properties that
-    cannot move a box. **The open gap is layerization, and it is also why this
+    runs on the document's owner thread (the Lynx main thread, on a
+    `BeginFrame` tick with no JavaScript involved), as a stylo animation-only
+    traversal over just the animating elements, with no selector matching and
+    no layout for properties that cannot move a box. **The open gap is layerization, and it is also why this
     engine does not throttle.** A browser can skip the per-frame restyle
     because a compositor is interpolating instead; here the animation-only
     traversal is the only thing that produces the animated value, and with no

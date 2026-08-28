@@ -16,16 +16,15 @@ use dom::event::EventSteps;
 
 use crate::runtime::{ENTRY_PREAMBLE, MainThreadRuntime};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{SharedListenerNames, SharedTree};
+use crate::view::{FrameHub, SharedListenerNames};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
-/// The same pair the engine's script thread owns: one realm, one document,
-/// and the hand-off slot between them.
+/// The same pair the engine's main thread owns: one realm and the document
+/// it holds outright.
 #[derive(Debug)]
 pub struct ScriptHarness {
     runtime: MainThreadRuntime,
-    elements: SharedTree,
     listener_names: Arc<SharedListenerNames>,
 }
 
@@ -38,16 +37,17 @@ impl ScriptHarness {
     /// only useful response.
     #[must_use]
     pub fn new() -> Self {
-        let elements = SharedTree::new(new_document(
-            Viewport::new(393.0, 727.0),
-            PageConfig::default(),
-        ));
+        let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
         let listener_names = Arc::new(SharedListenerNames::default());
-        let runtime = MainThreadRuntime::new(elements.clone(), Arc::clone(&listener_names), || {})
-            .expect("the benchmark realm boots");
+        let runtime = MainThreadRuntime::new(
+            document,
+            Arc::clone(&listener_names),
+            Arc::new(FrameHub::default()),
+            || {},
+        )
+        .expect("the benchmark realm boots");
         Self {
             runtime,
-            elements,
             listener_names,
         }
     }
@@ -82,26 +82,28 @@ impl ScriptHarness {
             .expect("the benchmark step runs");
     }
 
-    /// Computes the path an event on `target` would take, as the presenting
-    /// side does while it holds the document.
+    /// Computes the path an event on `target` would take, as delivery does
+    /// on the document's owner thread.
     ///
     /// # Panics
     ///
-    /// Panics if the document is not in its slot or the id is malformed.
+    /// Panics if the id is malformed.
     #[must_use]
-    pub fn event_path(&self, target: u64) -> EventSteps {
+    pub fn event_path(&mut self, target: u64) -> EventSteps {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
-        self.document().event_steps(target, true, true)
+        self.runtime
+            .with_document(|document| document.event_steps(target, true, true))
     }
 
-    /// Delivers one already-computed path, reporting whether anything ran.
+    /// Delivers one routed event to `target`, reporting whether anything ran.
     ///
     /// # Panics
     ///
-    /// Panics if a listener throws.
-    pub fn dispatch(&mut self, path: &EventSteps, name: &Arc<str>, detail: &Arc<str>) -> bool {
+    /// Panics if a listener throws or the id is malformed.
+    pub fn dispatch(&mut self, target: u64, name: &Arc<str>, detail: &Arc<str>) -> bool {
+        let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
         self.runtime
-            .dispatch_event(path, name, detail)
+            .dispatch_event(target, name, detail)
             .expect("the benchmark dispatch completes")
     }
 
@@ -117,24 +119,22 @@ impl ScriptHarness {
     ///
     /// # Panics
     ///
-    /// Panics if the document is not in its slot or the id is malformed.
+    /// Panics if the id is malformed.
     #[must_use]
-    pub fn inline_style(&self, node: u64) -> Option<String> {
+    pub fn inline_style(&mut self, node: u64) -> Option<String> {
         let node = dom::NodeId::from_bits(node).expect("a well-formed packed handle");
-        self.document()
-            .get(node)
-            .and_then(|node| node.attribute("style"))
-            .map(str::to_owned)
+        self.with_document(|document| {
+            document
+                .get(node)
+                .and_then(|node| node.attribute("style"))
+                .map(str::to_owned)
+        })
     }
 
     /// The page root's handle, as `__CreatePage` returns it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the document is not in its slot.
     #[must_use]
-    pub fn page(&self) -> u64 {
-        self.document().document_element().id().to_bits()
+    pub fn page(&mut self) -> u64 {
+        self.with_document(|document| document.document_element().id().to_bits())
     }
 
     /// The handle of a child by position, so a benchmark can name a node by
@@ -142,32 +142,33 @@ impl ScriptHarness {
     ///
     /// # Panics
     ///
-    /// Panics if the document is not in its slot or the id is malformed.
+    /// Panics if the id is malformed.
     #[must_use]
-    pub fn child(&self, parent: u64, index: usize) -> Option<u64> {
+    pub fn child(&mut self, parent: u64, index: usize) -> Option<u64> {
         let parent = dom::NodeId::from_bits(parent).expect("a well-formed packed handle");
-        let document = self.document();
-        let children = document.get(parent)?.child_ids();
-        children.get(index).map(|child| child.to_bits())
+        self.with_document(|document| {
+            let children = document.get(parent)?.child_ids();
+            children.get(index).copied().map(dom::NodeId::to_bits)
+        })
     }
 
     /// How many children an element has.
     ///
     /// # Panics
     ///
-    /// Panics if the document is not in its slot or the id is malformed.
+    /// Panics if the id is malformed.
     #[must_use]
-    pub fn child_count(&self, parent: u64) -> usize {
+    pub fn child_count(&mut self, parent: u64) -> usize {
         let parent = dom::NodeId::from_bits(parent).expect("a well-formed packed handle");
-        self.document()
-            .get(parent)
-            .map_or(0, |node| node.child_ids().len())
+        self.with_document(|document| {
+            document
+                .get(parent)
+                .map_or(0, |node| node.child_ids().len())
+        })
     }
 
-    fn document(&self) -> impl std::ops::Deref<Target = LynxDocument> + '_ {
-        self.elements
-            .try_tree()
-            .expect("no batch is open between benchmark steps")
+    fn with_document<R>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> R) -> R {
+        self.runtime.with_document(probe)
     }
 }
 

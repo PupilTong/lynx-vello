@@ -12,36 +12,35 @@
 //! supplied at attach time, while lifecycle completion wakes the host event
 //! loop through [`EventRequester`].
 //!
-//! # Two threads, one hand-off slot
+//! # One committer, one compositor
 //!
-//! The document has exactly one holder at any instant; [`SharedTree`] is
-//! the slot it changes hands through:
+//! The document exists in exactly one place for its whole life: the
+//! view-owned Lynx main thread — the same thread that runs the `QuickJS`
+//! realm. [`LynxView::new`] builds the document, applies every source to it,
+//! and hands it to that thread, which boots the entry module and then serves
+//! commands forever; the presenting side never holds it. Every later change
+//! reaches the document as a [`MainCommand`] on the one ordered channel
+//! (input targets, scrolls, resizes, `BeginFrame` animation ticks). That
+//! thread is the only committer: `__FlushElementTree` commits, and every
+//! served command round ends in a commit when anything went stale.
 //!
-//! - **The Lynx main thread** (view-owned, started by [`LynxView::new`]): the core's `QuickJS`
-//!   realm and its job loop. A batch's first `bobcat` call takes the document out of the slot;
-//!   every call after that is a plain `&mut` mutation with no synchronization at all;
-//!   `__FlushElementTree` runs the style + layout commit on the taken document, puts it back, and
-//!   asks for a frame. Locks are touched twice per batch, not per call.
-//! - **The presenting side** (the thread the embedder calls the engine from — its OS event loop):
-//!   input routing, scrolling, frame production (paint-order build + scene encode), GPU submission,
-//!   and present. It borrows the document from the slot non-blockingly: an empty slot (a batch is
-//!   open) or a busy slot lock means re-present the retained target, buffer the input, and retry
-//!   next frame.
+//! What crosses back is one immutable [`CommittedFrame`] per commit,
+//! published into the [`FrameHub`]. The presenting side is a pure compositor
+//! over it: `notify_redraw` acquires the swap-chain image, uploads the
+//! latest published scene if it is new, and presents — no document, no lock,
+//! no skipped frames. Input is routed against the published frame too: hit
+//! testing and gesture recognition read its tables (the scroll-slot table
+//! carries the containing-block scroll chain exactly so recognition needs no
+//! live styles), scroll consumption is arbitrated against published bounds,
+//! and what must reach the realm crosses as plain data.
 //!
-//! The slot is occupied while the script merely computes, which is the
-//! point: a long JavaScript task between batches does not stop the
-//! presenting side from scrolling — target resolution reads the retained
-//! paint order, the offset lands in the document, and the next frame is
-//! produced and presented without the script's cooperation. A half-applied
-//! batch is unobservable while the slot is empty; once an evaluation ends
-//! the document is back, and whatever state it holds may present — the
-//! same visibility web-core has, where the browser paints the live DOM on
-//! its own schedule regardless of `__FlushElementTree`.
-//!
-//! The law: the main thread waits only on its own batch boundaries; the
-//! presenting side never waits on the main thread; the frame's vsync wait —
-//! the swap-chain acquire that opens a window frame — happens outside any
-//! borrow, so it blocks no one.
+//! The law: the main thread waits only on its own channel; the presenting
+//! side never waits on the main thread (the offscreen `tick`, an embedder's
+//! synthetic vsync, is the deliberate exception — it is a synchronization
+//! point, not a frame path); the frame's vsync wait — the swap-chain acquire
+//! that opens a window frame — happens before any of the frame's work, so
+//! the clock reading everything resolves against belongs to the frame being
+//! shown.
 
 mod graphics;
 
@@ -50,25 +49,24 @@ mod animation_tests;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::{Deref, DerefMut};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
+use std::time::Duration;
 
-use dom::event::EventSteps;
-use dom::input::InputEvent;
+use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
 use dom::scroll::ScrollAxes;
 use dom::vello::peniko::Color;
-use dom::{FontBlob, ImageStore};
+use dom::{CommittedFrame, FontBlob, HitTarget, ImageStore, NodeId, Vector2D};
 use http::HeaderMap;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
@@ -353,99 +351,90 @@ impl FrameRequester for NoWindow {
     }
 }
 
-/// The hand-off slot for the one document.
-#[derive(Clone)]
-pub(crate) struct SharedTree {
-    slot: Arc<Mutex<Option<LynxDocument>>>,
+/// How long a synchronizing caller waits for the main thread to service a
+/// `BeginFrame` before proceeding with whatever frame is published. Generous,
+/// because it only ever expires when the main thread is wedged or gone.
+const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The published-frame slot the committer fills and the compositor reads,
+/// plus the `BeginFrame` service marker a synchronizing caller waits on.
+#[derive(Debug, Default)]
+pub(crate) struct FrameHub {
+    latest: Mutex<Option<Arc<CommittedFrame>>>,
+    begin_frames: Mutex<BeginFrameLedger>,
+    begin_frame_signal: Condvar,
 }
 
-impl fmt::Debug for SharedTree {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("SharedTree").finish_non_exhaustive()
-    }
+#[derive(Debug, Default)]
+struct BeginFrameLedger {
+    serviced: u64,
+    /// The committer thread has exited — no queued `BeginFrame` will ever be
+    /// serviced, so waiters must stop waiting.
+    committer_gone: bool,
 }
 
-impl SharedTree {
-    #[must_use]
-    pub(crate) fn new(tree: LynxDocument) -> Self {
-        Self {
-            slot: Arc::new(Mutex::new(Some(tree))),
-        }
-    }
-
-    /// Blocking borrow for setup and observation.
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn tree(&self) -> TreeGuard<'_> {
-        let guard = self.lock();
-        assert!(
-            guard.is_some(),
-            "a PAPI batch is open: the Lynx main thread holds the tree"
-        );
-        TreeGuard(guard)
-    }
-
-    pub(crate) fn try_tree(&self) -> Option<TreeGuard<'_>> {
-        match self.slot.try_lock() {
-            Ok(guard) if guard.is_some() => Some(TreeGuard(guard)),
-            Ok(_) | Err(TryLockError::WouldBlock) => None,
-            Err(TryLockError::Poisoned(error)) => {
-                panic!("the tree slot is poisoned: {error}")
-            }
-        }
-    }
-
-    /// Takes the tree out to open a batch. Blocks only for the presenting
-    /// side's brief borrows — the script may wait on the engine.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a batch is already open: there is one main thread.
-    pub(crate) fn take(&self) -> LynxDocument {
-        self.lock()
-            .take()
-            .expect("the tree was already taken: only one batch can be open")
-    }
-
-    /// Puts the tree back at a batch boundary.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slot is occupied: the tree cannot be returned twice.
-    pub(crate) fn put(&self, tree: LynxDocument) {
-        let mut guard = self.lock();
-        assert!(
-            guard.is_none(),
-            "the slot is occupied: the tree was returned twice"
-        );
-        *guard = Some(tree);
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Option<LynxDocument>> {
-        self.slot
+impl FrameHub {
+    pub(crate) fn publish(&self, frame: Arc<CommittedFrame>) {
+        *self
+            .latest
             .lock()
-            .unwrap_or_else(|error| panic!("the tree slot is poisoned: {error}"))
+            .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}")) = Some(frame);
     }
-}
 
-/// A borrow of the document from its slot.
-#[derive(Debug)]
-pub(crate) struct TreeGuard<'a>(MutexGuard<'a, Option<LynxDocument>>);
-
-impl Deref for TreeGuard<'_> {
-    type Target = LynxDocument;
-    fn deref(&self) -> &LynxDocument {
-        self.0
-            .as_ref()
-            .expect("a TreeGuard is only built over an occupied slot")
+    pub(crate) fn latest(&self) -> Option<Arc<CommittedFrame>> {
+        self.latest
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}"))
+            .clone()
     }
-}
 
-impl DerefMut for TreeGuard<'_> {
-    fn deref_mut(&mut self) -> &mut LynxDocument {
-        self.0
-            .as_mut()
-            .expect("a TreeGuard is only built over an occupied slot")
+    /// The committer marks a serviced `BeginFrame`, after the commit that
+    /// round produced was published.
+    pub(crate) fn note_begin_frame_serviced(&self, seq: u64) {
+        let mut ledger = self
+            .begin_frames
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}"));
+        ledger.serviced = seq.max(ledger.serviced);
+        self.begin_frame_signal.notify_all();
+    }
+
+    /// The committer thread is exiting — normally or by panic. Wakes every
+    /// waiter so a `BeginFrame` sent while the thread was still alive does
+    /// not sleep out its whole timeout.
+    pub(crate) fn note_committer_gone(&self) {
+        let mut ledger = self
+            .begin_frames
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}"));
+        ledger.committer_gone = true;
+        self.begin_frame_signal.notify_all();
+    }
+
+    /// Waits until the committer has serviced `BeginFrame` number `seq`, or
+    /// the committer is gone, or the timeout passes (a wedged committer must
+    /// not hang the caller). Returns whether the frame was serviced.
+    fn wait_begin_frame(&self, seq: u64, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut ledger = self
+            .begin_frames
+            .lock()
+            .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}"));
+        while ledger.serviced < seq {
+            if ledger.committer_gone {
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .begin_frame_signal
+                .wait_timeout(ledger, deadline - now)
+                .unwrap_or_else(|error| panic!("the frame hub is poisoned: {error}"));
+            ledger = guard;
+        }
+        true
     }
 }
 
@@ -476,25 +465,148 @@ fn emit_detail(event: &EmitEvent) -> String {
     }
 }
 
-/// The document facts the router asks for while deciding, answered from the
-/// borrowed tree and the shared listener-name table.
-struct EngineRouterHost<'a> {
-    tree: &'a LynxDocument,
+/// The facts the router asks for while deciding, answered from the published
+/// frame's scroll-slot table and the shared listener-name table. No document
+/// anywhere.
+struct FrameRouterHost<'a> {
+    frame: Option<&'a CommittedFrame>,
     listener_names: &'a SharedListenerNames,
 }
 
-impl RouterHost for EngineRouterHost<'_> {
-    fn nearest_user_scrollable(&self, node: dom::NodeId, axes: ScrollAxes) -> Option<dom::NodeId> {
-        self.tree.nearest_user_scrollable(node, axes)
+impl RouterHost for FrameRouterHost<'_> {
+    fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
+        let frame = self.frame?;
+        let slot = frame.nearest_user_scrollable(from.scroll, axes)?;
+        Some(frame.scroll_slots()[slot as usize].node)
     }
 
-    fn contains_node(&self, node: dom::NodeId) -> bool {
-        self.tree.get(node).is_some()
+    fn contains_node(&self, node: NodeId) -> bool {
+        self.frame
+            .is_some_and(|frame| frame.slot_of(node).is_some())
     }
 
     fn has_listener(&self, name: &str) -> bool {
         self.listener_names.contains(name)
     }
+}
+
+/// The presenting side's between-commits view of scroll offsets, for
+/// consumption arbitration only.
+///
+/// A drag's tap suppression must be decided as the moves arrive, but the
+/// authoritative offsets live in the document and come back with the next
+/// commit. So each consumed step is accumulated here against the published
+/// frame's bounds; when a frame whose own offset equals an intent publishes,
+/// the intent has served its purpose and drops, and the rest re-clamp to the
+/// new bounds — so a drag held at a clamp is not re-granted headroom the
+/// document has already refused.
+#[derive(Debug, Default)]
+struct ScrollIntents {
+    offsets: HashMap<NodeId, Vector2D<f32>>,
+    /// The commit epoch last rebased against, so one publish rebases once.
+    epoch: Option<u64>,
+}
+
+impl ScrollIntents {
+    fn rebase(&mut self, frame: &CommittedFrame) {
+        if self.epoch == Some(frame.epoch()) {
+            return;
+        }
+        self.epoch = Some(frame.epoch());
+        self.offsets.retain(|node, offset| {
+            let Some(slot) = frame.slot_of(*node) else {
+                return false;
+            };
+            let slot = &frame.scroll_slots()[slot as usize];
+            *offset = Vector2D::new(
+                clamp_scroll_axis(offset.x, slot.max_offset.x),
+                clamp_scroll_axis(offset.y, slot.max_offset.y),
+            );
+            // Equal means the frame's own offsets already contain this
+            // intent — the `ScrollBy` that moved it has been committed.
+            *offset != slot.offset
+        });
+    }
+
+    /// Mirrors `Document::scroll_chain` against published geometry: chained,
+    /// clamped, per-axis masked. Returns whether anything was consumed — the
+    /// fact the gesture router claims a sequence on.
+    fn chain(&mut self, frame: &CommittedFrame, from: NodeId, delta: Vector2D<f32>) -> bool {
+        self.rebase(frame);
+        let slots = frame.scroll_slots();
+        let Some(start) = frame.slot_of(from) else {
+            return false;
+        };
+        let mut search = Some(start);
+        let mut remaining = delta;
+        let mut consumed = false;
+        loop {
+            let axes = ScrollAxes {
+                x: remaining.x != 0.0,
+                y: remaining.y != 0.0,
+            };
+            let Some(index) = frame.nearest_user_scrollable(search, axes) else {
+                break;
+            };
+            let slot = slots[index as usize];
+            let offset = self.offsets.get(&slot.node).copied().unwrap_or(slot.offset);
+            let admitted = Vector2D::new(
+                if slot.user_scrollable.x {
+                    remaining.x
+                } else {
+                    0.0
+                },
+                if slot.user_scrollable.y {
+                    remaining.y
+                } else {
+                    0.0
+                },
+            );
+            let applied = Vector2D::new(
+                clamp_scroll_axis(offset.x + admitted.x, slot.max_offset.x),
+                clamp_scroll_axis(offset.y + admitted.y, slot.max_offset.y),
+            );
+            let step = applied - offset;
+            if step != Vector2D::zero() {
+                self.offsets.insert(slot.node, applied);
+                remaining -= step;
+                consumed = true;
+            }
+            if remaining == Vector2D::zero() {
+                break;
+            }
+            search = slot.parent;
+            if search.is_none() {
+                break;
+            }
+        }
+        consumed
+    }
+}
+
+fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, max)
+    } else {
+        0.0
+    }
+}
+
+/// Routes one input event against the published frame: the topmost
+/// hit-testable element and its scroll slot, or nothing before the first
+/// commit or outside every element.
+fn route_published(frame: Option<&CommittedFrame>, event: &InputEvent) -> Option<HitTarget> {
+    let finite = event.position.x.is_finite()
+        && event.position.y.is_finite()
+        && match event.kind {
+            InputKind::Wheel { delta } => delta.x.is_finite() && delta.y.is_finite(),
+            _ => true,
+        };
+    if !finite {
+        debug_assert!(false, "host input events must be finite, got {event:?}");
+        return None;
+    }
+    frame?.hit(event.position)
 }
 
 /// Everything one view is built from.
@@ -580,18 +692,42 @@ struct EntryModule {
     url: String,
 }
 
-/// What the presenting side asks one view's script thread to do after the
-/// entry module has finished booting.
+/// One change on its way to the document's owner — the Lynx main thread.
 ///
-/// Only plain data crosses: node ids, an event name, and a JSON payload. The
-/// realm and document both stay where they are.
-enum ScriptCommand {
-    /// Deliver one already-computed event path to the realm's listeners.
+/// Only plain data crosses: node ids, geometry, a clock reading. The realm
+/// and the document both stay where they are. The channel is ordered, so the
+/// order decisions are made in is the order they apply in.
+pub(crate) enum MainCommand {
+    /// Deliver one routed event: the main thread validates the target is
+    /// still live, computes the propagation path, and walks the realm's
+    /// listeners.
     DispatchEvent {
-        steps: EventSteps,
+        target: NodeId,
         name: Arc<str>,
         detail: Arc<str>,
     },
+    /// Drive the user-agent scroll chain from `from` by `delta` CSS px. The
+    /// presenting side already arbitrated consumption against published
+    /// bounds; the document's own chain is the authority the next commit
+    /// publishes.
+    ScrollBy { from: NodeId, delta: Vector2D<f32> },
+    /// New device metrics from the embedder.
+    Resize {
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    },
+    /// One animation tick: advance the timeline to `now` and commit what
+    /// changed. `seq` is acknowledged through
+    /// [`FrameHub::note_begin_frame_serviced`] so a synchronizing caller can
+    /// wait for this specific tick.
+    BeginFrame { now: f64, seq: u64 },
+    /// The installed store's answers changed; repaint with them.
+    NoteImagesChanged,
+    /// Run a closure against the document, for tests that observe main-thread
+    /// state from the outside.
+    #[cfg(test)]
+    Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
 }
 
 /// A running Lynx view: the shared element tree, input routing, frame
@@ -608,14 +744,21 @@ enum ScriptCommand {
 ///
 /// Deliberately `!Send`: it lives on the thread the embedder calls it from.
 pub struct LynxView<'window, W: Window = NoWindow> {
-    /// The only `Sender`, dropped first so this view's detached script thread
-    /// wakes and releases its owner-thread-bound realm. It must never be cloned
-    /// anywhere the script thread can reach: a surviving clone would leave the
-    /// receiver parked with a live realm forever.
-    script_commands: mpsc::Sender<ScriptCommand>,
-    elements: SharedTree,
+    /// The only `Sender` of the main thread's command channel, dropped first
+    /// so this view's detached main thread wakes and releases its
+    /// owner-thread-bound realm. It must never be cloned anywhere the script
+    /// thread can reach: a surviving clone would leave the receiver parked
+    /// with a live realm forever.
+    commands: mpsc::Sender<MainCommand>,
+    /// A test-only view built without its main thread, so tests can hold
+    /// the command receiver and observe the decision→command seam directly.
+    #[cfg(test)]
+    detached: bool,
+    /// The published-frame hub the committer fills and the compositor
+    /// reads from.
+    hub: Arc<FrameHub>,
     /// The store the paint walk reads, installed once at construction and
-    /// held here too so reaching it never waits on a script batch.
+    /// held here too so async loaders reach it without the document.
     image_store: Arc<dyn dom::ImageStore>,
     viewport: Viewport,
     frame_size: FrameSize,
@@ -625,25 +768,24 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     /// thread always observes the currently attached target rather than a
     /// startup-time snapshot.
     frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
-    /// Buffered input, each event stamped with the clock reading at arrival —
-    /// so a sequence drained late, behind a busy document, keeps its real
-    /// duration.
-    pending_input: VecDeque<(InputEvent, f64)>,
-    pending_resize: Option<(f32, f32, f32)>,
     /// The gesture recognizer: turns routed pointer sequences into Lynx's
-    /// `tap`/`longpress` beside the raw pointer events.
+    /// `tap`/`longpress` beside the raw pointer events, and decides the
+    /// user-agent scroll — all against the published frame.
     gesture: GestureRouter,
     /// Which event names the realm has listeners for; written by the script
     /// thread's registration members, read when gestures resolve.
     listener_names: Arc<SharedListenerNames>,
     /// The animation timeline. Engine-owned and concrete: an embedder cannot
     /// name one, drive one, or observe this one. Sampled once per frame, on
-    /// the presenting thread, after the swap-chain acquire has waited.
+    /// the presenting thread; the main thread receives the reading inside
+    /// `BeginFrame`.
     clock: FrameClock,
-    /// Whether the last frame left an animation running. Read without the
-    /// document, because the frame request has to be made whether or not the
-    /// slot was free this frame.
-    animating: bool,
+    /// Between-commits scroll offsets, for consumption arbitration.
+    scroll_intents: ScrollIntents,
+    /// The commit epoch last composed to the offscreen target.
+    composed: Option<u64>,
+    /// `BeginFrame` sequence numbers, acknowledged through the hub.
+    begin_frames_sent: u64,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -656,7 +798,6 @@ impl<W: Window> fmt::Debug for LynxView<'_, W> {
             .debug_struct("LynxView")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
-            .field("pending_input", &self.pending_input.len())
             .finish_non_exhaustive()
     }
 }
@@ -719,7 +860,8 @@ impl<'window, W: Window> LynxView<'window, W> {
         )?)
     }
 
-    /// Hands the finished document to its Lynx main thread.
+    /// Hands the finished document to its Lynx main thread — the document's
+    /// owner for the rest of its life.
     ///
     /// The half of [`Self::new`] that touches no IO, so the crate's own tests
     /// can start a view without a resource provider.
@@ -730,47 +872,89 @@ impl<'window, W: Window> LynxView<'window, W> {
         event_requester: Arc<dyn EventRequester>,
         entry: EntryModule,
     ) -> Result<Self, EngineError> {
-        // Captured before the document goes into its slot and never replaced,
-        // so reading it never has to borrow the document.
+        // Captured before the document leaves for its owner thread, so async
+        // loaders reach the store without it.
         let image_store = Arc::clone(document.image_store());
-        let (message_sender, messages) = mpsc::channel();
-        let elements = SharedTree::new(document);
-        let listener_names = Arc::new(SharedListenerNames::default());
-        let frames: Arc<Mutex<Option<Arc<W::Frames>>>> = Arc::new(Mutex::new(None));
-        let script_commands = spawn_main_thread(
+        let (view, receiver, events) =
+            Self::with_channel(image_store, viewport, frame_size, event_requester);
+        spawn_main_thread(
+            document,
             entry,
-            elements.clone(),
-            Arc::clone(&listener_names),
-            Arc::clone(&frames),
-            EngineEventSender {
-                sender: message_sender,
-                requester: event_requester,
-            },
+            receiver,
+            Arc::clone(&view.hub),
+            Arc::clone(&view.listener_names),
+            Arc::clone(&view.frames),
+            events,
         )?;
-        Ok(Self {
-            script_commands,
-            elements,
+        #[cfg(test)]
+        let view = {
+            let mut view = view;
+            view.detached = false;
+            view
+        };
+        Ok(view)
+    }
+
+    /// The view minus its main thread: every field constructed, the command
+    /// receiver and the thread's event sender handed back instead of served.
+    fn with_channel(
+        image_store: Arc<dyn dom::ImageStore>,
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<dyn EventRequester>,
+    ) -> (Self, mpsc::Receiver<MainCommand>, EngineEventSender) {
+        let (message_sender, messages) = mpsc::channel();
+        let (commands, command_receiver) = mpsc::channel();
+        let view = Self {
+            commands,
+            #[cfg(test)]
+            detached: true,
+            hub: Arc::new(FrameHub::default()),
             image_store,
             viewport,
             frame_size,
             messages,
             output: Output::None,
-            frames,
-            pending_input: VecDeque::new(),
-            pending_resize: None,
+            frames: Arc::new(Mutex::new(None)),
             gesture: GestureRouter::default(),
-            listener_names,
+            listener_names: Arc::new(SharedListenerNames::default()),
             clock: FrameClock::new(),
-            animating: false,
+            scroll_intents: ScrollIntents::default(),
+            composed: None,
+            begin_frames_sent: 0,
             thread_bound: PhantomData,
-        })
+        };
+        let events = EngineEventSender {
+            sender: message_sender,
+            requester: event_requester,
+        };
+        (view, command_receiver, events)
     }
 
-    /// A blocking borrow of the document, for observation and setup.
-    #[must_use]
+    /// Runs `probe` against the main-thread document over the command
+    /// channel, waiting for the answer. `None` on a detached test view or
+    /// after the main thread is gone.
     #[cfg(test)]
-    pub(crate) fn elements(&self) -> TreeGuard<'_> {
-        self.elements.tree()
+    pub(crate) fn probe_document<R: Send + 'static>(
+        &mut self,
+        probe: impl FnOnce(&mut LynxDocument) -> R + Send + 'static,
+    ) -> Option<R> {
+        if self.detached {
+            return None;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.commands
+            .send(MainCommand::Probe(Box::new(move |document| {
+                let _ = sender.send(probe(document));
+            })))
+            .ok()?;
+        receiver.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    /// The latest published frame, for tests that assert on commits.
+    #[cfg(test)]
+    pub(crate) fn published_frame(&self) -> Option<Arc<CommittedFrame>> {
+        self.hub.latest()
     }
 
     /// Whether the engine owes the timeline another frame: the last produced
@@ -783,32 +967,17 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// long-press never resolves.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        self.animating || self.gesture.needs_frame()
-    }
-
-    /// Advances the document's animations to `now` — the frame's one clock
-    /// reading, the same instant its gesture deadlines resolve against.
-    ///
-    /// Runs on the presenting thread, inside the borrow that is about to
-    /// produce the frame: no script, no DOM mutation, and no hand-off to the
-    /// Lynx main thread. An animation of a property that does not affect
-    /// geometry re-cascades only the elements it touches and never reaches
-    /// layout.
-    ///
-    /// Takes the reading rather than `&self` so it can run while the attached
-    /// output is mutably borrowed.
-    fn advance_animations(now: f64, tree: &mut LynxDocument) -> bool {
-        tree.advance_animations(now).needs_next_frame
+        self.hub
+            .latest()
+            .is_some_and(|frame| frame.animations_active())
+            || self.gesture.needs_frame()
     }
 
     /// Loads one image through the installed store and repaints with it.
     ///
-    /// Reaching the store and invalidating the scene each need the document
-    /// for the length of one call, and neither holds it across the await, so
-    /// a load cannot deadlock a script batch. Both are refused with
-    /// [`EngineError::ResourceUpdateBusy`] while a batch owns the document:
-    /// refused before the fetch nothing has started, and refused after it the
-    /// pixels are already in the store, so asking again costs no transfer.
+    /// The store is reached without the document; the repaint is one queued
+    /// command to the document's owner thread, so a load can never collide
+    /// with a script batch.
     pub async fn load_image(&mut self, source: &str) -> Result<(), LynxViewError> {
         let store = self.image_store();
         store
@@ -818,7 +987,7 @@ impl<'window, W: Window> LynxView<'window, W> {
                 image_source: source.to_owned(),
                 message: error.to_string(),
             })?;
-        self.note_images_changed()?;
+        self.note_images_changed();
         Ok(())
     }
 
@@ -828,9 +997,6 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// The pixels reach the screen on the first frame after they land only if
     /// something else invalidates the scene; a prefetch is a warm-up, not a
     /// load. Use [`Self::load_image`] for an image the next frame must draw.
-    ///
-    /// Refused with [`EngineError::ResourceUpdateBusy`] while a script batch
-    /// owns the document, because reaching the store needs it.
     pub fn prefetch_image(&self, source: &str) {
         self.image_store().prefetch(source);
     }
@@ -849,64 +1015,51 @@ impl<'window, W: Window> LynxView<'window, W> {
 
     /// Rebuilds the next frame's scene because the installed store's answers
     /// changed, and asks for that frame.
-    fn note_images_changed(&mut self) -> Result<(), EngineError> {
-        let Some(mut tree) = self.elements.try_tree() else {
-            return Err(EngineError::ResourceUpdateBusy);
-        };
-        tree.note_images_changed();
-        drop(tree);
+    fn note_images_changed(&mut self) {
+        let _ = self.commands.send(MainCommand::NoteImagesChanged);
         self.refresh();
-        Ok(())
     }
 
-    fn drain_deferred(
-        pending_resize: &mut Option<(f32, f32, f32)>,
-        pending_input: &mut VecDeque<(InputEvent, f64)>,
-        gesture: &mut GestureRouter,
-        listener_names: &SharedListenerNames,
-        tree: &mut LynxDocument,
-        commands: &mpsc::Sender<ScriptCommand>,
-    ) {
-        if let Some((width, height, ratio)) = pending_resize.take() {
-            tree.set_viewport(width, height);
-            tree.set_device_pixel_ratio(ratio);
-        }
+    /// Routes one host input event on the presenting side: hit test and
+    /// gesture recognition against the published frame, scroll and dispatch
+    /// decisions queued as commands at once. Nothing buffers and nothing
+    /// blocks.
+    pub fn dispatch_input(&mut self, event: InputEvent) {
+        let at = self.clock.now_seconds();
+        let published = self.hub.latest();
+        let frame = published.as_deref();
+        let target = route_published(frame, &event);
         let mut decisions = Vec::new();
-        while let Some((event, at)) = pending_input.pop_front() {
-            // Routing is a pure read; `dom` has no default-action machinery.
-            // Deciding the user-agent scroll belongs to the router, and the
-            // event's `default_prevented` — the embedder's suppression seam —
-            // is honored there by deciding no scroll.
-            let target = tree.route_input(event);
-            gesture.on_input(
-                &event,
-                target,
-                at,
-                &EngineRouterHost {
-                    tree,
-                    listener_names,
-                },
-                &mut decisions,
-            );
-            Self::execute_decisions(&mut decisions, gesture, listener_names, tree, commands);
+        {
+            let host = FrameRouterHost {
+                frame,
+                listener_names: &self.listener_names,
+            };
+            self.gesture
+                .on_input(&event, target, at, &host, &mut decisions);
+        }
+        self.execute_decisions(&mut decisions, published.as_ref());
+        // A commit requests its own frame; an armed long-press deadline
+        // needs the frame clock even when nothing is dirty.
+        if self.gesture.needs_frame() {
+            self.refresh();
         }
     }
 
     /// Executes the router's decisions in order — which is the delivery
     /// order, because the command channel is ordered.
-    ///
-    /// A scroll decision drives the document's scroll chain, reporting real
-    /// consumption back so the router can claim the sequence. An emit
-    /// decision goes to path construction and the channel; a target freed
-    /// since the decision formed resolves to nothing rather than a path —
-    /// checked here because `event_steps` asserts liveness.
     fn execute_decisions(
+        &mut self,
         decisions: &mut Vec<InputDecision>,
-        gesture: &mut GestureRouter,
-        listener_names: &SharedListenerNames,
-        tree: &mut LynxDocument,
-        commands: &mpsc::Sender<ScriptCommand>,
+        published: Option<&Arc<CommittedFrame>>,
     ) {
+        let Self {
+            commands,
+            gesture,
+            scroll_intents,
+            listener_names,
+            ..
+        } = self;
         for decision in decisions.drain(..) {
             match decision {
                 InputDecision::Scroll {
@@ -914,45 +1067,29 @@ impl<'window, W: Window> LynxView<'window, W> {
                     from,
                     delta,
                 } => {
-                    if tree.get(from).is_none() {
-                        continue;
-                    }
-                    if tree.scroll_chain(from, delta).is_some()
-                        && let Some(pointer) = pointer
-                    {
+                    // Arbitrate against published bounds now, apply
+                    // authoritatively on the main thread; the commit that
+                    // publishes the moved offsets reconciles the two.
+                    let consumed =
+                        published.is_some_and(|frame| scroll_intents.chain(frame, from, delta));
+                    let _ = commands.send(MainCommand::ScrollBy { from, delta });
+                    if consumed && let Some(pointer) = pointer {
                         gesture.note_scroll_consumed(pointer);
                     }
                 }
                 InputDecision::Emit(event) => {
-                    // Asked before anything is built. The shared name table
-                    // the gesture router already consults answers "does the
-                    // realm want this at all?", so an event no card listens
-                    // for — every `pointermove` of every card that does not
-                    // track the pointer — costs one lookup instead of a path
-                    // walk, two allocations and a cross-thread wakeup.
-                    //
-                    // The table is what the realm has registered *so far*, and
-                    // the two threads run: a listener that registers a new
-                    // name while this event is being routed does not receive
-                    // it, where an unfiltered channel would have queued the
-                    // event behind the registration and delivered it. The
-                    // window is one routing pass wide and closes as soon as
-                    // the registering call returns. This is the same
-                    // presenting-side staleness `long_press_consumed` already
-                    // reads the table under; see `docs/tracking/dom-events.md`.
+                    // Asked before anything is built: an event no listener
+                    // registered for costs one lookup instead of a
+                    // cross-thread wakeup. The table is what the realm has
+                    // registered *so far*; the staleness window is one
+                    // routing pass wide (see docs/tracking/dom-events.md).
                     if !listener_names.contains(event.name) {
                         continue;
                     }
-                    if tree.get(event.target).is_none() {
-                        continue;
-                    }
-                    // Built here, where the document is already borrowed, so
-                    // the thread that owns the realm never has to take it to
-                    // find out who an event reaches. The router decided the
-                    // type and the target; the chain is this module's.
-                    let steps = tree.event_steps(event.target, true, true);
-                    let _ = commands.send(ScriptCommand::DispatchEvent {
-                        steps,
+                    // Liveness is the main thread's to check, where the
+                    // document is; a freed target resolves to nothing there.
+                    let _ = commands.send(MainCommand::DispatchEvent {
+                        target: event.target,
                         name: Arc::from(event.name),
                         detail: Arc::from(emit_detail(&event)),
                     });
@@ -963,51 +1100,20 @@ impl<'window, W: Window> LynxView<'window, W> {
 
     /// Resolves gesture deadlines against the frame clock — the per-frame
     /// half of the router, beside the per-event half in
-    /// [`Self::drain_deferred`]. While a deadline is armed the router's
+    /// [`Self::dispatch_input`]. While a deadline is armed the router's
     /// [`GestureRouter::needs_frame`] keeps frames coming, the same
     /// continuation contract running animations use.
-    fn service_gesture_clock(
-        gesture: &mut GestureRouter,
-        listener_names: &SharedListenerNames,
-        tree: &mut LynxDocument,
-        commands: &mpsc::Sender<ScriptCommand>,
-        now: f64,
-    ) {
+    fn service_gesture_clock(&mut self, now: f64) {
+        let published = self.hub.latest();
         let mut decisions = Vec::new();
-        gesture.on_tick(
-            now,
-            &EngineRouterHost {
-                tree,
-                listener_names,
-            },
-            &mut decisions,
-        );
-        Self::execute_decisions(&mut decisions, gesture, listener_names, tree, commands);
-    }
-
-    /// Routes one host input event on the presenting side.
-    pub fn dispatch_input(&mut self, event: InputEvent) {
-        let at = self.clock.now_seconds();
-        self.pending_input.push_back((event, at));
-        let needs_frame = match self.elements.try_tree() {
-            Some(mut tree) => {
-                Self::drain_deferred(
-                    &mut self.pending_resize,
-                    &mut self.pending_input,
-                    &mut self.gesture,
-                    &self.listener_names,
-                    &mut tree,
-                    &self.script_commands,
-                );
-                tree.needs_render()
-            }
-            None => false,
-        };
-        // An armed long-press deadline needs the frame clock even when the
-        // document is visually clean — the frame is what resolves it.
-        if needs_frame || self.gesture.needs_frame() {
-            self.refresh();
+        {
+            let host = FrameRouterHost {
+                frame: published.as_deref(),
+                listener_names: &self.listener_names,
+            };
+            self.gesture.on_tick(now, &host, &mut decisions);
         }
+        self.execute_decisions(&mut decisions, published.as_ref());
     }
 
     /// Applies new device metrics from the embedder.
@@ -1025,22 +1131,11 @@ impl<'window, W: Window> LynxView<'window, W> {
         if !size_changed && !scale_changed {
             return Ok(());
         }
-        match self.elements.try_tree() {
-            Some(mut tree) => {
-                // A deferred resize is already in `self.viewport`, so the
-                // comparisons above describe the document only while nothing
-                // is pending — and taking it stops `drain_deferred` from
-                // replaying a superseded viewport over this one.
-                let deferred = self.pending_resize.take().is_some();
-                if size_changed || deferred {
-                    tree.set_viewport(width, height);
-                }
-                if scale_changed || deferred {
-                    tree.set_device_pixel_ratio(device_pixel_ratio);
-                }
-            }
-            None => self.pending_resize = Some((width, height, device_pixel_ratio)),
-        }
+        let _ = self.commands.send(MainCommand::Resize {
+            width,
+            height,
+            device_pixel_ratio,
+        });
         self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         self.frame_size = next_size;
         self.refresh();
@@ -1118,12 +1213,41 @@ impl<'window, W: Window> LynxView<'window, W> {
         Ok(())
     }
 
-    /// Relays the OS's "the window wants a frame" fact.
+    /// Sends one `BeginFrame` when the latest committed frame left an
+    /// animation running (or `always`), returning the sequence number sent.
+    /// The main thread serves from construction, so there is no window in
+    /// which a tick has nobody to answer it.
+    fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
+        // A detached test view has nobody serving; a queued `BeginFrame`
+        // would only stall a synchronizing caller.
+        #[cfg(test)]
+        if self.detached {
+            return None;
+        }
+        let animating = self
+            .hub
+            .latest()
+            .is_some_and(|frame| frame.animations_active());
+        if !animating && !always {
+            return None;
+        }
+        self.begin_frames_sent += 1;
+        let seq = self.begin_frames_sent;
+        self.commands
+            .send(MainCommand::BeginFrame { now, seq })
+            .ok()
+            .map(|()| seq)
+    }
+
+    /// Relays the OS's "the window wants a frame" fact: acquire, compose the
+    /// latest published frame, present. The document is never touched — the
+    /// main thread is asked for the next animation tick, and what is already
+    /// published is composed.
     pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
         let frames = self.frame_requester();
-        let Output::Window(graphics) = &mut self.output else {
+        if !matches!(self.output, Output::Window(_)) {
             return Ok(());
-        };
+        }
         let size = self.frame_size;
         let frames = frames
             .as_deref()
@@ -1133,77 +1257,68 @@ impl<'window, W: Window> LynxView<'window, W> {
         // then belongs to the frame that image will display — including the
         // clock reading, which would otherwise be a whole swap-chain pipeline
         // stale by the time the pixels it produced reach the screen.
-        let acquired = match graphics.acquire(size)? {
-            FrameAcquisition::Ready(acquired) => acquired,
-            FrameAcquisition::Retry => {
-                frames.request_frame();
-                return Ok(());
-            }
-        };
-        // The frame's one instant. Gesture deadlines and animations resolve
-        // against the same reading, so nothing in a frame disagrees about
-        // when the frame is.
-        let now = self.clock.now_seconds();
-        let tree_was_busy = match self.elements.try_tree() {
-            Some(mut tree) => {
-                Self::drain_deferred(
-                    &mut self.pending_resize,
-                    &mut self.pending_input,
-                    &mut self.gesture,
-                    &self.listener_names,
-                    &mut tree,
-                    &self.script_commands,
-                );
-                Self::service_gesture_clock(
-                    &mut self.gesture,
-                    &self.listener_names,
-                    &mut tree,
-                    &self.script_commands,
-                    now,
-                );
-                // Input and resize first, then the timeline, so a scroll and
-                // an animation compose in one defined order under one truth;
-                // then render, so an animation that just ended relayouts in
-                // the same frame it ended.
-                self.animating = Self::advance_animations(now, &mut tree);
-                let produced = tree.render();
-                if produced || !graphics.rendered_at(size) {
-                    graphics.render_to_target(&tree.scene(), size)?;
+        let acquired = {
+            let Output::Window(graphics) = &mut self.output else {
+                unreachable!("the window output was just checked");
+            };
+            match graphics.acquire(size)? {
+                FrameAcquisition::Ready(acquired) => acquired,
+                FrameAcquisition::Retry => {
+                    frames.request_frame();
+                    return Ok(());
                 }
-                false
             }
-            None => true,
         };
-        // A script/DOM batch can take the slot after requesting this frame.
-        // Keep the request alive so event-driven embedders retry instead of
-        // losing the only wakeup while presenting the retained target.
-        if tree_was_busy || self.animating || self.gesture.needs_frame() {
+        // The frame's one instant. Gesture deadlines resolve against the same
+        // reading the committer's animations will, so nothing in a frame
+        // disagrees about when the frame is.
+        let now = self.clock.now_seconds();
+        self.service_gesture_clock(now);
+        let _ = self.begin_frame(now, false);
+        let latest = self.hub.latest();
+        if let Some(frame) = &latest {
+            self.scroll_intents.rebase(frame);
+        }
+        let animating = latest
+            .as_ref()
+            .is_some_and(|frame| frame.animations_active());
+        let Output::Window(graphics) = &mut self.output else {
+            unreachable!("the window output was just checked");
+        };
+        if let Some(frame) = &latest
+            && graphics.needs_paint(frame.epoch(), size)
+        {
+            graphics.render_to_target(frame.scene(), size, frame.epoch())?;
+        }
+        if animating || self.gesture.needs_frame() {
             frames.request_frame();
         }
-        // Nothing rendered at this size means the tree was busy — a rendering
-        // pass always leaves one — so the request above already fired and the
-        // acquired image goes back unpresented, to be re-taken next frame.
+        // Nothing rendered at this size means nothing was ever published for
+        // it — the acquired image goes back unpresented, to be re-taken once
+        // a commit lands (which requests its own frame).
         if graphics.rendered_at(size) {
             graphics.present(acquired, frames);
+        } else {
+            frames.request_frame();
         }
         Ok(())
     }
 
     /// Captures the current frame as pixels — synchronously, from whichever
-    /// target is attached. Renders first if the document changed and the
-    /// tree is available; a tree busy mid-commit (window mode) captures the
-    /// retained frame, which is what the window is showing.
+    /// target is attached: what is published is what the window is showing.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
+        let latest = self.hub.latest();
         match &mut self.output {
             Output::None => Err(EngineError::NoDrawTarget),
             Output::Offscreen(gpu) => {
-                if let Some(mut tree) = self.elements.try_tree()
-                    && tree.render()
+                if let Some(frame) = &latest
+                    && self.composed != Some(frame.epoch())
                 {
-                    gpu.render_frame(&tree.scene(), size.width, size.height, Color::WHITE)
+                    gpu.render_frame(frame.scene(), size.width, size.height, Color::WHITE)
                         .map_err(|error| EngineError::Gpu(error.to_string()))?;
+                    self.composed = Some(frame.epoch());
                 }
                 let pixels = gpu
                     .read_pixels()
@@ -1211,11 +1326,10 @@ impl<'window, W: Window> LynxView<'window, W> {
                 Ok(Screenshot { size, pixels })
             }
             Output::Window(graphics) => {
-                if let Some(mut tree) = self.elements.try_tree() {
-                    let produced = tree.render();
-                    if produced || !graphics.rendered_at(size) {
-                        graphics.render_to_target(&tree.scene(), size)?;
-                    }
+                if let Some(frame) = &latest
+                    && graphics.needs_paint(frame.epoch(), size)
+                {
+                    graphics.render_to_target(frame.scene(), size, frame.epoch())?;
                 }
                 if !graphics.rendered_at(size) {
                     return Err(EngineError::Render(
@@ -1229,20 +1343,23 @@ impl<'window, W: Window> LynxView<'window, W> {
     }
 }
 
-/// Starts the one Lynx main thread a view has.
+/// Starts the one Lynx main thread a view has, handing it the document it
+/// will own for the rest of its life.
 ///
-/// It creates the `QuickJS` realm and the main-thread runtime over the shared
-/// document, registers `entry` at its resolved URL, runs Bobcat's ESM boot
-/// module, and then serves the command channel for as long as the view holds
-/// its sender.
+/// The thread creates the `QuickJS` realm and the main-thread runtime over
+/// the document, registers `entry` at its resolved URL, runs Bobcat's ESM
+/// boot module, and then serves the command channel for as long as the view
+/// holds its sender. A failed boot reports and ends the thread — the view is
+/// over, exactly as when a source failed to load.
 fn spawn_main_thread<F: FrameRequester>(
+    document: LynxDocument,
     entry: EntryModule,
-    elements: SharedTree,
+    commands: mpsc::Receiver<MainCommand>,
+    hub: Arc<FrameHub>,
     listener_names: Arc<SharedListenerNames>,
     frame_requesters: Arc<Mutex<Option<Arc<F>>>>,
     events: EngineEventSender,
-) -> Result<mpsc::Sender<ScriptCommand>, EngineError> {
-    let (command_sender, commands) = mpsc::channel::<ScriptCommand>();
+) -> Result<(), EngineError> {
     ThreadBuilder::new()
         .name("bobcat-main".to_owned())
         .spawn(move || {
@@ -1250,13 +1367,18 @@ fn spawn_main_thread<F: FrameRequester>(
             install_script_panic_hook();
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
             set_script_panic_reporter(Some(events.clone()));
-            let on_flush = Arc::clone(&frame_requesters);
+            let publish_hub = Arc::clone(&hub);
+            let wake_frames = Arc::clone(&frame_requesters);
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut runtime =
-                    crate::runtime::MainThreadRuntime::new(elements, listener_names, move || {
-                        request_current_frame(&on_flush);
-                    })
-                    .map_err(MainThreadError::into_script_error)?;
+                let mut runtime = crate::runtime::MainThreadRuntime::new(
+                    document,
+                    listener_names,
+                    publish_hub,
+                    move || {
+                        request_current_frame(&wake_frames);
+                    },
+                )
+                .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&entry.source, &entry.url)
                     .map_err(MainThreadError::into_script_error)?;
@@ -1281,60 +1403,110 @@ fn spawn_main_thread<F: FrameRequester>(
             request_current_frame(&frame_requesters);
 
             if let Some(runtime) = runtime {
-                serve_script_commands(runtime, &commands, &events, &frame_requesters);
+                // The document's own pipeline is let-it-crash: a style,
+                // layout, or paint assertion ends this thread. Report it
+                // first — the embedder's pump loop is its fatal-error
+                // channel, and a silent exit would freeze the view on the
+                // last published frame with no explanation.
+                let served = catch_unwind(AssertUnwindSafe(|| {
+                    serve_main_commands(runtime, &commands, &events, &hub);
+                }));
+                if let Err(payload) = served {
+                    events.send(EngineEvent::ScriptRunError(platform_script_error(format!(
+                        "the Lynx main thread panicked while serving commands: {}",
+                        panic_payload(payload.as_ref())
+                    ))));
+                }
             }
+            hub.note_committer_gone();
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
             set_script_panic_reporter(None);
         })
-        .map(|_thread| command_sender)
+        .map(|_thread| ())
         .map_err(|error| EngineError::Thread {
             name: "script",
             message: error.to_string(),
         })
 }
 
-/// Serves the command channel for as long as the engine holds its sender.
+/// How many commands one served round may apply before it must commit.
 ///
-/// The realm now outlives its entry module. The channel closing is the only
-/// shutdown signal this thread needs or gets, and every command queued is
-/// delivered, in order.
-fn serve_script_commands<F: FrameRequester>(
+/// A round coalesces a burst — pointer moves, a resize storm — into one
+/// commit, but a producer that stays ahead of the consumer (a slow listener
+/// under sustained input) must not defer publishing indefinitely: the cap
+/// closes the round so scrolls applied so far reach the screen and queued
+/// `BeginFrame`s are acknowledged.
+const MAX_COMMANDS_PER_ROUND: usize = 16;
+
+/// Serves the command channel for as long as the view holds its sender.
+///
+/// The realm outlives its entry module; the channel closing is the only
+/// shutdown signal this thread needs or gets. Commands are applied in order;
+/// each round drains what is already queued, up to
+/// [`MAX_COMMANDS_PER_ROUND`], and ends with one commit when anything went
+/// stale, published before any `BeginFrame` in the round is acknowledged.
+fn serve_main_commands(
     mut runtime: crate::runtime::MainThreadRuntime,
-    commands: &mpsc::Receiver<ScriptCommand>,
+    commands: &mpsc::Receiver<MainCommand>,
     events: &EngineEventSender,
-    frames: &Mutex<Option<Arc<F>>>,
+    hub: &FrameHub,
 ) {
-    // Matched exhaustively rather than destructured in the `while let`: a
-    // second `ScriptCommand` variant must fail to compile here, not quietly
-    // end the loop.
-    while let Ok(command) = commands.recv() {
-        match command {
-            ScriptCommand::DispatchEvent {
-                steps,
-                name,
-                detail,
-            } => {
-                // A panicking listener must not take the realm with it: the
-                // next event still has to arrive.
-                let delivered = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.dispatch_event(&steps, &name, &detail)
-                }));
-                match delivered {
-                    // A listener may have changed the tree without flushing,
-                    // and the presenting thread asked `needs_render` before
-                    // any of them ran — so nothing else will notice.
-                    Ok(Ok(true)) => request_current_frame(frames),
-                    Ok(Err(error)) => {
-                        events.send(EngineEvent::ListenerFailed(error.into_script_error()));
-                    }
-                    // A panic is already the crate's unspecified-state
-                    // contract, and the unwind carries no `ScriptError` to
-                    // report; the realm survives it, which is what the
-                    // `catch_unwind` is for.
-                    Ok(Ok(false)) | Err(_) => {}
-                }
+    while let Ok(first) = commands.recv() {
+        let mut serviced_begin_frame = None;
+        let mut command = Some(first);
+        let mut applied = 0usize;
+        while let Some(current) = command.take() {
+            apply_main_command(&mut runtime, current, events, &mut serviced_begin_frame);
+            applied += 1;
+            if applied >= MAX_COMMANDS_PER_ROUND {
+                break;
+            }
+            command = commands.try_recv().ok();
+        }
+        runtime.commit_if_dirty();
+        if let Some(seq) = serviced_begin_frame {
+            hub.note_begin_frame_serviced(seq);
+        }
+    }
+}
+
+fn apply_main_command(
+    runtime: &mut crate::runtime::MainThreadRuntime,
+    command: MainCommand,
+    events: &EngineEventSender,
+    serviced_begin_frame: &mut Option<u64>,
+) {
+    match command {
+        MainCommand::DispatchEvent {
+            target,
+            name,
+            detail,
+        } => {
+            // A panicking listener must not take the realm with it: the next
+            // event still has to arrive.
+            let delivered = catch_unwind(AssertUnwindSafe(|| {
+                runtime.dispatch_event(target, &name, &detail)
+            }));
+            // A panic is already the crate's unspecified-state contract, and
+            // the unwind carries no `ScriptError` to report; the realm
+            // survives it, which is what the `catch_unwind` is for.
+            if let Ok(Err(error)) = delivered {
+                events.send(EngineEvent::ListenerFailed(error.into_script_error()));
             }
         }
+        MainCommand::ScrollBy { from, delta } => runtime.apply_scroll(from, delta),
+        MainCommand::Resize {
+            width,
+            height,
+            device_pixel_ratio,
+        } => runtime.apply_resize(width, height, device_pixel_ratio),
+        MainCommand::BeginFrame { now, seq } => {
+            runtime.begin_frame(now);
+            *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
+        }
+        MainCommand::NoteImagesChanged => runtime.note_images_changed(),
+        #[cfg(test)]
+        MainCommand::Probe(probe) => runtime.with_document(probe),
     }
 }
 
@@ -1549,44 +1721,40 @@ impl OffscreenLynxView {
     pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
         let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
         self.output = Output::Offscreen(Box::new(gpu));
+        self.composed = None;
         Ok(())
     }
 
-    /// Renders one frame to the offscreen target if the document changed (or unconditionally with
-    /// `force`), returning whether a frame was submitted.
+    /// Renders one frame to the offscreen target if a newer commit was
+    /// published (or unconditionally with `force`), returning whether a frame
+    /// was submitted.
+    ///
+    /// This is the embedder's synthetic vsync, and deliberately also its one
+    /// synchronization point: the main thread is sent a `BeginFrame` and
+    /// waited on, so the composed pixels deterministically include every
+    /// command queued before this call. A windowed frame never waits; this
+    /// offscreen path trades that law for reproducibility.
     pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
-        let Output::Offscreen(gpu) = &mut self.output else {
+        if !matches!(self.output, Output::Offscreen(_)) {
             return Err(EngineError::NoDrawTarget);
-        };
-        let Some(mut tree) = self.elements.try_tree() else {
+        }
+        let now = self.clock.now_seconds();
+        self.service_gesture_clock(now);
+        if let Some(seq) = self.begin_frame(now, true) {
+            let _ = self.hub.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
+        }
+        let Some(frame) = self.hub.latest() else {
             return Ok(false);
         };
-        Self::drain_deferred(
-            &mut self.pending_resize,
-            &mut self.pending_input,
-            &mut self.gesture,
-            &self.listener_names,
-            &mut tree,
-            &self.script_commands,
-        );
-        // One reading for the whole frame, as in `notify_redraw`. An
-        // offscreen target has no swap chain to wait on, so there is nothing
-        // for the sample to sit behind.
-        let now = self.clock.now_seconds();
-        Self::service_gesture_clock(
-            &mut self.gesture,
-            &self.listener_names,
-            &mut tree,
-            &self.script_commands,
-            now,
-        );
-        self.animating = Self::advance_animations(now, &mut tree);
-        let changed = tree.render();
-        if !changed && !force {
+        self.scroll_intents.rebase(&frame);
+        if self.composed == Some(frame.epoch()) && !force {
             return Ok(false);
         }
+        let Output::Offscreen(gpu) = &mut self.output else {
+            unreachable!("the offscreen output was just checked");
+        };
         gpu.render_frame(
-            &tree.scene(),
+            frame.scene(),
             self.frame_size.width,
             self.frame_size.height,
             Color::WHITE,
@@ -1594,69 +1762,57 @@ impl OffscreenLynxView {
         .map_err(|error| EngineError::Gpu(error.to_string()))?;
         gpu.wait_idle()
             .map_err(|error| EngineError::Gpu(error.to_string()))?;
+        self.composed = Some(frame.epoch());
         Ok(true)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::sync::{Arc, mpsc};
 
-    use super::{EngineEvent, EntryModule, OffscreenLynxView, ScriptCommand, frame_size};
-    use crate::tree::{LynxDocument, Viewport, new_document};
+    use super::{MainCommand, frame_size};
+    use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
     /// A phone-shaped document, ready for a main thread to be started over it.
     fn document() -> LynxDocument {
-        new_document(
-            Viewport::new(393.0, 727.0),
-            crate::tree::PageConfig::default(),
-        )
+        new_document(Viewport::new(393.0, 727.0), PageConfig::default())
     }
 
+    /// Starts a view over `document` and `entry`, the IO-free half of
+    /// construction.
     fn view_over(
         events: Arc<dyn super::EventRequester>,
         document: LynxDocument,
         entry: &str,
     ) -> super::OffscreenLynxView {
-        super::OffscreenLynxView::start(
+        super::LynxView::start(
             document,
             Viewport::new(393.0, 727.0),
-            frame_size(393.0, 727.0, 1.0).expect("a bounded target"),
+            frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
             events,
-            EntryModule {
+            super::EntryModule {
                 source: entry.to_owned(),
-                url: "app:///entry.js".to_owned(),
+                url: "app:///main.js".to_owned(),
             },
         )
-        .expect("view")
+        .expect("the test view starts")
     }
 
-    /// An engine whose entry module has already finished, so its Lynx main
-    /// thread is parked on the command channel and the document is back in
-    /// its slot. Every view has a running main thread; a test that wants to
-    /// look at the document has to wait for that thread's boot to end.
-    fn engine() -> super::OffscreenLynxView {
-        let mut engine = view_over(Arc::new(|| {}), document(), "");
-        wait_for_boot(&mut engine);
-        engine
-    }
-
-    fn wait_for_boot(engine: &mut super::OffscreenLynxView) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            for event in engine.pump() {
-                match event {
-                    EngineEvent::ScriptFinished => return,
-                    EngineEvent::ScriptRunError(error) => {
-                        panic!("the entry module failed: {error}")
-                    }
-                    EngineEvent::ListenerFailed(_) => {}
-                }
-            }
-            assert!(Instant::now() < deadline, "the entry module did not finish");
-            std::thread::yield_now();
-        }
+    /// A view with every seam built but no main thread: the command receiver
+    /// is handed back so a test can observe the decision→command seam
+    /// directly. Probes answer `None` and `BeginFrame`s are withheld —
+    /// nobody would ever service them.
+    fn detached() -> (super::OffscreenLynxView, mpsc::Receiver<MainCommand>) {
+        let document = document();
+        let store = Arc::clone(document.image_store());
+        let (view, receiver, _events) = super::LynxView::with_channel(
+            store,
+            Viewport::new(393.0, 727.0),
+            frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+            Arc::new(|| {}),
+        );
+        (view, receiver)
     }
 
     #[test]
@@ -1671,175 +1827,127 @@ mod tests {
         assert!(error.to_string().contains("16384"));
     }
 
-    /// The store an embedder installs is the one the paint walk reads, and the
-    /// pixels reach it without a copy: the buffer identity that comes back out
-    /// of the document is the one that went in.
+    /// The store a view is built over is the one the paint walk reads, and
+    /// the pixels reach it without a copy: the buffer identity that comes
+    /// back out of the main-thread document is the one that went in.
     #[test]
     fn the_installed_image_store_is_the_one_the_document_reads() {
+        let mut document = document();
         let images = Arc::new(flashbulb::TestImages::new());
         let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
         let pixel_id = pixels.data.id();
         images.insert("app:///pixel.png", pixels);
-        let mut document = document();
         document.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
-        let mut engine = view_over(Arc::new(|| {}), document, "");
-        wait_for_boot(&mut engine);
 
-        let tree = engine.elements();
-        assert_eq!(
-            tree.image_store()
-                .peek("app:///pixel.png")
-                .expect("published source")
-                .data
-                .id(),
-            pixel_id
+        let mut view = view_over(
+            Arc::new(|| {}),
+            document,
+            "globalThis.renderPage = function () { __CreatePage('card', 0); };",
         );
-        assert!(tree.image_store().peek("app:///missing.png").is_none());
+        let (hit, miss) = view
+            .probe_document(move |tree| {
+                (
+                    tree.image_store()
+                        .peek("app:///pixel.png")
+                        .map(|image| image.data.id()),
+                    tree.image_store().peek("app:///missing.png").is_none(),
+                )
+            })
+            .expect("the main thread answers probes");
+        assert_eq!(hit, Some(pixel_id));
+        assert!(miss);
     }
 
-    /// An emit decision whose target was freed before execution must be
-    /// skipped, because `Document::event_steps` asserts liveness — the guard
-    /// is the only thing between a mid-sequence `dropElement` and a
-    /// presenting-thread panic.
+    /// An emit decision costs one name-table lookup and stops there unless a
+    /// listener exists; when it crosses, it crosses as plain data — the
+    /// target id, not a path. Liveness is the main thread's to check at
+    /// delivery.
     #[test]
-    fn an_emit_decision_for_a_freed_target_is_skipped_not_delivered() {
-        use crate::gesture::{EmitEvent, GestureRouter, InputDecision, TAP_EVENT};
+    fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
+        use crate::gesture::{EmitEvent, InputDecision, TAP_EVENT};
 
-        let engine = engine();
-        let (sender, receiver) = std::sync::mpsc::channel::<super::ScriptCommand>();
-        let mut tree = engine.elements.tree();
-        let doomed = tree.create_element("view", ());
-        tree.drop_element(doomed);
-
-        let mut decisions = vec![InputDecision::Emit(EmitEvent {
-            name: TAP_EVENT,
-            target: doomed,
-            position: dom::Point2D::new(1.0, 1.0),
-            wheel: None,
-        })];
-        let mut gesture = GestureRouter::default();
-        let names = super::SharedListenerNames::default();
-        names.note_enabled(TAP_EVENT);
-        super::OffscreenLynxView::execute_decisions(
-            &mut decisions,
-            &mut gesture,
-            &names,
-            &mut tree,
-            &sender,
-        );
-        assert!(decisions.is_empty(), "the queue is always drained");
-        assert!(
-            receiver.try_recv().is_err(),
-            "a freed target reaches no one rather than panicking the walk"
-        );
-    }
-
-    /// Repainting is the one host request that still needs the document, so
-    /// it is the only one an open batch can refuse. Reaching the store does
-    /// not: it was installed once, before the document had a second holder.
-    #[test]
-    fn a_repaint_request_reports_a_busy_script_batch() {
-        let mut engine = engine();
-        let script_tree = engine.elements.clone();
-        let tree = script_tree.take();
-
-        engine.image_store();
-        assert!(matches!(
-            engine.note_images_changed(),
-            Err(super::EngineError::ResourceUpdateBusy)
-        ));
-
-        script_tree.put(tree);
-    }
-
-    #[test]
-    fn an_open_batch_is_hidden_from_the_presenting_side() {
-        let engine = engine();
-        let script_tree = engine.elements.clone();
-
-        let mut tree = script_tree.take();
-        let page = tree.document_element().id();
-        let view = tree.create_element("view", ());
-        tree.insert_before(page, view, None);
-        assert!(
-            engine.elements.try_tree().is_none(),
-            "the presenting side cannot observe a half-applied batch"
-        );
-
-        tree.layout();
-        script_tree.put(tree);
-        assert!(engine.elements().is_connected(view));
-    }
-
-    /// An emit decision for a name nobody listens to costs a lookup and stops
-    /// there: no path is walked and nothing is queued for the thread that
-    /// owns the realm.
-    #[test]
-    fn an_event_no_listener_wants_never_crosses_to_the_script_thread() {
-        use std::sync::mpsc;
-
-        use crate::gesture::{EmitEvent, GestureRouter, InputDecision, TAP_EVENT};
-
-        let engine = engine();
-        let mut tree = engine.elements.try_tree().expect("the slot is free");
-        let page = tree.document_element().id();
-        let view = tree.create_element("view", ());
-        tree.insert_before(page, view, None);
-        tree.layout();
-
-        let (sender, receiver) = mpsc::channel();
-        let mut gesture = GestureRouter::default();
-        let names = super::SharedListenerNames::default();
-        let mut emit = |names: &super::SharedListenerNames, tree: &mut LynxDocument| {
+        let (mut view, commands) = detached();
+        // The permanent page element's packed handle, as script would name it.
+        let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
+        let emit = |view: &mut super::OffscreenLynxView| {
             let mut decisions = vec![InputDecision::Emit(EmitEvent {
                 name: TAP_EVENT,
-                target: view,
+                target,
                 position: dom::Point2D::new(1.0, 1.0),
                 wheel: None,
             })];
-            OffscreenLynxView::execute_decisions(
-                &mut decisions,
-                &mut gesture,
-                names,
-                tree,
-                &sender,
-            );
+            view.execute_decisions(&mut decisions, None);
+            assert!(decisions.is_empty(), "the queue is always drained");
         };
 
-        emit(&names, &mut tree);
+        emit(&mut view);
         assert!(
-            receiver.try_recv().is_err(),
+            commands.try_recv().is_err(),
             "an empty listener table sends nothing"
         );
 
-        names.note_enabled("pointerup");
-        emit(&names, &mut tree);
+        view.listener_names.note_enabled("pointerup");
+        emit(&mut view);
         assert!(
-            receiver.try_recv().is_err(),
+            commands.try_recv().is_err(),
             "a listener on another name sends nothing"
         );
 
-        names.note_enabled(TAP_EVENT);
-        emit(&names, &mut tree);
-        let ScriptCommand::DispatchEvent { name, .. } =
-            receiver.try_recv().expect("the listened-for name crosses");
+        view.listener_names.note_enabled(TAP_EVENT);
+        emit(&mut view);
+        let command = commands.try_recv().expect("the listened-for name crosses");
+        let MainCommand::DispatchEvent {
+            name, target: sent, ..
+        } = command
+        else {
+            panic!("an emit decision becomes a dispatch command");
+        };
         assert_eq!(name.as_ref(), TAP_EVENT);
+        assert_eq!(sent, target);
 
         // And the count is a count: the last removal is what closes the name.
-        names.note_disabled(TAP_EVENT);
-        emit(&names, &mut tree);
+        view.listener_names.note_disabled(TAP_EVENT);
+        emit(&mut view);
         assert!(
-            receiver.try_recv().is_err(),
+            commands.try_recv().is_err(),
             "the removed registration stops the crossing"
         );
     }
 
+    /// A scroll decision for a remote document crosses as a command carrying
+    /// the raw delta; the main thread's own chain is the authority.
     #[test]
-    fn the_entry_module_a_view_is_built_with_mutates_the_shared_tree() {
-        use std::sync::mpsc;
+    fn a_scroll_decision_reaches_the_main_thread_as_a_command() {
+        use crate::gesture::InputDecision;
+
+        let (mut view, commands) = detached();
+        let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
+        let mut decisions = vec![InputDecision::Scroll {
+            pointer: None,
+            from: node,
+            delta: dom::Vector2D::new(0.0, 5.0),
+        }];
+        view.execute_decisions(&mut decisions, None);
+        let MainCommand::ScrollBy { from, delta } =
+            commands.try_recv().expect("the scroll crosses")
+        else {
+            panic!("a scroll decision becomes a scroll command");
+        };
+        assert_eq!(from, node);
+        assert!((delta.y - 5.0).abs() < f32::EPSILON);
+    }
+
+    /// Boot's final flush is a commit: by the time `ScriptFinished` is
+    /// pumped, a frame is published and the document — owned by the main
+    /// thread — answers probes.
+    #[test]
+    fn a_booted_view_commits_and_publishes() {
+        use std::time::Duration;
+
+        use super::EngineEvent;
 
         let (wake_sender, wake_receiver) = mpsc::channel();
-        let mut engine = view_over(
+        let mut view = view_over(
             Arc::new(move || {
                 let _ = wake_sender.send(());
             }),
@@ -1857,7 +1965,7 @@ mod tests {
         wake_receiver
             .recv_timeout(Duration::from_secs(5))
             .expect("script completion must wake the host event loop");
-        let finished = engine
+        let finished = view
             .pump()
             .into_iter()
             .find(|event| {
@@ -1869,22 +1977,26 @@ mod tests {
             .expect("the event must be enqueued before the wakeup");
         assert!(matches!(finished, EngineEvent::ScriptFinished));
 
-        let elements = engine.elements();
-        let page = elements.document_element().id();
-        let views = elements
-            .get(page)
-            .expect("the page is live")
-            .child_ids()
-            .to_vec();
-        assert_eq!(views.len(), 2, "the boot script appends two views");
-        assert!(
-            views.iter().all(|&view| elements.is_connected(view)),
-            "both views are attached"
-        );
-        assert!(
-            elements.rounded_layout(page).is_some(),
-            "the boot's final flush laid the page out"
-        );
+        let frame = view
+            .published_frame()
+            .expect("the boot's flush published a committed frame");
+        assert!(frame.epoch() > 0);
+
+        let (views, connected, laid_out) = view
+            .probe_document(|tree| {
+                let page = tree.document_element().id();
+                let views = tree
+                    .get(page)
+                    .expect("the page is live")
+                    .child_ids()
+                    .to_vec();
+                let connected = views.iter().all(|&view| tree.is_connected(view));
+                (views.len(), connected, tree.rounded_layout(page).is_some())
+            })
+            .expect("the main thread answers probes");
+        assert_eq!(views, 2, "the boot script appends two views");
+        assert!(connected, "both views are attached");
+        assert!(laid_out, "the boot's final flush laid the page out");
     }
 }
 
@@ -1903,23 +2015,24 @@ mod event_loop_tests {
         dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
     }
 
-    /// Builds a view over `source` and waits for its entry module to finish,
-    /// leaving the Lynx main thread parked on its command channel.
+    /// Boots a script and waits for it to finish, leaving the main thread
+    /// parked on its command channel with the boot's frame published.
     fn booted(source: &str) -> OffscreenLynxView {
-        let mut engine = OffscreenLynxView::start(
-            crate::tree::new_document(
-                crate::tree::Viewport::new(393.0, 727.0),
-                crate::tree::PageConfig::default(),
-            ),
+        let document = crate::tree::new_document(
             crate::tree::Viewport::new(393.0, 727.0),
-            super::frame_size(393.0, 727.0, 1.0).expect("a bounded target"),
+            crate::tree::PageConfig::default(),
+        );
+        let mut engine = super::LynxView::start(
+            document,
+            crate::tree::Viewport::new(393.0, 727.0),
+            super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
             Arc::new(|| {}),
             super::EntryModule {
                 source: source.to_owned(),
                 url: "app:///main.js".to_owned(),
             },
         )
-        .expect("view");
+        .expect("the test view starts");
 
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1928,6 +2041,10 @@ mod event_loop_tests {
                 .into_iter()
                 .any(|event| matches!(event, crate::EngineEvent::ScriptFinished))
             {
+                assert!(
+                    engine.published_frame().is_some(),
+                    "boot's flush publishes before ScriptFinished is pumped"
+                );
                 return engine;
             }
             assert!(Instant::now() < deadline, "the entry module did not finish");
@@ -1935,31 +2052,23 @@ mod event_loop_tests {
         }
     }
 
-    #[test]
-    fn independent_views_can_own_live_script_threads_in_one_process() {
-        let source = r"
-            globalThis.renderPage = function () {
-              const page = __CreatePage('card', 0);
-              __AppendElement(page, __CreateView(0));
-              __FlushElementTree();
-            };
-        ";
-
-        let first = booted(source);
-        let second = booted(source);
-
-        for engine in [&first, &second] {
-            let tree = engine
-                .elements
-                .try_tree()
-                .expect("each live view retains its own document");
-            assert_eq!(tree.document_element().child_ids().len(), 1);
-        }
+    /// One attribute of one node, read on the main thread through a probe.
+    fn attribute_of(
+        engine: &mut OffscreenLynxView,
+        node: u64,
+        name: &'static str,
+    ) -> Option<String> {
+        engine
+            .probe_document(move |tree| {
+                tree.get(node_id(node))
+                    .and_then(|live| live.attribute(name).map(str::to_owned))
+            })
+            .flatten()
     }
 
-    /// The whole loop: input arrives on this thread, is routed and given its
-    /// default action here, and its path is delivered to a listener on the
-    /// thread that owns the realm.
+    /// The whole loop: input arrives on this thread, is routed against the
+    /// published frame and decided here, and delivered to a listener on the
+    /// thread that owns the realm and the document.
     #[test]
     fn a_host_input_event_reaches_a_listener_in_the_realm() {
         let mut engine = booted(
@@ -1971,8 +2080,8 @@ mod event_loop_tests {
               globalThis.held = [page, view];
               __SetInlineStyles(view, 'width:200px;height:200px');
               __AddEventListener(view, 'pointerdown', (event) => {
-                // Observable from the presenting side, and proof the document
-                // was free while a listener ran.
+                // Observable from the presenting side, and proof delivery ran
+                // where the document is.
                 __SetAttribute(view, 'seen', event.type + ':' + event.detail.x);
               }, {});
               __FlushElementTree();
@@ -1980,12 +2089,6 @@ mod event_loop_tests {
             ",
         );
 
-        // Routing reads the rendered frame, so one has to exist first.
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
         engine.dispatch_input(InputEvent::pointer(
             Point2D::new(10.0, 10.0),
             1,
@@ -1993,16 +2096,11 @@ mod event_loop_tests {
             PointerPhase::Down,
         ));
 
-        // Delivery is asynchronous by construction: this thread queued a path
-        // and moved on.
+        // Delivery is asynchronous by construction: this thread queued a
+        // command and moved on.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            // Non-blocking, like the presenting side's own borrow: an empty
-            // slot means the script thread is mid-delivery, not an error.
-            let seen = engine.elements.try_tree().and_then(|tree| {
-                tree.get(node_id(3))
-                    .and_then(|node| node.attribute("seen").map(str::to_owned))
-            });
+            let seen = attribute_of(&mut engine, 3, "seen");
             if seen.as_deref() == Some("pointerdown:10") {
                 return;
             }
@@ -2014,12 +2112,10 @@ mod event_loop_tests {
         }
     }
 
-    /// A listener that throws must not take the document with it. Building the
-    /// event object alone takes it — the realm reads two ids to fill in
-    /// `target` and `currentTarget` — so a bare `throw` used to strand it in
-    /// the hand-off slot with nothing able to put it back.
+    /// A listener that throws must not take the loop with it: the failure is
+    /// reported rather than swallowed, and the next event still delivers.
     #[test]
-    fn a_throwing_listener_leaves_the_document_where_the_presenter_can_find_it() {
+    fn a_throwing_listener_keeps_the_loop_alive_and_is_reported() {
         let mut engine = booted(
             r"
             globalThis.renderPage = function () {
@@ -2027,9 +2123,11 @@ mod event_loop_tests {
               const view = __CreateView(0);
               __AppendElement(page, view);
               globalThis.held = [page, view];
+              globalThis.count = 0;
               __SetInlineStyles(view, 'width:200px;height:200px');
               __AddEventListener(view, 'pointerdown', () => {
-                __SetAttribute(view, 'seen', 'yes');
+                count += 1;
+                __SetAttribute(view, 'seen', String(count));
                 throw new Error('a listener may fail');
               }, {});
               __FlushElementTree();
@@ -2037,11 +2135,6 @@ mod event_loop_tests {
             ",
         );
 
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
         engine.dispatch_input(InputEvent::pointer(
             Point2D::new(10.0, 10.0),
             1,
@@ -2049,9 +2142,6 @@ mod event_loop_tests {
             PointerPhase::Down,
         ));
 
-        // The listener ran, threw, and the document still came back — and the
-        // failure is reported rather than swallowed, which is the only way an
-        // embedder can see its own handler fail.
         let mut reported = false;
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -2059,11 +2149,8 @@ mod event_loop_tests {
                 matches!(event, crate::EngineEvent::ListenerFailed(error)
                     if error.message.contains("a listener may fail"))
             });
-            let seen = engine.elements.try_tree().and_then(|tree| {
-                tree.get(node_id(3))
-                    .and_then(|node| node.attribute("seen").map(str::to_owned))
-            });
-            if seen.as_deref() == Some("yes") && reported {
+            let seen = attribute_of(&mut engine, 3, "seen");
+            if seen.as_deref() == Some("1") && reported {
                 break;
             }
             assert!(
@@ -2073,12 +2160,24 @@ mod event_loop_tests {
             std::thread::yield_now();
         }
 
-        // And the view still works: a second event routes and is delivered.
-        engine
-            .elements
-            .try_tree()
-            .expect("a thrown listener must not wedge the view")
-            .render();
+        // And the loop still works: a second event routes and is delivered.
+        engine.dispatch_input(InputEvent::pointer(
+            Point2D::new(10.0, 10.0),
+            1,
+            PointerKind::Touch,
+            PointerPhase::Down,
+        ));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if attribute_of(&mut engine, 3, "seen").as_deref() == Some("2") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "a thrown listener must not wedge delivery"
+            );
+            std::thread::yield_now();
+        }
     }
 
     /// A node with no registration must not cost a trip into the realm, and a
@@ -2098,11 +2197,6 @@ mod event_loop_tests {
             ",
         );
 
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
         engine.dispatch_input(InputEvent::pointer(
             Point2D::new(10.0, 10.0),
             1,
@@ -2111,19 +2205,10 @@ mod event_loop_tests {
         ));
 
         std::thread::sleep(Duration::from_millis(50));
-        assert!(
-            engine
-                .elements
-                .try_tree()
-                .expect("nothing was delivered, so the slot is free")
-                .get(node_id(3))
-                .expect("the view is live")
-                .attribute("seen")
-                .is_none()
-        );
+        assert!(attribute_of(&mut engine, 3, "seen").is_none());
     }
 
-    /// The gesture suite's page: one 200×200 view whose listeners append
+    /// The gesture suite's page: one 200x200 view whose listeners append
     /// `type:x` to a `log` attribute. The placeholder line opts a variant
     /// into a `longpress` registration.
     const GESTURE_PAGE: &str = r"
@@ -2164,13 +2249,10 @@ mod event_loop_tests {
     /// the wait by showing up in the actual value. The deadline is generous
     /// because the whole suite's realm boots share the machine with this
     /// spin.
-    fn wait_for_log<W: super::Window>(engine: &mut super::LynxView<'_, W>, expected: &str) {
+    fn wait_for_log(engine: &mut OffscreenLynxView, expected: &str) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let log = engine.elements.try_tree().and_then(|tree| {
-                tree.get(node_id(3))
-                    .and_then(|node| node.attribute("log").map(str::to_owned))
-            });
+            let log = attribute_of(engine, 3, "log");
             if log.as_deref() == Some(expected) {
                 return;
             }
@@ -2187,12 +2269,6 @@ mod event_loop_tests {
     #[test]
     fn a_quick_release_delivers_tap_to_the_realm() {
         let mut engine = booted(&gesture_page(false));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
         engine.dispatch_input(touch(1, PointerPhase::Up, 12.0));
         wait_for_log(&mut engine, "tap:12");
@@ -2204,12 +2280,6 @@ mod event_loop_tests {
     #[test]
     fn travel_beyond_the_tap_slop_suppresses_the_tap() {
         let mut engine = booted(&gesture_page(false));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
         engine.dispatch_input(touch(1, PointerPhase::Move, 100.0));
         engine.dispatch_input(touch(1, PointerPhase::Up, 100.0));
@@ -2224,12 +2294,6 @@ mod event_loop_tests {
     #[test]
     fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
         let mut engine = booted(&gesture_page(true));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
         engine.clock.pin(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
@@ -2247,19 +2311,27 @@ mod event_loop_tests {
     #[test]
     fn a_long_hold_without_longpress_listener_still_taps() {
         let mut engine = booted(&gesture_page(false));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
         engine.clock.pin(0.6);
         engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
         wait_for_log(&mut engine, "tap:10");
     }
 
-    /// A scrollable page: the 200×200 view scrolls a 1000px-tall child, and
+    /// Input processed after the deadline resolves the deadline first: the
+    /// decision order is the delivery order on the ordered channel, so
+    /// `longpress` precedes the release that follows it.
+    #[test]
+    fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
+        let mut engine = booted(&gesture_page(true));
+        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
+        engine.clock.pin(0.6);
+        engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
+        engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
+        engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
+        wait_for_log(&mut engine, "longpress:10,tap:30");
+    }
+
+    /// A scrollable page: the 200x200 view scrolls a 1000px-tall child, and
     /// its `tap` listener logs `type:x` exactly as the gesture page does.
     const SCROLLING_GESTURE_PAGE: &str = r"
         globalThis.renderPage = function () {
@@ -2281,21 +2353,22 @@ mod event_loop_tests {
         };
         ";
 
+    fn scroll_offset_of(engine: &mut OffscreenLynxView, node: u64) -> dom::Vector2D<f32> {
+        engine
+            .probe_document(move |tree| tree.scroll_offset(node_id(node)))
+            .expect("the main thread answers probes")
+    }
+
     /// A drag the user-agent scroll consumed is the claim that suppresses
-    /// `tap` — end to end, through the real drag recognizer's
-    /// real consumption rather than an injected flag. The drag travels
-    /// 30px: past `dom`'s 8px drag slop so it scrolls, inside the 50px tap
-    /// slop so the claim is the only suppressor. The fence tap at another x
-    /// pins that the suppressed one never crossed the channel.
+    /// `tap` — end to end: recognition against the published scroll-slot
+    /// table, consumption arbitrated against published bounds, the scroll
+    /// applied authoritatively on the main thread. The drag travels 30px:
+    /// past the 8px drag slop so it scrolls, inside the 50px tap slop so the
+    /// claim is the only suppressor. The fence tap at another x pins that
+    /// the suppressed one never crossed the channel.
     #[test]
     fn a_scroll_consuming_drag_suppresses_the_tap() {
         let mut engine = booted(SCROLLING_GESTURE_PAGE);
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(InputEvent::pointer(
             Point2D::new(100.0, 100.0),
             1,
@@ -2318,13 +2391,9 @@ mod event_loop_tests {
         engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
         wait_for_log(&mut engine, "tap:150");
 
-        // The router's scroll decision drove the document: 30px of travel
-        // minus the 8px drag slop moved the scroller 22px.
-        let offset = engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .scroll_offset(node_id(3));
+        // The router's scroll decision drove the document's chain: 30px of
+        // travel minus the 8px drag slop moved the scroller 22px.
+        let offset = scroll_offset_of(&mut engine, 3);
         assert!(
             (offset.y - 22.0).abs() < 0.5,
             "the drag scrolled the view, got {offset:?}"
@@ -2332,8 +2401,8 @@ mod event_loop_tests {
     }
 
     /// A wheel over scrollable content scrolls it (the router's decision,
-    /// executed against the document) and dispatches `wheel` with its delta
-    /// in the detail — in that order.
+    /// applied on the main thread) and dispatches `wheel` with its delta in
+    /// the detail — in that order.
     #[test]
     fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
         let page = SCROLLING_GESTURE_PAGE.replace(
@@ -2344,22 +2413,12 @@ mod event_loop_tests {
              }, {});",
         );
         let mut engine = booted(&page);
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(InputEvent::wheel(
             Point2D::new(100.0, 100.0),
             dom::Vector2D::new(0.0, 30.0),
         ));
         wait_for_log(&mut engine, "wheel:30");
-        let offset = engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .scroll_offset(node_id(3));
+        let offset = scroll_offset_of(&mut engine, 3);
         assert!(
             (offset.y - 30.0).abs() < 0.5,
             "the wheel scrolled the view, got {offset:?}"
@@ -2373,12 +2432,6 @@ mod event_loop_tests {
     #[test]
     fn a_stationary_hold_longpresses_on_the_frame_clock() {
         let mut engine = booted(&gesture_page(true));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
-
         engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
         assert!(
             engine.gesture.needs_frame(),
@@ -2386,19 +2439,8 @@ mod event_loop_tests {
         );
 
         engine.clock.pin(0.6);
-        {
-            let mut tree = engine
-                .elements
-                .try_tree()
-                .expect("the script thread is parked");
-            OffscreenLynxView::service_gesture_clock(
-                &mut engine.gesture,
-                &engine.listener_names,
-                &mut tree,
-                &engine.script_commands,
-                engine.clock.now_seconds(),
-            );
-        }
+        let now = engine.clock.now_seconds();
+        engine.service_gesture_clock(now);
         wait_for_log(&mut engine, "longpress:10");
         assert!(
             !engine.gesture.needs_frame(),
@@ -2406,30 +2448,24 @@ mod event_loop_tests {
         );
     }
 
-    /// Input buffered behind an open batch keeps its arrival time: a hold
-    /// whose down and release both waited out a busy document still spans
-    /// the deadline, so the drain delivers `longpress` first and suppresses
-    /// the tap — drain-time stamping would deliver a plain tap instead.
     #[test]
-    fn buffered_input_keeps_its_arrival_time_across_a_busy_batch() {
-        let mut engine = booted(&gesture_page(true));
-        engine
-            .elements
-            .try_tree()
-            .expect("the script thread is parked")
-            .render();
+    fn independent_views_can_own_live_script_threads_in_one_process() {
+        let source = r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              __AppendElement(page, __CreateView(0));
+              __FlushElementTree();
+            };
+        ";
 
-        // Open the batch state by hand: the slot is empty, input buffers.
-        let tree = engine.elements.take();
-        engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-        engine.clock.pin(0.6);
-        engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
-        engine.elements.put(tree);
+        let mut first = booted(source);
+        let mut second = booted(source);
 
-        // The next event drains the buffer under the returned document.
-        engine.clock.pin(0.61);
-        engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
-        engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
-        wait_for_log(&mut engine, "longpress:10,tap:30");
+        for engine in [&mut first, &mut second] {
+            let children = engine
+                .probe_document(|tree| tree.document_element().child_ids().len())
+                .expect("each live view retains its own document");
+            assert_eq!(children, 1);
+        }
     }
 }

@@ -10,10 +10,11 @@
 //! this module.
 //!
 //! The tick needs nothing but `&mut Document`. In the Bobcat runtime the
-//! presenting thread holds that between frames, so advancing an animation
-//! costs no script, no DOM mutation, and no round trip to the Lynx main
-//! thread; only *starting* and *stopping* an animation needs the main thread,
-//! and that rides the style flush it already runs. Elements whose animated
+//! document's owner thread runs it — the Lynx main thread once the script
+//! starts, on a per-frame `BeginFrame` command that carries the presenting
+//! side's clock reading — so advancing an animation costs no script and no
+//! DOM mutation; starting and stopping an animation rides the style flush
+//! the same thread already runs. Elements whose animated
 //! properties do not affect geometry never reach layout either, because the
 //! harvest only calls `invalidate_layout` for damage that
 //! [`StyleDamage::needs_relayout`] reports.
@@ -181,6 +182,14 @@ impl<T: Sync> Document<T> {
         let hinted = self.step_animation_states(now);
         if hinted.is_empty() {
             self.sync_animation_state();
+            // The timeline was active on entry; if this step ended it, the
+            // idle fact must reach the next committed frame even though no
+            // style moved — the frame's animation flag is itself visual
+            // state, and a stale `true` would keep the compositor asking
+            // for animation ticks forever.
+            if !self.animations().is_active() {
+                self.note_visual_mutation();
+            }
             return AnimationTick::default();
         }
 
@@ -190,7 +199,9 @@ impl<T: Sync> Document<T> {
         // animations, so what the timeline owns is only settled afterwards.
         self.sync_animation_state();
         tick.needs_next_frame = self.animations().is_active();
-        if tick.restyled > 0 {
+        // A restyle is a visual change; so is the timeline going idle, whose
+        // flag rides the committed frame (see above).
+        if tick.restyled > 0 || !tick.needs_next_frame {
             self.note_visual_mutation();
         }
         tick
@@ -537,5 +548,45 @@ impl<T: Sync> Document<T> {
             }
         }
         tick
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tree::document::tests::device;
+    use crate::{Document, StylesheetOrigin};
+
+    /// The finishing tick must republish even when the final style equals the
+    /// previous one: the committed frame's animation flag is what keeps the
+    /// compositor asking for ticks, and a stale `true` would never end.
+    #[test]
+    fn an_animation_ending_without_a_restyle_still_invalidates_the_frame() {
+        let mut document: Document<()> = Document::new(device(), "page", ());
+        document.add_stylesheet(
+            "page { width: 100px; height: 100px; animation: hold 0.1s linear; }
+             @keyframes hold { from { opacity: 1; } to { opacity: 1; } }",
+            StylesheetOrigin::Author,
+        );
+        document.render();
+        let frame = document.committed_frame().expect("a frame is committed");
+        assert!(
+            frame.animations_active(),
+            "the animation armed at the flush"
+        );
+
+        let tick = document.advance_animations(10.0);
+        assert!(!tick.needs_next_frame, "the animation is over");
+        assert!(
+            document.needs_render(),
+            "the idle transition must reach the next committed frame"
+        );
+        document.render();
+        assert!(
+            !document
+                .committed_frame()
+                .expect("a frame is committed")
+                .animations_active(),
+            "the committed frame reports the timeline idle"
+        );
     }
 }

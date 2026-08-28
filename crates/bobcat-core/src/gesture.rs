@@ -48,7 +48,7 @@
 
 use dom::input::{InputEvent, InputKind, PointerId, PointerPhase};
 use dom::scroll::ScrollAxes;
-use dom::{NodeId, Point2D, Vector2D};
+use dom::{HitTarget, NodeId, Point2D, Vector2D};
 
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
@@ -82,15 +82,19 @@ pub(crate) const LONG_PRESS_EVENT: &str = "longpress";
 /// The event name a released sequence synthesizes.
 pub(crate) const TAP_EVENT: &str = "tap";
 
-/// The document facts the router may ask for while deciding. Borrowed for
-/// exactly one call; the router retains nothing of the host's.
+/// The published-frame facts the router may ask for while deciding. Borrowed
+/// for exactly one call; the router retains nothing of the host's. Every
+/// answer comes from the committed frame's scroll-slot table and the shared
+/// listener-name table — never from the document, which lives on the main
+/// thread.
 pub(crate) trait RouterHost {
-    /// The nearest ancestor-or-self the user may scroll on any of `axes`.
-    fn nearest_user_scrollable(&self, node: NodeId, axes: ScrollAxes) -> Option<NodeId>;
+    /// The nearest scroll container on the hit item's containing-block chain
+    /// (itself included) the user may scroll on any of `axes`.
+    fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId>;
 
-    /// Whether `node` still names a live node. A latched scroller can be
-    /// freed mid-gesture; its id is retired rather than reissued, so this is
-    /// a plain liveness question and the drag simply ends.
+    /// Whether `node` still names a scroll container in the current frame. A
+    /// latched scroller can be freed mid-gesture; a commit then drops it from
+    /// the slot table, and the drag simply ends.
     fn contains_node(&self, node: NodeId) -> bool;
 
     /// Whether any listener for `name` exists anywhere in the document.
@@ -218,7 +222,7 @@ impl GestureRouter {
     pub(crate) fn on_input(
         &mut self,
         event: &InputEvent,
-        target: Option<NodeId>,
+        target: Option<HitTarget>,
         at: f64,
         host: &impl RouterHost,
         out: &mut Vec<InputDecision>,
@@ -238,7 +242,7 @@ impl GestureRouter {
                 if let Some(target) = target
                     && let Some(name) = pointer_event_name(phase)
                 {
-                    out.push(emit(name, target, event.position));
+                    out.push(emit(name, target.node, event.position));
                 }
                 self.synthesize(event, target, id, phase, at, out);
             }
@@ -251,7 +255,7 @@ impl GestureRouter {
                 }
                 out.push(InputDecision::Emit(EmitEvent {
                     name: "wheel",
-                    target,
+                    target: target.node,
                     position: event.position,
                     wheel: Some(delta),
                 }));
@@ -305,7 +309,7 @@ impl GestureRouter {
     fn drag_step(
         &mut self,
         event: &InputEvent,
-        target: Option<NodeId>,
+        target: Option<HitTarget>,
         id: PointerId,
         drags_to_scroll: bool,
         phase: PointerPhase,
@@ -319,7 +323,7 @@ impl GestureRouter {
                     return;
                 }
                 let scroller =
-                    target.and_then(|node| host.nearest_user_scrollable(node, ScrollAxes::BOTH));
+                    target.and_then(|hit| host.nearest_user_scrollable(hit, ScrollAxes::BOTH));
                 if let Some(scroller) = scroller {
                     self.drags.push(Drag {
                         pointer: id,
@@ -372,7 +376,7 @@ impl GestureRouter {
     /// the delta's axes. The embedder has already normalized the delta to
     /// viewport CSS pixels. Stateless — a wheel latches nothing.
     fn wheel_scroll(
-        target: NodeId,
+        target: HitTarget,
         delta: Vector2D<f32>,
         host: &impl RouterHost,
         out: &mut Vec<InputDecision>,
@@ -395,7 +399,7 @@ impl GestureRouter {
     fn synthesize(
         &mut self,
         event: &InputEvent,
-        target: Option<NodeId>,
+        target: Option<HitTarget>,
         id: PointerId,
         phase: PointerPhase,
         at: f64,
@@ -416,7 +420,7 @@ impl GestureRouter {
                     // it starts no sequence.
                     self.sequence = target.map(|target| Sequence {
                         pointer: id,
-                        target,
+                        target: target.node,
                         down_position: event.position,
                         latest_position: event.position,
                         tap_allowed: true,
@@ -532,7 +536,7 @@ mod tests {
     }
 
     impl RouterHost for MockHost {
-        fn nearest_user_scrollable(&self, _node: NodeId, _axes: ScrollAxes) -> Option<NodeId> {
+        fn nearest_user_scrollable(&self, _from: HitTarget, _axes: ScrollAxes) -> Option<NodeId> {
             self.scroller
         }
 
@@ -565,6 +569,7 @@ mod tests {
         }
 
         fn feed_routed(&mut self, event: InputEvent, hit: Option<NodeId>, at: f64) {
+            let hit = hit.map(|node| HitTarget { node, scroll: None });
             self.router
                 .on_input(&event, hit, at, &self.host, &mut self.out);
         }

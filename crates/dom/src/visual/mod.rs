@@ -4,11 +4,14 @@
 //! [`Document::render`] builds the private `PaintOrder`: a flat item list in
 //! back-to-front order, each item carrying its viewport-space transform and
 //! innermost clip. The private painter walks it forwards, back to front,
-//! then retains it beside the scene; [`Document::elements_from_point`],
-//! [`Document::elements_from_points`], and [`Document::route_input`] walk
-//! that retained frame backwards as pure reads — hit testing never re-runs
-//! the pipeline. Neither the frame nor the painter crosses the document API
-//! boundary.
+//! then retains it — together with the encoded scene and the scroll-slot
+//! table — as one immutable [`CommittedFrame`] behind an `Arc`.
+//! [`Document::elements_from_point`], [`Document::elements_from_points`], and
+//! [`Document::route_input`] walk that retained frame backwards as pure reads
+//! — hit testing never re-runs the pipeline. [`Document::commit`] publishes
+//! the same `Arc` across the document API boundary: a thread that does not
+//! hold the document composites, hit-tests, and recognizes scroll gestures
+//! against the published frame alone.
 //! The hit queries answer from the retained frame however stale it is,
 //! skipping only the items whose node has since been freed. That is safe
 //! because a [`crate::NodeId`] is retired on free and never reissued: an id
@@ -81,6 +84,7 @@
 //!   would key on, but nothing on this path reads them today.
 
 mod build;
+pub(crate) mod frame;
 mod geometry;
 mod hit;
 mod motion;
@@ -89,12 +93,12 @@ mod stacking;
 mod tests;
 mod transform;
 
-use std::cell::Ref;
 use std::sync::Arc;
 
 use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
+pub use self::frame::{CommittedFrame, HitTarget, ScrollSlot};
 use crate::tree::document::Document;
 use crate::{ImageStore, NodeId};
 
@@ -104,10 +108,11 @@ pub(crate) struct PaintOrder {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
+    slots: Vec<ScrollSlot>,
     visual_epoch: u64,
 }
 
-/// The three growable tables a [`PaintOrder`] is made of, emptied of one
+/// The four growable tables a [`PaintOrder`] is made of, emptied of one
 /// frame's contents but not of their capacity.
 ///
 /// The builder fills a set and the painter reclaims the set from the frame it
@@ -120,15 +125,17 @@ pub(crate) struct FrameBuffers {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
+    slots: Vec<ScrollSlot>,
 }
 
 impl FrameBuffers {
     #[cfg(test)]
-    pub(crate) fn capacities(&self) -> [usize; 3] {
+    pub(crate) fn capacities(&self) -> [usize; 4] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
+            self.slots.capacity(),
         ]
     }
 }
@@ -136,25 +143,28 @@ impl FrameBuffers {
 impl PaintOrder {
     /// Empties this frame and hands back its storage with capacity intact.
     ///
-    /// [`PaintItem`], [`ClipNode`] and [`RenderLayer`] own no heap data, so
-    /// each clear is a length write.
+    /// [`PaintItem`], [`ClipNode`], [`RenderLayer`] and [`ScrollSlot`] own no
+    /// heap data, so each clear is a length write.
     pub(crate) fn into_buffers(mut self) -> FrameBuffers {
         self.items.clear();
         self.clips.clear();
         self.layers.clear();
+        self.slots.clear();
         FrameBuffers {
             items: self.items,
             clips: self.clips,
             layers: self.layers,
+            slots: self.slots,
         }
     }
 
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 3] {
+    fn capacities(&self) -> [usize; 4] {
         [
             self.items.capacity(),
             self.clips.capacity(),
             self.layers.capacity(),
+            self.slots.capacity(),
         ]
     }
 
@@ -171,6 +181,11 @@ impl PaintOrder {
     #[must_use]
     pub(crate) fn layers(&self) -> &[RenderLayer] {
         &self.layers
+    }
+
+    #[must_use]
+    pub(crate) fn slots(&self) -> &[ScrollSlot] {
+        &self.slots
     }
 
     #[must_use]
@@ -195,6 +210,14 @@ pub(crate) struct PaintItem {
     pub(crate) size: Size2D<f32>,
     pub(crate) radii: CornerRadii,
     pub(crate) hit_testable: bool,
+    /// The nearest ancestor-or-self scroll container on this item's
+    /// containing-block chain, as an index into [`PaintOrder::slots`]. This is
+    /// the *recognition* chain: a scroll container's own item names its own
+    /// slot (the box is a scroll target), while the containers that *carry*
+    /// the item — whose content translation is folded into
+    /// [`Self::transform`] — are this slot's parent chain for a container's
+    /// own item and this very chain for everything else.
+    pub(crate) slot: Option<u32>,
 }
 
 /// A stacking context rendered as a composited group.
@@ -268,8 +291,8 @@ impl<T: Sync> Document<T> {
         frame
     }
 
-    /// Renders only when the retained scene no longer represents the current
-    /// document state. Returns whether a new scene was built.
+    /// Renders only when the retained frame no longer represents the current
+    /// document state. Returns whether a new frame was built.
     pub fn render(&mut self) -> bool {
         if !self.needs_render() {
             return false;
@@ -279,12 +302,72 @@ impl<T: Sync> Document<T> {
         let bound = self.arenas().slot_bound();
         self.layout_state_mut().ensure_covers(bound);
         let frame = self.build_paint_order();
-        self.painter.borrow_mut().paint(self, frame);
+        let animations_active = self.animations().is_active();
+        let viewport = self.viewport_size();
+        let device_pixel_ratio = self.device_pixel_ratio();
+        self.painter.borrow_mut().paint(
+            self,
+            frame,
+            animations_active,
+            viewport,
+            device_pixel_ratio,
+        );
         true
+    }
+
+    /// Runs the whole pipeline — style, layout, paint-order build, scene
+    /// encode — if anything is stale, and returns the committed frame.
+    ///
+    /// The returned `Arc` is the same object the document retains for its own
+    /// hit queries: publishing it to another thread costs one reference-count
+    /// increment, and the frame stays valid however stale it later gets.
+    pub fn commit(&mut self) -> Arc<CommittedFrame> {
+        self.render();
+        self.committed_frame()
+            .expect("render always leaves a committed frame retained")
+    }
+}
+
+/// A borrow-shaped handle on the committed frame's scene: it keeps the frame
+/// alive and dereferences to the [`crate::vello::Scene`] inside it.
+#[derive(Debug)]
+pub struct SceneRef(Arc<CommittedFrame>);
+
+impl std::ops::Deref for SceneRef {
+    type Target = crate::vello::Scene;
+
+    fn deref(&self) -> &crate::vello::Scene {
+        self.0.scene()
     }
 }
 
 impl<T> Document<T> {
+    /// The frame the last [`Self::render`] committed, if any.
+    #[must_use]
+    pub fn committed_frame(&self) -> Option<Arc<CommittedFrame>> {
+        self.painter.borrow().frame().cloned()
+    }
+
+    /// The Vello scene committed by the last successful [`Self::render`].
+    ///
+    /// Valid only within this document's own viewport — [`Self::viewport_size`]
+    /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
+    /// sizes its target from. The painter discards content that can put no ink
+    /// there, so rendering this scene into a target covering more CSS pixels
+    /// than the document's viewport leaves the excess blank rather than
+    /// showing what happens to be laid out beyond it.
+    ///
+    /// # Panics
+    ///
+    /// If nothing has been rendered yet: there is no committed frame to read.
+    #[must_use]
+    pub fn scene(&self) -> SceneRef {
+        SceneRef(
+            self.committed_frame()
+                .expect("Document::scene reads the committed frame: render first"),
+        )
+    }
+
     /// Returns rendered elements under a point from front to back.
     #[must_use]
     pub fn elements_from_point(&self, point: Point2D<f32>) -> Vec<NodeId> {
@@ -314,36 +397,20 @@ impl<T> Document<T> {
     fn with_rendered_frame<R>(&self, read: impl FnOnce(&PaintOrder) -> R) -> Option<R> {
         let painter = self.painter.borrow();
         let frame = painter.frame()?;
-        Some(read(frame))
+        Some(read(&frame.order))
     }
 }
 
 impl<T> Document<T> {
-    /// Whether a visual mutation has made the retained scene stale, or no
-    /// scene has been built yet.
+    /// Whether a visual mutation has made the retained frame stale, or no
+    /// frame has been built yet.
     #[must_use]
     pub fn needs_render(&self) -> bool {
         self.painter.borrow().needs_render(self.visual_epoch())
     }
 
-    /// The Vello scene retained by the last successful
-    /// [`Self::render`] call.
-    ///
-    /// Valid only within this document's own viewport — [`Self::viewport_size`]
-    /// scaled by [`Self::device_pixel_ratio`], which is the region an embedder
-    /// sizes its target from. The painter discards content that can put no ink
-    /// there, so rendering this scene into a target covering more CSS pixels
-    /// than the document's viewport leaves the excess blank rather than
-    /// showing what happens to be laid out beyond it. Resize the document
-    /// first: changing the viewport invalidates the retained scene, so the
-    /// next render builds one for the larger region.
-    #[must_use]
-    pub fn scene(&self) -> Ref<'_, crate::vello::Scene> {
-        Ref::map(self.painter.borrow(), crate::paint::painter::Painter::scene)
-    }
-
     /// The capacity of every buffer the paint pipeline retains between
-    /// frames: the retained frame's three tables, the spare frame's three,
+    /// frames: the retained frame's four tables, the spare frame's four,
     /// then the working scratch, ending with one entry per pooled
     /// pseudo-context buffer.
     ///
@@ -357,7 +424,7 @@ impl<T> Document<T> {
         let painter = self.painter.borrow();
         let mut out = painter
             .frame()
-            .map_or([0, 0, 0], PaintOrder::capacities)
+            .map_or([0, 0, 0, 0], |frame| frame.order.capacities())
             .to_vec();
         let (spare, scratch) = painter.storage_capacities();
         out.extend_from_slice(&spare);

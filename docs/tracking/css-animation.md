@@ -85,9 +85,10 @@ concretely, so the tables above are read as "the target" and this section as
   contributes the timeline. Animations start and cancel inside the ordinary
   style flush, through `MatchMethods::process_animations`.
 - **Where the frame work happens.** `Document::advance_animations(now)` runs on
-  the presenting thread, inside the borrow that is about to produce the frame:
-  no script, no DOM mutation, and no hand-off to the Lynx main thread. It is a
-  Stylo animation-only traversal, which does no selector matching and reads no
+  the document's owner thread — the Lynx main thread once the script starts —
+  driven by one `BeginFrame` command per frame that carries the presenting
+  side's clock reading; no JavaScript is involved. It is a Stylo
+  animation-only traversal, which does no selector matching and reads no
   snapshots, over just the animating elements and whatever inherits from them.
   A property that cannot move a box never reaches layout, because the damage
   harvest only invalidates layout for damage that says relayout.

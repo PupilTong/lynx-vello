@@ -19,7 +19,10 @@ use url::Url;
 
 /// Waits for the engine-owned script thread to report its terminal boot event.
 pub fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptError> {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
+    // boot takes about two seconds on its own, so a tight deadline only
+    // ever fires spuriously under parallel test load.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         for event in view.pump() {
             match event {

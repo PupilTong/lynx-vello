@@ -945,6 +945,7 @@ mod tests {
             size: Size2D::new(size, size),
             radii: CornerRadii::ZERO,
             hit_testable: true,
+            slot: None,
         }
     }
 

@@ -39,9 +39,11 @@
 //! `hit-slop`, `user-interaction-enabled`, tap/long-press synthesis, fling
 //! momentum. This crate has no default-action machinery and no recognizer:
 //! that single decision point is the runtime's input router, and there is no
-//! second consumer this crate would keep one for. Dispatch is likewise not
-//! this crate's — [`crate::event`] computes which nodes an event visits and
-//! in what order, and reaching a listener means leaving this thread.
+//! second consumer this crate would keep one for — the router itself routes
+//! against the published [`crate::CommittedFrame`], which answers the same
+//! hit question without the document. Dispatch is likewise not this
+//! crate's — [`crate::event`] computes which nodes an event visits and in
+//! what order, and reaching a listener means leaving this thread.
 //!
 //! [`InputEvent::default_prevented`] is `preventDefault()` by another name,
 //! and this crate never reads it. Lynx has no cancelable event: a handler

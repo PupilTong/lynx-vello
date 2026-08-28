@@ -39,7 +39,7 @@ use super::geometry::{inner_radii, resolve_corner_radii};
 use super::transform::{ParentPerspective, stacking_context_matrix};
 use super::{
     ClipNode, CornerRadii, FrameBuffers, PaintItem, PaintItemKind, PaintOrder, RenderLayer,
-    stacking,
+    ScrollSlot, stacking,
 };
 use crate::layout::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
@@ -70,11 +70,15 @@ pub(crate) fn build<T>(
         items: buffers.items,
         clips: buffers.clips,
         layers: buffers.layers,
+        slots: buffers.slots,
         current_layer: None,
         scratch,
     };
     debug_assert!(
-        builder.items.is_empty() && builder.clips.is_empty() && builder.layers.is_empty(),
+        builder.items.is_empty()
+            && builder.clips.is_empty()
+            && builder.layers.is_empty()
+            && builder.slots.is_empty(),
         "a recycled frame is emptied before it is handed back to the builder",
     );
     builder.scratch.assert_settled();
@@ -101,6 +105,7 @@ pub(crate) fn build<T>(
             items: builder.items,
             clips: builder.clips,
             layers: builder.layers,
+            slots: builder.slots,
             visual_epoch,
         },
         builder.scratch,
@@ -233,12 +238,18 @@ impl Collection<'_> {
 }
 
 /// What a box inherits from its containing-block chain: the innermost clip,
-/// and the translation the scroll containers along that chain have applied to
-/// their contents.
+/// the translation the scroll containers along that chain have applied to
+/// their contents, and the nearest of those containers as a scroll-slot
+/// index.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
     scroll: Vector2D<f32>,
+    /// The nearest scroll container on this chain, in the frame's slot table.
+    /// Carried beside `scroll` under the same escape rule: a member keyed
+    /// `absolute` or `fixed` swaps in its containing block's context, and its
+    /// slot chain swaps with it.
+    chain: Option<u32>,
 }
 
 impl FlowContext {
@@ -283,6 +294,7 @@ struct ItemRecord {
     size: Size2D<f32>,
     radii: CornerRadii,
     hit_testable: bool,
+    slot: Option<u32>,
 }
 
 /// One member of a stacking context, awaiting the `(level, seq)` sort.
@@ -317,6 +329,7 @@ struct Builder<'doc, T> {
     items: Vec<PaintItem>,
     clips: Vec<ClipNode>,
     layers: Vec<RenderLayer>,
+    slots: Vec<ScrollSlot>,
     current_layer: Option<usize>,
     scratch: BuildScratch,
 }
@@ -342,6 +355,35 @@ impl<'doc, T> Builder<'doc, T> {
         )
     }
 
+    /// Records `node` in the frame's scroll-slot table when it is a scroll
+    /// container, linked to the nearest container on its containing-block
+    /// chain, and returns its slot.
+    ///
+    /// Allocated beside the element's own item — before any descend, and
+    /// whether or not the box is visible or a leaf — so every container the
+    /// frame lays out is a chain target, including one whose contents are
+    /// never painted.
+    fn allocate_scroll_slot(
+        &mut self,
+        node: NodeId,
+        style: &ComputedValues,
+        parent: Option<u32>,
+    ) -> Option<u32> {
+        let state = self.state.at(self.tree.live_slot(node));
+        let scroll_box = scroll::resolve(style, &state.slot.rounded, state.scroll_offset)?;
+        self.slots.push(ScrollSlot {
+            node,
+            parent,
+            user_scrollable: scroll_box.user_scrollable,
+            offset: scroll_box.offset,
+            max_offset: scroll_box.max_offset(),
+        });
+        Some(
+            u32::try_from(self.slots.len() - 1)
+                .expect("a frame cannot hold 2^32 scroll containers"),
+        )
+    }
+
     fn build_stacking_context(
         &mut self,
         root: NodeId,
@@ -360,6 +402,7 @@ impl<'doc, T> Builder<'doc, T> {
             .then(parent_world);
         let layer = self.open_layer(root, values, &world, size);
 
+        let own_slot = self.allocate_scroll_slot(root, values, seed.current.chain);
         let (visible, hit_testable) = item_flags(values);
         if visible {
             self.items.push(PaintItem {
@@ -370,6 +413,7 @@ impl<'doc, T> Builder<'doc, T> {
                 size,
                 radii: resolve_corner_radii(values, size),
                 hit_testable,
+                slot: own_slot.or(seed.current.chain),
             });
         }
 
@@ -378,7 +422,7 @@ impl<'doc, T> Builder<'doc, T> {
             self.close_layer(layer);
             return;
         }
-        let ctx = self.enter_element(root, values, &world, seed);
+        let ctx = self.enter_element(root, values, &world, seed, own_slot);
 
         // This context's members and in-flow records occupy the tail of the
         // two shared stacks. Anything a nested context pushes lands above
@@ -651,6 +695,7 @@ impl<'doc, T> Builder<'doc, T> {
             None => (target, ctx),
         };
 
+        let own_slot = self.allocate_scroll_slot(child.node, style, outer.current.chain);
         if visible {
             self.push_stream(
                 target,
@@ -661,6 +706,7 @@ impl<'doc, T> Builder<'doc, T> {
                     child.size,
                     outer.current.clip,
                     hit_testable,
+                    own_slot.or(outer.current.chain),
                 ),
             );
         }
@@ -670,6 +716,7 @@ impl<'doc, T> Builder<'doc, T> {
                 style,
                 &translated(collection.world, child.offset),
                 outer,
+                own_slot,
             );
             self.collect(
                 Cursor {
@@ -750,6 +797,7 @@ impl<'doc, T> Builder<'doc, T> {
         style: &ComputedValues,
         transform: &Transform3D<f32>,
         ctx: ClipContexts,
+        own_slot: Option<u32>,
     ) -> ClipContexts {
         let mut inner = ctx;
         let clipped = clipped_axes(style);
@@ -786,6 +834,9 @@ impl<'doc, T> Builder<'doc, T> {
             inner.current.clip = Some(self.clips.len() - 1);
         }
         inner.current.scroll += self.scroll_translation(node, style);
+        if own_slot.is_some() {
+            inner.current.chain = own_slot;
+        }
         let node_ref = self.node(node);
         if establishes_absolute_containing_block(node_ref, style) {
             inner.absolute = inner.current;
@@ -821,6 +872,7 @@ impl<'doc, T> Builder<'doc, T> {
             size: Size2D::new(layout.size.width, layout.size.height),
             radii: CornerRadii::ZERO,
             hit_testable,
+            slot: ctx.current.chain,
         })
     }
 }
@@ -846,6 +898,7 @@ fn push_record(items: &mut Vec<PaintItem>, record: &ItemRecord, world: &Transfor
         size: record.size,
         radii: record.radii,
         hit_testable: record.hit_testable,
+        slot: record.slot,
     });
 }
 
@@ -856,6 +909,7 @@ fn element_record(
     size: Size2D<f32>,
     clip: Option<usize>,
     hit_testable: bool,
+    slot: Option<u32>,
 ) -> ItemRecord {
     ItemRecord {
         node,
@@ -865,6 +919,7 @@ fn element_record(
         size,
         radii: resolve_corner_radii(style, size),
         hit_testable,
+        slot,
     }
 }
 

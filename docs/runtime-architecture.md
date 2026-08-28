@@ -2,7 +2,7 @@
 
 Bobcat exposes one runtime object to an embedder: `bobcat_core::LynxView`.
 The document, Element-PAPI tree, script realm, renderer scheduler, and the
-tree hand-off protocol are implementation state. An embedder supplies only
+commit/publish protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
 - a `ResourceFetcher`, borrowed for construction only;
@@ -58,11 +58,12 @@ different time origin than the Worker's own `performance.now()`.
 
 **The frame's one reading.** `notify_redraw` and `tick` each call
 `FrameClock::now_seconds` exactly once and pass that `f64` to everything the
-frame resolves — `service_gesture_clock` for armed `longpress` deadlines and
-`advance_animations` for the timeline — so a gesture and an animation in the
-same frame cannot disagree about when the frame is. Input arrival is the one
-other reading, taken in `dispatch_input` at the moment the event arrives, which
-is what keeps a sequence buffered behind a busy document at its real duration.
+frame resolves — `service_gesture_clock` for armed `longpress` deadlines on
+the presenting side, and the `BeginFrame` command that carries the same
+reading to the main thread's `advance_animations` — so a gesture and an
+animation in the same frame cannot disagree about when the frame is. Input
+arrival is the one other reading, taken in `dispatch_input` at the moment the
+event arrives.
 
 **Where the reading is taken.** A window frame is `WindowGraphics::acquire`,
 then `render_to_target`, then `present`. Acquiring first is deliberate: under
@@ -71,19 +72,23 @@ then `render_to_target`, then `present`. Acquiring first is deliberate: under
 refresh between that wait and scan-out. Sampling the clock after it puts the
 whole frame on the near side of the pipeline — what is sampled is the frame
 being produced for the next refresh, not one produced a pipeline-depth earlier.
-The wait still happens outside the tree borrow, so it blocks nobody. An
-offscreen `tick` has no swap chain and samples immediately.
+The wait blocks nobody: the presenting side touches no document and takes no
+lock. An offscreen `tick` has no swap chain and samples immediately.
 
 `dom` itself reads no clock: `now` is a parameter to
 `Document::advance_animations`. That is what lets the presenting side decide
 the instant, not the document.
 
-Advancing an animation never crosses to the Lynx main thread. The presenting
-side already holds the document between frames, and the tick is a Stylo
-animation-only traversal of just the animating elements — no selector
-matching, no snapshots, and no layout unless an animated property actually
-moved a box. Starting and cancelling animations still belong to the main
-thread, and ride the style flush it already runs at `__FlushElementTree`.
+Advancing an animation runs where the document is — the Lynx main thread,
+its only home. The presenting side sends one `BeginFrame { now }` command per
+frame while the latest committed frame reports an active animation, and the
+main thread's recv loop advances the timeline — a Stylo animation-only
+traversal of just the animating elements, no JavaScript involved — and
+commits what changed. The published frame's
+`animations_active` flag is what keeps the loop sustained: the presenting
+side re-requests frames and keeps sending `BeginFrame` until a commit reports
+the timeline idle. Starting and cancelling animations belong to the style
+flush the main thread already runs at `__FlushElementTree`.
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
 remain independently usable libraries, but an application embedding Bobcat
@@ -141,13 +146,13 @@ method, or way to mount a stylesheet or start a second entry module.
 
 The following types are private to `bobcat-core`:
 
-- `Engine`, `SharedTree`, and `TreeGuard`;
+- `Engine`, `FrameHub`, and `MainCommand`;
 - `MainThreadRuntime` and its Element-PAPI host implementation;
 - `LynxDocument`, `Viewport`, and `new_document`;
 - the concrete QuickJS realm adapter.
 
 This prevents an embedder from bypassing commit ordering, mutating the tree
-beside JavaScript, retaining a document during presentation, submitting a
+beside JavaScript, reaching the main-thread document at all, submitting a
 scene independently of the view, or evaluating code directly in the view's
 realm.
 
@@ -247,46 +252,56 @@ private Document<()>
   ├── layout/text state
   ├── Arc<dyn ImageStore>   (the embedder's; the document holds no pixels)
   └── private Painter
-        ├── retained vello::Scene
-        └── reusable walk scratch
+        ├── retained Arc<CommittedFrame>   (paint tables + encoded Scene +
+        │                                   scroll-slot table; the publish unit)
+        └── reusable walk/build scratch
 ```
 
-The presenting side alone runs input routing, retained-scene production, GPU
-submission, presentation, and capture. The public `EventRequester`, `Window`,
-and `FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
+A commit — style flush, layout, paint-order build, scene encode — runs where
+the document is and ends by publishing one immutable `Arc<CommittedFrame>`.
+The presenting side is a compositor over the published frame: it routes
+input and recognizes gestures against the frame's tables, uploads the scene,
+submits, presents, and captures. The public `EventRequester`, `Window`, and
+`FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
 scheduling capabilities; they do not expose the engine that consumes them.
 
 Images are the host-implemented `ImageStore` contract and nothing else. No
 container sniffing, codec, cache, byte budget or eviction policy exists in this
 workspace: an embedder supplies a store as its `ViewSources::image_store`, and
 the engine asks it for one image at a time by source string. The paint walk
-calls only the store's non-blocking `peek`, because it runs on the presenting
-thread between a swap-chain acquire and a present and can neither block nor
-suspend; a miss paints nothing that frame, the same not-yet-loaded state a
-browser shows. `LynxView::load_image` awaits the store's `get` outside the
+calls only the store's non-blocking `peek`, because encoding runs inside a
+commit on the document's owner thread and must not stall it; a miss paints
+nothing that frame, the same not-yet-loaded state a browser shows. `LynxView::load_image` awaits the store's `get` outside the
 frame and then invalidates the retained scene, and `prefetch_image` starts the
 same work without waiting. The `<image>` element has not yet wired the store
 into automatic loading.
 
-## Tree hand-off and visibility
+## Commit, publish, and visibility
 
-The engine and Lynx main thread share exactly one document through a private
-slot:
+The document has one owner for its whole life: the engine-owned Lynx main
+thread, which `execute_script` starts and which creates the document itself
+from the view's `PageConfig` and device metrics. The engine never holds one —
+setup called before `execute_script` buffers in the command channel and
+applies, in send order, before the entry script boots. That thread is the
+only committer, and the two threads share only two one-way channels:
 
 ```text
-Lynx main thread                         embedder/presenting thread
-factory creates owner-thread VM          opaque LynxView
-first PAPI mutation: take document        input, scrolling, scene production
-later mutations: plain &mut               GPU submission and present
-flush: layout, return document ─────────▶ request/present next frame
+Lynx main thread (owns document + realm)   embedder/presenting thread
+PAPI mutations: plain &mut                 input routing + gesture recognition
+__FlushElementTree: commit                 (against the published frame)
+  style → layout → build → encode          scroll/dispatch/resize/BeginFrame
+  ─── publish Arc<CommittedFrame> ───▶     compose: upload scene, present
+  ◀── MainCommand channel ─────────────    capture, offscreen ticks
 ```
 
-A batch touches the slot only when taking and returning the document. While
-the slot is empty, the presenting side never blocks: it buffers input,
-retains the last target, and retries on a later frame. A half-applied batch is
-therefore unobservable. At the end of every evaluation the runtime returns an
-open batch even if script omitted `__FlushElementTree`, matching web-core's
-live-DOM visibility.
+Every command round the main thread serves — input dispatches, scrolls,
+resizes, resource updates, `BeginFrame` ticks — ends with a commit when
+anything went stale, which is what makes the recorded contract true: script
+must flush after mutating, and nothing guarantees the tree is *not* flushed
+at other times. A half-applied JavaScript turn is still unobservable, because
+the main thread only serves commands between evaluations. The presenting
+side never blocks and never skips a frame: it always has the latest published
+frame to compose and hit-test, however busy the main thread is.
 
 ## Native and Wasm spawning
 
@@ -332,19 +347,21 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 1. `LynxView::new` fetches the `ViewSources`' stylesheets and entry MTS source
    through `ResourceFetcher`.
 2. It builds the private document from `PageConfig`, device metrics, and those
-   sheets, then spawns the target-specific Lynx main task over it.
+   sheets, then spawns the target-specific Lynx main task over it — the
+   document's owner for the rest of its life.
 3. The task creates the QuickJS realm, installs Bobcat callbacks, preloads
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module.
-4. `__FlushElementTree` performs style/layout commit, returns the document,
-   and asks `FrameRequester` for a frame.
-5. The presenting side non-blockingly drains buffered input and resize, then
-   samples the engine's `FrameClock` once and advances every running
-   animation to that instant, then renders the retained document scene and
-   submits it to its attached target. An animation that is still running makes
-   the presenting side ask for the next frame itself, so the loop sustains
-   without waking the Lynx main thread; `LynxView::is_animating` reports the
-   same fact to an offscreen host that drives its own cadence.
+4. `__FlushElementTree` commits — style flush, layout, paint-order build,
+   scene encode — publishes the `Arc<CommittedFrame>`, and asks
+   `FrameRequester` for a frame.
+5. The presenting side samples the engine's `FrameClock` once per frame,
+   resolves gesture deadlines against it, uploads the latest published scene
+   if it is new, and presents. While the latest frame reports an active
+   animation it sends the main thread one `BeginFrame` carrying that reading
+   and keeps requesting frames, so the animation loop sustains without any
+   JavaScript running; `LynxView::is_animating` reports the same fact to an
+   offscreen host that drives its own cadence.
 6. The task enqueues sanitized script completion and calls `EventRequester`;
    the awakened host observes it through `pump`. No realm or tree object
    crosses the boundary.
