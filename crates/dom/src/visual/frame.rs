@@ -214,7 +214,7 @@ impl std::fmt::Debug for CommittedFrame {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("CommittedFrame")
-            .field("epoch", &self.epoch())
+            .field("commit_id", &self.commit_id())
             .field("viewport", &self.viewport)
             .finish_non_exhaustive()
     }
@@ -257,11 +257,12 @@ impl CommittedFrame {
         );
     }
 
-    /// The document's visual epoch this frame was built at. Monotonic across
-    /// a document's life, so it orders commits.
+    /// This frame's commit id. Monotonic across a document's life, so it
+    /// orders commits; it says nothing about what changed between two of
+    /// them.
     #[must_use]
-    pub fn epoch(&self) -> u64 {
-        self.order.visual_epoch()
+    pub fn commit_id(&self) -> u64 {
+        self.order.commit_id()
     }
 
     /// Whether the document had a running animation at commit time — the
@@ -458,8 +459,8 @@ mod tests {
             "a scroll the retained frame can compose invalidates nothing"
         );
         assert_eq!(
-            document.commit().epoch(),
-            before.epoch(),
+            document.commit().commit_id(),
+            before.commit_id(),
             "no new frame is built for it"
         );
 

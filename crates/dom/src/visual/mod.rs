@@ -17,8 +17,8 @@
 //! because a [`crate::NodeId`] is retired on free and never reissued: an id
 //! the frame still names resolves either to the node it was drawn for or to
 //! nothing, never to a different node that took its place.
-//! Painting is pinned harder — to the document's private visual-mutation
-//! epoch via its freshness assertion, let-it-crash — because it resolves the
+//! Painting is pinned harder — to the current commit id with a clean dirty
+//! bit via its freshness assertion, let-it-crash — because it resolves the
 //! frame against live styles/layouts/text, which any visual mutation
 //! desynchronizes; hit testing's snapshot is self-contained and tolerates
 //! non-structural mutations, which is exactly what lets an event landing
@@ -77,11 +77,12 @@
 //!   projects about the border-box center.
 //! - No incremental visual-order structure. The last `PaintOrder` is retained beside the scene, but
 //!   only as the hit-test snapshot: it is never an input to the next build, and every visual
-//!   mutation rebuilds the whole order. Invalidation is the document's private visual epoch
-//!   ([`Document::needs_render`]) — one counter for every kind of change, so a one-pixel scroll and
-//!   a structural edit are indistinguishable to the render path. `StyleDamage`'s repaint and
-//!   stacking classes are computed by the style flush and dropped; they are what a tiered scheme
-//!   would key on, but nothing on this path reads them today.
+//!   mutation rebuilds the whole order. Invalidation is one private dirty bit
+//!   ([`Document::needs_render`]) — every kind of change sets the same bit, so any two changes are
+//!   indistinguishable to the render path; a frame's identity is its commit id, which orders
+//!   commits and carries no damage information. `StyleDamage`'s repaint and stacking classes are
+//!   computed by the style flush and dropped; they are what a tiered scheme would key on, but
+//!   nothing on this path reads them today.
 
 mod build;
 pub(crate) mod curves;
@@ -111,7 +112,7 @@ pub(crate) struct PaintOrder {
     layers: Vec<RenderLayer>,
     slots: Vec<ScrollSlot>,
     animations: Vec<AnimationSlot>,
-    visual_epoch: u64,
+    commit_id: u64,
 }
 
 /// One animation slot's compose-time values, sampled at one instant: the
@@ -222,8 +223,8 @@ impl PaintOrder {
     }
 
     #[must_use]
-    pub(crate) const fn visual_epoch(&self) -> u64 {
-        self.visual_epoch
+    pub(crate) const fn commit_id(&self) -> u64 {
+        self.commit_id
     }
 
     /// The chain whose scroll translations move this item — the *content*
@@ -359,6 +360,10 @@ impl CornerRadii {
 impl<T: Sync> Document<T> {
     pub(crate) fn build_paint_order(&mut self) -> PaintOrder {
         self.layout();
+        // Claimed before the build so the built frame carries it; a
+        // panicking build or walk leaves the previous frame retained with
+        // its older id, so `needs_render` still reports stale.
+        let _ = self.next_commit_id();
         // Both takes finish before `build` reborrows the document shared. The
         // retained frame is not among them: it stays where hit testing can
         // read it for the whole build, and a build that panics loses only one
@@ -499,7 +504,9 @@ impl<T> Document<T> {
     /// frame has been built yet.
     #[must_use]
     pub fn needs_render(&self) -> bool {
-        self.painter.borrow().needs_render(self.visual_epoch())
+        self.visual_dirty()
+            || self.painter.borrow().frame().map(|frame| frame.commit_id())
+                != Some(self.commit_id())
     }
 
     /// The capacity of every buffer the paint pipeline retains between
@@ -546,7 +553,7 @@ impl<T> Document<T> {
     /// changed — pixels arrived, or entries were dropped.
     ///
     /// The document cannot observe an embedder-owned store changing under it,
-    /// and the retained scene is only rebuilt when the visual epoch moves, so
+    /// and the retained scene is only rebuilt when the frame is invalidated, so
     /// a load that completes without this call paints on no frame at all.
     pub fn note_images_changed(&mut self) {
         self.note_visual_mutation();
