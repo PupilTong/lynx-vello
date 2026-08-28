@@ -5,6 +5,7 @@
 //! timeline that drives Stylo's animation state between flushes.
 
 pub(crate) mod animation;
+pub(crate) mod curve_export;
 pub(crate) mod damage;
 pub(crate) mod device;
 pub(crate) mod engine;

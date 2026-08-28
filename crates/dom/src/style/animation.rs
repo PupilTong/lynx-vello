@@ -164,6 +164,27 @@ impl<T: Sync> Document<T> {
         self.animations().is_active()
     }
 
+    /// Whether anything animating is *not* covered by one of `frame`'s
+    /// exported curves — those elements still need per-frame ticks on this
+    /// thread, so the presenting side keeps sending `BeginFrame`s.
+    pub(crate) fn animation_needs_main_ticks(&self, frame: &crate::visual::PaintOrder) -> bool {
+        let handle = self.animations().context_handle();
+        let sets = handle.sets.read();
+        let arenas = self.arenas();
+        sets.iter().any(|(key, set)| {
+            if !set.needs_animation_ticks() {
+                return false;
+            }
+            let Some(id) = arenas.id_at_arena_key(key.node.0) else {
+                return false;
+            };
+            !frame
+                .animations()
+                .iter()
+                .any(|slot| slot.node == id && slot.curve.is_some())
+        })
+    }
+
     /// Advances every live animation and transition to `now` — seconds on a
     /// monotonic timeline whose epoch is the caller's choice — and re-cascades
     /// the elements that moved.

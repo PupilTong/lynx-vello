@@ -25,7 +25,18 @@ use crate::paint::shape::{BoxShape, with_shape};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Rect};
 use crate::vello::peniko::{BlendMode, Fill};
-use crate::visual::ScrollSlot;
+use crate::visual::{AnimationSample, ScrollSlot};
+
+/// The compose-time coordinate context one op or fragment rides: the scroll
+/// chain whose translations move it, and the animation chain whose sampled
+/// deltas move it. Scroll translations always apply outside animation deltas
+/// — export eligibility refuses a scroll container inside an animated
+/// subtree, so the two never interleave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct ComposeChain {
+    pub(crate) scroll: Option<u32>,
+    pub(crate) animation: Option<u32>,
+}
 
 /// A shape captured at encode time, replayable without the document.
 ///
@@ -40,13 +51,13 @@ pub(crate) enum CapturedShape {
 
 /// One walker-level layer-stack operation, with the chain its shape rides.
 pub(crate) enum ComposeOp {
-    /// Append `fragments[index]` translated by `chain`'s offsets.
+    /// Append `fragments[index]` transformed by `chain`.
     Fragment {
         index: u32,
-        chain: Option<u32>,
+        chain: ComposeChain,
     },
     /// `Scene::push_layer` (or `push_clip_layer` when `clip_only`) with the
-    /// recorded parameters, the transform translated by `chain`'s offsets.
+    /// recorded parameters, the transform carried by `chain`.
     Push {
         clip_only: bool,
         fill: Fill,
@@ -54,7 +65,11 @@ pub(crate) enum ComposeOp {
         alpha: f32,
         transform: Affine,
         shape: CapturedShape,
-        chain: Option<u32>,
+        chain: ComposeChain,
+        /// The animation slot whose sampled opacity replaces `alpha` — set
+        /// only on the effect layer of an element exporting an opacity
+        /// curve.
+        alpha_animation: Option<u32>,
     },
     Pop,
 }
@@ -65,12 +80,7 @@ pub(crate) struct ComposeAssembly {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
     /// The chain of the currently open fragment, if one is open.
-    #[expect(
-        clippy::option_option,
-        reason = "the outer level is whether a fragment is open; the inner is \
-                  its chain, where `None` is the root chain"
-    )]
-    current: Option<Option<u32>>,
+    current: Option<ComposeChain>,
     /// Emptied scenes to encode the next fragments into.
     pool: Vec<Scene>,
 }
@@ -108,7 +118,7 @@ impl ComposeAssembly {
 
     /// The scene content on `chain` encodes into, cutting a fragment when
     /// the chain changed.
-    pub(crate) fn fragment_for(&mut self, chain: Option<u32>) -> &mut Scene {
+    pub(crate) fn fragment_for(&mut self, chain: ComposeChain) -> &mut Scene {
         if self.current != Some(chain) {
             self.seal_fragment();
             let mut scene = self.pool.pop().unwrap_or_default();
@@ -159,6 +169,34 @@ impl ComposeAssembly {
     }
 }
 
+/// One chain's full compose transform in CSS px: the animation chain's
+/// sampled deltas (innermost applied first), then the scroll chain's
+/// translation.
+pub(crate) fn chain_transform(
+    slots: &[ScrollSlot],
+    samples: &[AnimationSample],
+    chain: ComposeChain,
+    ratio: f32,
+    offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
+) -> Affine {
+    let translation = chain_translation(slots, chain.scroll, ratio, offset_of);
+    Affine::translate((-f64::from(translation.x), -f64::from(translation.y)))
+        * animation_deltas(samples, chain.animation)
+}
+
+/// The ordered product of an animation chain's sampled deltas, outermost
+/// first, in CSS px.
+pub(crate) fn animation_deltas(samples: &[AnimationSample], chain: Option<u32>) -> Affine {
+    let mut product = Affine::IDENTITY;
+    let mut current = chain;
+    while let Some(index) = current {
+        let sample = &samples[index as usize];
+        product = sample.delta * product;
+        current = sample.parent;
+    }
+    product
+}
+
 /// One chain's compose translation in CSS px: the sum of its slots' offsets,
 /// each snapped to the device pixel grid — the snapping the folded encode
 /// used to apply per scroller.
@@ -202,23 +240,26 @@ pub(crate) fn replay(
     fragments: &[Scene],
     program: &[ComposeOp],
     slots: &[ScrollSlot],
+    samples: &[AnimationSample],
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) {
-    let device_translation = |chain: Option<u32>| {
-        let css = chain_translation(slots, chain, ratio, offset_of);
-        Affine::translate((
-            -f64::from(css.x) * f64::from(ratio),
-            -f64::from(css.y) * f64::from(ratio),
-        ))
+    // A CSS-px chain transform conjugated into device px: encoded content
+    // carries the device scale as its outermost factor, so the chain applies
+    // inside one scale and outside the other.
+    let scale = f64::from(ratio);
+    let device_transform = |chain: ComposeChain| {
+        let css = chain_transform(slots, samples, chain, ratio, offset_of);
+        if scale.is_finite() && scale > 0.0 {
+            Affine::scale(scale) * css * Affine::scale(1.0 / scale)
+        } else {
+            css
+        }
     };
     for op in program {
         match op {
             ComposeOp::Fragment { index, chain } => {
-                scene.append(
-                    &fragments[*index as usize],
-                    Some(device_translation(*chain)),
-                );
+                scene.append(&fragments[*index as usize], Some(device_transform(*chain)));
             }
             ComposeOp::Push {
                 clip_only,
@@ -228,8 +269,12 @@ pub(crate) fn replay(
                 transform,
                 shape,
                 chain,
+                alpha_animation,
             } => {
-                let transform = device_translation(*chain) * *transform;
+                let alpha = alpha_animation
+                    .and_then(|slot| samples[slot as usize].alpha)
+                    .unwrap_or(*alpha);
+                let transform = device_transform(*chain) * *transform;
                 match (clip_only, shape) {
                     (true, CapturedShape::Rect(rect)) => {
                         scene.push_clip_layer(*fill, transform, rect);
@@ -238,11 +283,11 @@ pub(crate) fn replay(
                         with_shape!(shape, |s| scene.push_clip_layer(*fill, transform, s));
                     }
                     (false, CapturedShape::Rect(rect)) => {
-                        scene.push_layer(*fill, *blend, *alpha, transform, rect);
+                        scene.push_layer(*fill, *blend, alpha, transform, rect);
                     }
                     (false, CapturedShape::Box(shape)) => {
                         with_shape!(shape, |s| scene
-                            .push_layer(*fill, *blend, *alpha, transform, s));
+                            .push_layer(*fill, *blend, alpha, transform, s));
                     }
                 }
             }

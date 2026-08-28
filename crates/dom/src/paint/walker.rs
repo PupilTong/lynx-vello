@@ -76,7 +76,7 @@
 
 use euclid::default::Vector2D;
 
-use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeOp};
+use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
@@ -109,16 +109,21 @@ pub(crate) enum WalkSink<'s> {
 
 impl WalkSink<'_> {
     /// The scene content riding `chain` encodes into.
-    fn scene_for(&mut self, chain: Option<u32>) -> &mut Scene {
+    fn scene_for(&mut self, chain: ComposeChain) -> &mut Scene {
         match self {
             Self::Monolithic(scene) => scene,
             Self::Compose(assembly) => assembly.fragment_for(chain),
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors vello's push_layer plus the compose tags"
+    )]
     fn push_layer_rect(
         &mut self,
-        chain: Option<u32>,
+        chain: ComposeChain,
+        alpha_animation: Option<u32>,
         fill: Fill,
         blend: BlendMode,
         alpha: f32,
@@ -135,13 +140,14 @@ impl WalkSink<'_> {
                 transform,
                 shape: CapturedShape::Rect(rect),
                 chain,
+                alpha_animation,
             }),
         }
     }
 
     fn push_layer_box(
         &mut self,
-        chain: Option<u32>,
+        chain: ComposeChain,
         fill: Fill,
         blend: BlendMode,
         alpha: f32,
@@ -161,13 +167,14 @@ impl WalkSink<'_> {
                 transform,
                 shape: CapturedShape::Box(shape),
                 chain,
+                alpha_animation: None,
             }),
         }
     }
 
     fn push_clip_box(
         &mut self,
-        chain: Option<u32>,
+        chain: ComposeChain,
         fill: Fill,
         transform: Affine,
         shape: BoxShape,
@@ -184,11 +191,12 @@ impl WalkSink<'_> {
                 transform,
                 shape: CapturedShape::Box(shape),
                 chain,
+                alpha_animation: None,
             }),
         }
     }
 
-    fn push_clip_empty(&mut self, chain: Option<u32>) {
+    fn push_clip_empty(&mut self, chain: ComposeChain) {
         match self {
             Self::Monolithic(scene) => {
                 scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
@@ -201,6 +209,7 @@ impl WalkSink<'_> {
                 transform: Affine::IDENTITY,
                 shape: CapturedShape::Rect(Rect::ZERO),
                 chain,
+                alpha_animation: None,
             }),
         }
     }
@@ -237,6 +246,11 @@ pub(crate) struct Scratch {
     /// offset range the culled encode must stay valid for. Index-parallel
     /// with [`PaintOrder::slots`].
     slot_windows: Vec<(Vector2D<f32>, Vector2D<f32>)>,
+    /// Per animation slot, whether a live transform curve moves its chain —
+    /// transitive through slot parents. Content on a moving chain is never
+    /// culled and its enclosing groups keep unclipped bounds: the sampled
+    /// delta can carry it anywhere.
+    animation_moves: Vec<bool>,
     paths: PathScratch,
 }
 
@@ -376,6 +390,17 @@ fn walk_within<T>(
             .iter()
             .map(crate::visual::ScrollSlot::encode_window),
     );
+    scratch.animation_moves.clear();
+    for slot in frame.animations() {
+        let own = slot
+            .curve
+            .as_ref()
+            .is_some_and(|curve| curve.transform.is_some());
+        let inherited = slot
+            .parent
+            .is_some_and(|parent| scratch.animation_moves[parent as usize]);
+        scratch.animation_moves.push(own || inherited);
+    }
     plan_clips(scratch, frame, cull);
     plan_frame(scratch, document, frame, cull);
 
@@ -598,7 +623,10 @@ fn open_scope<T>(
         scale,
     } = painting;
     let layer = &frame.layers()[layer_index];
-    let chain = layer.slot;
+    let chain = ComposeChain {
+        scroll: layer.slot,
+        animation: layer.animation,
+    };
     let base = scratch.scopes.last().map_or(0, |scope| scope.base);
     pop_clips_to(sink, scratch, base);
 
@@ -609,8 +637,14 @@ fn open_scope<T>(
     let effects = style.get_effects();
     let blend = blend_mode(style);
     let mut pushed = 1_u32;
+    // The effect layer's alpha is replaced at compose time when this group's
+    // own element exports an opacity curve.
+    let alpha_animation = layer
+        .animation
+        .filter(|&slot| frame.animations()[slot as usize].node == layer.node);
     sink.push_layer_rect(
         chain,
+        alpha_animation,
         Fill::NonZero,
         blend,
         effects.opacity.clamp(0.0, 1.0),
@@ -643,6 +677,7 @@ fn open_scope<T>(
             ),
             None => sink.push_layer_rect(
                 chain,
+                None,
                 Fill::NonZero,
                 BlendMode::new(Mix::Normal, Compose::SrcOver),
                 1.0,
@@ -659,6 +694,7 @@ fn open_scope<T>(
         }
         sink.push_layer_rect(
             chain,
+            None,
             Fill::NonZero,
             BlendMode::new(Mix::Normal, Compose::SrcIn),
             1.0,
@@ -692,7 +728,10 @@ fn close_scope<T>(sink: &mut WalkSink<'_>, scratch: &mut Scratch, painting: Pain
         let layer = &frame.layers()[scope.layer];
         if let Some(style) = document.paint_style(layer.node) {
             filters::apply(
-                sink.scene_for(layer.slot),
+                sink.scene_for(ComposeChain {
+                    scroll: layer.slot,
+                    animation: layer.animation,
+                }),
                 style,
                 scratch.layer_bounds[scope.layer],
                 scale,
@@ -723,7 +762,7 @@ fn paint_item<T>(
         scale,
     } = painting;
     sync_clips(sink, scratch, frame, item, scale);
-    let scene = sink.scene_for(frame.item_translation_chain(item));
+    let scene = sink.scene_for(frame.item_compose_chain(item));
     let transform = scale * local;
 
     match item.kind {
@@ -883,10 +922,20 @@ fn sync_clips(
     }
 }
 
+/// A clip node's compose chain: its scroll chain, and never an animation
+/// chain — export eligibility refuses a clip established inside an animated
+/// subtree, so a clip's rect never moves with a sampled delta.
+fn clip_chain(clip: &ClipNode) -> ComposeChain {
+    ComposeChain {
+        scroll: clip.slot,
+        animation: None,
+    }
+}
+
 fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let Some(local) = convert::item_affine(&clip.transform, size) else {
-        sink.push_clip_empty(clip.slot);
+        sink.push_clip_empty(clip_chain(clip));
         return;
     };
     let rect = Rect::new(
@@ -896,7 +945,7 @@ fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {
         (clip.rect.origin.y + clip.rect.size.height) as f64,
     );
     let shape = BoxShape::new(rect, &clip.radii);
-    sink.push_clip_box(clip.slot, Fill::NonZero, scale * local, shape);
+    sink.push_clip_box(clip_chain(clip), Fill::NonZero, scale * local, shape);
 }
 
 fn pop_clips_to(sink: &mut WalkSink<'_>, scratch: &mut Scratch, len: usize) {
@@ -964,8 +1013,15 @@ fn plan_frame<T>(
         };
         let top = scratch.open_layers.last().copied();
         let content_chain = frame.item_translation_chain(item);
-        let admitted =
-            cull.map(|cull| admitted_region(scratch, frame, cull, content_chain, item.clip));
+        let moving = item
+            .animation
+            .is_some_and(|slot| scratch.animation_moves[slot as usize]);
+        let admitted = if moving {
+            // A sampled delta can move the item anywhere; it always paints.
+            None
+        } else {
+            cull.map(|cull| admitted_region(scratch, frame, cull, content_chain, item.clip))
+        };
 
         // An item whose plain border box already reaches the admitted region
         // paints whatever its fragments reach, because every reach only grows
@@ -1032,7 +1088,16 @@ fn close_layer(
         .open_layers
         .pop()
         .expect("close is only called with an open layer");
+    let moving = layers[closed]
+        .animation
+        .is_some_and(|slot| scratch.animation_moves[slot as usize]);
     scratch.layer_bounds[closed] = scratch.bounds_acc[closed].map_or(Rect::ZERO, |rect| {
+        if moving {
+            // The group's rect and content translate together under the
+            // sampled delta, but the *viewport* does not: clipping to it
+            // would cut content the delta moves into view.
+            return rect;
+        }
         let (low, high) =
             relative_offset_range(slots, &scratch.slot_windows, layers[closed].slot, None);
         rect.intersect(expand_region(viewport, low, high))
@@ -1255,6 +1320,7 @@ mod tests {
             radii: CornerRadii::ZERO,
             hit_testable: true,
             slot: None,
+            animation: None,
         }
     }
 
