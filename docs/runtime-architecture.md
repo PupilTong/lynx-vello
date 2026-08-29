@@ -331,6 +331,30 @@ already display; a future script-facing scroll API must either dirty the
 paint or publish its offsets, since the compositor only knows what crossed
 the channel.
 
+## Composite animations compose; the rest tick
+
+The same compose machinery carries animations. At commit, an element whose
+one running animation moves only `opacity`/`transform` — and whose keyframes
+and structure the exporter can re-express exactly (see
+`docs/tracking/css-animation.md`) — publishes an `AnimationSlot` curve on
+the frame: timing from stylo's public `Animation` fields, per-property
+tracks re-read from the stylist's `@keyframes` steps. The element is forced
+to paint as a stacking context with a composited group, its subtree's
+fragments and layer pushes are tagged with its animation chain, and each
+presented frame samples the curve at the frame clock: the group's alpha is
+replaced, and the transform delta against the committed bake multiplies
+into the tagged fragments, pushes, and hit tests. Between commits the
+compositor animates alone.
+
+`BeginFrame` narrows accordingly: it is sent per frame only while the
+committed frame reports `needs_main_ticks` — something animating that could
+not export — and once when a finite curve runs past its end, so the main
+thread runs the finish restyle and commits the end state. An infinite
+exported animation involves the main thread zero times per frame. The
+sampling mirrors stylo's own progress computation exactly, so the values
+composition shows between commits are the values any commit's restyle
+lands on at the same instant — handoffs are seamless in both directions.
+
 ## Native and Wasm spawning
 
 `LynxView::new` always delegates VM creation and module boot to an

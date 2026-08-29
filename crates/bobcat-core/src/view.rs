@@ -650,10 +650,11 @@ fn scene_for<'frame>(
     intents: &ScrollIntents,
     buffer: &'frame mut Scene,
     frame: &'frame CommittedFrame,
+    animation_now: Option<f64>,
 ) -> &'frame Scene {
-    if intents.overrides_any() {
+    if intents.overrides_any() || animation_now.is_some() {
         buffer.reset();
-        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node));
+        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
         buffer
     } else {
         frame.scene()
@@ -671,6 +672,7 @@ fn route_published(
     frame: Option<&CommittedFrame>,
     intents: &ScrollIntents,
     event: &InputEvent,
+    animation_now: Option<f64>,
 ) -> Option<HitTarget> {
     let finite = event.position.x.is_finite()
         && event.position.y.is_finite()
@@ -682,7 +684,11 @@ fn route_published(
         debug_assert!(false, "host input events must be finite, got {event:?}");
         return None;
     }
-    frame?.hit(event.position, &|slot| intents.offset_for(slot.node))
+    frame?.hit(
+        event.position,
+        &|slot| intents.offset_for(slot.node),
+        animation_now,
+    )
 }
 
 /// Everything one view is built from.
@@ -1122,7 +1128,8 @@ impl<'window, W: Window> LynxView<'window, W> {
         }
         let generation = self.scroll_intents.generation;
         let frame = published.as_deref();
-        let target = route_published(frame, &self.scroll_intents, &event);
+        let animation_now = frame.and_then(|frame| frame.has_live_curves().then_some(at));
+        let target = route_published(frame, &self.scroll_intents, &event, animation_now);
         let mut decisions = Vec::new();
         {
             let host = FrameRouterHost {
@@ -1335,11 +1342,14 @@ impl<'window, W: Window> LynxView<'window, W> {
         if self.detached {
             return None;
         }
-        let animating = self
+        // An exported curve animates on this side; the main thread is asked
+        // for a tick only for what could not export, or once a curve has
+        // run past its domain and needs its finish restyle.
+        let main_ticks_due = self
             .hub
             .latest()
-            .is_some_and(|frame| frame.animations_active());
-        if !animating && !always {
+            .is_some_and(|frame| frame.needs_main_ticks() || frame.animation_boundary_passed(now));
+        if !main_ticks_due && !always {
             return None;
         }
         self.begin_frames_sent += 1;
@@ -1397,13 +1407,21 @@ impl<'window, W: Window> LynxView<'window, W> {
         let key = latest
             .as_ref()
             .map(|frame| (frame.epoch(), self.scroll_intents.generation));
+        let animation_now = latest
+            .as_ref()
+            .and_then(|frame| frame.has_live_curves().then_some(now));
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
         if let (Some(frame), Some(key)) = (&latest, key)
-            && graphics.needs_paint(key, size)
+            && (animation_now.is_some() || graphics.needs_paint(key, size))
         {
-            let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+            let scene = scene_for(
+                &self.scroll_intents,
+                &mut self.composed_scene,
+                frame,
+                animation_now,
+            );
             graphics.render_to_target(scene, size, key)?;
         }
         if animating || self.gesture.needs_frame() {
@@ -1425,17 +1443,26 @@ impl<'window, W: Window> LynxView<'window, W> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
+        let now = self.clock.now_seconds();
         let latest = self.hub.latest();
         let key = latest
             .as_ref()
             .map(|frame| (frame.epoch(), self.scroll_intents.generation));
+        let animation_now = latest
+            .as_ref()
+            .and_then(|frame| frame.has_live_curves().then_some(now));
         match &mut self.output {
             Output::None => Err(EngineError::NoDrawTarget),
             Output::Offscreen(gpu) => {
                 if let (Some(frame), Some(key)) = (&latest, key)
-                    && self.composed != Some(key)
+                    && (self.composed != Some(key) || animation_now.is_some())
                 {
-                    let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+                    let scene = scene_for(
+                        &self.scroll_intents,
+                        &mut self.composed_scene,
+                        frame,
+                        animation_now,
+                    );
                     gpu.render_frame(scene, size.width, size.height, Color::WHITE)
                         .map_err(|error| EngineError::Gpu(error.to_string()))?;
                     self.composed = Some(key);
@@ -1447,9 +1474,14 @@ impl<'window, W: Window> LynxView<'window, W> {
             }
             Output::Window(graphics) => {
                 if let (Some(frame), Some(key)) = (&latest, key)
-                    && graphics.needs_paint(key, size)
+                    && (animation_now.is_some() || graphics.needs_paint(key, size))
                 {
-                    let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, frame);
+                    let scene = scene_for(
+                        &self.scroll_intents,
+                        &mut self.composed_scene,
+                        frame,
+                        animation_now,
+                    );
                     graphics.render_to_target(scene, size, key)?;
                 }
                 if !graphics.rendered_at(size) {
@@ -1871,10 +1903,16 @@ impl OffscreenLynxView {
         self.scroll_intents.rebase(&frame);
         self.maybe_request_refill(&frame);
         let key = (frame.epoch(), self.scroll_intents.generation);
-        if self.composed == Some(key) && !force {
+        let animation_now = frame.has_live_curves().then_some(now);
+        if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
         }
-        let scene = scene_for(&self.scroll_intents, &mut self.composed_scene, &frame);
+        let scene = scene_for(
+            &self.scroll_intents,
+            &mut self.composed_scene,
+            &frame,
+            animation_now,
+        );
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
         };
@@ -2708,6 +2746,116 @@ mod event_loop_tests {
             (published.y - 150.0).abs() < 0.5,
             "the refill commit publishes the scrolled offset, got {published:?}"
         );
+    }
+
+    /// Boots a card whose one view runs `animation_css`, waiting for the
+    /// boot flush like [`booted`] does.
+    fn booted_animated(animation_css: &str) -> OffscreenLynxView {
+        let mut document = crate::tree::new_document(
+            crate::tree::Viewport::new(393.0, 727.0),
+            crate::tree::PageConfig::default(),
+        );
+        crate::style::add_style_sheet_text(&mut document, animation_css);
+        let mut engine = super::LynxView::start(
+            document,
+            crate::tree::Viewport::new(393.0, 727.0),
+            super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+            Arc::new(|| {}),
+            super::EntryModule {
+                source: r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                  __FlushElementTree();
+                };
+                "
+                .to_owned(),
+                url: "app:///animated.js".to_owned(),
+            },
+        )
+        .expect("the test view starts");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !engine
+            .pump()
+            .into_iter()
+            .any(|event| matches!(event, crate::EngineEvent::ScriptFinished))
+        {
+            assert!(Instant::now() < deadline, "the entry module did not finish");
+            std::thread::yield_now();
+        }
+        engine
+    }
+
+    /// Sends one `BeginFrame` and waits for its round's commit to publish.
+    fn synchronized_tick(engine: &mut OffscreenLynxView, now: f64) {
+        let seq = engine.begin_frame(now, true).expect("a tick crosses");
+        assert!(
+            engine.hub.wait_begin_frame(seq, Duration::from_secs(5)),
+            "the main thread services the tick"
+        );
+    }
+
+    /// An exported curve animates on the presenting side: after the tick
+    /// that promotes it to running, the committed frame carries the curve,
+    /// wants no per-frame main-thread ticks, and `begin_frame` sends
+    /// nothing.
+    #[test]
+    fn an_exported_curve_stops_asking_for_main_thread_ticks() {
+        let mut engine = booted_animated(
+            "view { width: 100px; height: 100px; background-color: red;
+                    animation: fade 1s linear infinite; }
+             @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+        );
+        let boot = engine.published_frame().expect("the boot flush published");
+        assert!(
+            boot.needs_main_ticks(),
+            "a pending animation still needs the promoting tick"
+        );
+
+        synchronized_tick(&mut engine, 0.1);
+        let frame = engine.published_frame().expect("the promotion committed");
+        assert!(frame.animations_active());
+        assert!(frame.has_live_curves(), "the fade exported");
+        assert!(
+            !frame.needs_main_ticks(),
+            "an exported curve frees the main thread"
+        );
+        assert!(
+            engine.begin_frame(0.5, false).is_none(),
+            "no BeginFrame crosses while the curve covers the animation"
+        );
+    }
+
+    /// A finite curve's expiry is the one moment the main thread must hear
+    /// about: the boundary tick runs the finish restyle and the next frame
+    /// reports the timeline idle.
+    #[test]
+    fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
+        let mut engine = booted_animated(
+            "view { width: 100px; height: 100px; background-color: red;
+                    animation: fade 0.2s linear; }
+             @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+        );
+        synchronized_tick(&mut engine, 0.05);
+        let frame = engine.published_frame().expect("the promotion committed");
+        assert!(frame.has_live_curves());
+        assert!(
+            engine.begin_frame(0.1, false).is_none(),
+            "inside the curve's domain nothing crosses"
+        );
+
+        let seq = engine
+            .begin_frame(0.3, false)
+            .expect("the passed boundary sends the finish tick");
+        assert!(engine.hub.wait_begin_frame(seq, Duration::from_secs(5)));
+        let finished = engine.published_frame().expect("the finish committed");
+        assert!(
+            !finished.animations_active(),
+            "the finish restyle retires the timeline"
+        );
+        assert!(!finished.has_live_curves());
     }
 
     #[test]

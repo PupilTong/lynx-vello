@@ -86,8 +86,12 @@ concretely, so the tables above are read as "the target" and this section as
   style flush, through `MatchMethods::process_animations`.
 - **Where the frame work happens.** `Document::advance_animations(now)` runs on
   the document's owner thread — the Lynx main thread once the script starts —
-  driven by one `BeginFrame` command per frame that carries the presenting
-  side's clock reading; no JavaScript is involved. It is a Stylo
+  driven by `BeginFrame` commands that carry the presenting side's clock
+  reading; no JavaScript is involved. An animation the commit exported as a
+  composite curve (below) receives no per-frame `BeginFrame` at all: the
+  compositor samples the curve itself, and the main thread hears about the
+  animation again only when a finite curve runs out (one boundary
+  `BeginFrame` for the finish restyle) or something else commits. It is a Stylo
   animation-only traversal, which does no selector matching and reads no
   snapshots, over just the animating elements and whatever inherits from them.
   A property that cannot move a box never reaches layout, because the damage
@@ -100,12 +104,29 @@ concretely, so the tables above are read as "the target" and this section as
   380 µs, so the tick is O(animating) at roughly 3.2 µs per element. A `width`
   animation, which does reach layout, costs 24 µs more at one element and 69 µs
   more at 120 — that is the reflow the paint-only path avoids.
-- **The scene rebuild is the dominant term, and the driver cannot touch it.**
-  Every frame above carries a constant ~248 µs of scene rebuild: at one
-  animating element that is 98% of the frame. This is `docs/style-assumptions.md`
-  §11's open gap in numbers — the animation work is already small, and the
-  remaining win is bounded by a constant that only compose-time layers can
-  remove.
+- **Composite curve export** (`dom::style::curve_export` +
+  `dom::visual::curves`) closes §11's gap for the common case: at commit, an
+  element whose one running animation moves only `opacity`/`transform` — with
+  context-free keyframe values (numbers, absolute lengths, angles),
+  `linear`/`cubic-bezier` easing, matched transform lists, both track ends
+  declared, no transitions, and nothing structural in the way (no enclosing
+  composited group, no scroll container or overflow clip in the animated
+  subtree, no individual transforms/motion path/perspective, a 2D invertible
+  world) — is re-expressed as an `AnimationSlot` curve on the committed
+  frame. Sampling mirrors stylo's `get_property_declaration_at_time` exactly
+  (interval pick, FROM-keyframe timing function, `1/(200×segment)` bezier
+  tolerance, iteration/direction emulation), so the compositor's frames and
+  the next commit's restyle land on the same values. Composition retargets
+  the element's group alpha and multiplies the transform delta
+  `pre·L(t)·Lc⁻¹·pre⁻¹` into its subtree's fragments, pushes, and hit
+  tests. Anything the exporter refuses simply keeps the per-frame
+  `BeginFrame` path — a refusal is never wrong.
+- **The scene rebuild was the dominant term.** Before the export, every
+  frame carried a constant ~248 µs of scene rebuild: at one animating
+  element that is 98% of the frame. An exported animation now rebuilds
+  nothing per frame — composition replays the committed fragments with a
+  new sampled delta/alpha — and the numbers above apply only to the
+  fallback path.
 - **Wiring the driver costs non-animating documents nothing**: `initial_commit`,
   `media_viewport_flip`, `var_chain_cascade`, and `noop_commit` in the `css`
   bench all sit within noise of their pre-driver medians. Reaching that required

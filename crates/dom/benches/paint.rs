@@ -659,7 +659,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         phase = !phase;
         scroll_to(&mut dom, phase);
         scene.reset();
-        frame.compose_into(&mut scene, &|slot| Some(dom.scroll_offset(slot.node)));
+        frame.compose_into(&mut scene, &|slot| Some(dom.scroll_offset(slot.node)), None);
         divan::black_box(scene.encoding().draw_tags.len());
     });
 }
