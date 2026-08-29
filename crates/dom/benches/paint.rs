@@ -16,13 +16,13 @@
 //!
 //! What the `frame_*` set is arranged to expose:
 //!
-//! - **Almost nothing is incremental yet.** [`dom::Document::render`] is gated on one `u64` visual
-//!   epoch, so any visual mutation rebuilds the whole paint order and re-encodes the whole scene.
-//!   Every `frame_*` number here is therefore roughly the same constant, whatever the mutation
-//!   touched. That is the point: the constant is the baseline the tiered-damage work has to break,
-//!   and the benchmarks are shaped so that breaking it shows up as divergence between paired cases
-//!   rather than as one number moving. The one mutation already off that path is a windowed scroll:
-//!   the frame is baked unscrolled and a scroll tick only replays the compose program, so
+//! - **Almost nothing is incremental yet.** [`dom::Document::render`] is gated on one dirty bit, so
+//!   any visual mutation rebuilds the whole paint order and re-encodes the whole scene. Every
+//!   `frame_*` number here is therefore roughly the same constant, whatever the mutation touched.
+//!   That is the point: the constant is the baseline the tiered-damage work has to break, and the
+//!   benchmarks are shaped so that breaking it shows up as divergence between paired cases rather
+//!   than as one number moving. The one mutation already off that path is a windowed scroll: the
+//!   frame is baked unscrolled and a scroll tick only replays the compose program, so
 //!   `frame_scroll_tick` times composition, not `render`.
 //! - **Paired by reach.** `frame_visible_row_flip` and `frame_offscreen_row_flip` differ only in
 //!   whether the repainted row is inside the scrollport; `frame_with_text_runs` and
@@ -40,10 +40,9 @@
 //!   should not be rebuilding, not as a check on culling; culling shows up in the absolute number,
 //!   which fell by about three quarters at 512 rows when it landed.
 //! - **`frame_inert_attribute` is the floor.** It writes a `data-` attribute no rule selects. The
-//!   write still bumps the visual epoch (`ensure_snapshot` in
-//!   `crates/dom/src/style/invalidation.rs` notes a visual mutation unconditionally), so today it
-//!   costs a whole rebuild for a change nothing paints. It is the case a `Clean` damage tier should
-//!   collapse to nothing.
+//!   write still sets the dirty bit (`ensure_snapshot` in `crates/dom/src/style/invalidation.rs`
+//!   notes a visual mutation unconditionally), so today it costs a whole rebuild for a change
+//!   nothing paints. It is the case a `Clean` damage tier should collapse to nothing.
 //!
 //! Two properties every `frame_*` benchmark here must keep, both easy to lose:
 //!

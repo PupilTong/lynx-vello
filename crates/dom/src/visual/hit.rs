@@ -29,9 +29,8 @@ pub(crate) type OffsetSource<'a> = dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> 
 
 impl PaintOrder {
     pub(crate) fn assert_visually_fresh<T>(&self, document: &Document<T>) {
-        assert_eq!(
-            self.visual_epoch,
-            document.visual_epoch(),
+        assert!(
+            self.commit_id == document.commit_id() && !document.visual_dirty(),
             "visually stale PaintOrder: the document mutated after this frame was built; \
              rebuild it through the document visual pipeline before painting",
         );

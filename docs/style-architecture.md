@@ -58,8 +58,8 @@ CSS supplied as text.
   `insert_before`,
   `remove_element`, `drop_element`, and `drop_subtree` record their own
   pre-mutation snapshots or scoped restyle hints before changing the tree.
-  A `drop_element` of an already-detached node records nothing and moves no
-  visual epoch: what it frees was not rendered.
+  A `drop_element` of an already-detached node records nothing and
+  invalidates no retained frame: what it frees was not rendered.
   Stylesheet and device operations schedule the document root in the same call.
   Embedders cannot set, clear, or query internal traversal dirty state.
 - **Payloads are opaque.** The payload arena retains the `T` supplied for
