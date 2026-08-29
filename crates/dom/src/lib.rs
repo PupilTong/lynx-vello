@@ -51,3 +51,4 @@ pub use crate::tree::document::{Document, NodeId};
 pub use crate::tree::node::ChildrenIter;
 pub use crate::tree::node::Node;
 pub use crate::tree::shadow::ShadowRootMode;
+pub use crate::visual::{CommittedFrame, HitTarget, ScrollSlot};

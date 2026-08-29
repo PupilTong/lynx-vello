@@ -6,14 +6,13 @@ use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dom::event::EventSteps;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
 
 use crate::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 use crate::tree::LynxDocument;
-use crate::view::{SharedListenerNames, SharedTree};
+use crate::view::{FrameHub, SharedListenerNames};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -132,41 +131,39 @@ impl std::error::Error for MainThreadError {}
 /// knob, not a measurement.
 const REMOVALS_PER_COLLECTION: u32 = 32;
 
-/// The script thread's hold on the document for one batch.
-///
-/// A batch is open from the first `bobcat` call that takes the document out
-/// of the hand-off slot until it goes back, at `__FlushElementTree` or at the
-/// end of the evaluation or event delivery that opened it.
+/// The main thread's outright ownership of the document, plus the publish
+/// seam its commits leave through.
 struct TreeHandle {
-    slot: SharedTree,
-    taken: Option<LynxDocument>,
+    document: LynxDocument,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
+    /// Where committed frames are published.
+    hub: Arc<FrameHub>,
+    /// Wakes the presenting side after a publish, through whatever frame
+    /// capability is currently attached.
+    wake: Box<dyn Fn()>,
 }
 
 impl TreeHandle {
     fn tree(&mut self) -> &mut LynxDocument {
-        if self.taken.is_none() {
-            self.taken = Some(self.slot.take());
-        }
-        self.taken
-            .as_mut()
-            .expect("the batch tree was just ensured")
+        &mut self.document
     }
 
+    /// Runs the whole pipeline and publishes the committed frame — the
+    /// native half of `__FlushElementTree`, and the only place frames leave
+    /// this thread.
     fn flush(&mut self) {
-        let mut tree = match self.taken.take() {
-            Some(tree) => tree,
-            None => self.slot.take(),
-        };
-        tree.layout();
-        self.slot.put(tree);
+        let frame = self.document.commit();
+        self.hub.publish(frame);
+        (self.wake)();
     }
 
-    /// Closes the batch: returns the tree if one is held.
-    fn release(&mut self) {
-        if let Some(tree) = self.taken.take() {
-            self.slot.put(tree);
+    /// Commits and publishes only when something is stale — the tail of
+    /// every served command round, which is what makes "we do not guarantee
+    /// the tree is not flushed outside `__FlushElementTree`" true.
+    fn commit_if_dirty(&mut self) {
+        if self.document.needs_render() {
+            self.flush();
         }
     }
 
@@ -183,12 +180,6 @@ impl TreeHandle {
         }
         self.removals = 0;
         true
-    }
-}
-
-impl Drop for TreeHandle {
-    fn drop(&mut self) {
-        self.release();
     }
 }
 
@@ -212,11 +203,6 @@ struct EventState {
     listeners: RefCell<HashMap<Arc<str>, ListenerNodes>>,
     /// The same registrations keyed the other way, so dropping an element
     /// costs its own listeners rather than a scan of every name.
-    ///
-    /// Dropping an element is not rare — it is whatever the collector hands
-    /// back after a list update — and the forward index is keyed by name, so
-    /// without this a single drop walks every registered event name and every
-    /// node registered under it.
     by_node: RefCell<HashMap<dom::NodeId, NodeListeners>>,
     /// The presenting thread's view of which names are registered anywhere.
     ///
@@ -332,22 +318,17 @@ impl fmt::Debug for MainThreadRuntime {
     }
 }
 
-impl Drop for MainThreadRuntime {
-    fn drop(&mut self) {
-        self.tree.borrow_mut().release();
-    }
-}
-
 impl MainThreadRuntime {
     pub(crate) fn new(
-        elements: SharedTree,
+        document: LynxDocument,
         listener_names: Arc<SharedListenerNames>,
-        on_flush: impl Fn() + 'static,
+        hub: Arc<FrameHub>,
+        wake: impl Fn() + 'static,
     ) -> Result<Self, MainThreadError> {
         let mut engine = ScriptEngine::new()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(listener_names));
-        let tree = install_bobcat(&mut engine, elements, on_flush, &events)?;
+        let tree = install_bobcat(&mut engine, document, hub, wake, &events)?;
         Ok(Self {
             engine,
             tree,
@@ -356,18 +337,59 @@ impl MainThreadRuntime {
         })
     }
 
-    /// Delivers a path the presenting side already computed.
+    /// Commits and publishes when anything is stale. Called by the command
+    /// loop at the end of every round.
+    pub(crate) fn commit_if_dirty(&mut self) {
+        self.tree.borrow_mut().commit_if_dirty();
+    }
+
+    /// Advances the animation timeline to the presenting side's clock
+    /// reading. Whether anything changed is the next commit's business.
+    pub(crate) fn begin_frame(&mut self, now: f64) {
+        let _ = self.tree.borrow_mut().tree().advance_animations(now);
+    }
+
+    /// Drives the user-agent scroll chain the presenting side decided.
+    pub(crate) fn apply_scroll(&mut self, from: dom::NodeId, delta: dom::Vector2D<f32>) {
+        let mut handle = self.tree.borrow_mut();
+        let document = handle.tree();
+        if document.get(from).is_some() {
+            let _ = document.scroll_chain(from, delta);
+        }
+    }
+
+    /// Applies new device metrics.
+    pub(crate) fn apply_resize(&mut self, width: f32, height: f32, device_pixel_ratio: f32) {
+        let mut handle = self.tree.borrow_mut();
+        let document = handle.tree();
+        let viewport = document.viewport_size();
+        if viewport.width.to_bits() != width.to_bits()
+            || viewport.height.to_bits() != height.to_bits()
+        {
+            document.set_viewport(width, height);
+        }
+        if document.device_pixel_ratio().to_bits() != device_pixel_ratio.to_bits() {
+            document.set_device_pixel_ratio(device_pixel_ratio);
+        }
+    }
+
+    pub(crate) fn note_images_changed(&mut self) {
+        self.tree.borrow_mut().tree().note_images_changed();
+    }
+
+    /// Runs `probe` against the owned document — the observation seam for
+    /// everything outside this thread.
+    pub(crate) fn with_document<R>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> R) -> R {
+        probe(self.tree.borrow_mut().tree())
+    }
+
+    /// Delivers one routed event the presenting side decided: the type and
+    /// the target crossed as plain data; the propagation path is computed
+    /// here, where the document is.
     ///
-    /// The split is deliberate. The presenting thread holds the document when
-    /// it routes an input event, so building the path there costs it no extra
-    /// borrow, and it must stay responsive — a long task here cannot be
-    /// allowed to stop scrolling. This thread owns the realm, which cannot
-    /// move, so delivery has to happen here.
-    ///
-    /// Nothing has to guard the window in between. A `NodeId` names one node
-    /// for the life of the document — freeing retires it — so a step whose
-    /// node was freed since the path was built resolves to no handle and
-    /// reaches no one, which is exactly what should happen.
+    /// A target freed since the decision formed resolves to nothing rather
+    /// than a path — a `NodeId` names one node for the life of the document,
+    /// so the check is one lookup and can never hit a stranger.
     ///
     /// Each walk carries an id naming it, and each call says whether it is the
     /// last. Together they let the realm hold one event object for the whole
@@ -378,10 +400,19 @@ impl MainThreadRuntime {
     /// Returns whether anything was delivered.
     pub(crate) fn dispatch_event(
         &mut self,
-        steps: &EventSteps,
+        target: dom::NodeId,
         name: &Arc<str>,
         detail_json: &Arc<str>,
     ) -> Result<bool, MainThreadError> {
+        let steps = {
+            let mut handle = self.tree.borrow_mut();
+            let document = handle.tree();
+            if document.get(target).is_none() {
+                return Ok(false);
+            }
+            document.event_steps(target, true, true)
+        };
+        let steps = &steps;
         // One lookup for the whole walk, and the first thing done: an event no
         // listener registered for never reaches the realm and never takes the
         // document.
@@ -391,12 +422,6 @@ impl MainThreadRuntime {
         // listener may register or unregister from inside the walk, so the
         // borrow cannot be held across a call into the realm — but the
         // *path* is short and bounded, and the index is not.
-        //
-        // Filtering ahead of the walk is also what lets each call say whether
-        // another follows it. That is the realm's cue to drop the event
-        // object, and the only one the host can give: the walk's other two
-        // endings — a listener stopping propagation, a listener throwing —
-        // are both visible to the realm itself as they happen.
         let mut deliverable: SmallVec<[(dom::NodeId, dom::NodeId, bool); INLINE_DELIVERIES]> =
             SmallVec::new();
         {
@@ -445,13 +470,6 @@ impl MainThreadRuntime {
                 EVENT_DISPATCH_EXPORT,
                 &arguments,
             );
-            // Before anything else, including propagating a failure. Building
-            // the event object alone takes the document — it reads two ids —
-            // so a listener that merely throws would otherwise strand it in
-            // the hand-off slot, and nothing could ever put it back: the only
-            // code that releases needs a next dispatch, and a next dispatch is
-            // only built while the tree is held.
-            self.tree.borrow_mut().release();
             if !called
                 .map_err(|error| MainThreadError::from_engine("delivering an event", error))?
             {
@@ -511,9 +529,7 @@ __FlushElementTree();
         reason = "the explicit collection entry point, used by tests"
     )]
     pub(crate) fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
-        let result = self.collect();
-        self.tree.borrow_mut().release();
-        result
+        self.collect()
     }
 
     fn collect(&mut self) -> Result<(), MainThreadError> {
@@ -524,13 +540,11 @@ __FlushElementTree();
     }
 
     /// Collects if enough held subtrees were removed since the last
-    /// collection, then ends the batch. Runs after every evaluation that
-    /// succeeded; a failed one keeps its count for the next.
+    /// collection. Runs after every evaluation that succeeded; a failed one
+    /// keeps its count for the next.
     fn finish_batch(&mut self, succeeded: bool) -> Result<(), MainThreadError> {
         let due = succeeded && self.tree.borrow_mut().take_collection_due();
-        let result = if due { self.collect() } else { Ok(()) };
-        self.tree.borrow_mut().release();
-        result
+        if due { self.collect() } else { Ok(()) }
     }
 
     pub(crate) fn evaluate_module(
@@ -550,17 +564,19 @@ __FlushElementTree();
 
 fn install_bobcat(
     engine: &mut ScriptEngine,
-    elements: SharedTree,
-    on_flush: impl Fn() + 'static,
+    document: LynxDocument,
+    hub: Arc<FrameHub>,
+    wake: impl Fn() + 'static,
     events: &Rc<EventState>,
 ) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
-        slot: elements,
-        taken: None,
+        document,
         removals: 0,
+        hub,
+        wake: Box::new(wake),
     }));
 
-    install_host_module(engine, &handle, on_flush, events)?;
+    install_host_module(engine, &handle, events)?;
     install_event_members(engine, events)?;
     engine
         .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
@@ -616,7 +632,6 @@ macro_rules! tree_members {
 fn install_host_module(
     engine: &mut ScriptEngine,
     handle: &Rc<RefCell<TreeHandle>>,
-    on_flush: impl Fn() + 'static,
     events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
@@ -687,24 +702,19 @@ fn install_host_module(
     // one thing that holds an element: the node is freed now. Only the node —
     // its element children are unlinked and go on as detached roots, each
     // held by the handle that names it, while the text node a `raw-text`
-    // reflects goes with it because no handle could ever name one. The
-    // element cannot still be on screen: a connected element's handle is kept
-    // alive by its parent's, up to the permanent page handle. Every listener
-    // the realm had on it is gone too, since those lived on the handle, so
-    // the index stops naming the node.
+    // reflects goes with it because no handle could ever name one. Every
+    // listener the realm had on it is gone too, since those lived on the
+    // handle, so the index stops naming the node.
     install(engine, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
         let node = node_id_argument(NAME, arguments, 0)?;
         let mut tree = borrow_tree(NAME, &tree)?;
         let document = tree.tree();
         validate_removable(document, NAME, node)?;
-        // The one place the realm's ownership graph is checkable from here,
-        // and the check that turns a mirror bug into an error instead of a
-        // row disappearing. A connected element's handle is held by its
-        // parent's, up to the permanent page handle, so a connected element
-        // can never be the subject of a drop; if one is, the graph and the
-        // tree disagree and the realm must hear about it before the element
-        // is gone.
+        // A connected element's handle is held by its parent's, up to the
+        // permanent page handle, so a connected element can never be the
+        // subject of a drop; if one is, the graph and the tree disagree and
+        // the realm must hear about it before the element is gone.
         if document.is_connected(node) {
             return Err(format!(
                 "{NAME} was given a connected element: the element ownership \
@@ -721,7 +731,6 @@ fn install_host_module(
     let tree = Rc::clone(handle);
     install(engine, "flushElementTree", 0, move |_arguments| {
         borrow_tree("bobcat-internal:host.flushElementTree", &tree)?.flush();
-        on_flush();
         Ok(HostValue::Undefined)
     })?;
 
@@ -731,10 +740,8 @@ fn install_host_module(
 /// Installs the three members the realm's `EventTarget` speaks to.
 ///
 /// None of them touches the document. The first two only maintain an index —
-/// which nodes are worth visiting — and the third only sets a flag. That is
-/// not an optimization: `stopPropagation` runs while the host is inside a call
-/// into the realm, and re-entering the realm from a host function would nest
-/// an execution guard, which `QuickJS` refuses.
+/// which nodes are worth visiting — and the third only sets a flag; see
+/// [`EventState::stopped`].
 fn install_event_members(
     engine: &mut ScriptEngine,
     events: &Rc<EventState>,
@@ -789,9 +796,6 @@ fn install_attribute_members(
             document.set_attribute(node, name, value);
             Ok(HostValue::Undefined)
         }
-        // One crossing for a whole `__SetInlineStyles` record, and one
-        // declaration block built from empty for it.
-        //
         // Deliberately name-based: this PAPI receives record keys, custom
         // properties have no numeric id, and Stylo's internal PropertyId is
         // not a stable script ABI. A future numeric-key `__AddInlineStyle`
@@ -907,14 +911,8 @@ fn take_record_field<'a>(function: &str, rest: &'a str) -> Result<(&'a str, &'a 
     Ok((&body[..end], &body[end..]))
 }
 
-/// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse.
-///
-/// The same encoding runs both ways because the same reason holds both ways:
-/// a field can contain any character, the delimiter included, so its extent
-/// has to be counted rather than searched for. Only the reader changes sides
-/// — here the count is what JavaScript's `String.prototype.slice` consumes,
-/// so it is in UTF-16 code units for the same reason `String.prototype.length`
-/// produces them on the way in.
+/// Appends one `<units>:<text>` field, [`take_record_field`]'s inverse; the
+/// count is in UTF-16 code units because `String.prototype.slice` consumes it.
 fn write_record_field(record: &mut String, text: &str) {
     let units: usize = text.chars().map(char::len_utf16).sum();
     record.push_str(&units.to_string());
@@ -1124,12 +1122,7 @@ mod tests {
         Arc::from("")
     }
 
-    /// The path the presenting side would compute for `target`.
-    fn steps(elements: &SharedTree, target: u64) -> EventSteps {
-        elements.tree().event_steps(node_id(target), true, true)
-    }
-
-    fn runtime() -> (MainThreadRuntime, SharedTree) {
+    fn runtime() -> (MainThreadRuntime, DocumentProbe) {
         runtime_over(new_document(
             Viewport::new(393.0, 727.0),
             PageConfig::default(),
@@ -1138,7 +1131,7 @@ mod tests {
 
     /// The same runtime over a document that can shape text: Ahem's solid em
     /// squares make a run's box its glyph count times its font size.
-    fn text_runtime() -> (MainThreadRuntime, SharedTree) {
+    fn text_runtime() -> (MainThreadRuntime, DocumentProbe) {
         const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
 
         let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
@@ -1146,21 +1139,37 @@ mod tests {
         runtime_over(document)
     }
 
-    fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, SharedTree) {
+    fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, DocumentProbe) {
         let (runtime, elements, _) = runtime_over_watching_names(document);
         (runtime, elements)
+    }
+
+    /// A same-thread window onto the runtime-owned document, so a test can
+    /// observe what script built without going through the runtime's own
+    /// methods.
+    struct DocumentProbe(Rc<RefCell<TreeHandle>>);
+
+    impl DocumentProbe {
+        fn tree(&self) -> RefMut<'_, LynxDocument> {
+            RefMut::map(self.0.borrow_mut(), TreeHandle::tree)
+        }
     }
 
     /// The same runtime, plus the shared name table the presenting side
     /// filters against — so a test can ask what the realm published.
     fn runtime_over_watching_names(
         document: LynxDocument,
-    ) -> (MainThreadRuntime, SharedTree, Arc<SharedListenerNames>) {
-        let elements = SharedTree::new(document);
+    ) -> (MainThreadRuntime, DocumentProbe, Arc<SharedListenerNames>) {
         let names = Arc::new(SharedListenerNames::default());
-        let runtime = MainThreadRuntime::new(elements.clone(), Arc::clone(&names), || {})
-            .expect("main-thread runtime");
-        (runtime, elements, names)
+        let runtime = MainThreadRuntime::new(
+            document,
+            Arc::clone(&names),
+            Arc::new(FrameHub::default()),
+            || {},
+        )
+        .expect("main-thread runtime");
+        let probe = DocumentProbe(Rc::clone(&runtime.tree));
+        (runtime, probe, names)
     }
 
     #[test]
@@ -1430,8 +1439,8 @@ mod tests {
 
         assert!(error.source.message.contains("stale element id"));
         assert!(
-            elements.try_tree().is_some(),
-            "a rejected callback must return the private document to the presenter"
+            elements.tree().get(node_id(2)).is_some(),
+            "a rejected callback leaves the document usable"
         );
     }
 
@@ -1884,7 +1893,7 @@ mod tests {
 
     #[test]
     fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -1912,7 +1921,7 @@ mod tests {
 
         let target = 4;
         let delivered = runtime
-            .dispatch_event(&steps(&elements, target), &tap(), &Arc::from("{\"x\":1}"))
+            .dispatch_event(node_id(target), &tap(), &Arc::from("{\"x\":1}"))
             .expect("dispatch");
         assert!(delivered);
 
@@ -1931,7 +1940,7 @@ mod tests {
 
     #[test]
     fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -1970,7 +1979,7 @@ mod tests {
 
         assert!(
             runtime
-                .dispatch_event(&steps(&elements, 4), &tap(), &no_detail())
+                .dispatch_event(node_id(4), &tap(), &no_detail())
                 .expect("dispatch")
         );
 
@@ -1989,7 +1998,7 @@ mod tests {
 
     #[test]
     fn a_replaced_add_event_handler_moves_its_node_between_passes() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -2017,7 +2026,7 @@ mod tests {
 
         assert!(
             runtime
-                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
+                .dispatch_event(node_id(3), &tap(), &no_detail())
                 .expect("dispatch")
         );
 
@@ -2042,7 +2051,7 @@ mod tests {
 
         assert!(
             !runtime
-                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
+                .dispatch_event(node_id(3), &tap(), &no_detail())
                 .expect("dispatch")
         );
     }
@@ -2054,7 +2063,7 @@ mod tests {
     /// `eventPhase` and `currentTarget` on an event a listener kept.
     #[test]
     fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -2080,7 +2089,7 @@ mod tests {
         for _ in 0..2 {
             assert!(
                 runtime
-                    .dispatch_event(&steps(&elements, 4), &tap(), &no_detail())
+                    .dispatch_event(node_id(4), &tap(), &no_detail())
                     .expect("dispatch")
             );
         }
@@ -2146,7 +2155,7 @@ mod tests {
             .expect("main-thread script");
 
         runtime
-            .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
+            .dispatch_event(node_id(3), &tap(), &no_detail())
             .expect("dispatch");
 
         assert_eq!(
@@ -2161,7 +2170,7 @@ mod tests {
 
     #[test]
     fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -2185,7 +2194,6 @@ mod tests {
             )
             .expect("main-thread script");
 
-        let steps = steps(&elements, 3);
         // Collect the unrelated handle between building the path and running
         // the walk. The real finalizer performs the one `dropElement` call;
         // invoking it manually here would leave that finalizer armed and make
@@ -2193,7 +2201,7 @@ mod tests {
         runtime.collect_garbage().expect("sweep");
 
         runtime
-            .dispatch_event(&steps, &tap(), &no_detail())
+            .dispatch_event(node_id(3), &tap(), &no_detail())
             .expect("dispatch");
 
         // A collected handle is routine — a ReactLynx re-render drops them
@@ -2209,7 +2217,7 @@ mod tests {
 
     #[test]
     fn stopping_propagation_ends_the_walk() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -2231,7 +2239,7 @@ mod tests {
             .expect("main-thread script");
 
         runtime
-            .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
+            .dispatch_event(node_id(3), &tap(), &no_detail())
             .expect("dispatch");
 
         runtime
@@ -2245,7 +2253,7 @@ mod tests {
 
     #[test]
     fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
-        let (mut runtime, elements) = runtime();
+        let (mut runtime, _elements) = runtime();
         runtime
             .run_main_thread_script(
                 r"
@@ -2260,7 +2268,7 @@ mod tests {
 
         assert!(
             !runtime
-                .dispatch_event(&steps(&elements, 3), &tap(), &no_detail())
+                .dispatch_event(node_id(3), &tap(), &no_detail())
                 .expect("dispatch"),
             "with an empty listener index the walk crosses the boundary zero times"
         );
@@ -2937,9 +2945,8 @@ mod tests {
             "the run is the node the realm mints no handle for"
         );
 
-        let at_run = steps(&elements, 5);
         let error = runtime
-            .dispatch_event(&at_run, &tap(), &no_detail())
+            .dispatch_event(node_id(5), &tap(), &no_detail())
             .expect_err("a target no handle names cannot be delivered");
         assert!(error.to_string().contains("ownership graph"), "{error}");
     }

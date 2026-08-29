@@ -5,7 +5,10 @@
 //! group-effect layers through Vello, and paints box fragments plus retained
 //! Parley glyph runs. It reads computed styles and rounded layouts directly
 //! from the same document, so viewport, scale, geometry, resources, and scene
-//! construction cannot be assembled from divergent owners.
+//! construction cannot be assembled from divergent owners. What it produces
+//! is an immutable [`CommittedFrame`] behind an `Arc`: retained here for the
+//! document's own hit queries, and published as-is to whichever thread
+//! composites and routes input without the document.
 //!
 //! Deliberate v1 limits (the compatibility bar is behavioral, not
 //! pixel-perfect):
@@ -32,26 +35,38 @@
 //! - The grammar has no `image-orientation`; the embedder's `ImageStore` is expected to apply EXIF
 //!   orientation before it publishes pixels and natural size.
 
+use std::sync::Arc;
+
+use euclid::default::Size2D;
+
 use crate::Document;
 use crate::vello::Scene;
-use crate::visual::PaintOrder;
+use crate::visual::{CommittedFrame, PaintOrder};
 
 /// Reusable document-owned scene builder state.
 #[derive(Default)]
 pub(crate) struct Painter {
-    scene: Scene,
     scratch: crate::paint::walker::Scratch,
     build_scratch: crate::visual::BuildScratch,
-    scene_epoch: Option<u64>,
-    frame: Option<PaintOrder>,
-    /// Storage reclaimed from the frame this painter last retired, held for
-    /// the next build.
+    /// The frame the last successful paint committed — the hit-test snapshot,
+    /// and the object [`Document::commit`](crate::Document::commit) publishes.
+    frame: Option<Arc<CommittedFrame>>,
+    /// A frame retired while something else still held it — in the engine's
+    /// flow the frame hub always still holds the previous commit at the
+    /// moment it retires here, and releases it only when the commit after it
+    /// publishes. Reclaimed at the next paint, one retirement late.
+    retiring: Option<Arc<CommittedFrame>>,
+    /// Storage reclaimed from a retired frame nobody else was still holding,
+    /// kept for the next build.
     ///
     /// Kept apart from `frame` because `frame` is the one thing hit testing
     /// can read between renders: emptying it in place would leave the
     /// document frameless for the length of a build, and permanently
     /// frameless if that build panicked.
     spare: crate::visual::FrameBuffers,
+    /// A retired frame's scene, emptied but with its encoding capacity
+    /// intact, for the next paint.
+    spare_scene: Option<Scene>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -61,28 +76,62 @@ impl std::fmt::Debug for Painter {
 }
 
 impl Painter {
-    pub(crate) fn paint<T>(&mut self, document: &Document<T>, frame: PaintOrder) {
-        self.scene_epoch = None;
-        self.scene.reset();
+    pub(crate) fn paint<T>(
+        &mut self,
+        document: &Document<T>,
+        frame: PaintOrder,
+        animations_active: bool,
+        viewport: Size2D<f32>,
+        device_pixel_ratio: f32,
+    ) {
+        let mut scene = self.spare_scene.take().unwrap_or_default();
+        scene.reset();
+        // A panicking walk drops the half-encoded scene here and leaves the
+        // previously committed frame retained: the frame either advances
+        // whole or not at all.
         crate::paint::walker::walk(
-            &mut self.scene,
+            &mut scene,
             &mut self.scratch,
             document,
             &frame,
             document.image_store().as_ref(),
         );
-        self.scene_epoch = Some(frame.visual_epoch());
+        let committed = Arc::new(CommittedFrame {
+            order: frame,
+            scene,
+            animations_active,
+            viewport,
+            device_pixel_ratio,
+        });
         // Reclaiming here, past the point where the walk can fail, is what
-        // keeps a frame retained at every instant.
-        if let Some(retired) = self.frame.replace(frame) {
-            self.spare = retired.into_buffers();
+        // keeps a frame retained at every instant. A frame that retired
+        // while it was still published comes back one paint later, once the
+        // publish after it released the outside copy; one still shared even
+        // then is given up rather than waited on.
+        if let Some(waiting) = self.retiring.take()
+            && let Ok(inner) = Arc::try_unwrap(waiting)
+        {
+            self.reclaim(inner);
         }
+        if let Some(retired) = self.frame.replace(committed) {
+            match Arc::try_unwrap(retired) {
+                Ok(inner) => self.reclaim(inner),
+                Err(shared) => self.retiring = Some(shared),
+            }
+        }
+    }
+
+    fn reclaim(&mut self, inner: CommittedFrame) {
+        self.spare = inner.order.into_buffers();
+        let mut scene = inner.scene;
+        scene.reset();
+        self.spare_scene = Some(scene);
     }
 
     /// The spare frame buffers' and the build scratch's capacities, for the
     /// reuse tests.
     #[cfg(test)]
-    pub(crate) fn storage_capacities(&self) -> ([usize; 3], Vec<usize>) {
+    pub(crate) fn storage_capacities(&self) -> ([usize; 4], Vec<usize>) {
         (self.spare.capacities(), self.build_scratch.capacities())
     }
 
@@ -98,16 +147,12 @@ impl Painter {
         std::mem::take(&mut self.spare)
     }
 
-    pub(crate) const fn frame(&self) -> Option<&PaintOrder> {
+    pub(crate) const fn frame(&self) -> Option<&Arc<CommittedFrame>> {
         self.frame.as_ref()
     }
 
     pub(crate) fn needs_render(&self, visual_epoch: u64) -> bool {
-        self.scene_epoch != Some(visual_epoch)
-    }
-
-    pub(crate) const fn scene(&self) -> &Scene {
-        &self.scene
+        self.frame.as_ref().map(|frame| frame.epoch()) != Some(visual_epoch)
     }
 }
 
@@ -118,24 +163,34 @@ mod tests {
     use crate::{Document, StylesheetOrigin};
 
     #[test]
-    fn a_failed_paint_cannot_leave_a_partial_scene_marked_current() {
+    fn a_failed_paint_cannot_leave_a_partial_frame_committed() {
         let mut document = Document::new(crate::tree::document::tests::device(), "page", ());
         document.add_stylesheet(
             "page { width: 10px; height: 10px; background-color: teal; }",
             StylesheetOrigin::Author,
         );
         let root = document.document_element().id();
-        let frame = document.build_paint_order();
+        assert!(document.render(), "the first frame commits");
+        let first = document.committed_frame().expect("a frame is retained");
+        let stale = document.build_paint_order();
 
         document.set_inline_style(root, "display: none");
         document.layout();
 
         let mut painter = document.painter.take();
-        let current_epoch = document.visual_epoch();
-        painter.scene_epoch = Some(current_epoch);
-        let result = catch_unwind(AssertUnwindSafe(|| painter.paint(&document, frame)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            painter.paint(&document, stale, false, document.viewport_size(), 1.0);
+        }));
 
         assert!(result.is_err(), "the stale frame must fail closed");
-        assert!(painter.needs_render(current_epoch));
+        assert_eq!(
+            painter
+                .frame()
+                .map(|frame| frame.epoch())
+                .expect("the retained frame survives the failed paint"),
+            first.epoch(),
+            "the failed paint left the previous commit in place"
+        );
+        assert!(painter.needs_render(document.visual_epoch()));
     }
 }

@@ -1613,9 +1613,10 @@ fn scroll_to(document: &mut crate::Document<()>, scroller: NodeId, offset: f32) 
 fn retained_fingerprint(document: &crate::Document<()>) -> String {
     let painter = document.painter.borrow();
     fingerprint(
-        painter
+        &painter
             .frame()
-            .expect("a rendered document retains its frame"),
+            .expect("a rendered document retains its frame")
+            .order,
     )
 }
 
@@ -1636,7 +1637,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
     assert!(cold.contains("layer"), "the fixture must exercise a group");
     assert!(cold.contains("clip"), "the fixture must exercise a clip");
     assert_eq!(
-        h.doc.dom.paint_storage_capacities()[3],
+        h.doc.dom.paint_storage_capacities()[4],
         0,
         "the first build has nothing to recycle",
     );
@@ -1645,7 +1646,7 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
         scroll_to(&mut h.doc.dom, scroller, nudge.y);
         h.doc.dom.render();
         assert!(
-            h.doc.dom.paint_storage_capacities()[3] > 0,
+            h.doc.dom.paint_storage_capacities()[4] > 0,
             "round {round} must have a retired frame to build into",
         );
         scroll_to(&mut h.doc.dom, scroller, rest.y);
@@ -1656,6 +1657,26 @@ fn a_warm_build_produces_the_paint_order_a_cold_build_produces() {
             "round {round} diverged",
         );
     }
+}
+
+#[test]
+fn a_frame_held_elsewhere_is_reclaimed_one_retirement_late() {
+    let (mut h, scroller) = reuse_harness();
+    h.doc.dom.render();
+    // A hub-shaped holder: always holds the latest committed frame, releasing
+    // the previous one only when the next commit replaces it — exactly the
+    // publish flow, under which immediate reclamation can never succeed.
+    let mut published = h.doc.dom.committed_frame();
+    for offset in [1.0_f32, 0.0, 1.0, 0.0] {
+        scroll_to(&mut h.doc.dom, scroller, offset);
+        h.doc.dom.render();
+        published = h.doc.dom.committed_frame();
+    }
+    let _ = published;
+    assert!(
+        h.doc.dom.paint_storage_capacities()[4] > 0,
+        "a frame retired while published must still come back as spare storage",
+    );
 }
 
 #[test]
@@ -1749,6 +1770,7 @@ fn culling_does_not_change_the_retained_frame() {
         .borrow()
         .frame()
         .expect("a rendered document retains its frame")
+        .order
         .items()
         .len();
     assert_eq!(

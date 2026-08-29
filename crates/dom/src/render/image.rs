@@ -9,13 +9,13 @@
 //!
 //! # Why one trait has both a blocking-free and an async half
 //!
-//! The paint walk runs on the presenting thread inside
-//! [`Document::render`](crate::Document::render), between a swap-chain acquire
-//! and a present, holding `&mut Scene` and an open clip stack. It cannot
-//! suspend: a yield mid-walk would leave the scene with unbalanced layer
-//! pushes, and it cannot block either, because the frame budget is the vsync
-//! interval. So the walk calls exactly one method, [`ImageStore::peek`], which
-//! must return already-resident pixels or nothing at all.
+//! The paint walk runs inside a commit on the document's owner thread —
+//! [`Document::render`](crate::Document::render) — holding `&mut Scene` and
+//! an open clip stack. It cannot suspend: a yield mid-walk would leave the
+//! scene with unbalanced layer pushes, and it must not block either, because
+//! a commit is what every frame waits on. So the walk calls exactly one
+//! method, [`ImageStore::peek`], which must return already-resident pixels or
+//! nothing at all — from whichever thread owns the document.
 //!
 //! Producing those pixels is the other half. [`ImageStore::get`] resolves,
 //! fetches and decodes, and is awaited by the layer above this crate, outside

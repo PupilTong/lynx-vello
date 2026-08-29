@@ -167,10 +167,10 @@ stops input before terminating the Worker. Wheel input is not connected yet.
 
 ## Synchronization and rendering
 
-The private document moves through core's `SharedTree` slot. A PAPI batch
-takes the document; the Render Worker only tries a non-blocking borrow. An
-open batch therefore cannot expose partial mutation or stall the last retained
-frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
+The private document lives on the Lynx main Worker outright; commits publish
+an immutable frame the Render Worker composes, and changes travel the other
+way as ordered commands. A JavaScript turn therefore cannot expose partial
+mutation or stall the last published frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
 Worker to the Render Worker, whose animation loop calls `renderIfRequested`
 with no argument: the animation timeline is core's own `web_time` clock, read
 once per frame on the Render Worker after the canvas surface hands over an

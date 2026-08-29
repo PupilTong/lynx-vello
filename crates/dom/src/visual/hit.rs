@@ -68,7 +68,7 @@ impl PaintOrder {
             .filter(move |&node| document.contains_node(node))
     }
 
-    fn item_hit(&self, item: &PaintItem, point: Point2D<f32>) -> Option<NodeId> {
+    pub(super) fn item_hit(&self, item: &PaintItem, point: Point2D<f32>) -> Option<NodeId> {
         if !item.hit_testable {
             return None;
         }

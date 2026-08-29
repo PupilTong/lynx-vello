@@ -12,7 +12,6 @@
 use std::sync::Arc;
 
 use bobcat_core::bench_support::ScriptHarness;
-use dom::event::EventSteps;
 
 fn main() {
     divan::main();
@@ -161,8 +160,8 @@ fn read_one_string_from_every_row(bencher: divan::Bencher) {
 }
 
 /// A booted list with a listener on the container and one on the page, and
-/// the path an event on the deepest label takes.
-fn listening_harness() -> (ScriptHarness, EventSteps) {
+/// the deepest label an event dispatch targets.
+fn listening_harness() -> (ScriptHarness, u64) {
     let mut harness = ScriptHarness::new();
     harness.boot(&snapshot_source(ROWS));
     harness.evaluate(
@@ -177,14 +176,14 @@ fn listening_harness() -> (ScriptHarness, EventSteps) {
     // case does not depend on the order the PAPI issued handles in.
     let page = harness.page();
     let list = harness.child(page, 0).expect("the boot appended the list");
+    let last_row = harness.child_count(list) - 1;
     let bottom_row = harness
-        .child(list, harness.child_count(list) - 1)
+        .child(list, last_row)
         .expect("the boot appended rows");
     let label = harness
         .child(bottom_row, 0)
         .expect("every row holds a label");
-    let path = harness.event_path(label);
-    (harness, path)
+    (harness, label)
 }
 
 /// One event walked to two listeners along a full-depth path.
@@ -194,25 +193,25 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
     let detail: Arc<str> = Arc::from(r#"{"x":123.5,"y":456.25}"#);
     bencher
         .with_inputs(listening_harness)
-        .bench_local_refs(|(harness, path)| {
-            assert!(harness.dispatch(path, &name, &detail));
+        .bench_local_refs(|(harness, label)| {
+            assert!(harness.dispatch(*label, &name, &detail));
         });
 }
 
-/// The same path for an event name nothing listens to.
+/// The same target for an event name nothing listens to.
 ///
 /// The presenting side answers this from the shared listener-name table, so
-/// the realistic cost is one lookup; the dispatch below is what remains if it
-/// ever crosses anyway.
+/// the realistic cost is one lookup; the dispatch below — liveness check,
+/// path build, index miss — is what remains if it ever crosses anyway.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");
     let detail: Arc<str> = Arc::from(r#"{"x":123.5,"y":456.25}"#);
     bencher
         .with_inputs(listening_harness)
-        .bench_local_refs(|(harness, path)| {
+        .bench_local_refs(|(harness, label)| {
             assert!(!harness.has_listeners(&name));
-            assert!(!harness.dispatch(path, &name, &detail));
+            assert!(!harness.dispatch(*label, &name, &detail));
         });
 }
 

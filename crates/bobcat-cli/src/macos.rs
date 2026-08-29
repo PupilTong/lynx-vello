@@ -6,8 +6,8 @@
 //! an OS fact goes in
 //! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
 //! decides what the pipeline does with it. The engine owns the Lynx main
-//! thread (the script realm) and shares the element tree with it behind
-//! one lock; presentation and vsync stay on this thread. [`MacWindow`] is
+//! thread (the script realm and, once the script starts, the document);
+//! composition, presentation, and vsync stay on this thread. [`MacWindow`] is
 //! the window it borrows at attach time: the draw target plus the two OS
 //! mechanisms it schedules through (`request_redraw`, `pre_present_notify`).
 
