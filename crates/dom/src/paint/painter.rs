@@ -64,9 +64,14 @@ pub(crate) struct Painter {
     /// document frameless for the length of a build, and permanently
     /// frameless if that build panicked.
     spare: crate::visual::FrameBuffers,
-    /// A retired frame's scene, emptied but with its encoding capacity
-    /// intact, for the next paint.
-    spare_scene: Option<Scene>,
+    /// Retired frames' scenes — fragments and committed compositions —
+    /// emptied but with their encoding capacity intact, pooled for the next
+    /// paint's fragments and composition.
+    spare_scenes: Vec<Scene>,
+    /// A retired frame's emptied fragment container, capacity intact.
+    spare_fragments: Vec<Scene>,
+    /// A retired frame's emptied compose program, capacity intact.
+    spare_program: Vec<crate::paint::compose::ComposeOp>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -84,21 +89,51 @@ impl Painter {
         viewport: Size2D<f32>,
         device_pixel_ratio: f32,
     ) {
-        let mut scene = self.spare_scene.take().unwrap_or_default();
-        scene.reset();
-        // A panicking walk drops the half-encoded scene here and leaves the
-        // previously committed frame retained: the frame either advances
+        let mut assembly = crate::paint::compose::ComposeAssembly::with_storage(
+            std::mem::take(&mut self.spare_fragments),
+            std::mem::take(&mut self.spare_program),
+            std::mem::take(&mut self.spare_scenes),
+        );
+        // A panicking walk drops the half-encoded assembly here and leaves
+        // the previously committed frame retained: the frame either advances
         // whole or not at all.
-        crate::paint::walker::walk(
-            &mut scene,
+        crate::paint::walker::walk_compose(
+            &mut assembly,
             &mut self.scratch,
             document,
             &frame,
             document.image_store().as_ref(),
         );
+        let (fragments, program, pool) = assembly.finish();
+        self.spare_scenes = pool;
+        // The committed-offset composition is built here, at commit, from
+        // pooled storage — or skipped entirely for the one-fragment frame
+        // shape, whose single untranslated append would only copy the
+        // encoding it already holds.
+        let committed = if matches!(
+            program.as_slice(),
+            [crate::paint::compose::ComposeOp::Fragment {
+                index: 0,
+                chain: None
+            }]
+        ) {
+            crate::visual::frame::CommittedScene::Whole
+        } else {
+            let mut scene = self.spare_scenes.pop().unwrap_or_default();
+            scene.reset();
+            crate::paint::compose::replay(
+                &mut scene,
+                &fragments,
+                &program,
+                frame.slots(),
+                device_pixel_ratio,
+                &|_| None,
+            );
+            crate::visual::frame::CommittedScene::Composed(scene)
+        };
         let committed = Arc::new(CommittedFrame {
             order: frame,
-            scene,
+            presentation: crate::visual::frame::Presentation::new(fragments, program, committed),
             animations_active,
             viewport,
             device_pixel_ratio,
@@ -123,9 +158,18 @@ impl Painter {
 
     fn reclaim(&mut self, inner: CommittedFrame) {
         self.spare = inner.order.into_buffers();
-        let mut scene = inner.scene;
-        scene.reset();
-        self.spare_scene = Some(scene);
+        let (mut fragments, mut program, composed) = inner.presentation.into_parts();
+        for mut scene in fragments.drain(..) {
+            scene.reset();
+            self.spare_scenes.push(scene);
+        }
+        self.spare_fragments = fragments;
+        program.clear();
+        self.spare_program = program;
+        if let Some(mut scene) = composed {
+            scene.reset();
+            self.spare_scenes.push(scene);
+        }
     }
 
     /// The spare frame buffers' and the build scratch's capacities, for the

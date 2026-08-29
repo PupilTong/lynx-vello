@@ -13,11 +13,19 @@
 //! nothing at all. It can never resolve to a stranger, so a removal anywhere
 //! in the tree no longer has to blank every query in it.
 
-use euclid::default::{Point2D, Rect};
+use euclid::default::{Point2D, Rect, Vector2D};
 
-use super::{PaintItem, PaintItemKind, PaintOrder, geometry};
+use super::{PaintItem, PaintItemKind, PaintOrder, ScrollSlot, geometry};
 use crate::NodeId;
+use crate::paint::compose::chain_translation;
 use crate::tree::document::Document;
+
+/// Where a hit query's scroll offsets come from: `None` falls back to the
+/// slot's committed offset. The frame is baked unscrolled, so a query
+/// translates the point *into* each item's scrolled space before inverting
+/// its transform — the same chain translation composition applies, snapped
+/// the same way.
+pub(crate) type OffsetSource<'a> = dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>> + 'a;
 
 impl PaintOrder {
     pub(crate) fn assert_visually_fresh<T>(&self, document: &Document<T>) {
@@ -34,9 +42,11 @@ impl PaintOrder {
         &self,
         document: &Document<T>,
         point: Point2D<f32>,
+        offsets: &OffsetSource<'_>,
+        ratio: f32,
     ) -> Vec<NodeId> {
         let mut elements = Vec::new();
-        for node in self.hits_at(document, point) {
+        for node in self.hits_at(document, point, offsets, ratio) {
             if !elements.contains(&node) {
                 elements.push(node);
             }
@@ -49,8 +59,10 @@ impl PaintOrder {
         &self,
         document: &Document<T>,
         point: Point2D<f32>,
+        offsets: &OffsetSource<'_>,
+        ratio: f32,
     ) -> Option<NodeId> {
-        self.hits_at(document, point).next()
+        self.hits_at(document, point, offsets, ratio).next()
     }
 
     /// Items whose node died since the frame was built are skipped, not
@@ -60,18 +72,35 @@ impl PaintOrder {
         &'frame self,
         document: &'frame Document<T>,
         point: Point2D<f32>,
+        offsets: &'frame OffsetSource<'frame>,
+        ratio: f32,
     ) -> impl Iterator<Item = NodeId> + 'frame {
         self.items
             .iter()
             .rev()
-            .filter_map(move |item| self.item_hit(item, point))
+            .filter_map(move |item| self.item_hit(item, point, offsets, ratio))
             .filter(move |&node| document.contains_node(node))
     }
 
-    pub(super) fn item_hit(&self, item: &PaintItem, point: Point2D<f32>) -> Option<NodeId> {
+    pub(super) fn item_hit(
+        &self,
+        item: &PaintItem,
+        point: Point2D<f32>,
+        offsets: &OffsetSource<'_>,
+        ratio: f32,
+    ) -> Option<NodeId> {
         if !item.hit_testable {
             return None;
         }
+        // The frame is baked unscrolled: carry the screen point into the
+        // item's scrolled space before inverting its transform.
+        let translation = chain_translation(
+            &self.slots,
+            self.item_translation_chain(item),
+            ratio,
+            offsets,
+        );
+        let point = point + translation;
         let local = item.transform.inverse()?.transform_point2d(point)?;
         if local.x >= item.size.width || local.y >= item.size.height {
             return None;
@@ -79,7 +108,7 @@ impl PaintOrder {
         if !geometry::rounded_rect_contains(Rect::from_size(item.size), &item.radii, local) {
             return None;
         }
-        if !self.point_passes_clips(item.clip, point) {
+        if !self.point_passes_clips(item.clip, point - translation, offsets, ratio) {
             return None;
         }
         Some(match item.kind {
@@ -88,13 +117,20 @@ impl PaintOrder {
         })
     }
 
-    fn point_passes_clips(&self, mut clip: Option<usize>, point: Point2D<f32>) -> bool {
+    fn point_passes_clips(
+        &self,
+        mut clip: Option<usize>,
+        point: Point2D<f32>,
+        offsets: &OffsetSource<'_>,
+        ratio: f32,
+    ) -> bool {
         while let Some(index) = clip {
             let node = &self.clips[index];
+            let translated = point + chain_translation(&self.slots, node.slot, ratio, offsets);
             let Some(local) = node
                 .transform
                 .inverse()
-                .and_then(|inverse| inverse.transform_point2d(point))
+                .and_then(|inverse| inverse.transform_point2d(translated))
             else {
                 return false;
             };
