@@ -2275,7 +2275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
+    fn a_raw_text_reaches_the_private_document_as_a_laid_out_paragraph() {
         let (mut runtime, elements) = text_runtime();
         runtime
             .run_main_thread_script(
@@ -2299,17 +2299,17 @@ mod tests {
         let run = carrier.first_child().expect("the reflected run").id();
         assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hello"));
 
-        let layout = tree.rounded_layout(run).expect("the run is laid out");
+        let layout = tree.rounded_layout(run).expect("the source run is live");
         assert!(
-            (layout.size.width - 100.0).abs() < f32::EPSILON
-                && (layout.size.height - 20.0).abs() < f32::EPSILON,
-            "five Ahem em squares at 20px, got {:?}",
+            layout.size.width.abs() < f32::EPSILON && layout.size.height.abs() < f32::EPSILON,
+            "the source run is represented by its text paragraph, got {:?}",
             layout.size
         );
         assert!(
-            tree.rounded_layout(node_id(3))
-                .is_some_and(|text| (text.size.height - 20.0).abs() < f32::EPSILON),
-            "and the text element is sized by the run it contains"
+            tree.rounded_layout(node_id(3)).is_some_and(|text| {
+                text.size.width >= 100.0 && (text.size.height - 20.0).abs() < f32::EPSILON
+            }),
+            "and the text paragraph contains five Ahem em squares"
         );
     }
 
@@ -2322,16 +2322,35 @@ mod tests {
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
                   const text = __CreateText(0);
-                  __SetInlineStyles(text, 'font-family:Ahem;font-size:20px');
-                  const raw = __CreateRawText('hello');
+                  __SetInlineStyles(text, 'width:40px;font-family:Ahem;font-size:20px');
+                  const raw = globalThis.heldRawText = __CreateRawText('hello');
                   __AppendElement(text, raw);
                   __AppendElement(page, text);
-                  __SetAttribute(raw, 'text', 'hi');
                 };
                 ",
                 "app:///update-raw-text.js",
             )
             .expect("main-thread script");
+
+        assert!(
+            elements
+                .tree()
+                .rounded_layout(node_id(3))
+                .is_some_and(|text| (text.size.height - 60.0).abs() < f32::EPSILON),
+            "the initial five-glyph paragraph wraps to three lines"
+        );
+
+        runtime
+            .evaluate_module(
+                r"
+                import { __SetAttribute, __FlushElementTree } from 'bobcat:element';
+                __SetAttribute(globalThis.heldRawText, 'text', 'hi');
+                __FlushElementTree();
+                ",
+                "app:///shorten-raw-text.mjs",
+                "shortening raw text",
+            )
+            .expect("text update");
 
         let tree = elements.tree();
         let run = tree
@@ -2346,9 +2365,9 @@ mod tests {
         );
         assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hi"));
         assert!(
-            tree.rounded_layout(run)
-                .is_some_and(|layout| (layout.size.width - 40.0).abs() < f32::EPSILON),
-            "the shorter run is re-measured, not left at its old width"
+            tree.rounded_layout(node_id(3))
+                .is_some_and(|text| (text.size.height - 20.0).abs() < f32::EPSILON),
+            "the shorter paragraph is re-broken, not left at its old height"
         );
     }
 

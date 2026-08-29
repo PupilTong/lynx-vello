@@ -8,16 +8,18 @@ use parley::{
     Alignment, CHROMIUM_LINE_BREAK_OVERRIDE, FontFamily as ParleyFontFamily,
     FontFamilyName as ParleyFontFamilyName, FontFeature, FontFeatures,
     FontStyle as ParleyFontStyle, FontVariation, FontVariations, FontWeight as ParleyFontWeight,
-    GenericFamily as ParleyGenericFamily, LineHeight as ParleyLineHeight,
-    OverflowWrap as ParleyOverflowWrap, TextStyle as ParleyTextStyle,
-    TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
+    GenericFamily as ParleyGenericFamily, InlineBox as ParleyInlineBox, InlineBoxKind,
+    LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
+    TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
 use stylo::Zero;
 use stylo::computed_values::{direction, text_wrap_mode};
 use stylo::values::computed::font::{FontFamily, GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
-use super::content::normalize_runs;
+use super::content::{
+    AtomicInlineBox, InlineItem, ShapingContent, normalize_items, normalize_runs,
+};
 use super::layout::BreakConstraint;
 #[cfg(debug_assertions)]
 use super::layout::ShapeFingerprint;
@@ -72,40 +74,10 @@ where
             self.runs.clone(),
             self.container_style.white_space_collapse(),
         );
-        #[cfg(test)]
-        self.context.record_shape();
-        let (font_context, layout_context) = self.context.font_and_layout_contexts();
-        let mut builder =
-            layout_context.style_run_builder(font_context, content.text.as_str(), 1.0, false);
-        let word_break = self.container_style.word_break();
-        if word_break != WordBreak::BreakAll {
-            builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
-        }
-        builder.reserve(content.ranges.len(), content.ranges.len());
-
-        for range in &content.ranges {
-            let owned_family;
-            let family = if let Some(family) = range.style.font_family_ref() {
-                family
-            } else {
-                owned_family = range.style.font_family();
-                &owned_family
-            };
-            let style = translate_run_style(
-                range.style,
-                family,
-                word_break,
-                self.container_style.text_wrap_mode(),
-            );
-            let style_index = builder.push_style(style);
-            builder.push_style_run(style_index, range.bytes.clone());
-        }
-
-        let has_text = !content.text.is_empty();
-        let layout = builder.build(content.text.as_str());
-        TextLayout::shaped(
-            layout,
-            has_text,
+        shape_content(
+            self.context,
+            self.container_style,
+            content,
             #[cfg(debug_assertions)]
             self.shape_fingerprint(),
         )
@@ -139,82 +111,308 @@ where
     /// of painting stale glyphs.
     #[cfg(debug_assertions)]
     fn shape_fingerprint(&self) -> ShapeFingerprint {
-        use core::hash::{Hash, Hasher};
-        use core::mem::discriminant;
-        use std::collections::hash_map::DefaultHasher;
+        paragraph_shape_fingerprint(
+            self.container_style,
+            self.runs.clone().map(InlineItem::Text),
+        )
+    }
+}
 
-        let mut hasher = DefaultHasher::new();
-        // Paragraph-level values the shaper and the normalizer read. Neither
-        // `text-indent` nor `text-align` belongs here: the first is part of
-        // the break constraint and the second is re-applied on every commit,
-        // so a change in either re-breaks or re-aligns the retained layout
-        // rather than leaving it stale.
-        discriminant(&self.container_style.white_space_collapse()).hash(&mut hasher);
-        discriminant(&self.container_style.word_break()).hash(&mut hasher);
-        discriminant(&self.container_style.text_wrap_mode()).hash(&mut hasher);
+/// Parley adapter for a source-ordered mixture of text runs and measured
+/// atomic inline boxes.
+pub struct InlineMeasurer<'session, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    context: &'session mut TextContext,
+    artifacts: &'session mut TextLayoutStore,
+    container_style: &'source Container,
+    items: Items,
+}
 
-        for run in self.runs.clone() {
-            run.text.hash(&mut hasher);
-            run.preserve_newlines.hash(&mut hasher);
-            let style = run.style;
-            let owned_family;
-            let family = if let Some(family) = style.font_family_ref() {
-                family
-            } else {
-                owned_family = style.font_family();
-                &owned_family
-            };
-            for single in family.families.list.iter() {
-                match single {
-                    SingleFontFamily::FamilyName(name) => {
-                        0u8.hash(&mut hasher);
-                        name.name.as_ref().hash(&mut hasher);
-                    }
-                    SingleFontFamily::Generic(generic) => {
-                        1u8.hash(&mut hasher);
-                        discriminant(generic).hash(&mut hasher);
-                    }
+impl<'session, 'source, Container, RunStyle, Items>
+    InlineMeasurer<'session, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    pub fn new(
+        context: &'session mut TextContext,
+        artifacts: &'session mut TextLayoutStore,
+        container_style: &'source Container,
+        items: Items,
+    ) -> Self {
+        Self {
+            context,
+            artifacts,
+            container_style,
+            items,
+        }
+    }
+
+    pub fn compute_layout(&mut self, input: LayoutInput) -> LayoutOutput {
+        let container_style = self.container_style;
+        compute_leaf_layout_with_measurement(input, container_style, None, true, |measure_input| {
+            self.measure(measure_input).metrics()
+        })
+    }
+
+    pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement {
+        let container_style = self.container_style;
+        let artifact = self.retained();
+        measure_retained_artifact(artifact, container_style, input)
+    }
+
+    fn shape(&mut self) -> TextLayout {
+        let content = normalize_items(
+            self.items.clone(),
+            self.container_style.white_space_collapse(),
+        );
+        shape_content(
+            self.context,
+            self.container_style,
+            content,
+            #[cfg(debug_assertions)]
+            self.shape_fingerprint(),
+        )
+    }
+
+    fn retained(&mut self) -> &mut TextLayout {
+        let inline_boxes = self
+            .items
+            .clone()
+            .filter_map(|item| match item {
+                InlineItem::Text(_) => None,
+                InlineItem::Atomic(inline_box) => Some(sanitize_atomic_inline_box(inline_box)),
+            })
+            .collect::<Vec<_>>();
+        #[cfg(debug_assertions)]
+        let fingerprint = self.shape_fingerprint();
+
+        let topology_matches = self
+            .artifacts
+            .artifact
+            .as_deref()
+            .is_none_or(|artifact| artifact.inline_box_ids_match(inline_boxes.iter().copied()));
+        if !topology_matches {
+            debug_assert!(
+                false,
+                "a retained inline layout outlived its atomic-box topology"
+            );
+            self.artifacts.artifact = None;
+        }
+        if self.artifacts.artifact.is_none() {
+            let shaped = self.shape();
+            self.artifacts.artifact = Some(Box::new(shaped));
+        }
+        let artifact = self
+            .artifacts
+            .artifact
+            .as_deref_mut()
+            .expect("the retained inline layout was just installed");
+        artifact.sync_inline_boxes(&inline_boxes);
+        #[cfg(debug_assertions)]
+        artifact.assert_shaped_from(fingerprint);
+        artifact
+    }
+
+    #[cfg(debug_assertions)]
+    fn shape_fingerprint(&self) -> ShapeFingerprint {
+        paragraph_shape_fingerprint(self.container_style, self.items.clone())
+    }
+}
+
+impl<'source, Container, RunStyle, Items> fmt::Debug
+    for InlineMeasurer<'_, 'source, Container, RunStyle, Items>
+where
+    Container: TextContainerStyle,
+    RunStyle: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, RunStyle>> + Clone,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InlineMeasurer")
+            .finish_non_exhaustive()
+    }
+}
+
+fn shape_content<R: TextRunStyle>(
+    context: &mut TextContext,
+    container_style: &impl TextContainerStyle,
+    shaping: ShapingContent<'_, R>,
+    #[cfg(debug_assertions)] fingerprint: ShapeFingerprint,
+) -> TextLayout {
+    #[cfg(test)]
+    context.record_shape();
+    let (font_context, layout_context) = context.font_and_layout_contexts();
+    let mut builder =
+        layout_context.style_run_builder(font_context, shaping.text.as_str(), 1.0, false);
+    let word_break = container_style.word_break();
+    if word_break != WordBreak::BreakAll {
+        builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
+    }
+    builder.reserve(shaping.ranges.len(), shaping.ranges.len());
+
+    for range in &shaping.ranges {
+        let owned_family;
+        let family = if let Some(family) = range.style.font_family_ref() {
+            family
+        } else {
+            owned_family = range.style.font_family();
+            &owned_family
+        };
+        let style = translate_run_style(
+            range.style,
+            family,
+            word_break,
+            container_style.text_wrap_mode(),
+        );
+        let style_index = builder.push_style(style);
+        builder.push_style_run(style_index, range.bytes.clone());
+    }
+
+    let has_content = !shaping.text.is_empty() || !shaping.boxes.is_empty();
+    let mut atomic_boxes = Vec::with_capacity(shaping.boxes.len());
+    for inline_box in shaping.boxes {
+        let atomic = sanitize_atomic_inline_box(inline_box.inline_box);
+        builder.push_inline_box(ParleyInlineBox {
+            id: atomic.id,
+            kind: InlineBoxKind::InFlow,
+            index: inline_box.index,
+            width: atomic.width,
+            height: atomic.height,
+        });
+        atomic_boxes.push(atomic);
+    }
+    let layout = builder.build(shaping.text.as_str());
+    TextLayout::shaped_with_inline_boxes(
+        layout,
+        has_content,
+        atomic_boxes,
+        #[cfg(debug_assertions)]
+        fingerprint,
+    )
+}
+
+/// Hashes exactly the content and style values that reach Parley's shaper.
+/// Atomic geometry is deliberately excluded: width, height, and baseline are
+/// line-break inputs updated in place on the one retained shaped layout.
+#[cfg(debug_assertions)]
+fn paragraph_shape_fingerprint<'source, R, Items>(
+    container_style: &impl TextContainerStyle,
+    items: Items,
+) -> ShapeFingerprint
+where
+    R: TextRunStyle + 'source,
+    Items: Iterator<Item = InlineItem<'source, R>>,
+{
+    use core::hash::{Hash, Hasher};
+    use core::mem::discriminant;
+    use std::collections::hash_map::DefaultHasher;
+
+    let mut hasher = DefaultHasher::new();
+    // Neither `text-indent` nor `text-align` belongs here: the first is a
+    // break constraint and the second is re-applied on every commit.
+    discriminant(&container_style.white_space_collapse()).hash(&mut hasher);
+    discriminant(&container_style.word_break()).hash(&mut hasher);
+    discriminant(&container_style.text_wrap_mode()).hash(&mut hasher);
+
+    for item in items {
+        let InlineItem::Text(run) = item else {
+            1_u8.hash(&mut hasher);
+            if let InlineItem::Atomic(inline_box) = item {
+                inline_box.id.hash(&mut hasher);
+            }
+            continue;
+        };
+        0_u8.hash(&mut hasher);
+        run.text.hash(&mut hasher);
+        run.preserve_newlines.hash(&mut hasher);
+        let style = run.style;
+        let owned_family;
+        let family = if let Some(family) = style.font_family_ref() {
+            family
+        } else {
+            owned_family = style.font_family();
+            &owned_family
+        };
+        for single in family.families.list.iter() {
+            match single {
+                SingleFontFamily::FamilyName(name) => {
+                    0_u8.hash(&mut hasher);
+                    name.name.as_ref().hash(&mut hasher);
                 }
-            }
-            style.font_size().to_bits().hash(&mut hasher);
-            style.font_weight().value().to_bits().hash(&mut hasher);
-            let font_style = style.font_style();
-            if font_style == FontStyle::NORMAL {
-                0u8.hash(&mut hasher);
-            } else if font_style == FontStyle::ITALIC {
-                1u8.hash(&mut hasher);
-            } else {
-                2u8.hash(&mut hasher);
-                font_style.oblique_degrees().to_bits().hash(&mut hasher);
-            }
-            style
-                .letter_spacing()
-                .0
-                .resolve(Length::zero())
-                .px()
-                .to_bits()
-                .hash(&mut hasher);
-            match style.line_height() {
-                LineHeight::Normal => 0u8.hash(&mut hasher),
-                LineHeight::Number(factor) => {
-                    1u8.hash(&mut hasher);
-                    factor.0.to_bits().hash(&mut hasher);
+                SingleFontFamily::Generic(generic) => {
+                    1_u8.hash(&mut hasher);
+                    discriminant(generic).hash(&mut hasher);
                 }
-                LineHeight::Length(length) => {
-                    2u8.hash(&mut hasher);
-                    length.0.px().to_bits().hash(&mut hasher);
-                }
-            }
-            for feature in &style.font_feature_settings().0 {
-                feature.tag.0.hash(&mut hasher);
-                feature.value.hash(&mut hasher);
-            }
-            for variation in &style.font_variation_settings().0 {
-                variation.tag.0.hash(&mut hasher);
-                variation.value.to_bits().hash(&mut hasher);
             }
         }
-        ShapeFingerprint::from_hash(hasher.finish())
+        style.font_size().to_bits().hash(&mut hasher);
+        style.font_weight().value().to_bits().hash(&mut hasher);
+        let font_style = style.font_style();
+        if font_style == FontStyle::NORMAL {
+            0_u8.hash(&mut hasher);
+        } else if font_style == FontStyle::ITALIC {
+            1_u8.hash(&mut hasher);
+        } else {
+            2_u8.hash(&mut hasher);
+            font_style.oblique_degrees().to_bits().hash(&mut hasher);
+        }
+        style
+            .letter_spacing()
+            .0
+            .resolve(Length::zero())
+            .px()
+            .to_bits()
+            .hash(&mut hasher);
+        match style.line_height() {
+            LineHeight::Normal => 0_u8.hash(&mut hasher),
+            LineHeight::Number(factor) => {
+                1_u8.hash(&mut hasher);
+                factor.0.to_bits().hash(&mut hasher);
+            }
+            LineHeight::Length(length) => {
+                2_u8.hash(&mut hasher);
+                length.0.px().to_bits().hash(&mut hasher);
+            }
+        }
+        for feature in &style.font_feature_settings().0 {
+            feature.tag.0.hash(&mut hasher);
+            feature.value.hash(&mut hasher);
+        }
+        for variation in &style.font_variation_settings().0 {
+            variation.tag.0.hash(&mut hasher);
+            variation.value.to_bits().hash(&mut hasher);
+        }
+    }
+    ShapeFingerprint::from_hash(hasher.finish())
+}
+
+fn sanitize_atomic_inline_box(inline_box: AtomicInlineBox) -> AtomicInlineBox {
+    let width = finite_non_negative(inline_box.width);
+    let height = finite_non_negative(inline_box.height);
+    let baseline = if inline_box.baseline.is_finite() {
+        inline_box.baseline.clamp(0.0, height)
+    } else {
+        height
+    };
+    AtomicInlineBox {
+        id: inline_box.id,
+        width,
+        height,
+        baseline,
+    }
+}
+
+fn finite_non_negative(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -239,52 +437,54 @@ where
     Runs: Iterator<Item = TextRun<'source, RunStyle>> + Clone,
 {
     pub fn measure(&mut self, input: LeafMeasureInput) -> TextMeasurement {
-        let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
-        let indent = self
-            .container_style
-            .text_indent()
-            .length
-            .resolve(Length::new(inline_basis))
-            .px();
-        let alignment = alignment(
-            self.container_style.text_align(),
-            self.container_style.direction(),
-        );
-
+        let container_style = self.container_style;
         let artifact = self.retained();
-        let max_advance = line_break_width(input, artifact);
-        let constraint = BreakConstraint::new(max_advance, indent);
-        if !matches!(input.goal, LayoutGoal::Commit) {
-            return artifact.probe(constraint);
-        }
-
-        let mut measured = artifact.commit_break(constraint);
-        // Shrink-to-fit: alignment distributes the leftover of the width lines
-        // were broken at, so an auto-sized box that broke against a wider
-        // constraint breaks again against its own used width. Parley does this
-        // for itself when the break was unconstrained (its line breaker
-        // rewrites `inline_max_coord` to the laid-out width), so only a finite
-        // constraint wider than the content needs the second pass.
-        //
-        // Re-breaking at `Layout::width()` is not neutral: that width excludes
-        // hanging trailing whitespace while the breaker's fit test includes it,
-        // so text ending in a space can gain an empty trailing line, and the
-        // f32 round trip through a subtracted width can split the widest line
-        // one cluster early. Both make a commit disagree with the measurement
-        // the parent already sized this box from. Reproducing that is
-        // deliberate for now — it is what ships today, and correcting it needs
-        // an alignment width that is independent of the break width, which
-        // Parley 0.11 does not expose.
-        if input.known_dimensions.width.is_none()
-            && max_advance.is_some_and(|limit| limit > measured.size().width)
-        {
-            measured =
-                artifact.commit_break(BreakConstraint::new(Some(measured.size().width), indent));
-        }
-        artifact.align(alignment);
-        artifact.mark_committed(alignment);
-        measured
+        measure_retained_artifact(artifact, container_style, input)
     }
+}
+
+fn measure_retained_artifact(
+    artifact: &mut TextLayout,
+    container_style: &impl TextContainerStyle,
+    input: LeafMeasureInput,
+) -> TextMeasurement {
+    let inline_basis = definite_inline_size(input).unwrap_or(0.0).max(0.0);
+    let indent = container_style
+        .text_indent()
+        .length
+        .resolve(Length::new(inline_basis))
+        .px();
+    let alignment = alignment(container_style.text_align(), container_style.direction());
+
+    let max_advance = line_break_width(input, artifact);
+    let constraint = BreakConstraint::new(max_advance, indent);
+    if !matches!(input.goal, LayoutGoal::Commit) {
+        return artifact.probe(constraint);
+    }
+
+    let mut measured = artifact.commit_break(constraint);
+    // Shrink-to-fit: alignment distributes the leftover of the width lines
+    // were broken at, so an auto-sized box that broke against a wider
+    // constraint breaks again against its own used width. Parley does this
+    // for itself when the break was unconstrained (its line breaker rewrites
+    // `inline_max_coord` to the laid-out width), so only a finite constraint
+    // wider than the content needs the second pass.
+    //
+    // Re-breaking at `Layout::width()` is not neutral: that width excludes
+    // hanging trailing whitespace while the breaker's fit test includes it,
+    // so text ending in a space can gain an empty trailing line, and the f32
+    // round trip through a subtracted width can split the widest line one
+    // cluster early. Reproducing that is deliberate for now — fixing it needs
+    // an alignment width independent of the break width, which Parley 0.11
+    // does not expose.
+    if input.known_dimensions.width.is_none()
+        && max_advance.is_some_and(|limit| limit > measured.size().width)
+    {
+        measured = artifact.commit_break(BreakConstraint::new(Some(measured.size().width), indent));
+    }
+    artifact.align(alignment);
+    artifact.mark_committed(alignment);
+    measured
 }
 
 fn definite_inline_size(input: LeafMeasureInput) -> Option<f32> {
@@ -530,6 +730,10 @@ mod tests {
         )
     }
 
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
+    }
+
     #[test]
     fn one_shaped_layout_serves_every_probe_and_commit_constraint() {
         let mut context = TextContext::without_system_fonts();
@@ -707,6 +911,161 @@ mod tests {
         let mut measurer =
             TextMeasurer::new(&mut context, &mut artifacts, &container, runs.into_iter());
         measurer.measure(commit);
+    }
+
+    #[test]
+    fn pure_atomic_paragraphs_wrap_and_expose_positions_and_baselines() {
+        let mut context = TextContext::without_system_fonts();
+        let container = ContainerStyle::default();
+        let items = [
+            InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(1, 40.0, 16.0).with_baseline(6.0)),
+            InlineItem::Atomic(AtomicInlineBox::new(2, 30.0, 20.0).with_baseline(12.0)),
+        ];
+        let mut artifacts = TextLayoutStore::default();
+        let mut measurer =
+            InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+
+        let max_content = measurer.measure(measure_input(
+            AvailableSpace::MaxContent,
+            LayoutGoal::Measure(RequestedAxis::Both),
+        ));
+        assert_close(max_content.size().width, 70.0);
+        assert_eq!(max_content.line_count(), 1);
+
+        let committed = measurer.measure(measure_input(
+            AvailableSpace::Definite(50.0),
+            LayoutGoal::Commit,
+        ));
+        assert_eq!(committed.line_count(), 2);
+        assert!(
+            committed
+                .first_baselines()
+                .y
+                .is_some_and(|value| value > 0.0)
+        );
+        let layout = measurer.artifacts.committed().expect("committed");
+        let first = layout
+            .positioned_inline_box(1)
+            .expect("the first atomic box is positioned");
+        let second = layout
+            .positioned_inline_box(2)
+            .expect("the second atomic box is positioned");
+        assert_eq!(first.size, Size::new(40.0, 16.0));
+        assert_close(first.baseline, 6.0);
+        assert_eq!(second.size, Size::new(30.0, 20.0));
+        assert_close(second.baseline, 12.0);
+        assert!(second.origin.y >= first.origin.y + first.size.height);
+        assert!(committed.size().height >= second.origin.y + second.size.height);
+    }
+
+    #[test]
+    fn changed_atomic_metrics_update_the_retained_layout_without_reshaping() {
+        let mut context = TextContext::without_system_fonts();
+        let container = ContainerStyle::default();
+        let mut artifacts = TextLayoutStore::default();
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 20.0, 10.0,
+            ))];
+            let mut measurer =
+                InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Measure(RequestedAxis::Both),
+                    ))
+                    .size()
+                    .width,
+                20.0,
+            );
+        }
+        assert_eq!(context.shape_count(), 1);
+        let retained = core::ptr::from_ref(artifacts.retained().expect("retained"));
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 45.0, 14.0,
+            ))];
+            let mut measurer =
+                InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter());
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Measure(RequestedAxis::Both),
+                    ))
+                    .size()
+                    .width,
+                45.0,
+            );
+            assert_close(
+                measurer
+                    .measure(measure_input(
+                        AvailableSpace::MaxContent,
+                        LayoutGoal::Commit,
+                    ))
+                    .size()
+                    .width,
+                45.0,
+            );
+        }
+        assert_eq!(context.shape_count(), 1);
+        assert!(core::ptr::eq(
+            retained,
+            core::ptr::from_ref(artifacts.committed().expect("committed"))
+        ));
+    }
+
+    #[test]
+    fn an_atomic_probe_restores_the_committed_metrics_even_at_the_same_width() {
+        let mut context = TextContext::without_system_fonts();
+        let container = ContainerStyle::default();
+        let mut artifacts = TextLayoutStore::default();
+        let input = LeafMeasureInput::new(
+            Size::new(Some(50.0), None),
+            Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+            LayoutGoal::Commit,
+        );
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 20.0, 10.0,
+            ))];
+            InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter())
+                .measure(input);
+        }
+        assert_eq!(
+            artifacts
+                .committed()
+                .and_then(|layout| layout.positioned_inline_box(1))
+                .map(|inline_box| inline_box.size),
+            Some(Size::new(20.0, 10.0))
+        );
+
+        {
+            let items = [InlineItem::<RunStyle>::Atomic(AtomicInlineBox::new(
+                1, 40.0, 15.0,
+            ))];
+            let probe = LeafMeasureInput::new(
+                Size::new(Some(50.0), None),
+                Size::new(AvailableSpace::Definite(50.0), AvailableSpace::MaxContent),
+                LayoutGoal::Measure(RequestedAxis::Both),
+            );
+            InlineMeasurer::new(&mut context, &mut artifacts, &container, items.into_iter())
+                .measure(probe);
+        }
+        assert!(artifacts.is_probe_dirty());
+        assert!(artifacts.restore_committed());
+        assert!(!artifacts.is_probe_dirty());
+        assert_eq!(
+            artifacts
+                .committed()
+                .and_then(|layout| layout.positioned_inline_box(1))
+                .map(|inline_box| inline_box.size),
+            Some(Size::new(20.0, 10.0))
+        );
     }
 
     #[test]

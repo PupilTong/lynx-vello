@@ -1,6 +1,7 @@
 //! Protocol machinery entry points over a statically split tree and state.
 mod flexbox;
 mod grid;
+mod inline;
 mod leaf;
 mod linear;
 mod relative;
@@ -9,15 +10,22 @@ mod util;
 
 pub use flexbox::compute_flexbox_layout;
 pub use grid::compute_grid_layout;
-pub(crate) use leaf::compute_leaf_layout_with_measurement;
+pub use inline::{
+    AtomicInlineMetrics, commit_atomic_inline, content_box_origin, measure_atomic_inline,
+    padding_box_geometry,
+};
 #[cfg(feature = "layout-test-utils")]
 #[doc(hidden)]
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;
-pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
+pub use leaf::{
+    LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout,
+    compute_leaf_layout_with_measurement,
+};
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;
 use stylo::values::computed::{Margin, Size as StyleSize};
+pub use util::accumulate_scrollable_overflow;
 
 use self::util::{
     apply_box_sizing, auto_edges_to_zero, clamp, clamp_axis, resolve_border, resolve_container_box,

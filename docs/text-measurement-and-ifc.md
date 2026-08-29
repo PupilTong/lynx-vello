@@ -1,11 +1,11 @@
-# Text measurement, and the inline formatting context ahead of it
+# Text measurement and the bounded inline formatting context
 
 Two halves. The first records what the measurement path does now and why —
 the retained-layout contract `crates/hughie/src/text/` implements and the
-eviction contract `crates/dom` drives it with. The second is a design
-argument for the inline formatting context that has to sit on top of it, and
-the decisions that argument leaves open. **The IFC is not implemented**; §5–§8
-exist to be decided on, not to describe shipped behaviour.
+eviction contract `crates/dom` drives it with. The second records the bounded
+Flow paragraph now layered on top: sibling runs plus the four atomic
+`inline-*` layout modes. It also isolates what is still open: transparent
+rich-text spans, per-run paint/hit identity, and truncation.
 
 Companion documents: `docs/layout-architecture.md` (the box-layout engine this
 hangs off), `docs/tracking/css-text.md` (per-property Lynx conformance),
@@ -13,11 +13,13 @@ hangs off), `docs/tracking/css-text.md` (per-property Lynx conformance),
 
 ---
 
-## 1. What a text node retains
+## 1. What a text layout owner retains
 
-One shaped Parley layout per text node, in `TextLayoutStore`
+One shaped Parley layout per owner, in `TextLayoutStore`
 (`crates/hughie/src/text/layout.rs`), reached through `NodeLayoutState.text`
-(`crates/dom/src/tree/arena.rs`) and lazily allocated by `text_parts`.
+and lazily allocated by `text_parts`. A standalone W3C text leaf is its own
+owner. Inside a Flow box, that element owns one mixed paragraph and its source
+text nodes keep zero box geometry.
 
 Shaping is the expensive half and is invariant under line breaking. Of the ten
 vectors Parley's `LayoutData` owns (`parley-0.11.0/src/layout/data.rs`), eight
@@ -254,22 +256,23 @@ changes rendering. §8 D7 states the options.
 
 ---
 
-## 5. The inline formatting context: what blocks it
+## 5. The bounded inline formatting context
 
-Status quo, from `AGENTS.md`: no inline formatting context, so sibling runs in
-one `text` are separate flex items rather than one wrapped paragraph, a nested
-`text` is a flex item rather than an inline box, and `text-maxline` truncation
-is absent.
+`text` now receives a UA-only internal block-flow display. Its flat children
+are collected in source order into one paragraph: text nodes become styled
+runs, `display: contents` and transparent inline-flow wrappers recurse, the
+four `inline-flex`/`inline-grid`/`inline-linear`/`inline-relative` modes become
+indivisible Parley inline boxes, and absolute/fixed children become zero-sized
+static-position markers. Every atomic box still runs its ordinary Hughie inner
+algorithm before Parley decides whether its complete margin box fits the
+remaining line width.
 
-Concretely, `<text>a<x-span>b</x-span>c</text>` today — Lynx writes runs as
-`raw-text` carriers, so the real tree is
-`<text><raw-text text="a"/><x-span><raw-text text="b"/></x-span><raw-text
-text="c"/></text>`. The UA sheet dissolves the outer carriers
-(`text > raw-text { display: contents }`), `x-span` matches no rule and takes
-the lynx fork's initial `display: flex`, and its inner `raw-text` does not
-match `text > raw-text` so it computes `display: none`. Result: **`b` is not
-rendered at all**, and `a` and `c` sit side by side on one nowrap flex line as
-two independent shaped paragraphs.
+`raw-text` carriers directly under `text` or one `wrapper` deep dissolve into
+that paragraph and carry per-run `preserve-breaks`. The UA sheet makes the
+supported `view`/`image`/nested-`text` child paths atomic `inline-flex` boxes.
+An arbitrary span tag still matches no content opt-in and is suppressed; a
+nested `text` is an atomic inner paragraph rather than web-elements'
+transparent rich-text span. `text-maxline` truncation remains absent.
 
 ### 5.1 `TextBrush = ()` is the deepest incompatibility
 
@@ -345,66 +348,53 @@ index nor a text range). §8 D1.
 
 ---
 
-## 6. Moving artifact ownership from the text node to the text element
+## 6. Paragraph artifact ownership
 
-The unit of line breaking in an IFC is the paragraph. A run cannot start on the
-line its predecessor ended while each run owns its own `Layout`, and no
-production caller ever passes more than one `TextRun` today — the multi-run
-machinery in `crates/hughie/src/text/content.rs` (pointer-identity range
-merging, cross-run whitespace collapsing, cross-run CRLF) is exercised only by
-its own tests. So the store has to move to the box that establishes the IFC.
+The unit of line breaking is the paragraph, so a Flow element owns the retained
+layout assembled from all of its runs and atoms. Standalone text leaves keep
+their existing node-owned artifacts; this preserves the cheap leaf path used
+inside Flex/Grid/Linear/Relative containers.
 
-What the move gives up, and has to replace:
+The ownership consequences are explicit:
 
-- **Invalidation granularity.** `invalidate_layout(text_node)` clears exactly
-  that run today. Under element ownership any run's edit reshapes the
-  paragraph, and a text-content change (`set_text_node_data`) has to be routed
-  from the text node up to the owning paragraph.
-- **Paint and hit granularity.** `visual/build.rs` emits one
-  `PaintItemKind::TextRun { element }` per text node and `visual/hit.rs`
-  resolves a text hit to that single element. A paragraph item needs the brush
-  to switch style per glyph run, and per-run hit targets need it too.
-- **`background-clip: text`** collects one silhouette per text node
-  (`paint/walker.rs`); it becomes one per paragraph.
+- **Invalidation granularity.** A run edit walks through boxless/transparent
+  wrappers and clears the Flow owner. Empty-cache early stopping remains for
+  hidden, detached, and ordinary boxed subtrees.
+- **Paint and hit granularity.** `visual/build.rs` emits one paragraph
+  `PaintItemKind::TextRun`; source text records are suppressed. Until
+  `TextBrush` carries run identity, the Flow owner supplies paint style and the
+  whole paragraph is one hit target.
+- **`background-clip: text`** collects one silhouette per paragraph.
 - **Slot recycling.** The artifact dies with the element's slot instead of the
   text node's.
 
-### 6.1 A staged route
+### 6.1 Landed and remaining stages
 
-Each step is independently shippable, and steps 1–3 are observably no-ops
-because a single-run paragraph has exactly one brush and one owner.
-
-1. **Split the container and run style roles.** *Landed on this branch* —
-   `TextStyleView` became `TextContainerView` (paragraph: `white-space`,
-   `word-break`, `text-wrap`, `text-align`, `text-indent`) and `TextRunView`
-   (run: the font family/size/weight/style/variations/features, `line-height`,
-   `letter-spacing`). Both resolve to the same element today; keeping the roles
-   apart is what lets the run side gain its own style source without
-   disturbing the paragraph side.
-2. **Brush becomes an opaque run index.** hughie threads it; dom keeps a
-   one-entry table; the painter reads it. Observably a no-op.
-3. **Move the store to the IFC-establishing element**, still one run: the host
-   collects runs by walking the element's flat children, `text_layout` is keyed
-   by the element, `visual/build.rs` emits a paragraph item, and text-node
-   invalidation is routed to the owner. Observably a no-op.
-4. **Admit more than one run.** The UA sheet makes nested `text`/`inline-text`
-   inline, the host collects a run per text node with its own `TextRunView` and
-   brush, and the painter resolves fill/shadow/stroke/decorations per glyph
-   run. **This is where behaviour changes.**
-5. **Inline atoms** — `parley::InlineBox` for `image`/`view` children, plus the
-   line-metrics fixup Parley's ascent-only inline-box model needs.
+1. **Container/run style split: landed.** `TextContainerView` carries
+   paragraph inputs; each run's `ComputedValues` carries its font inputs,
+   `line-height`, and `letter-spacing`.
+2. **Flow ownership and multiple shaping runs: landed.** The host walks flat
+   children, the Flow element owns the layout, and source-text invalidation is
+   routed to it.
+3. **Atomic inline boxes: landed.** Parley places already-measured Hughie
+   boxes, followed by a line-metrics pass that accounts for atom baselines and
+   descenders.
+4. **Brush identity: pending.** An opaque run index must survive shaping so
+   paint, decorations, visibility, pointer events, and hits can resolve per
+   originating element without turning repaint-only style into layout damage.
+5. **Transparent rich-text spans and truncation: pending.** Nested `text` is
+   currently atomic, and `text-maxline` still needs a paragraph-level cut.
 
 ---
 
-## 7. Why `text-maxline` truncation has to come after step 3
+## 7. Why `text-maxline` truncation follows paragraph ownership
 
 1. **It is a paragraph property.** In Lynx it is an element *attribute*, not
    CSS (absent from the 236-entry property table), carried as
    `TextProps::text_max_line` and forwarded as the paragraph style
    `kTextPropTextMaxLine` through `SetParagraphStyle`. Its unit of effect is
-   "the Nth line of the paragraph". With per-text-node artifacts there is no
-   paragraph — three sibling runs are three flex items with three independent
-   line sets, and "line 3" is not expressible.
+   "the Nth line of the paragraph". The Flow-owned retained layout now supplies
+   that unit; a standalone text leaf remains a one-run paragraph.
 2. **The cut mutates content.** The inspectable reference implementation
    (`lynx-stack`'s `XTextTruncation.ts`) physically truncates the DOM text
    nodes and appends a literal `"..."`, after binary-searching the last
@@ -412,12 +402,11 @@ because a single-run paragraph has exactly one brush and one owner.
    it per artifact is a different, wrong feature.
 3. **It is a measurement input.** A maxline cut changes the measured height and
    can change the width, so `max_lines` has to join the `BreakConstraint` key
-   in §1.1. Adding it before the ownership move bakes it into a per-text-node
-   key that then has to be re-keyed to the paragraph — and the memo is what
-   makes the measurement path affordable.
+   in §1.1. The existing three-entry paragraph memo is the place to add it.
 4. **The custom truncation child is an inline atom.** `inline-truncation`
    builds a sub-paragraph whose measured width feeds the search for the cut
-   point. That needs both the IFC and step 5.
+   point. That needs both the landed IFC and a future inline-truncation atom
+   plus the paragraph-level cut in step 5.
 5. **The fast path is a trap.** Web-core's fast path (`-webkit-line-clamp` +
    `text-overflow: ellipsis`, taken when there is no custom truncation child
    and `tail-color-convert != "false"`) *could* be done per-artifact — but only
@@ -504,49 +493,43 @@ min/max. Linear has no shrink pass, so a text leaf is shaped and committed
 unwrapped regardless of the container width. Out of scope here; recorded for
 the layout owner.
 
-### 9.4 Only paint reads the committed layout
+### 9.4 Committed-layout consumers remain bounded
 
-`Document::text_layout` has exactly two call sites, both in `paint/walker.rs`
-(the text run itself, and `background-clip: text` silhouette collection). Hit
-testing recovers only the element id from `PaintItemKind::TextRun`; the
-paint-order build uses the rounded box layout; scroll, input, event and render
-never touch it; there is no accessibility module. That is what makes a
-pass-tail restore sufficient.
+Flow commit reads its owner's committed layout to place atomic inline boxes;
+visual construction reads the same artifact to emit a paragraph record, and
+paint reads it for the text run and `background-clip: text` silhouettes. Hit
+testing still recovers only the element id from `PaintItemKind::TextRun`; it
+does not inspect glyphs or line fragments. Scroll and events do not consume
+the text artifact, and there is no accessibility module. Every layout probe
+must therefore still be restored before the commit/visual/paint consumers run.
 
-### 9.5 Draft PR #90 (`codex/inline-layout`)
+### 9.5 PR #90 (`codex/inline-layout`)
 
 Scope, per its own body: the four atomic `inline-*` modes only — no
 author-facing `display: inline`, no `inline-block`, no inline-span
-fragmentation. Its base is 11 days behind `main` and it bumps `vendor/stylo`
-for the `inline-*` display grammar, so a rebase is substantial independently of
-this branch.
+fragmentation. It keeps Lynx's initial `display: flex`; a UA-origin-only
+`display: block` entry supplies the private Flow paragraph for `text`. Standard
+flex/grid item blockification remains unchanged.
 
 Where it lands relative to §5–§6:
 
 - **Brush untouched.** It generalises run styles for *shaping* only
   (`impl TextRunStyle for ComputedValues`, and a `collect_inline_sources` that
   threads each transparent inline ancestor's own `ComputedValues` down), so a
-  nested styled span shapes with its own font but **paints with the flow
-  element's colour, shadow, stroke and decorations**. That is precisely the gap
-  §5.2 closes, and it is worth closing in the same series.
-- **Ownership already moves** to the element for flow boxes, with
+  collected source run shapes with its own font but **paints with the flow
+  element's colour, shadow, stroke and decorations**. That remains the gap
+  specified in §5.2.
+- **Ownership moves** to the element for flow boxes, with
   `clear_inline_text_nodes` zeroing the absorbed text nodes, and per-text-node
-  artifacts kept under non-flow parents. That is §6.1 steps 3 and 4 taken
-  together.
-- **Two slots kept**, plus an `inline_boxes_match` content-identity predicate
-  guarding both the reuse and the install. That guard is a second mechanism for
-  what `ShapeFingerprint` does generally — an atom's measured margin box *is* a
-  shaping input, and folding it into the fingerprint is cheaper than
-  re-introducing the probe slot.
+  artifacts kept under non-flow parents.
+- **One retained layout stays.** Three break constraints are memoized around
+  the committed/resting state. Atom topology participates in the shape
+  fingerprint; same-topology metric changes update Parley's boxes in place,
+  clear break memos, and avoid reshaping.
 - **Real inline boxes**: `parley::InlineBox` plus a host-supplied
   `AtomicInlineBox`, a `resolve_atomic_line_metrics` pass recomputing per-line
-  ascent/descent, and an `extra_height` term working around Parley modelling an
-  inline box as ascent-only. `TextLayout` grows four fields including a
-  `HashMap`, relaxing its size assertion to `+ [usize; 8]`.
+  ascent/descent and storing a per-line block offset used by layout and paint.
 
-Conflict surface with this branch: `TextLayoutStore` is one slot with
-`retained`/`committed`/`is_probe_dirty`/`restore_committed`;
-`TextMeasurer::measure` returns an owned `TextMeasurement`; `TextStyleView` is
-split; `clear_layout_cache` is split. #90's `install_artifact_if_needed` and
-`measure_installed_artifact` factoring would be rewritten against the
-single-slot API.
+The rebase onto the single-slot retained-text architecture is complete: probes
+restore the committed constraint and atom snapshot at pass tail, while a
+committed same-width atom change refreshes positions without a second shape.

@@ -19,6 +19,9 @@ fn computed(declaration: &str, property: &str) -> String {
 
 #[test]
 fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
+    // Lynx keeps single-keyword display values. The four `inline-*` values
+    // select the same inner algorithms while participating as atomic inline
+    // boxes in the nearest flow formatting context.
     for value in ["none", "contents", "flex", "grid", "linear", "relative"] {
         assert!(parses("display", value), "`display: {value}` must parse");
         assert_eq!(
@@ -27,11 +30,27 @@ fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
             "`display: {value}` computed value"
         );
     }
+    for (value, blockified) in [
+        ("inline-flex", "flex"),
+        ("inline-grid", "grid"),
+        ("inline-linear", "linear"),
+        ("inline-relative", "relative"),
+    ] {
+        assert_eq!(
+            specified("display", value).as_deref(),
+            Some(value),
+            "`display: {value}` specified value"
+        );
+        assert_eq!(
+            computed(&format!("display: {value}"), "display"),
+            blockified,
+            "a direct child of the default flex root is blockified"
+        );
+    }
     for value in [
         "block",
         "inline",
         "inline-block",
-        "inline-flex",
         "flow-root",
         "table",
         "list-item",

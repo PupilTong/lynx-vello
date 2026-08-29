@@ -264,10 +264,11 @@ consequential choice about whether to follow the spec or the quirk.
   worth knowing: the reset stops a Lynx **text gradient** at the text root
   exactly as it stops a solid color (the fork's `color` holds either, and
   `inherit` carries the gradient into a nested run intact); and a `view` or
-  `image` that opts back out of the suppression becomes a plain flex box,
-  where web-elements can hand it `inline-flex`/`contents` inside a real inline
-  formatting context — the same no-IFC substitution already recorded for a
-  nested `text`.
+  `image` that opts back out of the suppression becomes an atomic inline-flex
+  box in the text root's Flow paragraph. A nested `text` currently takes that
+  same atomic route: unlike web-elements' transparent inline rich-text span,
+  it cannot break internally as part of the outer paragraph, and its paint
+  identity is not retained per run yet.
   A tag this engine has no rule for (anything but `wrapper`, `view`, `image`,
   `text`, `raw-text`) generates no box inside a `text`, which is the literal
   `x-text > * { display: none }` behavior and not a narrowing of it.

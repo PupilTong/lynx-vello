@@ -173,6 +173,8 @@ impl<T> Document<T> {
         Some(&self.layout_state().get(slot)?.slot.rounded)
     }
 
+    /// The committed retained Parley layout for either a standalone text leaf
+    /// or a flow element that owns a mixed inline paragraph.
     #[must_use]
     pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
         let slot = self.slot(id)?;
@@ -218,8 +220,18 @@ impl<T> Document<T> {
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
                 let node_state = state.get(node_slot).map(|state| &state.slot);
+                let style_view = node.is_element().then(|| StyleView::of(node));
+                let is_transparent_inline = style_view.as_ref().is_some_and(|style| {
+                    let mode = display_mode(style.display());
+                    mode.is_contents()
+                        || (mode.is_flow()
+                            && mode.is_inline()
+                            && !node.is_replaced()
+                            && !style.skips_contents())
+                });
                 if node_state.is_none_or(LayoutSlot::layout_cache_is_empty)
                     && node.flat_parent_id().is_some()
+                    && !is_transparent_inline
                 {
                     // Nothing above needs clearing: either an earlier
                     // invalidation already walked past here (whatever it
@@ -232,7 +244,6 @@ impl<T> Document<T> {
                     reached_root = false;
                     break;
                 }
-                let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;

@@ -11,19 +11,25 @@
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::compute_leaf_layout_with_measurement_for_testing;
 use hughie::compute::{
+    AtomicInlineMetrics, LeafMetrics, accumulate_scrollable_overflow, commit_atomic_inline,
     compute_absolute_layout, compute_boundary_relayout, compute_cached_layout,
-    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout, compute_linear_layout,
-    compute_relative_layout, compute_root_layout, compute_skipped_contents_layout, hide_subtree,
-    round_layout_subtree_with as round_with,
+    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout,
+    compute_leaf_layout_with_measurement, compute_linear_layout, compute_relative_layout,
+    compute_root_layout, compute_skipped_contents_layout, content_box_origin, hide_subtree,
+    measure_atomic_inline, padding_box_geometry, round_layout_subtree_with as round_with,
 };
 use hughie::geometry::{Point, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::{CoreStyle, PositionProperty, TextRun};
-use hughie::text::TextMeasurer;
+use hughie::text::{
+    AtomicInlineBox, InlineItem, InlineMeasurer, PositionedInlineBox, TextMeasurer,
+};
 use hughie::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
 };
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use stylo::computed_values::white_space_collapse;
+use stylo::properties::ComputedValues;
 
 use super::style::{
     DisplayMode, StyleView, TextContainerView, TextRunView, box_parent, display_mode,
@@ -83,7 +89,7 @@ impl<T> LayoutTree for TreeArenas<T> {
         } else {
             let view = self.style(node);
             let display = display_mode(view.display());
-            if display == DisplayMode::None {
+            if display.is_none() {
                 hide_subtree(self, state, node);
                 return LayoutOutput::HIDDEN;
             }
@@ -102,10 +108,11 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
                 }
-                DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
-                DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
-                DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
-                DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
+                DisplayMode::Flex { .. } => compute_flexbox_layout(tree, state, node, input),
+                DisplayMode::Grid { .. } => compute_grid_layout(tree, state, node, input),
+                DisplayMode::Linear { .. } => compute_linear_layout(tree, state, node, input),
+                DisplayMode::Relative { .. } => compute_relative_layout(tree, state, node, input),
+                DisplayMode::Flow { .. } => compute_flow_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
                     let output = if node_ref.is_text_node() {
@@ -155,6 +162,342 @@ impl<T> LayoutTree for TreeArenas<T> {
 
     fn clear_layout_cache(&self, state: &mut Self::State, node: NodeSlot) {
         state.clear_layout_cache(node);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InlineSource<'dom> {
+    Text {
+        text: &'dom str,
+        style: &'dom ComputedValues,
+    },
+    Atomic {
+        node: NodeSlot,
+        order: u32,
+    },
+    Positioned {
+        node: NodeSlot,
+        order: u32,
+        position: PositionProperty,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MeasuredInlineAtom {
+    metrics: AtomicInlineMetrics<NodeSlot>,
+    order: u32,
+}
+
+/// Lays out the inline contents of a flow box while leaving each atomic
+/// child's inner formatting context to its ordinary Hughie algorithm.
+///
+/// Atomic widths are resolved against the whole containing block before the
+/// paragraph is broken. Parley therefore receives indivisible, already-sized
+/// margin boxes and alone decides whether each stays in the remaining space
+/// or moves to the next line.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the probe, paragraph break, and atomic commit phases share one borrowed state"
+)]
+fn compute_flow_layout<T>(
+    tree: &TreeArenas<T>,
+    state: &mut DocumentLayoutState,
+    node: NodeSlot,
+    input: LayoutInput,
+) -> LayoutOutput {
+    let view = tree.style(node);
+    let mut sources = Vec::new();
+    let mut transparent = Vec::new();
+    let mut hidden = Vec::new();
+    let mut atomic_order = 0;
+    collect_inline_sources(
+        tree,
+        node,
+        view.values(),
+        &mut sources,
+        &mut transparent,
+        &mut hidden,
+        &mut atomic_order,
+    );
+
+    let mut measured_atoms: Vec<MeasuredInlineAtom> = Vec::new();
+    let mut positioned_atoms: Vec<PositionedInlineBox> = Vec::new();
+    let mut paragraph_items: Vec<InlineItem<'_, ComputedValues>> =
+        Vec::with_capacity(sources.len());
+    let mut output =
+        compute_leaf_layout_with_measurement(input, &view, None, true, |measure_input| {
+            let containing_block = Size::new(
+                measure_input
+                    .known_dimensions
+                    .width
+                    .or_else(|| measure_input.available_space.width.definite_value()),
+                measure_input
+                    .known_dimensions
+                    .height
+                    .or_else(|| measure_input.available_space.height.definite_value()),
+            );
+            measured_atoms.clear();
+            for source in &sources {
+                if let InlineSource::Atomic { node, order } = *source {
+                    measured_atoms.push(MeasuredInlineAtom {
+                        metrics: measure_atomic_inline(
+                            tree,
+                            state,
+                            node,
+                            containing_block,
+                            measure_input.available_space,
+                        ),
+                        order,
+                    });
+                }
+            }
+
+            let mut atom_index = 0;
+            paragraph_items.clear();
+            paragraph_items.extend(sources.iter().map(|source| match *source {
+                InlineSource::Text { text, style } => InlineItem::Text(TextRun {
+                    text,
+                    style,
+                    preserve_newlines: style.get_inherited_text().clone_white_space_collapse()
+                        != white_space_collapse::T::Collapse,
+                }),
+                InlineSource::Atomic { .. } => {
+                    let metrics = measured_atoms[atom_index].metrics;
+                    atom_index += 1;
+                    let size = metrics.margin_box_size();
+                    let baseline = metrics.first_baselines().y.unwrap_or(size.height);
+                    InlineItem::Atomic(
+                        AtomicInlineBox::new(metrics.node().to_bits(), size.width, size.height)
+                            .with_baseline(baseline),
+                    )
+                }
+                InlineSource::Positioned { node, .. } => {
+                    InlineItem::Atomic(AtomicInlineBox::new(node.to_bits(), 0.0, 0.0))
+                }
+            }));
+            let measurement = {
+                let (context, artifacts) = state.text_parts(node);
+                let mut measurer =
+                    InlineMeasurer::new(context, artifacts, &view, paragraph_items.iter().copied());
+                measurer.measure(measure_input)
+            };
+            if measure_input.goal == LayoutGoal::Commit {
+                positioned_atoms.clear();
+                let committed = state
+                    .at(node)
+                    .text
+                    .as_deref()
+                    .and_then(hughie::text::TextLayoutStore::committed)
+                    .expect("a committed inline paragraph must retain its text layout");
+                positioned_atoms.extend(committed.positioned_inline_boxes());
+            } else {
+                state.note_probed_text(node);
+            }
+            LeafMetrics::new(measurement.size()).with_first_baselines(measurement.first_baselines())
+        });
+
+    if input.goal == LayoutGoal::Commit {
+        let content_origin = content_box_origin(&view, input.parent_size.width);
+        let positioned_by_id: FxHashMap<_, _> = positioned_atoms
+            .iter()
+            .map(|positioned| (positioned.id, *positioned))
+            .collect();
+        for measured in measured_atoms.iter().copied() {
+            let metrics = measured.metrics;
+            let id = metrics.node().to_bits();
+            let Some(positioned) = positioned_by_id.get(&id) else {
+                hide_subtree(tree, state, metrics.node());
+                continue;
+            };
+            let committed = commit_atomic_inline(
+                tree,
+                state,
+                metrics,
+                Point::new(
+                    content_origin.x + positioned.origin.x,
+                    content_origin.y + positioned.origin.y,
+                ),
+                measured.order,
+            );
+            let layout = &tree.layout(state, metrics.node()).unrounded;
+            accumulate_scrollable_overflow(
+                &mut output.content_size,
+                layout.location,
+                layout.size,
+                committed.content_size,
+                tree.style(metrics.node()).overflow(),
+            );
+        }
+
+        let (padding_origin, padding_size) = padding_box_geometry(&view, output.size);
+        for source in &sources {
+            let InlineSource::Positioned {
+                node: positioned_node,
+                order,
+                position,
+            } = *source
+            else {
+                continue;
+            };
+            let id = positioned_node.to_bits();
+            let Some(positioned) = positioned_by_id.get(&id) else {
+                tree.set_static_position(state, positioned_node, Point::ZERO);
+                hide_subtree(tree, state, positioned_node);
+                continue;
+            };
+            let static_in_border_space = Point::new(
+                content_origin.x + positioned.origin.x,
+                content_origin.y + positioned.line_top,
+            );
+            match position {
+                PositionProperty::Absolute => {
+                    let static_in_padding_space = Point::new(
+                        static_in_border_space.x - padding_origin.x,
+                        static_in_border_space.y - padding_origin.y,
+                    );
+                    let mut layout = compute_absolute_layout(
+                        tree,
+                        state,
+                        positioned_node,
+                        padding_size,
+                        static_in_padding_space,
+                    );
+                    layout.location.x += padding_origin.x;
+                    layout.location.y += padding_origin.y;
+                    layout.order = order;
+                    accumulate_scrollable_overflow(
+                        &mut output.content_size,
+                        layout.location,
+                        layout.size,
+                        layout.content_size,
+                        tree.style(positioned_node).overflow(),
+                    );
+                    tree.set_unrounded_layout(state, positioned_node, layout);
+                }
+                PositionProperty::Fixed => {
+                    tree.set_static_position(state, positioned_node, static_in_border_space);
+                }
+                PositionProperty::Static
+                | PositionProperty::Relative
+                | PositionProperty::Sticky => {
+                    unreachable!("only out-of-flow positions become paragraph markers")
+                }
+            }
+        }
+        clear_transparent_inline_nodes(tree, state, &transparent);
+        clear_inline_text_nodes(tree, state, node);
+        for hidden_node in hidden {
+            hide_subtree(tree, state, hidden_node);
+        }
+    }
+
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_inline_sources<'dom, T>(
+    tree: &'dom TreeArenas<T>,
+    node: NodeSlot,
+    inherited_style: &'dom ComputedValues,
+    sources: &mut Vec<InlineSource<'dom>>,
+    transparent: &mut Vec<NodeSlot>,
+    hidden: &mut Vec<NodeSlot>,
+    atomic_order: &mut u32,
+) {
+    for child in tree.children(node) {
+        let child_ref = tree.at(child);
+        if child_ref.is_text_node() {
+            sources.push(InlineSource::Text {
+                text: child_ref.text().unwrap_or_default(),
+                style: inherited_style,
+            });
+            continue;
+        }
+        if !child_ref.is_element() {
+            continue;
+        }
+        let Some(style) = StyleView::try_of(child_ref) else {
+            hidden.push(child);
+            continue;
+        };
+        let mode = display_mode(style.display());
+        if mode.is_none() {
+            hidden.push(child);
+            continue;
+        }
+        let position = resolve_position(child_ref, style.values());
+        if matches!(
+            position,
+            PositionProperty::Absolute | PositionProperty::Fixed
+        ) {
+            sources.push(InlineSource::Positioned {
+                node: child,
+                order: *atomic_order,
+                position,
+            });
+            *atomic_order = atomic_order.saturating_add(1);
+            continue;
+        }
+        if mode.is_contents()
+            || (mode.is_flow()
+                && mode.is_inline()
+                && !child_ref.is_replaced()
+                && !style.skips_contents())
+        {
+            transparent.push(child);
+            collect_inline_sources(
+                tree,
+                child,
+                style.values(),
+                sources,
+                transparent,
+                hidden,
+                atomic_order,
+            );
+            continue;
+        }
+        if mode.is_inline() {
+            sources.push(InlineSource::Atomic {
+                node: child,
+                order: *atomic_order,
+            });
+            *atomic_order = atomic_order.saturating_add(1);
+        } else {
+            hidden.push(child);
+        }
+    }
+}
+
+fn clear_transparent_inline_nodes<T>(
+    tree: &TreeArenas<T>,
+    state: &mut DocumentLayoutState,
+    nodes: &[NodeSlot],
+) {
+    for &node in nodes {
+        tree.clear_layout_cache(state, node);
+        tree.set_unrounded_layout(state, node, Layout::default());
+    }
+}
+
+fn clear_inline_text_nodes<T>(
+    tree: &TreeArenas<T>,
+    state: &mut DocumentLayoutState,
+    root: NodeSlot,
+) {
+    for child in tree.children(root) {
+        let child_ref = tree.at(child);
+        if child_ref.is_text_node() {
+            tree.clear_layout_cache(state, child);
+            tree.set_unrounded_layout(state, child, Layout::default());
+            continue;
+        }
+        let Some(style) = StyleView::try_of(child_ref) else {
+            continue;
+        };
+        let mode = display_mode(style.display());
+        if mode.is_contents() || (mode.is_flow() && mode.is_inline() && !child_ref.is_replaced()) {
+            clear_inline_text_nodes(tree, state, child);
+        }
     }
 }
 
@@ -327,10 +670,10 @@ fn pre_position<T: Sync>(
         return false;
     };
     let display = display_mode(style.display());
-    if display == DisplayMode::None {
+    if display.is_none() {
         return false;
     }
-    if display == DisplayMode::Contents {
+    if display.is_contents() {
         tree.layout_mut(state, node_id)
             .set_unrounded(Layout::default());
         return true;
@@ -344,7 +687,7 @@ fn pre_position<T: Sync>(
         let fixed = style.values().clone_position() == PositionProperty::Fixed;
         position_hoisted(tree, state, node_id, viewport, fixed);
     }
-    display != DisplayMode::Leaf && !skips_contents(style.values())
+    !display.is_leaf() && !skips_contents(style.values())
 }
 
 fn position_hoisted<T: Sync>(
@@ -443,7 +786,7 @@ fn sibling_paint_order<T>(tree: &TreeArenas<T>, parent_id: NodeSlot, target: Nod
 fn sibling_effective_paint_order<T>(child: &Node<T>) -> Option<i32> {
     match StyleView::try_of(child) {
         Some(style) => {
-            if display_mode(style.display()) == DisplayMode::None {
+            if display_mode(style.display()).is_none() {
                 None
             } else if matches!(
                 style.values().clone_position(),
