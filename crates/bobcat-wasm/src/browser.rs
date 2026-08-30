@@ -598,10 +598,9 @@ impl BobcatRenderer {
                     // ride one wakeup, and leaving before the draw would spend
                     // that wakeup without producing the frame the failed
                     // script did commit — with nobody left to ask for another.
-                    EngineEvent::ScriptRunError(error) => {
-                        if fatal.is_none() {
-                            fatal = Some(js_error(error));
-                        }
+                    // The first failure is the one reported.
+                    EngineEvent::ScriptRunError(error) if fatal.is_none() => {
+                        fatal = Some(js_error(error));
                     }
                     EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
                     _ => {}
