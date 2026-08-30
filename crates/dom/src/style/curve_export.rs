@@ -245,8 +245,6 @@ fn build_track<V: Clone>(
     let first = declaring.first().expect("non-empty").percentage;
     let last = declaring.last().expect("non-empty").percentage;
     if first != 0.0 || last != 1.0 {
-        // Stylo would backfill from the start-time base style, which is not
-        // recoverable here.
         return None;
     }
     Some(Some(Track { points: declaring }))

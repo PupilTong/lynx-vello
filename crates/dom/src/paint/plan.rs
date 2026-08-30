@@ -12,11 +12,10 @@
 //! than by any overlap analysis.
 //!
 //! A push group bakes as part of a run only when its whole subtree rides
-//! the run's head, nothing in it samples an animation, and every
-//! non-`SrcOver` blend inside has an isolating layer between it and the
-//! plane — a blend against the plane's transparent backdrop would read
-//! pixels the full composition would have had. The group's own layer must
-//! be a clip or plain `SrcOver` for the same reason.
+//! the run's head and every push in it is a clip or a plain `SrcOver`
+//! layer with no sampled alpha — a non-`SrcOver` blend against the plane's
+//! transparent backdrop would read pixels the full composition never
+//! shows, so any such group replays raw instead.
 //!
 //! Clip-only pushes riding an *outer* chain are the one outer-chain shape a
 //! run absorbs. The walker re-pushes an item's whole clip chain inside
@@ -135,8 +134,6 @@ struct OpenGroup {
     /// Index of the push op.
     index: usize,
     lattice: Lattice,
-    /// No blend inside lacks an isolating layer within this group.
-    isolation_ok: bool,
 }
 
 /// Per push op: its matching pop and the scroll head its whole group may
@@ -152,8 +149,6 @@ fn summarize_groups(program: &[ComposeOp]) -> Vec<Option<GroupInfo>> {
     let mut info: Vec<Option<GroupInfo>> = Vec::with_capacity(program.len());
     info.resize_with(program.len(), || None);
     let mut open: Vec<OpenGroup> = Vec::new();
-    // Indices of currently open isolating (non-clip) pushes.
-    let mut isolating: Vec<usize> = Vec::new();
     for (index, op) in program.iter().enumerate() {
         match op {
             ComposeOp::Fragment { chain, .. } => {
@@ -168,23 +163,13 @@ fn summarize_groups(program: &[ComposeOp]) -> Vec<Option<GroupInfo>> {
                 alpha_animation,
                 ..
             } => {
-                if !clip_only && !is_plain(*blend) {
-                    // Every open group this blend is bare in — no isolating
-                    // layer between them — must not bake: against a plane's
-                    // transparent backdrop the blend reads different pixels.
-                    let nearest = isolating.last().copied();
-                    for group in &mut open {
-                        if nearest.is_none_or(|iso| group.index > iso) {
-                            group.isolation_ok = false;
-                        }
-                    }
-                }
-                let contributes = if alpha_animation.is_some() {
+                // Module-doc bake rules: a sampled alpha or non-SrcOver
+                // blend keeps its groups raw; an outer-chain clip re-push
+                // counts as nothing; everything else rides its chain.
+                let contributes = if alpha_animation.is_some() || (!clip_only && !is_plain(*blend))
+                {
                     Some(Rides::Foreign)
                 } else if *clip_only && rides(*chain) == Rides::Foreign {
-                    // An outer-chain clip re-push: absorbed by the bake (its
-                    // shape is applied around the plane draw instead), so it
-                    // neither poisons nor heads a group.
                     None
                 } else {
                     Some(rides(*chain))
@@ -196,29 +181,12 @@ fn summarize_groups(program: &[ComposeOp]) -> Vec<Option<GroupInfo>> {
                     }
                     lattice = lattice.merge(contributes);
                 }
-                open.push(OpenGroup {
-                    index,
-                    lattice,
-                    isolation_ok: true,
-                });
-                if !clip_only {
-                    isolating.push(index);
-                }
+                open.push(OpenGroup { index, lattice });
             }
             ComposeOp::Pop => {
                 let group = open.pop().expect("the program's pushes balance its pops");
-                if isolating.last() == Some(&group.index) {
-                    isolating.pop();
-                }
-                let ComposeOp::Push {
-                    clip_only, blend, ..
-                } = &program[group.index]
-                else {
-                    unreachable!("an open group starts at a push");
-                };
-                let isolates_or_plain = *clip_only || is_plain(*blend);
                 let head = match group.lattice {
-                    Lattice::Uniform(slot) if group.isolation_ok && isolates_or_plain => Some(slot),
+                    Lattice::Uniform(slot) => Some(slot),
                     _ => None,
                 };
                 info[group.index] = Some(GroupInfo {
@@ -450,10 +418,8 @@ mod tests {
     fn a_bare_blend_inside_the_scroller_stays_out_of_the_plane() {
         let mut doc = scroller_doc("", 3, "mix-blend-mode: multiply");
         let frame = doc.dom.commit();
-        // The blend groups must not bake: against the plane's transparent
-        // backdrop, multiply would read pixels the full composition never
-        // shows. Whether anything is left to layer is the plan's call; what
-        // is asserted is that no plane range contains a non-SrcOver push.
+        // Whether anything is left to layer is the plan's call; what is
+        // asserted is that no plane range contains a non-SrcOver push.
         if let Some(plan) = frame.composite_plan() {
             assert_partitions(&frame, plan);
             for (op, in_plane) in covered_ops(plan) {
@@ -517,10 +483,6 @@ mod tests {
         assert!(
             frame.composite_plan().is_none(),
             "a plane past 8192 device px cannot live in the atlas"
-        );
-        assert!(
-            frame.scene().is_some(),
-            "the refused frame composes at commit instead"
         );
     }
 

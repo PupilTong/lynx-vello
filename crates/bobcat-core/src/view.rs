@@ -20,19 +20,19 @@
 //! and hands it to that thread, which boots the entry module and then serves
 //! commands forever; the presenting side never holds it. Every later change
 //! reaches the document as a [`MainCommand`] on the one ordered channel
-//! (input targets, scrolls, resizes, `BeginFrame` animation ticks). That
-//! thread is the only committer: `__FlushElementTree` commits, and every
-//! served command round ends in a commit when anything went stale.
+//! (input targets, refill write-backs, resizes, `BeginFrame` animation
+//! ticks). That thread is the only committer: `__FlushElementTree` commits,
+//! and every served command round ends in a commit when anything went stale.
 //!
 //! What crosses back is one immutable [`CommittedFrame`] per commit,
 //! published into the [`FrameHub`]. The presenting side is a pure compositor
 //! over it: `notify_redraw` acquires the swap-chain image, uploads the
 //! latest published scene if it is new, and presents — no document, no lock,
 //! no skipped frames. Input is routed against the published frame too: hit
-//! testing and gesture recognition read its tables (the scroll-slot table
-//! carries the containing-block scroll chain exactly so recognition needs no
-//! live styles), scroll consumption is arbitrated against published bounds,
-//! and what must reach the realm crosses as plain data.
+//! testing and gesture recognition read its tables, and scroll consumption
+//! lands in the presenting side's own intents — the offsets the screen
+//! shows, written back to the document only when a refill re-centers the
+//! encode windows.
 //!
 //! The law: the main thread waits only on its own channel; the presenting
 //! side never waits on the main thread (the offscreen `tick`, an embedder's
@@ -187,9 +187,7 @@ pub enum EngineEvent {
     ///
     /// Reported rather than swallowed, and separate from [`Self::ScriptRunError`]
     /// because it is not fatal: the walk goes on, the realm stays usable, and
-    /// every later event is delivered as normal. An embedder that logs it gets
-    /// the same visibility over its own handlers that it has over its entry
-    /// module; one that ignores it loses nothing but the message.
+    /// every later event is delivered as normal.
     ListenerFailed(ScriptError),
 }
 
@@ -213,11 +211,9 @@ impl fmt::Debug for Screenshot {
 /// capability the engine schedules through. The embedder provides the
 /// mechanisms; the engine decides when to invoke them.
 ///
-/// The engine is generic over this trait, so every call here is a direct one
-/// — a window is a type, not a set of boxed closures. The draw target is a
-/// GAT, which lets native surfaces borrow an embedder-owned window. Browser
-/// embedders can instead attach an owned canvas target through
-/// [`LynxView::attach_target`].
+/// The draw target is a GAT, which lets native surfaces borrow an
+/// embedder-owned window. Browser embedders can instead attach an owned
+/// canvas target through [`crate::LynxView::attach_target`].
 pub trait Window {
     type Target<'window>: Into<WindowTarget<'window>>
     where
@@ -494,16 +490,16 @@ impl RouterHost for FrameRouterHost<'_> {
     }
 }
 
-/// The presenting side's between-commits view of scroll offsets, for
-/// consumption arbitration only.
+/// The presenting side's scroll offsets — the offsets the screen is
+/// showing, and the only place a user scroll lands between refills.
 ///
-/// A drag's tap suppression must be decided as the moves arrive, but the
-/// authoritative offsets live in the document and come back with the next
-/// commit. So each consumed step is accumulated here against the published
-/// frame's bounds; when a frame whose own offset equals an intent publishes,
-/// the intent has served its purpose and drops, and the rest re-clamp to the
-/// new bounds — so a drag held at a clamp is not re-granted headroom the
-/// document has already refused.
+/// Each consumed step accumulates here against the published frame's
+/// bounds; composition and hit testing read these as overrides over the
+/// committed offsets. The document learns them only when a refill writes
+/// them back, so reconciliation is a value comparison: when a published
+/// frame's own offset equals the intent, the intent has served its purpose
+/// and drops; anything else is kept and re-clamped to the new bounds — a
+/// drag held at a clamp is not re-granted headroom the geometry refused.
 #[derive(Debug, Default)]
 struct ScrollIntents {
     offsets: HashMap<NodeId, Vector2D<f32>>,
@@ -529,15 +525,15 @@ impl ScrollIntents {
                 clamp_scroll_axis(offset.x, slot.max_offset.x),
                 clamp_scroll_axis(offset.y, slot.max_offset.y),
             );
-            // Equal means the frame's own offsets already contain this
-            // intent — the `ScrollBy` that moved it has been committed.
+            // Equal means the committed composition already shows this
+            // intent — a refill wrote it back, or the clamp converged them.
             *offset != slot.offset
         });
     }
 
-    /// Mirrors `Document::scroll_chain` against published geometry: chained,
-    /// clamped, per-axis masked. Returns whether anything was consumed — the
-    /// fact the gesture router claims a sequence on.
+    /// Mirrors the user-agent scroll chain against published geometry:
+    /// chained, clamped, per-axis masked. Returns whether anything was
+    /// consumed — the fact the gesture router claims a sequence on.
     fn chain(&mut self, frame: &CommittedFrame, from: NodeId, delta: Vector2D<f32>) -> bool {
         self.rebase(frame);
         let slots = frame.scroll_slots();
@@ -618,6 +614,14 @@ impl ScrollIntents {
             })
         })
     }
+
+    /// Every in-flight offset, for a refill's write-back.
+    fn writeback(&self) -> Vec<(NodeId, Vector2D<f32>)> {
+        self.offsets
+            .iter()
+            .map(|(node, offset)| (*node, *offset))
+            .collect()
+    }
 }
 
 /// One axis of [`ScrollIntents::refill_due`]: past halfway between the
@@ -652,19 +656,15 @@ fn scene_for<'frame>(
     frame: &'frame CommittedFrame,
     animation_now: Option<f64>,
 ) -> &'frame Scene {
-    if intents.overrides_any() || animation_now.is_some() {
-        buffer.reset();
-        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
-        buffer
-    } else if let Some(scene) = frame.scene() {
-        scene
-    } else {
-        // A layered frame retains no whole composition; targets draw it
-        // from its planes, and a caller landing here composes it flat.
-        buffer.reset();
-        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
-        buffer
+    if !intents.overrides_any()
+        && animation_now.is_none()
+        && let Some(scene) = frame.scene()
+    {
+        return scene;
     }
+    buffer.reset();
+    frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
+    buffer
 }
 
 /// The scene to draw for a layered frame: its plan composed into `buffer` —
@@ -816,11 +816,6 @@ pub(crate) enum MainCommand {
         name: Arc<str>,
         detail: Arc<str>,
     },
-    /// Drive the user-agent scroll chain from `from` by `delta` CSS px. The
-    /// presenting side already arbitrated consumption against published
-    /// bounds; the document's own chain is the authority the next commit
-    /// publishes.
-    ScrollBy { from: NodeId, delta: Vector2D<f32> },
     /// New device metrics from the embedder.
     Resize {
         width: f32,
@@ -833,11 +828,14 @@ pub(crate) enum MainCommand {
     /// wait for this specific tick.
     BeginFrame { now: f64, seq: u64 },
     /// The presenting side's compose offsets have consumed most of a slot's
-    /// committed encode window: repaint so the next commit re-centers the
-    /// windows on the current offsets. The offsets themselves are already
-    /// authoritative on the main thread — the `ScrollBy` commands that moved
-    /// them are ordered ahead of this on the same channel.
-    Refill,
+    /// committed encode window: write the offsets the screen is showing back
+    /// into the document and repaint, so the next commit re-centers the
+    /// windows on them. This is the only channel a user scroll crosses on —
+    /// between refills the presenting side's intents *are* the offsets, and
+    /// nothing about a windowed scroll touches the main thread at all.
+    Refill {
+        offsets: Vec<(NodeId, Vector2D<f32>)>,
+    },
     /// The installed store's answers changed; repaint with them.
     NoteImagesChanged,
     /// Run a closure against the document, for tests that observe main-thread
@@ -863,15 +861,12 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     /// The only `Sender` of the main thread's command channel, dropped first
     /// so this view's detached main thread wakes and releases its
     /// owner-thread-bound realm. It must never be cloned anywhere the script
-    /// thread can reach: a surviving clone would leave the receiver parked
-    /// with a live realm forever.
+    /// thread can reach.
     commands: mpsc::Sender<MainCommand>,
     /// A test-only view built without its main thread, so tests can hold
     /// the command receiver and observe the decision→command seam directly.
     #[cfg(test)]
     detached: bool,
-    /// The published-frame hub the committer fills and the compositor
-    /// reads from.
     hub: Arc<FrameHub>,
     /// The store the paint walk reads, installed once at construction and
     /// held here too so async loaders reach it without the document.
@@ -1179,9 +1174,10 @@ impl<'window, W: Window> LynxView<'window, W> {
         }
     }
 
-    /// Asks the main thread for a refill commit when in-flight offsets have
-    /// consumed most of a slot's encode window — once per committed frame,
-    /// because only the next commit re-centers the windows.
+    /// Writes the offsets the screen is showing back to the main thread
+    /// when in-flight offsets have consumed most of a slot's encode window —
+    /// once per committed frame, because only the next commit re-centers
+    /// the windows.
     fn maybe_request_refill(&mut self, frame: &CommittedFrame) {
         if self.refill_requested_for == Some(frame.commit_id())
             || !self.scroll_intents.refill_due(frame)
@@ -1189,7 +1185,9 @@ impl<'window, W: Window> LynxView<'window, W> {
             return;
         }
         self.refill_requested_for = Some(frame.commit_id());
-        let _ = self.commands.send(MainCommand::Refill);
+        let _ = self.commands.send(MainCommand::Refill {
+            offsets: self.scroll_intents.writeback(),
+        });
     }
 
     /// Executes the router's decisions in order — which is the delivery
@@ -1213,12 +1211,8 @@ impl<'window, W: Window> LynxView<'window, W> {
                     from,
                     delta,
                 } => {
-                    // Arbitrate against published bounds now, apply
-                    // authoritatively on the main thread; the commit that
-                    // publishes the moved offsets reconciles the two.
                     let consumed =
                         published.is_some_and(|frame| scroll_intents.chain(frame, from, delta));
-                    let _ = commands.send(MainCommand::ScrollBy { from, delta });
                     if consumed && let Some(pointer) = pointer {
                         gesture.note_scroll_consumed(pointer);
                     }
@@ -1359,10 +1353,8 @@ impl<'window, W: Window> LynxView<'window, W> {
         Ok(())
     }
 
-    /// Sends one `BeginFrame` when the latest committed frame left an
-    /// animation running (or `always`), returning the sequence number sent.
-    /// The main thread serves from construction, so there is no window in
-    /// which a tick has nobody to answer it.
+    /// Sends one `BeginFrame` when something animating still needs the main
+    /// thread (or `always`), returning the sequence number sent.
     fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
         // A detached test view has nobody serving; a queued `BeginFrame`
         // would only stall a synchronizing caller.
@@ -1644,22 +1636,17 @@ fn spawn_main_thread<F: FrameRequester>(
         })
 }
 
-/// How many commands one served round may apply before it must commit.
-///
-/// A round coalesces a burst — pointer moves, a resize storm — into one
-/// commit, but a producer that stays ahead of the consumer (a slow listener
-/// under sustained input) must not defer publishing indefinitely: the cap
-/// closes the round so scrolls applied so far reach the screen and queued
-/// `BeginFrame`s are acknowledged.
-const MAX_COMMANDS_PER_ROUND: usize = 16;
-
-/// Serves the command channel for as long as the view holds its sender.
+/// Serves the command channel for as long as the engine holds its sender.
 ///
 /// The realm outlives its entry module; the channel closing is the only
-/// shutdown signal this thread needs or gets. Commands are applied in order;
-/// each round drains what is already queued, up to
-/// [`MAX_COMMANDS_PER_ROUND`], and ends with one commit when anything went
-/// stale, published before any `BeginFrame` in the round is acknowledged.
+/// shutdown signal this thread needs or gets. Commands are applied in
+/// order; each round drains what is already queued and ends with one commit
+/// when anything went stale, published before any `BeginFrame` in the round
+/// is acknowledged. The round needs no command cap: every producer is
+/// frame- or event-rate-bounded — `BeginFrame` once per frame, input as the
+/// OS delivers it (pointer moves coalesced on the presenting side), and
+/// scrolls not at all, since a windowed scroll never crosses — so the queue
+/// empties faster than it fills and the drain terminates on its own.
 fn serve_main_commands(
     mut runtime: crate::runtime::MainThreadRuntime,
     commands: &mpsc::Receiver<MainCommand>,
@@ -1669,13 +1656,8 @@ fn serve_main_commands(
     while let Ok(first) = commands.recv() {
         let mut serviced_begin_frame = None;
         let mut command = Some(first);
-        let mut applied = 0usize;
         while let Some(current) = command.take() {
             apply_main_command(&mut runtime, current, events, &mut serviced_begin_frame);
-            applied += 1;
-            if applied >= MAX_COMMANDS_PER_ROUND {
-                break;
-            }
             command = commands.try_recv().ok();
         }
         runtime.commit_if_dirty();
@@ -1709,7 +1691,6 @@ fn apply_main_command(
                 events.send(EngineEvent::ListenerFailed(error.into_script_error()));
             }
         }
-        MainCommand::ScrollBy { from, delta } => runtime.apply_scroll(from, delta),
         MainCommand::Resize {
             width,
             height,
@@ -1719,7 +1700,7 @@ fn apply_main_command(
             runtime.begin_frame(now);
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
-        MainCommand::Refill => runtime.refill_scroll_windows(),
+        MainCommand::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
         MainCommand::NoteImagesChanged => runtime.note_images_changed(),
         #[cfg(test)]
         MainCommand::Probe(probe) => runtime.with_document(probe),
@@ -2151,10 +2132,13 @@ mod tests {
         );
     }
 
-    /// A scroll decision for a remote document crosses as a command carrying
-    /// the raw delta; the main thread's own chain is the authority.
+    /// A scroll decision crosses nothing: it lands in the presenting side's
+    /// intents, which are the offsets composition shows, and the main
+    /// thread hears about scrolling only when a refill writes offsets back.
+    /// With no published frame there is no geometry to consume against, so
+    /// the decision evaporates entirely.
     #[test]
-    fn a_scroll_decision_reaches_the_main_thread_as_a_command() {
+    fn a_scroll_decision_sends_no_command() {
         use crate::gesture::InputDecision;
 
         let (mut view, commands) = detached();
@@ -2165,13 +2149,11 @@ mod tests {
             delta: dom::Vector2D::new(0.0, 5.0),
         }];
         view.execute_decisions(&mut decisions, None);
-        let MainCommand::ScrollBy { from, delta } =
-            commands.try_recv().expect("the scroll crosses")
-        else {
-            panic!("a scroll decision becomes a scroll command");
-        };
-        assert_eq!(from, node);
-        assert!((delta.y - 5.0).abs() < f32::EPSILON);
+        assert!(
+            commands.try_recv().is_err(),
+            "a windowed scroll never crosses the command channel"
+        );
+        assert!(view.scroll_intents.offsets.is_empty());
     }
 
     /// Boot's final flush is a commit: by the time `ScriptFinished` is
@@ -2628,17 +2610,26 @@ mod event_loop_tests {
         engine.dispatch_input(touch(1, PointerPhase::Up, 150.0));
         wait_for_log(&mut engine, "tap:150");
 
-        // The router's scroll decision drove the document's chain: 30px of
-        // travel minus the 8px drag slop moved the scroller 22px.
-        let offset = scroll_offset_of(&mut engine, 3);
+        // The router's scroll decision landed in the intents: 30px of
+        // travel minus the 8px drag slop moved the scroller 22px. The
+        // document never hears about a windowed scroll.
+        let offset = engine
+            .scroll_intents
+            .offset_for(node_id(3))
+            .expect("the drag scrolled the view");
         assert!(
             (offset.y - 22.0).abs() < 0.5,
             "the drag scrolled the view, got {offset:?}"
         );
+        assert_eq!(
+            scroll_offset_of(&mut engine, 3),
+            dom::Vector2D::zero(),
+            "a windowed scroll leaves the document untouched"
+        );
     }
 
     /// A wheel over scrollable content scrolls it (the router's decision,
-    /// applied on the main thread) and dispatches `wheel` with its delta in
+    /// landing in the intents) and dispatches `wheel` with its delta in
     /// the detail — in that order.
     #[test]
     fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
@@ -2655,7 +2646,10 @@ mod event_loop_tests {
             dom::Vector2D::new(0.0, 30.0),
         ));
         wait_for_log(&mut engine, "wheel:30");
-        let offset = scroll_offset_of(&mut engine, 3);
+        let offset = engine
+            .scroll_intents
+            .offset_for(node_id(3))
+            .expect("the wheel scrolled the view");
         assert!(
             (offset.y - 30.0).abs() < 0.5,
             "the wheel scrolled the view, got {offset:?}"
@@ -2709,11 +2703,11 @@ mod event_loop_tests {
         };
         ";
 
-    /// The composed-scroll law, from the engine's side: a user scroll inside
-    /// the encode window updates the document's offsets and the presenting
-    /// side's intents but commits nothing — and hit testing follows the
-    /// intent offsets, not the committed ones, so a tap lands on what the
-    /// screen shows.
+    /// The composed-scroll law, from the engine's side: a user scroll
+    /// inside the encode window lands in the presenting side's intents and
+    /// nowhere else — no command crosses, the document's offsets stay put,
+    /// nothing recommits — and hit testing follows the intent offsets, not
+    /// the committed ones, so a tap lands on what the screen shows.
     #[test]
     fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
@@ -2731,10 +2725,10 @@ mod event_loop_tests {
             Point2D::new(100.0, 100.0),
             dom::Vector2D::new(0.0, 30.0),
         ));
-        let offset = scroll_offset_of(&mut engine, 3);
-        assert!(
-            (offset.y - 30.0).abs() < 0.5,
-            "the wheel scrolled the document, got {offset:?}"
+        assert_eq!(
+            scroll_offset_of(&mut engine, 3),
+            dom::Vector2D::zero(),
+            "a windowed scroll leaves the document untouched"
         );
         // The probe round-tripped the main thread, so its round's
         // commit-if-dirty has already run — and found nothing.

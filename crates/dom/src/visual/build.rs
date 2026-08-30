@@ -243,13 +243,11 @@ impl Collection<'_> {
 /// What a box inherits from its containing-block chain: the innermost clip
 /// and the nearest scroll container on that chain as a scroll-slot index.
 ///
-/// Scroll translations are no longer folded into item transforms here: the
-/// frame is baked in *unscrolled* coordinates, and every consumer — the
+/// The frame is baked in *unscrolled* coordinates; every consumer — the
 /// composed scene, hit testing, culling — applies the chain's translations
-/// at use time from the slot table. What the escape rule used to do for the
-/// folded translation it now does for `chain`: a member keyed `absolute` or
-/// `fixed` swaps in its containing block's context, and its slot chain swaps
-/// with it (the containing-block escape of CSS2 §11.1.1).
+/// at use time from the slot table. A member keyed `absolute` or `fixed`
+/// swaps in its containing block's context, slot chain included (the
+/// containing-block escape of CSS2 §11.1.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct FlowContext {
     clip: Option<usize>,
@@ -668,12 +666,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
     /// order-modified document order, and returns where the run starts.
     ///
     /// `Layout::order` is the order-modified paint index the layout algorithm
-    /// assigned over this same flattened sibling space. When no sibling
-    /// carries a non-zero CSS `order`, that index *is* the flattened index,
-    /// so the run arrives strictly increasing in `(order, index)` and the
-    /// sort would be the identity permutation. The fill scan detects that and
-    /// skips it: `index` increases by construction, so a non-decreasing
-    /// `order` makes the whole key strictly increasing.
+    /// assigned over this same flattened sibling space. The sort is skipped
+    /// when `order` arrives non-decreasing: `index` increases by
+    /// construction, so the whole key is already strictly increasing.
     fn rank_children(&mut self, node: NodeId) -> usize {
         let base = self.scratch.ranked.len();
         // Copied out first: both are `&'doc`, so the iterator borrows the
@@ -824,12 +819,9 @@ impl<'doc, T: Sync> Builder<'doc, T> {
 
     /// Collects a child that paints inside the enclosing stacking context.
     ///
-    /// Two shapes. A positioned box with `z-index: auto` and no other trigger
-    /// is a *pseudo*-stacking context: it paints its own item and its in-flow
-    /// content into a buffer of its own and surfaces as one level-0 member, so
-    /// that its positioned descendants can still interleave with the enclosing
-    /// context's members (CSS2 §E.2 step 8). Everything else appends straight
-    /// to `target`.
+    /// A pseudo-stacking context (module doc) collects its records into a
+    /// pooled buffer and surfaces as one level-0 member; everything else
+    /// appends straight to `target`.
     fn collect_in_context(
         &mut self,
         child: &ChildBox<'doc, T>,

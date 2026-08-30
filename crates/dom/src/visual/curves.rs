@@ -37,10 +37,8 @@ pub(crate) enum Easing {
 
 impl Easing {
     /// The eased output for `progress`, matching stylo's
-    /// `TimingFunction::calculate_output` with `BeforeFlag::Unset`:
-    /// `calculate_bezier_output`'s linear shortcut, exact edges, tangent
-    /// extrapolation outside `[0, 1]`, and a Newton-then-bisection solve at
-    /// the given tolerance inside it.
+    /// `TimingFunction::calculate_output` with `BeforeFlag::Unset` (see
+    /// [`bezier_output`]).
     fn output(self, progress: f64, epsilon: f64) -> f64 {
         match self {
             Self::Linear => progress,

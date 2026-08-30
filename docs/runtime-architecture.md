@@ -312,24 +312,25 @@ compose program tagged with the scroll chain each shape rides, the content
 between them lands in per-chain scene fragments, and replaying the program
 with a set of per-slot offsets reproduces exactly what a monolithic encode at
 those offsets would have produced. A user scroll therefore never waits for a
-commit. The presenting side arbitrates consumption against the published
-slot table, keeps the consumed offsets as *scroll intents* (each stamped
-with its `ScrollBy` command's sequence number), recomposes and re-hit-tests
-at those offsets immediately, and sends the same `ScrollBy` to the main
-thread, whose document applies it without dirtying anything. A published
-frame echoes the highest sequence applied, so intents a frame already
-incorporates are dropped and the rest re-clamp to its bounds.
+commit — or the main thread at all. The presenting side arbitrates
+consumption against the published slot table, keeps the consumed offsets as
+*scroll intents*, and recomposes and re-hit-tests at those offsets
+immediately; between refills the intents *are* the offsets, and no per-event
+command exists. When a frame publishes, an intent the frame's own offset
+already equals has served its purpose and drops; the rest re-clamp to the
+new bounds.
 
 The encode is windowed: each slot's fragments cover one scrollport past its
 committed offset per scrollable axis (`ENCODE_WINDOW_SCROLLPORTS`). When an
 intent moves past half its remaining window headroom, the engine sends one
-`Refill` command per committed frame; the main thread marks the paint stale
-and its next commit re-bakes the windows centered on the current offsets —
-no script involvement anywhere. Programmatic scrolls need no refill today
-because every scroll reaching the document rides a `ScrollBy` the intents
-already display; a future script-facing scroll API must either dirty the
-paint or publish its offsets, since the compositor only knows what crossed
-the channel.
+`Refill` per committed frame carrying the offsets the screen is showing;
+the main thread writes them into the document, marks the paint stale, and
+its next commit re-bakes the windows centered on them — no script
+involvement anywhere. The refill write-back is the only way a user scroll
+reaches the document, so between refills document-side offset reads lag the
+screen; a future script-facing scroll API must either dirty the paint or
+publish its offsets, since the compositor only knows what crossed the
+channel.
 
 ### Scroller content lives in retained planes
 
@@ -350,10 +351,11 @@ per-use copy of each plane texture into its image atlas. Plane memory is
 screen-proportional — scrollport-sized windows per scroller, never
 per-fragment — and capped at half vello's 8192×8192 atlas; a frame past
 the budget, and any frame recommitting every tick for an unexported
-animation, plans nothing and composes flat exactly as above. Layered
-frames also skip the eagerly composed committed scene: `scene()` answers
-`None` for them, and the one whole-frame composition (a content-linear
-second encoding) exists only for frames that actually read it.
+animation, plans nothing and composes flat exactly as above. No frame
+materializes a whole composition beside its fragments (that would be a
+content-proportional second encoding): `scene()` borrows the single
+fragment of the common whole-frame shape and answers `None` for every
+other, and consumers needing a flat scene compose one on demand.
 
 ## Composite animations compose; the rest tick
 

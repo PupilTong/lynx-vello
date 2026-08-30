@@ -107,57 +107,28 @@ impl Painter {
         );
         let (fragments, program, pool) = assembly.finish();
         self.spare_scenes = pool;
-        // Three commit shapes, cheapest first. One untranslated fragment is
-        // the whole frame and borrows as-is. Scroller content bakes into a
-        // plan's retained planes — no whole-frame composition is built, so a
-        // content-heavy frame is never encoded twice — except while an
-        // unexported animation recommits every tick, when re-baking planes
-        // each frame would cost more than the composition it saves. What
-        // remains is composed once, at commit, from pooled storage.
-        let whole = matches!(
-            program.as_slice(),
-            [crate::paint::compose::ComposeOp::Fragment { index: 0, chain }]
-                if *chain == crate::paint::compose::ComposeChain::default()
-        );
-        let committed = if whole {
-            crate::visual::frame::CommittedScene::Whole
-        } else if let Some(plan) = (!needs_main_ticks)
+        // No plan while an unexported animation recommits every tick:
+        // re-baking planes each frame would cost more than they save.
+        let plan = (!needs_main_ticks)
             .then(|| {
                 crate::paint::plan::plan(&program, frame.slots(), frame.clips(), device_pixel_ratio)
             })
-            .flatten()
-        {
-            crate::visual::frame::CommittedScene::Planned(plan)
-        } else {
-            let mut scene = self.spare_scenes.pop().unwrap_or_default();
-            scene.reset();
-            // Committed values throughout: no offset overrides, and every
-            // animation slot sampled as the committed instant.
-            let samples = frame.sample_animations(None);
-            crate::paint::compose::replay(
-                &mut scene,
-                &fragments,
-                &program,
-                frame.slots(),
-                &samples,
-                device_pixel_ratio,
-                &|_| None,
-            );
-            crate::visual::frame::CommittedScene::Composed(scene)
-        };
+            .flatten();
         let committed = Arc::new(CommittedFrame {
             order: frame,
-            presentation: crate::visual::frame::Presentation::new(fragments, program, committed),
+            presentation: crate::visual::frame::Presentation {
+                fragments,
+                program,
+                plan,
+            },
             animations_active,
             needs_main_ticks,
             viewport,
             device_pixel_ratio,
         });
         // Reclaiming here, past the point where the walk can fail, is what
-        // keeps a frame retained at every instant. A frame that retired
-        // while it was still published comes back one paint later, once the
-        // publish after it released the outside copy; one still shared even
-        // then is given up rather than waited on.
+        // keeps a frame retained at every instant. A frame still shared at
+        // reclaim time is given up rather than waited on.
         if let Some(waiting) = self.retiring.take()
             && let Ok(inner) = Arc::try_unwrap(waiting)
         {
@@ -173,7 +144,11 @@ impl Painter {
 
     fn reclaim(&mut self, inner: CommittedFrame) {
         self.spare = inner.order.into_buffers();
-        let (mut fragments, mut program, composed) = inner.presentation.into_parts();
+        let crate::visual::frame::Presentation {
+            mut fragments,
+            mut program,
+            ..
+        } = inner.presentation;
         for mut scene in fragments.drain(..) {
             scene.reset();
             self.spare_scenes.push(scene);
@@ -181,10 +156,6 @@ impl Painter {
         self.spare_fragments = fragments;
         program.clear();
         self.spare_program = program;
-        if let Some(mut scene) = composed {
-            scene.reset();
-            self.spare_scenes.push(scene);
-        }
     }
 
     /// The spare frame buffers' and the build scratch's capacities, for the
