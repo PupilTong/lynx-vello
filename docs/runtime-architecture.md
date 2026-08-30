@@ -9,8 +9,9 @@ capabilities and OS facts:
 - a `ViewSources`: owned font bytes, an optional default font family, an
   optional `ImageStore` — which owns every decoded image the view draws —
   author stylesheet URLs in cascade order, and the one entry MTS module URL;
-- an `EventRequester` for lifecycle wakeups;
-- a draw target plus `FrameRequester`;
+- an `EventRequester`, the one wakeup the engine has: a lifecycle event to
+  drain and a frame to draw both ride it;
+- a draw target;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -56,7 +57,7 @@ samples *after* the acquire that waits on it (below). A browser's
 taken on the page's main thread, before the Render Worker is woken, and on a
 different time origin than the Worker's own `performance.now()`.
 
-**The frame's one reading.** `notify_redraw` and `tick` each call
+**The frame's one reading.** `draw` and `tick` each call
 `FrameClock::now_seconds` exactly once and pass that `f64` to everything the
 frame resolves — `service_gesture_clock` for armed `longpress` deadlines on
 the presenting side, and the `BeginFrame` command that carries the same
@@ -139,7 +140,7 @@ bound for the response it materializes.
 ## Public and private boundaries
 
 The public facade is `LynxView<'window, W>`, with `OffscreenLynxView` as its
-windowless alias. It relays input, resize, redraw, frame-pump, target
+windowless alias. It relays input, resize, draw, event-pump, target
 attachment, offscreen ticks, capture, and image loads. It exposes no tree
 getter, document getter, renderer getter, script-realm handle, decomposition
 method, or way to mount a stylesheet or start a second entry module.
@@ -263,9 +264,11 @@ A commit — style flush, layout, paint-order build, scene encode — runs where
 the document is and ends by publishing one immutable `Arc<CommittedFrame>`.
 The presenting side is a compositor over the published frame: it routes
 input and recognizes gestures against the frame's tables, uploads the scene,
-submits, presents, and captures. The public `EventRequester`, `Window`, and
-`FrameRequester` traits describe lifecycle wakeup, draw-target, and frame
-scheduling capabilities; they do not expose the engine that consumes them.
+submits, presents, and captures. The public `EventRequester` and `Window`
+traits describe the host wakeup and the draw target; they do not expose the
+engine that consumes them. There is no frame-scheduling capability: a commit
+records that it wants a frame and wakes the host loop, whose next turn calls
+`draw` — no OS frame callback is asked for or waited on.
 
 Images are the host-implemented `ImageStore` contract and nothing else. No
 container sniffing, codec, cache, byte budget or eviction policy exists in this
@@ -431,15 +434,16 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
-   scene encode — publishes the `Arc<CommittedFrame>`, and asks
-   `FrameRequester` for a frame.
-5. The presenting side samples the engine's `FrameClock` once per frame,
-   resolves gesture deadlines against it, uploads the latest published scene
-   if it is new, and presents. While the latest frame reports an active
-   animation it sends the main thread one `BeginFrame` carrying that reading
-   and keeps requesting frames, so the animation loop sustains without any
-   JavaScript running; `LynxView::is_animating` reports the same fact to an
-   offscreen host that drives its own cadence.
+   scene encode — publishes the `Arc<CommittedFrame>`, records that a frame is
+   wanted, and wakes the host loop through `EventRequester`.
+5. That wakeup's handler calls `LynxView::draw`, which takes the pending frame
+   and produces it: the `FrameClock` is sampled once, gesture deadlines resolve
+   against it, the latest published scene is uploaded if it is new, and the
+   frame presents. While the latest frame reports an active animation it sends
+   the main thread one `BeginFrame` carrying that reading and asks for the next
+   frame the same way — the loop sustains without any JavaScript, paced on a
+   window output by the `AutoVsync` acquire; `LynxView::is_animating` reports
+   the same fact to an offscreen host that drives its own cadence.
 6. The task enqueues sanitized script completion and calls `EventRequester`;
    the awakened host observes it through `pump`. No realm or tree object
    crosses the boundary.

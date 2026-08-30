@@ -111,12 +111,14 @@ checkpoint or timer interception participates in completion; the fallback
 listener is retained inside the preloaded runtime ESM rather than by the
 browser.
 
-After a successful boot, the Render Worker keeps an independent lifecycle
-waiter active instead of tying `pump` to animation frames. `ListenerFailed`
-is written to the browser console without stopping the page, while a later
-script-Worker failure remains fatal even when `requestAnimationFrame` is
-paused for a hidden document. A load advances the waiter's generation before
-replacing the native view, so an old page cannot consume the new page's event.
+Boot's outcome decides the load's response, not the page's life: the Render
+Worker's wakeup loop runs whether the entry module finished or threw, because
+a failed page still has a view that scrolls, resizes, and holds published
+frames to draw. `ListenerFailed` is written to the browser console without
+stopping the page, while a later script-Worker failure remains fatal; neither
+is tied to animation frames, so a hidden document cannot strand it. A load
+advances the loop's generation before replacing the native view, so an old
+page cannot consume the new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named
@@ -170,17 +172,21 @@ stops input before terminating the Worker. Wheel input is not connected yet.
 The private document lives on the Lynx main Worker outright; commits publish
 an immutable frame the Render Worker composes, and changes travel the other
 way as ordered commands. A JavaScript turn therefore cannot expose partial
-mutation or stall the last published frame. A shared atomic `FrameSignal` carries redraw requests from the Lynx main
-Worker to the Render Worker, whose animation loop calls `renderIfRequested`
-with no argument: the animation timeline is core's own `web_time` clock, read
-once per frame on the Render Worker after the canvas surface hands over an
-image. `requestAnimationFrame`'s `DOMHighResTimeStamp` is taken on the page's
-main thread, before this Worker is woken and on a different time origin than
-its `performance.now()`, so it is not the better reading it appears to be.
-A separate lost-wake-safe event signal wakes a Promise whenever core queues an
-engine event. Script completion therefore does not poll and does not depend on
-rAF, so a hidden page cannot strand a `load` Promise merely by
-suspending drawing. The UI facade, nested VM Worker startup, and built-in
+mutation or stall the last published frame. One lost-wake-safe event signal
+carries everything back from the Lynx main Worker: it wakes a Promise whenever
+core queues an engine event *or* wants a frame drawn, and the Render Worker's
+loop answers each wakeup with one `pump` — drain the events, draw the pending
+frame. No frame clock stands between a commit and the canvas; the loop's only
+concession to the browser is a `setTimeout(0)` task hop per wakeup, so an
+animating page — which asks for its next frame on this same signal — cannot
+starve the Worker's message queue. `pump` takes no argument: the animation
+timeline is core's own `web_time` clock, read once per frame on the Render
+Worker after the canvas surface hands over an image. `requestAnimationFrame`'s
+`DOMHighResTimeStamp` would be taken on the page's main thread, before this
+Worker is woken and on a different time origin than its `performance.now()`,
+so it is not the better reading it appears to be. Script completion therefore
+does not poll and does not depend on a frame clock, so a hidden page cannot
+strand a `load` Promise merely by suspending drawing. The UI facade, nested VM Worker startup, and built-in
 QuickJS adapter impose no wall-clock deadline on loading or execution. Fetch,
 VM initialization, and script errors are still reported normally; work that
 never completes remains pending until the worker fails or the view is
