@@ -42,6 +42,6 @@ pub use tree::PageConfig;
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
-    EngineError, EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, LynxViewError,
-    NoWindow, OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
+    EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError, NoWindow,
+    OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
 };

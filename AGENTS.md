@@ -210,7 +210,7 @@ useful signal for currently-compatible versions of those libraries.
   batch is unobservable while the slot is empty; an abandoned batch may
   present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
-  OS facts in (`dispatch_input`/`resize`/`notify_redraw`/`pump`/ticks);
+  OS facts in (`dispatch_input`/`resize`/`draw`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
   `ScriptFinished` reports a successful entry-module boot,
@@ -219,14 +219,19 @@ useful signal for currently-compatible versions of those libraries.
   event delivery — separate because the last is not fatal:
   the walk continues, the realm stays usable, and later events are delivered
   as normal;
-  drawing is scheduled through the public `Window` capability borrowed at
-  attach time (`target`, `frames`).
+  a frame the engine wants drawn rides the same wakeup: it records the
+  request and the host's next turn calls `draw`, so no OS frame callback and
+  no vsync round trip stands between a commit and its pixels. A continuation
+  is not a wakeup: while `is_animating` holds, the embedder keeps drawing on
+  the frame clock it owns — the engine never schedules across a thread to
+  sustain an animation.
+  The public `Window` capability borrowed at attach time is the draw target
+  and nothing else (`target`).
   The private `Engine` is generic over that trait; the draw target is a GAT,
   which is what lets a native surface borrow
   the embedder's window instead of requiring a `'static` refcounted handle.
   Browser embedders may instead pass an owned canvas target through the async
-  `attach_target`; `FrameRequester` owns both redraw requests and the optional
-  presenting-side `pre_present` hook. `OffscreenLynxView` is the public
+  `attach_target`. `OffscreenLynxView` is the public
   windowless facade over the uninhabited `NoWindow`.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
   and retains no pixel of its own: a host supplies an `ImageStore`
@@ -506,12 +511,17 @@ useful signal for currently-compatible versions of those libraries.
   winit window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
-  (`dispatch_input`, `resize`, `notify_redraw`, `pump`, clock ticks in
+  (`dispatch_input`, `resize`, `draw`, `pump`, clock ticks in
   headless mode); the engine owns the tree, commits, scheduling, and its
-  script and render threads. Frame callbacks go through the `MacWindow` it
-  borrows at attach time (the winit window as the draw target,
-  `request_redraw`, `pre_present_notify`); lifecycle events wake the event
-  loop through the separately injected `EventRequester`. The CLI gives one
+  script and render threads. The `MacWindow` it borrows at attach time lends
+  the winit window as the draw target and nothing else: frames and lifecycle
+  events alike wake the event loop through the injected `EventRequester`, and
+  the turn that wakeup opens ends in `about_to_wait`, which draws — winit's
+  `RedrawRequested` is not relayed at all. Drawing there rather than in the
+  relays coalesces a turn's events into one frame and keeps the frame's vsync
+  wait out of winit's proxy-event drain, which iterates until empty. A running
+  animation is no wakeup at all: `about_to_wait` polls while
+  `LynxView::is_animating`, paced by the swap chain's vsync. The CLI gives one
   `LynxView::new` its author CSS and entry MTS URL as a `ViewSources`, reports
   any failure as `CliError::StartView`, and observes the complete TLA boot
   through `ScriptFinished`/`ScriptRunError` and `pump`. Headed

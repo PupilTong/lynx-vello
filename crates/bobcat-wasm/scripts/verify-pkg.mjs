@@ -35,7 +35,7 @@ for (const requiredMethod of [
   'registerStyleSheet(',
   'registerLynxXml(',
   'bobcatrenderer_load(',
-  'pollScript(',
+  'pump(',
   'registerFonts(',
   'setDefaultFontFamily(',
   'waitForEngineEvent(',
@@ -246,9 +246,7 @@ const replaceView = renderWorker.slice(
 for (const requiredReplaceStep of [
   'await scriptCompletion',
   'engineEventGeneration += 1',
-  'loadingNativeView = true',
   'await renderer.load(entryUrl, styleSheetUrls)',
-  'loadingNativeView = false',
   'trackScriptCompletion(request)',
 ]) {
   if (!replaceView.includes(requiredReplaceStep)) {
@@ -276,6 +274,26 @@ if (renderWorker.includes('setTimeout(resolve, 1)')) {
 }
 if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
   throw new Error('Render Worker must await core engine events')
+}
+for (const requiredServeStep of [
+  '.catch(() => undefined)',
+  '.then(() => servePage(generation))',
+]) {
+  if (!renderWorker.includes(requiredServeStep)) {
+    throw new Error(
+      `Render Worker must serve every page's wakeups regardless of boot outcome: missing ${requiredServeStep}`,
+    )
+  }
+}
+if (renderWorker.includes('renderIfRequested')) {
+  throw new Error('Render Worker still drives frames through renderIfRequested')
+}
+// The frame clock is the continuation's alone: a commit must reach the canvas
+// through the engine wakeup, never by waiting for a display frame.
+if (!/if \(renderer\.isAnimating\(\)\) \{\s*await nextDisplayFrame\(\)/.test(renderWorker)) {
+  throw new Error(
+    'Render Worker must wait for a display frame only while the engine is animating',
+  )
 }
 if (
   renderWorker.includes('SCRIPT_START_TIMEOUT_MS') ||

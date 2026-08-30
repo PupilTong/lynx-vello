@@ -25,7 +25,7 @@ use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{ComposeKey, EngineError, FrameRequester, FrameSize};
+use super::{ComposeKey, EngineError, FrameSize};
 
 pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
 
@@ -211,9 +211,9 @@ impl<'window> WindowGraphics<'window> {
     }
 
     /// Presents the retained target into the image [`Self::acquire`] took:
-    /// blits, notifies the window just before presenting, and presents.
-    /// Pure composition — no document anywhere, nobody blocked behind this.
-    pub(super) fn present(&mut self, acquired: AcquiredFrame, frames: &impl FrameRequester) {
+    /// blits and presents. Pure composition — no document anywhere, nobody
+    /// blocked behind this.
+    pub(super) fn present(&mut self, acquired: AcquiredFrame) {
         let AcquiredFrame {
             texture: surface_texture,
             reconfigure_after,
@@ -238,7 +238,6 @@ impl<'window> WindowGraphics<'window> {
             &output_view,
         );
         handle.queue.submit([encoder.finish()]);
-        frames.pre_present();
         surface_texture.present();
         if reconfigure_after {
             context.configure_surface(surface);

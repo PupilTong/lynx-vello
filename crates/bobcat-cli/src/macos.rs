@@ -4,20 +4,22 @@
 //! loop, the window, device metrics, input translation, the command prompt,
 //! and PNG output. Every handler is a relay into [`bobcat_core::LynxView`] —
 //! an OS fact goes in
-//! (`dispatch_input`, `resize`, `notify_redraw`, `pump`), and the engine
+//! (`dispatch_input`, `resize`, `pump`), and the engine
 //! decides what the pipeline does with it. The engine owns the Lynx main
 //! thread (the script realm and, once the script starts, the document);
 //! composition, presentation, and vsync stay on this thread. [`MacWindow`] is
-//! the window it borrows at attach time: the draw target plus the two OS
-//! mechanisms it schedules through (`request_redraw`, `pre_present_notify`).
+//! the window it borrows at attach time, and it lends nothing but the draw
+//! target: the engine asks for its frames through the one `EventRequester`
+//! wakeup this loop already answers, and the turn that wakeup opens ends in
+//! `about_to_wait`, which draws. Winit's `RedrawRequested` is not relayed.
+//! A running animation is not a wakeup at all — `about_to_wait` polls while
+//! the engine reports one, paced by the swap chain's vsync.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{
-    EngineEvent, EventRequester, FrameRequester, FrameSize, LynxView, Window as EmbedderWindow,
-};
+use bobcat_core::{EngineEvent, EventRequester, FrameSize, LynxView, Window as EmbedderWindow};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -48,30 +50,9 @@ struct MacWindow {
 
 impl EmbedderWindow for MacWindow {
     type Target<'window> = &'window Window;
-    type Frames = FrameRequests;
 
     fn target(&self) -> &Window {
         &self.os
-    }
-
-    fn frames(&self) -> FrameRequests {
-        FrameRequests {
-            os: Arc::clone(&self.os),
-        }
-    }
-}
-
-struct FrameRequests {
-    os: Arc<Window>,
-}
-
-impl FrameRequester for FrameRequests {
-    fn request_frame(&self) {
-        self.os.request_redraw();
-    }
-
-    fn pre_present(&self) {
-        self.os.pre_present_notify();
     }
 }
 
@@ -79,7 +60,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|error| CliError::Window(error.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let event_proxy = proxy.clone();
     let event_requester: Arc<dyn EventRequester> = Arc::new(move || {
@@ -341,6 +321,31 @@ impl<'window> MacApplication<'window> {
         event_loop.exit();
     }
 
+    /// Produces the frame the engine asked for, at the end of the loop turn
+    /// its wakeup opened — here and not in the event relays, for two reasons.
+    /// A turn's whole event burst has been handed over by now, so a wheel
+    /// flurry draws one frame carrying its sum, the coalescing winit's
+    /// `request_redraw` used to provide. And a frame that asks for its
+    /// successor (an animation, a retry) must not do so from inside winit's
+    /// proxy-event drain, which iterates its channel until empty: the run
+    /// loop would never return to `AppKit`.
+    ///
+    /// An occluded window is the one thing that holds a frame back — the
+    /// request stays pending, and un-occluding asks again.
+    fn draw(&mut self, event_loop: &ActiveEventLoop) {
+        if self.occluded {
+            return;
+        }
+        let Some(view) = self.view.as_mut() else {
+            return;
+        };
+        if let Err(error) = view.draw() {
+            self.fail(event_loop, CliError::Engine(error));
+        }
+    }
+
+    /// Drains the engine's lifecycle events, which ride the same wakeup its
+    /// frames do.
     fn pump(&mut self, event_loop: &ActiveEventLoop) {
         let Some(view) = self.view.as_mut() else {
             return;
@@ -404,10 +409,6 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
                 }
                 Ok(())
             }
-            WindowEvent::RedrawRequested => match self.view.as_mut() {
-                Some(view) => view.notify_redraw().map_err(CliError::Engine),
-                None => Ok(()),
-            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some(position);
                 self.pointer_event(PointerPhase::Move);
@@ -453,6 +454,25 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
             UserEvent::Pump => {}
         }
         self.pump(event_loop);
+    }
+
+    /// The turn ends here: draw what the engine asked for, then decide
+    /// whether to wait at all.
+    ///
+    /// While the engine owes the timeline another frame this loop polls, and
+    /// the swap chain's `AutoVsync` acquire inside the next `draw` is what
+    /// paces it — this window's own vsync, which is the only honest source
+    /// for it. Nothing crosses a thread to keep an animation running, and an
+    /// occluded window polls for nothing. Otherwise the loop sleeps until an
+    /// OS fact or an engine wakeup arrives.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.draw(event_loop);
+        let animating = !self.occluded && self.view.as_ref().is_some_and(LynxView::is_animating);
+        event_loop.set_control_flow(if animating {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::Wait
+        });
     }
 }
 

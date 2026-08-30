@@ -2,7 +2,6 @@ import initWasm, { BobcatRenderer } from './pkg/bobcat_wasm.js'
 
 let renderer
 let running = false
-let loadingNativeView = false
 let initialized = false
 let scriptCompletion
 let engineEventGeneration = 0
@@ -34,32 +33,34 @@ function reportFatal(error) {
   self.postMessage({ type: 'bobcat-error', message: errorMessage(error) })
 }
 
-function scheduleFrame(callback) {
-  if (typeof self.requestAnimationFrame === 'function') {
-    self.requestAnimationFrame(callback)
-  } else {
-    setTimeout(callback, 16)
-  }
+// The Worker's frame clock, and the only one: while the engine owes the
+// timeline another frame it draws at the display's rate, because drawing
+// faster than the compositor shows is waste. `requestAnimationFrame` is that
+// rate where a Worker is given one; a frame-interval timer stands in where it
+// is not.
+const FRAME_INTERVAL_MS = 16
+
+function nextDisplayFrame() {
+  return new Promise((resolve) => {
+    if (typeof self.requestAnimationFrame === 'function') {
+      self.requestAnimationFrame(() => resolve())
+    } else {
+      setTimeout(resolve, FRAME_INTERVAL_MS)
+    }
+  })
 }
 
-function renderFrame() {
-  if (!running) {
-    return
+// One durable wakeup carries everything the engine has to say: a lifecycle
+// event to drain and a frame to draw. A commit resolves it and the same
+// Worker turn presents — no frame clock stands between the two. The clock is
+// only ever the continuation's: an animation is the engine's own business,
+// paced here, crossing nothing.
+async function nextEngineWakeup() {
+  if (renderer.isAnimating()) {
+    await nextDisplayFrame()
+  } else {
+    await renderer.waitForEngineEvent()
   }
-  if (!loadingNativeView) {
-    try {
-      // No timestamp crosses here. The animation timeline is core's own
-      // clock, read on this Worker once per frame after the canvas surface
-      // hands over an image; `requestAnimationFrame`'s timestamp is taken on
-      // the page's main thread, on a different time origin, before this
-      // Worker is even woken.
-      renderer.renderIfRequested()
-    } catch (error) {
-      reportFatal(error)
-      return
-    }
-  }
-  scheduleFrame(renderFrame)
 }
 
 async function initialize(message) {
@@ -81,7 +82,6 @@ async function initialize(message) {
   )
   running = true
   self.postMessage({ type: 'bobcat-ready' })
-  scheduleFrame(renderFrame)
 }
 
 function absoluteUrl(input) {
@@ -168,35 +168,43 @@ async function readBoundedBytes(response, limit) {
 }
 
 async function waitForScriptCompletion() {
-  while (running && renderer !== undefined && !renderer.pollScript()) {
-    await renderer.waitForEngineEvent()
+  while (running && renderer !== undefined && !renderer.pump()) {
+    await nextEngineWakeup()
   }
   if (!running || renderer === undefined) {
     throw new Error('Bobcat was disposed before the script completed')
   }
 }
 
-async function reportPostBootEvents(generation) {
+// The page's whole life after boot: every wakeup drains the engine's events
+// and draws the frame it asked for.
+async function servePage(generation) {
   const isCurrent = () =>
     running && renderer !== undefined && generation === engineEventGeneration
   while (isCurrent()) {
-    await renderer.waitForEngineEvent()
+    await nextEngineWakeup()
     if (isCurrent()) {
-      renderer.pollScript()
+      renderer.pump()
     }
   }
 }
 
 function trackScriptCompletion(request) {
+  const generation = engineEventGeneration
   const completion = waitForScriptCompletion()
   scriptCompletion = completion
   void completion.then(
-    () => {
-      postResponse(request, true)
-      void reportPostBootEvents(engineEventGeneration).catch(reportFatal)
-    },
+    () => postResponse(request, true),
     (error) => postResponse(request, false, error),
   )
+  // Boot's outcome decides the response, not the page's life: a script that
+  // threw leaves a view that still scrolls, resizes, and holds frames to
+  // draw, so this loop runs either way and only a replacement page or
+  // disposal ends it.
+  void completion
+    .catch(() => undefined)
+    .then(() => servePage(generation))
+    .catch(reportFatal)
 }
 
 // A view is its page: its sources are construction inputs, so loading a page
@@ -212,13 +220,10 @@ async function replaceNativeView(request, entryUrl, styleSheetUrls) {
     }
   }
   scriptCompletion = undefined
+  // Advancing the generation first is what keeps the outgoing page's wakeup
+  // loop off the renderer while the load owns its mutable borrow.
   engineEventGeneration += 1
-  loadingNativeView = true
-  try {
-    await renderer.load(entryUrl, styleSheetUrls)
-  } finally {
-    loadingNativeView = false
-  }
+  await renderer.load(entryUrl, styleSheetUrls)
   trackScriptCompletion(request)
 }
 

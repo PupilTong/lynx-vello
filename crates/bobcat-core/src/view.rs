@@ -7,10 +7,10 @@
 //! internal pipeline. A view's own sources are named once, in [`ViewSources`],
 //! and [`LynxView::new`] applies them; after that the embedder's event
 //! handlers are relays — they hand the view an OS fact (`dispatch_input`,
-//! `resize`, `notify_redraw`, `pump`) and it decides what the pipeline does
-//! with it, requesting frames itself through the [`Window`] capabilities
-//! supplied at attach time, while lifecycle completion wakes the host event
-//! loop through [`EventRequester`].
+//! `resize`, `draw`, `pump`) and it decides what the pipeline does with it.
+//! One wakeup carries everything the engine has to say: a frame it wants
+//! drawn and a lifecycle event both wake the host event loop through
+//! [`EventRequester`], and the handler that answers calls `draw` and `pump`.
 //!
 //! # One committer, one compositor
 //!
@@ -26,7 +26,7 @@
 //!
 //! What crosses back is one immutable [`CommittedFrame`] per commit,
 //! published into the [`FrameHub`]. The presenting side is a pure compositor
-//! over it: `notify_redraw` acquires the swap-chain image, uploads the
+//! over it: `draw` acquires the swap-chain image, uploads the
 //! latest published scene if it is new, and presents — no document, no lock,
 //! no skipped frames. Input is routed against the published frame too: hit
 //! testing and gesture recognition read its tables, and scroll consumption
@@ -37,9 +37,12 @@
 //! The law: the main thread waits only on its own channel; the presenting
 //! side never waits on the main thread (the offscreen `tick`, an embedder's
 //! synthetic vsync, is the deliberate exception — it is a synchronization
-//! point, not a frame path); the frame's vsync wait — the swap-chain acquire
-//! that opens a window frame — happens before any of the frame's work, so
-//! the clock reading everything resolves against belongs to the frame being
+//! point, not a frame path); nothing waits on an OS frame callback — a
+//! commit wakes the host loop directly and the next `draw` is the frame,
+//! while a running animation is paced by the embedder's own frame clock and
+//! crosses nothing; the frame's vsync wait — the swap-chain acquire that
+//! opens a window frame — happens before any of the frame's work, so the
+//! clock reading everything resolves against belongs to the frame being
 //! shown.
 
 mod graphics;
@@ -56,7 +59,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
@@ -207,9 +210,8 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// The embedder's window: the draw target it lends and the detachable frame
-/// capability the engine schedules through. The embedder provides the
-/// mechanisms; the engine decides when to invoke them.
+/// The embedder's window: the draw target it lends, and nothing else. The
+/// embedder provides the surface; the engine decides when to draw into it.
 ///
 /// The draw target is a GAT, which lets native surfaces borrow an
 /// embedder-owned window. Browser embedders can instead attach an owned
@@ -219,32 +221,17 @@ pub trait Window {
     where
         Self: 'window;
 
-    type Frames: FrameRequester;
-
     fn target(&self) -> Self::Target<'_>;
-
-    fn frames(&self) -> Self::Frames;
 }
 
-/// A window's scheduling capability, held apart from the draw target because
-/// frame requests travel to engine-owned threads while pre-present callbacks
-/// stay on the presenting side.
-pub trait FrameRequester: Send + Sync + 'static {
-    fn request_frame(&self);
-
-    /// Called on the presenting side immediately before presenting. Native
-    /// window handles use this for mechanisms such as winit's
-    /// `Window::pre_present_notify`; browser frame signals can keep the
-    /// default no-op.
-    fn pre_present(&self) {}
-}
-
-/// The host event-loop capability used to wake [`crate::LynxView::pump`].
+/// The host event-loop capability the engine wakes, and the only one it has.
 ///
-/// Engine-owned threads enqueue their event before invoking this callback, so
-/// an embedder may immediately call `pump` when its event loop receives the
-/// wakeup. This capability is separate from [`FrameRequester`]: lifecycle
-/// progress must not depend on a visible or attached draw target.
+/// Both of the engine's outward signals ride it: a lifecycle event to drain
+/// through [`crate::LynxView::pump`], and a frame to draw through
+/// [`crate::LynxView::draw`]. Engine-owned threads record the fact before
+/// invoking this callback, so an embedder may service both the moment its
+/// event loop receives the wakeup. Nothing here is a draw target: lifecycle
+/// progress must not depend on a visible or attached one.
 pub trait EventRequester: Send + Sync + 'static {
     fn request_event(&self);
 }
@@ -255,6 +242,35 @@ where
 {
     fn request_event(&self) {
         self();
+    }
+}
+
+/// The frame wakeup: the pending-frame bit and the host event-loop
+/// capability that carries it.
+///
+/// A frame is asked for by setting the bit and waking the loop the embedder
+/// already runs — the same wakeup lifecycle events use. No OS frame callback
+/// stands between the request and the pixels: the handler that answers the
+/// wakeup calls [`LynxView::draw`], which takes the bit. The committer thread
+/// holds one too, so a commit reaches the screen without asking a window for
+/// anything.
+#[derive(Clone)]
+struct FrameWakeup {
+    pending: Arc<AtomicBool>,
+    requester: Arc<dyn EventRequester>,
+}
+
+impl FrameWakeup {
+    fn request(&self) {
+        // Record first: after this wakeup, `draw` must be able to observe the
+        // pending frame without a polling race.
+        self.pending.store(true, Ordering::Release);
+        self.requester.request_event();
+    }
+
+    /// Takes the pending frame, if one was asked for.
+    fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -334,19 +350,8 @@ pub enum NoWindow {}
 
 impl Window for NoWindow {
     type Target<'window> = WindowTarget<'window>;
-    type Frames = Self;
 
     fn target(&self) -> Self::Target<'_> {
-        match *self {}
-    }
-
-    fn frames(&self) -> Self::Frames {
-        match *self {}
-    }
-}
-
-impl FrameRequester for NoWindow {
-    fn request_frame(&self) {
         match *self {}
     }
 }
@@ -875,10 +880,9 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     frame_size: FrameSize,
     messages: mpsc::Receiver<EngineEvent>,
     output: Output<'window>,
-    /// The window's frame-request handle, behind `Arc` so the Lynx main
-    /// thread always observes the currently attached target rather than a
-    /// startup-time snapshot.
-    frames: Arc<Mutex<Option<Arc<W::Frames>>>>,
+    /// The pending-frame bit and the host wakeup that carries it, shared
+    /// with the Lynx main thread so a commit asks for its own frame.
+    frames: FrameWakeup,
     /// The gesture recognizer: turns routed pointer sequences into Lynx's
     /// `tap`/`longpress` beside the raw pointer events, and decides the
     /// user-agent scroll — all against the published frame.
@@ -903,6 +907,9 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     refill_requested_for: Option<u64>,
     /// `BeginFrame` sequence numbers, acknowledged through the hub.
     begin_frames_sent: u64,
+    /// The window type this view attaches, which no field holds — the
+    /// `fn() -> W` imposes nothing on `W` itself.
+    window: PhantomData<fn() -> W>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -1000,7 +1007,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             receiver,
             Arc::clone(&view.hub),
             Arc::clone(&view.listener_names),
-            Arc::clone(&view.frames),
+            view.frames.clone(),
             events,
         )?;
         #[cfg(test)]
@@ -1022,6 +1029,10 @@ impl<'window, W: Window> LynxView<'window, W> {
     ) -> (Self, mpsc::Receiver<MainCommand>, EngineEventSender) {
         let (message_sender, messages) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
+        let frames = FrameWakeup {
+            pending: Arc::new(AtomicBool::new(false)),
+            requester: Arc::clone(&event_requester),
+        };
         let view = Self {
             commands,
             #[cfg(test)]
@@ -1032,7 +1043,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             frame_size,
             messages,
             output: Output::None,
-            frames: Arc::new(Mutex::new(None)),
+            frames,
             gesture: GestureRouter::default(),
             listener_names: Arc::new(SharedListenerNames::default()),
             clock: FrameClock::new(),
@@ -1041,6 +1052,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             composed_scene: Scene::new(),
             refill_requested_for: None,
             begin_frames_sent: 0,
+            window: PhantomData,
             thread_bound: PhantomData,
         };
         let events = EngineEventSender {
@@ -1080,10 +1092,11 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// frame left an animation running, or a gesture deadline is armed and
     /// waiting on the clock.
     ///
-    /// This is the one continuation signal an offscreen embedder has — no
-    /// [`FrameRequester`] exists on that output, so a host that idles its
-    /// tick loop must keep ticking while this reports `true` or an armed
-    /// long-press never resolves.
+    /// Every embedder's continuation signal, and the whole of the contract:
+    /// while this reports `true` the host keeps producing frames at its own
+    /// display's rate — the pace is the embedder's to set, because it is the
+    /// one holding a vsync. A host that stops asking while this is `true`
+    /// freezes a running animation and never resolves an armed long-press.
     #[must_use]
     pub fn is_animating(&self) -> bool {
         self.hub
@@ -1282,18 +1295,10 @@ impl<'window, W: Window> LynxView<'window, W> {
         Ok(())
     }
 
-    /// Asks the OS for a frame through the window's frame-request handle.
+    /// Asks for a frame: records it and wakes the host event loop, whose
+    /// next turn draws it. No OS frame callback is involved.
     pub fn refresh(&self) {
-        if let Some(frames) = self.frame_requester() {
-            frames.request_frame();
-        }
-    }
-
-    fn frame_requester(&self) -> Option<Arc<W::Frames>> {
-        self.frames
-            .lock()
-            .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}"))
-            .clone()
+        self.frames.request();
     }
 
     /// Drains lifecycle messages from engine-owned threads.
@@ -1327,11 +1332,10 @@ impl<'window, W: Window> LynxView<'window, W> {
         window: &'window W,
         size: FrameSize,
     ) -> Result<(), EngineError> {
-        self.attach_target(window.target(), window.frames(), size)
-            .await
+        self.attach_target(window.target(), size).await
     }
 
-    /// Attaches an already-owned surface target and its frame capability.
+    /// Attaches an already-owned surface target.
     ///
     /// This is the browser-friendly form: `SurfaceTarget::Canvas` owns a
     /// JavaScript canvas reference, so the Wasm wrapper does not need a
@@ -1339,16 +1343,10 @@ impl<'window, W: Window> LynxView<'window, W> {
     pub async fn attach_target(
         &mut self,
         target: impl Into<WindowTarget<'window>>,
-        frames: W::Frames,
         size: FrameSize,
     ) -> Result<(), EngineError> {
         let graphics = WindowGraphics::new(target, size).await?;
         self.output = Output::Window(Box::new(graphics));
-        *self
-            .frames
-            .lock()
-            .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}")) =
-            Some(Arc::new(frames));
         self.refresh();
         Ok(())
     }
@@ -1380,19 +1378,35 @@ impl<'window, W: Window> LynxView<'window, W> {
             .map(|()| seq)
     }
 
-    /// Relays the OS's "the window wants a frame" fact: acquire, compose the
-    /// latest published frame, present. The document is never touched — the
-    /// main thread is asked for the next animation tick, and what is already
-    /// published is composed.
-    pub fn notify_redraw(&mut self) -> Result<(), EngineError> {
-        let frames = self.frame_requester();
+    /// Draws the frame the engine asked for, if it asked for one: acquire,
+    /// compose the latest published frame, present. The document is never
+    /// touched — the main thread is asked for the next animation tick, and
+    /// what is already published is composed.
+    ///
+    /// The embedder calls this on every host wakeup, beside [`Self::pump`],
+    /// and a state change is what gates a frame: a commit, a consumed scroll,
+    /// a resize records one and wakes the loop, and that wakeup is the one
+    /// that draws it. A wakeup carrying no frame costs one bit read.
+    ///
+    /// A running animation is not a state change and does not use that path.
+    /// It is a continuation, reported by [`Self::is_animating`], and the
+    /// embedder's own frame clock paces it — the swap chain's vsync acquire
+    /// on a window, `requestAnimationFrame` on a canvas. Nothing crosses a
+    /// thread to keep an animation running.
+    pub fn draw(&mut self) -> Result<(), EngineError> {
         if !matches!(self.output, Output::Window(_)) {
             return Ok(());
         }
+        // Two ways to owe this frame, and the bit is only one of them: a
+        // state change recorded a request, or the timeline is mid-animation —
+        // a continuation the embedder paces, which records nothing. The bit
+        // is taken before any of the frame's work, so a commit landing while
+        // this frame composes leaves it set for the next one.
+        if !self.frames.take() && !self.is_animating() {
+            return Ok(());
+        }
+        let frames = self.frames.clone();
         let size = self.frame_size;
-        let frames = frames
-            .as_deref()
-            .expect("a window output always installs its frame capability");
         // Take the swap-chain image before doing any of the frame's work.
         // `AutoVsync` makes this the call that waits, and everything after it
         // then belongs to the frame that image will display — including the
@@ -1405,7 +1419,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             match graphics.acquire(size)? {
                 FrameAcquisition::Ready(acquired) => acquired,
                 FrameAcquisition::Retry => {
-                    frames.request_frame();
+                    frames.request();
                     return Ok(());
                 }
             }
@@ -1421,9 +1435,6 @@ impl<'window, W: Window> LynxView<'window, W> {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
         }
-        let animating = latest
-            .as_ref()
-            .is_some_and(|frame| frame.animations_active());
         let key = latest
             .as_ref()
             .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
@@ -1455,16 +1466,13 @@ impl<'window, W: Window> LynxView<'window, W> {
             };
             graphics.render_to_target(scene, size, key)?;
         }
-        if animating || self.gesture.needs_frame() {
-            frames.request_frame();
-        }
         // Nothing rendered at this size means nothing was ever published for
-        // it — the acquired image goes back unpresented, to be re-taken once
-        // a commit lands (which requests its own frame).
+        // it: the acquired image goes back unpresented and nothing is asked
+        // for, because the commit that ends the wait asks for its own frame.
+        // Asking here instead would spin against a committer that may never
+        // publish — one that failed its boot never will.
         if graphics.rendered_at(size) {
-            graphics.present(acquired, frames);
-        } else {
-            frames.request_frame();
+            graphics.present(acquired);
         }
         Ok(())
     }
@@ -1558,13 +1566,13 @@ impl<'window, W: Window> LynxView<'window, W> {
 /// boot module, and then serves the command channel for as long as the view
 /// holds its sender. A failed boot reports and ends the thread — the view is
 /// over, exactly as when a source failed to load.
-fn spawn_main_thread<F: FrameRequester>(
+fn spawn_main_thread(
     document: LynxDocument,
     entry: EntryModule,
     commands: mpsc::Receiver<MainCommand>,
     hub: Arc<FrameHub>,
     listener_names: Arc<SharedListenerNames>,
-    frame_requesters: Arc<Mutex<Option<Arc<F>>>>,
+    frames: FrameWakeup,
     events: EngineEventSender,
 ) -> Result<(), EngineError> {
     ThreadBuilder::new()
@@ -1575,15 +1583,13 @@ fn spawn_main_thread<F: FrameRequester>(
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
             set_script_panic_reporter(Some(events.clone()));
             let publish_hub = Arc::clone(&hub);
-            let wake_frames = Arc::clone(&frame_requesters);
+            let wake_frames = frames.clone();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut runtime = crate::runtime::MainThreadRuntime::new(
                     document,
                     listener_names,
                     publish_hub,
-                    move || {
-                        request_current_frame(&wake_frames);
-                    },
+                    move || wake_frames.request(),
                 )
                 .map_err(MainThreadError::into_script_error)?;
                 runtime
@@ -1607,7 +1613,7 @@ fn spawn_main_thread<F: FrameRequester>(
                     None
                 }
             };
-            request_current_frame(&frame_requesters);
+            frames.request();
 
             if let Some(runtime) = runtime {
                 // The document's own pipeline is let-it-crash: a style,
@@ -1704,16 +1710,6 @@ fn apply_main_command(
         MainCommand::NoteImagesChanged => runtime.note_images_changed(),
         #[cfg(test)]
         MainCommand::Probe(probe) => runtime.with_document(probe),
-    }
-}
-
-fn request_current_frame<F: FrameRequester>(frames: &Mutex<Option<Arc<F>>>) {
-    let current = frames
-        .lock()
-        .unwrap_or_else(|error| panic!("the frame-requester slot is poisoned: {error}"))
-        .clone();
-    if let Some(frames) = current {
-        frames.request_frame();
     }
 }
 
@@ -2161,7 +2157,7 @@ mod tests {
     /// thread — answers probes.
     #[test]
     fn a_booted_view_commits_and_publishes() {
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         use super::EngineEvent;
 
@@ -2181,19 +2177,28 @@ mod tests {
             ",
         );
 
-        wake_receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("script completion must wake the host event loop");
-        let finished = view
-            .pump()
-            .into_iter()
-            .find(|event| {
+        // One wakeup carries either kind of engine work: the boot commit's
+        // frame or a lifecycle event. The law under test is the ordering —
+        // whichever wakeup carries the event, `pump` observes it right then,
+        // with nothing polled for and nothing slept on.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let finished = loop {
+            wake_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("script completion must wake the host event loop");
+            if let Some(event) = view.pump().into_iter().find(|event| {
                 matches!(
                     event,
                     EngineEvent::ScriptFinished | EngineEvent::ScriptRunError(_)
                 )
-            })
-            .expect("the event must be enqueued before the wakeup");
+            }) {
+                break event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no wakeup ever carried the script-completion event"
+            );
+        };
         assert!(matches!(finished, EngineEvent::ScriptFinished));
 
         let frame = view
@@ -2658,7 +2663,7 @@ mod event_loop_tests {
 
     /// A stationary hold produces no further input, so only the frame half
     /// — `service_gesture_clock` plus the `needs_frame` continuation — can
-    /// resolve it. This drives that half exactly as `notify_redraw`/`tick`
+    /// resolve it. This drives that half exactly as `draw`/`tick`
     /// do, without needing a GPU output.
     #[test]
     fn a_stationary_hold_longpresses_on_the_frame_clock() {

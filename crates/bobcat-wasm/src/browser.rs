@@ -16,8 +16,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FontBlob, FrameRequester, FrameSize, LynxView, PageConfig,
-    ViewSources, Window, WindowTarget, configure_wasm_workers,
+    EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig, ViewSources, Window,
+    WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -43,26 +43,10 @@ const POINTER_PHASE_UP: u8 = 2;
 const POINTER_PHASE_CANCEL: u8 = 3;
 static RENDERER_CREATED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone, Debug, Default)]
-struct FrameSignal {
-    requested: Arc<AtomicBool>,
-}
-
-impl FrameSignal {
-    fn take(&self) -> bool {
-        self.requested.swap(false, Ordering::AcqRel)
-    }
-}
-
-impl FrameRequester for FrameSignal {
-    fn request_frame(&self) {
-        self.requested.store(true, Ordering::Release);
-    }
-}
-
-/// Lost-wake-safe lifecycle signal shared between core-owned Workers and the
-/// Render Worker. The atomic is the durable edge; the waker list only turns it
-/// into an awaitable browser Promise.
+/// Lost-wake-safe engine signal shared between core-owned Workers and the
+/// Render Worker: one durable wakeup covering both a lifecycle event to drain
+/// and a frame to draw. The atomic is the durable edge; the waker list only
+/// turns it into an awaitable browser Promise.
 #[derive(Debug, Default)]
 struct EventSignal {
     pending: AtomicBool,
@@ -133,13 +117,8 @@ enum BrowserWindow {}
 
 impl Window for BrowserWindow {
     type Target<'window> = WindowTarget<'window>;
-    type Frames = FrameSignal;
 
     fn target(&self) -> Self::Target<'_> {
-        match *self {}
-    }
-
-    fn frames(&self) -> Self::Frames {
         match *self {}
     }
 }
@@ -329,7 +308,6 @@ pub struct BobcatRenderer {
     view: Option<BrowserLynxView>,
     resources: BrowserResources,
     canvas: OffscreenCanvas,
-    frames: FrameSignal,
     events: Arc<EventSignal>,
     config: PageConfig,
     width: f32,
@@ -400,13 +378,11 @@ impl BobcatRenderer {
                 default_overflow_visible,
                 enable_css_selector,
             };
-            let frames = FrameSignal::default();
 
             Ok(Self {
                 view: None,
                 resources,
                 canvas,
-                frames,
                 events,
                 config,
                 width,
@@ -444,7 +420,6 @@ impl BobcatRenderer {
         // detached Lynx-main Worker then drops its thread-bound realm and
         // exits naturally; an independent replacement does not join it.
         drop(self.view.take());
-        self.frames.take();
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -475,7 +450,7 @@ impl BobcatRenderer {
         let mut view = built.map_err(js_error)?;
         set_canvas_size(&self.canvas, view.frame_size());
         let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(self.canvas.clone());
-        view.attach_target(target, self.frames.clone(), view.frame_size())
+        view.attach_target(target, view.frame_size())
             .await
             .map_err(js_error)?;
         self.view = Some(view);
@@ -597,23 +572,58 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Drain script engine events independently of animation frames.
-    #[wasm_bindgen(js_name = pollScript)]
-    pub fn poll_script(&mut self) -> Result<bool, JsValue> {
+    /// Answer one durable engine wakeup: drain the engine's lifecycle events
+    /// and draw the frame it asked for, if it asked for one. Returns whether
+    /// the entry module has finished booting.
+    ///
+    /// One call covers both because the engine has one wakeup: a commit and a
+    /// `ScriptFinished` arrive on the same signal, and the Worker turn that
+    /// observes it is the turn that presents — no animation-frame callback
+    /// sits between a committed frame and the canvas. No timestamp crosses
+    /// either: the animation timeline is core's own clock, read on this
+    /// Worker once the canvas surface has handed over an image.
+    #[wasm_bindgen(js_name = pump)]
+    pub fn pump(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
-        if self.events.take()
-            && let Some(view) = self.view.as_mut()
-        {
+        let drained = self.events.take();
+        let Some(view) = self.view.as_mut() else {
+            return Ok(self.script_finished);
+        };
+        let mut fatal = None;
+        if drained {
             for event in view.pump() {
                 match event {
                     EngineEvent::ScriptFinished => self.script_finished = true,
-                    EngineEvent::ScriptRunError(error) => return Err(js_error(error)),
+                    // Held back rather than returned: the events and the frame
+                    // ride one wakeup, and leaving before the draw would spend
+                    // that wakeup without producing the frame the failed
+                    // script did commit — with nobody left to ask for another.
+                    // The first failure is the one reported.
+                    EngineEvent::ScriptRunError(error) if fatal.is_none() => {
+                        fatal = Some(js_error(error));
+                    }
                     EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
                     _ => {}
                 }
             }
         }
+        let drawn = view.draw();
+        if let Some(error) = fatal {
+            return Err(error);
+        }
+        drawn.map_err(js_error)?;
         Ok(self.script_finished)
+    }
+
+    /// Whether the engine owes the timeline another frame — a running
+    /// animation, or an armed gesture deadline waiting on the clock.
+    ///
+    /// The Render Worker's continuation signal: while this is true it keeps
+    /// drawing at the display's rate, which on this target means
+    /// `requestAnimationFrame`. Nothing crosses the engine's wakeup for it.
+    #[wasm_bindgen(js_name = isAnimating)]
+    pub fn is_animating(&self) -> bool {
+        self.view.as_ref().is_some_and(LynxView::is_animating)
     }
 
     /// Route one browser `PointerEvent` into the opaque native view.
@@ -661,28 +671,6 @@ impl BobcatRenderer {
             view.dispatch_input(event);
         }
         Ok(())
-    }
-
-    /// Present a requested frame without exposing the engine or document to
-    /// the browser host.
-    ///
-    /// The browser hands over no timestamp: the animation timeline is core's
-    /// own `web_time` clock, read once per frame on this Worker after the
-    /// canvas surface has handed over an image. `requestAnimationFrame`'s
-    /// `DOMHighResTimeStamp` is taken on the page's main thread, before this
-    /// Worker is woken and on a different time origin than its
-    /// `performance.now()`, so it is not the better reading it looks like.
-    #[wasm_bindgen(js_name = renderIfRequested)]
-    pub fn render_if_requested(&mut self) -> Result<bool, JsValue> {
-        self.ensure_running()?;
-        if !self.frames.take() {
-            return Ok(false);
-        }
-        let Some(view) = self.view.as_mut() else {
-            return Ok(false);
-        };
-        view.notify_redraw().map_err(js_error)?;
-        Ok(true)
     }
 
     /// Apply browser device metrics and resize the Worker-owned surface.
