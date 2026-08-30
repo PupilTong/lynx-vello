@@ -49,6 +49,7 @@
 use dom::input::{InputEvent, InputKind, PointerId, PointerPhase};
 use dom::scroll::ScrollAxes;
 use dom::{HitTarget, NodeId, Point2D, Vector2D};
+use smallvec::SmallVec;
 
 /// How far a sequence may travel, in viewport CSS px, and still deliver `tap`.
 ///
@@ -132,6 +133,9 @@ pub(crate) enum InputDecision {
     /// Dispatch one event through the ordinary path.
     Emit(EmitEvent),
 }
+
+/// An inline-first batch of ordered decisions produced by the input router.
+pub(crate) type InputDecisions = SmallVec<[InputDecision; 4]>;
 
 fn emit(name: &'static str, target: NodeId, position: Point2D<f32>) -> InputDecision {
     InputDecision::Emit(EmitEvent {
@@ -228,7 +232,7 @@ impl GestureRouter {
         target: Option<HitTarget>,
         at: f64,
         host: &impl RouterHost,
-        out: &mut Vec<InputDecision>,
+        out: &mut InputDecisions,
     ) {
         match event.kind {
             InputKind::Pointer { id, device, phase } => {
@@ -289,12 +293,7 @@ impl GestureRouter {
     /// The engine calls this once per produced frame; while a deadline is
     /// armed [`Self::needs_frame`] keeps frames coming, the same continuation
     /// contract running animations use.
-    pub(crate) fn on_tick(
-        &mut self,
-        now: f64,
-        host: &impl RouterHost,
-        out: &mut Vec<InputDecision>,
-    ) {
+    pub(crate) fn on_tick(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
         self.fire_due(now, host, out);
     }
 
@@ -317,7 +316,7 @@ impl GestureRouter {
         drags_to_scroll: bool,
         phase: PointerPhase,
         host: &impl RouterHost,
-        out: &mut Vec<InputDecision>,
+        out: &mut InputDecisions,
     ) {
         match phase {
             PointerPhase::Down => {
@@ -382,7 +381,7 @@ impl GestureRouter {
         target: HitTarget,
         delta: Vector2D<f32>,
         host: &impl RouterHost,
-        out: &mut Vec<InputDecision>,
+        out: &mut InputDecisions,
     ) {
         let axes = ScrollAxes {
             x: delta.x != 0.0,
@@ -406,7 +405,7 @@ impl GestureRouter {
         id: PointerId,
         phase: PointerPhase,
         at: f64,
-        out: &mut Vec<InputDecision>,
+        out: &mut InputDecisions,
     ) {
         match phase {
             PointerPhase::Down => {
@@ -471,7 +470,7 @@ impl GestureRouter {
         }
     }
 
-    fn fire_due(&mut self, now: f64, host: &impl RouterHost, out: &mut Vec<InputDecision>) {
+    fn fire_due(&mut self, now: f64, host: &impl RouterHost, out: &mut InputDecisions) {
         let Some(sequence) = self.sequence.as_mut() else {
             return;
         };
@@ -555,7 +554,7 @@ mod tests {
     struct Harness {
         router: GestureRouter,
         host: MockHost,
-        out: Vec<InputDecision>,
+        out: InputDecisions,
     }
 
     impl Harness {
@@ -563,7 +562,7 @@ mod tests {
             Self {
                 router: GestureRouter::default(),
                 host: MockHost::default(),
-                out: Vec::new(),
+                out: InputDecisions::new(),
             }
         }
 
