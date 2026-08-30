@@ -500,7 +500,7 @@ fn plan_clips(scratch: &mut Scratch, frame: &PaintOrder, cull: Option<Rect>) {
 /// Mirrors [`push_clip`], including its `Size2D`-only perspective fit, so this
 /// is never tighter than the clip the painter pushes; taking the bounding box
 /// of a rounded rect only widens it, which is the safe direction.
-fn clip_bounds(clip: &ClipNode) -> Option<Rect> {
+pub(crate) fn clip_bounds(clip: &ClipNode) -> Option<Rect> {
     let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
     let affine = convert::item_affine(&clip.transform, size)?;
     Some(affine_rect(
@@ -925,11 +925,35 @@ fn sync_clips(
 /// A clip node's compose chain: its scroll chain, and never an animation
 /// chain — export eligibility refuses a clip established inside an animated
 /// subtree, so a clip's rect never moves with a sampled delta.
-fn clip_chain(clip: &ClipNode) -> ComposeChain {
+pub(crate) fn clip_chain(clip: &ClipNode) -> ComposeChain {
     ComposeChain {
         scroll: clip.slot,
         animation: None,
     }
+}
+
+/// Encodes one clip node as a clip layer directly on `scene`, its shape
+/// under `outer * scale * local` — the same operation [`push_clip`] emits,
+/// for the composite's re-application of a slot's clip chain around a
+/// plane draw. The caller pops it.
+pub(crate) fn encode_clip(scene: &mut Scene, clip: &ClipNode, outer: Affine, scale: Affine) {
+    let size = crate::Size2D::new(clip.rect.size.width, clip.rect.size.height);
+    let Some(local) = convert::item_affine(&clip.transform, size) else {
+        scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
+        return;
+    };
+    let rect = Rect::new(
+        clip.rect.origin.x as f64,
+        clip.rect.origin.y as f64,
+        (clip.rect.origin.x + clip.rect.size.width) as f64,
+        (clip.rect.origin.y + clip.rect.size.height) as f64,
+    );
+    let shape = BoxShape::new(rect, &clip.radii);
+    with_shape!(&shape, |s| scene.push_clip_layer(
+        Fill::NonZero,
+        outer * scale * local,
+        s
+    ));
 }
 
 fn push_clip(sink: &mut WalkSink<'_>, clip: &ClipNode, scale: Affine) {

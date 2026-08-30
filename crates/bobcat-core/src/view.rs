@@ -656,9 +656,37 @@ fn scene_for<'frame>(
         buffer.reset();
         frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
         buffer
+    } else if let Some(scene) = frame.scene() {
+        scene
     } else {
-        frame.scene()
+        // A layered frame retains no whole composition; targets draw it
+        // from its planes, and a caller landing here composes it flat.
+        buffer.reset();
+        frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
+        buffer
     }
+}
+
+/// The scene to draw for a layered frame: its plan composed into `buffer` —
+/// the raw steps at the in-flight offsets, each retained plane one textured
+/// draw. The per-frame cost is the raw content plus one image draw per
+/// plane; the scroller content moves without being re-encoded or
+/// re-rasterized.
+fn composite_scene<'frame>(
+    intents: &ScrollIntents,
+    buffer: &'frame mut Scene,
+    frame: &CommittedFrame,
+    plane_images: &[dom::vello::peniko::ImageData],
+    animation_now: Option<f64>,
+) -> &'frame Scene {
+    buffer.reset();
+    frame.composite_into(
+        buffer,
+        plane_images,
+        &|slot| intents.offset_for(slot.node),
+        animation_now,
+    );
+    buffer
 }
 
 /// Routes one input event against the published frame: the topmost
@@ -1416,12 +1444,23 @@ impl<'window, W: Window> LynxView<'window, W> {
         if let (Some(frame), Some(key)) = (&latest, key)
             && (animation_now.is_some() || graphics.needs_paint(key, size))
         {
-            let scene = scene_for(
-                &self.scroll_intents,
-                &mut self.composed_scene,
-                frame,
-                animation_now,
-            );
+            let scene = if frame.composite_plan().is_some() {
+                graphics.prepare_planes(frame)?;
+                composite_scene(
+                    &self.scroll_intents,
+                    &mut self.composed_scene,
+                    frame,
+                    graphics.plane_images(),
+                    animation_now,
+                )
+            } else {
+                scene_for(
+                    &self.scroll_intents,
+                    &mut self.composed_scene,
+                    frame,
+                    animation_now,
+                )
+            };
             graphics.render_to_target(scene, size, key)?;
         }
         if animating || self.gesture.needs_frame() {
@@ -1457,12 +1496,24 @@ impl<'window, W: Window> LynxView<'window, W> {
                 if let (Some(frame), Some(key)) = (&latest, key)
                     && (self.composed != Some(key) || animation_now.is_some())
                 {
-                    let scene = scene_for(
-                        &self.scroll_intents,
-                        &mut self.composed_scene,
-                        frame,
-                        animation_now,
-                    );
+                    let scene = if frame.composite_plan().is_some() {
+                        gpu.prepare_planes(frame)
+                            .map_err(|error| EngineError::Gpu(error.to_string()))?;
+                        composite_scene(
+                            &self.scroll_intents,
+                            &mut self.composed_scene,
+                            frame,
+                            gpu.plane_images(),
+                            animation_now,
+                        )
+                    } else {
+                        scene_for(
+                            &self.scroll_intents,
+                            &mut self.composed_scene,
+                            frame,
+                            animation_now,
+                        )
+                    };
                     gpu.render_frame(scene, size.width, size.height, Color::WHITE)
                         .map_err(|error| EngineError::Gpu(error.to_string()))?;
                     self.composed = Some(key);
@@ -1476,12 +1527,23 @@ impl<'window, W: Window> LynxView<'window, W> {
                 if let (Some(frame), Some(key)) = (&latest, key)
                     && (animation_now.is_some() || graphics.needs_paint(key, size))
                 {
-                    let scene = scene_for(
-                        &self.scroll_intents,
-                        &mut self.composed_scene,
-                        frame,
-                        animation_now,
-                    );
+                    let scene = if frame.composite_plan().is_some() {
+                        graphics.prepare_planes(frame)?;
+                        composite_scene(
+                            &self.scroll_intents,
+                            &mut self.composed_scene,
+                            frame,
+                            graphics.plane_images(),
+                            animation_now,
+                        )
+                    } else {
+                        scene_for(
+                            &self.scroll_intents,
+                            &mut self.composed_scene,
+                            frame,
+                            animation_now,
+                        )
+                    };
                     graphics.render_to_target(scene, size, key)?;
                 }
                 if !graphics.rendered_at(size) {
@@ -1907,14 +1969,26 @@ impl OffscreenLynxView {
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
         }
-        let scene = scene_for(
-            &self.scroll_intents,
-            &mut self.composed_scene,
-            &frame,
-            animation_now,
-        );
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
+        };
+        let scene = if frame.composite_plan().is_some() {
+            gpu.prepare_planes(&frame)
+                .map_err(|error| EngineError::Gpu(error.to_string()))?;
+            composite_scene(
+                &self.scroll_intents,
+                &mut self.composed_scene,
+                &frame,
+                gpu.plane_images(),
+                animation_now,
+            )
+        } else {
+            scene_for(
+                &self.scroll_intents,
+                &mut self.composed_scene,
+                &frame,
+                animation_now,
+            )
         };
         gpu.render_frame(
             scene,
@@ -2626,7 +2700,8 @@ mod event_loop_tests {
           __SetInlineStyles(view,
             'display:flex;flex-direction:column;overflow:scroll;width:200px;height:200px');
           for (const row of [first, second]) {
-            __SetInlineStyles(row, 'flex-shrink:0;width:200px;height:200px');
+            __SetInlineStyles(row,
+              'flex-shrink:0;width:200px;height:200px;background-color:#808080');
           }
           __AddEventListener(first, 'tap', () => __SetAttribute(first, 'tapped', 'yes'), {});
           __AddEventListener(second, 'tap', () => __SetAttribute(second, 'tapped', 'yes'), {});
@@ -2642,10 +2717,13 @@ mod event_loop_tests {
     #[test]
     fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         let mut engine = booted(TWO_ROW_SCROLLER_PAGE);
-        let boot_commit = engine
-            .published_frame()
-            .expect("boot published a frame")
-            .commit_id();
+        let frame = engine.published_frame().expect("boot published a frame");
+        assert!(
+            frame.composite_plan().is_some(),
+            "a scroller frame layers: targets draw it from retained planes"
+        );
+        let boot_commit = frame.commit_id();
+        drop(frame);
 
         // 30px is inside half the encode-window headroom (the 200px
         // scrollport), so no refill commit is due either.

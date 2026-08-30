@@ -331,6 +331,30 @@ already display; a future script-facing scroll API must either dirty the
 paint or publish its offsets, since the compositor only knows what crossed
 the channel.
 
+### Scroller content lives in retained planes
+
+A scroll container is a forced stacking context (Lynx's native scroll views
+are compositing boundaries; recorded deviation from the web, where
+`overflow` alone creates none), so its subtree encodes as one contiguous
+program run. At commit, the painter partitions the program into a
+*composite plan*: maximal contiguous runs riding one scroll head become
+*planes* — each baked unscrolled into a GPU texture covering its scrollport
+plus encode window — and everything else (root content, which viewport
+culling already bounds by the screen; animation-chained content; groups the
+bake rules refuse) stays raw. Both outputs keep a `PlaneBank`: a new commit
+re-bakes the planes' textures; every frame after that composes raw steps
+plus one textured draw per plane, each under its slot's clip chain. A
+scroll frame therefore re-encodes and re-rasterizes none of the scroller
+content — its whole cost is the raw steps, the plane draws, and vello's
+per-use copy of each plane texture into its image atlas. Plane memory is
+screen-proportional — scrollport-sized windows per scroller, never
+per-fragment — and capped at half vello's 8192×8192 atlas; a frame past
+the budget, and any frame recommitting every tick for an unexported
+animation, plans nothing and composes flat exactly as above. Layered
+frames also skip the eagerly composed committed scene: `scene()` answers
+`None` for them, and the one whole-frame composition (a content-linear
+second encoding) exists only for frames that actually read it.
+
 ## Composite animations compose; the rest tick
 
 The same compose machinery carries animations. At commit, an element whose

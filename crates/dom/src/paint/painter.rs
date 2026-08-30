@@ -107,16 +107,27 @@ impl Painter {
         );
         let (fragments, program, pool) = assembly.finish();
         self.spare_scenes = pool;
-        // The committed-offset composition is built here, at commit, from
-        // pooled storage — or skipped entirely for the one-fragment frame
-        // shape, whose single untranslated append would only copy the
-        // encoding it already holds.
-        let committed = if matches!(
+        // Three commit shapes, cheapest first. One untranslated fragment is
+        // the whole frame and borrows as-is. Scroller content bakes into a
+        // plan's retained planes — no whole-frame composition is built, so a
+        // content-heavy frame is never encoded twice — except while an
+        // unexported animation recommits every tick, when re-baking planes
+        // each frame would cost more than the composition it saves. What
+        // remains is composed once, at commit, from pooled storage.
+        let whole = matches!(
             program.as_slice(),
             [crate::paint::compose::ComposeOp::Fragment { index: 0, chain }]
                 if *chain == crate::paint::compose::ComposeChain::default()
-        ) {
+        );
+        let committed = if whole {
             crate::visual::frame::CommittedScene::Whole
+        } else if let Some(plan) = (!needs_main_ticks)
+            .then(|| {
+                crate::paint::plan::plan(&program, frame.slots(), frame.clips(), device_pixel_ratio)
+            })
+            .flatten()
+        {
+            crate::visual::frame::CommittedScene::Planned(plan)
         } else {
             let mut scene = self.spare_scenes.pop().unwrap_or_default();
             scene.reset();

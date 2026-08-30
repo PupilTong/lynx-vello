@@ -663,6 +663,58 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
     });
 }
 
+/// The same scroll tick through the layered path: the frame's plan
+/// composed, each retained plane one textured draw. This is what a GPU
+/// target encodes per frame for a layered frame — the raw steps plus the
+/// plane draws — while `frame_scroll_tick` above replays the scroller
+/// content itself, which is the fallback path's cost. The plane images are
+/// stand-ins with the plan's dimensions; nothing here renders, and the
+/// encode does not read pixels.
+#[divan::bench(args = ROW_ARGS)]
+fn frame_scroll_composite(bencher: divan::Bencher<'_, '_>, rows: usize) {
+    let page = list_page(rows);
+    let list = page.list;
+    let resting = page.resting_offset;
+    let scroll_to = move |dom: &mut Document<()>, phase: bool| {
+        let offset = if phase { resting + 1.0 } else { resting };
+        dom.scroll_to(list, Vector2D::new(0.0, offset))
+    };
+    let mut dom = page.dom;
+    dom.render();
+    let frame = dom
+        .committed_frame()
+        .expect("render always leaves a committed frame retained");
+    let plan = frame
+        .composite_plan()
+        .expect("the list frame carries scroller content, so it layers");
+    let planes: Vec<ImageData> = (0..plan.plane_count())
+        .map(|index| {
+            let (width, height) = plan.plane_size(index);
+            ImageData {
+                data: Blob::new(Arc::new([])),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width,
+                height,
+            }
+        })
+        .collect();
+    let mut scene = dom::vello::Scene::new();
+    let mut phase = false;
+    bencher.bench_local(move || {
+        phase = !phase;
+        scroll_to(&mut dom, phase);
+        scene.reset();
+        frame.composite_into(
+            &mut scene,
+            &planes,
+            &|slot| Some(dom.scroll_offset(slot.node)),
+            None,
+        );
+        divan::black_box(scene.encoding().draw_tags.len());
+    });
+}
+
 /// A `background-color` flip on a row the scrollport shows. The control for
 /// `frame_offscreen_row_flip`: this frame has to repaint something visible, so
 /// it is the cost a correct engine cannot avoid.

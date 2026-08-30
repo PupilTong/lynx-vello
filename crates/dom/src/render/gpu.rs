@@ -23,6 +23,126 @@ pub struct Headless {
     renderer: vello::Renderer,
     target: Option<RenderTarget>,
     readback: Option<ReadbackBuffer>,
+    planes: PlaneBank,
+}
+
+/// The retained plane textures of one layered frame, registered with one
+/// renderer as drawable images.
+///
+/// A commit re-bakes each of the frame's planes once; every frame after
+/// that composes them as textured draws. Each composite render re-copies
+/// the plane textures into vello's image atlas (one GPU texture-to-texture
+/// copy per plane, window-sized): vello 0.9 frees its persistent atlas
+/// whenever a scene without images renders — the bake scenes here included
+/// — while its cache still counts the planes resident and clean, so pixels
+/// only survive under an every-use dirty mark. The scroll frame still
+/// encodes and rasterizes none of the scroller content.
+#[derive(Default)]
+pub struct PlaneBank {
+    /// The commit the retained textures were baked from.
+    commit: Option<u64>,
+    planes: Vec<Plane>,
+    images: Vec<vello::peniko::ImageData>,
+    bake_scene: vello::Scene,
+}
+
+struct Plane {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+impl fmt::Debug for PlaneBank {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PlaneBank")
+            .field("commit", &self.commit)
+            .field("planes", &self.planes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PlaneBank {
+    /// Brings the retained textures up to `frame`'s plan: on a new commit,
+    /// each plane is (re)baked into its texture; textures are reused across
+    /// commits while their sizes hold. Call once before every composite
+    /// render — every call re-marks the planes dirty so the atlas re-copy
+    /// happens on use (see the type docs for why that is mandatory).
+    ///
+    /// # Panics
+    ///
+    /// If `frame` has no composite plan.
+    pub fn prepare(
+        &mut self,
+        renderer: &mut vello::Renderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &crate::visual::CommittedFrame,
+    ) -> Result<(), GpuError> {
+        let plan = frame
+            .composite_plan()
+            .expect("prepare bakes a layered frame's plan");
+        if self.commit == Some(frame.commit_id()) {
+            for image in &self.images {
+                renderer.mark_override_image_dirty(image);
+            }
+            return Ok(());
+        }
+        while self.planes.len() > plan.plane_count() {
+            self.planes.pop();
+            renderer.unregister_texture(self.images.pop().expect("images pair with planes"));
+        }
+        for index in 0..plan.plane_count() {
+            let (width, height) = plan.plane_size(index);
+            let sized = self.planes.get(index).is_some_and(|plane| {
+                plane.texture.width() == width && plane.texture.height() == height
+            });
+            if !sized {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("dom retained plane"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let image = renderer.register_texture(texture.clone());
+                if index < self.planes.len() {
+                    self.planes[index] = Plane { texture, view };
+                    renderer.unregister_texture(std::mem::replace(&mut self.images[index], image));
+                } else {
+                    self.planes.push(Plane { texture, view });
+                    self.images.push(image);
+                }
+            }
+            self.bake_scene.reset();
+            frame.bake_plane(index, &mut self.bake_scene);
+            renderer
+                .render_to_texture(
+                    device,
+                    queue,
+                    &self.bake_scene,
+                    &self.planes[index].view,
+                    &render_params(vello::peniko::Color::TRANSPARENT, width, height),
+                )
+                .map_err(|error| GpuError::Render(error.to_string()))?;
+            renderer.mark_override_image_dirty(&self.images[index]);
+        }
+        self.commit = Some(frame.commit_id());
+        Ok(())
+    }
+
+    /// The registered images, index-parallel with the plan's planes — what
+    /// [`crate::visual::CommittedFrame::composite_into`] draws.
+    #[must_use]
+    pub fn images(&self) -> &[vello::peniko::ImageData] {
+        &self.images
+    }
 }
 
 #[derive(Debug)]
@@ -108,7 +228,35 @@ impl Headless {
             renderer,
             target: None,
             readback: None,
+            planes: PlaneBank::default(),
         })
+    }
+
+    /// Brings this renderer's retained plane textures up to `frame`'s plan;
+    /// see [`PlaneBank::prepare`].
+    ///
+    /// # Panics
+    ///
+    /// If `frame` has no composite plan.
+    pub fn prepare_planes(
+        &mut self,
+        frame: &crate::visual::CommittedFrame,
+    ) -> Result<(), GpuError> {
+        let Self {
+            context,
+            device_index,
+            renderer,
+            planes,
+            ..
+        } = self;
+        let handle = &context.devices[*device_index];
+        planes.prepare(renderer, &handle.device, &handle.queue, frame)
+    }
+
+    /// The retained planes' registered images; see [`PlaneBank::images`].
+    #[must_use]
+    pub fn plane_images(&self) -> &[vello::peniko::ImageData] {
+        self.planes.images()
     }
 
     /// Renders a scene into the retained headless texture.

@@ -356,6 +356,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             offset: scroll_box.offset,
             max_offset: scroll_box.max_offset(),
             scrollport: scroll_box.scrollport,
+            clip: None,
         });
         Some(
             u32::try_from(self.slots.len() - 1)
@@ -756,13 +757,18 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let position = style.clone_position();
         let clips = member_clip_contexts(position, *cursor.ctx);
         let z_applies = stacking::z_index_applies(position, cursor.is_item_container);
-        // An element whose running animation moves only composite
-        // properties paints as a stacking context even where its committed
-        // style would not make one — the same rule browsers apply to
-        // animated `opacity`/`transform` — so its subtree is one atomic,
-        // retargetable unit.
-        let forced_context = child_node.may_have_animations()
-            && self.document.animates_composite_properties(child_node);
+        // Two forced stacking contexts beyond the CSS triggers. An element
+        // whose running animation moves only composite properties paints as
+        // a stacking context — the rule browsers apply to animated
+        // `opacity`/`transform` — so its subtree is one atomic, retargetable
+        // unit. A scroll container likewise: its subtree then encodes as one
+        // contiguous compose run, which is what lets scrolling move a
+        // retained layer instead of recomposing content (Lynx's native
+        // scroll views are compositing boundaries, so this matches the
+        // reference behavior rather than the web's).
+        let forced_context = (child_node.may_have_animations()
+            && self.document.animates_composite_properties(child_node))
+            || scroll::is_scroll_container(style);
         Some(ChildBox {
             node,
             level: (stacking::establishes_stacking_context(style, z_applies) || forced_context)
@@ -845,12 +851,8 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             None => (target, ctx),
         };
 
-        let own_slot = self.allocate_scroll_slot(child.node, style, outer.current.chain);
-        if own_slot.is_some() {
-            // A scroll container inside an animated subtree: its content's
-            // scroll translation cannot compose inside a sampled delta.
-            self.kill_animation_chain(outer.current.animation);
-        }
+        // No scroll slot here: a scroll container is a forced stacking
+        // context, so it never reaches this in-context path.
         if visible {
             self.push_stream(
                 target,
@@ -861,7 +863,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     child.size,
                     outer.current.clip,
                     hit_testable,
-                    own_slot.or(outer.current.chain),
+                    outer.current.chain,
                     outer.current.animation,
                 ),
             );
@@ -872,7 +874,7 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 style,
                 &translated(collection.world, child.offset),
                 outer,
-                own_slot,
+                None,
                 None,
             );
             self.collect(
@@ -991,6 +993,12 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                 slot: inner.current.chain,
             });
             inner.current.clip = Some(self.clips.len() - 1);
+            if let Some(slot) = own_slot {
+                // The scrollport clip, in the slot's own row: the compose
+                // plan sizes the slot's retained layer from it.
+                self.slots[slot as usize].clip =
+                    Some(u32::try_from(self.clips.len() - 1).expect("clip indices fit u32"));
+            }
             // A clip rect never rides a sampled delta; anything animated
             // around it falls back to main-thread ticks.
             self.kill_animation_chain(own_animation.or(ctx.current.animation));

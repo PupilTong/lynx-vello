@@ -417,15 +417,35 @@ impl<T: Sync> Document<T> {
 }
 
 /// A borrow-shaped handle on the committed frame's scene: it keeps the frame
-/// alive and dereferences to the [`crate::vello::Scene`] inside it.
-#[derive(Debug)]
-pub struct SceneRef(Arc<CommittedFrame>);
+/// alive and dereferences to the [`crate::vello::Scene`] inside it. A
+/// layered frame retains no whole-frame composition, so the handle carries
+/// one composed for it on demand.
+pub struct SceneRef {
+    frame: Arc<CommittedFrame>,
+    composed: Option<Box<crate::vello::Scene>>,
+}
+
+impl std::fmt::Debug for SceneRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SceneRef")
+            .field("frame", &self.frame)
+            .finish_non_exhaustive()
+    }
+}
 
 impl std::ops::Deref for SceneRef {
     type Target = crate::vello::Scene;
 
     fn deref(&self) -> &crate::vello::Scene {
-        self.0.scene()
+        self.composed.as_deref().map_or_else(
+            || {
+                self.frame
+                    .scene()
+                    .expect("a layered frame's handle carries its composition")
+            },
+            |scene| scene,
+        )
     }
 }
 
@@ -450,10 +470,15 @@ impl<T> Document<T> {
     /// If nothing has been rendered yet: there is no committed frame to read.
     #[must_use]
     pub fn scene(&self) -> SceneRef {
-        SceneRef(
-            self.committed_frame()
-                .expect("Document::scene reads the committed frame: render first"),
-        )
+        let frame = self
+            .committed_frame()
+            .expect("Document::scene reads the committed frame: render first");
+        let composed = frame.scene().is_none().then(|| {
+            let mut scene = crate::vello::Scene::new();
+            frame.compose_into(&mut scene, &|_| None, None);
+            Box::new(scene)
+        });
+        SceneRef { frame, composed }
     }
 
     /// Returns rendered elements under a point from front to back.
