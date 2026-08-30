@@ -221,7 +221,10 @@ useful signal for currently-compatible versions of those libraries.
   as normal;
   a frame the engine wants drawn rides the same wakeup: it records the
   request and the host's next turn calls `draw`, so no OS frame callback and
-  no vsync round trip stands between a commit and its pixels.
+  no vsync round trip stands between a commit and its pixels. A continuation
+  is not a wakeup: while `is_animating` holds, the embedder keeps drawing on
+  the frame clock it owns — the engine never schedules across a thread to
+  sustain an animation.
   The public `Window` capability borrowed at attach time is the draw target
   and nothing else (`target`).
   The private `Engine` is generic over that trait; the draw target is a GAT,
@@ -515,8 +518,10 @@ useful signal for currently-compatible versions of those libraries.
   events alike wake the event loop through the injected `EventRequester`, and
   the turn that wakeup opens ends in `about_to_wait`, which draws — winit's
   `RedrawRequested` is not relayed at all. Drawing there rather than in the
-  relays coalesces a turn's events into one frame and keeps a self-requesting
-  frame out of winit's proxy-event drain, which iterates until empty. The CLI gives one
+  relays coalesces a turn's events into one frame and keeps the frame's vsync
+  wait out of winit's proxy-event drain, which iterates until empty. A running
+  animation is no wakeup at all: `about_to_wait` polls while
+  `LynxView::is_animating`, paced by the swap chain's vsync. The CLI gives one
   `LynxView::new` its author CSS and entry MTS URL as a `ViewSources`, reports
   any failure as `CliError::StartView`, and observes the complete TLA boot
   through `ScriptFinished`/`ScriptRunError` and `pump`. Headed

@@ -11,7 +11,7 @@ capabilities and OS facts:
   author stylesheet URLs in cascade order, and the one entry MTS module URL;
 - an `EventRequester`, the one wakeup the engine has: a lifecycle event to
   drain and a frame to draw both ride it;
-- a draw target;
+- a draw target, and the frame clock that paces a running animation over it;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -440,10 +440,12 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    and produces it: the `FrameClock` is sampled once, gesture deadlines resolve
    against it, the latest published scene is uploaded if it is new, and the
    frame presents. While the latest frame reports an active animation it sends
-   the main thread one `BeginFrame` carrying that reading and asks for the next
-   frame the same way — the loop sustains without any JavaScript, paced on a
-   window output by the `AutoVsync` acquire; `LynxView::is_animating` reports
-   the same fact to an offscreen host that drives its own cadence.
+   the main thread one `BeginFrame` carrying that reading, and the loop
+   sustains without any JavaScript — but on the embedder's own frame clock,
+   not the wakeup: `LynxView::is_animating` is the continuation signal, and
+   the host paces it with the vsync it holds (a polled turn ending in the
+   `AutoVsync` acquire, `requestAnimationFrame` on a canvas, its own cadence
+   offscreen).
 6. The task enqueues sanitized script completion and calls `EventRequester`;
    the awakened host observes it through `pump`. No realm or tree object
    crosses the boundary.

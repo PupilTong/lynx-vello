@@ -12,6 +12,8 @@
 //! target: the engine asks for its frames through the one `EventRequester`
 //! wakeup this loop already answers, and the turn that wakeup opens ends in
 //! `about_to_wait`, which draws. Winit's `RedrawRequested` is not relayed.
+//! A running animation is not a wakeup at all — `about_to_wait` polls while
+//! the engine reports one, paced by the swap chain's vsync.
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -58,7 +60,6 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|error| CliError::Window(error.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let event_proxy = proxy.clone();
     let event_requester: Arc<dyn EventRequester> = Arc::new(move || {
@@ -455,8 +456,23 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
         self.pump(event_loop);
     }
 
+    /// The turn ends here: draw what the engine asked for, then decide
+    /// whether to wait at all.
+    ///
+    /// While the engine owes the timeline another frame this loop polls, and
+    /// the swap chain's `AutoVsync` acquire inside the next `draw` is what
+    /// paces it — this window's own vsync, which is the only honest source
+    /// for it. Nothing crosses a thread to keep an animation running, and an
+    /// occluded window polls for nothing. Otherwise the loop sleeps until an
+    /// OS fact or an engine wakeup arrives.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.draw(event_loop);
+        let animating = !self.occluded && self.view.as_ref().is_some_and(LynxView::is_animating);
+        event_loop.set_control_flow(if animating {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::Wait
+        });
     }
 }
 

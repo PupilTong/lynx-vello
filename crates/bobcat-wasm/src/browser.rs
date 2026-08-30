@@ -616,6 +616,17 @@ impl BobcatRenderer {
         Ok(self.script_finished)
     }
 
+    /// Whether the engine owes the timeline another frame — a running
+    /// animation, or an armed gesture deadline waiting on the clock.
+    ///
+    /// The Render Worker's continuation signal: while this is true it keeps
+    /// drawing at the display's rate, which on this target means
+    /// `requestAnimationFrame`. Nothing crosses the engine's wakeup for it.
+    #[wasm_bindgen(js_name = isAnimating)]
+    pub fn is_animating(&self) -> bool {
+        self.view.as_ref().is_some_and(LynxView::is_animating)
+    }
+
     /// Route one browser `PointerEvent` into the opaque native view.
     ///
     /// The JavaScript facade owns pointer capture and converts client

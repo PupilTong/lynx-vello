@@ -176,10 +176,12 @@ mutation or stall the last published frame. One lost-wake-safe event signal
 carries everything back from the Lynx main Worker: it wakes a Promise whenever
 core queues an engine event *or* wants a frame drawn, and the Render Worker's
 loop answers each wakeup with one `pump` — drain the events, draw the pending
-frame. No frame clock stands between a commit and the canvas; the loop's only
-concession to the browser is a `setTimeout(0)` task hop per wakeup, so an
-animating page — which asks for its next frame on this same signal — cannot
-starve the Worker's message queue. `pump` takes no argument: the animation
+frame. No frame clock stands between a commit and the canvas. The clock is
+the continuation's alone: while `isAnimating` reports that the engine owes the
+timeline another frame, the loop waits for the next display frame instead —
+`requestAnimationFrame` where a Worker is given one, a frame-interval timer
+where it is not — because drawing faster than the compositor shows is waste.
+An animation therefore crosses nothing. `pump` takes no argument: the animation
 timeline is core's own `web_time` clock, read once per frame on the Render
 Worker after the canvas surface hands over an image. `requestAnimationFrame`'s
 `DOMHighResTimeStamp` would be taken on the page's main thread, before this

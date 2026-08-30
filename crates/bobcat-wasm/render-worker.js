@@ -33,16 +33,34 @@ function reportFatal(error) {
   self.postMessage({ type: 'bobcat-error', message: errorMessage(error) })
 }
 
+// The Worker's frame clock, and the only one: while the engine owes the
+// timeline another frame it draws at the display's rate, because drawing
+// faster than the compositor shows is waste. `requestAnimationFrame` is that
+// rate where a Worker is given one; a frame-interval timer stands in where it
+// is not.
+const FRAME_INTERVAL_MS = 16
+
+function nextDisplayFrame() {
+  return new Promise((resolve) => {
+    if (typeof self.requestAnimationFrame === 'function') {
+      self.requestAnimationFrame(() => resolve())
+    } else {
+      setTimeout(resolve, FRAME_INTERVAL_MS)
+    }
+  })
+}
+
 // One durable wakeup carries everything the engine has to say: a lifecycle
-// event to drain and a frame to draw. Nothing polls a frame clock — a commit
-// resolves this and the same Worker turn presents it.
-//
-// The task hop is what keeps that honest: an animating page asks for its next
-// frame on this very signal, so the wait resolves immediately and a loop of
-// bare microtasks would starve this Worker's message queue.
+// event to drain and a frame to draw. A commit resolves it and the same
+// Worker turn presents — no frame clock stands between the two. The clock is
+// only ever the continuation's: an animation is the engine's own business,
+// paced here, crossing nothing.
 async function nextEngineWakeup() {
-  await renderer.waitForEngineEvent()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  if (renderer.isAnimating()) {
+    await nextDisplayFrame()
+  } else {
+    await renderer.waitForEngineEvent()
+  }
 }
 
 async function initialize(message) {

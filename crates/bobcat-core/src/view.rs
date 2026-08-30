@@ -38,10 +38,12 @@
 //! side never waits on the main thread (the offscreen `tick`, an embedder's
 //! synthetic vsync, is the deliberate exception — it is a synchronization
 //! point, not a frame path); nothing waits on an OS frame callback — a
-//! commit wakes the host loop directly and the next `draw` is the frame; the
-//! frame's vsync wait — the swap-chain acquire that opens a window frame —
-//! happens before any of the frame's work, so the clock reading everything
-//! resolves against belongs to the frame being shown.
+//! commit wakes the host loop directly and the next `draw` is the frame,
+//! while a running animation is paced by the embedder's own frame clock and
+//! crosses nothing; the frame's vsync wait — the swap-chain acquire that
+//! opens a window frame — happens before any of the frame's work, so the
+//! clock reading everything resolves against belongs to the frame being
+//! shown.
 
 mod graphics;
 
@@ -1090,10 +1092,11 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// frame left an animation running, or a gesture deadline is armed and
     /// waiting on the clock.
     ///
-    /// This is the one continuation signal an offscreen embedder has — that
-    /// output draws on the host's own ticks, so a host that idles its tick
-    /// loop must keep ticking while this reports `true` or an armed
-    /// long-press never resolves.
+    /// Every embedder's continuation signal, and the whole of the contract:
+    /// while this reports `true` the host keeps producing frames at its own
+    /// display's rate — the pace is the embedder's to set, because it is the
+    /// one holding a vsync. A host that stops asking while this is `true`
+    /// freezes a running animation and never resolves an armed long-press.
     #[must_use]
     pub fn is_animating(&self) -> bool {
         self.hub
@@ -1381,16 +1384,25 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// what is already published is composed.
     ///
     /// The embedder calls this on every host wakeup, beside [`Self::pump`],
-    /// and nothing else gates a frame: a commit, a consumed scroll, or an
-    /// armed deadline records one and wakes the loop, and that wakeup is the
-    /// one that draws it. A wakeup carrying no frame costs one bit read.
+    /// and a state change is what gates a frame: a commit, a consumed scroll,
+    /// a resize records one and wakes the loop, and that wakeup is the one
+    /// that draws it. A wakeup carrying no frame costs one bit read.
+    ///
+    /// A running animation is not a state change and does not use that path.
+    /// It is a continuation, reported by [`Self::is_animating`], and the
+    /// embedder's own frame clock paces it — the swap chain's vsync acquire
+    /// on a window, `requestAnimationFrame` on a canvas. Nothing crosses a
+    /// thread to keep an animation running.
     pub fn draw(&mut self) -> Result<(), EngineError> {
         if !matches!(self.output, Output::Window(_)) {
             return Ok(());
         }
-        // Taken before any of the frame's work: a commit that lands while
-        // this frame composes leaves the bit set for the next one.
-        if !self.frames.take() {
+        // Two ways to owe this frame, and the bit is only one of them: a
+        // state change recorded a request, or the timeline is mid-animation —
+        // a continuation the embedder paces, which records nothing. The bit
+        // is taken before any of the frame's work, so a commit landing while
+        // this frame composes leaves it set for the next one.
+        if !self.frames.take() && !self.is_animating() {
             return Ok(());
         }
         let frames = self.frames.clone();
@@ -1423,9 +1435,6 @@ impl<'window, W: Window> LynxView<'window, W> {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
         }
-        let animating = latest
-            .as_ref()
-            .is_some_and(|frame| frame.animations_active());
         let key = latest
             .as_ref()
             .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
@@ -1456,9 +1465,6 @@ impl<'window, W: Window> LynxView<'window, W> {
                 )
             };
             graphics.render_to_target(scene, size, key)?;
-        }
-        if animating || self.gesture.needs_frame() {
-            frames.request();
         }
         // Nothing rendered at this size means nothing was ever published for
         // it: the acquired image goes back unpresented and nothing is asked
