@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use smallvec::SmallVec;
@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 use crate::tree::LynxDocument;
-use crate::view::{FrameHub, SharedListenerNames};
+use crate::view::{FrameHub, ListenerUpdate};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -204,12 +204,14 @@ struct EventState {
     /// The same registrations keyed the other way, so dropping an element
     /// costs its own listeners rather than a scan of every name.
     by_node: RefCell<HashMap<dom::NodeId, NodeListeners>>,
-    /// The presenting thread's view of which names are registered anywhere.
+    /// Where the presenting thread's replica of the name set is fed from.
     ///
-    /// Maintained here rather than at a batch boundary because it is what the
-    /// realm has just been told, and touched only on a true transition: a
-    /// second listener for a name already carried moves no count.
-    names: Arc<SharedListenerNames>,
+    /// Published here rather than at a batch boundary because this is where
+    /// the realm has just been told, and only on a global edge of
+    /// `listeners`: the first registration for a name and the removal of its
+    /// last. A second listener for a name already open sends nothing, so the
+    /// traffic is registration edges, never registrations.
+    updates: mpsc::Sender<ListenerUpdate>,
     /// Set by the native `stopPropagation` export. A pure flag write: the
     /// realm is inside a `call_module_export` when it runs, and re-entering
     /// the realm from a host function would nest an execution guard, which
@@ -218,13 +220,24 @@ struct EventState {
 }
 
 impl EventState {
-    fn new(names: Arc<SharedListenerNames>) -> Self {
+    fn new(updates: mpsc::Sender<ListenerUpdate>) -> Self {
         Self {
             listeners: RefCell::default(),
             by_node: RefCell::default(),
-            names,
+            updates,
             stopped: Cell::default(),
         }
+    }
+
+    /// Tells the presenting side about an edge in the name set.
+    ///
+    /// Always after the index has been updated and its borrow released, so
+    /// the truth is never behind what has been published, and a send never
+    /// happens with a `RefCell` held. A closed channel is the view going
+    /// away, which this thread learns about through its command channel
+    /// instead.
+    fn publish(&self, update: ListenerUpdate) {
+        let _ = self.updates.send(update);
     }
 
     /// Records that `node` now has a listener for `(name, capture)`.
@@ -234,19 +247,23 @@ impl EventState {
             .borrow()
             .get_key_value(name)
             .map_or_else(|| Arc::from(name), |(existing, _)| Arc::clone(existing));
-        let fresh_registration = self
-            .listeners
-            .borrow_mut()
-            .entry(Arc::clone(&shared))
-            .or_default()
-            .insert((node, capture));
+        let mut listeners = self.listeners.borrow_mut();
+        let nodes = listeners.entry(Arc::clone(&shared)).or_default();
+        // No name is ever left keyed to an empty set, so an empty one here is
+        // the entry `or_default` just made: this is the name's first listener
+        // anywhere in the document.
+        let first_for_name = nodes.is_empty();
+        let fresh_registration = nodes.insert((node, capture));
+        drop(listeners);
         if fresh_registration {
             self.by_node
                 .borrow_mut()
                 .entry(node)
                 .or_default()
-                .push((shared, capture));
-            self.names.note_enabled(name);
+                .push((Arc::clone(&shared), capture));
+            if first_for_name {
+                self.publish(ListenerUpdate::Available(shared));
+            }
         }
     }
 
@@ -259,12 +276,18 @@ impl EventState {
         if !nodes.remove(&(node, capture)) {
             return;
         }
-        if nodes.is_empty() {
-            listeners.remove(name);
-        }
+        // The key comes back out with the removal: it is the `Arc` every
+        // index already shares, so publishing the edge allocates nothing.
+        let closed = if nodes.is_empty() {
+            listeners.remove_entry(name).map(|(name, _)| name)
+        } else {
+            None
+        };
         drop(listeners);
         self.forget_node_listener(node, name, capture);
-        self.names.note_disabled(name);
+        if let Some(name) = closed {
+            self.publish(ListenerUpdate::Unavailable(name));
+        }
     }
 
     /// Drops every registration on an element that is going away.
@@ -272,17 +295,22 @@ impl EventState {
         let Some(registrations) = self.by_node.borrow_mut().remove(&node) else {
             return;
         };
+        let mut closed = SmallVec::<[Arc<str>; INLINE_NODE_LISTENERS]>::new();
         let mut listeners = self.listeners.borrow_mut();
         for (name, capture) in registrations {
-            if let Some(nodes) = listeners.get_mut(&name) {
-                nodes.remove(&(node, capture));
-                if nodes.is_empty() {
-                    listeners.remove(&name);
-                }
+            if let Some(nodes) = listeners.get_mut(&name)
+                && nodes.remove(&(node, capture))
+                && nodes.is_empty()
+            {
+                // A drop is a removal like any other: an element that took
+                // the last listener for a name with it closes that name.
+                listeners.remove(&name);
+                closed.push(name);
             }
-            // A drop is a removal like any other: the shared table must not
-            // keep counting a registration the element took with it.
-            self.names.note_disabled(&name);
+        }
+        drop(listeners);
+        for name in closed {
+            self.publish(ListenerUpdate::Unavailable(name));
         }
     }
 
@@ -321,13 +349,13 @@ impl fmt::Debug for MainThreadRuntime {
 impl MainThreadRuntime {
     pub(crate) fn new(
         document: LynxDocument,
-        listener_names: Arc<SharedListenerNames>,
+        listener_updates: mpsc::Sender<ListenerUpdate>,
         hub: Arc<FrameHub>,
         wake: impl Fn() + 'static,
     ) -> Result<Self, MainThreadError> {
         let mut engine = ScriptEngine::new()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let events = Rc::new(EventState::new(listener_names));
+        let events = Rc::new(EventState::new(listener_updates));
         let tree = install_bobcat(&mut engine, document, hub, wake, &events)?;
         Ok(Self {
             engine,
@@ -1110,6 +1138,7 @@ fn string_argument<'a>(
 mod tests {
     use super::*;
     use crate::tree::{PageConfig, Viewport, new_document};
+    use crate::view::ListenerNames;
 
     /// The handle a packed id names. A handle carries a generation as well as
     /// an arena key, so a test spells one the way script sees it — and for a
@@ -1162,21 +1191,33 @@ mod tests {
         }
     }
 
-    /// The same runtime, plus the shared name table the presenting side
-    /// filters against — so a test can ask what the realm published.
+    /// The presenting side's replica of the realm's name set, driven by
+    /// hand: a test resyncs it where a routing pass would and then asks what
+    /// the realm has published.
+    struct PublishedNames(ListenerNames);
+
+    impl PublishedNames {
+        fn contains(&mut self, name: &str) -> bool {
+            self.0.sync();
+            self.0.contains(name)
+        }
+    }
+
+    /// The same runtime, plus the replica the presenting side filters
+    /// against — so a test can ask what the realm published.
     fn runtime_over_watching_names(
         document: LynxDocument,
-    ) -> (MainThreadRuntime, DocumentProbe, Arc<SharedListenerNames>) {
-        let names = Arc::new(SharedListenerNames::default());
-        let runtime = MainThreadRuntime::new(
-            document,
-            Arc::clone(&names),
-            Arc::new(FrameHub::default()),
-            || {},
-        )
-        .expect("main-thread runtime");
+    ) -> (MainThreadRuntime, DocumentProbe, PublishedNames) {
+        let (updates, published) = mpsc::channel();
+        let runtime =
+            MainThreadRuntime::new(document, updates, Arc::new(FrameHub::default()), || {})
+                .expect("main-thread runtime");
         let probe = DocumentProbe(Rc::clone(&runtime.tree));
-        (runtime, probe, names)
+        (
+            runtime,
+            probe,
+            PublishedNames(ListenerNames::new(published)),
+        )
     }
 
     #[test]
@@ -1803,38 +1844,55 @@ mod tests {
     }
 
     /// The two indexes are one fact written twice, so every mutation has to
-    /// leave them agreeing — including the shared name table the presenting
-    /// side filters against.
+    /// leave them agreeing — and the presenting side has to hear exactly the
+    /// global edges of the name set, no more and no fewer.
     #[test]
-    fn the_listener_indexes_and_the_published_names_stay_in_step() {
-        let names = Arc::new(SharedListenerNames::default());
-        let state = EventState::new(Arc::clone(&names));
+    fn the_listener_indexes_and_the_published_edges_stay_in_step() {
+        let (updates, published) = mpsc::channel();
+        let state = EventState::new(updates);
         let (a, b) = (node_id(3), node_id(4));
+        // The edges as a sequence, so both what crossed and what did not are
+        // one assertion rather than a pair of membership questions.
+        let drain = || {
+            published
+                .try_iter()
+                .map(|update| match update {
+                    ListenerUpdate::Available(name) => format!("+{name}"),
+                    ListenerUpdate::Unavailable(name) => format!("-{name}"),
+                })
+                .collect::<Vec<_>>()
+        };
 
         state.enable(a, "tap", false);
         state.enable(a, "tap", true);
         state.enable(a, "scroll", false);
         state.enable(b, "tap", false);
-        assert!(names.contains("tap"));
-        assert!(names.contains("scroll"));
+        assert_eq!(
+            drain(),
+            ["+tap", "+scroll"],
+            "only a name's first registration anywhere crosses"
+        );
         assert_eq!(state.by_node.borrow()[&a].len(), 3);
         assert_eq!(state.by_node.borrow()[&b].len(), 1);
 
         // A repeat registration is not a second one — neither index moves,
-        // so the shared count does not either.
+        // so no edge is published either.
         state.enable(a, "tap", false);
         assert_eq!(state.by_node.borrow()[&a].len(), 3);
+        assert!(
+            drain().is_empty(),
+            "a repeat registration publishes nothing"
+        );
 
         state.disable(a, "scroll", false);
-        assert!(!names.contains("scroll"));
-        assert!(names.contains("tap"));
+        assert_eq!(drain(), ["-scroll"], "the last removal closes the name");
         assert_eq!(state.by_node.borrow()[&a].len(), 2);
 
         // Dropping an element takes its own registrations and only those.
         state.forget_node(a);
         assert!(!state.by_node.borrow().contains_key(&a));
         assert!(
-            names.contains("tap"),
+            drain().is_empty(),
             "the sibling registration still holds the name open"
         );
         assert_eq!(
@@ -1848,17 +1906,14 @@ mod tests {
         state.forget_node(b);
         assert!(state.listeners.borrow().is_empty());
         assert!(state.by_node.borrow().is_empty());
-        assert!(
-            !names.contains("tap"),
-            "the last listener unpublishes its name"
-        );
+        assert_eq!(drain(), ["-tap"], "the last listener unpublishes its name");
     }
 
-    /// The shared name table is what the presenting side filters against, so
-    /// a registration has to reach it as the realm makes it.
+    /// The replica is what the presenting side filters against, so a
+    /// registration has to reach it as the realm makes it.
     #[test]
-    fn registering_a_listener_publishes_its_name_to_the_shared_table() {
-        let (mut runtime, _elements, names) = runtime_over_watching_names(new_document(
+    fn registering_a_listener_publishes_its_name_to_the_presenting_side() {
+        let (mut runtime, _elements, mut names) = runtime_over_watching_names(new_document(
             Viewport::new(393.0, 727.0),
             PageConfig::default(),
         ));

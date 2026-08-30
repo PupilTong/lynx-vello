@@ -201,10 +201,18 @@ consequential choice about whether to follow the spec or the quirk.
   - **The long-press "consumed" gate is name-level, not per-chain.** Lynx
     suppresses `tap` when the `longpress` walk found a handler anywhere in
     the response chain; this engine's presenting side only knows which names
-    have listeners somewhere in the document (`SharedListenerNames`), so a
-    `longpress` listener on an unrelated element also suppresses a
-    sequence's `tap`. Per-chain precision arrives with a presenting-side
-    per-node index.
+    have listeners somewhere in the document (`ListenerNames`, its own
+    lock-free replica of the main thread's index), so a `longpress` listener
+    on an unrelated element also suppresses a sequence's `tap`. Per-chain
+    precision arrives with a presenting-side per-node index.
+  - **The gate is one routing pass stale, and loses rather than replays
+    (2026-08-31).** The replica is resynced at the top of each routing or
+    gesture pass and then left alone, so a registration the main thread has
+    not yet published — or published after this pass drained — is invisible
+    until the next pass: an event of a freshly registered name is filtered
+    out rather than queued, and a `longpress` registration racing its own
+    deadline may land on either side of it. Accepted in exchange for a
+    presenting side that takes no lock on the pointer path.
   - **Single-finger only, all pointer kinds.** A second concurrent pointer
     cancels synthesis for the whole overlap (Lynx's single-finger `tap`
     gate, with `enableMultiTouch` unimplemented); mouse and pen sequences

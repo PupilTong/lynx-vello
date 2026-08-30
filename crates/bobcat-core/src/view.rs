@@ -32,18 +32,22 @@
 //! testing and gesture recognition read its tables, and scroll consumption
 //! lands in the presenting side's own intents — the offsets the screen
 //! shows, written back to the document only when a refill re-centers the
-//! encode windows.
+//! encode windows. The one main-thread fact routing needs — which event
+//! names have listeners — is not shared state either: the main thread
+//! publishes that set's global edges and this side keeps its own replica,
+//! resynced at the top of each pass, so a pointer event is routed without
+//! taking a lock (see [`ListenerNames`]).
 //!
 //! The law: the main thread waits only on its own channel; the presenting
-//! side never waits on the main thread (the offscreen `tick`, an embedder's
-//! synthetic vsync, is the deliberate exception — it is a synchronization
-//! point, not a frame path); nothing waits on an OS frame callback — a
-//! commit wakes the host loop directly and the next `draw` is the frame,
-//! while a running animation is paced by the embedder's own frame clock and
-//! crosses nothing; the frame's vsync wait — the swap-chain acquire that
-//! opens a window frame — happens before any of the frame's work, so the
-//! clock reading everything resolves against belongs to the frame being
-//! shown.
+//! side never waits on the main thread, and takes no lock to route input
+//! (the offscreen `tick`, an embedder's synthetic vsync, is the deliberate
+//! exception — it is a synchronization point, not a frame path); nothing
+//! waits on an OS frame callback — a commit wakes the host loop directly
+//! and the next `draw` is the frame, while a running animation is paced by
+//! the embedder's own frame clock and crosses nothing; the frame's vsync
+//! wait — the swap-chain acquire that opens a window frame — happens before
+//! any of the frame's work, so the clock reading everything resolves against
+//! belongs to the frame being shown.
 
 mod graphics;
 
@@ -52,7 +56,7 @@ mod animation_tests;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -60,7 +64,7 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 use std::time::Duration;
@@ -290,58 +294,81 @@ impl EngineEventSender {
     }
 }
 
-/// The event names the realm currently has listeners for, shared between the
-/// script thread that learns about registrations and the presenting thread
-/// that synthesizes gestures.
+/// A change in whether the document has any listener at all for one event
+/// name — the only listener fact that crosses to the presenting side.
 ///
-/// Maintained by the native `enableEventListener`/`disableEventListener` ESM
-/// exports — the realm already reports only empty↔occupied transitions, so
-/// the script side touches this on registration edges, never per event. The
-/// presenting side reads it when a long-press deadline resolves. Neither
-/// touch goes anywhere near the tree slot, so the locks-twice-per-batch law is
-/// untouched.
-///
-/// The set is name-level over the whole document. For gesture synthesis that
-/// is a recorded approximation: a `longpress` listener anywhere suppresses a
-/// sequence's `tap` even when the fired chain has none. Per-chain precision
-/// needs a presenting-side per-node index, which is future work shared with
-/// the event-path filtering.
-#[derive(Debug, Default)]
-pub(crate) struct SharedListenerNames {
-    counts: Mutex<HashMap<Arc<str>, usize>>,
+/// The Lynx main thread owns the precise `(name, node, capture)` index and
+/// the callbacks, and publishes only that index's global edges: the first
+/// registration for a name, and the removal of its last. Every registration
+/// between those two moves the main thread's index and sends nothing, so a
+/// card that binds a hundred rows to one name crosses once.
+#[derive(Debug)]
+pub(crate) enum ListenerUpdate {
+    /// The document went from no listener for this name to one.
+    Available(Arc<str>),
+    /// The document's last listener for this name went away.
+    Unavailable(Arc<str>),
 }
 
-impl SharedListenerNames {
-    fn lock(&self) -> MutexGuard<'_, HashMap<Arc<str>, usize>> {
-        self.counts
-            .lock()
-            .unwrap_or_else(|error| panic!("the listener-name table is poisoned: {error}"))
-    }
+/// The presenting side's own answer to "does anything listen for this name",
+/// behind no lock: this thread is the only one that reads or writes it.
+///
+/// The main thread's index is the truth; this is a replica of its name set,
+/// fed by [`ListenerUpdate`]s over this view's own ordered channel.
+/// [`Self::sync`] applies whatever has arrived and is called once at the top
+/// of each routing or gesture pass, so a pass decides against one unchanging
+/// snapshot instead of a set that can move between two of its own questions.
+/// Publishing an update wakes nothing: the next pass is when it matters, and
+/// the next pass resyncs.
+///
+/// The replica is therefore behind by at most one pass, deliberately and with
+/// no acknowledgement, cross-thread wait, or replay to close the gap. What
+/// that costs is recorded in `docs/tracking/dom-events.md`: an event whose
+/// name was registered for during the very pass routing it is filtered out,
+/// so a `pointerdown` listener that registers `pointerup` can miss a fast
+/// `pointerup`, and a `longpress` registration racing its own deadline may
+/// land on either side of it.
+///
+/// The set is name-level over the whole document, as the table it replaced
+/// was: a `longpress` listener anywhere suppresses a sequence's `tap` even
+/// when the fired chain has none. Per-chain precision needs a presenting-side
+/// per-node index, which is future work shared with event-path filtering.
+#[derive(Debug)]
+pub(crate) struct ListenerNames {
+    names: HashSet<Arc<str>>,
+    updates: mpsc::Receiver<ListenerUpdate>,
+}
 
-    /// Records one new `(node, capture)` registration for `name`.
-    pub(crate) fn note_enabled(&self, name: &str) {
-        let mut counts = self.lock();
-        if let Some(count) = counts.get_mut(name) {
-            *count += 1;
-        } else {
-            counts.insert(Arc::from(name), 1);
+impl ListenerNames {
+    pub(crate) fn new(updates: mpsc::Receiver<ListenerUpdate>) -> Self {
+        Self {
+            names: HashSet::new(),
+            updates,
         }
     }
 
-    /// Records one removed registration for `name`.
-    pub(crate) fn note_disabled(&self, name: &str) {
-        let mut counts = self.lock();
-        if let Some(count) = counts.get_mut(name) {
-            *count -= 1;
-            if *count == 0 {
-                counts.remove(name);
+    /// Applies every update that has arrived, without blocking.
+    ///
+    /// A closed channel leaves the last snapshot standing rather than
+    /// clearing it: the main thread is gone, so nothing will register or
+    /// unregister again, and the names it published are still the last true
+    /// answer.
+    pub(crate) fn sync(&mut self) {
+        while let Ok(update) = self.updates.try_recv() {
+            match update {
+                ListenerUpdate::Available(name) => {
+                    self.names.insert(name);
+                }
+                ListenerUpdate::Unavailable(name) => {
+                    self.names.remove(&name);
+                }
             }
         }
     }
 
-    /// Whether any listener for `name` exists anywhere in the document.
+    /// Whether any listener for `name` existed as of the last [`Self::sync`].
     pub(crate) fn contains(&self, name: &str) -> bool {
-        self.lock().contains_key(name)
+        self.names.contains(name)
     }
 }
 
@@ -471,11 +498,11 @@ fn emit_detail(event: &EmitEvent) -> String {
 }
 
 /// The facts the router asks for while deciding, answered from the published
-/// frame's scroll-slot table and the shared listener-name table. No document
-/// anywhere.
+/// frame's scroll-slot table and this thread's listener-name replica, both
+/// already in hand. No document anywhere, and nothing to wait on.
 struct FrameRouterHost<'a> {
     frame: Option<&'a CommittedFrame>,
-    listener_names: &'a SharedListenerNames,
+    listener_names: &'a ListenerNames,
 }
 
 impl RouterHost for FrameRouterHost<'_> {
@@ -887,9 +914,10 @@ pub struct LynxView<'window, W: Window = NoWindow> {
     /// `tap`/`longpress` beside the raw pointer events, and decides the
     /// user-agent scroll — all against the published frame.
     gesture: GestureRouter,
-    /// Which event names the realm has listeners for; written by the script
-    /// thread's registration members, read when gestures resolve.
-    listener_names: Arc<SharedListenerNames>,
+    /// Which event names the document has listeners for: this thread's own
+    /// replica of the main thread's index, resynced at the top of every
+    /// routing and gesture pass and read with no lock in between.
+    listener_names: ListenerNames,
     /// The animation timeline. Engine-owned and concrete: an embedder cannot
     /// name one, drive one, or observe this one. Sampled once per frame, on
     /// the presenting thread; the main thread receives the reading inside
@@ -999,14 +1027,14 @@ impl<'window, W: Window> LynxView<'window, W> {
         // Captured before the document leaves for its owner thread, so async
         // loaders reach the store without it.
         let image_store = Arc::clone(document.image_store());
-        let (view, receiver, events) =
+        let (view, receiver, events, listener_updates) =
             Self::with_channel(image_store, viewport, frame_size, event_requester);
         spawn_main_thread(
             document,
             entry,
             receiver,
             Arc::clone(&view.hub),
-            Arc::clone(&view.listener_names),
+            listener_updates,
             view.frames.clone(),
             events,
         )?;
@@ -1019,16 +1047,26 @@ impl<'window, W: Window> LynxView<'window, W> {
         Ok(view)
     }
 
-    /// The view minus its main thread: every field constructed, the command
-    /// receiver and the thread's event sender handed back instead of served.
+    /// The view minus its main thread: every field constructed, and the ends
+    /// that thread owns — the command receiver, the event sender, the
+    /// listener-update sender — handed back instead of served.
     fn with_channel(
         image_store: Arc<dyn dom::ImageStore>,
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<dyn EventRequester>,
-    ) -> (Self, mpsc::Receiver<MainCommand>, EngineEventSender) {
+    ) -> (
+        Self,
+        mpsc::Receiver<MainCommand>,
+        EngineEventSender,
+        mpsc::Sender<ListenerUpdate>,
+    ) {
         let (message_sender, messages) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
+        // Its own channel rather than a `MainCommand` or an `EngineEvent`:
+        // this one runs main → presenting, carries no wakeup, and is drained
+        // where it is read rather than where the host happens to pump.
+        let (listener_updates, listener_names) = mpsc::channel();
         let frames = FrameWakeup {
             pending: Arc::new(AtomicBool::new(false)),
             requester: Arc::clone(&event_requester),
@@ -1045,7 +1083,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             output: Output::None,
             frames,
             gesture: GestureRouter::default(),
-            listener_names: Arc::new(SharedListenerNames::default()),
+            listener_names: ListenerNames::new(listener_names),
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::default(),
             composed: None,
@@ -1059,7 +1097,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             sender: message_sender,
             requester: event_requester,
         };
-        (view, command_receiver, events)
+        (view, command_receiver, events, listener_updates)
     }
 
     /// Runs `probe` against the main-thread document over the command
@@ -1157,6 +1195,9 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// decisions queued as commands at once. Nothing buffers and nothing
     /// blocks.
     pub fn dispatch_input(&mut self, event: InputEvent) {
+        // One resync per pass, before anything asks a listener question, so
+        // every decision this pass makes sees the same name set.
+        self.listener_names.sync();
         let at = self.clock.now_seconds();
         let published = self.hub.latest();
         if let Some(frame) = &published {
@@ -1232,10 +1273,11 @@ impl<'window, W: Window> LynxView<'window, W> {
                 }
                 InputDecision::Emit(event) => {
                     // Asked before anything is built: an event no listener
-                    // registered for costs one lookup instead of a
-                    // cross-thread wakeup. The table is what the realm has
-                    // registered *so far*; the staleness window is one
-                    // routing pass wide (see docs/tracking/dom-events.md).
+                    // registered for costs one set lookup instead of a
+                    // cross-thread wakeup. The replica is what the realm had
+                    // registered as of this pass's resync; the staleness
+                    // window is one pass wide (see
+                    // docs/tracking/dom-events.md).
                     if !listener_names.contains(event.name) {
                         continue;
                     }
@@ -1257,6 +1299,10 @@ impl<'window, W: Window> LynxView<'window, W> {
     /// [`GestureRouter::needs_frame`] keeps frames coming, the same
     /// continuation contract running animations use.
     fn service_gesture_clock(&mut self, now: f64) {
+        // As in `dispatch_input`, and for the same reason: a long-press
+        // deadline resolving here asks whether anything listens, so the
+        // replica is brought current first and then left alone.
+        self.listener_names.sync();
         let published = self.hub.latest();
         let mut decisions = Vec::new();
         {
@@ -1571,7 +1617,7 @@ fn spawn_main_thread(
     entry: EntryModule,
     commands: mpsc::Receiver<MainCommand>,
     hub: Arc<FrameHub>,
-    listener_names: Arc<SharedListenerNames>,
+    listener_updates: mpsc::Sender<ListenerUpdate>,
     frames: FrameWakeup,
     events: EngineEventSender,
 ) -> Result<(), EngineError> {
@@ -1587,7 +1633,7 @@ fn spawn_main_thread(
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut runtime = crate::runtime::MainThreadRuntime::new(
                     document,
-                    listener_names,
+                    listener_updates,
                     publish_hub,
                     move || wake_frames.request(),
                 )
@@ -1985,7 +2031,7 @@ impl OffscreenLynxView {
 mod tests {
     use std::sync::{Arc, mpsc};
 
-    use super::{MainCommand, frame_size};
+    use super::{ListenerUpdate, MainCommand, frame_size};
     use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
     /// A phone-shaped document, ready for a main thread to be started over it.
@@ -2014,19 +2060,24 @@ mod tests {
     }
 
     /// A view with every seam built but no main thread: the command receiver
-    /// is handed back so a test can observe the decision→command seam
-    /// directly. Probes answer `None` and `BeginFrame`s are withheld —
-    /// nobody would ever service them.
-    fn detached() -> (super::OffscreenLynxView, mpsc::Receiver<MainCommand>) {
+    /// and the listener-update sender are handed back so a test can play
+    /// both halves of the main thread's side of the seam. Probes answer
+    /// `None` and `BeginFrame`s are withheld — nobody would ever service
+    /// them.
+    fn detached() -> (
+        super::OffscreenLynxView,
+        mpsc::Receiver<MainCommand>,
+        mpsc::Sender<ListenerUpdate>,
+    ) {
         let document = document();
         let store = Arc::clone(document.image_store());
-        let (view, receiver, _events) = super::LynxView::with_channel(
+        let (view, receiver, _events, listeners) = super::LynxView::with_channel(
             store,
             Viewport::new(393.0, 727.0),
             frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
             Arc::new(|| {}),
         );
-        (view, receiver)
+        (view, receiver, listeners)
     }
 
     #[test]
@@ -2080,7 +2131,7 @@ mod tests {
     fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         use crate::gesture::{EmitEvent, InputDecision, TAP_EVENT};
 
-        let (mut view, commands) = detached();
+        let (mut view, commands, listeners) = detached();
         // The permanent page element's packed handle, as script would name it.
         let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
         let emit = |view: &mut super::OffscreenLynxView| {
@@ -2094,20 +2145,35 @@ mod tests {
             assert!(decisions.is_empty(), "the queue is always drained");
         };
 
+        let publish = |update| {
+            listeners.send(update).expect("the view holds the receiver");
+        };
+
         emit(&mut view);
         assert!(
             commands.try_recv().is_err(),
-            "an empty listener table sends nothing"
+            "an empty listener set sends nothing"
         );
 
-        view.listener_names.note_enabled("pointerup");
+        publish(ListenerUpdate::Available(Arc::from("pointerup")));
+        view.listener_names.sync();
         emit(&mut view);
         assert!(
             commands.try_recv().is_err(),
             "a listener on another name sends nothing"
         );
 
-        view.listener_names.note_enabled(TAP_EVENT);
+        // An update that has not been synced yet is not yet visible: the
+        // replica moves at pass boundaries, which is the one pass of
+        // staleness this design accepts in exchange for the lock.
+        publish(ListenerUpdate::Available(Arc::from(TAP_EVENT)));
+        emit(&mut view);
+        assert!(
+            commands.try_recv().is_err(),
+            "an unsynced registration does not open the name mid-pass"
+        );
+
+        view.listener_names.sync();
         emit(&mut view);
         let command = commands.try_recv().expect("the listened-for name crosses");
         let MainCommand::DispatchEvent {
@@ -2119,12 +2185,52 @@ mod tests {
         assert_eq!(name.as_ref(), TAP_EVENT);
         assert_eq!(sent, target);
 
-        // And the count is a count: the last removal is what closes the name.
-        view.listener_names.note_disabled(TAP_EVENT);
+        // And the edge closes the name again: the main thread publishes the
+        // last removal, and from the next sync nothing crosses.
+        publish(ListenerUpdate::Unavailable(Arc::from(TAP_EVENT)));
+        view.listener_names.sync();
         emit(&mut view);
         assert!(
             commands.try_recv().is_err(),
-            "the removed registration stops the crossing"
+            "the closing edge stops the crossing"
+        );
+    }
+
+    /// A sync applies whatever arrived, in order, and stops at the last of
+    /// it — never blocking on a main thread that may be mid-registration.
+    ///
+    /// The ordering matters because the two edges for one name are a pair:
+    /// a name registered and unregistered between two passes must leave the
+    /// replica closed, not open.
+    #[test]
+    fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
+        let (mut view, _commands, listeners) = detached();
+        let names = &mut view.listener_names;
+
+        names.sync();
+        assert!(!names.contains("tap"), "nothing has been published yet");
+
+        for update in [
+            ListenerUpdate::Available(Arc::from("tap")),
+            ListenerUpdate::Available(Arc::from("scroll")),
+            ListenerUpdate::Unavailable(Arc::from("tap")),
+        ] {
+            listeners.send(update).expect("the view holds the receiver");
+        }
+        names.sync();
+        assert!(
+            !names.contains("tap"),
+            "the closing edge follows the opening one and wins"
+        );
+        assert!(names.contains("scroll"), "the other name stays open");
+
+        // The main thread going away is not an unregistration: what it
+        // published last is still the last true answer.
+        drop(listeners);
+        names.sync();
+        assert!(
+            names.contains("scroll"),
+            "a closed channel leaves the snapshot standing"
         );
     }
 
@@ -2137,7 +2243,7 @@ mod tests {
     fn a_scroll_decision_sends_no_command() {
         use crate::gesture::InputDecision;
 
-        let (mut view, commands) = detached();
+        let (mut view, commands, _listeners) = detached();
         let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
         let mut decisions = vec![InputDecision::Scroll {
             pointer: None,
