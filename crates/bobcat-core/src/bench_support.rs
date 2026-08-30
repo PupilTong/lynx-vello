@@ -10,13 +10,13 @@
 //! not a re-export of the runtime. It is `#[doc(hidden)]` and carries no
 //! stability promise.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use dom::event::EventSteps;
 
 use crate::runtime::{ENTRY_PREAMBLE, MainThreadRuntime};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{FrameHub, SharedListenerNames};
+use crate::view::{FrameHub, ListenerNames};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -25,7 +25,9 @@ use crate::view::{FrameHub, SharedListenerNames};
 #[derive(Debug)]
 pub struct ScriptHarness {
     runtime: MainThreadRuntime,
-    listener_names: Arc<SharedListenerNames>,
+    /// The presenting side's replica of the realm's listener names, so a
+    /// benchmark can ask the question the router asks — and pay what it pays.
+    listener_names: ListenerNames,
 }
 
 impl ScriptHarness {
@@ -38,17 +40,17 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let listener_names = Arc::new(SharedListenerNames::default());
+        let (listener_updates, updates) = mpsc::channel();
         let runtime = MainThreadRuntime::new(
             document,
-            Arc::clone(&listener_names),
+            listener_updates,
             Arc::new(FrameHub::default()),
             || {},
         )
         .expect("the benchmark realm boots");
         Self {
             runtime,
-            listener_names,
+            listener_names: ListenerNames::new(updates),
         }
     }
 
@@ -109,8 +111,12 @@ impl ScriptHarness {
 
     /// Whether the realm has published a listener for this event name — the
     /// question the presenting side asks before it builds anything.
-    #[must_use]
-    pub fn has_listeners(&self, name: &str) -> bool {
+    ///
+    /// Resyncs first, as the start of a routing pass does, so the answer
+    /// accounts for every registration the realm has made so far rather than
+    /// only those a previous call happened to drain.
+    pub fn has_listeners(&mut self, name: &str) -> bool {
+        self.listener_names.sync();
         self.listener_names.contains(name)
     }
 

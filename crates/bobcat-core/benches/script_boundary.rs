@@ -200,9 +200,10 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 
 /// The same target for an event name nothing listens to.
 ///
-/// The presenting side answers this from the shared listener-name table, so
-/// the realistic cost is one lookup; the dispatch below — liveness check,
-/// path build, index miss — is what remains if it ever crosses anyway.
+/// The presenting side answers this from its own listener-name replica — a
+/// pass resync and a set lookup, no lock — so the realistic cost is what
+/// `has_listeners` measures here; the dispatch below — liveness check, path
+/// build, index miss — is what remains if it ever crosses anyway.
 #[divan::bench]
 fn dispatch_with_no_listener(bencher: divan::Bencher) {
     let name: Arc<str> = Arc::from("scroll");

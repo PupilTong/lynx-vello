@@ -84,9 +84,9 @@ pub(crate) const TAP_EVENT: &str = "tap";
 
 /// The published-frame facts the router may ask for while deciding. Borrowed
 /// for exactly one call; the router retains nothing of the host's. Every
-/// answer comes from the committed frame's scroll-slot table and the shared
-/// listener-name table — never from the document, which lives on the main
-/// thread.
+/// answer comes from the committed frame's scroll-slot table and the
+/// presenting thread's own listener-name replica — never from the document,
+/// which lives on the main thread, and never from behind a lock.
 pub(crate) trait RouterHost {
     /// The nearest scroll container on the hit item's containing-block chain
     /// (itself included) the user may scroll on any of `axes`.
@@ -97,7 +97,10 @@ pub(crate) trait RouterHost {
     /// the slot table, and the drag simply ends.
     fn contains_node(&self, node: NodeId) -> bool;
 
-    /// Whether any listener for `name` exists anywhere in the document.
+    /// Whether any listener for `name` exists anywhere in the document, as
+    /// of the pass this call belongs to. The replica behind it is resynced
+    /// once per pass, so an answer cannot change under a decision — and can
+    /// be one pass behind the main thread's index.
     fn has_listener(&self, name: &str) -> bool;
 }
 
