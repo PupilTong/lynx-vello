@@ -72,7 +72,7 @@ fn booted() -> OffscreenLynxView {
         document,
         viewport,
         super::frame_size(32.0, 24.0, 1.0).expect("a bounded target"),
-        Arc::new(|| {}),
+        Arc::new(super::NoWakeup),
         EntryModule {
             source: SLIDER_SCRIPT.to_owned(),
             url: "app:///main.js".to_owned(),

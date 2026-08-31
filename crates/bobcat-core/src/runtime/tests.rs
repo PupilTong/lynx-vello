@@ -1,6 +1,7 @@
 use super::*;
-use crate::pipeline::ListenerNames;
+use crate::link::{PresenterLink, link};
 use crate::tree::{PageConfig, Viewport, new_document};
+use crate::view::NoWakeup;
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -20,7 +21,7 @@ fn no_detail() -> Arc<str> {
     Arc::from("")
 }
 
-fn runtime() -> (MainThreadRuntime, DocumentProbe) {
+fn runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
     runtime_over(new_document(
         Viewport::new(393.0, 727.0),
         PageConfig::default(),
@@ -29,7 +30,7 @@ fn runtime() -> (MainThreadRuntime, DocumentProbe) {
 
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
-fn text_runtime() -> (MainThreadRuntime, DocumentProbe) {
+fn text_runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
 
     let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
@@ -37,7 +38,7 @@ fn text_runtime() -> (MainThreadRuntime, DocumentProbe) {
     runtime_over(document)
 }
 
-fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, DocumentProbe) {
+fn runtime_over(document: LynxDocument) -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
     let (runtime, elements, _) = runtime_over_watching_names(document);
     (runtime, elements)
 }
@@ -45,7 +46,7 @@ fn runtime_over(document: LynxDocument) -> (MainThreadRuntime, DocumentProbe) {
 /// A same-thread window onto the runtime-owned document, so a test can
 /// observe what script built without going through the runtime's own
 /// methods.
-struct DocumentProbe(Rc<RefCell<TreeHandle>>);
+struct DocumentProbe(Rc<RefCell<TreeHandle<NoWakeup>>>);
 
 impl DocumentProbe {
     fn tree(&self) -> RefMut<'_, LynxDocument> {
@@ -56,29 +57,24 @@ impl DocumentProbe {
 /// The presenting side's replica of the realm's name set, driven by
 /// hand: a test resyncs it where a routing pass would and then asks what
 /// the realm has published.
-struct PublishedNames(ListenerNames);
+struct PublishedNames(PresenterLink<NoWakeup>);
 
 impl PublishedNames {
     fn contains(&mut self, name: &str) -> bool {
         self.0.sync();
-        self.0.contains(name)
+        self.0.has_listener(name)
     }
 }
 
-/// The same runtime, plus the replica the presenting side filters
-/// against — so a test can ask what the realm published.
+/// The same runtime, plus the presenting end of its link — so a test can
+/// ask what the realm published.
 fn runtime_over_watching_names(
     document: LynxDocument,
-) -> (MainThreadRuntime, DocumentProbe, PublishedNames) {
-    let (updates, published) = mpsc::channel();
-    let runtime = MainThreadRuntime::new(document, updates, Arc::new(FrameHub::default()), || {})
-        .expect("main-thread runtime");
+) -> (MainThreadRuntime<NoWakeup>, DocumentProbe, PublishedNames) {
+    let (presenter, main) = link(Arc::new(NoWakeup));
+    let runtime = MainThreadRuntime::new(document, main.notify).expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
-    (
-        runtime,
-        probe,
-        PublishedNames(ListenerNames::new(published)),
-    )
+    (runtime, probe, PublishedNames(presenter))
 }
 
 #[test]
@@ -709,17 +705,19 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (updates, published) = mpsc::channel();
-    let state = EventState::new(updates);
+    let (mut presenter, main) = link(Arc::new(NoWakeup));
+    let state = EventState::new(main.notify);
     let (a, b) = (node_id(3), node_id(4));
     // The edges as a sequence, so both what crossed and what did not are
     // one assertion rather than a pair of membership questions.
-    let drain = || {
-        published
-            .try_iter()
-            .map(|update| match update {
-                ListenerUpdate::Available(name) => format!("+{name}"),
-                ListenerUpdate::Unavailable(name) => format!("-{name}"),
+    let mut drain = || {
+        presenter
+            .drain()
+            .into_iter()
+            .map(|notification| match notification {
+                ToPresenter::ListenerAvailable(name) => format!("+{name}"),
+                ToPresenter::ListenerUnavailable(name) => format!("-{name}"),
+                other => panic!("the name index publishes only listener edges, got {other:?}"),
             })
             .collect::<Vec<_>>()
     };

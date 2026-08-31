@@ -18,11 +18,11 @@ fn booted(source: &str) -> OffscreenLynxView {
         crate::tree::Viewport::new(393.0, 727.0),
         crate::tree::PageConfig::default(),
     );
-    let engine = super::LynxView::start(
+    let mut engine = super::LynxView::start(
         document,
         crate::tree::Viewport::new(393.0, 727.0),
         super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        Arc::new(|| {}),
+        Arc::new(super::NoWakeup),
         super::EntryModule {
             source: source.to_owned(),
             url: "app:///main.js".to_owned(),
@@ -604,11 +604,11 @@ fn booted_animated(animation_css: &str) -> OffscreenLynxView {
         crate::tree::PageConfig::default(),
     );
     crate::style::add_style_sheet_text(&mut document, animation_css);
-    let engine = super::LynxView::start(
+    let mut engine = super::LynxView::start(
         document,
         crate::tree::Viewport::new(393.0, 727.0),
         super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        Arc::new(|| {}),
+        Arc::new(super::NoWakeup),
         super::EntryModule {
             source: r"
                 globalThis.renderPage = function () {
@@ -640,7 +640,7 @@ fn booted_animated(animation_css: &str) -> OffscreenLynxView {
 fn synchronized_tick(engine: &mut OffscreenLynxView, now: f64) {
     let seq = engine.begin_frame(now, true).expect("a tick crosses");
     assert!(
-        engine.hub.wait_begin_frame(seq, Duration::from_secs(5)),
+        engine.link.wait_begin_frame(seq, Duration::from_secs(5)),
         "the main thread services the tick"
     );
 }
@@ -697,7 +697,7 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     let seq = engine
         .begin_frame(0.3, false)
         .expect("the passed boundary sends the finish tick");
-    assert!(engine.hub.wait_begin_frame(seq, Duration::from_secs(5)));
+    assert!(engine.link.wait_begin_frame(seq, Duration::from_secs(5)));
     let finished = engine.published_frame().expect("the finish committed");
     assert!(
         !finished.animations_active(),

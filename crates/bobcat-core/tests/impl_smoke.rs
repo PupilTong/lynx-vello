@@ -5,7 +5,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWindow, PageConfig, ViewSources,
+    EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, NoWindow, PageConfig,
+    ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -15,7 +16,7 @@ async fn view(sources: ViewSources) -> Result<LynxView<'static, NoWindow>, LynxV
     LynxView::<NoWindow>::new(
         PageConfig::default(),
         &FetcherDouble::new(Vec::new()),
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         393.0,
         727.0,
         2.0,

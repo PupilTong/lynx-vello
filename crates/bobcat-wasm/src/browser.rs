@@ -123,7 +123,7 @@ impl Window for BrowserWindow {
     }
 }
 
-type BrowserLynxView = LynxView<'static, BrowserWindow>;
+type BrowserLynxView = LynxView<'static, BrowserWindow, EventSignal>;
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.

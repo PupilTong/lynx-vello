@@ -23,7 +23,7 @@ use bobcat_core::{EngineEvent, EventRequester, FrameSize, LynxView, Window as Em
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -61,10 +61,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
         .build()
         .map_err(|error| CliError::Window(error.to_string()))?;
     let proxy = event_loop.create_proxy();
-    let event_proxy = proxy.clone();
-    let event_requester: Arc<dyn EventRequester> = Arc::new(move || {
-        let _ = event_proxy.send_event(UserEvent::Pump);
-    });
+    let event_requester = Arc::new(ProxyWakeup(proxy.clone()));
     let console =
         Console::start(move |command| proxy.send_event(UserEvent::Command(command)).is_ok())
             .map_err(CliError::Console)?;
@@ -82,13 +79,27 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     }
 }
 
+/// This window's wakeup: a user event on winit's loop proxy, which is the
+/// only thing that reaches the run loop from another thread.
+#[derive(Debug)]
+struct ProxyWakeup(EventLoopProxy<UserEvent>);
+
+impl EventRequester for ProxyWakeup {
+    fn request_event(&self) {
+        let _ = self.0.send_event(UserEvent::Pump);
+    }
+}
+
+/// The windowed view this embedder drives, woken through its loop proxy.
+type MacLynxView<'window> = LynxView<'window, MacWindow, ProxyWakeup>;
+
 struct MacApplication<'window> {
     program: Option<Program>,
     input: String,
     initial_width: f32,
     initial_height: f32,
-    view: Option<LynxView<'window, MacWindow>>,
-    event_requester: Arc<dyn EventRequester>,
+    view: Option<MacLynxView<'window>>,
+    event_requester: Arc<ProxyWakeup>,
     window: &'window OnceLock<MacWindow>,
     console: Console,
     occluded: bool,
@@ -115,7 +126,7 @@ impl<'window> MacApplication<'window> {
         program: Program,
         options: &Options,
         console: Console,
-        event_requester: Arc<dyn EventRequester>,
+        event_requester: Arc<ProxyWakeup>,
         window: &'window OnceLock<MacWindow>,
     ) -> Self {
         Self {

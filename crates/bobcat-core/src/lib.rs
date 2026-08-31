@@ -21,7 +21,7 @@
 pub mod bench_support;
 mod clock;
 mod gesture;
-mod pipeline;
+mod link;
 mod quickjs;
 pub mod resource;
 mod runtime;
@@ -43,6 +43,6 @@ pub use tree::PageConfig;
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
-    EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError, NoWindow,
-    OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
+    EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError, NoWakeup,
+    NoWindow, OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
 };

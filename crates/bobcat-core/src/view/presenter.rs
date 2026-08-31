@@ -14,13 +14,12 @@ use rustc_hash::FxHashMap;
 use super::Screenshot;
 use super::graphics::{FrameAcquisition, WindowGraphics};
 use super::loading::LynxViewError;
-use super::main_thread::MainCommand;
 use super::{
-    ComposeKey, EngineError, FrameSize, LynxView, OffscreenLynxView, Output, Window, WindowTarget,
-    frame_size,
+    ComposeKey, EngineError, EventRequester, FrameSize, LynxView, OffscreenLynxView, Output,
+    Window, WindowTarget, frame_size,
 };
 use crate::gesture::{EmitEvent, InputDecision, InputDecisions, RouterHost};
-use crate::pipeline::ListenerNames;
+use crate::link::{PresenterLink, ToMain};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -35,12 +34,12 @@ fn emit_detail(event: &EmitEvent) -> String {
     }
 }
 
-struct FrameRouterHost<'a> {
+struct FrameRouterHost<'a, R: EventRequester> {
     frame: Option<&'a CommittedFrame>,
-    listener_names: &'a ListenerNames,
+    link: &'a PresenterLink<R>,
 }
 
-impl RouterHost for FrameRouterHost<'_> {
+impl<R: EventRequester> RouterHost for FrameRouterHost<'_, R> {
     fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
         let frame = self.frame?;
         let slot = frame.nearest_user_scrollable(from.scroll, axes)?;
@@ -53,7 +52,7 @@ impl RouterHost for FrameRouterHost<'_> {
     }
 
     fn has_listener(&self, name: &str) -> bool {
-        self.listener_names.contains(name)
+        self.link.has_listener(name)
     }
 }
 
@@ -263,11 +262,14 @@ fn route_published(
     )
 }
 
-impl<'window, W: Window> LynxView<'window, W> {
+impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
+    /// Whether the engine owes the timeline another frame, as of the last
+    /// pass that drained the link — a `pump`, a `draw`, or an input. That is
+    /// when a host asks: after answering the wakeup that carried the frame.
     #[must_use]
     pub fn is_animating(&self) -> bool {
-        self.hub
-            .latest()
+        self.link
+            .frame()
             .is_some_and(|frame| frame.animations_active())
             || self.gesture.needs_frame()
     }
@@ -295,14 +297,14 @@ impl<'window, W: Window> LynxView<'window, W> {
     }
 
     fn note_images_changed(&self) {
-        let _ = self.commands.send(MainCommand::NoteImagesChanged);
+        self.link.send(ToMain::NoteImagesChanged);
         self.refresh();
     }
 
     pub fn dispatch_input(&mut self, event: InputEvent) {
-        self.listener_names.sync();
+        self.link.sync();
         let at = self.clock.now_seconds();
-        let published = self.hub.latest();
+        let published = self.link.frame().cloned();
         if let Some(frame) = &published {
             self.scroll_intents.rebase(frame);
         }
@@ -314,7 +316,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         {
             let host = FrameRouterHost {
                 frame,
-                listener_names: &self.listener_names,
+                link: &self.link,
             };
             self.gesture
                 .on_input(&event, target, at, &host, &mut decisions);
@@ -335,7 +337,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             return;
         }
         self.refill_requested_for = Some(frame.commit_id());
-        let _ = self.commands.send(MainCommand::Refill {
+        self.link.send(ToMain::Refill {
             offsets: self.scroll_intents.writeback(),
         });
     }
@@ -346,10 +348,9 @@ impl<'window, W: Window> LynxView<'window, W> {
         published: Option<&CommittedFrame>,
     ) {
         let Self {
-            commands,
+            link,
             gesture,
             scroll_intents,
-            listener_names,
             ..
         } = self;
         for decision in decisions.drain(..) {
@@ -366,10 +367,10 @@ impl<'window, W: Window> LynxView<'window, W> {
                     }
                 }
                 InputDecision::Emit(event) => {
-                    if !listener_names.contains(event.name) {
+                    if !link.has_listener(event.name) {
                         continue;
                     }
-                    let _ = commands.send(MainCommand::DispatchEvent {
+                    link.send(ToMain::DispatchEvent {
                         target: event.target,
                         name: event.name,
                         detail: emit_detail(&event),
@@ -380,13 +381,13 @@ impl<'window, W: Window> LynxView<'window, W> {
     }
 
     pub(super) fn service_gesture_clock(&mut self, now: f64) {
-        self.listener_names.sync();
-        let published = self.hub.latest();
+        self.link.sync();
+        let published = self.link.frame().cloned();
         let mut decisions = InputDecisions::new();
         {
             let host = FrameRouterHost {
                 frame: published.as_deref(),
-                listener_names: &self.listener_names,
+                link: &self.link,
             };
             self.gesture.on_tick(now, &host, &mut decisions);
         }
@@ -407,7 +408,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         if !size_changed && !scale_changed {
             return Ok(());
         }
-        let _ = self.commands.send(MainCommand::Resize {
+        self.link.send(ToMain::Resize {
             width,
             height,
             device_pixel_ratio,
@@ -420,12 +421,13 @@ impl<'window, W: Window> LynxView<'window, W> {
     }
 
     pub fn refresh(&self) {
-        self.frames.request();
+        self.link.request_redraw();
     }
 
     #[must_use]
-    pub fn pump(&self) -> Vec<super::EngineEvent> {
-        self.messages.try_iter().collect()
+    pub fn pump(&mut self) -> Vec<super::EngineEvent> {
+        self.link.sync();
+        self.link.take_events()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -454,25 +456,21 @@ impl<'window, W: Window> LynxView<'window, W> {
             return None;
         }
         let main_ticks_due = self
-            .hub
-            .latest()
+            .link
+            .frame()
             .is_some_and(|frame| frame.needs_main_ticks() || frame.animation_boundary_passed(now));
         if !main_ticks_due && !always {
             return None;
         }
-        self.begin_frames_sent += 1;
-        let seq = self.begin_frames_sent;
-        self.commands
-            .send(MainCommand::BeginFrame { now, seq })
-            .ok()
-            .map(|()| seq)
+        self.link.begin_frame(now)
     }
 
     pub fn draw(&mut self) -> Result<(), EngineError> {
         if !matches!(self.output, Output::Window(_)) {
             return Ok(());
         }
-        if !self.frames.take() && !self.is_animating() {
+        self.link.sync();
+        if !self.link.take_redraw() && !self.is_animating() {
             return Ok(());
         }
         let size = self.frame_size;
@@ -483,7 +481,7 @@ impl<'window, W: Window> LynxView<'window, W> {
             match graphics.acquire(size)? {
                 FrameAcquisition::Ready(acquired) => acquired,
                 FrameAcquisition::Retry => {
-                    self.frames.request();
+                    self.link.request_redraw();
                     return Ok(());
                 }
             }
@@ -491,7 +489,7 @@ impl<'window, W: Window> LynxView<'window, W> {
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
         let _ = self.begin_frame(now, false);
-        let latest = self.hub.latest();
+        let latest = self.link.frame().cloned();
         if let Some(frame) = &latest {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
@@ -526,7 +524,8 @@ impl<'window, W: Window> LynxView<'window, W> {
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         let now = self.clock.now_seconds();
-        let latest = self.hub.latest();
+        self.link.sync();
+        let latest = self.link.frame().cloned();
         let key = latest
             .as_ref()
             .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
@@ -590,7 +589,7 @@ impl<'window, W: Window> LynxView<'window, W> {
     }
 }
 
-impl OffscreenLynxView {
+impl<R: EventRequester> OffscreenLynxView<R> {
     pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
         let gpu = dom::render::gpu::Headless::new()
             .map_err(|error| EngineError::Gpu(error.to_string()))?;
@@ -606,9 +605,10 @@ impl OffscreenLynxView {
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
         if let Some(seq) = self.begin_frame(now, true) {
-            let _ = self.hub.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
+            let _ = self.link.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
         }
-        let Some(frame) = self.hub.latest() else {
+        self.link.sync();
+        let Some(frame) = self.link.frame().cloned() else {
             return Ok(false);
         };
         self.scroll_intents.rebase(&frame);

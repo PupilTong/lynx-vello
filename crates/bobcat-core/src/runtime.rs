@@ -3,16 +3,17 @@
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::pipeline::{FrameHub, ListenerUpdate};
+use crate::link::{ToPresenter, ToPresenterSender};
 use crate::quickjs::ScriptEngine;
 use crate::script::ScriptError;
 use crate::tree::LynxDocument;
+use crate::view::EventRequester;
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -140,25 +141,20 @@ const REMOVALS_PER_COLLECTION: u32 = 32;
 
 /// The main thread's outright ownership of the document, plus the publish
 /// seam its commits leave through.
-struct TreeHandle {
+struct TreeHandle<R: EventRequester> {
     document: LynxDocument,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// Where committed frames are published.
-    hub: Arc<FrameHub>,
-    /// Wakes the presenting side after a publish, through whatever frame
-    /// capability is currently attached.
-    wake: Box<dyn Fn()>,
+    /// Where committed frames leave for the presenting side.
+    notify: ToPresenterSender<R>,
 }
 
-impl TreeHandle {
+impl<R: EventRequester> TreeHandle<R> {
     /// Runs the whole pipeline and publishes the committed frame — the
     /// native half of `__FlushElementTree`, and the only place frames leave
     /// this thread.
     fn flush(&mut self) {
-        let frame = self.document.commit();
-        self.hub.publish(frame);
-        (self.wake)();
+        self.notify.publish_frame(self.document.commit());
     }
 
     /// Commits and publishes only when something is stale — the tail of
@@ -198,7 +194,7 @@ type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
 /// Shared with the host functions that maintain it, so it is `Rc` rather than
 /// owned: the native `enableEventListener` export and the dispatch driver are
 /// different stack frames on the same thread.
-struct EventState {
+struct EventState<R: EventRequester> {
     /// The nodes the realm has a listener on, per event name and pass. Keyed
     /// by name first so a walk resolves it once and then tests each step
     /// without touching the name again — and so an event no listener wants
@@ -209,12 +205,15 @@ struct EventState {
     by_node: RefCell<FxHashMap<dom::NodeId, NodeListeners>>,
     /// Where the presenting thread's replica of the name set is fed from.
     ///
-    /// Published here rather than at a batch boundary because this is where
+    /// Sent from here rather than at a batch boundary because this is where
     /// the realm has just been told, and only on a global edge of
     /// `listeners`: the first registration for a name and the removal of its
     /// last. A second listener for a name already open sends nothing, so the
-    /// traffic is registration edges, never registrations.
-    updates: mpsc::Sender<ListenerUpdate>,
+    /// traffic is registration edges, never registrations. Every send happens
+    /// after the index it announces has been updated and its borrow released,
+    /// so the truth is never behind what has crossed, and no `RefCell` is
+    /// held across one.
+    notify: ToPresenterSender<R>,
     /// Set by the native `stopPropagation` export. A pure flag write: the
     /// realm is inside a `call_module_export` when it runs, and re-entering
     /// the realm from a host function would nest an execution guard, which
@@ -222,25 +221,14 @@ struct EventState {
     stopped: Cell<bool>,
 }
 
-impl EventState {
-    fn new(updates: mpsc::Sender<ListenerUpdate>) -> Self {
+impl<R: EventRequester> EventState<R> {
+    fn new(notify: ToPresenterSender<R>) -> Self {
         Self {
             listeners: RefCell::default(),
             by_node: RefCell::default(),
-            updates,
+            notify,
             stopped: Cell::default(),
         }
-    }
-
-    /// Tells the presenting side about an edge in the name set.
-    ///
-    /// Always after the index has been updated and its borrow released, so
-    /// the truth is never behind what has been published, and a send never
-    /// happens with a `RefCell` held. A closed channel is the view going
-    /// away, which this thread learns about through its command channel
-    /// instead.
-    fn publish(&self, update: ListenerUpdate) {
-        let _ = self.updates.send(update);
     }
 
     /// Records that `node` now has a listener for `(name, capture)`.
@@ -265,7 +253,7 @@ impl EventState {
                 .or_default()
                 .push((Arc::clone(&shared), capture));
             if first_for_name {
-                self.publish(ListenerUpdate::Available(shared));
+                self.notify.send(ToPresenter::ListenerAvailable(shared));
             }
         }
     }
@@ -289,7 +277,7 @@ impl EventState {
         drop(listeners);
         self.forget_node_listener(node, name, capture);
         if let Some(name) = closed {
-            self.publish(ListenerUpdate::Unavailable(name));
+            self.notify.send(ToPresenter::ListenerUnavailable(name));
         }
     }
 
@@ -313,7 +301,7 @@ impl EventState {
         }
         drop(listeners);
         for name in closed {
-            self.publish(ListenerUpdate::Unavailable(name));
+            self.notify.send(ToPresenter::ListenerUnavailable(name));
         }
     }
 
@@ -330,10 +318,10 @@ impl EventState {
 }
 
 /// The private main-thread runtime used by the engine pipeline.
-pub(crate) struct MainThreadRuntime {
+pub(crate) struct MainThreadRuntime<R: EventRequester> {
     engine: ScriptEngine,
-    tree: Rc<RefCell<TreeHandle>>,
-    events: Rc<EventState>,
+    tree: Rc<RefCell<TreeHandle<R>>>,
+    events: Rc<EventState<R>>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -341,7 +329,7 @@ pub(crate) struct MainThreadRuntime {
     next_event_id: u32,
 }
 
-impl fmt::Debug for MainThreadRuntime {
+impl<R: EventRequester> fmt::Debug for MainThreadRuntime<R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MainThreadRuntime")
@@ -349,17 +337,15 @@ impl fmt::Debug for MainThreadRuntime {
     }
 }
 
-impl MainThreadRuntime {
+impl<R: EventRequester> MainThreadRuntime<R> {
     pub(crate) fn new(
         document: LynxDocument,
-        listener_updates: mpsc::Sender<ListenerUpdate>,
-        hub: Arc<FrameHub>,
-        wake: impl Fn() + 'static,
+        notify: ToPresenterSender<R>,
     ) -> Result<Self, MainThreadError> {
         let mut engine = ScriptEngine::new()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let events = Rc::new(EventState::new(listener_updates));
-        let tree = install_bobcat(&mut engine, document, hub, wake, &events)?;
+        let events = Rc::new(EventState::new(notify.clone()));
+        let tree = install_bobcat(&mut engine, document, notify, &events)?;
         Ok(Self {
             engine,
             tree,
@@ -415,7 +401,7 @@ impl MainThreadRuntime {
 
     /// Runs `probe` against the owned document — the observation seam for
     /// everything outside this thread.
-    pub(crate) fn with_document<R>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> R) -> R {
+    pub(crate) fn with_document<T>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> T) -> T {
         probe(&mut self.tree.borrow_mut().document)
     }
 
@@ -574,18 +560,16 @@ __FlushElementTree();
     }
 }
 
-fn install_bobcat(
+fn install_bobcat<R: EventRequester>(
     engine: &mut ScriptEngine,
     document: LynxDocument,
-    hub: Arc<FrameHub>,
-    wake: impl Fn() + 'static,
-    events: &Rc<EventState>,
-) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
+    notify: ToPresenterSender<R>,
+    events: &Rc<EventState<R>>,
+) -> Result<Rc<RefCell<TreeHandle<R>>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         document,
         removals: 0,
-        hub,
-        wake: Box::new(wake),
+        notify,
     }));
 
     install_host_module(engine, &handle, events)?;
@@ -641,10 +625,10 @@ macro_rules! tree_members {
     })*};
 }
 
-fn install_host_module(
+fn install_host_module<R: EventRequester>(
     engine: &mut ScriptEngine,
-    handle: &Rc<RefCell<TreeHandle>>,
-    events: &Rc<EventState>,
+    handle: &Rc<RefCell<TreeHandle<R>>>,
+    events: &Rc<EventState<R>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
         fn createPage() |document| {
@@ -754,9 +738,9 @@ fn install_host_module(
 /// None of them touches the document. The first two only maintain an index —
 /// which nodes are worth visiting — and the third only sets a flag; see
 /// [`EventState::stopped`].
-fn install_event_members(
+fn install_event_members<R: EventRequester>(
     engine: &mut ScriptEngine,
-    events: &Rc<EventState>,
+    events: &Rc<EventState<R>>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
     install(engine, "enableEventListener", 3, move |arguments| {
@@ -794,9 +778,9 @@ fn install_event_members(
 /// whole-block replacement and building it from empty is what the setter
 /// means. Nothing in the realm — the Element PAPI included — receives a
 /// document handle.
-fn install_attribute_members(
+fn install_attribute_members<R: EventRequester>(
     engine: &mut ScriptEngine,
-    handle: &Rc<RefCell<TreeHandle>>,
+    handle: &Rc<RefCell<TreeHandle<R>>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, handle;
         fn setAttribute(
@@ -923,10 +907,10 @@ fn write_record_field(record: &mut String, text: &str) {
     record.push_str(text);
 }
 
-fn borrow_tree<'a>(
+fn borrow_tree<'a, R: EventRequester>(
     function: &str,
-    tree: &'a Rc<RefCell<TreeHandle>>,
-) -> Result<RefMut<'a, TreeHandle>, String> {
+    tree: &'a Rc<RefCell<TreeHandle<R>>>,
+) -> Result<RefMut<'a, TreeHandle<R>>, String> {
     tree.try_borrow_mut()
         .map_err(|_| format!("{function} cannot re-enter the element tree"))
 }

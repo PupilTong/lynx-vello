@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
-    PreparsedStyleSheet, ViewSources,
+    NoWakeup, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe,
+    PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -82,7 +82,7 @@ async fn booted() -> OffscreenLynxView {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         &resources(slider_sheet()),
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         32.0,
         24.0,
         1.0,

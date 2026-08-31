@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
-    LynxView, LynxViewError, NoWindow, PageConfig, PreparsedDeclaration, PreparsedRule,
+    LynxView, LynxViewError, NoWakeup, NoWindow, PageConfig, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
@@ -74,7 +74,7 @@ async fn view_with(
     LynxView::<NoWindow>::new(
         PageConfig::default(),
         fetcher,
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
