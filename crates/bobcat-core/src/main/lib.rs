@@ -5,7 +5,7 @@
 //! every startup resource, boots the realm, and then owns both document and
 //! realm until shutdown.
 
-mod quickjs;
+pub(crate) mod quickjs;
 #[path = "runtime/lib.rs"]
 pub(crate) mod runtime;
 #[path = "tree/lib.rs"]
@@ -30,9 +30,10 @@ use dom::{CommittedFrame, StylePool};
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
+use self::quickjs::ScriptRuntime;
 #[cfg(test)]
 use self::runtime::MainThreadError;
-use self::runtime::{ClockInstant, MainThreadRuntime};
+use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 #[cfg(test)]
 use self::tree::LynxDocument;
 use self::tree::new_document;
@@ -264,12 +265,16 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let MainLink { commands, notify } = link;
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut runtime = MainThreadRuntime::new(build_document(), notify.clone())
+                let mut js_runtime = ScriptRuntime::new()?;
+                install_shared_modules(&mut js_runtime)
                     .map_err(MainThreadError::into_script_error)?;
+                let mut runtime =
+                    MainThreadRuntime::new(&mut js_runtime, build_document(), notify.clone())
+                        .map_err(MainThreadError::into_script_error)?;
                 runtime
-                    .run_main_thread_script(&entry.source, &entry.url)
+                    .run_main_thread_script(&mut js_runtime, &entry.source, &entry.url)
                     .map_err(MainThreadError::into_script_error)?;
-                Ok(runtime)
+                Ok((js_runtime, runtime))
             }))
             .unwrap_or_else(|payload| {
                 Err(platform_script_error(format!(
@@ -278,10 +283,10 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                 )))
             });
             match result {
-                Ok(runtime) => {
+                Ok((mut js_runtime, runtime)) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
                     notify.send(ToPainter::FrameChanged);
-                    serve_main_commands(runtime, &commands, &notify);
+                    serve_main_commands(&mut js_runtime, runtime, &commands, &notify);
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -312,6 +317,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
 /// `None` means the view was cancelled or the painter is already gone: in
 /// both cases nobody is listening for an outcome.
 fn boot<R: EventRequester>(
+    js_runtime: &mut ScriptRuntime,
     viewport: Viewport,
     sources: MainSources,
     commands: &flume::Receiver<ToMain>,
@@ -376,14 +382,14 @@ fn boot<R: EventRequester>(
     if control.is_cancelled() {
         return None;
     }
-    let mut runtime = match MainThreadRuntime::new(document, notify.clone()) {
+    let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify.clone()) {
         Ok(runtime) => runtime,
         Err(error) => return Some(Err(error.into_script_error().into())),
     };
     if control.is_cancelled() {
         return None;
     }
-    if let Err(error) = runtime.run_main_thread_script(&entry.source, &entry.url) {
+    if let Err(error) = runtime.run_main_thread_script(js_runtime, &entry.source, &entry.url) {
         if control.is_cancelled() {
             return None;
         }
@@ -412,8 +418,31 @@ fn run_main_thread<R: EventRequester>(
         })
     }));
 
+    // One runtime per view today; a group hands the same one to every realm
+    // it opens, which is why the modules they share are registered on it.
+    let mut js_runtime =
+        match ScriptRuntime::new()
+            .map_err(LynxViewError::from)
+            .and_then(|mut runtime| {
+                install_shared_modules(&mut runtime)
+                    .map_err(|error| error.into_script_error().into())
+                    .map(|()| runtime)
+            }) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                notify.send(ToPainter::Started(Err(error)));
+                return;
+            }
+        };
     let booted = catch_unwind(AssertUnwindSafe(|| {
-        boot(viewport, sources, &commands, &notify, control)
+        boot(
+            &mut js_runtime,
+            viewport,
+            sources,
+            &commands,
+            &notify,
+            control,
+        )
     }))
     .unwrap_or_else(|payload| {
         Some(Err(EngineError::Thread {
@@ -435,7 +464,7 @@ fn run_main_thread<R: EventRequester>(
             notify.send(ToPainter::FrameChanged);
             notify.send(ToPainter::Started(Ok(())));
             let served = catch_unwind(AssertUnwindSafe(|| {
-                serve_main_commands(runtime, &commands, &notify);
+                serve_main_commands(&mut js_runtime, runtime, &commands, &notify);
             }));
             if let Err(payload) = served {
                 notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
@@ -456,6 +485,7 @@ fn run_main_thread<R: EventRequester>(
 }
 
 fn serve_main_commands<R: EventRequester>(
+    js_runtime: &mut ScriptRuntime,
     mut runtime: MainThreadRuntime<R>,
     commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
@@ -468,6 +498,7 @@ fn serve_main_commands<R: EventRequester>(
                     match command {
                         ToMain::Shutdown => return,
                         command => apply_main_command(
+                            js_runtime,
                             &mut runtime,
                             command,
                             notify,
@@ -484,7 +515,7 @@ fn serve_main_commands<R: EventRequester>(
         // delivered may have cleared a timer that is already due, and on
         // every round rather than only the ones a deadline woke, because a
         // command can arrive while a deadline is already behind us.
-        for failure in runtime.run_due_timers() {
+        for failure in runtime.run_due_timers(js_runtime) {
             notify.send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
         }
         runtime.commit_if_dirty();
@@ -549,6 +580,7 @@ impl Wake for UnparkWaker {
 }
 
 fn apply_main_command<R: EventRequester>(
+    js_runtime: &mut ScriptRuntime,
     runtime: &mut MainThreadRuntime<R>,
     command: ToMain,
     notify: &ToPainterSender<R>,
@@ -564,7 +596,7 @@ fn apply_main_command<R: EventRequester>(
             detail,
         } => {
             let delivered = catch_unwind(AssertUnwindSafe(|| {
-                runtime.dispatch_event(target, name, &detail)
+                runtime.dispatch_event(js_runtime, target, name, &detail)
             }));
             if let Ok(Err(error)) = delivered {
                 notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(

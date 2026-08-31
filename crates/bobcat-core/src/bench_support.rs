@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use dom::event::EventSteps;
 
-use crate::main::runtime::{MainThreadRuntime, entry_module_source};
+use crate::main::quickjs::ScriptRuntime;
+use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 use crate::paint::PainterLink;
 use crate::view::{NoWakeup, main_link};
@@ -25,6 +26,8 @@ use crate::view::{NoWakeup, main_link};
 /// it holds outright.
 #[derive(Debug)]
 pub struct ScriptHarness {
+    /// The runtime the realm lives on, as a group owns one.
+    js_runtime: ScriptRuntime,
     runtime: MainThreadRuntime<NoWakeup>,
     /// The painting end of the same link the engine builds, so a benchmark
     /// can ask the question the router asks — and pay what it pays.
@@ -42,9 +45,12 @@ impl ScriptHarness {
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
         let (painter, main) = main_link(Arc::new(NoWakeup));
-        let runtime =
-            MainThreadRuntime::new(document, main.notify).expect("the benchmark realm boots");
+        let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
+        install_shared_modules(&mut js_runtime).expect("the shared modules register");
+        let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
+            .expect("the benchmark realm boots");
         Self {
+            js_runtime,
             runtime,
             link: painter,
         }
@@ -58,7 +64,7 @@ impl ScriptHarness {
     /// Panics if the script fails.
     pub fn boot(&mut self, source: &str) {
         self.runtime
-            .run_main_thread_script(source, "bench:///main.js")
+            .run_main_thread_script(&mut self.js_runtime, source, "bench:///main.js")
             .expect("the benchmark script boots");
     }
 
@@ -76,7 +82,12 @@ impl ScriptHarness {
     pub fn evaluate(&mut self, source: &str) {
         let source = entry_module_source(source);
         self.runtime
-            .evaluate_module(&source, "bench:///step.mjs", "running a benchmark step")
+            .evaluate_module(
+                &mut self.js_runtime,
+                &source,
+                "bench:///step.mjs",
+                "running a benchmark step",
+            )
             .expect("the benchmark step runs");
     }
 
@@ -101,7 +112,7 @@ impl ScriptHarness {
     pub fn dispatch(&mut self, target: u64, name: &Arc<str>, detail: &Arc<str>) -> bool {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
         self.runtime
-            .dispatch_event(target, name, detail)
+            .dispatch_event(&mut self.js_runtime, target, name, detail)
             .expect("the benchmark dispatch completes")
     }
 
