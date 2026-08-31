@@ -354,6 +354,12 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         })
     }
 
+    /// Publishes no realm state: only the bridge's thread-safe cancellation
+    /// token used while `LynxView::new` is still awaiting startup.
+    pub(crate) fn interrupt_handle(&self) -> quickjs_rust_bridge::InterruptHandle {
+        self.engine.interrupt_handle()
+    }
+
     /// Commits and publishes when anything is stale. Called by the command
     /// loop at the end of every round.
     pub(crate) fn commit_if_dirty(&mut self) {

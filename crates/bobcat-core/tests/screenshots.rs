@@ -94,10 +94,14 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-async fn booted(source: &[u8], sources: ViewSources) -> LynxView {
+fn sources(source: &[u8]) -> ViewSources {
+    let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
+    ViewSources::new(fetcher, SCRIPT_URL)
+}
+
+async fn booted(sources: ViewSources) -> LynxView {
     let mut view = LynxView::new(
         PageConfig::default(),
-        &FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL),
         Arc::new(NoWakeup),
         393.0,
         727.0,
@@ -123,18 +127,20 @@ async fn booted_with_sheet_at(
     width: f32,
     height: f32,
 ) -> LynxView {
-    let mut view = LynxView::new(
-        PageConfig::default(),
-        &FetcherDouble::new(source.to_vec())
+    let fetcher = Arc::new(
+        FetcherDouble::new(source.to_vec())
             .resolving_to(SCRIPT_URL)
             .with_preparsed_style_sheet(sheet),
+    );
+    let mut view = LynxView::new(
+        PageConfig::default(),
         Arc::new(NoWakeup),
         width,
         height,
         1.0,
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(fetcher, SCRIPT_URL)
         },
     )
     .await
@@ -170,7 +176,7 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
 
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
-    let mut view = booted(MAIN_THREAD_SCRIPT.as_bytes(), ViewSources::new(SCRIPT_URL)).await;
+    let mut view = booted(sources(MAIN_THREAD_SCRIPT.as_bytes())).await;
 
     let shot = view.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
@@ -186,13 +192,10 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 /// the `background-image: url(...)` layer the script wrote draws those pixels.
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
-    let mut view = booted(
-        IMAGE_SCRIPT.as_bytes(),
-        ViewSources {
-            image_store: Some(checker_store() as Arc<dyn ImageStore>),
-            ..ViewSources::new(SCRIPT_URL)
-        },
-    )
+    let mut view = booted(ViewSources {
+        image_store: Some(checker_store() as Arc<dyn ImageStore>),
+        ..sources(IMAGE_SCRIPT.as_bytes())
+    })
     .await;
     view.load_image(IMAGE_URL).await.expect("published source");
 
@@ -210,14 +213,11 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 
     // Selecting the face by name is what proves the container registered: an
     // unknown default family fails the construction.
-    let mut view = booted(
-        TEXT_SCRIPT.as_bytes(),
-        ViewSources {
-            fonts: vec![FontBlob::from_static(ROBOTO)],
-            default_font_family: Some("Roboto".to_owned()),
-            ..ViewSources::new(SCRIPT_URL)
-        },
-    )
+    let mut view = booted(ViewSources {
+        fonts: vec![FontBlob::from_static(ROBOTO)],
+        default_font_family: Some("Roboto".to_owned()),
+        ..sources(TEXT_SCRIPT.as_bytes())
+    })
     .await;
 
     let shot = view.capture().expect("capture the committed page");

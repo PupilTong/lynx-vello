@@ -94,6 +94,13 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))
     }
 
+    /// A thread-safe handle used only to cancel startup while author code is
+    /// synchronously executing. Realm values and the runtime itself remain on
+    /// the Lynx main thread.
+    pub(crate) fn interrupt_handle(&self) -> quickjs::InterruptHandle {
+        self.runtime.interrupt_handle()
+    }
+
     fn with_config(config: QuickJsConfig) -> Result<Self, quickjs::Error> {
         let runtime = quickjs::Runtime::with_options(config.runtime_options)?;
         let realm = runtime.create_context()?;

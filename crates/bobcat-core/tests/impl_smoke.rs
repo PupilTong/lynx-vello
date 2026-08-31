@@ -14,7 +14,6 @@ const ENTRY: &str = "main.js";
 async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
     LynxView::new(
         PageConfig::default(),
-        &FetcherDouble::new(Vec::new()),
         Arc::new(NoWakeup),
         393.0,
         727.0,
@@ -24,6 +23,10 @@ async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
     .await
 }
 
+fn sources() -> ViewSources {
+    ViewSources::new(Arc::new(FetcherDouble::new(Vec::new())), ENTRY)
+}
+
 #[tokio::test]
 async fn host_capabilities_compose_into_the_opaque_view() {
     let images = Arc::new(flashbulb::TestImages::new());
@@ -31,7 +34,7 @@ async fn host_capabilities_compose_into_the_opaque_view() {
 
     let mut view = view(ViewSources {
         image_store: Some(Arc::clone(&images) as Arc<dyn ImageStore>),
-        ..ViewSources::new(ENTRY)
+        ..sources()
     })
     .await
     .expect("opaque view");
@@ -60,7 +63,7 @@ async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
-        ..ViewSources::new(ENTRY)
+        ..sources()
     };
     assert!(matches!(
         view(unusable).await.expect_err("no usable face registered"),

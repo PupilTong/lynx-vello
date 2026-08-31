@@ -36,9 +36,10 @@ bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
 pool; that renderer owns a sequence of non-overlapping native views, none
-until the first load, each later load dropping the current view and closing
-its sole command sender. The detached per-view Lynx-main Worker drops its
-thread-bound realm and exits naturally; the replacement does not join it. The
+until the first load, each later load dropping the current view. Core
+explicitly stops and joins the per-view Lynx-main Worker after it drops its
+document and thread-bound realm; only then can replacement construction
+begin. The
 process-wide pool adopts the persistent Render Worker as index zero and
 remains valid across loads. The configured count covers that owner plus at
 least one managed Stylo Worker; each live view's Lynx-main Worker is separate.
@@ -99,26 +100,27 @@ Lynx main Worker, so the realm remains owner-thread-bound and uses Bobcat's
 primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 
-Startup is one synchronous host boundary over an asynchronous ESM evaluation.
-QuickJS preloads `bobcat:runtime`, `bobcat:element`, and the resolved entry URL;
+Startup is an asynchronous host boundary whose owned work runs on the Lynx
+main Worker. It creates the document, awaits core resource futures, mounts the
+stylesheets, then creates QuickJS and preloads `bobcat:runtime`,
+`bobcat:element`, and the resolved entry URL;
 the `bobcat:boot` module uses top-level await to import the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
 element tree. QuickJS drains its owned pending-job queue until that
-module-evaluation promise settles, so boot completion is exactly the
-`ScriptFinished` or `ScriptRunError` engine event. No browser microtask
-checkpoint or timer interception participates in completion; the fallback
-listener is retained inside the preloaded runtime ESM rather than by the
-browser.
+module-evaluation promise settles. `LynxView::new` resolves only after that
+boot succeeds and rejects on any resource, font, realm, or boot failure, so a
+failed startup never exposes a half-initialized view. `ScriptFinished` remains
+queued as the successful lifecycle edge consumed by the browser loop. No
+browser microtask checkpoint or timer interception participates in completion;
+the fallback listener is retained inside the preloaded runtime ESM rather than
+by the browser.
 
-Boot's outcome decides the load's response, not the page's life: the Render
-Worker's wakeup loop runs whether the entry module finished or threw, because
-a failed page still has a view that scrolls, resizes, and holds published
-frames to draw. `ListenerFailed` is written to the browser console without
-stopping the page, while a later script-Worker failure remains fatal; neither
-is tied to animation frames, so a hidden document cannot strand it. A load
-advances the loop's generation before replacing the native view, so an old
-page cannot consume the new page's event.
+`ListenerFailed` is written to the browser console without stopping the page,
+while a later script-Worker failure remains fatal; neither is tied to animation
+frames, so a hidden document cannot strand it. A load advances the loop's
+generation before replacing the native view, so an old page cannot consume the
+new page's event.
 
 There is no browser create/append/drop/flush/direct-stylesheet API. Element
 mutation is reachable only from the fetched entry MTS module through the named

@@ -5,8 +5,8 @@ The document, Element-PAPI tree, script realm, renderer scheduler, and the
 commit/publish protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
-- a `ResourceFetcher`, borrowed for construction only;
-- a `ViewSources`: owned font bytes, an optional default font family, an
+- a `ViewSources`: an owned `Arc<dyn ResourceFetcher>`, owned font bytes, an
+  optional default font family, an
   optional `ImageStore` — which owns every decoded image the view draws —
   author stylesheet URLs in cascade order, and the one entry MTS module URL;
 - an `EventRequester`, the one wakeup the engine has for the embedder's
@@ -25,19 +25,20 @@ The source tree mirrors the three runtime owners:
 ```text
 crates/bobcat-core/src/
   view/lib.rs          shared values, messages, and channel construction
-  user/lib.rs          LynxView, source loading, and the embedder-side link
+  user/lib.rs          LynxView, startup guard, and the embedder-side link
   paint/lib.rs         Painter, frame clock, and paint-owned link replicas
   paint/gesture.rs     input arbitration
   paint/graphics.rs    window GPU state
-  main/lib.rs          Lynx main-thread startup, inbox, and notifications
+  main/lib.rs          document creation, source loading, startup, and inbox
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration
   main/tree/lib.rs     Lynx document and UA component policy
 ```
 
-Values that actually cross threads (`Viewport`, `EntryModule`, commands, and
-events) stay in `view`; a stateful type whose owner is fixed lives under
-`user`, `paint`, or `main`.
+Shared command, event, viewport, and channel vocabulary stays in `view`; a
+stateful type whose owner is fixed lives under `user`, `paint`, or `main`.
+`ViewSources` moves once from `user` into the main-owned startup request, and
+the fetched entry module never leaves `main`.
 
 The dependency graph is:
 
@@ -140,24 +141,32 @@ its Render Worker after fetching one XML URL. Neither embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 
-`LynxView::new` fetches every `ViewSources` URL through the injected resource
-contract — the author stylesheets first, each answered with CSS text or a
-host-decoded `PreparsedStyleSheet`, then the UTF-8 entry MTS module — mounts them
-as author-origin rules on a fresh document, and starts the engine-owned Lynx main
-thread over it before returning. The resolved entry URL becomes its exact module
-specifier; a source that will not load, or a thread that will not start, yields
-`LynxViewError` and no view. A default family neither the containers nor the
-platform has fails with `EngineError::UnknownFontFamily`. Boot completion is
-reported by `LynxView::pump` as `EngineEvent::ScriptFinished` on success or
-`EngineEvent::ScriptRunError` on a fatal boot-time failure. A platform failure on
-the Lynx main thread may also report `ScriptRunError` after boot. The engine
-enqueues every event before invoking the construction-time `EventRequester`, so
-the host can pump immediately without polling. Requests carry a specifier plus
-its optional base URL, not a semantic resource kind or transport hints. The
-embedder locates bytes by normalized resolved URL; `fetch_style_sheet` selects
-the stylesheet payload contract. Other buffered loads use `fetch_resource`, and
-a `ResourceRequest` carries no response-size limit; each fetcher owns the memory
-bound for the response it materializes.
+`LynxView::new` validates the viewport, creates both links, starts
+`bobcat-main` and the presenter, and asynchronously awaits one startup result.
+`bobcat-main` creates the fresh document itself, registers fonts and the image
+store, fetches each author stylesheet through the `ResourceFetcher` owned by
+`ViewSources`, mounts those sheets in cascade order, fetches the UTF-8 entry
+MTS module, creates QuickJS, and completes boot before answering. The actual
+network or file IO may run wherever the fetcher chooses; every fetch call,
+future continuation, document mutation, and post-fetch action runs on
+`bobcat-main`.
+
+The resolved entry URL becomes its exact module specifier. A resource,
+encoding, font, realm, script-boot, or thread failure yields `LynxViewError`
+and no view. Dropping the unresolved constructor cancels a pending resource
+future or interrupts active startup JavaScript, explicitly stops the
+presenter, and joins both engine-owned threads. Successful construction has
+already completed boot; `EngineEvent::ScriptFinished` remains queued for
+compatibility with the host's lifecycle loop. `ScriptRunError` is reserved for
+a fatal owner-thread failure after startup, while `ListenerFailed` remains
+non-fatal. The engine enqueues every event before invoking the
+construction-time `EventRequester`, so the host can pump immediately without
+polling. Requests carry a specifier plus its optional base URL, not a semantic
+resource kind or transport hints. The embedder locates bytes by normalized
+resolved URL; `fetch_style_sheet` selects the stylesheet payload contract.
+Other buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
+response-size limit; each fetcher owns the memory bound for the response it
+materializes.
 
 ## Public and private boundaries
 
@@ -469,14 +478,13 @@ not the browser facade.
 
 Wasm follows the native ownership model with one thread fewer: every
 `LynxView` spawns and owns one Lynx-main Worker — the Render Worker is
-already the presenter — and dropping that view closes its link so the
-Worker drops its QuickJS realm and exits. Independent views are not a
-process-global singleton. The npm facade keeps at most one live view per
-`BobcatRenderer`: `create` builds none, and each `load` replaces the view
-before it, retaining the Render Worker, transferred canvas, Wasm instance, and
-wrapper state. It does not join the detached script Worker: the
-closed command channel makes that Worker drop its thread-bound realm and exit
-naturally, and independent views may overlap during that brief teardown.
+already the presenter — and dropping that view explicitly shuts down and
+joins the Worker after it drops its document and QuickJS realm. Independent
+views are not a process-global singleton. The npm facade keeps at most one
+live view per `BobcatRenderer`: `create` builds none, and each `load` replaces
+the view before it, retaining the Render Worker, transferred canvas, Wasm
+instance, and wrapper state. Replacement construction therefore cannot
+overlap the old view's teardown.
 
 Only the Stylo Rayon pool is process-wide. It adopts the persistent Render
 Worker as index zero rather than a view's transient Lynx-main Worker, and adds
@@ -493,14 +501,16 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `LynxView::new` fetches the `ViewSources`' stylesheets and entry MTS source
-   through `ResourceFetcher`.
-2. It builds the private document from `PageConfig`, device metrics, and those
-   sheets, then spawns the target-specific Lynx main task over it — the
-   document's owner for the rest of its life.
-3. The task creates the QuickJS realm, installs Bobcat callbacks, preloads
+1. `LynxView::new` validates the metrics, creates both channel pairs, starts
+   `bobcat-main` and the presenter, then awaits a startup oneshot.
+2. `bobcat-main` creates the private document from `PageConfig` and the device
+   metrics, registers fonts and the image store, and awaits the `ViewSources`'
+   stylesheets and entry MTS source through its owned `ResourceFetcher`.
+3. Still on `bobcat-main`, it mounts the sheets, creates the QuickJS realm,
+   installs Bobcat callbacks, preloads
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
-   TLA-based `bobcat:boot` module.
+   TLA-based `bobcat:boot` module. Only complete success answers the startup
+   oneshot; cancellation tears both engine-owned threads down.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
    scene encode — writes the `Arc<CommittedFrame>` into the mailbox, announces
    it on the `ToPresenter` FIFO, and wakes the presenter with one more command
@@ -515,8 +525,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    presenter shares the host's thread, `LynxView::is_animating` is that
    continuation signal instead and the embedder paces it against the display
    it holds (`requestAnimationFrame` on a canvas).
-6. The presenter forwards the sanitized script completion to the host and
-   calls `EventRequester`; the awakened host observes it through `pump`. A
+6. The successful boot notification remains queued for the presenter, which
+   forwards it to the host and calls `EventRequester`; the awakened host
+   observes it through `pump`. A
    draw that fails arrives the same way, once, as
    `EngineEvent::RenderFailed`. No realm or tree object crosses either
    boundary.
