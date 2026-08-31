@@ -548,6 +548,52 @@ impl TileGrid {
     }
 }
 
+/// Which shape a clipped fill resolves to, decided without looking at what
+/// is being painted.
+///
+/// Every input is geometry: the clip shape and the rect to be covered. No
+/// branch reads a brush, a gradient or a pixel — which is what lets an image
+/// fill be described on one thread and encoded on another, with the pixels
+/// supplied only at encode time.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum FillPlan {
+    /// Degenerate: a zero-area draw, or a clip the draw misses entirely.
+    /// Nothing is painted.
+    None,
+    /// The draw covers the whole clip, so the clip shape is filled directly.
+    Shape,
+    /// A rectangular clip the draw only partly covers: fill the
+    /// intersection, no layer needed.
+    Rect(Rect),
+    /// A rounded clip the draw only partly covers: the fill needs a real
+    /// clip layer around it.
+    Clipped(Rect),
+}
+
+/// The shape a fill of `draw` inside `clip` resolves to.
+pub(super) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
+    if draw.width() <= 0.0 || draw.height() <= 0.0 {
+        return FillPlan::None;
+    }
+    let bounds = clip.bounding_box();
+    let covers = draw.x0 <= bounds.x0 + EPS
+        && draw.y0 <= bounds.y0 + EPS
+        && draw.x1 >= bounds.x1 - EPS
+        && draw.y1 >= bounds.y1 - EPS;
+    if covers {
+        FillPlan::Shape
+    } else if let BoxShape::Rect(rect) = clip {
+        let both = rect.intersect(draw);
+        if both.width() > 0.0 && both.height() > 0.0 {
+            FillPlan::Rect(both)
+        } else {
+            FillPlan::None
+        }
+    } else {
+        FillPlan::Clipped(draw)
+    }
+}
+
 fn fill_area(
     scene: &mut Scene,
     transform: Affine,
@@ -556,31 +602,25 @@ fn fill_area(
     brush: BrushRef<'_>,
     brush_transform: Option<Affine>,
 ) {
-    if draw.width() <= 0.0 || draw.height() <= 0.0 {
-        return;
-    }
-    let bounds = clip.bounding_box();
-    let covers = draw.x0 <= bounds.x0 + EPS
-        && draw.y0 <= bounds.y0 + EPS
-        && draw.x1 >= bounds.x1 - EPS
-        && draw.y1 >= bounds.y1 - EPS;
-    if covers {
-        with_shape!(clip, |s| scene.fill(
-            Fill::NonZero,
-            transform,
-            brush,
-            brush_transform,
-            s
-        ));
-    } else if let BoxShape::Rect(rect) = clip {
-        let both = rect.intersect(draw);
-        if both.width() > 0.0 && both.height() > 0.0 {
+    match fill_plan(clip, draw) {
+        FillPlan::None => {}
+        FillPlan::Shape => {
+            with_shape!(clip, |s| scene.fill(
+                Fill::NonZero,
+                transform,
+                brush,
+                brush_transform,
+                s
+            ));
+        }
+        FillPlan::Rect(both) => {
             scene.fill(Fill::NonZero, transform, brush, brush_transform, &both);
         }
-    } else {
-        with_shape!(clip, |s| scene.push_clip_layer(Fill::NonZero, transform, s));
-        scene.fill(Fill::NonZero, transform, brush, brush_transform, &draw);
-        scene.pop_layer();
+        FillPlan::Clipped(draw) => {
+            with_shape!(clip, |s| scene.push_clip_layer(Fill::NonZero, transform, s));
+            scene.fill(Fill::NonZero, transform, brush, brush_transform, &draw);
+            scene.pop_layer();
+        }
     }
 }
 

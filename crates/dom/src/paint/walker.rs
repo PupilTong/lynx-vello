@@ -749,7 +749,7 @@ fn paint_item<T>(
         scale,
     } = painting;
     sync_clips(sink, scratch, frame, item, scale);
-    let scene = sink.scene_for(frame.item_compose_chain(item));
+    let chain = frame.item_compose_chain(item);
     let transform = scale * local;
 
     match item.kind {
@@ -763,12 +763,23 @@ fn paint_item<T>(
             let fragment = BoxFragment::new(transform, item.size, item.radii, layout);
             let text_clip =
                 background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
-            shadow::paint_outset(scene, &mut scratch.paths, style, &fragment);
-            background::paint(scene, style, &fragment, images, text_clip.as_ref());
-            shadow::paint_inset(scene, &mut scratch.paths, style, &fragment);
+            // Each painter re-acquires the fragment rather than sharing one
+            // borrow across the item: an image draw between them is a
+            // program op, which cuts the open fragment. `fragment_for` cuts
+            // only when the chain actually changed, so re-acquiring where
+            // nothing was emitted costs a comparison.
+            shadow::paint_outset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            background::paint(
+                sink.scene_for(chain),
+                style,
+                &fragment,
+                images,
+                text_clip.as_ref(),
+            );
+            shadow::paint_inset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
             if let Some(source) = document.image_source(item.node) {
                 background::paint_replaced_content(
-                    scene,
+                    sink.scene_for(chain),
                     style,
                     &fragment,
                     images,
@@ -776,8 +787,8 @@ fn paint_item<T>(
                     document.natural_size(item.node),
                 );
             }
-            border::paint(scene, &mut scratch.paths, style, &fragment);
-            border::paint_outline(scene, &mut scratch.paths, style, &fragment);
+            border::paint(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            border::paint_outline(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
         }
         PaintItemKind::TextRun { element } => {
             let Some(style) = document.paint_style(element) else {
@@ -789,7 +800,14 @@ fn paint_item<T>(
             let decorations = text::propagated_decorations(document, element);
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
-            text::paint(scene, style, layout, transform, &decorations, gradient_box);
+            text::paint(
+                sink.scene_for(chain),
+                style,
+                layout,
+                transform,
+                &decorations,
+                gradient_box,
+            );
         }
     }
 }
