@@ -16,7 +16,7 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig, ViewSources, Window,
+    EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig, ViewSources,
     WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
@@ -110,20 +110,11 @@ impl Future for EventWait {
     }
 }
 
-/// Browser marker for a view whose owned surface target lives in a Render
-/// Worker. No value of this type is ever constructed.
-#[derive(Debug)]
-enum BrowserWindow {}
-
-impl Window for BrowserWindow {
-    type Target<'window> = WindowTarget<'window>;
-
-    fn target(&self) -> Self::Target<'_> {
-        match *self {}
-    }
-}
-
-type BrowserLynxView = LynxView<'static, BrowserWindow, EventSignal>;
+/// The view this Worker drives. Its presenter is this very thread: `wgpu`'s
+/// handles are not `Send` under shared memory and an `OffscreenCanvas` cannot
+/// be transferred on again, so the painter stays where the canvas is and
+/// [`BobcatRenderer::pump`] is the turn it runs in.
+type BrowserLynxView = LynxView<EventSignal>;
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
@@ -449,10 +440,8 @@ impl BobcatRenderer {
         self.resources.clear();
         let mut view = built.map_err(js_error)?;
         set_canvas_size(&self.canvas, view.frame_size());
-        let target: WindowTarget<'static> = WindowTarget::OffscreenCanvas(self.canvas.clone());
-        view.attach_target(target, view.frame_size())
-            .await
-            .map_err(js_error)?;
+        let target: WindowTarget = WindowTarget::OffscreenCanvas(self.canvas.clone());
+        view.attach_target(target).await.map_err(js_error)?;
         self.view = Some(view);
         Ok(())
     }
@@ -572,46 +561,48 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Answer one durable engine wakeup: drain the engine's lifecycle events
-    /// and draw the frame it asked for, if it asked for one. Returns whether
-    /// the entry module has finished booting.
+    /// Answer one durable engine wakeup: run the presenter's turn on this
+    /// Worker — routing whatever was queued, drawing the frame it owes — and
+    /// hand back the lifecycle events it produced. Returns whether the entry
+    /// module has finished booting.
     ///
-    /// One call covers both because the engine has one wakeup: a commit and a
-    /// `ScriptFinished` arrive on the same signal, and the Worker turn that
-    /// observes it is the turn that presents — no animation-frame callback
-    /// sits between a committed frame and the canvas. No timestamp crosses
-    /// either: the animation timeline is core's own clock, read on this
-    /// Worker once the canvas surface has handed over an image.
+    /// One call covers everything because the engine has one wakeup: a commit
+    /// and a `ScriptFinished` arrive on the same signal, and the Worker turn
+    /// that observes it is the turn that presents — no animation-frame
+    /// callback sits between a committed frame and the canvas. No timestamp
+    /// crosses either: the animation timeline is core's own clock, read on
+    /// this Worker once the canvas surface has handed over an image.
+    ///
+    /// A fatal error is reported after the turn, never instead of it: the
+    /// frame a failed script did commit still reaches the canvas, with nobody
+    /// left to ask for another.
     #[wasm_bindgen(js_name = pump)]
     pub fn pump(&mut self) -> Result<bool, JsValue> {
         self.ensure_running()?;
-        let drained = self.events.take();
+        // Clear the durable edge before serving, so anything the turn itself
+        // publishes re-arms it and the Worker comes back for it.
+        self.events.take();
         let Some(view) = self.view.as_mut() else {
             return Ok(self.script_finished);
         };
         let mut fatal = None;
-        if drained {
-            for event in view.pump() {
-                match event {
-                    EngineEvent::ScriptFinished => self.script_finished = true,
-                    // Held back rather than returned: the events and the frame
-                    // ride one wakeup, and leaving before the draw would spend
-                    // that wakeup without producing the frame the failed
-                    // script did commit — with nobody left to ask for another.
-                    // The first failure is the one reported.
-                    EngineEvent::ScriptRunError(error) if fatal.is_none() => {
-                        fatal = Some(js_error(error));
-                    }
-                    EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
-                    _ => {}
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => self.script_finished = true,
+                // The first failure is the one reported.
+                EngineEvent::ScriptRunError(error) if fatal.is_none() => {
+                    fatal = Some(js_error(error));
                 }
+                EngineEvent::RenderFailed(error) if fatal.is_none() => {
+                    fatal = Some(js_error(error));
+                }
+                EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
+                _ => {}
             }
         }
-        let drawn = view.draw();
         if let Some(error) = fatal {
             return Err(error);
         }
-        drawn.map_err(js_error)?;
         Ok(self.script_finished)
     }
 

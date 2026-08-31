@@ -28,7 +28,7 @@ pub struct ScriptHarness {
     runtime: MainThreadRuntime<NoWakeup>,
     /// The presenting end of the same link the engine builds, so a benchmark
     /// can ask the question the router asks — and pay what it pays.
-    link: PresenterLink<NoWakeup>,
+    link: PresenterLink,
 }
 
 impl ScriptHarness {

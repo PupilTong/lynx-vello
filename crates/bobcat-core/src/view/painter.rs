@@ -1,9 +1,18 @@
-//! Presenting-thread input, scrolling, composition, and draw targets.
+//! The presenter thread's object: input routing, scrolling, composition,
+//! and every draw target the view has.
+//!
+//! Everything here runs on one engine-owned thread. It answers the host
+//! through its [`PainterLink`] and the Lynx main thread through its
+//! [`PresenterLink`], and nothing it owns — a surface, a scene buffer, a
+//! gesture arena — is ever touched from anywhere else.
 
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dom::input::{InputEvent, InputKind};
+use dom::render::gpu::Headless;
 use dom::scroll::ScrollAxes;
 use dom::vello::Scene;
 use dom::vello::peniko::Color;
@@ -13,15 +22,66 @@ use rustc_hash::FxHashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use super::Screenshot;
 use super::graphics::{FrameAcquisition, WindowGraphics};
-use super::loading::LynxViewError;
-use super::{
-    ComposeKey, EngineError, EventRequester, FrameSize, LynxView, OffscreenLynxView, Output,
-    Window, WindowTarget, frame_size,
-};
-use crate::gesture::{EmitEvent, InputDecision, InputDecisions, RouterHost};
-use crate::link::{PresenterLink, ToMain};
+use super::{ComposeKey, EngineError, EngineEvent, EventRequester, FrameSize};
+use crate::clock::FrameClock;
+use crate::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
+use crate::link::{MainLink, PainterLink, PresenterLink, ToMain, ToPainter, link};
+use crate::tree::Viewport;
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the presenter waits before asking a swap chain that had nothing
+/// to give. Half a display refresh: soon enough that a transient miss costs
+/// no visible frame, slow enough that a window the compositor has stopped
+/// serving does not cost a core.
+const SWAP_CHAIN_RETRY: Duration = Duration::from_millis(8);
+
+/// Where a view's pixels go: nowhere yet, an offscreen GPU target, or a
+/// window's presentation stack.
+pub(super) enum Output {
+    None,
+    Offscreen(Box<Headless>),
+    Window(Box<WindowGraphics>),
+}
+
+/// The presenting half of a running view, on the thread that owns it.
+///
+/// Kept on that thread by construction — the `Rc` marker makes the whole
+/// struct `!Send`, so the only way it reaches the presenter is to be built
+/// there.
+pub(crate) struct Painter {
+    // Keep first: dropping the link closes the sole command sender, which
+    // wakes the Lynx main thread before any state it may still refer to is
+    // released.
+    pub(super) link: PresenterLink,
+    #[cfg(test)]
+    pub(super) detached: bool,
+    viewport: Viewport,
+    frame_size: FrameSize,
+    output: Output,
+    /// A window nobody can see draws nothing; the frame it owes stays owed.
+    occluded: bool,
+    /// A draw target that failed once cannot be reached again: it is reported
+    /// once, and nothing tries to paint it until another target arrives.
+    render_failed: bool,
+    pub(super) gesture: GestureRouter,
+    pub(super) clock: FrameClock,
+    pub(super) scroll_intents: ScrollIntents,
+    composed: Option<ComposeKey>,
+    composed_scene: Scene,
+    refill_requested_for: Option<u64>,
+    thread_bound: PhantomData<Rc<()>>,
+}
+
+impl std::fmt::Debug for Painter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Painter")
+            .field("viewport", &self.viewport)
+            .field("frame_size", &self.frame_size)
+            .finish_non_exhaustive()
+    }
+}
 
 fn emit_detail(event: &EmitEvent) -> String {
     let position = event.position;
@@ -34,12 +94,12 @@ fn emit_detail(event: &EmitEvent) -> String {
     }
 }
 
-struct FrameRouterHost<'a, R: EventRequester> {
+struct FrameRouterHost<'a> {
     frame: Option<&'a CommittedFrame>,
-    link: &'a PresenterLink<R>,
+    link: &'a PresenterLink,
 }
 
-impl<R: EventRequester> RouterHost for FrameRouterHost<'_, R> {
+impl RouterHost for FrameRouterHost<'_> {
     fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
         let frame = self.frame?;
         let slot = frame.nearest_user_scrollable(from.scroll, axes)?;
@@ -213,7 +273,7 @@ fn composite_scene<'frame>(
 }
 
 fn paint_window(
-    graphics: &mut WindowGraphics<'_>,
+    graphics: &mut WindowGraphics,
     intents: &ScrollIntents,
     buffer: &mut Scene,
     frame: &CommittedFrame,
@@ -262,38 +322,45 @@ fn route_published(
     )
 }
 
-impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
+impl Painter {
+    /// The painter and the other end of its link, with no Lynx main thread
+    /// started over it yet — the seam `start` spawns through, and the one a
+    /// test plays the main thread's half of.
+    pub(super) fn with_link<R: EventRequester>(
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<R>,
+    ) -> (Self, MainLink<R>) {
+        let (presenter, main) = link(event_requester);
+        let painter = Self {
+            link: presenter,
+            #[cfg(test)]
+            detached: true,
+            viewport,
+            frame_size,
+            output: Output::None,
+            occluded: false,
+            render_failed: false,
+            gesture: GestureRouter::default(),
+            clock: FrameClock::new(),
+            scroll_intents: ScrollIntents::default(),
+            composed: None,
+            composed_scene: Scene::new(),
+            refill_requested_for: None,
+            thread_bound: PhantomData,
+        };
+        (painter, main)
+    }
+
     /// Whether the engine owes the timeline another frame, as of the last
     /// pass that drained the link — a `pump`, a `draw`, or an input. That is
     /// when a host asks: after answering the wakeup that carried the frame.
     #[must_use]
-    pub fn is_animating(&self) -> bool {
+    pub(super) fn is_animating(&self) -> bool {
         self.link
             .frame()
             .is_some_and(|frame| frame.animations_active())
             || self.gesture.needs_frame()
-    }
-
-    pub async fn load_image(&self, source: &str) -> Result<(), LynxViewError> {
-        let store = Arc::clone(&self.image_store);
-        store
-            .get(source)
-            .await
-            .map_err(|error| LynxViewError::Image {
-                image_source: source.to_owned(),
-                message: error.to_string(),
-            })?;
-        self.note_images_changed();
-        Ok(())
-    }
-
-    pub fn prefetch_image(&self, source: &str) {
-        self.image_store.prefetch(source);
-    }
-
-    #[must_use]
-    pub const fn frame_size(&self) -> FrameSize {
-        self.frame_size
     }
 
     fn note_images_changed(&self) {
@@ -301,7 +368,7 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
         self.refresh();
     }
 
-    pub fn dispatch_input(&mut self, event: InputEvent) {
+    pub(super) fn dispatch_input(&mut self, event: InputEvent) {
         self.link.sync();
         let at = self.clock.now_seconds();
         let published = self.link.frame().cloned();
@@ -394,60 +461,43 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
         self.execute_decisions(&mut decisions, published.as_deref());
     }
 
-    pub fn resize(
-        &mut self,
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    ) -> Result<(), EngineError> {
-        let next_size = frame_size(width, height, device_pixel_ratio)?;
-        let size_changed = self.viewport.width.to_bits() != width.to_bits()
-            || self.viewport.height.to_bits() != height.to_bits();
-        let scale_changed =
-            self.viewport.device_pixel_ratio.to_bits() != device_pixel_ratio.to_bits();
-        if !size_changed && !scale_changed {
-            return Ok(());
-        }
+    /// Applies the host's new metrics. The host validated them and computed
+    /// the frame size, so nothing here can fail.
+    fn resize(&mut self, viewport: Viewport, frame_size: FrameSize) {
         self.link.send(ToMain::Resize {
-            width,
-            height,
-            device_pixel_ratio,
+            width: viewport.width,
+            height: viewport.height,
+            device_pixel_ratio: viewport.device_pixel_ratio,
         });
-        self.viewport =
-            crate::tree::Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        self.frame_size = next_size;
+        self.viewport = viewport;
+        self.frame_size = frame_size;
         self.refresh();
-        Ok(())
     }
 
-    pub fn refresh(&self) {
-        self.link.request_redraw();
+    pub(super) fn refresh(&self) {
+        self.link.mark_redraw();
+    }
+
+    /// A window nobody can see draws nothing, and un-occluding asks again
+    /// for the frame that was held back.
+    fn set_occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
+        if !occluded {
+            self.refresh();
+        }
     }
 
     #[must_use]
-    pub fn pump(&mut self) -> Vec<super::EngineEvent> {
+    pub(super) fn pump(&mut self) -> Vec<EngineEvent> {
         self.link.sync();
         self.link.take_events()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn attach_window(
-        &mut self,
-        window: &'window W,
-        size: FrameSize,
-    ) -> Result<(), EngineError> {
-        pollster::block_on(self.attach_target(window.target(), size))
-    }
-
-    pub async fn attach_target(
-        &mut self,
-        target: impl Into<WindowTarget<'window>>,
-        size: FrameSize,
-    ) -> Result<(), EngineError> {
-        let graphics = WindowGraphics::new(target, size).await?;
-        self.output = Output::Window(Box::new(graphics));
+    /// Takes over the presentation stack the host built on its own thread.
+    fn attach_graphics(&mut self, graphics: Box<WindowGraphics>) {
+        self.output = Output::Window(graphics);
+        self.render_failed = false;
         self.refresh();
-        Ok(())
     }
 
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
@@ -465,8 +515,8 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
         self.link.begin_frame(now)
     }
 
-    pub fn draw(&mut self) -> Result<(), EngineError> {
-        if !matches!(self.output, Output::Window(_)) {
+    pub(super) fn draw(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.output, Output::Window(_)) || self.occluded {
             return Ok(());
         }
         self.link.sync();
@@ -480,8 +530,11 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
             };
             match graphics.acquire(size)? {
                 FrameAcquisition::Ready(acquired) => acquired,
+                // No image this frame, and no vsync was waited on to find
+                // that out, so the frame stays owed and the presenter asks
+                // again on its own short delay rather than in a spin.
                 FrameAcquisition::Retry => {
-                    self.link.request_redraw();
+                    self.link.mark_redraw();
                     return Ok(());
                 }
             }
@@ -521,7 +574,7 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
+    pub(super) fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         let now = self.clock.now_seconds();
         self.link.sync();
@@ -587,18 +640,108 @@ impl<'window, W: Window, R: EventRequester> LynxView<'window, W, R> {
             }
         }
     }
-}
-
-impl<R: EventRequester> OffscreenLynxView<R> {
-    pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
-        let gpu = dom::render::gpu::Headless::new()
-            .map_err(|error| EngineError::Gpu(error.to_string()))?;
+    pub(super) fn attach_offscreen(&mut self) -> Result<(), EngineError> {
+        let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
         self.output = Output::Offscreen(Box::new(gpu));
         self.composed = None;
+        self.render_failed = false;
         Ok(())
     }
 
-    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+    /// Applies one host command, answering whether the presenter goes on.
+    ///
+    /// A command the host is blocked on hands back everything the turn has
+    /// produced *before* it answers, so a `tick` that returns has already
+    /// put its events and its animation state in the host's hands.
+    pub(super) fn apply<H: EventRequester>(
+        &mut self,
+        command: ToPainter,
+        host: &PainterLink<H>,
+    ) -> bool {
+        match command {
+            // The turn this opened will sync; there is nothing else to do.
+            #[cfg(not(target_arch = "wasm32"))]
+            ToPainter::MainChanged => {}
+            ToPainter::Input(event) => self.dispatch_input(event),
+            ToPainter::Resize {
+                viewport,
+                frame_size,
+            } => self.resize(viewport, frame_size),
+            ToPainter::Occluded(occluded) => self.set_occluded(occluded),
+            ToPainter::Refresh => self.refresh(),
+            ToPainter::Attach(graphics) => self.attach_graphics(graphics),
+            ToPainter::AttachOffscreen(reply) => {
+                let answer = self.attach_offscreen();
+                self.hand_back(host);
+                let _ = reply.send(answer);
+            }
+            ToPainter::Tick { force, reply } => {
+                let answer = self.tick(force);
+                self.hand_back(host);
+                let _ = reply.send(answer);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            ToPainter::Capture(reply) => {
+                let answer = self.capture();
+                self.hand_back(host);
+                let _ = reply.send(answer);
+            }
+            ToPainter::NoteImagesChanged => self.note_images_changed(),
+            ToPainter::Shutdown => return false,
+        }
+        true
+    }
+
+    /// Ends one turn: produce the frame it owes, hand the host what the
+    /// realm had to say, and publish whether the timeline wants another.
+    ///
+    /// In that order deliberately. Drawing first means the pixels a fatal
+    /// script error left behind reach the screen on the turn that reports
+    /// it, with nobody left to ask for another frame.
+    ///
+    /// A draw that fails is reported once. There is no recovering a lost
+    /// surface, and the loop would otherwise report the same failure on
+    /// every turn for as long as the host takes to notice the first.
+    pub(super) fn serve<H: EventRequester>(&mut self, host: &PainterLink<H>) {
+        if !self.render_failed
+            && let Err(error) = self.draw()
+        {
+            self.render_failed = true;
+            host.report(EngineEvent::RenderFailed(error));
+        }
+        self.hand_back(host);
+    }
+
+    /// Hands the host everything this turn produced.
+    fn hand_back<H: EventRequester>(&mut self, host: &PainterLink<H>) {
+        for event in self.pump() {
+            host.report(event);
+        }
+        host.set_animating(self.is_animating());
+    }
+
+    /// When the presenter owes itself another turn, and how soon.
+    ///
+    /// `None` parks until something arrives. Zero is a running animation:
+    /// the swap chain's `AutoVsync` acquire inside the next draw is the
+    /// pace, and asking for the turn immediately is what keeps the frames
+    /// coming. Anything else is a swap chain that had no image to give —
+    /// which it answers without waiting for vsync, so the retry needs a
+    /// delay of its own or it becomes a spin.
+    ///
+    /// Only ever a visible, working window. An offscreen target has no
+    /// display to keep up with: its frames are the host's to ask for.
+    pub(super) fn next_turn(&self) -> Option<Duration> {
+        if self.render_failed || self.occluded || !matches!(self.output, Output::Window(_)) {
+            return None;
+        }
+        if self.is_animating() {
+            return Some(Duration::ZERO);
+        }
+        self.link.redraw_owed().then_some(SWAP_CHAIN_RETRY)
+    }
+
+    pub(super) fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
         if !matches!(self.output, Output::Offscreen(_)) {
             return Err(EngineError::NoDrawTarget);
         }

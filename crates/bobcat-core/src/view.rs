@@ -1,13 +1,19 @@
-//! The embedder-facing Lynx view and the private link behind it.
+//! The embedder-facing Lynx view and the two private threads behind it.
 //!
-//! Source loading, Lynx-main-thread ownership, and presenting-thread work live
-//! in focused submodules. This module keeps the public facade and the state
-//! shared by those parts.
+//! A view spans three threads. The embedder's own thread holds [`LynxView`],
+//! which is a handle and nothing else: it captures input, creates the
+//! surface, and drains lifecycle events. The presenter thread owns the
+//! [`Painter`](painter::Painter) — every draw target, the gesture router, the scroll intents,
+//! and the composition — and the Lynx main thread owns the document and the
+//! script realm. Source loading, presenting work, main-thread ownership and
+//! the host handle live in focused submodules; this module keeps the
+//! vocabulary all of them share.
 
 mod graphics;
+mod host;
 mod loading;
 mod main_thread;
-mod presenter;
+mod painter;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -17,26 +23,16 @@ mod event_loop_tests;
 mod tests;
 
 use std::fmt;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
 
-use dom::render::gpu::Headless;
-use dom::vello::Scene;
-
-use self::graphics::WindowGraphics;
+pub(crate) use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+pub use self::host::LynxView;
 #[cfg(test)]
 use self::loading::EntryModule;
 pub use self::loading::{LynxViewError, ViewSources};
 #[cfg(target_arch = "wasm32")]
 pub use self::main_thread::configure_wasm_workers;
-use self::presenter::ScrollIntents;
-use crate::clock::FrameClock;
-use crate::gesture::GestureRouter;
-use crate::link::PresenterLink;
 use crate::script::ScriptError;
-use crate::tree::Viewport;
 
 /// The physical pixel size of the render target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +74,10 @@ pub enum EngineEvent {
     ScriptRunError(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
+    /// The presenter could not produce a frame. Fatal for the draw target:
+    /// nothing further will reach the screen, so an embedder reports it and
+    /// takes the window down.
+    RenderFailed(EngineError),
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at size.
@@ -96,16 +96,7 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// The draw target an embedder lends the engine.
-pub trait Window {
-    type Target<'window>: Into<WindowTarget<'window>>
-    where
-        Self: 'window;
-
-    fn target(&self) -> Self::Target<'_>;
-}
-
-/// Wakes the host event loop for pending engine events or frames.
+/// Wakes a thread that parks on an event loop the engine does not own.
 ///
 /// One implementation per platform — a winit event-loop proxy, an `AppKit`
 /// source, a Worker's signal — and the view is generic over it, so the wake
@@ -122,61 +113,6 @@ pub struct NoWakeup;
 
 impl EventRequester for NoWakeup {
     fn request_event(&self) {}
-}
-
-#[derive(Debug)]
-pub enum NoWindow {}
-
-impl Window for NoWindow {
-    type Target<'window> = WindowTarget<'window>;
-
-    fn target(&self) -> Self::Target<'_> {
-        match *self {}
-    }
-}
-
-enum Output<'window> {
-    None,
-    Offscreen(Box<Headless>),
-    Window(Box<WindowGraphics<'window>>),
-}
-
-/// A running Lynx view with an engine-owned script thread.
-///
-/// Generic over the embedder's window capability. The windowless form is
-/// [`OffscreenLynxView`]. A view remains on the thread that owns its presenter.
-pub struct LynxView<'window, W: Window = NoWindow, R: EventRequester = NoWakeup> {
-    // Keep first: dropping the link closes the sole command sender, which
-    // wakes the main thread before any state it may still refer to is
-    // released.
-    link: PresenterLink<R>,
-    #[cfg(test)]
-    detached: bool,
-    image_store: Arc<dyn dom::ImageStore>,
-    viewport: Viewport,
-    frame_size: FrameSize,
-    output: Output<'window>,
-    gesture: GestureRouter,
-    clock: FrameClock,
-    scroll_intents: ScrollIntents,
-    composed: Option<ComposeKey>,
-    composed_scene: Scene,
-    refill_requested_for: Option<u64>,
-    window: PhantomData<fn() -> W>,
-    thread_bound: PhantomData<Rc<()>>,
-}
-
-/// The offscreen composition of [`LynxView`].
-pub type OffscreenLynxView<R = NoWakeup> = LynxView<'static, NoWindow, R>;
-
-impl<W: Window, R: EventRequester> fmt::Debug for LynxView<'_, W, R> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LynxView")
-            .field("viewport", &self.viewport)
-            .field("frame_size", &self.frame_size)
-            .finish_non_exhaustive()
-    }
 }
 
 fn frame_size(width: f32, height: f32, device_pixel_ratio: f32) -> Result<FrameSize, EngineError> {

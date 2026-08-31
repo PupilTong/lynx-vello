@@ -9,8 +9,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    FontBlob, ImageStore, NoWakeup, OffscreenLynxView, PageConfig, PreparsedDeclaration,
-    PreparsedRule, PreparsedStyleSheet, ViewSources,
+    FontBlob, ImageStore, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -94,8 +94,8 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-async fn booted(source: &[u8], sources: ViewSources) -> OffscreenLynxView {
-    let mut view = OffscreenLynxView::new(
+async fn booted(source: &[u8], sources: ViewSources) -> LynxView {
+    let mut view = LynxView::new(
         PageConfig::default(),
         &FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL),
         Arc::new(NoWakeup),
@@ -113,7 +113,7 @@ async fn booted(source: &[u8], sources: ViewSources) -> OffscreenLynxView {
 }
 
 /// A view whose stylesheet request the double answers pre-parsed.
-async fn booted_with_sheet(source: &[u8], sheet: PreparsedStyleSheet) -> OffscreenLynxView {
+async fn booted_with_sheet(source: &[u8], sheet: PreparsedStyleSheet) -> LynxView {
     booted_with_sheet_at(source, sheet, 393.0, 727.0).await
 }
 
@@ -122,8 +122,8 @@ async fn booted_with_sheet_at(
     sheet: PreparsedStyleSheet,
     width: f32,
     height: f32,
-) -> OffscreenLynxView {
-    let mut view = OffscreenLynxView::new(
+) -> LynxView {
+    let mut view = LynxView::new(
         PageConfig::default(),
         &FetcherDouble::new(source.to_vec())
             .resolving_to(SCRIPT_URL)

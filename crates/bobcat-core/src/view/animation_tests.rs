@@ -10,7 +10,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{EntryModule, OffscreenLynxView};
+use super::EntryModule;
+use super::painter::Painter;
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
 /// One 8x8 red square, animated by an author `@keyframes` rule.
@@ -64,11 +65,11 @@ fn slider_sheet() -> PreparsedStyleSheet {
 }
 
 /// A 32x24 offscreen engine with the sheet mounted and the page built.
-fn booted() -> OffscreenLynxView {
+fn booted() -> Painter {
     let viewport = crate::tree::Viewport::new(32.0, 24.0);
     let mut document = crate::tree::new_document(viewport, crate::tree::PageConfig::default());
     crate::style::add_preparsed_style_sheet(&mut document, &slider_sheet());
-    let mut engine = OffscreenLynxView::start(
+    let mut engine = Painter::start(
         document,
         viewport,
         super::frame_size(32.0, 24.0, 1.0).expect("a bounded target"),
@@ -98,7 +99,7 @@ fn booted() -> OffscreenLynxView {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(engine: &mut OffscreenLynxView) -> usize {
+fn red_left_edge(engine: &mut Painter) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels

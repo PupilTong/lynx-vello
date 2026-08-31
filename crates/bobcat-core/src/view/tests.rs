@@ -1,6 +1,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use super::painter::Painter;
 use super::{EngineEvent, NoWakeup, frame_size};
 use crate::link::{MainLink, ToMain, ToPresenter};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
@@ -16,8 +17,8 @@ fn view_over<R: super::EventRequester>(
     events: Arc<R>,
     document: LynxDocument,
     entry: &str,
-) -> super::OffscreenLynxView<R> {
-    super::LynxView::start(
+) -> Painter {
+    Painter::start(
         document,
         Viewport::new(393.0, 727.0),
         frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
@@ -30,15 +31,12 @@ fn view_over<R: super::EventRequester>(
     .expect("the test view starts")
 }
 
-/// A view with every seam built but no main thread: the other end of its
+/// A painter with every seam built but no main thread: the other end of its
 /// link is handed back so a test can play the main thread's whole side of
 /// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
 /// ever service them.
-fn detached() -> (super::OffscreenLynxView, MainLink<NoWakeup>) {
-    let document = document();
-    let store = Arc::clone(document.image_store());
-    super::LynxView::with_link(
-        store,
+fn detached() -> (Painter, MainLink<NoWakeup>) {
+    Painter::with_link(
         Viewport::new(393.0, 727.0),
         frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(NoWakeup),
@@ -158,7 +156,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     let (mut view, main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
-    let emit = |view: &mut super::OffscreenLynxView| {
+    let emit = |view: &mut Painter| {
         let mut decisions = InputDecisions::new();
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
@@ -296,6 +294,36 @@ impl super::EventRequester for WakeSignal {
     fn request_event(&self) {
         let _ = self.0.send(());
     }
+}
+
+/// A frame the presenter asks of itself wakes nothing.
+///
+/// Every caller of `refresh` is the presenter, mid-turn, and the turn ends
+/// in the draw that answers it. A wake there would post into the very inbox
+/// the presenter is about to drain — a turn that finds nothing, asks for
+/// another, and never stops. Only the main thread's publish wakes.
+#[test]
+fn a_self_directed_frame_request_wakes_nobody() {
+    let (wake_sender, wakes) = mpsc::channel();
+    let (painter, main) = Painter::with_link(
+        Viewport::new(393.0, 727.0),
+        frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        Arc::new(WakeSignal(wake_sender)),
+    );
+
+    painter.refresh();
+    assert!(
+        wakes.try_recv().is_err(),
+        "a presenter-local request is answered by the turn it was made in"
+    );
+    assert!(painter.link.take_redraw(), "and the frame is still owed");
+
+    main.notify.publish_frame(document().commit());
+    assert!(
+        wakes.try_recv().is_ok(),
+        "a commit from the other thread is the one thing that must wake"
+    );
+    assert!(wakes.try_recv().is_err(), "and it wakes exactly once");
 }
 
 /// Boot's final flush is a commit: by the time `ScriptFinished` is

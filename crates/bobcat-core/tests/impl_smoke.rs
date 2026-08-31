@@ -5,15 +5,14 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, NoWindow, PageConfig,
-    ViewSources,
+    EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
 const ENTRY: &str = "main.js";
 
-async fn view(sources: ViewSources) -> Result<LynxView<'static, NoWindow>, LynxViewError> {
-    LynxView::<NoWindow>::new(
+async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
+    LynxView::new(
         PageConfig::default(),
         &FetcherDouble::new(Vec::new()),
         Arc::new(NoWakeup),

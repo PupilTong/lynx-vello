@@ -11,7 +11,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::{EngineEvent, EventRequester, OffscreenLynxView};
+use bobcat_core::{EngineEvent, EventRequester, LynxView};
 
 use crate::CliError;
 use crate::args::Options;
@@ -31,7 +31,7 @@ impl EventRequester for ChannelWakeup {
 }
 
 /// The offscreen view this embedder drives, woken through its own channel.
-type HeadlessView = OffscreenLynxView<ChannelWakeup>;
+type HeadlessView = LynxView<ChannelWakeup>;
 
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     program.warn_about_compatibility_limits();
@@ -185,6 +185,7 @@ fn check_script(view: &mut HeadlessView, input: &str) -> Result<bool, CliError> 
             EngineEvent::ListenerFailed(error) => {
                 eprintln!("event listener failed: {error}");
             }
+            EngineEvent::RenderFailed(error) => return Err(CliError::Engine(error)),
             _ => {}
         }
     }

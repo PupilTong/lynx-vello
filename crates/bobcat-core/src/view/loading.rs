@@ -7,7 +7,7 @@ use std::{fmt, str};
 use dom::{FontBlob, ImageStore};
 use http::HeaderMap;
 
-use super::{EngineError, EventRequester, LynxView, Window, frame_size};
+use super::{EngineError, EventRequester, LynxView, frame_size};
 use crate::resource::{
     CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
     ResourcePriority, ResourceRequest, StyleSheetPayload,
@@ -73,7 +73,7 @@ pub(super) struct EntryModule {
     pub(super) url: String,
 }
 
-impl<W: Window, R: EventRequester> LynxView<'_, W, R> {
+impl<R: EventRequester> LynxView<R> {
     /// Loads every source, then starts the view's single entry module.
     pub async fn new(
         config: PageConfig,

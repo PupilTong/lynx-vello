@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::script::ScriptError;
-use bobcat_core::{LynxView, NoWakeup, NoWindow, PageConfig, ViewSources};
+use bobcat_core::{LynxView, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 const FIXTURES: &[(&str, &[u8])] = &[
@@ -28,7 +28,7 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
 }
 
 async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptError> {
-    let mut view = LynxView::<NoWindow>::new(
+    let mut view = LynxView::new(
         config,
         &FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url),
         Arc::new(NoWakeup),

@@ -3,16 +3,13 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::script::ScriptError;
-use bobcat_core::{LynxView, LynxViewError, NoWakeup, NoWindow, PageConfig, ViewSources};
+use bobcat_core::{LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 /// The one way to build a view: hand it its sources and it comes back with
 /// its Lynx main thread already running the entry module.
-async fn view(
-    source: &[u8],
-    resolved_url: &str,
-) -> Result<LynxView<'static, NoWindow>, LynxViewError> {
-    LynxView::<NoWindow>::new(
+async fn view(source: &[u8], resolved_url: &str) -> Result<LynxView, LynxViewError> {
+    LynxView::new(
         PageConfig::default(),
         &FetcherDouble::new(source.to_vec()).resolving_to(resolved_url),
         Arc::new(NoWakeup),

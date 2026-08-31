@@ -13,12 +13,12 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
-use bobcat_core::{EngineEvent, OffscreenLynxView, PreparsedStyleSheet};
+use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
 use bytes::Bytes;
 use url::Url;
 
 /// Waits for the engine-owned script thread to report its terminal boot event.
-pub fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptError> {
+pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.
@@ -28,6 +28,10 @@ pub fn wait_for_script(view: &mut OffscreenLynxView) -> Result<(), ScriptError> 
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
                 EngineEvent::ScriptRunError(error) => return Err(error),
+                // Not a script failure, but a view that cannot draw will
+                // never finish anything either; failing here beats waiting
+                // out the deadline.
+                EngineEvent::RenderFailed(error) => panic!("the presenter failed: {error}"),
                 _ => {}
             }
         }
