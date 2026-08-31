@@ -1,4 +1,4 @@
-//! The presenting-thread input router: one place that turns routed input into
+//! The paint-thread input router: one place that turns routed input into
 //! every decision the engine executes — which scroll the user-agent performs,
 //! which event is dispatched, and at which target node.
 //!

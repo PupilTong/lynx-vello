@@ -1,10 +1,10 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use super::painter::Painter;
-use super::{EngineEvent, NoWakeup, frame_size};
-use crate::link::{MainLink, ToMain, ToPresenter};
-use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use super::Painter;
+use crate::main::MainLink;
+use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::view::{EngineEvent, EventRequester, NoWakeup, ToMain, ToPresenter, frame_size};
 
 /// A phone-shaped document, ready for a main thread to be started over it.
 fn document() -> LynxDocument {
@@ -13,11 +13,7 @@ fn document() -> LynxDocument {
 
 /// Starts a view over `document` and `entry`, the IO-free half of
 /// construction.
-fn view_over<R: super::EventRequester>(
-    events: Arc<R>,
-    document: LynxDocument,
-    entry: &str,
-) -> Painter {
+fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &str) -> Painter {
     Painter::start(
         document,
         Viewport::new(393.0, 727.0),
@@ -151,7 +147,7 @@ fn the_frame_mailbox_keeps_only_the_newest_commit() {
 /// delivery.
 #[test]
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
-    use crate::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
+    use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
     let (mut view, main) = detached();
     // The permanent page element's packed handle, as script would name it.
@@ -268,7 +264,7 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
 /// the decision evaporates entirely.
 #[test]
 fn a_scroll_decision_sends_no_command() {
-    use crate::gesture::{InputDecision, InputDecisions};
+    use super::gesture::{InputDecision, InputDecisions};
 
     let (mut view, main) = detached();
     let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
@@ -290,7 +286,7 @@ fn a_scroll_decision_sends_no_command() {
 /// loop actually being asked to run.
 struct WakeSignal(mpsc::Sender<()>);
 
-impl super::EventRequester for WakeSignal {
+impl EventRequester for WakeSignal {
     fn request_event(&self) {
         let _ = self.0.send(());
     }
@@ -333,7 +329,7 @@ fn a_self_directed_frame_request_wakes_nobody() {
 fn a_booted_view_commits_and_publishes() {
     use std::time::{Duration, Instant};
 
-    use super::EngineEvent;
+    use crate::view::EngineEvent;
 
     let (wake_sender, wake_receiver) = mpsc::channel();
     let mut view = view_over(

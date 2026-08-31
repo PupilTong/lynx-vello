@@ -1,4 +1,4 @@
-//! What every tag module's tests need to say anything about the UA cascade:
+//! Shared support for the main-thread tree policy tests:
 //! a document, a way to hang an element in it, and the computed style that
 //! comes back out.
 

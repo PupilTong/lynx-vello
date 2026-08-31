@@ -1,4 +1,4 @@
-//! The Lynx UA cascade: the page configuration that parameterizes it, the
+//! The main-thread Lynx UA cascade: page configuration, defaults, and
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
@@ -77,9 +77,9 @@ mod tests {
     use dom::stylo::computed_values::box_sizing;
     use dom::stylo::values::computed::{Display, Overflow};
 
+    use super::super::LynxDocument;
+    use super::super::test_support::{child, document, overflow, style_of, with_config};
     use super::{PageConfig, ua_stylesheet};
-    use crate::tree::LynxDocument;
-    use crate::tree::test_support::{child, document, overflow, style_of, with_config};
 
     /// The tags that get `web-elements`' common container block.
     const CONTAINER_TAGS: [&str; 4] = ["page", "view", "scroll-view", "list"];

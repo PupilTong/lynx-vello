@@ -1,7 +1,7 @@
 use super::*;
-use crate::link::{PresenterLink, link};
-use crate::tree::{PageConfig, Viewport, new_document};
-use crate::view::NoWakeup;
+use crate::main::tree::{PageConfig, Viewport, new_document};
+use crate::paint::PresenterLink;
+use crate::view::{NoWakeup, main_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -31,7 +31,7 @@ fn runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
 fn text_runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
-    const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
     let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
     assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
@@ -71,7 +71,7 @@ impl PublishedNames {
 fn runtime_over_watching_names(
     document: LynxDocument,
 ) -> (MainThreadRuntime<NoWakeup>, DocumentProbe, PublishedNames) {
-    let (presenter, main) = link(Arc::new(NoWakeup));
+    let (presenter, main) = main_link(Arc::new(NoWakeup));
     let runtime = MainThreadRuntime::new(document, main.notify).expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
     (runtime, probe, PublishedNames(presenter))
@@ -705,7 +705,7 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut presenter, main) = link(Arc::new(NoWakeup));
+    let (mut presenter, main) = main_link(Arc::new(NoWakeup));
     let state = EventState::new(main.notify);
     let (a, b) = (node_id(3), node_id(4));
     // The edges as a sequence, so both what crossed and what did not are

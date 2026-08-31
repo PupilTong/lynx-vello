@@ -1,4 +1,4 @@
-//! The `@keyframes` timeline, end to end: a host-decoded keyframes rule
+//! Paint-thread `@keyframes` timeline tests, end to end: a decoded rule
 //! reaches Stylo, the presenting side advances it against the engine's own
 //! clock, and the committed frame moves.
 //!
@@ -10,8 +10,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::EntryModule;
-use super::painter::Painter;
+use super::{EntryModule, Painter};
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 
 /// One 8x8 red square, animated by an author `@keyframes` rule.
@@ -66,8 +65,9 @@ fn slider_sheet() -> PreparsedStyleSheet {
 
 /// A 32x24 offscreen engine with the sheet mounted and the page built.
 fn booted() -> Painter {
-    let viewport = crate::tree::Viewport::new(32.0, 24.0);
-    let mut document = crate::tree::new_document(viewport, crate::tree::PageConfig::default());
+    let viewport = crate::main::tree::Viewport::new(32.0, 24.0);
+    let mut document =
+        crate::main::tree::new_document(viewport, crate::main::tree::PageConfig::default());
     crate::style::add_preparsed_style_sheet(&mut document, &slider_sheet());
     let mut engine = Painter::start(
         document,

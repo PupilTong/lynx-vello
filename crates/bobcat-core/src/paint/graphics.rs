@@ -1,4 +1,4 @@
-//! The engine-owned window presentation stack.
+//! The paint thread's window presentation stack.
 //!
 //! Built on the host thread, because creating a surface from a window handle
 //! is a main-thread-only call on macOS, and then handed to the presenter
@@ -27,7 +27,7 @@ use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
 
-use super::{ComposeKey, EngineError, FrameSize};
+use crate::view::{ComposeKey, EngineError, FrameSize};
 
 /// The draw target an embedder lends a view.
 ///

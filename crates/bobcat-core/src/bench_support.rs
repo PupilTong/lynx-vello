@@ -14,10 +14,10 @@ use std::sync::Arc;
 
 use dom::event::EventSteps;
 
-use crate::link::{PresenterLink, link};
-use crate::runtime::{MainThreadRuntime, entry_module_source};
-use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::NoWakeup;
+use crate::main::runtime::{MainThreadRuntime, entry_module_source};
+use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::paint::PresenterLink;
+use crate::view::{NoWakeup, main_link};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -41,7 +41,7 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (presenter, main) = link(Arc::new(NoWakeup));
+        let (presenter, main) = main_link(Arc::new(NoWakeup));
         let runtime =
             MainThreadRuntime::new(document, main.notify).expect("the benchmark realm boots");
         Self {

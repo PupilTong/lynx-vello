@@ -1,4 +1,4 @@
-//! The `raw-text` component: the join between how Lynx *writes* a text run
+//! The `raw-text` component joins how Lynx *writes* a text run
 //! and what the engine can measure and paint.
 //!
 //! Script writes a run as an attribute — `__CreateRawText(value)` builds a
@@ -128,7 +128,7 @@ mod tests {
     use super::{LynxDocument, RAW_TEXT_TAG, TEXT_ATTRIBUTE, owned_text_node};
 
     /// Solid em squares, so a run's box is its glyph count times its font size.
-    const AHEM: &[u8] = include_bytes!("../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
     /// A `text` element under the page, styled to Ahem's exact metrics.
     fn text_element(document: &mut LynxDocument) -> NodeId {

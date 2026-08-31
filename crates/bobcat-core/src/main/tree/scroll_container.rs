@@ -1,4 +1,4 @@
-//! The `scroll-view` and `list` tags as scroll containers.
+//! The `scroll-view` and `list` tags as main-thread scroll containers.
 //!
 //! Neither tag is a [`dom::CustomElement`] yet — there is no cell recycling,
 //! no scroll-to-index, no threshold events. What is here is the part a UA
@@ -48,7 +48,7 @@ mod tests {
     use dom::stylo::computed_values::{flex_direction, linear_direction};
     use dom::stylo::values::computed::Overflow;
 
-    use crate::tree::test_support::{child, document, element_under, overflow, style_of};
+    use super::super::test_support::{child, document, element_under, overflow, style_of};
 
     #[test]
     fn a_scroller_scrolls_one_axis_and_clips_the_other() {
