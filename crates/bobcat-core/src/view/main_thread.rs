@@ -1,8 +1,10 @@
 //! Lynx main-thread startup and the command rounds it serves.
+//!
+//! The thread is started from the presenter, which owns the other end of its
+//! link for the rest of the view's life.
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
@@ -14,17 +16,13 @@ use std::time::Duration;
 
 #[cfg(test)]
 use dom::CommittedFrame;
-use dom::ImageStore;
-use dom::vello::Scene;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
 use super::loading::EntryModule;
-use super::presenter::ScrollIntents;
-use super::{EngineError, EngineEvent, EventRequester, FrameSize, LynxView, Output, Window};
-use crate::clock::FrameClock;
-use crate::gesture::GestureRouter;
-use crate::link::{MainLink, ToMain, ToPresenter, ToPresenterSender, link};
+use super::painter::Painter;
+use super::{EngineError, EngineEvent, EventRequester, FrameSize};
+use crate::link::{MainLink, ToMain, ToPresenter, ToPresenterSender};
 use crate::runtime::{MainThreadError, MainThreadRuntime};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::tree::{LynxDocument, Viewport};
@@ -83,54 +81,23 @@ pub fn configure_wasm_workers(
         })
 }
 
-impl<W: Window, R: EventRequester> LynxView<'_, W, R> {
-    pub(super) fn start(
+impl Painter {
+    pub(super) fn start<R: EventRequester>(
         document: LynxDocument,
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<R>,
         entry: EntryModule,
     ) -> Result<Self, EngineError> {
-        let image_store = Arc::clone(document.image_store());
-        let (view, main) = Self::with_link(image_store, viewport, frame_size, event_requester);
+        let (painter, main) = Self::with_link(viewport, frame_size, event_requester);
         spawn_main_thread(document, entry, main)?;
         #[cfg(test)]
-        let view = {
-            let mut view = view;
-            view.detached = false;
-            view
+        let painter = {
+            let mut painter = painter;
+            painter.detached = false;
+            painter
         };
-        Ok(view)
-    }
-
-    /// The view and the other end of its link, with no thread started over
-    /// it yet — the seam `start` spawns through, and the one a test plays
-    /// the main thread's half of.
-    pub(super) fn with_link(
-        image_store: Arc<dyn ImageStore>,
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-    ) -> (Self, MainLink<R>) {
-        let (presenter, main) = link(event_requester);
-        let view = Self {
-            link: presenter,
-            #[cfg(test)]
-            detached: true,
-            image_store,
-            viewport,
-            frame_size,
-            output: Output::None,
-            gesture: GestureRouter::default(),
-            clock: FrameClock::new(),
-            scroll_intents: ScrollIntents::default(),
-            composed: None,
-            composed_scene: Scene::new(),
-            refill_requested_for: None,
-            window: PhantomData,
-            thread_bound: PhantomData,
-        };
-        (view, main)
+        Ok(painter)
     }
 
     #[cfg(test)]
@@ -322,7 +289,7 @@ fn platform_script_error(message: String) -> ScriptError {
     }
 }
 
-fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
+pub(super) fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
     if let Some(message) = payload.downcast_ref::<String>() {
         message
     } else if let Some(message) = payload.downcast_ref::<&'static str>() {

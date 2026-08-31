@@ -1,7 +1,9 @@
 //! The engine-owned window presentation stack.
 //!
-//! Lives on the embedder's main thread beside its event loop — presentation
-//! and vsync interact with the OS only here. Rendering into the retained
+//! Built on the host thread, because creating a surface from a window handle
+//! is a main-thread-only call on macOS, and then handed to the presenter
+//! thread, which owns it for the rest of the view's life: every acquire,
+//! render and present happens there. Rendering into the retained
 //! target texture and presenting it are separate steps: the target is
 //! re-rendered only when a new scene was produced, while surface
 //! invalidation and re-exposure re-present the retained target with a blit
@@ -27,7 +29,13 @@ use dom::vello::util::{RenderContext, RenderSurface};
 
 use super::{ComposeKey, EngineError, FrameSize};
 
-pub type WindowTarget<'window> = vello::wgpu::SurfaceTarget<'window>;
+/// The draw target an embedder lends a view.
+///
+/// `'static` deliberately: the surface built from it outlives the host
+/// thread's own borrow of the window, because it is moved to the presenter.
+/// A windowing embedder passes a shared handle — an `Arc<winit::Window>` —
+/// rather than a reference.
+pub type WindowTarget = vello::wgpu::SurfaceTarget<'static>;
 
 /// The swap-chain image a frame will be presented in, taken before the frame
 /// is produced. Dropping it without [`WindowGraphics::present`] discards it,
@@ -47,9 +55,9 @@ pub(super) enum FrameAcquisition {
     Retry,
 }
 
-pub(super) struct WindowGraphics<'window> {
+pub(crate) struct WindowGraphics {
     context: RenderContext,
-    surface: RenderSurface<'window>,
+    surface: RenderSurface<'static>,
     renderer: vello::Renderer,
     /// Retained plane textures for layered frames; see
     /// [`dom::render::gpu::PlaneBank`].
@@ -72,7 +80,7 @@ struct CaptureTarget {
     blitter: vello::wgpu::util::TextureBlitter,
 }
 
-impl std::fmt::Debug for WindowGraphics<'_> {
+impl std::fmt::Debug for WindowGraphics {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WindowGraphics")
@@ -81,9 +89,9 @@ impl std::fmt::Debug for WindowGraphics<'_> {
     }
 }
 
-impl<'window> WindowGraphics<'window> {
-    pub(super) async fn new(
-        target: impl Into<WindowTarget<'window>>,
+impl WindowGraphics {
+    pub(crate) async fn new(
+        target: impl Into<WindowTarget>,
         size: FrameSize,
     ) -> Result<Self, EngineError> {
         let mut context = RenderContext::new();

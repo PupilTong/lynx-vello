@@ -1,9 +1,18 @@
-//! The one link each `LynxView` has between its two threads.
+//! The two links each `LynxView` has between its three threads.
 //!
-//! Two FIFOs are the whole protocol: [`ToMain`] carries every host fact the
-//! document must see, [`ToPresenter`] carries everything the main thread has
-//! to say back. Both are ordered, so a command and the notification it
-//! produces never overtake each other.
+//! A view spans three threads and needs exactly two links to join them. The
+//! host thread — `AppKit`'s main thread, a browser's Render Worker — owns the
+//! window, captures input, and creates the surface; the presenter thread owns
+//! the [`Painter`](crate::view::Painter) and does routing, gestures,
+//! scrolling and every GPU call; the Lynx main thread owns the document and
+//! the script realm.
+//!
+//! Each link is a pair of ordered FIFOs, so a command and the answer it
+//! produces never overtake each other. Downwards: [`ToPainter`] carries every
+//! host fact the presenter must see, and [`ToMain`] every presenting fact the
+//! document must see. Upwards the traffic is thinner — the presenter hands
+//! the host lifecycle events, and [`ToPresenter`] carries everything the main
+//! thread has to say back.
 //!
 //! Frames are the one thing that does not ride a FIFO. A queue of them would
 //! retain every intermediate scene the main thread ever built, so a commit
@@ -14,22 +23,30 @@
 //! one.
 //!
 //! A channel stores a message but cannot wake `AppKit`, winit, or a browser
-//! Worker, so the link also holds the embedder's [`EventRequester`] and wakes
-//! it *after* — never before — the state it announces is in place. One view
-//! has one requester: both ends are generic over the platform's own type, so
-//! a wake is a direct call, and the link is the only thing that holds it.
+//! Worker, so a link also holds the wakeup for the thread it feeds and fires
+//! it *after* — never before — the state it announces is in place. The
+//! presenter's own wakeup is [`InboxWakeup`]: one more command in the very
+//! inbox it parks on, so a publish from the main thread and a fact from the
+//! host arrive through the same door and one blocking receive covers both.
+//! The host's is the embedder's [`EventRequester`], and the link is the only
+//! thing that holds it.
 
 use std::cell::Cell;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
+use dom::input::InputEvent;
 use dom::{CommittedFrame, NodeId, Vector2D};
 use rustc_hash::FxHashSet;
 
 #[cfg(test)]
 use crate::tree::LynxDocument;
-use crate::view::{EngineEvent, EventRequester};
+use crate::tree::Viewport;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::view::Screenshot;
+use crate::view::{EngineError, EngineEvent, EventRequester, FrameSize, WindowGraphics};
 
 /// presenting → Lynx main: every host fact the document must see.
 pub(crate) enum ToMain {
@@ -132,11 +149,10 @@ pub(crate) struct MainLink<R: EventRequester> {
 
 /// The presenting thread's end of the link, and the replicas it keeps of
 /// what the main thread has published.
-pub(crate) struct PresenterLink<R: EventRequester> {
+pub(crate) struct PresenterLink {
     commands: mpsc::Sender<ToMain>,
     notifications: mpsc::Receiver<ToPresenter>,
     frames: Arc<FrameHub>,
-    requester: Arc<R>,
     /// The newest published frame. Read out of the mailbox only when a sync
     /// finds one announced, so a pass that composes, hit-tests, and refills
     /// against it takes no lock at all.
@@ -158,7 +174,7 @@ pub(crate) struct PresenterLink<R: EventRequester> {
 
 /// Builds one view's link: the presenting end, and the end its Lynx main
 /// thread is started over.
-pub(crate) fn link<R: EventRequester>(requester: Arc<R>) -> (PresenterLink<R>, MainLink<R>) {
+pub(crate) fn link<R: EventRequester>(requester: Arc<R>) -> (PresenterLink, MainLink<R>) {
     let (commands, command_receiver) = mpsc::channel();
     let (notifications, notification_receiver) = mpsc::channel();
     let frames = Arc::new(FrameHub::new(None));
@@ -166,7 +182,6 @@ pub(crate) fn link<R: EventRequester>(requester: Arc<R>) -> (PresenterLink<R>, M
         commands,
         notifications: notification_receiver,
         frames: Arc::clone(&frames),
-        requester: Arc::clone(&requester),
         frame: None,
         events: Vec::new(),
         listener_names: FxHashSet::default(),
@@ -185,7 +200,7 @@ pub(crate) fn link<R: EventRequester>(requester: Arc<R>) -> (PresenterLink<R>, M
     (presenter, main)
 }
 
-impl<R: EventRequester> PresenterLink<R> {
+impl PresenterLink {
     /// Sends one command. A closed channel is a main thread that has exited;
     /// the presenting side goes on showing what it last published.
     pub(crate) fn send(&self, command: ToMain) {
@@ -243,16 +258,24 @@ impl<R: EventRequester> PresenterLink<R> {
         std::mem::take(&mut self.events)
     }
 
-    /// Asks for a frame on the presenting side's own behalf, and wakes the
-    /// host loop that will draw it.
-    pub(crate) fn request_redraw(&self) {
+    /// Notes that a frame is owed.
+    ///
+    /// It wakes nothing, and must not: every caller is the presenter itself,
+    /// mid-turn, and the turn ends in the draw that answers this. Waking here
+    /// would post into the very inbox the presenter is about to drain, which
+    /// is a turn that finds nothing and asks for another.
+    pub(crate) fn mark_redraw(&self) {
         self.redraw_pending.set(true);
-        self.requester.request_event();
     }
 
     /// Whether a frame is owed, clearing the request.
     pub(crate) fn take_redraw(&self) -> bool {
         self.redraw_pending.replace(false)
+    }
+
+    /// Whether a frame is owed, leaving the request standing.
+    pub(crate) fn redraw_owed(&self) -> bool {
+        self.redraw_pending.get()
     }
 
     /// Asks the main thread to advance the timeline to `now`, answering with
@@ -294,12 +317,199 @@ impl<R: EventRequester> PresenterLink<R> {
     }
 }
 
-impl<R: EventRequester> fmt::Debug for PresenterLink<R> {
+impl fmt::Debug for PresenterLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PresenterLink")
             .field("listener_names", &self.listener_names.len())
             .field("begin_frames_sent", &self.begin_frames_sent)
             .finish_non_exhaustive()
+    }
+}
+
+/// host → presenting: every fact the embedder's own thread has to hand over.
+///
+/// Not `Debug`: a frame's worth of GPU state rides the `Attach` arm, and a
+/// reply channel has nothing useful to print.
+pub(crate) enum ToPainter {
+    /// One normalized OS input event, to route against the published frame.
+    Input(InputEvent),
+    /// New device metrics, already validated by the host.
+    Resize {
+        viewport: Viewport,
+        frame_size: FrameSize,
+    },
+    /// The window went behind something, or came back out.
+    Occluded(bool),
+    /// Draw a frame even though nothing the presenter knows about changed.
+    Refresh,
+    /// The window presentation stack, built on the thread that owns the
+    /// window because that is the only thread allowed to create a surface.
+    Attach(Box<WindowGraphics>),
+    AttachOffscreen(mpsc::Sender<Result<(), EngineError>>),
+    /// Advance the offscreen output by one frame, answering whether it drew.
+    Tick {
+        force: bool,
+        reply: mpsc::Sender<Result<bool, EngineError>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    Capture(mpsc::Sender<Result<Screenshot, EngineError>>),
+    NoteImagesChanged,
+    /// The Lynx main thread published something; the turn this opens syncs.
+    #[cfg(not(target_arch = "wasm32"))]
+    MainChanged,
+    /// The view is going away, so the presenter is too.
+    Shutdown,
+}
+
+/// The presenter thread's wakeup: one more command in the inbox it parks on.
+///
+/// The Lynx main thread holds it, which is what makes a single blocking
+/// receive enough for a thread that must answer two other threads. The
+/// `Mutex` is what an `mpsc::Sender` needs to be `Sync`; it is uncontended
+/// by construction, since only the main thread ever wakes this way.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct InboxWakeup(Mutex<mpsc::Sender<ToPainter>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EventRequester for InboxWakeup {
+    fn request_event(&self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| panic!("the presenter inbox is poisoned: {error}"))
+            .send(ToPainter::MainChanged);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Debug for InboxWakeup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InboxWakeup")
+    }
+}
+
+/// The host thread's end of its link to the presenter.
+pub(crate) struct HostLink {
+    commands: mpsc::Sender<ToPainter>,
+    events: mpsc::Receiver<EngineEvent>,
+    /// Whether the presenter owed the timeline another frame as of its last
+    /// turn — the one thing a host reads without asking for it.
+    animating: Arc<AtomicBool>,
+}
+
+/// The presenter thread's end of its link to the host.
+pub(crate) struct PainterLink<R: EventRequester> {
+    commands: mpsc::Receiver<ToPainter>,
+    events: mpsc::Sender<EngineEvent>,
+    requester: Arc<R>,
+    animating: Arc<AtomicBool>,
+}
+
+/// Builds a view's host link: the end the embedder holds, and the end the
+/// presenter is run over.
+pub(crate) fn painter_link<R: EventRequester>(requester: Arc<R>) -> (HostLink, PainterLink<R>) {
+    let (commands, command_receiver) = mpsc::channel();
+    let (events, event_receiver) = mpsc::channel();
+    let animating = Arc::new(AtomicBool::new(false));
+    let host = HostLink {
+        commands,
+        events: event_receiver,
+        animating: Arc::clone(&animating),
+    };
+    let painter = PainterLink {
+        commands: command_receiver,
+        events,
+        requester,
+        animating,
+    };
+    (host, painter)
+}
+
+impl HostLink {
+    /// Hands one fact to the presenter. A closed channel is a presenter that
+    /// has already stopped; the window keeps showing whatever it drew last.
+    pub(crate) fn send(&self, command: ToPainter) {
+        let _ = self.commands.send(command);
+    }
+
+    /// The wakeup the Lynx main thread fires: another command in the same
+    /// inbox the presenter is parked on.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn wakeup(&self) -> InboxWakeup {
+        InboxWakeup(Mutex::new(self.commands.clone()))
+    }
+
+    /// Every lifecycle event the presenter has forwarded so far.
+    pub(crate) fn take_events(&self) -> Vec<EngineEvent> {
+        self.events.try_iter().collect()
+    }
+
+    pub(crate) fn is_animating(&self) -> bool {
+        self.animating.load(Ordering::Relaxed)
+    }
+}
+
+impl fmt::Debug for HostLink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HostLink")
+            .field("animating", &self.is_animating())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: EventRequester> PainterLink<R> {
+    /// The next queued command, if one is waiting. A closed inbox is a host
+    /// that is already gone, which is the same instruction as `Shutdown`.
+    pub(crate) fn try_next(&self) -> Option<ToPainter> {
+        match self.commands.try_recv() {
+            Ok(command) => Some(command),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(ToPainter::Shutdown),
+        }
+    }
+
+    /// Blocks until the next command arrives, or the host is gone.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn next(&self) -> ToPainter {
+        self.commands.recv().unwrap_or(ToPainter::Shutdown)
+    }
+
+    /// The same wait, given up on after `timeout` — for a turn the presenter
+    /// owes itself soon but that nothing is going to announce.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn next_within(&self, timeout: Duration) -> Option<ToPainter> {
+        match self.commands.recv_timeout(timeout) {
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(ToPainter::Shutdown),
+        }
+    }
+
+    /// Hands the host one lifecycle event, then wakes its loop — always in
+    /// that order, so the wake never overtakes what it announces.
+    pub(crate) fn report(&self, event: EngineEvent) {
+        if self.events.send(event).is_ok() {
+            self.requester.request_event();
+        }
+    }
+
+    /// Publishes whether the timeline still owes a frame, for a host that
+    /// paces its own continuation on it.
+    pub(crate) fn set_animating(&self, animating: bool) {
+        self.animating.store(animating, Ordering::Relaxed);
+    }
+
+    /// The host's wakeup, for a driver whose host shares this thread.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn requester(&self) -> &Arc<R> {
+        &self.requester
+    }
+}
+
+impl<R: EventRequester> fmt::Debug for PainterLink<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PainterLink")
     }
 }

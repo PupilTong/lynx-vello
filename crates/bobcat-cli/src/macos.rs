@@ -3,23 +3,23 @@
 //! This file owns the embedder's share and nothing more: the winit event
 //! loop, the window, device metrics, input translation, the command prompt,
 //! and PNG output. Every handler is a relay into [`bobcat_core::LynxView`] —
-//! an OS fact goes in
-//! (`dispatch_input`, `resize`, `pump`), and the engine
-//! decides what the pipeline does with it. The engine owns the Lynx main
-//! thread (the script realm and, once the script starts, the document);
-//! composition, presentation, and vsync stay on this thread. [`MacWindow`] is
-//! the window it borrows at attach time, and it lends nothing but the draw
-//! target: the engine asks for its frames through the one `EventRequester`
-//! wakeup this loop already answers, and the turn that wakeup opens ends in
-//! `about_to_wait`, which draws. Winit's `RedrawRequested` is not relayed.
-//! A running animation is not a wakeup at all — `about_to_wait` polls while
-//! the engine reports one, paced by the swap chain's vsync.
+//! an OS fact goes in (`dispatch_input`, `resize`, `set_occluded`, `pump`),
+//! and the engine decides what the pipeline does with it.
+//!
+//! This thread does not draw. It creates the surface, because on macOS only
+//! the main thread may, and hands it over; from then on composition,
+//! presentation and the vsync wait live on the engine's presenter thread, so
+//! a slow frame never holds up `AppKit`. What still comes back here are the
+//! engine's lifecycle events, and they arrive through the one
+//! `EventRequester` wakeup this loop answers. Winit's `RedrawRequested` is
+//! not relayed, and the loop always waits — a running animation is the
+//! presenter's own business, paced by the swap chain it owns.
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{EngineEvent, EventRequester, FrameSize, LynxView, Window as EmbedderWindow};
+use bobcat_core::{EngineEvent, EventRequester, LynxView};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -44,18 +44,6 @@ const MOUSE_POINTER_ID: u32 = u32::MAX;
 /// unit. Core accepts wheel deltas in CSS pixels only.
 const WHEEL_LINE_CSS_PX: f32 = 40.0;
 
-struct MacWindow {
-    os: Arc<Window>,
-}
-
-impl EmbedderWindow for MacWindow {
-    type Target<'window> = &'window Window;
-
-    fn target(&self) -> &Window {
-        &self.os
-    }
-}
-
 pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -68,8 +56,7 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
     println!("bobcat: macOS window starting; enter `help` for commands");
     console.prompt();
 
-    let window = OnceLock::new();
-    let mut application = MacApplication::new(program, options, console, event_requester, &window);
+    let mut application = MacApplication::new(program, options, console, event_requester);
     event_loop
         .run_app(&mut application)
         .map_err(|error| CliError::Window(error.to_string()))?;
@@ -91,43 +78,44 @@ impl EventRequester for ProxyWakeup {
 }
 
 /// The windowed view this embedder drives, woken through its loop proxy.
-type MacLynxView<'window> = LynxView<'window, MacWindow, ProxyWakeup>;
+type MacLynxView = LynxView<ProxyWakeup>;
 
-struct MacApplication<'window> {
+struct MacApplication {
     program: Option<Program>,
     input: String,
     initial_width: f32,
     initial_height: f32,
-    view: Option<MacLynxView<'window>>,
+    /// Declared before the window it draws into: dropping the view joins the
+    /// presenter, so the surface is released before the last handle to the
+    /// window goes — and the window itself is destroyed on this thread,
+    /// which is the only one allowed to destroy it.
+    view: Option<MacLynxView>,
     event_requester: Arc<ProxyWakeup>,
-    window: &'window OnceLock<MacWindow>,
+    window: Option<Arc<Window>>,
     console: Console,
-    occluded: bool,
     pointer: Option<PhysicalPosition<f64>>,
     pressed: bool,
     error: Option<CliError>,
 }
 
-impl std::fmt::Debug for MacApplication<'_> {
+impl std::fmt::Debug for MacApplication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("MacApplication")
             .field("input", &self.input)
             .field("initial_width", &self.initial_width)
             .field("initial_height", &self.initial_height)
-            .field("occluded", &self.occluded)
             .field("has_error", &self.error.is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl<'window> MacApplication<'window> {
+impl MacApplication {
     fn new(
         program: Program,
         options: &Options,
         console: Console,
         event_requester: Arc<ProxyWakeup>,
-        window: &'window OnceLock<MacWindow>,
     ) -> Self {
         Self {
             input: program.input.clone(),
@@ -136,17 +124,16 @@ impl<'window> MacApplication<'window> {
             initial_height: options.viewport_height,
             view: None,
             event_requester,
-            window,
+            window: None,
             console,
-            occluded: false,
             pointer: None,
             pressed: false,
             error: None,
         }
     }
 
-    fn window(&self) -> Option<&'window MacWindow> {
-        self.window.get()
+    fn window(&self) -> Option<&Arc<Window>> {
+        self.window.as_ref()
     }
 
     fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<(), CliError> {
@@ -167,7 +154,7 @@ impl<'window> MacApplication<'window> {
         let physical_size = non_empty_size(os.inner_size());
         let (css_width, css_height, scale_factor) =
             viewport_metrics(physical_size, os.scale_factor());
-        let window = self.window.get_or_init(|| MacWindow { os });
+        let window = self.window.insert(os);
         let program = self
             .program
             .take()
@@ -190,13 +177,9 @@ impl<'window> MacApplication<'window> {
             input: program.input,
             source,
         })?;
-        view.attach_window(
-            window,
-            FrameSize {
-                width: physical_size.width,
-                height: physical_size.height,
-            },
-        )?;
+        // The surface is built here, on the thread `AppKit` requires for it,
+        // and handed to the presenter, which owns it from now on.
+        pollster::block_on(view.attach_target(Arc::clone(window)))?;
 
         self.view = Some(view);
         Ok(())
@@ -210,7 +193,7 @@ impl<'window> MacApplication<'window> {
             .window()
             .expect("resize events arrive only after window creation");
         let (css_width, css_height, scale_factor) =
-            viewport_metrics(physical_size, window.os.scale_factor());
+            viewport_metrics(physical_size, window.scale_factor());
         self.view
             .as_mut()
             .expect("the view is installed with the window")
@@ -291,7 +274,7 @@ impl<'window> MacApplication<'window> {
         let Some(point) = self.css_point(position) else {
             return;
         };
-        let scale = self.window().map_or(1.0, |window| window.os.scale_factor());
+        let scale = self.window().map_or(1.0, |window| window.scale_factor());
         self.dispatch(InputEvent::wheel(point, wheel_delta_css(delta, scale)));
     }
 
@@ -314,7 +297,7 @@ impl<'window> MacApplication<'window> {
     }
 
     fn css_point(&self, physical: PhysicalPosition<f64>) -> Option<Point2D<f32>> {
-        let scale = self.window()?.os.scale_factor();
+        let scale = self.window()?.scale_factor();
         #[allow(
             clippy::cast_possible_truncation,
             reason = "window coordinates are far inside f32 range"
@@ -332,58 +315,41 @@ impl<'window> MacApplication<'window> {
         event_loop.exit();
     }
 
-    /// Produces the frame the engine asked for, at the end of the loop turn
-    /// its wakeup opened — here and not in the event relays, for two reasons.
-    /// A turn's whole event burst has been handed over by now, so a wheel
-    /// flurry draws one frame carrying its sum, the coalescing winit's
-    /// `request_redraw` used to provide. And a frame that asks for its
-    /// successor (an animation, a retry) must not do so from inside winit's
-    /// proxy-event drain, which iterates its channel until empty: the run
-    /// loop would never return to `AppKit`.
-    ///
-    /// An occluded window is the one thing that holds a frame back — the
-    /// request stays pending, and un-occluding asks again.
-    fn draw(&mut self, event_loop: &ActiveEventLoop) {
-        if self.occluded {
-            return;
-        }
-        let Some(view) = self.view.as_mut() else {
-            return;
-        };
-        if let Err(error) = view.draw() {
-            self.fail(event_loop, CliError::Engine(error));
-        }
-    }
-
-    /// Drains the engine's lifecycle events, which ride the same wakeup its
-    /// frames do.
+    /// Drains the engine's lifecycle events, the one thing that still
+    /// crosses back to this thread.
     fn pump(&mut self, event_loop: &ActiveEventLoop) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
-        let error = view.pump().into_iter().find_map(|event| match event {
-            EngineEvent::ScriptRunError(source) => Some(source),
-            // Not fatal — the realm survives it and later events are still
-            // delivered — so it is reported and the window stays up.
-            EngineEvent::ListenerFailed(error) => {
-                eprintln!("event listener failed: {error}");
-                None
+        let mut fatal = None;
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptRunError(source) if fatal.is_none() => {
+                    fatal = Some(CliError::Script {
+                        input: self.input.clone(),
+                        source,
+                    });
+                }
+                // The presenter cannot reach the screen again, so the window
+                // has nothing left to show.
+                EngineEvent::RenderFailed(error) if fatal.is_none() => {
+                    fatal = Some(CliError::Engine(error));
+                }
+                // Not fatal — the realm survives it and later events are
+                // still delivered — so it is reported and the window stays up.
+                EngineEvent::ListenerFailed(error) => {
+                    eprintln!("event listener failed: {error}");
+                }
+                _ => {}
             }
-            _ => None,
-        });
-        if let Some(source) = error {
-            self.fail(
-                event_loop,
-                CliError::Script {
-                    input: self.input.clone(),
-                    source,
-                },
-            );
+        }
+        if let Some(error) = fatal {
+            self.fail(event_loop, error);
         }
     }
 }
 
-impl ApplicationHandler<UserEvent> for MacApplication<'_> {
+impl ApplicationHandler<UserEvent> for MacApplication {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Err(error) = self.initialize(event_loop) {
             self.fail(event_loop, error);
@@ -396,7 +362,7 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window().map(|window| window.os.id()) != Some(window_id) {
+        if self.window().map(|window| window.id()) != Some(window_id) {
             return;
         }
         let result = match event {
@@ -409,14 +375,12 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
                 let size = self
                     .window()
                     .expect("the event belongs to the current window")
-                    .os
                     .inner_size();
                 self.resize(size)
             }
             WindowEvent::Occluded(occluded) => {
-                self.occluded = occluded;
-                if !occluded && let Some(view) = &self.view {
-                    view.refresh();
+                if let Some(view) = &self.view {
+                    view.set_occluded(occluded);
                 }
                 Ok(())
             }
@@ -467,23 +431,13 @@ impl ApplicationHandler<UserEvent> for MacApplication<'_> {
         self.pump(event_loop);
     }
 
-    /// The turn ends here: draw what the engine asked for, then decide
-    /// whether to wait at all.
+    /// The turn ends by going back to sleep, always.
     ///
-    /// While the engine owes the timeline another frame this loop polls, and
-    /// the swap chain's `AutoVsync` acquire inside the next `draw` is what
-    /// paces it — this window's own vsync, which is the only honest source
-    /// for it. Nothing crosses a thread to keep an animation running, and an
-    /// occluded window polls for nothing. Otherwise the loop sleeps until an
-    /// OS fact or an engine wakeup arrives.
+    /// Frames are not this thread's work any more: the presenter draws them
+    /// on its own thread, and a running animation is paced there by the swap
+    /// chain's `AutoVsync` acquire. Nothing here polls for one.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.draw(event_loop);
-        let animating = !self.occluded && self.view.as_ref().is_some_and(LynxView::is_animating);
-        event_loop.set_control_flow(if animating {
-            ControlFlow::Poll
-        } else {
-            ControlFlow::Wait
-        });
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 

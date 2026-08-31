@@ -9,11 +9,12 @@ capabilities and OS facts:
 - a `ViewSources`: owned font bytes, an optional default font family, an
   optional `ImageStore` — which owns every decoded image the view draws —
   author stylesheet URLs in cascade order, and the one entry MTS module URL;
-- an `EventRequester`, the one wakeup the engine has: a lifecycle event to
-  drain and a frame to draw both ride it. It is a platform type, not a trait
-  object — a view is generic over it, so the wake is a direct call;
-  `NoWakeup` is the implementation for a host with no event loop to wake;
-- a draw target, and the frame clock that paces a running animation over it;
+- an `EventRequester`, the one wakeup the engine has for the embedder's
+  thread. It is a platform type, not a trait object — a view is generic over
+  it, so the wake is a direct call; `NoWakeup` is the implementation for a
+  host with no event loop to wake;
+- a draw target: anything convertible into a `WindowTarget`, which is a
+  `'static` surface target, so a shared window handle rather than a borrow;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -141,17 +142,19 @@ bound for the response it materializes.
 
 ## Public and private boundaries
 
-The public facade is `LynxView<'window, W, R>` — the embedder's window
-capability and its event-loop wakeup, both chosen at compile time — with
-`OffscreenLynxView<R>` as its windowless alias. It relays input, resize,
-draw, event-pump, target attachment, offscreen ticks, capture, and image
-loads. It exposes no tree getter, document getter, renderer getter,
+The public facade is `LynxView<R>` — the embedder's event-loop wakeup, chosen
+at compile time. It is a handle: it relays input, resize, occlusion, target
+attachment, offscreen ticks, capture, image loads, and it drains lifecycle
+events. It exposes no tree getter, document getter, renderer getter,
 script-realm handle, decomposition method, or way to mount a stylesheet or
-start a second entry module.
+start a second entry module. There is no draw call on it — producing frames
+belongs to the presenter, which owns the target.
 
 The following types are private to `bobcat-core`:
 
-- the link — `ToMain`, `ToPresenter`, and the frame mailbox behind them;
+- the `Painter` — the presenting thread's whole object;
+- both links — `ToPainter`, `ToMain`, `ToPresenter`, and the frame mailbox
+  behind them;
 - `MainThreadRuntime` and its Element-PAPI host implementation;
 - `LynxDocument`, `Viewport`, and `new_document`;
 - the concrete QuickJS realm adapter.
@@ -266,14 +269,14 @@ private Document<()>
 
 A commit — style flush, layout, paint-order build, scene encode — runs where
 the document is and ends by publishing one immutable `Arc<CommittedFrame>`.
-The presenting side is a compositor over the published frame: it routes
-input and recognizes gestures against the frame's tables, uploads the scene,
-submits, presents, and captures. The public `EventRequester` and `Window`
-traits describe the host wakeup and the draw target — each implemented by the
-platform and named in the view's type, never boxed — and they do not expose
-the engine that consumes them. There is no frame-scheduling capability: a commit
-records that it wants a frame and wakes the host loop, whose next turn calls
-`draw` — no OS frame callback is asked for or waited on.
+The presenter is a compositor over the published frame: it routes input and
+recognizes gestures against the frame's tables, uploads the scene, submits,
+presents, and captures. The public `EventRequester` trait describes the host
+wakeup — implemented by the platform and named in the view's type, never
+boxed — and it does not expose the engine that consumes it. There is no
+frame-scheduling capability: a commit records that it wants a frame and wakes
+the presenter, whose next turn draws it — no OS frame callback is asked for
+or waited on.
 
 Images are the host-implemented `ImageStore` contract and nothing else. No
 container sniffing, codec, cache, byte budget or eviction policy exists in this
@@ -289,22 +292,41 @@ into automatic loading.
 ## Commit, publish, and visibility
 
 The document has one owner for its whole life: the engine-owned Lynx main
-thread, which `execute_script` starts and which creates the document itself
-from the view's `PageConfig` and device metrics. The engine never holds one —
-setup called before `execute_script` buffers in the command channel and
-applies, in send order, before the entry script boots. That thread is the
-only committer, and the two threads share exactly one link: an ordered FIFO
-per direction, plus a one-slot mailbox for the frames themselves.
+thread, which creates the document itself from the view's `PageConfig` and
+device metrics. That thread is the only committer.
+
+A view spans three threads and two links. The embedder's own thread owns the
+window, captures input, and creates the surface — the one call macOS allows
+nowhere else. The presenter owns everything that draws. The Lynx main thread
+owns the document and the realm. Each link is an ordered FIFO per direction,
+and the lower one adds a one-slot mailbox for the frames themselves.
 
 ```text
-Lynx main thread (owns document + realm)   embedder/presenting thread
-PAPI mutations: plain &mut                 input routing + gesture recognition
-__FlushElementTree: commit                 (against the published frame)
-  style → layout → build → encode          scroll/dispatch/resize/BeginFrame
-  ── Arc<CommittedFrame> ▶ mailbox ──▶     compose: upload scene, present
-  ── ToPresenter FIFO ───────────────▶     capture, offscreen ticks
-  ◀── ToMain FIFO ────────────────────
+host thread (AppKit main, or a Render Worker)
+  window lifecycle, input capture, surface creation
+  ── ToPainter FIFO ──▶                    ◀── EngineEvent FIFO ──
+                    presenter thread (owns the Painter)
+                    input routing + gesture recognition
+                    (against the published frame)
+                    scroll/dispatch/resize/BeginFrame
+                    compose: upload scene, acquire, present
+                    capture, offscreen ticks
+  ── ToMain FIFO ──▶                       ◀── ToPresenter FIFO ──
+                                           ◀── Arc<CommittedFrame> mailbox ──
+                    Lynx main thread (owns document + realm)
+                    PAPI mutations: plain &mut
+                    __FlushElementTree: commit
+                      style → layout → build → encode
 ```
+
+The surface is built on the host thread and handed down, because
+`create_surface` from a window handle panics off the macOS main thread; every
+acquire, render and present after that runs on the presenter, so a frame's
+vsync wait never holds up the run loop. The one target where the presenter is
+*not* its own thread is the browser: `wgpu`'s handles are not `Send` under
+shared memory and an `OffscreenCanvas` cannot be transferred on again, so the
+Render Worker is the presenter and each turn runs inside its `pump`. The
+handle's API is the same either way.
 
 A commit writes its frame into the mailbox, over whatever the presenting side
 has not read, and announces it as one `ToPresenter::FrameChanged`; lifecycle
@@ -315,9 +337,15 @@ at one however far the main thread runs ahead. The presenting side drains the
 FIFO once per pass, reads the mailbox at most once per drain, and keeps the
 name replica, the pending-redraw bit, and the newest frame locally — so
 composing, hit-testing, and refilling take no lock at all. Every send wakes
-the host loop through the link's one `EventRequester` — the platform's own
-type, called directly — always after the state it announces is in place. Nothing announces the main thread's exit: dropping
-its end of the link closes the FIFO, which is the same fact.
+the thread it feeds, always after the state it announces is in place. The
+presenter's wakeup is one more command in the very inbox it parks on, so a
+publish from below and a fact from above arrive through the same door and one
+blocking receive covers both; the host's is the embedder's `EventRequester`.
+A frame the presenter asks of *itself* wakes nothing — the turn it was asked
+in is the turn that answers it. Nothing announces the main thread's exit:
+dropping its end of the link closes the FIFO, which is the same fact. The
+host announces its own, because the presenter would otherwise wait on an
+inbox the main thread is still holding open.
 
 Every command round the main thread serves — input dispatches, scrolls,
 resizes, resource updates, `BeginFrame` ticks — ends with a commit when
@@ -420,8 +448,9 @@ the core then uses that same target-specific spawn path for the Lynx main
 Worker and for Stylo's Rayon Workers. Stylo pool creation belongs to the core,
 not the browser facade.
 
-Wasm follows the native ownership model: every `LynxView` spawns and owns one
-Lynx-main Worker, and dropping that view closes its link so the
+Wasm follows the native ownership model with one thread fewer: every
+`LynxView` spawns and owns one Lynx-main Worker — the Render Worker is
+already the presenter — and dropping that view closes its link so the
 Worker drops its QuickJS realm and exits. Independent views are not a
 process-global singleton. The npm facade keeps at most one live view per
 `BobcatRenderer`: `create` builds none, and each `load` replaces the view
@@ -454,22 +483,24 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
-   scene encode — writes the `Arc<CommittedFrame>` into the link's mailbox,
-   announces it on the `ToPresenter` FIFO, and wakes the host loop through
-   `EventRequester`.
-5. That wakeup's handler calls `LynxView::draw`, which takes the pending frame
-   and produces it: the `FrameClock` is sampled once, gesture deadlines resolve
-   against it, the latest published scene is uploaded if it is new, and the
-   frame presents. While the latest frame reports an active animation it sends
-   the main thread one `BeginFrame` carrying that reading, and the loop
-   sustains without any JavaScript — but on the embedder's own frame clock,
-   not the wakeup: `LynxView::is_animating` is the continuation signal, and
-   the host paces it with the vsync it holds (a polled turn ending in the
-   `AutoVsync` acquire, `requestAnimationFrame` on a canvas, its own cadence
-   offscreen).
-6. The task enqueues sanitized script completion and calls `EventRequester`;
-   the awakened host observes it through `pump`. No realm or tree object
-   crosses the boundary.
+   scene encode — writes the `Arc<CommittedFrame>` into the mailbox, announces
+   it on the `ToPresenter` FIFO, and wakes the presenter with one more command
+   in its inbox.
+5. The presenter's turn takes the pending frame and produces it: the
+   `FrameClock` is sampled once, gesture deadlines resolve against it, the
+   latest published scene is uploaded if it is new, and the frame presents.
+   While the latest frame reports an active animation it sends the main thread
+   one `BeginFrame` carrying that reading, and the loop sustains without any
+   JavaScript and without waking anyone — the presenter simply takes its next
+   turn, paced by the `AutoVsync` acquire it is about to make. Where the
+   presenter shares the host's thread, `LynxView::is_animating` is that
+   continuation signal instead and the embedder paces it against the display
+   it holds (`requestAnimationFrame` on a canvas).
+6. The presenter forwards the sanitized script completion to the host and
+   calls `EventRequester`; the awakened host observes it through `pump`. A
+   draw that fails arrives the same way, once, as
+   `EngineEvent::RenderFailed`. No realm or tree object crosses either
+   boundary.
 
 ## Validation matrix
 

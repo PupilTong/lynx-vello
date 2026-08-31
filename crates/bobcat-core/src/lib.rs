@@ -44,5 +44,5 @@ pub use tree::PageConfig;
 pub use view::configure_wasm_workers;
 pub use view::{
     EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError, NoWakeup,
-    NoWindow, OffscreenLynxView, Screenshot, ViewSources, Window, WindowTarget,
+    Screenshot, ViewSources, WindowTarget,
 };

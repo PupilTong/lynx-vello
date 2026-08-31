@@ -57,7 +57,7 @@ impl DocumentProbe {
 /// The presenting side's replica of the realm's name set, driven by
 /// hand: a test resyncs it where a routing pass would and then asks what
 /// the realm has published.
-struct PublishedNames(PresenterLink<NoWakeup>);
+struct PublishedNames(PresenterLink);
 
 impl PublishedNames {
     fn contains(&mut self, name: &str) -> bool {

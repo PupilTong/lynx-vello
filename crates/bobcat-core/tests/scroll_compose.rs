@@ -14,7 +14,7 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::{NoWakeup, OffscreenLynxView, PageConfig, ViewSources};
+use bobcat_core::{LynxView, NoWakeup, PageConfig, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
 use support::{FetcherDouble, wait_for_script};
@@ -44,9 +44,9 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-async fn booted() -> OffscreenLynxView {
+async fn booted() -> LynxView {
     let fetcher = FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL);
-    let mut view = OffscreenLynxView::new(
+    let mut view = LynxView::new(
         PageConfig::default(),
         &fetcher,
         Arc::new(NoWakeup),
@@ -64,7 +64,7 @@ async fn booted() -> OffscreenLynxView {
 }
 
 /// The captured pixel at `(x, y)`, as RGBA.
-fn pixel_at(view: &mut OffscreenLynxView, x: usize, y: usize) -> [u8; 4] {
+fn pixel_at(view: &mut LynxView, x: usize, y: usize) -> [u8; 4] {
     let shot = view.capture().expect("capture the frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     let start = (y * width + x) * 4;
@@ -76,7 +76,7 @@ fn pixel_at(view: &mut OffscreenLynxView, x: usize, y: usize) -> [u8; 4] {
 const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-fn wheel(view: &mut OffscreenLynxView, delta_y: f32) {
+fn wheel(view: &mut LynxView, delta_y: f32) {
     view.dispatch_input(InputEvent::wheel(
         Point2D::new(50.0, 50.0),
         dom::Vector2D::new(0.0, delta_y),

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    NoWakeup, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedKeyframe,
-    PreparsedRule, PreparsedStyleSheet, ViewSources,
+    LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -78,8 +78,8 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 
 /// A view built the only way there is to build one: its sheet and its entry
 /// module are its construction inputs.
-async fn booted() -> OffscreenLynxView {
-    let mut view = OffscreenLynxView::new(
+async fn booted() -> LynxView {
+    let mut view = LynxView::new(
         PageConfig::default(),
         &resources(slider_sheet()),
         Arc::new(NoWakeup),
@@ -100,7 +100,7 @@ async fn booted() -> OffscreenLynxView {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(view: &mut OffscreenLynxView) -> usize {
+fn red_left_edge(view: &mut LynxView) -> usize {
     let shot = view.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
@@ -119,11 +119,14 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
     let mut view = booted().await;
 
     view.tick(true).expect("first frame");
-    let first = red_left_edge(&mut view);
+    // Read before anything else crosses back: a frame the engine produced
+    // hands over what it implies before it answers, so the host never sees a
+    // reply that is ahead of the state behind it.
     assert!(
         view.is_animating(),
         "the engine's clock keeps the animation asking for frames"
     );
+    let first = red_left_edge(&mut view);
 
     // A quarter of the 1s travel is 4px. The square is *not* asserted to have
     // moved right: the animation is infinite, boot takes an unknown slice of
