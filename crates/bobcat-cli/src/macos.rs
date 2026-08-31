@@ -166,7 +166,6 @@ impl MacApplication {
         // Lynx main thread is running before the window is attached.
         let mut view = pollster::block_on(LynxView::new(
             program.config,
-            &program.resource_fetcher,
             Arc::clone(&self.event_requester),
             css_width,
             css_height,

@@ -14,11 +14,23 @@ use url::Url;
 
 use crate::style::PreparsedStyleSheet;
 
+/// A resource operation polled directly on the thread that called the fetcher.
+///
+/// During view startup that owner is `bobcat-main`, which deliberately has no
+/// ambient Tokio runtime or IO reactor. Implementations may move actual file or
+/// network IO onto their own executor or worker threads and wake this future,
+/// but the returned future itself must be executor-neutral and must not assume
+/// a caller-provided runtime.
 pub type ResourceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ResourceError>> + Send + 'a>>;
 
 pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
+/// Host-owned resource policy whose startup calls and continuations run on
+/// `bobcat-main`.
+///
+/// Implementations own any executor or reactor their IO requires; Bobcat only
+/// polls the returned [`ResourceFuture`] until it is woken and ready.
 pub trait ResourceFetcher: Send + Sync + 'static {
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
 

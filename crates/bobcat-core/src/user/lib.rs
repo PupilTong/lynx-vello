@@ -12,42 +12,46 @@
 //! `OffscreenCanvas` cannot be transferred again once a Worker holds it, so
 //! the painter stays on the thread that owns the canvas and each turn runs
 //! inside a `pump`. Both drivers run the same [`serve_pending`], and the
-//! handle's API is the same either way. One-shot source loading lives beside
-//! that handle because it is the user thread's construction phase, not a
-//! fourth runtime owner.
+//! handle's API is the same either way. Construction on this thread stops at
+//! channel setup: source loading, document initialization, and script boot
+//! all belong to `bobcat-main`.
 
+use std::fmt;
 use std::marker::PhantomData;
 #[cfg(not(target_arch = "wasm32"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::{fmt, str};
 
 use dom::input::InputEvent;
 use dom::{FontBlob, ImageStore};
-use http::HeaderMap;
+use tokio::sync::oneshot;
 
-use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::tree::{PageConfig, Viewport};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::main::{InboxWakeup, panic_payload};
-use crate::paint::{Painter, PainterLink, WindowGraphics};
-use crate::resource::{
-    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
-    ResourcePriority, ResourceRequest, StyleSheetPayload,
+use crate::main::{
+    MainThreadHome, StartupRequest, StartupResult, StartupSuccess, spawn_main_thread,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::paint::PresenterLink;
+use crate::paint::{Painter, PainterLink, WindowGraphics};
+use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    EngineError, EngineEvent, EntryModule, EventRequester, FrameSize, NoWakeup, ToPainter,
-    WindowTarget, frame_size, paint_link,
+    EngineError, EngineEvent, EventRequester, FrameSize, LynxViewError, NoWakeup, ToPainter,
+    WindowTarget, frame_size, main_link, paint_link,
 };
 
-static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
-
-/// Everything loaded before the entry module starts.
+/// Everything transferred to `bobcat-main` before the entry module starts.
 #[derive(Clone)]
 pub struct ViewSources {
+    /// Owned by `bobcat-main` for the complete source-loading phase. The
+    /// fetcher's own implementation decides where actual network or file IO
+    /// runs; completion and document mutation resume on the main thread.
+    pub resource_fetcher: Arc<dyn ResourceFetcher>,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
     pub image_store: Option<Arc<dyn ImageStore>>,
@@ -57,8 +61,9 @@ pub struct ViewSources {
 
 impl ViewSources {
     #[must_use]
-    pub fn new(entry: impl Into<String>) -> Self {
+    pub fn new(resource_fetcher: Arc<dyn ResourceFetcher>, entry: impl Into<String>) -> Self {
         Self {
+            resource_fetcher,
             fonts: Vec::new(),
             default_font_family: None,
             image_store: None,
@@ -76,24 +81,6 @@ impl fmt::Debug for ViewSources {
             .field("entry", &self.entry)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum LynxViewError {
-    #[error(transparent)]
-    Engine(#[from] EngineError),
-    #[error(transparent)]
-    Resource(#[from] crate::resource::ResourceError),
-    #[error("script `{url}` is not valid UTF-8: {message}")]
-    InvalidScriptEncoding { url: String, message: String },
-    #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
-    InvalidStyleSheetEncoding { url: String, message: String },
-    #[error("the image store could not load `{image_source}`: {message}")]
-    Image {
-        image_source: String,
-        message: String,
-    },
 }
 
 /// The user thread's end of its link to the painter.
@@ -276,6 +263,9 @@ impl<R: EventRequester> PainterHome<R> {
     }
 
     fn shutdown(&mut self) {
+        if self.running {
+            self.running = serve_pending(&mut self.painter, &self.link);
+        }
         self.running = false;
     }
 }
@@ -289,6 +279,7 @@ impl<R: EventRequester> PainterHome<R> {
 pub struct LynxView<R: EventRequester = NoWakeup> {
     link: HostLink,
     home: PainterHome<R>,
+    main: MainThreadHome,
     image_store: Arc<dyn dom::ImageStore>,
     viewport: Viewport,
     frame_size: FrameSize,
@@ -309,53 +300,11 @@ impl<R: EventRequester> Drop for LynxView<R> {
     fn drop(&mut self) {
         self.link.send(ToPainter::Shutdown);
         self.home.shutdown();
+        self.main.shutdown();
     }
 }
 
 impl<R: EventRequester> LynxView<R> {
-    /// Starts both engine threads over a loaded document: the IO-free half
-    /// of construction.
-    pub(super) fn start(
-        document: LynxDocument,
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        entry: EntryModule,
-    ) -> Result<Self, EngineError> {
-        let image_store = Arc::clone(document.image_store());
-        // The host's wakeup is always the embedder's. Whose the painter's is
-        // depends on where it runs: its own inbox natively, and this same
-        // requester where the presenter shares the host's thread.
-        #[cfg(not(target_arch = "wasm32"))]
-        let (link, painter) = paint_link(event_requester);
-        #[cfg(target_arch = "wasm32")]
-        let (link, painter) = paint_link(Arc::clone(&event_requester));
-        #[cfg(not(target_arch = "wasm32"))]
-        let home = {
-            let wakeup = Arc::new(link.wakeup());
-            PainterHome {
-                thread: Some(spawn_presenter(
-                    document, viewport, frame_size, wakeup, entry, painter,
-                )?),
-                requester: PhantomData,
-            }
-        };
-        #[cfg(target_arch = "wasm32")]
-        let home = PainterHome {
-            painter: Painter::start(document, viewport, frame_size, event_requester, entry)?,
-            link: painter,
-            running: true,
-        };
-        Ok(Self {
-            link,
-            home,
-            image_store,
-            viewport,
-            frame_size,
-            thread_bound: PhantomData,
-        })
-    }
-
     /// Hands one normalized OS input event to the presenter, which routes it
     /// against the frame it last read.
     pub fn dispatch_input(&mut self, event: InputEvent) {
@@ -509,54 +458,102 @@ impl<R: EventRequester> LynxView<R> {
     }
 }
 
-/// Starts the presenter thread, which builds the painter — and with it the
-/// Lynx main thread — before it serves anything.
-///
-/// Construction is reported back before the loop begins, so a view that
-/// cannot start its threads fails where it was asked to start them.
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_presenter<H: EventRequester>(
-    document: LynxDocument,
+/// A half-built view whose destructor is the cancellation protocol for
+/// `LynxView::new`.
+struct ViewStartup<R: EventRequester> {
+    link: Option<HostLink>,
+    home: Option<PainterHome<R>>,
+    main: Option<MainThreadHome>,
+    started: Option<oneshot::Receiver<StartupResult>>,
     viewport: Viewport,
     frame_size: FrameSize,
-    wakeup: Arc<InboxWakeup>,
-    entry: EntryModule,
+}
+
+impl<R: EventRequester> ViewStartup<R> {
+    async fn wait(&mut self) -> Result<StartupSuccess, LynxViewError> {
+        self.started
+            .as_mut()
+            .expect("startup result is present until the view is built")
+            .await
+            .map_err(|_| EngineError::Thread {
+                name: "script",
+                message: "the Lynx main thread stopped before startup completed".to_owned(),
+            })?
+    }
+
+    fn finish(mut self, success: StartupSuccess) -> LynxView<R> {
+        self.started.take();
+        LynxView {
+            link: self.link.take().expect("startup owns the host link"),
+            home: self.home.take().expect("startup owns the presenter"),
+            main: self.main.take().expect("startup owns the Lynx main thread"),
+            image_store: success.image_store,
+            viewport: self.viewport,
+            frame_size: self.frame_size,
+            thread_bound: PhantomData,
+        }
+    }
+}
+
+impl<R: EventRequester> Drop for ViewStartup<R> {
+    fn drop(&mut self) {
+        // Publish cancellation before closing the result receiver, so a
+        // resource that becomes ready in the same poll cannot proceed into
+        // QuickJS before bobcat-main observes the flag.
+        if let Some(main) = self.main.as_ref() {
+            main.cancel();
+        }
+        // Closing wakes `Sender::closed`, which drops any pending
+        // ResourceFuture on bobcat-main.
+        if let Some(started) = self.started.as_mut() {
+            started.close();
+        }
+        if let Some(link) = self.link.as_ref() {
+            link.send(ToPainter::Shutdown);
+        }
+        // The presenter must go first: dropping its PresenterLink closes the
+        // command path a successfully booted main thread may be parked on.
+        if let Some(home) = self.home.as_mut() {
+            home.shutdown();
+        }
+        if let Some(main) = self.main.as_mut() {
+            main.shutdown();
+        }
+    }
+}
+
+/// Starts the native presenter over the already-created main-thread link.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_presenter<H: EventRequester>(
+    viewport: Viewport,
+    frame_size: FrameSize,
+    presenter: PresenterLink,
     link: PainterLink<H>,
 ) -> Result<std::thread::JoinHandle<()>, EngineError> {
-    let (ready, started) = mpsc::channel();
-    let thread = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("bobcat-present".to_owned())
         .spawn(move || {
-            let painter = match Painter::start(document, viewport, frame_size, wakeup, entry) {
-                Ok(painter) => painter,
-                Err(error) => {
-                    let _ = ready.send(Err(error));
-                    return;
-                }
-            };
-            let _ = ready.send(Ok(()));
+            let painter = Painter::new(viewport, frame_size, presenter);
             run_presenter(painter, &link);
         })
         .map_err(|error| EngineError::Thread {
             name: "presenter",
             message: error.to_string(),
-        })?;
-    match started.recv() {
-        Ok(Ok(())) => Ok(thread),
-        Ok(Err(error)) => Err(error),
-        Err(_) => Err(EngineError::Thread {
-            name: "presenter",
-            message: "the presenter stopped before it started".to_owned(),
-        }),
-    }
+        })
 }
 
 impl<R: EventRequester> LynxView<R> {
-    /// Loads every source on the user thread, then starts the view's single
-    /// entry module and both engine-owned threads.
+    /// Starts both engine-owned threads and waits asynchronously until
+    /// `bobcat-main` has created its document, loaded and mounted every
+    /// source, and booted the entry module.
+    ///
+    /// Dropping this future before it resolves cancels pending resource work
+    /// or stops startup before `QuickJS` begins, shuts down the presenter, and
+    /// joins both engine-owned threads. If synchronous startup JavaScript is
+    /// already running, teardown waits for that work to return before the main
+    /// thread can be joined.
     pub async fn new(
         config: PageConfig,
-        resource_fetcher: &dyn ResourceFetcher,
         event_requester: Arc<R>,
         width: f32,
         height: f32,
@@ -565,102 +562,57 @@ impl<R: EventRequester> LynxView<R> {
     ) -> Result<Self, LynxViewError> {
         let frame_size = frame_size(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let mut document = new_document(viewport, config);
-        for font in sources.fonts {
-            document.register_fonts(font);
-        }
-        if let Some(family) = sources.default_font_family
-            && !document.set_default_font_family(&family)
-        {
-            return Err(EngineError::UnknownFontFamily(family).into());
-        }
-        if let Some(store) = sources.image_store {
-            document.set_image_store(store);
-        }
+        let (started_sender, started) = oneshot::channel();
 
-        let mut requests = RequestId {
-            namespace: NEXT_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed),
-            sequence: 0,
+        // The host's wakeup is always the embedder's. Whose the painter's is
+        // depends on where it runs: its own inbox natively, and this same
+        // requester where the presenter shares the host's thread.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (link, painter_link) = paint_link(event_requester);
+        #[cfg(target_arch = "wasm32")]
+        let (link, painter_link) = paint_link(Arc::clone(&event_requester));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (presenter, main_link) = main_link(Arc::new(link.wakeup()));
+        #[cfg(target_arch = "wasm32")]
+        let (presenter, main_link) = main_link(event_requester);
+
+        let main = spawn_main_thread(
+            StartupRequest::new(config, viewport, sources),
+            main_link,
+            started_sender,
+        )?;
+        let mut startup = ViewStartup {
+            link: Some(link),
+            home: None,
+            main: Some(main),
+            started: Some(started),
+            viewport,
+            frame_size,
         };
-        for url in &sources.style_sheets {
-            mount_style_sheet(resource_fetcher, &mut requests, url, &mut document).await?;
-        }
-        let entry = fetch_entry(resource_fetcher, &mut requests, &sources.entry).await?;
-        Self::start(document, viewport, frame_size, event_requester, entry).map_err(Into::into)
-    }
-}
 
-async fn mount_style_sheet(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-    document: &mut LynxDocument,
-) -> Result<(), LynxViewError> {
-    let (request, source_name) = resolve_for_fetch(fetcher, requests, url).await?;
-    match fetcher.fetch_style_sheet(request).await?.payload {
-        StyleSheetPayload::Preparsed(sheet) => {
-            crate::style::add_preparsed_style_sheet(document, &sheet);
-        }
-        StyleSheetPayload::Text(bytes) => {
-            let css = str::from_utf8(&bytes).map_err(|error| {
-                LynxViewError::InvalidStyleSheetEncoding {
-                    url: source_name,
-                    message: error.to_string(),
-                }
-            })?;
-            crate::style::add_style_sheet_text(document, css);
-        }
-    }
-    Ok(())
-}
-
-async fn fetch_entry(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-) -> Result<EntryModule, LynxViewError> {
-    let (request, url) = resolve_for_fetch(fetcher, requests, url).await?;
-    let response = fetcher.fetch_resource(request).await?;
-    let source = match str::from_utf8(&response.bytes) {
-        Ok(source) => source.to_owned(),
-        Err(error) => {
-            return Err(LynxViewError::InvalidScriptEncoding {
-                url,
-                message: error.to_string(),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            startup.home = Some(PainterHome {
+                thread: Some(spawn_presenter(
+                    viewport,
+                    frame_size,
+                    presenter,
+                    painter_link,
+                )?),
+                requester: PhantomData,
             });
         }
-    };
-    Ok(EntryModule { source, url })
-}
+        #[cfg(target_arch = "wasm32")]
+        {
+            startup.home = Some(PainterHome {
+                painter: Painter::new(viewport, frame_size, presenter),
+                link: painter_link,
+                running: true,
+            });
+        }
 
-async fn resolve_for_fetch(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-) -> Result<(ResourceRequest, String), LynxViewError> {
-    let context = RequestContext {
-        id: *requests,
-        priority: ResourcePriority::Critical,
-    };
-    requests.sequence += 1;
-    let resolved = fetcher
-        .resolve_locator(ResolveRequest {
-            context: context.clone(),
-            resource: ResourceDescriptor {
-                specifier: Arc::from(url),
-                base_url: None,
-            },
-            percent_decode: false,
-        })
-        .await?;
-    let source_name = resolved.url.to_string();
-    Ok((
-        ResourceRequest {
-            context,
-            resource: resolved,
-            headers: HeaderMap::new(),
-            cache_policy: CachePolicy::Default,
-        },
-        source_name,
-    ))
+        let success = startup.wait().await?;
+        Ok(startup.finish(success))
+    }
 }

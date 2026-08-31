@@ -45,15 +45,15 @@ globalThis.renderPage = function renderPage() {
 ";
 
 async fn booted() -> LynxView {
-    let fetcher = FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL);
+    let fetcher =
+        Arc::new(FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL));
     let mut view = LynxView::new(
         PageConfig::default(),
-        &fetcher,
         Arc::new(NoWakeup),
         100.0,
         100.0,
         1.0,
-        ViewSources::new(SCRIPT_URL),
+        ViewSources::new(fetcher, SCRIPT_URL),
     )
     .await
     .expect("view construction fetches and boots the entry script");
