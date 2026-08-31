@@ -10,13 +10,14 @@
 //! not a re-export of the runtime. It is `#[doc(hidden)]` and carries no
 //! stability promise.
 
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use dom::event::EventSteps;
 
-use crate::pipeline::{FrameHub, ListenerNames};
+use crate::link::{PresenterLink, link};
 use crate::runtime::{MainThreadRuntime, entry_module_source};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::view::NoWakeup;
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -24,10 +25,10 @@ use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 /// it holds outright.
 #[derive(Debug)]
 pub struct ScriptHarness {
-    runtime: MainThreadRuntime,
-    /// The presenting side's replica of the realm's listener names, so a
-    /// benchmark can ask the question the router asks — and pay what it pays.
-    listener_names: ListenerNames,
+    runtime: MainThreadRuntime<NoWakeup>,
+    /// The presenting end of the same link the engine builds, so a benchmark
+    /// can ask the question the router asks — and pay what it pays.
+    link: PresenterLink<NoWakeup>,
 }
 
 impl ScriptHarness {
@@ -40,17 +41,12 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (listener_updates, updates) = mpsc::channel();
-        let runtime = MainThreadRuntime::new(
-            document,
-            listener_updates,
-            Arc::new(FrameHub::default()),
-            || {},
-        )
-        .expect("the benchmark realm boots");
+        let (presenter, main) = link(Arc::new(NoWakeup));
+        let runtime =
+            MainThreadRuntime::new(document, main.notify).expect("the benchmark realm boots");
         Self {
             runtime,
-            listener_names: ListenerNames::new(updates),
+            link: presenter,
         }
     }
 
@@ -116,8 +112,8 @@ impl ScriptHarness {
     /// accounts for every registration the realm has made so far rather than
     /// only those a previous call happened to drain.
     pub fn has_listeners(&mut self, name: &str) -> bool {
-        self.listener_names.sync();
-        self.listener_names.contains(name)
+        self.link.sync();
+        self.link.has_listener(name)
     }
 
     /// The serialized inline style of an element, so a benchmark can assert

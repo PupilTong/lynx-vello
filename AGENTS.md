@@ -135,7 +135,7 @@ useful signal for currently-compatible versions of those libraries.
   reference embedders own those omitted integration steps and consume this
   crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
-  opaque `LynxView<'window, W>` facade plus the protocol-only, host-injected
+  opaque `LynxView<'window, W, R>` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
   lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an

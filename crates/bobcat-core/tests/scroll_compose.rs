@@ -14,7 +14,7 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::{OffscreenLynxView, PageConfig, ViewSources};
+use bobcat_core::{NoWakeup, OffscreenLynxView, PageConfig, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
 use support::{FetcherDouble, wait_for_script};
@@ -49,7 +49,7 @@ async fn booted() -> OffscreenLynxView {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         &fetcher,
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         100.0,
         100.0,
         1.0,

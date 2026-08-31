@@ -1,4 +1,4 @@
-//! Lynx main-thread startup and its ordered command protocol.
+//! Lynx main-thread startup and the command rounds it serves.
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
@@ -6,7 +6,6 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
@@ -15,8 +14,8 @@ use std::time::Duration;
 
 #[cfg(test)]
 use dom::CommittedFrame;
+use dom::ImageStore;
 use dom::vello::Scene;
-use dom::{ImageStore, NodeId, Vector2D};
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -25,7 +24,7 @@ use super::presenter::ScrollIntents;
 use super::{EngineError, EngineEvent, EventRequester, FrameSize, LynxView, Output, Window};
 use crate::clock::FrameClock;
 use crate::gesture::GestureRouter;
-use crate::pipeline::{FrameHub, ListenerNames, ListenerUpdate};
+use crate::link::{MainLink, ToMain, ToPresenter, ToPresenterSender, link};
 use crate::runtime::{MainThreadError, MainThreadRuntime};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::tree::{LynxDocument, Viewport};
@@ -35,9 +34,15 @@ static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
 
+/// Reports a panic on the thread that installed it, over whatever link that
+/// thread holds. Erased to a closure because a `thread_local!` static cannot
+/// be generic — and the hook it feeds is process-global anyway.
+#[cfg(all(target_arch = "wasm32", panic = "abort"))]
+type ScriptPanicReporter = Box<dyn Fn(ScriptError)>;
+
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 thread_local! {
-    static WASM_SCRIPT_PANIC_REPORTER: RefCell<Option<EngineEventSender>> = const {
+    static WASM_SCRIPT_PANIC_REPORTER: RefCell<Option<ScriptPanicReporter>> = const {
         RefCell::new(None)
     };
 }
@@ -78,89 +83,17 @@ pub fn configure_wasm_workers(
         })
 }
 
-#[derive(Clone)]
-pub(super) struct FrameWakeup {
-    pending: Arc<AtomicBool>,
-    requester: Arc<dyn EventRequester>,
-}
-
-impl FrameWakeup {
-    fn new(requester: Arc<dyn EventRequester>) -> Self {
-        Self {
-            pending: Arc::new(AtomicBool::new(false)),
-            requester,
-        }
-    }
-
-    pub(super) fn request(&self) {
-        // The event-loop wake must never overtake the state it announces.
-        self.pending.store(true, Ordering::Release);
-        self.requester.request_event();
-    }
-
-    pub(super) fn take(&self) -> bool {
-        self.pending.swap(false, Ordering::AcqRel)
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct EngineEventSender {
-    sender: mpsc::Sender<EngineEvent>,
-    requester: Arc<dyn EventRequester>,
-}
-
-impl EngineEventSender {
-    fn send(&self, event: EngineEvent) {
-        // Enqueue before waking so pump observes the announced event.
-        if self.sender.send(event).is_ok() {
-            self.requester.request_event();
-        }
-    }
-}
-
-pub(crate) enum MainCommand {
-    DispatchEvent {
-        target: NodeId,
-        name: &'static str,
-        detail: String,
-    },
-    Resize {
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    },
-    BeginFrame {
-        now: f64,
-        seq: u64,
-    },
-    Refill {
-        offsets: Vec<(NodeId, Vector2D<f32>)>,
-    },
-    NoteImagesChanged,
-    #[cfg(test)]
-    Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
-}
-
-impl<W: Window> LynxView<'_, W> {
+impl<W: Window, R: EventRequester> LynxView<'_, W, R> {
     pub(super) fn start(
         document: LynxDocument,
         viewport: Viewport,
         frame_size: FrameSize,
-        event_requester: Arc<dyn EventRequester>,
+        event_requester: Arc<R>,
         entry: EntryModule,
     ) -> Result<Self, EngineError> {
         let image_store = Arc::clone(document.image_store());
-        let (view, receiver, events, listener_updates) =
-            Self::with_channel(image_store, viewport, frame_size, event_requester);
-        spawn_main_thread(
-            document,
-            entry,
-            receiver,
-            Arc::clone(&view.hub),
-            listener_updates,
-            view.frames.clone(),
-            events,
-        )?;
+        let (view, main) = Self::with_link(image_store, viewport, frame_size, event_requester);
+        spawn_main_thread(document, entry, main)?;
         #[cfg(test)]
         let view = {
             let mut view = view;
@@ -170,96 +103,84 @@ impl<W: Window> LynxView<'_, W> {
         Ok(view)
     }
 
-    pub(super) fn with_channel(
+    /// The view and the other end of its link, with no thread started over
+    /// it yet — the seam `start` spawns through, and the one a test plays
+    /// the main thread's half of.
+    pub(super) fn with_link(
         image_store: Arc<dyn ImageStore>,
         viewport: Viewport,
         frame_size: FrameSize,
-        event_requester: Arc<dyn EventRequester>,
-    ) -> (
-        Self,
-        mpsc::Receiver<MainCommand>,
-        EngineEventSender,
-        mpsc::Sender<ListenerUpdate>,
-    ) {
-        let (message_sender, messages) = mpsc::channel();
-        let (commands, command_receiver) = mpsc::channel();
-        let (listener_updates, listener_names) = mpsc::channel();
-        let frames = FrameWakeup::new(Arc::clone(&event_requester));
+        event_requester: Arc<R>,
+    ) -> (Self, MainLink<R>) {
+        let (presenter, main) = link(event_requester);
         let view = Self {
-            commands,
+            link: presenter,
             #[cfg(test)]
             detached: true,
-            hub: Arc::new(FrameHub::default()),
             image_store,
             viewport,
             frame_size,
-            messages,
             output: Output::None,
-            frames,
             gesture: GestureRouter::default(),
-            listener_names: ListenerNames::new(listener_names),
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::default(),
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
-            begin_frames_sent: 0,
             window: PhantomData,
             thread_bound: PhantomData,
         };
-        let events = EngineEventSender {
-            sender: message_sender,
-            requester: event_requester,
-        };
-        (view, command_receiver, events, listener_updates)
+        (view, main)
     }
 
     #[cfg(test)]
-    pub(crate) fn probe_document<R: Send + 'static>(
+    pub(crate) fn probe_document<T: Send + 'static>(
         &mut self,
-        probe: impl FnOnce(&mut LynxDocument) -> R + Send + 'static,
-    ) -> Option<R> {
+        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
         if self.detached {
             return None;
         }
         let (sender, receiver) = mpsc::channel();
-        self.commands
-            .send(MainCommand::Probe(Box::new(move |document| {
-                let _ = sender.send(probe(document));
-            })))
-            .ok()?;
+        self.link.send(ToMain::Probe(Box::new(move |document| {
+            let _ = sender.send(probe(document));
+        })));
         receiver.recv_timeout(Duration::from_secs(10)).ok()
     }
 
     #[cfg(test)]
-    pub(crate) fn published_frame(&self) -> Option<Arc<CommittedFrame>> {
-        self.hub.latest()
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.link.sync();
+        self.link.frame().cloned()
     }
 }
 
-fn spawn_main_thread(
+/// Starts the Lynx main thread over `document`, holding the main end of the
+/// view's link for the rest of its life.
+///
+/// Nothing announces its exit: dropping the last `ToPresenterSender` closes
+/// the notification FIFO, which is the same fact — and the one a presenting
+/// side blocked on a `BeginFrame` is already waiting on.
+fn spawn_main_thread<R: EventRequester>(
     document: LynxDocument,
     entry: EntryModule,
-    commands: mpsc::Receiver<MainCommand>,
-    hub: Arc<FrameHub>,
-    listener_updates: mpsc::Sender<ListenerUpdate>,
-    frames: FrameWakeup,
-    events: EngineEventSender,
+    link: MainLink<R>,
 ) -> Result<(), EngineError> {
     ThreadBuilder::new()
         .name("bobcat-main".to_owned())
         .spawn(move || {
+            let MainLink { commands, notify } = link;
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
             install_script_panic_hook();
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-            set_script_panic_reporter(Some(events.clone()));
-            let publish_hub = Arc::clone(&hub);
-            let wake_frames = frames.clone();
+            set_script_panic_reporter(Some({
+                let notify = notify.clone();
+                Box::new(move |error| {
+                    notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(error)));
+                })
+            }));
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut runtime =
-                    MainThreadRuntime::new(document, listener_updates, publish_hub, move || {
-                        wake_frames.request();
-                    })
+                let mut runtime = MainThreadRuntime::new(document, notify.clone())
                     .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&entry.source, &entry.url)
@@ -274,28 +195,32 @@ fn spawn_main_thread(
             });
             let runtime = match result {
                 Ok(runtime) => {
-                    events.send(EngineEvent::ScriptFinished);
+                    notify.send(ToPresenter::Engine(EngineEvent::ScriptFinished));
                     Some(runtime)
                 }
                 Err(error) => {
-                    events.send(EngineEvent::ScriptRunError(error));
+                    notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(error)));
                     None
                 }
             };
-            frames.request();
+            // Boot's outcome and boot's pixels ride one wakeup: whatever the
+            // entry committed before it ended reaches the target on the turn
+            // that reports the ending, with nobody left to ask for another.
+            notify.send(ToPresenter::FrameChanged);
 
             if let Some(runtime) = runtime {
                 let served = catch_unwind(AssertUnwindSafe(|| {
-                    serve_main_commands(runtime, &commands, &events, &hub);
+                    serve_main_commands(runtime, &commands, &notify);
                 }));
                 if let Err(payload) = served {
-                    events.send(EngineEvent::ScriptRunError(platform_script_error(format!(
-                        "the Lynx main thread panicked while serving commands: {}",
-                        panic_payload(payload.as_ref())
-                    ))));
+                    notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(
+                        platform_script_error(format!(
+                            "the Lynx main thread panicked while serving commands: {}",
+                            panic_payload(payload.as_ref())
+                        )),
+                    )));
                 }
             }
-            hub.note_committer_gone();
             #[cfg(all(target_arch = "wasm32", panic = "abort"))]
             set_script_panic_reporter(None);
         })
@@ -306,34 +231,33 @@ fn spawn_main_thread(
         })
 }
 
-fn serve_main_commands(
-    mut runtime: MainThreadRuntime,
-    commands: &mpsc::Receiver<MainCommand>,
-    events: &EngineEventSender,
-    hub: &FrameHub,
+fn serve_main_commands<R: EventRequester>(
+    mut runtime: MainThreadRuntime<R>,
+    commands: &mpsc::Receiver<ToMain>,
+    notify: &ToPresenterSender<R>,
 ) {
     while let Ok(first) = commands.recv() {
         let mut serviced_begin_frame = None;
         let mut command = Some(first);
         while let Some(current) = command.take() {
-            apply_main_command(&mut runtime, current, events, &mut serviced_begin_frame);
+            apply_main_command(&mut runtime, current, notify, &mut serviced_begin_frame);
             command = commands.try_recv().ok();
         }
         runtime.commit_if_dirty();
         if let Some(seq) = serviced_begin_frame {
-            hub.note_begin_frame_serviced(seq);
+            notify.send(ToPresenter::BeginFrameServiced(seq));
         }
     }
 }
 
-fn apply_main_command(
-    runtime: &mut MainThreadRuntime,
-    command: MainCommand,
-    events: &EngineEventSender,
+fn apply_main_command<R: EventRequester>(
+    runtime: &mut MainThreadRuntime<R>,
+    command: ToMain,
+    notify: &ToPresenterSender<R>,
     serviced_begin_frame: &mut Option<u64>,
 ) {
     match command {
-        MainCommand::DispatchEvent {
+        ToMain::DispatchEvent {
             target,
             name,
             detail,
@@ -342,22 +266,24 @@ fn apply_main_command(
                 runtime.dispatch_event(target, name, &detail)
             }));
             if let Ok(Err(error)) = delivered {
-                events.send(EngineEvent::ListenerFailed(error.into_script_error()));
+                notify.send(ToPresenter::Engine(EngineEvent::ListenerFailed(
+                    error.into_script_error(),
+                )));
             }
         }
-        MainCommand::Resize {
+        ToMain::Resize {
             width,
             height,
             device_pixel_ratio,
         } => runtime.apply_resize(width, height, device_pixel_ratio),
-        MainCommand::BeginFrame { now, seq } => {
+        ToMain::BeginFrame { now, seq } => {
             runtime.begin_frame(now);
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
-        MainCommand::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
-        MainCommand::NoteImagesChanged => runtime.note_images_changed(),
+        ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
+        ToMain::NoteImagesChanged => runtime.note_images_changed(),
         #[cfg(test)]
-        MainCommand::Probe(probe) => runtime.with_document(probe),
+        ToMain::Probe(probe) => runtime.with_document(probe),
     }
 }
 
@@ -371,10 +297,10 @@ fn install_script_panic_hook() {
                     let location = info
                         .location()
                         .map_or_else(String::new, |location| format!(" at {location}"));
-                    reporter.send(EngineEvent::ScriptRunError(platform_script_error(format!(
+                    reporter(platform_script_error(format!(
                         "the script Worker aborted after a panic{location}: {}",
                         panic_payload(info.payload())
-                    ))));
+                    )));
                 }
             });
             previous(info);
@@ -383,7 +309,7 @@ fn install_script_panic_hook() {
 }
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn set_script_panic_reporter(reporter: Option<EngineEventSender>) {
+fn set_script_panic_reporter(reporter: Option<ScriptPanicReporter>) {
     WASM_SCRIPT_PANIC_REPORTER.with(|slot| *slot.borrow_mut() = reporter);
 }
 

@@ -19,17 +19,28 @@ use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
+/// This embedder's wakeup: a `Pump` on the same channel the console and the
+/// synthetic clock feed, so an engine wakeup is one more loop input.
+#[derive(Debug)]
+struct ChannelWakeup(mpsc::Sender<HostEvent>);
+
+impl EventRequester for ChannelWakeup {
+    fn request_event(&self) {
+        let _ = self.0.send(HostEvent::Pump);
+    }
+}
+
+/// The offscreen view this embedder drives, woken through its own channel.
+type HeadlessView = OffscreenLynxView<ChannelWakeup>;
+
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     program.warn_about_compatibility_limits();
     let (sender, receiver) = mpsc::channel();
-    let event_sender = sender.clone();
-    let event_requester: std::sync::Arc<dyn EventRequester> = std::sync::Arc::new(move || {
-        let _ = event_sender.send(HostEvent::Pump);
-    });
+    let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
     // One construction: the input's author CSS and its entry MTS module are
     // this view's sources, so the first commit is already styled and the Lynx
     // main thread is running before anything else here happens.
-    let mut view = pollster::block_on(OffscreenLynxView::new(
+    let mut view = pollster::block_on(HeadlessView::new(
         program.config,
         &program.resource_fetcher,
         event_requester,
@@ -109,7 +120,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
-    view: &mut OffscreenLynxView,
+    view: &mut HeadlessView,
     clock: &mut FrameClock,
     running: &mut bool,
 ) -> Result<bool, CliError> {
@@ -157,7 +168,7 @@ enum HostEvent {
     Pump,
 }
 
-fn check_script(view: &mut OffscreenLynxView, input: &str) -> Result<bool, CliError> {
+fn check_script(view: &mut HeadlessView, input: &str) -> Result<bool, CliError> {
     let mut finished = false;
     for event in view.pump() {
         match event {

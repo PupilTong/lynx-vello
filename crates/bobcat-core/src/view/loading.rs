@@ -73,12 +73,12 @@ pub(super) struct EntryModule {
     pub(super) url: String,
 }
 
-impl<W: Window> LynxView<'_, W> {
+impl<W: Window, R: EventRequester> LynxView<'_, W, R> {
     /// Loads every source, then starts the view's single entry module.
     pub async fn new(
         config: PageConfig,
         resource_fetcher: &dyn ResourceFetcher,
-        event_requester: Arc<dyn EventRequester>,
+        event_requester: Arc<R>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,

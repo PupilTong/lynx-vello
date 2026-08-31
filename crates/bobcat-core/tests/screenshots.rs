@@ -9,8 +9,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    FontBlob, ImageStore, OffscreenLynxView, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet, ViewSources,
+    FontBlob, ImageStore, NoWakeup, OffscreenLynxView, PageConfig, PreparsedDeclaration,
+    PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -98,7 +98,7 @@ async fn booted(source: &[u8], sources: ViewSources) -> OffscreenLynxView {
     let mut view = OffscreenLynxView::new(
         PageConfig::default(),
         &FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL),
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
@@ -128,7 +128,7 @@ async fn booted_with_sheet_at(
         &FetcherDouble::new(source.to_vec())
             .resolving_to(SCRIPT_URL)
             .with_preparsed_style_sheet(sheet),
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         width,
         height,
         1.0,

@@ -1,6 +1,8 @@
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
-use super::{ListenerUpdate, MainCommand, frame_size};
+use super::{EngineEvent, NoWakeup, frame_size};
+use crate::link::{MainLink, ToMain, ToPresenter};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
 
 /// A phone-shaped document, ready for a main thread to be started over it.
@@ -10,11 +12,11 @@ fn document() -> LynxDocument {
 
 /// Starts a view over `document` and `entry`, the IO-free half of
 /// construction.
-fn view_over(
-    events: Arc<dyn super::EventRequester>,
+fn view_over<R: super::EventRequester>(
+    events: Arc<R>,
     document: LynxDocument,
     entry: &str,
-) -> super::OffscreenLynxView {
+) -> super::OffscreenLynxView<R> {
     super::LynxView::start(
         document,
         Viewport::new(393.0, 727.0),
@@ -28,25 +30,19 @@ fn view_over(
     .expect("the test view starts")
 }
 
-/// A view with every seam built but no main thread: the command receiver
-/// and the listener-update sender are handed back so a test can play
-/// both halves of the main thread's side of the seam. Probes answer
-/// `None` and `BeginFrame`s are withheld — nobody would ever service
-/// them.
-fn detached() -> (
-    super::OffscreenLynxView,
-    mpsc::Receiver<MainCommand>,
-    mpsc::Sender<ListenerUpdate>,
-) {
+/// A view with every seam built but no main thread: the other end of its
+/// link is handed back so a test can play the main thread's whole side of
+/// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
+/// ever service them.
+fn detached() -> (super::OffscreenLynxView, MainLink<NoWakeup>) {
     let document = document();
     let store = Arc::clone(document.image_store());
-    let (view, receiver, _events, listeners) = super::LynxView::with_channel(
+    super::LynxView::with_link(
         store,
         Viewport::new(393.0, 727.0),
         frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        Arc::new(|| {}),
-    );
-    (view, receiver, listeners)
+        Arc::new(NoWakeup),
+    )
 }
 
 #[test]
@@ -74,7 +70,7 @@ fn the_installed_image_store_is_the_one_the_document_reads() {
     document.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
 
     let mut view = view_over(
-        Arc::new(|| {}),
+        Arc::new(NoWakeup),
         document,
         "globalThis.renderPage = function () { __CreatePage('card', 0); };",
     );
@@ -92,6 +88,65 @@ fn the_installed_image_store_is_the_one_the_document_reads() {
     assert!(miss);
 }
 
+/// One drain of the notification FIFO applies every kind of thing that
+/// rides it — a lifecycle event `pump` will hand back, a listener edge, a
+/// `BeginFrame` acknowledgement, and the redraw an announced frame asks
+/// for — and applies each of them exactly once.
+#[test]
+fn one_drain_applies_every_kind_of_notification() {
+    let (mut view, main) = detached();
+    assert!(!view.link.take_redraw(), "a fresh link owes no frame");
+    assert!(view.pump().is_empty(), "and has nothing to report");
+
+    for notification in [
+        ToPresenter::ListenerAvailable(Arc::from("tap")),
+        ToPresenter::Engine(EngineEvent::ScriptFinished),
+        ToPresenter::BeginFrameServiced(7),
+        ToPresenter::FrameChanged,
+    ] {
+        main.notify.send(notification);
+    }
+
+    let events = view.pump();
+    assert!(matches!(events.as_slice(), [EngineEvent::ScriptFinished]));
+    assert!(view.link.has_listener("tap"));
+    assert!(
+        view.link.wait_begin_frame(7, Duration::ZERO),
+        "the acknowledgement rode the same drain, so the wait never blocks"
+    );
+    assert!(
+        view.link.take_redraw(),
+        "an announced frame asks for a draw"
+    );
+
+    assert!(view.pump().is_empty(), "an event is handed back once");
+    assert!(!view.link.take_redraw(), "and a request is taken once");
+}
+
+/// Frames do not queue: the mailbox holds one slot, so a presenting side
+/// that syncs after several commits sees the newest and never the ones it
+/// slept through — however many announcements arrived for them.
+#[test]
+fn the_frame_mailbox_keeps_only_the_newest_commit() {
+    let (mut view, main) = detached();
+    let mut document = document();
+    let first = document.commit();
+    document.set_viewport(320.0, 640.0);
+    let second = document.commit();
+    assert_ne!(first.commit_id(), second.commit_id());
+
+    main.notify.publish_frame(Arc::clone(&first));
+    main.notify.publish_frame(Arc::clone(&second));
+    view.link.sync();
+
+    let published = view.link.frame().expect("the sync adopted a frame");
+    assert_eq!(
+        published.commit_id(),
+        second.commit_id(),
+        "the second publish overwrote the first rather than queueing behind it"
+    );
+}
+
 /// An emit decision costs one name-table lookup and stops there unless a
 /// listener exists; when it crosses, it crosses as plain data — the
 /// target id, not a path. Liveness is the main thread's to check at
@@ -100,7 +155,7 @@ fn the_installed_image_store_is_the_one_the_document_reads() {
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     use crate::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
-    let (mut view, commands, listeners) = detached();
+    let (mut view, main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
     let emit = |view: &mut super::OffscreenLynxView| {
@@ -115,9 +170,8 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         assert!(decisions.is_empty(), "the queue is always drained");
     };
 
-    let publish = |update| {
-        listeners.send(update).expect("the view holds the receiver");
-    };
+    let publish = |notification| main.notify.send(notification);
+    let commands = &main.commands;
 
     emit(&mut view);
     assert!(
@@ -125,8 +179,8 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         "an empty listener set sends nothing"
     );
 
-    publish(ListenerUpdate::Available(Arc::from("pointerup")));
-    view.listener_names.sync();
+    publish(ToPresenter::ListenerAvailable(Arc::from("pointerup")));
+    view.link.sync();
     emit(&mut view);
     assert!(
         commands.try_recv().is_err(),
@@ -136,17 +190,17 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     // An update that has not been synced yet is not yet visible: the
     // replica moves at pass boundaries, which is the one pass of
     // staleness this design accepts in exchange for the lock.
-    publish(ListenerUpdate::Available(Arc::from(TAP_EVENT)));
+    publish(ToPresenter::ListenerAvailable(Arc::from(TAP_EVENT)));
     emit(&mut view);
     assert!(
         commands.try_recv().is_err(),
         "an unsynced registration does not open the name mid-pass"
     );
 
-    view.listener_names.sync();
+    view.link.sync();
     emit(&mut view);
     let command = commands.try_recv().expect("the listened-for name crosses");
-    let MainCommand::DispatchEvent {
+    let ToMain::DispatchEvent {
         name, target: sent, ..
     } = command
     else {
@@ -157,8 +211,8 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 
     // And the edge closes the name again: the main thread publishes the
     // last removal, and from the next sync nothing crosses.
-    publish(ListenerUpdate::Unavailable(Arc::from(TAP_EVENT)));
-    view.listener_names.sync();
+    publish(ToPresenter::ListenerUnavailable(Arc::from(TAP_EVENT)));
+    view.link.sync();
     emit(&mut view);
     assert!(
         commands.try_recv().is_err(),
@@ -174,32 +228,37 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 /// replica closed, not open.
 #[test]
 fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
-    let (mut view, _commands, listeners) = detached();
-    let names = &mut view.listener_names;
+    let (mut view, main) = detached();
 
-    names.sync();
-    assert!(!names.contains("tap"), "nothing has been published yet");
-
-    for update in [
-        ListenerUpdate::Available(Arc::from("tap")),
-        ListenerUpdate::Available(Arc::from("scroll")),
-        ListenerUpdate::Unavailable(Arc::from("tap")),
-    ] {
-        listeners.send(update).expect("the view holds the receiver");
-    }
-    names.sync();
+    view.link.sync();
     assert!(
-        !names.contains("tap"),
+        !view.link.has_listener("tap"),
+        "nothing has been published yet"
+    );
+
+    for edge in [
+        ToPresenter::ListenerAvailable(Arc::from("tap")),
+        ToPresenter::ListenerAvailable(Arc::from("scroll")),
+        ToPresenter::ListenerUnavailable(Arc::from("tap")),
+    ] {
+        main.notify.send(edge);
+    }
+    view.link.sync();
+    assert!(
+        !view.link.has_listener("tap"),
         "the closing edge follows the opening one and wins"
     );
-    assert!(names.contains("scroll"), "the other name stays open");
+    assert!(
+        view.link.has_listener("scroll"),
+        "the other name stays open"
+    );
 
     // The main thread going away is not an unregistration: what it
     // published last is still the last true answer.
-    drop(listeners);
-    names.sync();
+    drop(main);
+    view.link.sync();
     assert!(
-        names.contains("scroll"),
+        view.link.has_listener("scroll"),
         "a closed channel leaves the snapshot standing"
     );
 }
@@ -213,7 +272,7 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
 fn a_scroll_decision_sends_no_command() {
     use crate::gesture::{InputDecision, InputDecisions};
 
-    let (mut view, commands, _listeners) = detached();
+    let (mut view, main) = detached();
     let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
     let mut decisions = InputDecisions::new();
     decisions.push(InputDecision::Scroll {
@@ -223,10 +282,20 @@ fn a_scroll_decision_sends_no_command() {
     });
     view.execute_decisions(&mut decisions, None);
     assert!(
-        commands.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"
     );
     assert!(view.scroll_intents.offsets.is_empty());
+}
+
+/// A requester that records every wake, so a test can wait on the host
+/// loop actually being asked to run.
+struct WakeSignal(mpsc::Sender<()>);
+
+impl super::EventRequester for WakeSignal {
+    fn request_event(&self) {
+        let _ = self.0.send(());
+    }
 }
 
 /// Boot's final flush is a commit: by the time `ScriptFinished` is
@@ -240,9 +309,7 @@ fn a_booted_view_commits_and_publishes() {
 
     let (wake_sender, wake_receiver) = mpsc::channel();
     let mut view = view_over(
-        Arc::new(move || {
-            let _ = wake_sender.send(());
-        }),
+        Arc::new(WakeSignal(wake_sender)),
         document(),
         r"
             globalThis.renderPage = function () {

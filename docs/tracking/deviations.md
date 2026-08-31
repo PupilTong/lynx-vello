@@ -201,8 +201,8 @@ consequential choice about whether to follow the spec or the quirk.
   - **The long-press "consumed" gate is name-level, not per-chain.** Lynx
     suppresses `tap` when the `longpress` walk found a handler anywhere in
     the response chain; this engine's presenting side only knows which names
-    have listeners somewhere in the document (`ListenerNames`, its own
-    lock-free replica of the main thread's index), so a `longpress` listener
+    have listeners somewhere in the document (its own lock-free replica of
+    the main thread's index), so a `longpress` listener
     on an unrelated element also suppresses a sequence's `tap`. Per-chain
     precision arrives with a presenting-side per-node index.
   - **The gate is one routing pass stale, and loses rather than replays

@@ -1,4 +1,4 @@
-//! The embedder-facing Lynx view and the private pipeline behind it.
+//! The embedder-facing Lynx view and the private link behind it.
 //!
 //! Source loading, Lynx-main-thread ownership, and presenting-thread work live
 //! in focused submodules. This module keeps the public facade and the state
@@ -19,7 +19,7 @@ mod tests;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use dom::render::gpu::Headless;
 use dom::vello::Scene;
@@ -31,13 +31,10 @@ use self::loading::EntryModule;
 pub use self::loading::{LynxViewError, ViewSources};
 #[cfg(target_arch = "wasm32")]
 pub use self::main_thread::configure_wasm_workers;
-use self::main_thread::{FrameWakeup, MainCommand};
 use self::presenter::ScrollIntents;
 use crate::clock::FrameClock;
 use crate::gesture::GestureRouter;
-#[cfg(test)]
-use crate::pipeline::ListenerUpdate;
-use crate::pipeline::{FrameHub, ListenerNames};
+use crate::link::PresenterLink;
 use crate::script::ScriptError;
 use crate::tree::Viewport;
 
@@ -109,17 +106,22 @@ pub trait Window {
 }
 
 /// Wakes the host event loop for pending engine events or frames.
+///
+/// One implementation per platform — a winit event-loop proxy, an `AppKit`
+/// source, a Worker's signal — and the view is generic over it, so the wake
+/// is a direct call rather than a virtual one. A view's link holds the only
+/// handle to it.
 pub trait EventRequester: Send + Sync + 'static {
     fn request_event(&self);
 }
 
-impl<F> EventRequester for F
-where
-    F: Fn() + Send + Sync + 'static,
-{
-    fn request_event(&self) {
-        self();
-    }
+/// The requester for a host with no event loop to wake: an offscreen view
+/// driven by its own `tick`, a benchmark, a test.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoWakeup;
+
+impl EventRequester for NoWakeup {
+    fn request_event(&self) {}
 }
 
 #[derive(Debug)]
@@ -143,35 +145,31 @@ enum Output<'window> {
 ///
 /// Generic over the embedder's window capability. The windowless form is
 /// [`OffscreenLynxView`]. A view remains on the thread that owns its presenter.
-pub struct LynxView<'window, W: Window = NoWindow> {
-    // Keep first: dropping the sole sender wakes the main thread before any
-    // state it may still refer to is released.
-    commands: mpsc::Sender<MainCommand>,
+pub struct LynxView<'window, W: Window = NoWindow, R: EventRequester = NoWakeup> {
+    // Keep first: dropping the link closes the sole command sender, which
+    // wakes the main thread before any state it may still refer to is
+    // released.
+    link: PresenterLink<R>,
     #[cfg(test)]
     detached: bool,
-    hub: Arc<FrameHub>,
     image_store: Arc<dyn dom::ImageStore>,
     viewport: Viewport,
     frame_size: FrameSize,
-    messages: mpsc::Receiver<EngineEvent>,
     output: Output<'window>,
-    frames: FrameWakeup,
     gesture: GestureRouter,
-    listener_names: ListenerNames,
     clock: FrameClock,
     scroll_intents: ScrollIntents,
     composed: Option<ComposeKey>,
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
-    begin_frames_sent: u64,
     window: PhantomData<fn() -> W>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
 /// The offscreen composition of [`LynxView`].
-pub type OffscreenLynxView = LynxView<'static, NoWindow>;
+pub type OffscreenLynxView<R = NoWakeup> = LynxView<'static, NoWindow, R>;
 
-impl<W: Window> fmt::Debug for LynxView<'_, W> {
+impl<W: Window, R: EventRequester> fmt::Debug for LynxView<'_, W, R> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
