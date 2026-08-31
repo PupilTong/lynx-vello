@@ -4,6 +4,27 @@ This is the canonical project/architecture doc for coding agents working in this
 repo (Claude Code and Codex both start here — `CLAUDE.md` is a short pointer to
 this file plus Claude-specific notes).
 
+## Pull-request descriptions
+
+Every pull-request body must include one or more GitHub-rendered Mermaid
+diagrams. Taken together, the diagrams must:
+
+- show the relevant architecture, ownership, control flow, or data flow before
+  the change;
+- show the corresponding structure or flow after the change; and
+- visually mark the nodes, edges, boundaries, invariants, or risks that need
+  the reviewer's closest attention, with the accompanying text explaining why
+  each marked area matters.
+
+A prose-only before/after description does not satisfy this requirement. There
+are no exemptions for small, documentation-only, test-only, dependency, or
+other non-architectural changes: in those cases, diagram the affected authoring,
+build, test, release, or runtime path and explicitly label the architectural
+parts that remain unchanged. Tailor every diagram to the actual PR; remove all
+template placeholders and verify that the Mermaid renders in GitHub's PR
+preview before publishing or updating the PR description. Use
+`.github/pull_request_template.md` as the minimum required structure.
+
 ## Mission
 
 lynx-vello is a from-scratch Rust reimplementation of the LynxJS **web-bundle**
