@@ -14,9 +14,9 @@ use std::sync::{Arc, mpsc};
 
 use dom::event::EventSteps;
 
-use crate::runtime::{ENTRY_PREAMBLE, MainThreadRuntime};
+use crate::pipeline::{FrameHub, ListenerNames};
+use crate::runtime::{MainThreadRuntime, entry_module_source};
 use crate::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{FrameHub, ListenerNames};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -78,7 +78,7 @@ impl ScriptHarness {
     ///
     /// Panics if the snippet throws.
     pub fn evaluate(&mut self, source: &str) {
-        let source = format!("{ENTRY_PREAMBLE}{source}");
+        let source = entry_module_source(source);
         self.runtime
             .evaluate_module(&source, "bench:///step.mjs", "running a benchmark step")
             .expect("the benchmark step runs");

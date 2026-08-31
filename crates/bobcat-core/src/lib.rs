@@ -21,6 +21,7 @@
 pub mod bench_support;
 mod clock;
 mod gesture;
+mod pipeline;
 mod quickjs;
 pub mod resource;
 mod runtime;
