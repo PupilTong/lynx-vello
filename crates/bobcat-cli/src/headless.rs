@@ -42,7 +42,6 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     // main thread is running before anything else here happens.
     let mut view = pollster::block_on(HeadlessView::new(
         program.config,
-        &program.resource_fetcher,
         event_requester,
         options.viewport_width,
         options.viewport_height,

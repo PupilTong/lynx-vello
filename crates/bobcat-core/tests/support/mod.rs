@@ -17,7 +17,8 @@ use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
 use bytes::Bytes;
 use url::Url;
 
-/// Waits for the engine-owned script thread to report its terminal boot event.
+/// Drains the terminal boot event preserved after construction. `LynxView::new`
+/// has already awaited the same outcome before it returns.
 pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
@@ -54,6 +55,9 @@ pub struct FetcherDouble {
     /// When set, stylesheet requests are answered pre-parsed instead of as
     /// CSS text — the arm a bundle-decoding embedder uses.
     pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
+    /// When set, stylesheet requests use these bytes while ordinary resource
+    /// requests keep using `bytes` for the entry module.
+    pub style_sheet_text: Option<Vec<u8>>,
     pub style_sheet_fetches: AtomicUsize,
 }
 
@@ -68,6 +72,7 @@ impl FetcherDouble {
             resolves: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
             style_sheet: None,
+            style_sheet_text: None,
             style_sheet_fetches: AtomicUsize::new(0),
         }
     }
@@ -78,6 +83,14 @@ impl FetcherDouble {
         self.style_sheet = Some(Arc::new(sheet));
         self.capabilities
             .push(ResourceCapability::PreparsedStyleSheet);
+        self
+    }
+
+    /// Answers stylesheet requests with raw text bytes independently of the
+    /// entry-module bytes returned by `fetch_resource`.
+    #[must_use]
+    pub fn with_style_sheet_text(mut self, bytes: Vec<u8>) -> Self {
+        self.style_sheet_text = Some(bytes);
         self
     }
 
@@ -147,19 +160,28 @@ impl ResourceFetcher for FetcherDouble {
         request: ResourceRequest,
     ) -> ResourceFuture<'_, StyleSheetResponse> {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
-        let Some(sheet) = self.style_sheet.clone() else {
-            // No pre-parsed sheet registered, so behave like a host that only
-            // moves bytes: run the trait's own default, which is the code path
-            // a browser embedder takes in production.
-            return bobcat_core::resource::fetch_style_sheet_as_text(self, request);
-        };
-        let metadata = self.metadata(request.resource.clone(), request.context.id);
-        Box::pin(async move {
-            Ok(StyleSheetResponse {
-                metadata,
-                payload: StyleSheetPayload::Preparsed(sheet),
-            })
-        })
+        if let Some(sheet) = self.style_sheet.clone() {
+            let metadata = self.metadata(request.resource.clone(), request.context.id);
+            return Box::pin(async move {
+                Ok(StyleSheetResponse {
+                    metadata,
+                    payload: StyleSheetPayload::Preparsed(sheet),
+                })
+            });
+        }
+        if let Some(bytes) = self.style_sheet_text.clone() {
+            let mut metadata = self.metadata(request.resource, request.context.id);
+            metadata.content_length = Some(bytes.len() as u64);
+            return Box::pin(async move {
+                Ok(StyleSheetResponse {
+                    metadata,
+                    payload: StyleSheetPayload::Text(Bytes::from(bytes)),
+                })
+            });
+        }
+        // No dedicated sheet registered, so behave like a host that only
+        // moves bytes: run the trait's own default.
+        bobcat_core::resource::fetch_style_sheet_as_text(self, request)
     }
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {

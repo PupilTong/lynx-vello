@@ -40,16 +40,19 @@ use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, Rou
 use self::graphics::FrameAcquisition;
 pub(crate) use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
-use crate::main::tree::{LynxDocument, Viewport};
-use crate::main::{MainLink, spawn_main_thread};
+#[cfg(test)]
+use crate::main::tree::LynxDocument;
+use crate::main::tree::Viewport;
+#[cfg(test)]
+use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, EngineError, EngineEvent, EntryModule, EventRequester, FrameHub, FrameSize, ToMain,
-    ToPainter, ToPresenter, frame_slot, main_link,
+    ComposeKey, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize, ToMain, ToPainter,
+    ToPresenter, frame_slot,
 };
 #[cfg(test)]
-use crate::view::{NoWakeup, frame_size};
+use crate::view::{NoWakeup, frame_size, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -355,6 +358,8 @@ pub(crate) struct Painter {
     // released.
     pub(super) link: PresenterLink,
     #[cfg(test)]
+    main: Option<MainThreadHome>,
+    #[cfg(test)]
     pub(super) detached: bool,
     viewport: Viewport,
     frame_size: FrameSize,
@@ -380,6 +385,16 @@ impl std::fmt::Debug for Painter {
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+impl Drop for Painter {
+    fn drop(&mut self) {
+        if let Some(main) = self.main.as_mut() {
+            self.link.send(ToMain::Shutdown);
+            main.shutdown();
+        }
     }
 }
 
@@ -623,6 +638,31 @@ fn route_published(
 }
 
 impl Painter {
+    /// Creates the paint-thread owner over links the user thread established
+    /// before either engine-owned thread began running.
+    pub(super) fn new(viewport: Viewport, frame_size: FrameSize, link: PresenterLink) -> Self {
+        Self {
+            link,
+            #[cfg(test)]
+            main: None,
+            #[cfg(test)]
+            detached: true,
+            viewport,
+            frame_size,
+            output: Output::None,
+            occluded: false,
+            render_failed: false,
+            gesture: GestureRouter::default(),
+            clock: FrameClock::new(),
+            scroll_intents: ScrollIntents::default(),
+            composed: None,
+            composed_scene: Scene::new(),
+            refill_requested_for: None,
+            thread_bound: PhantomData,
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn start<R: EventRequester>(
         document: LynxDocument,
         viewport: Viewport,
@@ -630,14 +670,9 @@ impl Painter {
         event_requester: Arc<R>,
         entry: EntryModule,
     ) -> Result<Self, EngineError> {
-        let (painter, main) = Self::with_link(viewport, frame_size, event_requester);
-        spawn_main_thread(document, entry, main)?;
-        #[cfg(test)]
-        let painter = {
-            let mut painter = painter;
-            painter.detached = false;
-            painter
-        };
+        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester);
+        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
+        painter.detached = false;
         Ok(painter)
     }
 
@@ -665,29 +700,14 @@ impl Painter {
     /// The painter and the other end of its link, with no Lynx main thread
     /// started over it yet — the seam `start` spawns through, and the one a
     /// test plays the main thread's half of.
+    #[cfg(test)]
     pub(super) fn with_link<R: EventRequester>(
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<R>,
     ) -> (Self, MainLink<R>) {
         let (presenter, main) = main_link(event_requester);
-        let painter = Self {
-            link: presenter,
-            #[cfg(test)]
-            detached: true,
-            viewport,
-            frame_size,
-            output: Output::None,
-            occluded: false,
-            render_failed: false,
-            gesture: GestureRouter::default(),
-            clock: FrameClock::new(),
-            scroll_intents: ScrollIntents::default(),
-            composed: None,
-            composed_scene: Scene::new(),
-            refill_requested_for: None,
-            thread_bound: PhantomData,
-        };
+        let painter = Self::new(viewport, frame_size, presenter);
         (painter, main)
     }
 
@@ -1026,7 +1046,10 @@ impl Painter {
                 let _ = reply.send(answer);
             }
             ToPainter::NoteImagesChanged => self.note_images_changed(),
-            ToPainter::Shutdown => return false,
+            ToPainter::Shutdown => {
+                self.link.send(ToMain::Shutdown);
+                return false;
+            }
         }
         true
     }

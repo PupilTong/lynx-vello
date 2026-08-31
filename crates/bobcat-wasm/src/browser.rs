@@ -297,7 +297,7 @@ impl ResourceFetcher for BrowserResources {
 #[wasm_bindgen]
 pub struct BobcatRenderer {
     view: Option<BrowserLynxView>,
-    resources: BrowserResources,
+    resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -362,7 +362,7 @@ impl BobcatRenderer {
         let result = async move {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
-            let resources = BrowserResources::default();
+            let resources = Arc::new(BrowserResources::default());
             let events = Arc::new(EventSignal::default());
             let config = PageConfig {
                 default_display_linear,
@@ -407,9 +407,8 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Dropping the previous view closes its sole command sender. The
-        // detached Lynx-main Worker then drops its thread-bound realm and
-        // exits naturally; an independent replacement does not join it.
+        // Dropping the previous view explicitly stops and joins its Lynx-main
+        // Worker before construction of the independent replacement begins.
         drop(self.view.take());
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
@@ -421,11 +420,10 @@ impl BobcatRenderer {
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
-            ..ViewSources::new(entry_url)
+            ..ViewSources::new(self.resources.clone(), entry_url)
         };
         let built = LynxView::new(
             self.config,
-            &self.resources,
             self.events.clone(),
             self.width,
             self.height,
@@ -433,10 +431,10 @@ impl BobcatRenderer {
             sources,
         )
         .await;
-        // Construction copied every byte it needed and retains no fetcher, so
-        // this page's registered bytes are dead either way. Clearing here is
-        // what keeps a Render Worker that loads page after page from growing
-        // a registry of them.
+        // Construction has finished every source load and released its fetcher
+        // clone, so this page's registered bytes are dead either way. Clearing
+        // here keeps a Render Worker that loads page after page from growing a
+        // registry of them.
         self.resources.clear();
         let mut view = built.map_err(js_error)?;
         set_canvas_size(&self.canvas, view.frame_size());
@@ -688,8 +686,8 @@ impl BobcatRenderer {
     }
 
     /// Release the current native view before the outer facade terminates its
-    /// Render Worker and the Wasm session with it. Its detached script Worker
-    /// observes the closed command channel and exits naturally.
+    /// Render Worker and the Wasm session with it. Dropping the view stops and
+    /// joins its Lynx-main Worker.
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;

@@ -140,22 +140,31 @@ useful signal for currently-compatible versions of those libraries.
   lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
   embedder sees is the sanitized `script::ScriptError` a failure is reported
-  with. A view is built from one `ViewSources` — owned font containers, an
-  optional default font family, an optional `ImageStore`, author stylesheet URLs
-  in cascade order, and the one entry MTS module URL — passed to the async
-  `LynxView::new` with `PageConfig` and the device metrics. It borrows the fetcher
-  only for that call, fetches every source, applies it to a fresh document, and
-  starts both engine-owned threads — the presenter and the Lynx main thread —
-  before returning; a failure yields
-  `LynxViewError` and no view, and nothing later mounts a stylesheet or starts a
-  second entry. The default family is prepended to the `system-ui`, `sans-serif`,
+  with. A view is built from one `ViewSources` — an owned
+  `Arc<dyn ResourceFetcher>`, owned font containers, an optional default font
+  family, an optional `ImageStore`, author stylesheet URLs in cascade order,
+  and the one entry MTS module URL — passed to the async `LynxView::new` with
+  `PageConfig` and the device metrics. `new` validates the viewport, creates
+  both links, starts the presenter and `bobcat-main`, and awaits one startup
+  result. `bobcat-main` creates the document itself, registers its fonts and
+  image store, awaits and mounts every stylesheet, awaits the entry module,
+  creates QuickJS, and boots it before returning success; the fetcher decides
+  where actual network or file IO runs, but every future continuation and
+  document mutation remains on `bobcat-main`. A resource, font, realm, or boot
+  failure yields `LynxViewError` and no view, and nothing later mounts a
+  stylesheet or starts a second entry. Cancelling the unresolved `new` future
+  drops pending resource work or stops startup before `QuickJS` begins, then
+  stops the presenter and directly joins `bobcat-main`; synchronous startup
+  JavaScript is allowed to finish rather than being externally interrupted.
+  The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
   the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
   Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
   responsibilities; core validates the entry module's source as UTF-8, registers
-  its resolved URL in QuickJS's preloaded ESM graph, and reports boot completion
-  through `pump`. The protocol's `fetch_style_sheet` answers with either
+  its resolved URL in QuickJS's preloaded ESM graph. Successful construction
+  has already completed boot; its `ScriptFinished` lifecycle edge remains
+  queued for `pump`. The protocol's `fetch_style_sheet` answers with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
   itself, since a `.web.bundle` ships CSS a build step already tokenized and
   re-serializing it to a sheet blob is the startup cost the design rules out.
@@ -184,13 +193,13 @@ useful signal for currently-compatible versions of those libraries.
   about it is `Send`. Values crossing it are `quickjs-rust-bridge`'s
   primitives-only `HostValue`/`HostArgument`, so realm values and DOM handles
   never cross as themselves. The private
-  `MainThreadRuntime` owns the realm integration: a
-  batch's first `bobcat` call takes the document out of its hand-off
-  slot, every call after that is a plain `&mut` mutation with no
-  synchronization, and `__FlushElementTree` runs the style + layout commit
-  on the taken document, puts it back, and notifies the presenter through
-  the callback injected at construction — locks are touched twice per
-  batch, never per call.
+  `MainThreadRuntime` owns the realm integration and the document together.
+  Its `Rc<RefCell<TreeHandle>>` exists only so same-thread native QuickJS
+  callbacks can borrow the owner; it is not a cross-thread sharing mechanism.
+  Each `bobcat-internal:host` call is a plain owner-thread mutation, and
+  `__FlushElementTree` runs the style + layout + paint commit and publishes one
+  immutable `Arc<CommittedFrame>` to the presenter. The document is never
+  taken from, returned to, or observed by another thread.
   The core depends on `dom` and re-exports exactly one narrow seam of it: the
   `input` module republishes `dom::Point2D` and
   `dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase}`
@@ -198,26 +207,21 @@ useful signal for currently-compatible versions of those libraries.
   itself. Wheel deltas crossing that seam are always viewport CSS pixels;
   conversion from physical-pixel, line, or page units is embedder policy.
   Nothing else crosses — no document, no node, no hit-test result —
-  and that list is the whole of it. Its private `Engine`
-  passes the element tree to and from its engine-owned Lynx main thread through
-  the private `SharedTree` hand-off slot — one holder at any instant — and runs input
-  routing, scrolling, frame production, and presentation on the thread the
-  embedder calls it from; vsync interacts with the OS only there. The
-  presenting side borrows the tree non-blockingly (an empty slot = batch
-  open = re-present the retained target, buffer input, retry next frame;
-  present's vsync wait happens outside the borrow), the slot is occupied
-  while the script merely computes (a long JS task between batches cannot
-  stop scrolling — one truth, no reconciliation protocol), a half-applied
-  batch is unobservable while the slot is empty; an abandoned batch may
-  present once its evaluation ends, which is web-core's visibility model. Embedders provide user input, device
+  and that list is the whole of it. The private `Painter` retains the newest
+  published frame and runs input routing, gestures, compositor scrolling,
+  composition, and presentation on the presenter; vsync interacts with the OS
+  only there. Commands that require the live tree go to `bobcat-main`, which
+  answers by publishing a later frame. A long JavaScript task therefore cannot
+  stop scrolling or re-presentation of the retained frame, while a
+  half-applied batch is unobservable because only commits publish. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
   OS facts in (`dispatch_input`/`resize`/`draw`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
-  `ScriptFinished` reports a successful entry-module boot,
-  `ScriptRunError` reports a fatal script-runtime failure during boot or later
-  owner-thread work, and `ListenerFailed` reports a listener that threw during
-  event delivery — separate because the last is not fatal:
+  `ScriptFinished` preserves the successful entry-module boot edge after
+  `new` has awaited it, `ScriptRunError` reports a fatal script-runtime failure
+  during later owner-thread work, and `ListenerFailed` reports a listener that
+  threw during event delivery — separate because the last is not fatal:
   the walk continues, the realm stays usable, and later events are delivered
   as normal;
   a frame the engine wants drawn wakes nobody: the engine-owned presenter
@@ -252,9 +256,9 @@ useful signal for currently-compatible versions of those libraries.
   Automatic loading for the Lynx `<image>` element remains unwired, as does
   its element surface (`mode`, `placeholder` racing, `cap-insets`,
   `blur-radius`, `load`/`error` events).
-  `Painter`, `SharedTree`, `TreeGuard`, `LynxDocument`,
-  `Viewport`, `new_document`, `MainThreadRuntime`, and the concrete QuickJS
-  adapter are all crate-private.
+  `Painter`, `LynxDocument`, `Viewport`, `new_document`, `MainThreadRuntime`,
+  the startup owner/guard, and the concrete QuickJS adapter are all
+  crate-private.
   The private `MainThreadRuntime`
   registers the native QuickJS ESM `bobcat-internal:host` (one Rust-backed
   named function export per member — `createPage`, `createElement`,
@@ -530,8 +534,9 @@ useful signal for currently-compatible versions of those libraries.
   animation is no wakeup at all: `about_to_wait` polls while
   `LynxView::is_animating`, paced by the swap chain's vsync. The CLI gives one
   `LynxView::new` its author CSS and entry MTS URL as a `ViewSources`, reports
-  any failure as `CliError::StartView`, and observes the complete TLA boot
-  through `ScriptFinished`/`ScriptRunError` and `pump`. Headed
+  any resource or TLA boot failure as `CliError::StartView`; after successful
+  construction it consumes the preserved `ScriptFinished` edge and any later
+  `ScriptRunError` through `pump`. Headed
   mode attaches the window as the draw target; headless mode attaches the
   view's offscreen target and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
@@ -592,9 +597,10 @@ useful signal for currently-compatible versions of those libraries.
   its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
   native view does. Every public `BobcatCanvas` gets a separate Render Worker
   and Wasm instance; a renderer holds no view until `BobcatRenderer::load` builds
-  one, and each later load replaces the current native `LynxView`. Closing the view's
-  sole command sender makes its detached Lynx-main Worker drop the thread-bound
-  QuickJS realm and exit naturally; replacement creation does not join it. The
+  one, and each later load replaces the current native `LynxView`. Dropping the
+  view explicitly stops and joins its Lynx-main Worker after the Worker drops
+  the document and thread-bound QuickJS realm; replacement construction starts
+  only after that teardown. The
   transferred OffscreenCanvas, module instance, configuration, latest metrics,
   resource provider, registered font containers, selected default font family,
   and Stylo pool are the renderer's own, reapplied to each view it builds; a
@@ -1070,11 +1076,12 @@ useful signal for currently-compatible versions of those libraries.
   because the realm cannot move and scrolling must stay responsive: the
   presenter thread routes the input (`route_input`, one hit test), feeds it
   to the input router — which decides the user-agent scroll and every event's
-  type and target in one place — executes those decisions in order, and
-  builds each emitted event's path, then sends the paths to the script
-  thread, which delivers them with the document handed back — that
-  order is what lets a listener mutate the tree. Nothing guards the window in
-  between: a `NodeId` names one node for the life of the document, so a step
+  type and target in one place — executes those decisions in order, and sends
+  each emitted event's type, target, and detail to the script thread. The
+  script thread builds its path from the exclusively owned
+  document and delivers it there — that order is what lets a listener mutate
+  the tree. Nothing guards the window in between: a `NodeId` names one node
+  for the life of the document, so a step
   that outlived its node resolves to no handle and reaches no one, and no later
   element can take its place. There is no `preventDefault` and no
   cancelable event anywhere on this path — Lynx dispatches none — so

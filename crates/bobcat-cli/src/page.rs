@@ -407,7 +407,10 @@ impl Program {
                 .map(Url::to_string)
                 .into_iter()
                 .collect(),
-            ..ViewSources::new(self.script_url.to_string())
+            ..ViewSources::new(
+                Arc::new(self.resource_fetcher.clone()),
+                self.script_url.to_string(),
+            )
         }
     }
 

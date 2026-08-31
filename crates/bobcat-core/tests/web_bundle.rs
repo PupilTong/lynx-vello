@@ -28,14 +28,15 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
 }
 
 async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptError> {
+    let fetcher =
+        Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = LynxView::new(
         config,
-        &FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
-        ViewSources::new("main.js"),
+        ViewSources::new(fetcher, "main.js"),
     )
     .await
     .expect("fetch and start");
@@ -59,8 +60,8 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
 /// `ReactLynx` installs an error boundary around the render it drives, so a
 /// missing PAPI surfaces as a call to `_ReportError` rather than as a thrown
 /// exception. The realm's shim swallows that call by design; rethrowing is what
-/// makes the boundary's report reach `ScriptRunError`, and what keeps this test
-/// from passing on a card that failed quietly.
+/// makes the boundary's report fail startup, and what keeps this test from
+/// passing on a card that failed quietly.
 fn with_fatal_reporter(root: &str) -> String {
     format!("globalThis._ReportError = function (error) {{ throw error; }};\n{root}")
 }

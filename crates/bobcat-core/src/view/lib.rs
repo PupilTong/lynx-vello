@@ -24,14 +24,7 @@ pub use crate::paint::WindowTarget;
 use crate::paint::{PainterLink, PresenterLink, WindowGraphics};
 use crate::script::ScriptError;
 use crate::user::HostLink;
-pub use crate::user::{LynxView, LynxViewError, ViewSources};
-
-/// The loaded main-thread module passed from source loading to realm boot.
-#[derive(Debug)]
-pub(crate) struct EntryModule {
-    pub(crate) source: String,
-    pub(crate) url: String,
-}
+pub use crate::user::{LynxView, ViewSources};
 
 /// View metrics copied across all three thread boundaries.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,12 +91,36 @@ pub enum EngineError {
     ResourceUpdateBusy,
 }
 
+/// A construction failure. No [`LynxView`] exists for any of these errors:
+/// source acquisition, document configuration, and script boot all complete
+/// on `bobcat-main` before the startup result is answered.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LynxViewError {
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Resource(#[from] crate::resource::ResourceError),
+    #[error(transparent)]
+    Script(#[from] ScriptError),
+    #[error("script `{url}` is not valid UTF-8: {message}")]
+    InvalidScriptEncoding { url: String, message: String },
+    #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
+    InvalidStyleSheetEncoding { url: String, message: String },
+    #[error("the image store could not load `{image_source}`: {message}")]
+    Image {
+        image_source: String,
+        message: String,
+    },
+}
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
     /// The entry MTS module and Bobcat boot completed successfully.
     ScriptFinished,
-    /// The script runtime failed fatally during boot or later owner-thread work.
+    /// The script runtime failed fatally during owner-thread work after startup.
+    /// Boot failures are returned by [`LynxView::new`] instead.
     ScriptRunError(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
@@ -168,6 +185,7 @@ pub(crate) enum ToMain {
         offsets: Vec<(NodeId, Vector2D<f32>)>,
     },
     NoteImagesChanged,
+    Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
 }

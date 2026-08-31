@@ -2,31 +2,27 @@ mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::script::ScriptError;
 use bobcat_core::{LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 /// The one way to build a view: hand it its sources and it comes back with
 /// its Lynx main thread already running the entry module.
 async fn view(source: &[u8], resolved_url: &str) -> Result<LynxView, LynxViewError> {
+    let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(resolved_url));
     LynxView::new(
         PageConfig::default(),
-        &FetcherDouble::new(source.to_vec()).resolving_to(resolved_url),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
-        ViewSources::new("main.js"),
+        ViewSources::new(fetcher, "main.js"),
     )
     .await
 }
 
-async fn run(source: &str, resolved_url: &str) -> Result<(), ScriptError> {
-    let mut view = view(source.as_bytes(), resolved_url)
-        .await
-        .expect("fetch and start");
-
-    wait_for_script(&mut view)
+async fn run(source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
+    let mut view = view(source.as_bytes(), resolved_url).await?;
+    wait_for_script(&mut view).map_err(Into::into)
 }
 
 #[tokio::test]
@@ -101,6 +97,7 @@ async fn resolved_script_url_is_preserved_in_errors() {
         .await
         .expect_err("syntax error");
     let message = error.to_string();
+    assert!(matches!(error, LynxViewError::Script(_)));
     assert!(message.contains("booting the MTS entry"), "{message}");
     assert!(message.contains("app:///broken.js:"), "{message}");
 }

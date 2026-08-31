@@ -79,16 +79,16 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 /// A view built the only way there is to build one: its sheet and its entry
 /// module are its construction inputs.
 async fn booted() -> LynxView {
+    let fetcher = Arc::new(resources(slider_sheet()));
     let mut view = LynxView::new(
         PageConfig::default(),
-        &resources(slider_sheet()),
         Arc::new(NoWakeup),
         32.0,
         24.0,
         1.0,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
-            ..ViewSources::new(SCRIPT_URL)
+            ..ViewSources::new(fetcher, SCRIPT_URL)
         },
     )
     .await
