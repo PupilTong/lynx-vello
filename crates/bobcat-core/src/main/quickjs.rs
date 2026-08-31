@@ -1,4 +1,4 @@
-//! Bobcat's script engine: one `QuickJS` runtime, the one realm on it, and
+//! The main thread's script engine: one `QuickJS` runtime and one realm,
 //! the policy around them.
 //!
 //! Runtime and realm live in `quickjs-rust-bridge`. What this module adds is

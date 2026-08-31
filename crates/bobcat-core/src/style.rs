@@ -19,7 +19,7 @@
 
 use dom::{CssDeclaration, CssKeyframe, CssRule, StylesheetOrigin};
 
-use crate::tree::LynxDocument;
+use crate::main::tree::LynxDocument;
 
 /// An author stylesheet whose CSS the host parsed before the engine saw it.
 ///
@@ -147,7 +147,7 @@ pub(crate) fn add_style_sheet_text(document: &mut LynxDocument, css: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree::{PageConfig, Viewport, new_document};
+    use crate::main::tree::{PageConfig, Viewport, new_document};
 
     fn document() -> LynxDocument {
         new_document(Viewport::new(393.0, 727.0), PageConfig::default())

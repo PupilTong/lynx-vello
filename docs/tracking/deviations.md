@@ -188,7 +188,7 @@ consequential choice about whether to follow the spec or the quirk.
   recognizers) instead of a hardcoded cross-event rule, so apps that don't
   use the gesture API don't inherit an invisible suppression.
 - **`tap`/`longpress` synthesis semantics (user ruling 2026-08-21,
-  implemented in `crates/bobcat-core/src/gesture.rs`)** — `tap` fires at
+  implemented in `crates/bobcat-core/src/paint/gesture.rs`)** — `tap` fires at
   release with the native movement-cancel rule; `longpress` fires at a press
   held past 500ms (the native default on every platform). The recorded
   deviations inside that ruling:

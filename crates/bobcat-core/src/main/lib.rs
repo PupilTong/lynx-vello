@@ -1,31 +1,128 @@
-//! Lynx main-thread startup and the command rounds it serves.
+//! Lynx main-thread ownership, startup, and command rounds.
 //!
 //! The thread is started from the presenter, which owns the other end of its
 //! link for the rest of the view's life.
 
+mod quickjs;
+#[path = "runtime/lib.rs"]
+pub(crate) mod runtime;
+#[path = "tree/lib.rs"]
+pub(crate) mod tree;
+
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::{Arc, mpsc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
-#[cfg(test)]
-use std::time::Duration;
 
-#[cfg(test)]
 use dom::CommittedFrame;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use super::loading::EntryModule;
-use super::painter::Painter;
-use super::{EngineError, EngineEvent, EventRequester, FrameSize};
-use crate::link::{MainLink, ToMain, ToPresenter, ToPresenterSender};
-use crate::runtime::{MainThreadError, MainThreadRuntime};
+use self::runtime::{MainThreadError, MainThreadRuntime};
+use self::tree::LynxDocument;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
-use crate::tree::{LynxDocument, Viewport};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::view::ToPainter;
+use crate::view::{
+    EngineError, EngineEvent, EntryModule, EventRequester, FrameHub, ToMain, ToPresenter,
+    frame_slot,
+};
+
+/// The main thread's sending end: notification FIFO, newest-frame mailbox,
+/// and the wakeup that announces both to the paint thread.
+pub(crate) struct ToPresenterSender<R: EventRequester> {
+    notifications: mpsc::Sender<ToPresenter>,
+    frames: Arc<FrameHub>,
+    requester: Arc<R>,
+}
+
+// Hand-written: `derive(Clone)` would demand `R: Clone`, while a requester is
+// shared through its `Arc` and is never cloned itself.
+impl<R: EventRequester> Clone for ToPresenterSender<R> {
+    fn clone(&self) -> Self {
+        Self {
+            notifications: self.notifications.clone(),
+            frames: Arc::clone(&self.frames),
+            requester: Arc::clone(&self.requester),
+        }
+    }
+}
+
+impl<R: EventRequester> ToPresenterSender<R> {
+    pub(crate) fn new(
+        notifications: mpsc::Sender<ToPresenter>,
+        frames: Arc<FrameHub>,
+        requester: Arc<R>,
+    ) -> Self {
+        Self {
+            notifications,
+            frames,
+            requester,
+        }
+    }
+
+    /// Announces one notification, then wakes the paint thread.
+    pub(crate) fn send(&self, notification: ToPresenter) {
+        if self.notifications.send(notification).is_ok() {
+            self.requester.request_event();
+        }
+    }
+
+    /// Replaces the newest-frame mailbox, then announces it.
+    pub(crate) fn publish_frame(&self, frame: Arc<CommittedFrame>) {
+        *frame_slot(&self.frames) = Some(frame);
+        self.send(ToPresenter::FrameChanged);
+    }
+}
+
+/// The main thread's receiving end of its link to the painter.
+pub(crate) struct MainLink<R: EventRequester> {
+    /// Commands from the paint thread, in the order it sent them.
+    pub(crate) commands: mpsc::Receiver<ToMain>,
+    /// Everything this thread has to say back.
+    pub(crate) notify: ToPresenterSender<R>,
+}
+
+impl<R: EventRequester> MainLink<R> {
+    pub(crate) fn new(commands: mpsc::Receiver<ToMain>, notify: ToPresenterSender<R>) -> Self {
+        Self { commands, notify }
+    }
+}
+
+/// The wakeup owned by the main thread: one command in the paint inbox.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct InboxWakeup(Mutex<mpsc::Sender<ToPainter>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl InboxWakeup {
+    pub(crate) fn new(commands: mpsc::Sender<ToPainter>) -> Self {
+        Self(Mutex::new(commands))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EventRequester for InboxWakeup {
+    fn request_event(&self) {
+        let _ = self
+            .0
+            .lock()
+            .unwrap_or_else(|error| panic!("the presenter inbox is poisoned: {error}"))
+            .send(ToPainter::MainChanged);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for InboxWakeup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InboxWakeup")
+    }
+}
 
 #[cfg(target_arch = "wasm32")]
 static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
@@ -81,54 +178,13 @@ pub fn configure_wasm_workers(
         })
 }
 
-impl Painter {
-    pub(super) fn start<R: EventRequester>(
-        document: LynxDocument,
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        entry: EntryModule,
-    ) -> Result<Self, EngineError> {
-        let (painter, main) = Self::with_link(viewport, frame_size, event_requester);
-        spawn_main_thread(document, entry, main)?;
-        #[cfg(test)]
-        let painter = {
-            let mut painter = painter;
-            painter.detached = false;
-            painter
-        };
-        Ok(painter)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_document<T: Send + 'static>(
-        &mut self,
-        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
-    ) -> Option<T> {
-        if self.detached {
-            return None;
-        }
-        let (sender, receiver) = mpsc::channel();
-        self.link.send(ToMain::Probe(Box::new(move |document| {
-            let _ = sender.send(probe(document));
-        })));
-        receiver.recv_timeout(Duration::from_secs(10)).ok()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
-        self.link.sync();
-        self.link.frame().cloned()
-    }
-}
-
 /// Starts the Lynx main thread over `document`, holding the main end of the
 /// view's link for the rest of its life.
 ///
 /// Nothing announces its exit: dropping the last `ToPresenterSender` closes
 /// the notification FIFO, which is the same fact — and the one a presenting
 /// side blocked on a `BeginFrame` is already waiting on.
-fn spawn_main_thread<R: EventRequester>(
+pub(crate) fn spawn_main_thread<R: EventRequester>(
     document: LynxDocument,
     entry: EntryModule,
     link: MainLink<R>,

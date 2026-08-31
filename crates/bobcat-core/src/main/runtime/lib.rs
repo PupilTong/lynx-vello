@@ -1,4 +1,4 @@
-//! Engine-owned Lynx main-thread runtime over the core's `QuickJS` realm.
+//! The Lynx main-thread runtime over its owned `QuickJS` realm.
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
@@ -9,11 +9,11 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use crate::link::{ToPresenter, ToPresenterSender};
-use crate::quickjs::ScriptEngine;
+use super::ToPresenterSender;
+use super::quickjs::ScriptEngine;
+use crate::main::tree::LynxDocument;
 use crate::script::ScriptError;
-use crate::tree::LynxDocument;
-use crate::view::EventRequester;
+use crate::view::{EventRequester, ToPresenter};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -34,9 +34,9 @@ const INLINE_NODE_LISTENERS: usize = 4;
 const INLINE_DELIVERIES: usize = 8;
 
 const ELEMENT_PAPI_SOURCE: &str =
-    include_str!("../../../packages/bobcat-element/src/element-papi.mjs");
+    include_str!("../../../../../packages/bobcat-element/src/element-papi.mjs");
 const RUNTIME_MODULE_SOURCE: &str =
-    include_str!("../../../packages/bobcat-element/src/main-thread-runtime.mjs");
+    include_str!("../../../../../packages/bobcat-element/src/main-thread-runtime.mjs");
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,

@@ -1,4 +1,4 @@
-//! Lynx page policy over the generic document: the `page` root tag, the UA
+//! Main-thread Lynx page policy: the `page` root tag, the UA
 //! cascade defaults, the components the engine defines, and view metrics.
 //! Everything else the runtime does goes
 //! straight to [`dom::Document`] — element identity is the DOM [`NodeId`],
@@ -23,12 +23,11 @@ mod scroll_container;
 mod test_support;
 mod text;
 mod ua_sheet;
-mod viewport;
 
 use dom::{Document, StylesheetOrigin};
 
 pub use self::ua_sheet::PageConfig;
-pub(crate) use self::viewport::Viewport;
+pub(crate) use crate::view::Viewport;
 
 /// The one document shape the runtime speaks.
 pub(crate) type LynxDocument = Document<()>;

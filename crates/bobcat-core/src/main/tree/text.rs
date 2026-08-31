@@ -1,4 +1,4 @@
-//! The `text` tag's own defaults: what color a run wears, and what may
+//! The `text` tag's defaults: what color a run wears, and what may
 //! generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
@@ -37,7 +37,7 @@ mod tests {
     use dom::stylo::color::AbsoluteColor;
     use dom::stylo::values::computed::{ColorPropertyValue, Display};
 
-    use crate::tree::test_support::{child, display, document, element_under, style_of};
+    use super::super::test_support::{child, display, document, element_under, style_of};
 
     #[test]
     fn a_text_does_not_wear_an_ancestor_s_color() {

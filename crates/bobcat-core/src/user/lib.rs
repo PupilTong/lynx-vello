@@ -1,4 +1,4 @@
-//! The handle an embedder holds, and the thread it drives the painter on.
+//! User-thread ownership: the embedder handle and presenter driver.
 //!
 //! Nothing here draws. [`LynxView`] lives on the embedder's own thread — the
 //! one that owns the window, captures input, and is the only thread allowed
@@ -12,30 +12,138 @@
 //! `OffscreenCanvas` cannot be transferred again once a Worker holds it, so
 //! the painter stays on the thread that owns the canvas and each turn runs
 //! inside a `pump`. Both drivers run the same [`serve_pending`], and the
-//! handle's API is the same either way.
+//! handle's API is the same either way. One-shot source loading lives beside
+//! that handle because it is the user thread's construction phase, not a
+//! fourth runtime owner.
 
 use std::marker::PhantomData;
 #[cfg(not(target_arch = "wasm32"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
+use std::{fmt, str};
 
 use dom::input::InputEvent;
+use dom::{FontBlob, ImageStore};
+use http::HeaderMap;
 
+use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 #[cfg(not(target_arch = "wasm32"))]
-use super::Screenshot;
-use super::graphics::WindowGraphics;
-use super::loading::{EntryModule, LynxViewError};
-#[cfg(not(target_arch = "wasm32"))]
-use super::main_thread::panic_payload;
-use super::painter::Painter;
-use super::{
-    EngineError, EngineEvent, EventRequester, FrameSize, NoWakeup, WindowTarget, frame_size,
+use crate::main::{InboxWakeup, panic_payload};
+use crate::paint::{Painter, PainterLink, WindowGraphics};
+use crate::resource::{
+    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
+    ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
 #[cfg(not(target_arch = "wasm32"))]
-use crate::link::InboxWakeup;
-use crate::link::{HostLink, PainterLink, ToPainter, painter_link};
-use crate::tree::{LynxDocument, Viewport};
+use crate::view::Screenshot;
+use crate::view::{
+    EngineError, EngineEvent, EntryModule, EventRequester, FrameSize, NoWakeup, ToPainter,
+    WindowTarget, frame_size, paint_link,
+};
+
+static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
+
+/// Everything loaded before the entry module starts.
+#[derive(Clone)]
+pub struct ViewSources {
+    pub fonts: Vec<FontBlob>,
+    pub default_font_family: Option<String>,
+    pub image_store: Option<Arc<dyn ImageStore>>,
+    pub style_sheets: Vec<String>,
+    pub entry: String,
+}
+
+impl ViewSources {
+    #[must_use]
+    pub fn new(entry: impl Into<String>) -> Self {
+        Self {
+            fonts: Vec::new(),
+            default_font_family: None,
+            image_store: None,
+            style_sheets: Vec::new(),
+            entry: entry.into(),
+        }
+    }
+}
+
+impl fmt::Debug for ViewSources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ViewSources")
+            .field("style_sheets", &self.style_sheets)
+            .field("entry", &self.entry)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LynxViewError {
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+    #[error(transparent)]
+    Resource(#[from] crate::resource::ResourceError),
+    #[error("script `{url}` is not valid UTF-8: {message}")]
+    InvalidScriptEncoding { url: String, message: String },
+    #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
+    InvalidStyleSheetEncoding { url: String, message: String },
+    #[error("the image store could not load `{image_source}`: {message}")]
+    Image {
+        image_source: String,
+        message: String,
+    },
+}
+
+/// The user thread's end of its link to the painter.
+pub(crate) struct HostLink {
+    commands: mpsc::Sender<ToPainter>,
+    events: mpsc::Receiver<EngineEvent>,
+    /// Whether the painter owed the timeline another frame as of its last
+    /// turn — the one fact the user thread reads without asking for it.
+    animating: Arc<AtomicBool>,
+}
+
+impl HostLink {
+    pub(crate) fn new(
+        commands: mpsc::Sender<ToPainter>,
+        events: mpsc::Receiver<EngineEvent>,
+        animating: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            commands,
+            events,
+            animating,
+        }
+    }
+
+    pub(crate) fn send(&self, command: ToPainter) {
+        let _ = self.commands.send(command);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn wakeup(&self) -> InboxWakeup {
+        InboxWakeup::new(self.commands.clone())
+    }
+
+    pub(crate) fn take_events(&self) -> Vec<EngineEvent> {
+        self.events.try_iter().collect()
+    }
+
+    pub(crate) fn is_animating(&self) -> bool {
+        self.animating.load(Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Debug for HostLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostLink")
+            .field("animating", &self.is_animating())
+            .finish_non_exhaustive()
+    }
+}
 
 /// Applies everything the presenter has queued and ends the turn, answering
 /// whether it is still running.
@@ -219,9 +327,9 @@ impl<R: EventRequester> LynxView<R> {
         // depends on where it runs: its own inbox natively, and this same
         // requester where the presenter shares the host's thread.
         #[cfg(not(target_arch = "wasm32"))]
-        let (link, painter) = painter_link(event_requester);
+        let (link, painter) = paint_link(event_requester);
         #[cfg(target_arch = "wasm32")]
-        let (link, painter) = painter_link(Arc::clone(&event_requester));
+        let (link, painter) = paint_link(Arc::clone(&event_requester));
         #[cfg(not(target_arch = "wasm32"))]
         let home = {
             let wakeup = Arc::new(link.wakeup());
@@ -441,4 +549,118 @@ fn spawn_presenter<H: EventRequester>(
             message: "the presenter stopped before it started".to_owned(),
         }),
     }
+}
+
+impl<R: EventRequester> LynxView<R> {
+    /// Loads every source on the user thread, then starts the view's single
+    /// entry module and both engine-owned threads.
+    pub async fn new(
+        config: PageConfig,
+        resource_fetcher: &dyn ResourceFetcher,
+        event_requester: Arc<R>,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+        sources: ViewSources,
+    ) -> Result<Self, LynxViewError> {
+        let frame_size = frame_size(width, height, device_pixel_ratio)?;
+        let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
+        let mut document = new_document(viewport, config);
+        for font in sources.fonts {
+            document.register_fonts(font);
+        }
+        if let Some(family) = sources.default_font_family
+            && !document.set_default_font_family(&family)
+        {
+            return Err(EngineError::UnknownFontFamily(family).into());
+        }
+        if let Some(store) = sources.image_store {
+            document.set_image_store(store);
+        }
+
+        let mut requests = RequestId {
+            namespace: NEXT_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            sequence: 0,
+        };
+        for url in &sources.style_sheets {
+            mount_style_sheet(resource_fetcher, &mut requests, url, &mut document).await?;
+        }
+        let entry = fetch_entry(resource_fetcher, &mut requests, &sources.entry).await?;
+        Self::start(document, viewport, frame_size, event_requester, entry).map_err(Into::into)
+    }
+}
+
+async fn mount_style_sheet(
+    fetcher: &dyn ResourceFetcher,
+    requests: &mut RequestId,
+    url: &str,
+    document: &mut LynxDocument,
+) -> Result<(), LynxViewError> {
+    let (request, source_name) = resolve_for_fetch(fetcher, requests, url).await?;
+    match fetcher.fetch_style_sheet(request).await?.payload {
+        StyleSheetPayload::Preparsed(sheet) => {
+            crate::style::add_preparsed_style_sheet(document, &sheet);
+        }
+        StyleSheetPayload::Text(bytes) => {
+            let css = str::from_utf8(&bytes).map_err(|error| {
+                LynxViewError::InvalidStyleSheetEncoding {
+                    url: source_name,
+                    message: error.to_string(),
+                }
+            })?;
+            crate::style::add_style_sheet_text(document, css);
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_entry(
+    fetcher: &dyn ResourceFetcher,
+    requests: &mut RequestId,
+    url: &str,
+) -> Result<EntryModule, LynxViewError> {
+    let (request, url) = resolve_for_fetch(fetcher, requests, url).await?;
+    let response = fetcher.fetch_resource(request).await?;
+    let source = match str::from_utf8(&response.bytes) {
+        Ok(source) => source.to_owned(),
+        Err(error) => {
+            return Err(LynxViewError::InvalidScriptEncoding {
+                url,
+                message: error.to_string(),
+            });
+        }
+    };
+    Ok(EntryModule { source, url })
+}
+
+async fn resolve_for_fetch(
+    fetcher: &dyn ResourceFetcher,
+    requests: &mut RequestId,
+    url: &str,
+) -> Result<(ResourceRequest, String), LynxViewError> {
+    let context = RequestContext {
+        id: *requests,
+        priority: ResourcePriority::Critical,
+    };
+    requests.sequence += 1;
+    let resolved = fetcher
+        .resolve_locator(ResolveRequest {
+            context: context.clone(),
+            resource: ResourceDescriptor {
+                specifier: Arc::from(url),
+                base_url: None,
+            },
+            percent_decode: false,
+        })
+        .await?;
+    let source_name = resolved.url.to_string();
+    Ok((
+        ResourceRequest {
+            context,
+            resource: resolved,
+            headers: HeaderMap::new(),
+            cache_policy: CachePolicy::Default,
+        },
+        source_name,
+    ))
 }

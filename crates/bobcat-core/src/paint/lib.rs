@@ -1,4 +1,4 @@
-//! The presenter thread's object: input routing, scrolling, composition,
+//! Paint-thread ownership: input routing, scrolling, composition,
 //! and every draw target the view has.
 //!
 //! Everything here runs on one engine-owned thread. It answers the host
@@ -6,10 +6,25 @@
 //! [`PresenterLink`], and nothing it owns — a surface, a scene buffer, a
 //! gesture arena — is ever touched from anywhere else.
 
+mod gesture;
+mod graphics;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod animation_tests;
+#[cfg(test)]
+mod event_loop_tests;
+#[cfg(test)]
+mod tests;
+
+use std::cell::Cell;
+use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant as ClockInstant;
+use std::time::{Duration, Instant};
 
 use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
@@ -17,16 +32,24 @@ use dom::scroll::ScrollAxes;
 use dom::vello::Scene;
 use dom::vello::peniko::Color;
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant as ClockInstant;
 
+use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
+use self::graphics::FrameAcquisition;
+pub(crate) use self::graphics::WindowGraphics;
+pub use self::graphics::WindowTarget;
+use crate::main::tree::{LynxDocument, Viewport};
+use crate::main::{MainLink, spawn_main_thread};
 #[cfg(not(target_arch = "wasm32"))]
-use super::Screenshot;
-use super::graphics::{FrameAcquisition, WindowGraphics};
-use super::{ComposeKey, EngineError, EngineEvent, EventRequester, FrameSize};
-use crate::clock::FrameClock;
-use crate::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
-use crate::link::{MainLink, PainterLink, PresenterLink, ToMain, ToPainter, link};
-use crate::tree::Viewport;
+use crate::view::Screenshot;
+use crate::view::{
+    ComposeKey, EngineError, EngineEvent, EntryModule, EventRequester, FrameHub, FrameSize, ToMain,
+    ToPainter, ToPresenter, frame_slot, main_link,
+};
+#[cfg(test)]
+use crate::view::{NoWakeup, frame_size};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -35,6 +58,283 @@ const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// no visible frame, slow enough that a window the compositor has stopped
 /// serving does not cost a core.
 const SWAP_CHAIN_RETRY: Duration = Duration::from_millis(8);
+
+/// The paint thread's monotonic animation timeline. Its epoch is view
+/// construction, and one reading is shared by every operation in a frame.
+#[derive(Debug)]
+pub(crate) struct FrameClock {
+    epoch: ClockInstant,
+    #[cfg(test)]
+    pinned: Option<f64>,
+}
+
+impl FrameClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            epoch: ClockInstant::now(),
+            #[cfg(test)]
+            pinned: None,
+        }
+    }
+
+    pub(crate) fn now_seconds(&self) -> f64 {
+        #[cfg(test)]
+        if let Some(seconds) = self.pinned {
+            return seconds;
+        }
+        self.epoch.elapsed().as_secs_f64()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pin(&mut self, seconds: f64) {
+        self.pinned = Some(seconds.max(0.0));
+    }
+}
+
+impl Default for FrameClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::FrameClock;
+
+    #[test]
+    fn the_clock_starts_near_zero_and_never_goes_back() {
+        let clock = FrameClock::new();
+        let first = clock.now_seconds();
+        let second = clock.now_seconds();
+        assert!((0.0..1.0).contains(&first), "the epoch is clock creation");
+        assert!(second >= first, "and time only moves forward");
+    }
+
+    #[test]
+    fn a_pinned_clock_holds_the_instant_a_test_named() {
+        let mut clock = FrameClock::new();
+        clock.pin(1.5);
+        assert!((clock.now_seconds() - 1.5).abs() < 1e-9);
+        clock.pin(1.75);
+        assert!((clock.now_seconds() - 1.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_pinned_clock_never_reports_negative_time() {
+        let mut clock = FrameClock::new();
+        clock.pin(-5.0);
+        assert!((clock.now_seconds() - 0.0).abs() < f64::EPSILON);
+    }
+}
+
+/// The paint thread's end of its link to the Lynx main thread, including the
+/// replicas it uses while routing and drawing without touching that thread.
+pub(crate) struct PresenterLink {
+    commands: mpsc::Sender<ToMain>,
+    notifications: mpsc::Receiver<ToPresenter>,
+    frames: Arc<FrameHub>,
+    frame: Option<Arc<CommittedFrame>>,
+    events: Vec<EngineEvent>,
+    listener_names: FxHashSet<Arc<str>>,
+    begin_frames_sent: u64,
+    begin_frames_serviced: u64,
+    redraw_pending: Cell<bool>,
+}
+
+impl PresenterLink {
+    pub(crate) fn new(
+        commands: mpsc::Sender<ToMain>,
+        notifications: mpsc::Receiver<ToPresenter>,
+        frames: Arc<FrameHub>,
+    ) -> Self {
+        Self {
+            commands,
+            notifications,
+            frames,
+            frame: None,
+            events: Vec::new(),
+            listener_names: FxHashSet::default(),
+            begin_frames_sent: 0,
+            begin_frames_serviced: 0,
+            redraw_pending: Cell::new(false),
+        }
+    }
+
+    /// Sends one command. A closed channel is a main thread that has exited;
+    /// the painter goes on showing what it last published.
+    pub(crate) fn send(&self, command: ToMain) {
+        let _ = self.commands.send(command);
+    }
+
+    /// Applies everything that has arrived. However many frames were
+    /// announced, the mailbox is read once.
+    pub(crate) fn sync(&mut self) {
+        let mut announced = false;
+        while let Ok(notification) = self.notifications.try_recv() {
+            announced |= self.apply(notification);
+        }
+        self.adopt_frame(announced);
+    }
+
+    fn apply(&mut self, notification: ToPresenter) -> bool {
+        match notification {
+            ToPresenter::FrameChanged => return true,
+            ToPresenter::Engine(event) => self.events.push(event),
+            ToPresenter::ListenerAvailable(name) => {
+                self.listener_names.insert(name);
+            }
+            ToPresenter::ListenerUnavailable(name) => {
+                self.listener_names.remove(&name);
+            }
+            ToPresenter::BeginFrameServiced(seq) => {
+                self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
+            }
+        }
+        false
+    }
+
+    fn adopt_frame(&mut self, announced: bool) {
+        if announced {
+            self.frame.clone_from(&frame_slot(&self.frames));
+            self.redraw_pending.set(true);
+        }
+    }
+
+    pub(crate) fn frame(&self) -> Option<&Arc<CommittedFrame>> {
+        self.frame.as_ref()
+    }
+
+    pub(crate) fn has_listener(&self, name: &str) -> bool {
+        self.listener_names.contains(name)
+    }
+
+    pub(crate) fn take_events(&mut self) -> Vec<EngineEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Marks a paint-thread-local redraw without posting another wakeup into
+    /// the inbox this same turn is about to drain.
+    pub(crate) fn mark_redraw(&self) {
+        self.redraw_pending.set(true);
+    }
+
+    pub(crate) fn take_redraw(&self) -> bool {
+        self.redraw_pending.replace(false)
+    }
+
+    pub(crate) fn redraw_owed(&self) -> bool {
+        self.redraw_pending.get()
+    }
+
+    pub(crate) fn begin_frame(&mut self, now: f64) -> Option<u64> {
+        self.begin_frames_sent += 1;
+        let seq = self.begin_frames_sent;
+        self.commands
+            .send(ToMain::BeginFrame { now, seq })
+            .ok()
+            .map(|()| seq)
+    }
+
+    /// Waits for a particular main-thread animation round while applying all
+    /// notifications that precede its acknowledgement.
+    pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut announced = false;
+        while self.begin_frames_serviced < seq {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            let Ok(notification) = self.notifications.recv_timeout(remaining) else {
+                break;
+            };
+            announced |= self.apply(notification);
+        }
+        self.adopt_frame(announced);
+        self.begin_frames_serviced >= seq
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain(&mut self) -> Vec<ToPresenter> {
+        self.notifications.try_iter().collect()
+    }
+}
+
+impl fmt::Debug for PresenterLink {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PresenterLink")
+            .field("listener_names", &self.listener_names.len())
+            .field("begin_frames_sent", &self.begin_frames_sent)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The paint thread's end of its link to the embedder's user thread.
+pub(crate) struct PainterLink<R: EventRequester> {
+    commands: mpsc::Receiver<ToPainter>,
+    events: mpsc::Sender<EngineEvent>,
+    requester: Arc<R>,
+    animating: Arc<AtomicBool>,
+}
+
+impl<R: EventRequester> PainterLink<R> {
+    pub(crate) fn new(
+        commands: mpsc::Receiver<ToPainter>,
+        events: mpsc::Sender<EngineEvent>,
+        requester: Arc<R>,
+        animating: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            commands,
+            events,
+            requester,
+            animating,
+        }
+    }
+
+    pub(crate) fn try_next(&self) -> Option<ToPainter> {
+        match self.commands.try_recv() {
+            Ok(command) => Some(command),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => Some(ToPainter::Shutdown),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn next(&self) -> ToPainter {
+        self.commands.recv().unwrap_or(ToPainter::Shutdown)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn next_within(&self, timeout: Duration) -> Option<ToPainter> {
+        match self.commands.recv_timeout(timeout) {
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => Some(ToPainter::Shutdown),
+        }
+    }
+
+    pub(crate) fn report(&self, event: EngineEvent) {
+        if self.events.send(event).is_ok() {
+            self.requester.request_event();
+        }
+    }
+
+    pub(crate) fn set_animating(&self, animating: bool) {
+        self.animating.store(animating, Ordering::Relaxed);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn requester(&self) -> &Arc<R> {
+        &self.requester
+    }
+}
+
+impl<R: EventRequester> fmt::Debug for PainterLink<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PainterLink")
+    }
+}
 
 /// Where a view's pixels go: nowhere yet, an offscreen GPU target, or a
 /// window's presentation stack.
@@ -323,6 +623,45 @@ fn route_published(
 }
 
 impl Painter {
+    pub(super) fn start<R: EventRequester>(
+        document: LynxDocument,
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<R>,
+        entry: EntryModule,
+    ) -> Result<Self, EngineError> {
+        let (painter, main) = Self::with_link(viewport, frame_size, event_requester);
+        spawn_main_thread(document, entry, main)?;
+        #[cfg(test)]
+        let painter = {
+            let mut painter = painter;
+            painter.detached = false;
+            painter
+        };
+        Ok(painter)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_document<T: Send + 'static>(
+        &mut self,
+        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
+        if self.detached {
+            return None;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.link.send(ToMain::Probe(Box::new(move |document| {
+            let _ = sender.send(probe(document));
+        })));
+        receiver.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.link.sync();
+        self.link.frame().cloned()
+    }
+
     /// The painter and the other end of its link, with no Lynx main thread
     /// started over it yet — the seam `start` spawns through, and the one a
     /// test plays the main thread's half of.
@@ -331,7 +670,7 @@ impl Painter {
         frame_size: FrameSize,
         event_requester: Arc<R>,
     ) -> (Self, MainLink<R>) {
-        let (presenter, main) = link(event_requester);
+        let (presenter, main) = main_link(event_requester);
         let painter = Self {
             link: presenter,
             #[cfg(test)]

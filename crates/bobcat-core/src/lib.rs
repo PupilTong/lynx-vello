@@ -19,15 +19,16 @@
 /// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
-mod clock;
-mod gesture;
-mod link;
-mod quickjs;
+#[path = "main/lib.rs"]
+mod main;
+#[path = "paint/lib.rs"]
+mod paint;
 pub mod resource;
-mod runtime;
 pub mod script;
 pub mod style;
-mod tree;
+#[path = "user/lib.rs"]
+mod user;
+#[path = "view/lib.rs"]
 mod view;
 
 /// Normalized host input vocabulary. No document or hit-test result crosses
@@ -38,8 +39,8 @@ pub mod input {
 }
 
 pub use dom::{FontBlob, ImageFuture, ImageStore, ImageStoreError};
+pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-pub use tree::PageConfig;
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{

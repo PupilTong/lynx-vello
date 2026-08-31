@@ -20,6 +20,25 @@ capabilities and OS facts:
 
 No clock is among them: the animation timeline is engine-owned.
 
+The source tree mirrors the three runtime owners:
+
+```text
+crates/bobcat-core/src/
+  view/lib.rs          shared values, messages, and channel construction
+  user/lib.rs          LynxView, source loading, and the embedder-side link
+  paint/lib.rs         Painter, frame clock, and paint-owned link replicas
+  paint/gesture.rs     input arbitration
+  paint/graphics.rs    window GPU state
+  main/lib.rs          Lynx main-thread startup, inbox, and notifications
+  main/quickjs.rs      owner-thread-bound QuickJS adapter
+  main/runtime/lib.rs  realm/DOM integration
+  main/tree/lib.rs     Lynx document and UA component policy
+```
+
+Values that actually cross threads (`Viewport`, `EntryModule`, commands, and
+events) stay in `view`; a stateful type whose owner is fixed lives under
+`user`, `paint`, or `main`.
+
 The dependency graph is:
 
 ```text
@@ -45,8 +64,8 @@ bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
 
 ## Animation timeline
 
-The engine owns it. `crate::clock::FrameClock` is private to `bobcat-core`,
-concrete, and constructed by `Engine::new`: there is no trait, no type
+The engine owns it. `crate::paint::FrameClock` is private to `bobcat-core`,
+concrete, and constructed with the `Painter`: there is no trait, no type
 parameter, and no constructor that takes one. It reads the platform's monotonic
 clock — `std::time::Instant` natively and `web_time::Instant` on Wasm, the same
 split `quickjs-rust-bridge` already uses — with the epoch at view construction.
@@ -168,7 +187,7 @@ realm.
 
 The script engine is not an injected capability. `bobcat-core` owns one
 `QuickJS` runtime and the single realm on it outright, behind the
-crate-private `quickjs::ScriptEngine`, which is created on the engine-owned
+crate-private `main::quickjs::ScriptEngine`, which is created on the engine-owned
 Lynx main thread and never leaves it — it is deliberately not `Send`, and
 nothing outside the crate can name it. The bridge would carry more realms on
 that one runtime, which is the shape a background-thread realm would take:
