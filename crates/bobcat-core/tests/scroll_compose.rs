@@ -54,7 +54,7 @@ async fn booted() -> LynxView {
         100.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(fetcher, SCRIPT_URL),
+        ViewSources::new(support::factory(fetcher), SCRIPT_URL),
     )
     .await
     .expect("view construction fetches and boots the entry script");

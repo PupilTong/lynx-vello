@@ -89,7 +89,7 @@ async fn booted() -> LynxView {
         DrawTarget::Offscreen,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
-            ..ViewSources::new(fetcher, SCRIPT_URL)
+            ..ViewSources::new(support::factory(fetcher), SCRIPT_URL)
         },
     )
     .await

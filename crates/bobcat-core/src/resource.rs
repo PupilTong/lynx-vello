@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use dom::{ImageId, ImageRef};
 use http::{HeaderMap, Method, StatusCode};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -21,17 +22,28 @@ use crate::style::PreparsedStyleSheet;
 /// network IO onto their own executor or worker threads and wake this future,
 /// but the returned future itself must be executor-neutral and must not assume
 /// a caller-provided runtime.
-pub type ResourceFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, ResourceError>> + Send + 'a>>;
+pub type ResourceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ResourceError>> + 'a>>;
 
 pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
-/// Host-owned resource policy whose startup calls and continuations run on
-/// `bobcat-main`.
+/// The host's whole resource system: bytes, stylesheets and images.
+///
+/// Owned by the painter, which is the thread that constructed the view, and
+/// never reachable from `bobcat-main` — every resource the document needs is
+/// asked for by message. It is therefore free to be neither `Send` nor `Sync`
+/// and to hold `Rc`, `RefCell` or browser objects directly.
+///
+/// The two halves have deliberately different shapes, because their callers
+/// do. Bytes and stylesheets are awaited off the frame path, so they are
+/// futures. Images are named synchronously, loaded on the host's own
+/// concurrency, and reported through an [`ImageSink`]; the pixels are then
+/// read back synchronously by [`dom::FrameImages::read`] during composition,
+/// which cannot suspend. That read may block, and after a successful load it
+/// must not miss — see [`dom::FrameImages`].
 ///
 /// Implementations own any executor or reactor their IO requires; Bobcat only
 /// polls the returned [`ResourceFuture`] until it is woken and ready.
-pub trait ResourceFetcher: Send + Sync + 'static {
+pub trait ResourceFetcher: dom::FrameImages {
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
 
     fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator>;
@@ -52,7 +64,39 @@ pub trait ResourceFetcher: Send + Sync + 'static {
         fetch_style_sheet_as_text(self, request)
     }
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse>;
+    /// Names `source` and begins loading it, or `None` if this host serves no
+    /// images at all.
+    ///
+    /// Non-blocking: it returns the canonical id immediately and reports the
+    /// outcome later through the [`ImageSink`] the factory was given.
+    ///
+    /// Idempotent and single-flight: repeated or concurrent requests for one
+    /// source join one load, and a request for an already-loaded source starts
+    /// nothing. Two sources this host canonicalises to one resource MUST
+    /// return the same [`ImageId`] — that is the only place cross-source
+    /// bitmap reuse can happen.
+    ///
+    /// For every id it hands out, the host eventually calls exactly one of
+    /// [`ImageSink::loaded`] or [`ImageSink::failed`], unless the view is torn
+    /// down first. It may call `loaded` again later with a greater generation
+    /// when the bytes behind the id change.
+    ///
+    /// The default serves nothing, which is what a host with no image support
+    /// wants: a source is asked for exactly once and then never drawn.
+    fn request_image(&self, _source: &str) -> Option<ImageId> {
+        None
+    }
+
+    /// The images the frame just encoded, deduplicated in paint order.
+    ///
+    /// Advisory: it informs residency and nothing else, and a host that
+    /// ignores it is still correct. Called once per resolve pass.
+    fn retain_images(&self, _frame: &[ImageRef]) {}
+
+    /// No live node or style names `id` any more. Advisory; the host may keep
+    /// the bitmap, and must answer a later [`Self::request_image`] for the
+    /// same source as a fresh load if it did not.
+    fn release_image(&self, _id: ImageId) {}
 }
 
 /// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as

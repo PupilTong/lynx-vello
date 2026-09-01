@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::ImageData;
-use dom::{FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, ImageStore};
+use dom::{FrameImages, ImageEvent, ImageId, ImageRef, ImageSink};
 use rustc_hash::FxHashMap;
 
+use crate::resource::ResourceFetcher;
 use crate::view::EventRequester;
 
 /// Completed loads waiting for the painter to take its next turn.
@@ -117,7 +118,7 @@ impl<R: EventRequester> ImageSink for PainterImageSink<R> {
 /// bitmap. Every decision about what stays in memory belongs to the store.
 #[derive(Default)]
 pub(crate) struct PainterImages {
-    store: Option<Rc<dyn ImageStore>>,
+    store: Option<Rc<dyn ResourceFetcher>>,
     queue: Arc<ImageQueue>,
     /// `(commit_id, epoch)` the resolved map was built for.
     key: Option<(u64, u64)>,
@@ -147,8 +148,16 @@ impl PainterImages {
         Arc::new(PainterImageSink::new(Arc::clone(&self.queue), requester))
     }
 
-    pub(crate) fn install(&mut self, store: Rc<dyn ImageStore>) {
+    pub(crate) fn install(&mut self, store: Rc<dyn ResourceFetcher>) {
         self.store = Some(store);
+    }
+
+    /// An owned handle on the host's resource system.
+    ///
+    /// Owned rather than borrowed because a `ResourceFuture` borrows the
+    /// fetcher across an await, and the caller uses the link afterwards.
+    pub(crate) fn fetcher(&self) -> Option<Rc<dyn ResourceFetcher>> {
+        self.store.clone()
     }
 
     pub(crate) fn epoch(&self) -> u64 {
@@ -164,9 +173,10 @@ impl PainterImages {
         };
         sources
             .into_iter()
-            .map(|source| {
-                let id = store.request(source.as_ref());
-                ImageEvent::Bound { source, id }
+            .filter_map(|source| {
+                store
+                    .request_image(source.as_ref())
+                    .map(|id| ImageEvent::Bound { source, id })
             })
             .collect()
     }
@@ -174,7 +184,7 @@ impl PainterImages {
     pub(crate) fn release(&self, ids: &[ImageId]) {
         if let Some(store) = &self.store {
             for id in ids {
-                store.release(*id);
+                store.release_image(*id);
             }
         }
     }
@@ -204,7 +214,7 @@ impl PainterImages {
         self.resolved.clear();
         if let Some(store) = &self.store {
             frame.collect_images(&mut self.working_set);
-            store.retain(&self.working_set);
+            store.retain_images(&self.working_set);
             for image in &self.working_set {
                 if let Some(data) = store.read(*image) {
                     self.resolved.insert(*image, data);
@@ -291,21 +301,20 @@ mod tests {
     /// GPU uploads and two atlas slots.
     #[test]
     fn every_read_of_one_image_keeps_the_same_buffer_identity() {
-        use dom::ImageRef;
+        use dom::{FrameImages as _, ImageRef};
 
-        let images = Arc::new(flashbulb::TestImages::new());
+        let images = flashbulb::TestImages::new();
         let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
         let published = pixels.data.id();
         images.insert("app:///pixel.png", pixels);
 
-        let store = flashbulb::shared(&images);
         let image = ImageRef {
-            id: store.request("app:///pixel.png"),
+            id: images.request("app:///pixel.png"),
             generation: 1,
         };
 
-        let first = store.read(image).expect("a published image reads back");
-        let second = store.read(image).expect("and reads back again");
+        let first = images.read(image).expect("a published image reads back");
+        let second = images.read(image).expect("and reads back again");
         assert_eq!(
             first.data.id(),
             published,
@@ -322,12 +331,11 @@ mod tests {
     /// standing in for another image.
     #[test]
     fn an_unpublished_source_reads_as_nothing() {
-        use dom::ImageRef;
+        use dom::{FrameImages as _, ImageRef};
 
-        let images = Arc::new(flashbulb::TestImages::new());
-        let store = flashbulb::shared(&images);
-        let id = store.request("app:///missing.png");
-        assert!(store.read(ImageRef { id, generation: 1 }).is_none());
+        let images = flashbulb::TestImages::new();
+        let id = images.request("app:///missing.png");
+        assert!(images.read(ImageRef { id, generation: 1 }).is_none());
     }
 
     /// A store outliving its view must not keep queuing into a dead painter.

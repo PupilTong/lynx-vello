@@ -16,7 +16,7 @@ async fn view(source: &[u8], resolved_url: &str) -> Result<LynxView, LynxViewErr
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(fetcher, "main.js"),
+        ViewSources::new(support::factory(fetcher), "main.js"),
     )
     .await
 }

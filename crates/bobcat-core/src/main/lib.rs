@@ -13,9 +13,7 @@ pub(crate) mod tree;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::pin;
 use std::str;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
@@ -26,24 +24,18 @@ use std::task::Poll;
 use std::thread::Builder as ThreadBuilder;
 
 use dom::{CommittedFrame, FontBlob};
-use http::HeaderMap;
-use tokio::sync::oneshot;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use self::runtime::{MainThreadError, MainThreadRuntime};
+#[cfg(test)]
+use self::runtime::MainThreadError;
+use self::runtime::MainThreadRuntime;
 use self::tree::{LynxDocument, PageConfig, new_document};
-use crate::resource::{
-    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
-    ResourcePriority, ResourceRequest, StyleSheetPayload,
-};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, FrameHub, LynxViewError, ToMain, ToPainter,
-    ViewSources, Viewport, frame_slot,
+    EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, SourceSlot,
+    StartupWakeSender, StyleSheetSource, ToMain, ToPainter, Viewport, frame_slot,
 };
-
-static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct EntryModule {
     pub(crate) source: String,
@@ -61,7 +53,6 @@ pub(crate) struct EntryModule {
 pub(crate) struct StartupRequest {
     config: PageConfig,
     viewport: Viewport,
-    resource_fetcher: Arc<dyn ResourceFetcher>,
     fonts: Vec<FontBlob>,
     default_font_family: Option<String>,
     style_sheets: Vec<String>,
@@ -69,21 +60,17 @@ pub(crate) struct StartupRequest {
 }
 
 impl StartupRequest {
-    /// Keeps the main-bound half of `sources` and drops the rest.
-    pub(crate) fn new(config: PageConfig, viewport: Viewport, sources: ViewSources) -> Self {
-        let ViewSources {
-            resource_fetcher,
-            fonts,
-            default_font_family,
-            style_sheets,
-            entry,
-            // Stays with the painter, which is the thread building this.
-            image_store: _,
-        } = sources;
+    pub(crate) fn new(
+        config: PageConfig,
+        viewport: Viewport,
+        fonts: Vec<FontBlob>,
+        default_font_family: Option<String>,
+        style_sheets: Vec<String>,
+        entry: String,
+    ) -> Self {
         Self {
             config,
             viewport,
-            resource_fetcher,
             fonts,
             default_font_family,
             style_sheets,
@@ -91,13 +78,6 @@ impl StartupRequest {
         }
     }
 }
-
-/// Startup produced a live main thread. Carries nothing: the document is
-/// born, booted, served and destroyed on `bobcat-main`, and the image store
-/// the old shape copied back out now belongs to the painter.
-pub(crate) struct StartupSuccess;
-
-pub(crate) type StartupResult = Result<StartupSuccess, LynxViewError>;
 
 /// The construction guard's cancellation flag.
 ///
@@ -148,6 +128,16 @@ pub(crate) struct ToPainterSender<R: EventRequester> {
     notifications: flume::Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
+    /// A payload-free nudge for the one wait the painter makes before it has
+    /// a host turn to be woken into.
+    ///
+    /// Declared *after* `notifications` on purpose: fields drop in
+    /// declaration order, so the last sender's death closes the FIFO before
+    /// this, and a painter woken by the closure of this channel then sees a
+    /// disconnected FIFO rather than an empty one. Correctness does not rest
+    /// on that — `serve_startup` drains once more after the wake closes — but
+    /// it keeps the common case one pass shorter.
+    startup_wake: StartupWakeSender,
 }
 
 // Hand-written: `derive(Clone)` would demand `R: Clone`, while a requester is
@@ -158,6 +148,7 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
             notifications: self.notifications.clone(),
             frames: Arc::clone(&self.frames),
             requester: Arc::clone(&self.requester),
+            startup_wake: self.startup_wake.clone(),
         }
     }
 }
@@ -167,17 +158,25 @@ impl<R: EventRequester> ToPainterSender<R> {
         notifications: flume::Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
+        startup_wake: StartupWakeSender,
     ) -> Self {
         Self {
             notifications,
             frames,
             requester,
+            startup_wake,
         }
     }
 
     /// Announces one notification, then wakes the thread that paints.
+    ///
+    /// Two wakes, because the painter has two ways of being woken: the host's
+    /// requester once a view exists, and the startup channel before it does.
+    /// The tick is a nudge only — the notification is already queued — and it
+    /// fails harmlessly once construction drops its receiver.
     pub(crate) fn send(&self, notification: ToPainter) {
         if self.notifications.send(notification).is_ok() {
+            let _ = self.startup_wake.send(());
             self.requester.request_event();
         }
     }
@@ -276,13 +275,12 @@ pub fn configure_wasm_workers(
 pub(crate) fn spawn_main_thread<R: EventRequester>(
     startup: StartupRequest,
     link: MainLink<R>,
-    result: oneshot::Sender<StartupResult>,
 ) -> Result<MainThreadHome, EngineError> {
     let control = Arc::new(StartupControl::default());
     let main_control = Arc::clone(&control);
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
-        .spawn(move || run_main_thread(startup, link, result, &main_control))
+        .spawn(move || run_main_thread(startup, link, &main_control))
         .map_err(|error| EngineError::Thread {
             name: "script",
             message: error.to_string(),
@@ -343,98 +341,67 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
     })
 }
 
-struct StartupReady<R: EventRequester> {
-    runtime: MainThreadRuntime<R>,
-    success: StartupSuccess,
+/// What boot is still waiting for.
+///
+/// One slot per stylesheet in cascade order, so an answer arriving out of
+/// order cannot reorder the cascade.
+struct PendingSources {
+    sheets: Vec<Option<StyleSheetSource>>,
+    /// How far the ready prefix has been mounted.
+    mounted: usize,
+    entry: Option<EntryModule>,
+    outstanding: usize,
 }
 
-type StartupOutcome<R> = Option<StartupReady<R>>;
-
-fn run_main_thread<R: EventRequester>(
-    startup: StartupRequest,
-    link: MainLink<R>,
-    mut started: oneshot::Sender<StartupResult>,
-    control: &StartupControl,
-) {
-    let MainLink { commands, notify } = link;
-    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    install_script_panic_hook();
-    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    set_script_panic_reporter(Some({
-        let notify = notify.clone();
-        Box::new(move |error| {
-            notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
-        })
-    }));
-
-    let initialized = catch_unwind(AssertUnwindSafe(|| {
-        pollster::block_on(until_startup_cancelled(
-            initialize(startup, notify.clone(), control),
-            &mut started,
-        ))
-    }))
-    .unwrap_or_else(|payload| {
-        Some(Err(EngineError::Thread {
-            name: "script",
-            message: format!(
-                "the Lynx main thread panicked during startup: {}",
-                panic_payload(payload.as_ref())
-            ),
-        }
-        .into()))
-    });
-    if let Some(Ok(Some(StartupReady { runtime, success }))) = initialized {
-        notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
-        // Boot's outcome and boot's pixels ride one wakeup: whatever the
-        // entry committed before it ended reaches the target on the turn
-        // that reports the ending, with nobody left to ask for another.
-        notify.send(ToPainter::FrameChanged);
-        if started.send(Ok(success)).is_ok() {
-            let served = catch_unwind(AssertUnwindSafe(|| {
-                serve_main_commands(runtime, &commands, &notify);
-            }));
-            if let Err(payload) = served {
-                notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
-                    platform_script_error(format!(
-                        "the Lynx main thread panicked while serving commands: {}",
-                        panic_payload(payload.as_ref())
-                    )),
-                )));
+impl PendingSources {
+    fn place(&mut self, slot: SourceSlot, source: LoadedSource) {
+        match (slot, source) {
+            (SourceSlot::StyleSheet(index), LoadedSource::StyleSheet(sheet)) => {
+                self.sheets[index] = Some(sheet);
             }
+            (SourceSlot::Entry, LoadedSource::Entry { source, url }) => {
+                self.entry = Some(EntryModule { source, url });
+            }
+            (slot, _) => unreachable!("the painter answers {slot:?} in kind"),
         }
-    } else if let Some(Err(error)) = initialized {
-        let _ = started.send(Err(error));
     }
 
-    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    set_script_panic_reporter(None);
-}
-
-async fn until_startup_cancelled<T>(
-    future: impl Future<Output = T>,
-    started: &mut oneshot::Sender<StartupResult>,
-) -> Option<T> {
-    let mut future = pin!(future);
-    let mut cancelled = pin!(started.closed());
-    poll_fn(|context| {
-        if cancelled.as_mut().poll(context).is_ready() {
-            Poll::Ready(None)
-        } else {
-            future.as_mut().poll(context).map(Some)
+    /// Mounts every sheet whose turn has come. Parsing CSS here overlaps the
+    /// fetches still in flight on the painter.
+    fn mount_ready_prefix(&mut self, document: &mut LynxDocument) {
+        while let Some(slot) = self.sheets.get_mut(self.mounted)
+            && let Some(sheet) = slot.take()
+        {
+            match sheet {
+                StyleSheetSource::Preparsed(sheet) => {
+                    crate::style::add_preparsed_style_sheet(document, &sheet);
+                }
+                StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(document, &css),
+            }
+            self.mounted += 1;
         }
-    })
-    .await
+    }
 }
 
-async fn initialize<R: EventRequester>(
+/// Everything between this thread starting and its first served command.
+///
+/// Synchronous top to bottom. Its only wait is `commands.recv()` — the same
+/// one it spends the rest of its life in — so there is no future here and no
+/// executor to drive one. Every source it will ever need is asked for before
+/// that first park, and afterwards it holds no specifier at all, which is why
+/// no later fetch is even constructible.
+///
+/// `None` means the view was cancelled or the painter is already gone: in
+/// both cases nobody is listening for an outcome.
+fn boot<R: EventRequester>(
     startup: StartupRequest,
-    notify: ToPainterSender<R>,
+    commands: &flume::Receiver<ToMain>,
+    notify: &ToPainterSender<R>,
     control: &StartupControl,
-) -> Result<StartupOutcome<R>, LynxViewError> {
+) -> Option<Result<MainThreadRuntime<R>, LynxViewError>> {
     let StartupRequest {
         config,
         viewport,
-        resource_fetcher,
         fonts,
         default_font_family,
         style_sheets,
@@ -448,110 +415,132 @@ async fn initialize<R: EventRequester>(
     if let Some(family) = default_font_family
         && !document.set_default_font_family(&family)
     {
-        return Err(EngineError::UnknownFontFamily(family).into());
+        return Some(Err(EngineError::UnknownFontFamily(family).into()));
     }
 
-    let mut requests = RequestId {
-        namespace: NEXT_REQUEST_NAMESPACE.fetch_add(1, Ordering::Relaxed),
-        sequence: 0,
+    let mut pending = PendingSources {
+        sheets: (0..style_sheets.len()).map(|_| None).collect(),
+        mounted: 0,
+        entry: None,
+        outstanding: style_sheets.len() + 1,
     };
-    for url in &style_sheets {
-        mount_style_sheet(resource_fetcher.as_ref(), &mut requests, url, &mut document).await?;
+    for (index, specifier) in style_sheets.into_iter().enumerate() {
+        notify.send(ToPainter::FetchSource {
+            slot: SourceSlot::StyleSheet(index),
+            specifier,
+        });
     }
-    let entry = fetch_entry(resource_fetcher.as_ref(), &mut requests, &entry).await?;
-    if control.is_cancelled() {
-        return Ok(None);
+    notify.send(ToPainter::FetchSource {
+        slot: SourceSlot::Entry,
+        specifier: entry,
+    });
+
+    while pending.outstanding > 0 {
+        // The one park, satisfied by *any* message rather than a particular
+        // one — which is what keeps this from being half of a wait cycle.
+        let Ok(command) = commands.recv() else {
+            return None;
+        };
+        match command {
+            ToMain::Shutdown => return None,
+            ToMain::SourceLoaded { slot, result } => {
+                pending.outstanding -= 1;
+                match result {
+                    Err(error) => return Some(Err(error)),
+                    Ok(source) => pending.place(slot, source),
+                }
+                pending.mount_ready_prefix(&mut document);
+            }
+            _ => unreachable!("a view that has not booted has nothing else to apply"),
+        }
+        if control.is_cancelled() {
+            return None;
+        }
     }
-    let mut runtime =
-        MainThreadRuntime::new(document, notify).map_err(MainThreadError::into_script_error)?;
+
+    let entry = pending
+        .entry
+        .take()
+        .expect("the entry is one of the awaited sources");
     if control.is_cancelled() {
-        return Ok(None);
+        return None;
+    }
+    let mut runtime = match MainThreadRuntime::new(document, notify.clone()) {
+        Ok(runtime) => runtime,
+        Err(error) => return Some(Err(error.into_script_error().into())),
+    };
+    if control.is_cancelled() {
+        return None;
     }
     if let Err(error) = runtime.run_main_thread_script(&entry.source, &entry.url) {
         if control.is_cancelled() {
-            return Ok(None);
+            return None;
         }
-        return Err(error.into_script_error().into());
+        return Some(Err(error.into_script_error().into()));
     }
     if control.is_cancelled() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(StartupReady {
-        runtime,
-        success: StartupSuccess,
-    }))
+    Some(Ok(runtime))
 }
 
-async fn mount_style_sheet(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-    document: &mut LynxDocument,
-) -> Result<(), LynxViewError> {
-    let (request, source_name) = resolve_for_fetch(fetcher, requests, url).await?;
-    match fetcher.fetch_style_sheet(request).await?.payload {
-        StyleSheetPayload::Preparsed(sheet) => {
-            crate::style::add_preparsed_style_sheet(document, &sheet);
-        }
-        StyleSheetPayload::Text(bytes) => {
-            let css = str::from_utf8(&bytes).map_err(|error| {
-                LynxViewError::InvalidStyleSheetEncoding {
-                    url: source_name,
-                    message: error.to_string(),
-                }
-            })?;
-            crate::style::add_style_sheet_text(document, css);
-        }
-    }
-    Ok(())
-}
-
-async fn fetch_entry(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-) -> Result<EntryModule, LynxViewError> {
-    let (request, url) = resolve_for_fetch(fetcher, requests, url).await?;
-    let response = fetcher.fetch_resource(request).await?;
-    let source = str::from_utf8(&response.bytes)
-        .map_err(|error| LynxViewError::InvalidScriptEncoding {
-            url: url.clone(),
-            message: error.to_string(),
-        })?
-        .to_owned();
-    Ok(EntryModule { source, url })
-}
-
-async fn resolve_for_fetch(
-    fetcher: &dyn ResourceFetcher,
-    requests: &mut RequestId,
-    url: &str,
-) -> Result<(ResourceRequest, String), LynxViewError> {
-    let context = RequestContext {
-        id: *requests,
-        priority: ResourcePriority::Critical,
-    };
-    requests.sequence += 1;
-    let resolved = fetcher
-        .resolve_locator(ResolveRequest {
-            context: context.clone(),
-            resource: ResourceDescriptor {
-                specifier: Arc::from(url),
-                base_url: None,
-            },
-            percent_decode: false,
+fn run_main_thread<R: EventRequester>(
+    startup: StartupRequest,
+    link: MainLink<R>,
+    control: &StartupControl,
+) {
+    let MainLink { commands, notify } = link;
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    install_script_panic_hook();
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    set_script_panic_reporter(Some({
+        let notify = notify.clone();
+        Box::new(move |error| {
+            notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
-        .await?;
-    let source_name = resolved.url.to_string();
-    Ok((
-        ResourceRequest {
-            context,
-            resource: resolved,
-            headers: HeaderMap::new(),
-            cache_policy: CachePolicy::Default,
-        },
-        source_name,
-    ))
+    }));
+
+    let booted = catch_unwind(AssertUnwindSafe(|| {
+        boot(startup, &commands, &notify, control)
+    }))
+    .unwrap_or_else(|payload| {
+        Some(Err(EngineError::Thread {
+            name: "script",
+            message: format!(
+                "the Lynx main thread panicked during startup: {}",
+                panic_payload(payload.as_ref())
+            ),
+        }
+        .into()))
+    });
+
+    match booted {
+        Some(Ok(runtime)) => {
+            // Boot's outcome and boot's pixels ride one FIFO, in this order:
+            // whatever the entry committed reaches the target on the turn
+            // that reports the ending, with nobody left to ask for another.
+            notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
+            notify.send(ToPainter::FrameChanged);
+            notify.send(ToPainter::Started(Ok(())));
+            let served = catch_unwind(AssertUnwindSafe(|| {
+                serve_main_commands(runtime, &commands, &notify);
+            }));
+            if let Err(payload) = served {
+                notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
+                    platform_script_error(format!(
+                        "the Lynx main thread panicked while serving commands: {}",
+                        panic_payload(payload.as_ref())
+                    )),
+                )));
+            }
+        }
+        Some(Err(error)) => notify.send(ToPainter::Started(Err(error))),
+        // Cancelled, or the painter is already gone: nobody is listening.
+        None => {}
+    }
+
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    set_script_panic_reporter(None);
 }
 
 fn serve_main_commands<R: EventRequester>(
@@ -583,6 +572,9 @@ fn apply_main_command<R: EventRequester>(
     serviced_begin_frame: &mut Option<u64>,
 ) {
     match command {
+        ToMain::SourceLoaded { .. } => {
+            unreachable!("sources are answered once, before boot returns")
+        }
         ToMain::DispatchEvent {
             target,
             name,

@@ -8,9 +8,10 @@
 //!   [`Blob`](vello::peniko::Blob), no store.
 //! - [`FrameImages`] is the read seam. A committed frame's image draws name an [`ImageRef`], and
 //!   whoever composes that frame supplies the pixels for it.
-//! - [`ImageStore`] is the embedder's resource system, owned by the painter. It is the only thing
-//!   in the process that holds bytes, and the only thing that decides caching, residency and
-//!   eviction.
+//!
+//! Producing those pixels is not this crate's business at all: the embedder's
+//! resource system owns bytes, decoding, residency and eviction, and this
+//! crate only ever names images and reads them back.
 //!
 //! # Why the read is synchronous and may block
 //!
@@ -82,9 +83,9 @@ pub struct ImageRef {
 
 /// The synchronous pixel source a frame's image draws resolve against.
 ///
-/// [`ImageStore`] is one implementation; the painter's per-commit resolved
-/// set is another; a test double is a third. This is the only image-shaped
-/// type the compose path knows.
+/// The embedder's resource system is one implementation; the painter's
+/// per-commit resolved set is another; a test double is a third. This is the
+/// only image-shaped type the compose path knows.
 pub trait FrameImages {
     /// The pixels for `image`, or `None` when there are none to draw.
     ///
@@ -122,42 +123,6 @@ pub trait ImageSink: Send + Sync {
     /// `id` will not produce pixels. Terminal; the engine does not retry, and
     /// ignores this for an id that has already loaded.
     fn failed(&self, id: ImageId);
-}
-
-/// The embedder's image resource system: the only owner of bytes, decoding,
-/// disk, memory and eviction policy in the whole stack.
-///
-/// Built on and owned by the painter thread, and never reachable from the
-/// document's thread or the embedder's own afterwards. It is therefore free to
-/// be neither `Send` nor `Sync`, and to hold `Rc`, `RefCell` or browser
-/// objects. Only the loaders it starts itself cross threads, and they report
-/// through [`ImageSink`], which is `Send + Sync`.
-pub trait ImageStore: FrameImages {
-    /// Names `source` and begins loading it. Non-blocking; returns the
-    /// canonical id immediately.
-    ///
-    /// Idempotent and single-flight: repeated or concurrent requests for one
-    /// source join one load, and a request for an already-loaded source starts
-    /// nothing. Two sources the store canonicalises to one resource MUST
-    /// return the same [`ImageId`] — that is the only place cross-source
-    /// bitmap reuse can happen.
-    ///
-    /// For every id it hands out, the store eventually calls exactly one of
-    /// [`ImageSink::loaded`] or [`ImageSink::failed`], unless the view is torn
-    /// down first. It may call `loaded` again later with a greater generation
-    /// when the bytes behind the id change.
-    fn request(&self, source: &str) -> ImageId;
-
-    /// The images the frame just encoded, deduplicated in paint order.
-    ///
-    /// Advisory: it informs residency and nothing else, and a store that
-    /// ignores it is still correct. Called once per resolve pass.
-    fn retain(&self, _frame: &[ImageRef]) {}
-
-    /// No live node or style names `id` any more. Advisory; the store may keep
-    /// the bitmap, and must answer a later [`Self::request`] for the same
-    /// source as a fresh load if it did not.
-    fn release(&self, _id: ImageId) {}
 }
 
 /// One report from the store, on its way to the document.
@@ -315,6 +280,17 @@ impl ImageRegistry {
         let mut wanted = std::mem::take(self.wanted.get_mut());
         wanted.sort_unstable();
         wanted.dedup();
+        // Record each one as asked-for before handing it over. Without this
+        // the next walk finds no binding and asks again — forever, since a
+        // binding only appears when the answer comes back, and an embedder
+        // with no image system installed never answers at all.
+        for source in &wanted {
+            self.by_source
+                .entry(Arc::clone(source))
+                .or_insert_with(|| Binding::Unbound {
+                    nodes: SmallVec::new(),
+                });
+        }
         wanted
     }
 
@@ -457,6 +433,17 @@ mod tests {
             registry.take_wanted(),
             vec![Arc::from("app:///a.png")],
             "however many draws named it, the store is asked once"
+        );
+
+        // And asking is remembered, so a later walk does not ask again while
+        // the answer is still outstanding — including when it never comes,
+        // which is what an embedder with no image system installed does.
+        for _ in 0..5 {
+            assert!(registry.resolve("app:///a.png").is_none());
+        }
+        assert!(
+            registry.take_wanted().is_empty(),
+            "an outstanding request is never repeated"
         );
 
         registry.apply(&bound("app:///a.png", 1));

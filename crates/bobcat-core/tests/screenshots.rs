@@ -96,7 +96,7 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 /// it captured is the one its entry module committed.
 fn sources(source: &[u8]) -> ViewSources {
     let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
-    ViewSources::new(fetcher, SCRIPT_URL)
+    ViewSources::new(support::factory(fetcher), SCRIPT_URL)
 }
 
 async fn booted(sources: ViewSources) -> LynxView {
@@ -140,7 +140,7 @@ async fn booted_with_sheet_at(
         DrawTarget::Offscreen,
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(fetcher, SCRIPT_URL)
+            ..ViewSources::new(support::factory(fetcher), SCRIPT_URL)
         },
     )
     .await
@@ -220,14 +220,15 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
-    let store = Arc::clone(&images);
-    let mut view = booted(ViewSources {
-        image_store: Some(Box::new(move |sink| {
-            store.attach(sink);
-            flashbulb::shared(&store)
-        })),
-        ..sources(IMAGE_SCRIPT.as_bytes())
-    })
+    let fetcher = Arc::new(
+        FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
+            .resolving_to(SCRIPT_URL)
+            .with_images(Arc::clone(&images)),
+    );
+    let mut view = booted(ViewSources::new(
+        support::factory_serving_images(fetcher, Arc::clone(&images)),
+        SCRIPT_URL,
+    ))
     .await;
     settle_images(&mut view, &images);
 

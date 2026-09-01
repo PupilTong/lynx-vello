@@ -40,14 +40,12 @@ pub mod input {
     pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use dom::{
-    FontBlob, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, ImageStore, NoImages,
-};
+pub use dom::{FontBlob, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, NoImages, vello};
 pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError,
-    NoWakeup, Screenshot, ViewSources, WindowTarget,
+    NoWakeup, ResourceFactory, Screenshot, ViewSources, WindowTarget,
 };

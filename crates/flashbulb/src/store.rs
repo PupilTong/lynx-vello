@@ -16,7 +16,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, ImageStore};
+use dom::{Document, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink};
 
 /// One named image: its id, the generation of the pixels currently published
 /// for it, and those pixels.
@@ -199,8 +199,13 @@ impl FrameImages for TestImages {
     }
 }
 
-impl ImageStore for TestImages {
-    fn request(&self, source: &str) -> ImageId {
+impl TestImages {
+    /// Names `source` and reports it immediately if pixels are published.
+    ///
+    /// Inherent rather than a trait impl: the embedder-facing resource trait
+    /// lives in `bobcat-core`, which this crate deliberately does not depend
+    /// on. A `bobcat-core` test wraps this in its own adapter.
+    pub fn request(&self, source: &str) -> ImageId {
         let (id, load) = {
             let mut entries = self.entries();
             let entry = entries.entry(source.to_owned()).or_insert_with(|| Entry {
@@ -222,7 +227,8 @@ impl ImageStore for TestImages {
         id
     }
 
-    fn retain(&self, frame: &[ImageRef]) {
+    /// Records the working set a resolve pass reported.
+    pub fn retain(&self, frame: &[ImageRef]) {
         self.retained
             .lock()
             .expect("test image retain log")
@@ -247,35 +253,6 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 /// own reference to the same state: the painter's handle is an `Rc`, because
 /// a store never leaves the painter thread and needs neither `Send` nor
 /// `Sync`, but a test still has to publish images and read the retain log.
-#[derive(Debug)]
-pub struct SharedTestImages(Arc<TestImages>);
-
-impl FrameImages for SharedTestImages {
-    fn read(&self, image: ImageRef) -> Option<ImageData> {
-        self.0.read(image)
-    }
-}
-
-impl ImageStore for SharedTestImages {
-    fn request(&self, source: &str) -> ImageId {
-        self.0.request(source)
-    }
-
-    fn retain(&self, frame: &[ImageRef]) {
-        self.0.retain(frame);
-    }
-
-    fn release(&self, id: ImageId) {
-        self.0.release(id);
-    }
-}
-
-/// The painter-owned handle for a store a test also holds.
-#[must_use]
-pub fn shared(images: &Arc<TestImages>) -> std::rc::Rc<dyn ImageStore> {
-    std::rc::Rc::new(SharedTestImages(Arc::clone(images)))
-}
-
 /// Drives one round of the document-to-store image protocol, the same loop a
 /// painter runs: request every source the last walk discovered, then apply
 /// whatever the store reported.

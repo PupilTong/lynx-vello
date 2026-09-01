@@ -218,7 +218,6 @@ dependencies = [
  "flume",
  "http",
  "lynx-template-decoder",
- "pollster",
  "quickjs-rust-bridge",
  "rayon",
  "rustc-hash 2.1.3",

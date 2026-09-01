@@ -11,6 +11,7 @@
 mod gesture;
 mod graphics;
 pub(crate) mod images;
+mod sources;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -49,13 +50,22 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize, ToMain,
-    ToPainter, frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize,
+    LynxViewError, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The main thread stopped before it could say how startup went.
+fn main_thread_gone() -> LynxViewError {
+    EngineError::Thread {
+        name: "script",
+        message: "the Lynx main thread stopped before startup completed".to_owned(),
+    }
+    .into()
+}
 
 /// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
@@ -143,6 +153,12 @@ pub(crate) struct PainterLink {
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
     image_releases: Vec<dom::ImageId>,
+    /// Awaitable only during construction, when the painter has no host turn
+    /// to be woken into. Dropped once startup settles.
+    startup_wake: Option<StartupWakeReceiver>,
+    /// Whether a drain has seen a frame announcement it has not adopted yet.
+    /// A field rather than a local because a startup drain runs in pieces.
+    pending_announce: bool,
 }
 
 impl PainterLink {
@@ -150,6 +166,7 @@ impl PainterLink {
         commands: flume::Sender<ToMain>,
         notifications: flume::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
+        startup_wake: StartupWakeReceiver,
     ) -> Self {
         Self {
             commands,
@@ -163,7 +180,43 @@ impl PainterLink {
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
             image_releases: Vec::new(),
+            startup_wake: Some(startup_wake),
+            pending_announce: false,
         }
+    }
+
+    /// One message, without applying it.
+    fn try_next(&mut self) -> Result<ToPainter, flume::TryRecvError> {
+        self.notifications.try_recv()
+    }
+
+    /// Applies one message, remembering a frame announcement for [`Self::settle`].
+    fn apply_announced(&mut self, notification: ToPainter) {
+        self.pending_announce |= self.apply(notification);
+    }
+
+    /// Adopts whatever the drains since the last settle announced.
+    fn settle(&mut self) {
+        let announced = std::mem::take(&mut self.pending_announce);
+        self.adopt_frame(announced);
+    }
+
+    /// Waits for `bobcat-main` to have said something. `None` once that
+    /// thread is gone.
+    ///
+    /// Only a nudge: every fact is already in the FIFO before the tick that
+    /// announces it, so a missed tick costs a wait, never a message.
+    async fn await_startup_wake(&mut self) -> Option<()> {
+        match self.startup_wake.as_mut() {
+            Some(wake) => wake.recv().await,
+            None => None,
+        }
+    }
+
+    /// Drops the construction-time wake. After this the painter is woken by
+    /// the host's own turns, like everything else.
+    fn finish_startup(&mut self) {
+        self.startup_wake = None;
     }
 
     /// Sends one command. A closed channel is a main thread that has exited;
@@ -175,11 +228,10 @@ impl PainterLink {
     /// Applies everything that has arrived. However many frames were
     /// announced, the mailbox is read once.
     pub(crate) fn sync(&mut self) {
-        let mut announced = false;
         while let Ok(notification) = self.notifications.try_recv() {
-            announced |= self.apply(notification);
+            self.apply_announced(notification);
         }
-        self.adopt_frame(announced);
+        self.settle();
     }
 
     fn apply(&mut self, notification: ToPainter) -> bool {
@@ -197,6 +249,9 @@ impl PainterLink {
             }
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
             ToPainter::ReleaseImages(ids) => self.image_releases.extend(ids),
+            ToPainter::FetchSource { .. } | ToPainter::Started(_) => {
+                unreachable!("startup messages are served before the view exists")
+            }
         }
         false
     }
@@ -294,7 +349,7 @@ impl fmt::Debug for PainterLink {
 /// Where a view's pixels go: a window's presentation stack, or a texture the
 /// view owns and nothing displays. One of them exists before the view does,
 /// and it is the one the view has for its whole life.
-pub(super) enum Output {
+pub(crate) enum Output {
     /// A painter with nowhere to draw. Test-only, so a unit test that
     /// exercises routing alone pays for no GPU device; production has
     /// exactly the two targets an embedder can name.
@@ -314,7 +369,10 @@ pub(super) enum Output {
 impl Output {
     /// Builds the target an embedder named, on the thread that will draw into
     /// it — the only thread macOS lets a surface be created from.
-    async fn build(target: DrawTarget, frame_size: FrameSize) -> Result<Self, EngineError> {
+    pub(crate) async fn build(
+        target: DrawTarget,
+        frame_size: FrameSize,
+    ) -> Result<Self, EngineError> {
         match target {
             DrawTarget::Window(target) => Ok(Self::Window(Box::new(
                 WindowGraphics::new(target, frame_size).await?,
@@ -651,22 +709,7 @@ fn route_published(
 }
 
 impl Painter {
-    /// Creates the painting owner over the link its view established before
-    /// the Lynx main thread began running, with the draw target it will keep.
-    ///
-    /// The target is built here rather than handed over later: a view is
-    /// never in a state where it has run but has nowhere to put a frame.
-    pub(super) async fn new(
-        viewport: Viewport,
-        frame_size: FrameSize,
-        link: PainterLink,
-        target: DrawTarget,
-    ) -> Result<Self, EngineError> {
-        let output = Output::build(target, frame_size).await?;
-        Ok(Self::with_output(viewport, frame_size, link, output))
-    }
-
-    fn with_output(
+    pub(super) fn with_output(
         viewport: Viewport,
         frame_size: FrameSize,
         link: PainterLink,
@@ -694,6 +737,85 @@ impl Painter {
         }
     }
 
+    /// Serves `bobcat-main` until it answers startup.
+    ///
+    /// This is the painter's only wait on the Lynx main thread during
+    /// construction, and it is a drain of the same one inbox the steady state
+    /// drains. There is no arm to forget, because serving a source request
+    /// and noticing the answer are one loop over one enum.
+    ///
+    /// It cannot deadlock against `bobcat-main`: that thread sends every
+    /// source request it will ever make *before* its first park, so each
+    /// request is already queued here when this loop starts, and each reply
+    /// this loop sends is what unparks it.
+    pub(super) async fn serve_startup(&mut self) -> Result<(), LynxViewError> {
+        let mut requests = sources::mint_namespace();
+        let mut closed = false;
+        loop {
+            if let Some(result) = self.drain_startup(&mut requests).await {
+                return result;
+            }
+            if closed {
+                // The wake channel closed and a full drain after that found
+                // nothing terminal, so nothing more can ever arrive.
+                return Err(main_thread_gone());
+            }
+            closed = self.link.await_startup_wake().await.is_none();
+        }
+    }
+
+    /// Applies everything queued, answering source requests as they come.
+    /// `Some` once startup has an outcome.
+    async fn drain_startup(
+        &mut self,
+        requests: &mut crate::resource::RequestId,
+    ) -> Option<Result<(), LynxViewError>> {
+        loop {
+            match self.link.try_next() {
+                Ok(ToPainter::Started(result)) => {
+                    self.link.settle();
+                    self.link.finish_startup();
+                    return Some(result);
+                }
+                Ok(ToPainter::FetchSource { slot, specifier }) => {
+                    // An owned handle: a `ResourceFuture` borrows the fetcher
+                    // across the await, and the link is used after it.
+                    let fetcher = self.images.fetcher();
+                    let loaded = match fetcher {
+                        Some(fetcher) => {
+                            sources::load(fetcher.as_ref(), requests, slot, &specifier).await
+                        }
+                        None => Err(LynxViewError::from(EngineError::NoResourceFetcher)),
+                    };
+                    self.link.send(ToMain::SourceLoaded {
+                        slot,
+                        result: loaded,
+                    });
+                }
+                // A script error during startup *is* the startup failure. On
+                // wasm32 under `panic = "abort"` it is the only thing a
+                // trapping main thread can say before it stops running
+                // destructors, so treating it as terminal here is what keeps
+                // construction from waiting forever.
+                Ok(ToPainter::Engine(EngineEvent::ScriptRunError(error))) => {
+                    self.link.settle();
+                    self.link.finish_startup();
+                    return Some(Err(error.into()));
+                }
+                // Frames, lifecycle events, listener edges, boot's image
+                // requests: the steady-state path, so every fact boot
+                // published lands where the host's first turn finds it.
+                Ok(other) => self.link.apply_announced(other),
+                Err(flume::TryRecvError::Empty) => return None,
+                Err(flume::TryRecvError::Disconnected) => {
+                    self.link.settle();
+                    self.link.finish_startup();
+                    return Some(Err(main_thread_gone()));
+                }
+            }
+        }
+    }
+
     /// The sink completed loads report through, for the store this view is
     /// about to build.
     ///
@@ -709,7 +831,7 @@ impl Painter {
 
     /// Installs the embedder's store. Called once, on this thread, before the
     /// view is handed back.
-    pub(super) fn install_images(&mut self, store: Rc<dyn dom::ImageStore>) {
+    pub(super) fn install_resources(&mut self, store: Rc<dyn crate::resource::ResourceFetcher>) {
         self.images.install(store);
     }
 

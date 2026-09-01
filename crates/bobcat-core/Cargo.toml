@@ -13,7 +13,6 @@ bytes = { workspace = true }
 dom = { workspace = true }
 flume = { workspace = true }
 http = { workspace = true }
-pollster = { workspace = true }
 quickjs-rust-bridge = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }

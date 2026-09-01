@@ -25,7 +25,10 @@ async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
 }
 
 fn sources() -> ViewSources {
-    ViewSources::new(Arc::new(FetcherDouble::new(Vec::new())), ENTRY)
+    ViewSources::new(
+        support::factory(Arc::new(FetcherDouble::new(Vec::new()))),
+        ENTRY,
+    )
 }
 
 #[tokio::test]
@@ -33,14 +36,13 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     let images = Arc::new(flashbulb::TestImages::new());
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
-    let store = Arc::clone(&images);
-    let mut view = view(ViewSources {
-        image_store: Some(Box::new(move |sink| {
-            store.attach(sink);
-            flashbulb::shared(&store)
-        })),
-        ..sources()
-    })
+    let mut view = view(ViewSources::new(
+        support::factory_serving_images(
+            Arc::new(FetcherDouble::new(Vec::new()).with_images(Arc::clone(&images))),
+            Arc::clone(&images),
+        ),
+        ENTRY,
+    ))
     .await
     .expect("opaque view");
     wait_for_script(&mut view).expect("the empty entry module boots");

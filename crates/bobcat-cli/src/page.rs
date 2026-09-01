@@ -9,10 +9,10 @@
 use std::sync::Arc;
 
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
+    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
+    RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
 use http::HeaderMap;
@@ -112,19 +112,6 @@ impl ProgramResourceFetcher {
                 retry: RetryAdvice::Never,
             })
         })
-    }
-
-    fn unsupported<T>(
-        request_id: Option<RequestId>,
-        phase: ResourceErrorPhase,
-    ) -> ResourceFuture<'static, T> {
-        Self::error(
-            request_id,
-            ResourceErrorKind::UnsupportedOperation,
-            phase,
-            None,
-            "the CLI in-memory fetcher does not support this operation",
-        )
     }
 }
 
@@ -277,9 +264,15 @@ impl ResourceFetcher for ProgramResourceFetcher {
             })
         })
     }
+}
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
+/// The CLI serves no images: a page it renders draws whatever its own
+/// stylesheet describes, and nothing fetches a bitmap. Every image draw
+/// therefore resolves to nothing, which is what an unloaded image looks like
+/// anyway.
+impl bobcat_core::FrameImages for ProgramResourceFetcher {
+    fn read(&self, _image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+        None
     }
 }
 
@@ -408,7 +401,10 @@ impl Program {
                 .into_iter()
                 .collect(),
             ..ViewSources::new(
-                Arc::new(self.resource_fetcher.clone()),
+                {
+                    let fetcher = self.resource_fetcher.clone();
+                    Box::new(move |_sink| std::rc::Rc::new(fetcher))
+                },
                 self.script_url.to_string(),
             )
         }

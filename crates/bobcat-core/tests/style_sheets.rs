@@ -60,10 +60,10 @@ fn basic_sheet() -> PreparsedStyleSheet {
     }
 }
 
-fn sources(fetcher: Arc<dyn ResourceFetcher>, style_sheets: &[&str]) -> ViewSources {
+fn sources<F: ResourceFetcher + 'static>(fetcher: Arc<F>, style_sheets: &[&str]) -> ViewSources {
     ViewSources {
         style_sheets: style_sheets.iter().map(|url| (*url).to_owned()).collect(),
-        ..ViewSources::new(fetcher, SCRIPT_URL)
+        ..ViewSources::new(support::factory(fetcher), SCRIPT_URL)
     }
 }
 

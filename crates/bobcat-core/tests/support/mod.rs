@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
+    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
+    RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
 use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
@@ -60,6 +60,10 @@ pub struct FetcherDouble {
     /// requests keep using `bytes` for the entry module.
     pub style_sheet_text: Option<Vec<u8>>,
     pub style_sheet_fetches: AtomicUsize,
+    /// The images this host serves, if a test installed any. Shared with the
+    /// test through an `Arc` so it can publish pixels and read the retain log
+    /// while the painter owns its own handle.
+    pub images: Option<Arc<flashbulb::TestImages>>,
 }
 
 impl FetcherDouble {
@@ -75,7 +79,28 @@ impl FetcherDouble {
             style_sheet: None,
             style_sheet_text: None,
             style_sheet_fetches: AtomicUsize::new(0),
+            images: None,
         }
+    }
+
+    /// Serves images from `images`, which the test keeps a handle on so it
+    /// can publish pixels and read the retain log.
+    #[must_use]
+    pub fn with_images(mut self, images: Arc<flashbulb::TestImages>) -> Self {
+        self.images = Some(images);
+        self
+    }
+
+    /// This double as the one thing a view is built from: a factory that
+    /// hands the painter the whole resource system, images included.
+    #[must_use]
+    pub fn into_factory(self) -> bobcat_core::ResourceFactory {
+        Box::new(move |sink| {
+            if let Some(images) = self.images.as_ref() {
+                images.attach(sink);
+            }
+            std::rc::Rc::new(self)
+        })
     }
 
     /// Answers stylesheet requests with a host-decoded sheet.
@@ -223,7 +248,87 @@ impl ResourceFetcher for FetcherDouble {
         })
     }
 
-    fn fetch_http(&self, _request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Box::pin(async { Err(unsupported(ResourceErrorPhase::SendRequest)) })
+    fn request_image(&self, source: &str) -> Option<bobcat_core::ImageId> {
+        self.images.as_ref().map(|images| images.request(source))
     }
+
+    fn retain_images(&self, frame: &[bobcat_core::ImageRef]) {
+        if let Some(images) = self.images.as_ref() {
+            images.retain(frame);
+        }
+    }
+}
+
+/// A double serves images only when a test gave it a store; otherwise every
+/// image draw resolves to nothing, which is what an unloaded image looks like.
+impl bobcat_core::FrameImages for FetcherDouble {
+    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.images.as_ref().and_then(|images| images.read(image))
+    }
+}
+
+/// A fetcher the painter owns while the test keeps a handle on it.
+///
+/// The painter's handle is an `Rc`, because a fetcher never leaves that
+/// thread; a test still has to inspect the double afterwards, and two of them
+/// assert on when it is *dropped*, which needs the `Arc` to stay weakly
+/// observable.
+pub struct SharedFetcher<F>(pub Arc<F>);
+
+impl<F: bobcat_core::FrameImages> bobcat_core::FrameImages for SharedFetcher<F> {
+    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.0.read(image)
+    }
+}
+
+impl<F: ResourceFetcher> ResourceFetcher for SharedFetcher<F> {
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        self.0.supports_capability(capability)
+    }
+
+    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+        self.0.resolve_locator(request)
+    }
+
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        self.0.fetch_resource(request)
+    }
+
+    fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        self.0.fetch_style_sheet(request)
+    }
+
+    fn request_image(&self, source: &str) -> Option<bobcat_core::ImageId> {
+        self.0.request_image(source)
+    }
+
+    fn retain_images(&self, frame: &[bobcat_core::ImageRef]) {
+        self.0.retain_images(frame);
+    }
+
+    fn release_image(&self, id: bobcat_core::ImageId) {
+        self.0.release_image(id);
+    }
+}
+
+/// The one thing a view is built from, over a double the test still holds.
+#[must_use]
+pub fn factory<F: ResourceFetcher + 'static>(fetcher: Arc<F>) -> bobcat_core::ResourceFactory {
+    Box::new(move |_sink| std::rc::Rc::new(SharedFetcher(fetcher)))
+}
+
+/// [`factory`], with the view's image sink wired into a test image store, so
+/// completed loads reach the document the way a real host's would.
+#[must_use]
+pub fn factory_serving_images<F: ResourceFetcher + 'static>(
+    fetcher: Arc<F>,
+    images: Arc<flashbulb::TestImages>,
+) -> bobcat_core::ResourceFactory {
+    Box::new(move |sink| {
+        images.attach(sink);
+        std::rc::Rc::new(SharedFetcher(fetcher))
+    })
 }

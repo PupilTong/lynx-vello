@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -10,10 +11,10 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
+    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
+    RetryAdvice, StyleSheetResponse,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
@@ -182,19 +183,6 @@ impl BrowserResources {
             })
         })
     }
-
-    fn unsupported<T>(
-        request_id: Option<RequestId>,
-        phase: ResourceErrorPhase,
-    ) -> ResourceFuture<'static, T> {
-        Self::error(
-            request_id,
-            ResourceErrorKind::UnsupportedOperation,
-            phase,
-            None,
-            "the browser source registry does not support this operation",
-        )
-    }
 }
 
 impl ResourceFetcher for BrowserResources {
@@ -278,9 +266,48 @@ impl ResourceFetcher for BrowserResources {
             })
         })
     }
+}
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
+/// The browser embedder serves no images yet: a page draws whatever its own
+/// stylesheet describes, and nothing here fetches a bitmap. Every image draw
+/// therefore resolves to nothing, which is what an unloaded image looks like.
+impl bobcat_core::FrameImages for BrowserResources {
+    fn read(&self, _image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+        None
+    }
+}
+
+/// The per-view handle on the Worker's one resource registry.
+///
+/// The registry outlives every page this Worker shows, so it stays an `Arc`;
+/// the painter's handle is an `Rc`, because a fetcher never leaves the thread
+/// that owns the view.
+struct ViewResources(Arc<BrowserResources>);
+
+impl bobcat_core::FrameImages for ViewResources {
+    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.0.read(image)
+    }
+}
+
+impl ResourceFetcher for ViewResources {
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        self.0.supports_capability(capability)
+    }
+
+    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+        self.0.resolve_locator(request)
+    }
+
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        self.0.fetch_resource(request)
+    }
+
+    fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        self.0.fetch_style_sheet(request)
     }
 }
 
@@ -415,7 +442,13 @@ impl BobcatRenderer {
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
-            ..ViewSources::new(self.resources.clone(), entry_url)
+            ..ViewSources::new(
+                {
+                    let resources = Arc::clone(&self.resources);
+                    Box::new(move |_sink| Rc::new(ViewResources(resources)))
+                },
+                entry_url,
+            )
         };
         // A canvas owns its own resolution — configuring a context does not
         // set it — and the view builds its surface from this canvas during

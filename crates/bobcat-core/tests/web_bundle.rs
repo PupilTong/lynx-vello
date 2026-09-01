@@ -37,7 +37,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(fetcher, "main.js"),
+        ViewSources::new(support::factory(fetcher), "main.js"),
     )
     .await
     .expect("fetch and start");
