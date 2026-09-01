@@ -11,7 +11,6 @@
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
-use std::time::Duration;
 
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, ImageStore, NodeId, Vector2D};
@@ -429,32 +428,29 @@ impl LynxView {
         self.painter.serve()
     }
 
-    /// How long the host may sleep before offering the view another
-    /// [`Self::pump`].
+    /// Whether the view has a frame to put on its window.
     ///
-    /// `None` is nothing owed: park until an OS fact or the engine's wakeup
-    /// opens the next turn. `Some(Duration::ZERO)` is a running animation —
-    /// come straight back, because the swap chain's `AutoVsync` acquire
-    /// inside the next draw is the pace, and on a target whose acquire does
-    /// not wait (a browser canvas) it means one display frame instead.
-    /// Anything else is a swap chain that had no image to give and said so
-    /// without waiting for vsync, so the retry needs that delay or it becomes
-    /// a spin.
+    /// Read it at the end of a turn: while it holds, the host owes the view
+    /// another [`Self::pump`] at its own next display frame — a
+    /// `requestAnimationFrame`, a display link, whatever that host's display
+    /// clock is. The engine names no interval, because it owns no clock: a
+    /// running animation, a swap chain that had no image to give, and a
+    /// frame a [`Self::refresh`] left owed are one answer here, and one
+    /// answer is all a vsync-driven host needs.
     ///
-    /// Only ever a visible window answers anything but `None`; an offscreen
-    /// view's frames are the host's to ask for through [`Self::tick`].
+    /// Only a visible window ever answers `true`; an offscreen view's frames
+    /// are the host's to ask for through [`Self::tick`].
     #[must_use]
-    pub fn next_turn(&self) -> Option<Duration> {
-        self.painter.next_turn()
+    pub fn owes_frame(&self) -> bool {
+        self.painter.owes_frame()
     }
 
     /// Whether the engine owed the timeline another frame as of the last
     /// turn.
     ///
-    /// A host that owns the display clock — a Worker driving
-    /// `requestAnimationFrame` — reads it to decide whether to ask for
-    /// another turn. Unlike [`Self::next_turn`] it answers for an offscreen
-    /// view too, which has no display to pace against.
+    /// Narrower than [`Self::owes_frame`] and answered for any target: this
+    /// is the animation itself, which an offscreen host — with no display to
+    /// pace against and no window to owe — asks about directly.
     #[must_use]
     pub fn is_animating(&self) -> bool {
         self.painter.is_animating()

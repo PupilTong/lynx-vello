@@ -6,7 +6,6 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
@@ -25,7 +24,7 @@ use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
-use web_sys::{DedicatedWorkerGlobalScope, OffscreenCanvas};
+use web_sys::OffscreenCanvas;
 
 #[wasm_bindgen]
 extern "C" {
@@ -576,11 +575,11 @@ impl BobcatRenderer {
     /// crosses either: the animation timeline is core's own clock, read on
     /// this Worker once the canvas surface has handed over an image.
     ///
-    /// A swap chain that had nothing to give asks for the turn again after a
-    /// short delay, which this Worker owes itself: the signal is re-armed so
-    /// the loop comes back. A running animation is not re-armed here — that
-    /// continuation is the display's, and the loop takes it as an animation
-    /// frame.
+    /// Anything the turn leaves owed — a running animation, a swap chain
+    /// that had no image to give — is answered by [`Self::owes_frame`], which
+    /// this Worker's loop reads before it parks, and takes at the display's
+    /// own rate. Nothing is re-armed here: the signal carries facts from the
+    /// Lynx main thread, and a frame is not one of them.
     ///
     /// A fatal error is reported after the turn, never instead of it: the
     /// frame a failed script did commit still reaches the canvas, with nobody
@@ -609,26 +608,24 @@ impl BobcatRenderer {
                 _ => {}
             }
         }
-        if let Some(delay) = view.next_turn().filter(|delay| !delay.is_zero()) {
-            self.arm_after(delay);
-        }
         if let Some(error) = fatal {
             return Err(error);
         }
         Ok(self.script_finished)
     }
 
-    /// Whether the engine owes the timeline another frame — a running
-    /// animation, or an armed gesture deadline waiting on the clock.
+    /// Whether the view has a frame to put on the canvas: a running
+    /// animation, a gesture deadline the clock has yet to reach, a swap chain
+    /// that had no image to give, or a commit the last turn did not draw.
     ///
-    /// The Render Worker's continuation signal: while this is true it keeps
-    /// drawing at the display's rate, which on this target means
-    /// `requestAnimationFrame`. Nothing crosses the engine's wakeup for it:
-    /// on a canvas the acquire never waits, so the display — not the swap
-    /// chain — is what paces an animation here.
-    #[wasm_bindgen(js_name = isAnimating)]
-    pub fn is_animating(&self) -> bool {
-        self.view.as_ref().is_some_and(LynxView::is_animating)
+    /// The Render Worker's continuation signal. While it holds, the loop
+    /// takes its next turn at the display's own rate —
+    /// `requestAnimationFrame` on this target — instead of parking on the
+    /// engine's wakeup. Nothing crosses a thread for it: on a canvas the
+    /// acquire never waits, so the display is the only honest pace there is.
+    #[wasm_bindgen(js_name = owesFrame)]
+    pub fn owes_frame(&self) -> bool {
+        self.view.as_ref().is_some_and(LynxView::owes_frame)
     }
 
     /// Route one browser `PointerEvent` into the opaque native view.
@@ -717,25 +714,6 @@ impl BobcatRenderer {
 }
 
 impl BobcatRenderer {
-    /// Arms this Worker's own wakeup once the delay the engine named has
-    /// passed.
-    ///
-    /// The only turn that needs it is the swap chain's retry, and it needs
-    /// the wait: arming immediately would resolve `waitForEngineEvent` in a
-    /// microtask, and the loop would spin without ever handing a macrotask
-    /// back to the Worker's message queue. A timer that never fires — a
-    /// terminated Worker — costs nothing, because the view is gone with it.
-    fn arm_after(&self, delay: Duration) {
-        let signal = Arc::clone(&self.events);
-        let arm = Closure::once_into_js(move || signal.request_event());
-        let milliseconds = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
-        let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
-        let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
-            arm.unchecked_ref(),
-            milliseconds,
-        );
-    }
-
     fn ensure_running(&self) -> Result<(), JsValue> {
         if self.disposed {
             Err(js_error("the Bobcat renderer is disposed"))

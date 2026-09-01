@@ -296,51 +296,24 @@ impl EventRequester for WakeSignal {
     }
 }
 
-/// The swap chain's own answer paces the turn, ahead of the animation.
+/// A view with nowhere to present owes the display nothing, whatever else
+/// is true of it.
 ///
-/// An empty acquire costs no vsync wait, so nothing else can pace it. While
-/// an animation runs, "come straight back" would otherwise be the answer to
-/// every one of them — which is a hidden window (wgpu-hal's Metal backend
-/// answers `Occluded` from its own `NSWindow.occlusionState`, for a window
-/// winit has not reported) burning a core for as long as the animation
-/// lasts, at four figures of turns per second.
+/// The rule that keeps a host from waiting on a frame clock for a view that
+/// has no display to keep up with: an offscreen view's frames are asked for
+/// through `tick`, and a painter with no target at all has none to give.
 #[test]
-fn an_empty_swap_chain_paces_the_turn_before_a_running_animation_does() {
-    assert_eq!(
-        super::next_turn_delay(true, true, true),
-        Some(super::SWAP_CHAIN_RETRY),
-        "an empty acquire is the one thing that must not be answered immediately"
-    );
-    assert_eq!(
-        super::next_turn_delay(true, false, false),
-        Some(super::SWAP_CHAIN_RETRY),
-        "and it is owed a turn even when nothing else asked for one"
-    );
-    assert_eq!(
-        super::next_turn_delay(false, true, true),
-        Some(Duration::ZERO),
-        "an animation over a swap chain that is answering is paced by its acquire"
-    );
-    assert_eq!(
-        super::next_turn_delay(false, false, true),
-        Some(super::SWAP_CHAIN_RETRY),
-        "a frame left owed comes back on the same short delay"
-    );
-    assert_eq!(
-        super::next_turn_delay(false, false, false),
-        None,
-        "and nothing owed parks"
-    );
-}
-
-/// A view with nowhere to present asks for no turns at all: an offscreen
-/// target has no display to keep up with, and its frames are the host's to
-/// ask for.
-#[test]
-fn a_view_that_presents_to_no_window_never_asks_for_a_turn() {
+fn a_view_that_presents_to_no_window_owes_no_frame() {
     let (painter, _main) = detached();
     painter.refresh();
-    assert_eq!(painter.next_turn(), None);
+    assert!(
+        painter.link.redraw_owed(),
+        "the refresh did leave a frame owed"
+    );
+    assert!(
+        !painter.owes_frame(),
+        "but nothing owes the display a frame it cannot present"
+    );
 }
 
 /// A frame the painter asks of itself wakes nothing.

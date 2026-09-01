@@ -53,10 +53,11 @@ function nextDisplayFrame() {
 // One durable wakeup carries everything the engine has to say: a lifecycle
 // event to drain and a frame to draw. A commit resolves it and the same
 // Worker turn presents — no frame clock stands between the two. The clock is
-// only ever the continuation's: an animation is the engine's own business,
-// paced here, crossing nothing.
+// only ever the continuation's: a frame the view still owes — an animation, a
+// swap chain that had no image to give — is taken at this display's rate, and
+// the engine names no interval for it.
 async function nextEngineWakeup() {
-  if (renderer.isAnimating()) {
+  if (renderer.owesFrame()) {
     await nextDisplayFrame()
   } else {
     await renderer.waitForEngineEvent()

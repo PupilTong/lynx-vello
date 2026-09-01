@@ -252,12 +252,15 @@ useful signal for currently-compatible versions of those libraries.
   a frame the engine wants drawn rides the same wakeup, and the `pump` that
   answers it is the turn that draws it — so no OS frame callback and no vsync
   round trip stands between a commit and its pixels. Pacing is the
-  embedder's: after each turn `next_turn` answers `None` to park,
-  `Some(Duration::ZERO)` to come straight back (a running animation, paced by
-  the `AutoVsync` acquire inside the next draw itself), or a short delay for
-  a swap chain that had no image to give. `is_animating` is the same fact in
-  the form a host that owns the display clock — or an offscreen one — can
-  use. A draw that fails arrives once, as `RenderFailed`.
+  embedder's, and the engine names no interval for it: after each turn
+  `owes_frame` answers whether the view still has a frame to put on its
+  window — a running animation, a swap chain that had no image to give, a
+  commit the turn did not draw — and a host takes that frame at **its own
+  next display frame**, whatever its display clock is (a `CVDisplayLink` on
+  the window's monitor, `requestAnimationFrame` in a Worker). `is_animating`
+  is the narrower fact, answered for any target, that an offscreen host with
+  no display to pace against asks instead. A draw that fails arrives once, as
+  `RenderFailed`.
   **A view spans two threads**: the embedder's own — whichever one called
   `LynxView::new` — which owns the window, the input capture, the surface
   (the one call macOS allows nowhere else), and the private `Painter`

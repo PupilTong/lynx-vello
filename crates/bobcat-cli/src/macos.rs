@@ -12,15 +12,18 @@
 //! commit behind the next one, and `bobcat-main` answers through this very
 //! [`ProxyWakeup`] — so drawing from inside an event relay would post into
 //! the channel winit is still draining, and the run loop would never return
-//! to `AppKit`. Winit's `RedrawRequested` is not relayed either. How long the
-//! loop then sleeps is [`bobcat_core::LynxView::next_turn`]'s answer: park,
-//! come straight back for a running animation (paced by the swap chain's
-//! `AutoVsync` acquire inside the next draw), or retry a swap chain that had
-//! no image after the delay the engine names.
+//! to `AppKit`. Winit's `RedrawRequested` is not relayed either.
+//!
+//! The loop always waits. What wakes it for a *frame* is this window's own
+//! display: while [`bobcat_core::LynxView::owes_frame`] holds, a
+//! [`crate::vsync::DisplayLink`] on the monitor the window is on posts one
+//! wakeup per refresh, and stops the moment nothing is owed. The engine names
+//! no interval and this file owns no timer — an animation runs at the rate
+//! the display actually scans out, and a swap chain that had no image to give
+//! is asked again one refresh later rather than on a guess.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
@@ -28,6 +31,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -35,6 +39,7 @@ use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::Program;
 use crate::screenshot::save_screenshot;
+use crate::vsync::DisplayLink;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -93,6 +98,10 @@ struct MacApplication {
     /// itself is destroyed on this thread, which is the only one allowed to
     /// destroy it.
     view: Option<LynxView>,
+    /// This window's display clock, running only while a frame is owed.
+    /// Declared before the view so it is stopped — and its callback proven
+    /// finished — before the view it wakes goes away.
+    vsync: Option<DisplayLink>,
     event_requester: Arc<ProxyWakeup>,
     window: Option<Arc<Window>>,
     console: Console,
@@ -126,6 +135,7 @@ impl MacApplication {
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             view: None,
+            vsync: None,
             event_requester,
             window: None,
             console,
@@ -185,6 +195,17 @@ impl MacApplication {
         })?;
 
         self.view = Some(view);
+        // The display this window is on is the clock its frames run at. A
+        // monitor winit cannot name, or a link CoreVideo will not open,
+        // leaves the window on the engine's own wakeups: it still paints
+        // every commit, it just cannot pace an animation itself.
+        self.vsync = window.current_monitor().and_then(|monitor| {
+            let requester = Arc::clone(&self.event_requester);
+            DisplayLink::new(monitor.native_id(), move || requester.request_event())
+        });
+        if self.vsync.is_none() {
+            eprintln!("bobcat: no display link for this window; animations will not be paced");
+        }
         Ok(())
     }
 
@@ -445,12 +466,10 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     /// from inside that drain the run loop would never return to `AppKit`,
     /// while a wakeup posted from here simply opens the next turn.
     ///
-    /// The engine names the sleep. A running animation asks to come straight
-    /// back, and the swap chain's `AutoVsync` acquire inside the next draw is
-    /// what paces it — this window's own vsync, the only honest source. A
-    /// swap chain that had no image asks for a short delay instead, because
-    /// it answered without waiting for vsync at all. Anything else parks
-    /// until an OS fact or an engine wakeup arrives.
+    /// The loop then always waits: the only thing that asks for a frame is
+    /// the display itself. While the view owes one, the display link posts a
+    /// wakeup per refresh; the turn that answers it draws, and the turn that
+    /// finds nothing owed stops the link.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // A turn that quit opened draws nothing: this thread is the one
         // taking the window down, and a frame presented into a surface being
@@ -461,12 +480,11 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             return;
         }
         self.serve(event_loop);
-        let flow = match self.view.as_ref().and_then(LynxView::next_turn) {
-            Some(delay) if delay.is_zero() => ControlFlow::Poll,
-            Some(delay) => ControlFlow::WaitUntil(Instant::now() + delay),
-            None => ControlFlow::Wait,
-        };
-        event_loop.set_control_flow(flow);
+        let owed = self.view.as_ref().is_some_and(LynxView::owes_frame);
+        if let Some(vsync) = self.vsync.as_mut() {
+            vsync.set_running(owed);
+        }
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 

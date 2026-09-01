@@ -56,44 +56,6 @@ use crate::view::{EventRequester, NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a host is asked to wait before giving the view another turn for
-/// a swap chain that had nothing to give. Half a display refresh: soon
-/// enough that a transient miss costs no visible frame, slow enough that a
-/// window the compositor has stopped serving does not cost a core.
-const SWAP_CHAIN_RETRY: Duration = Duration::from_millis(8);
-
-/// How long a host may sleep before it owes the view another turn, given
-/// what the last one answered. Split from the state it reads so the order
-/// can be pinned without a window.
-///
-/// **A swap chain that had nothing to give is asked first**, and that order
-/// is the whole point: it answers without waiting for vsync, so nothing
-/// paces it, and a running animation would otherwise say "come straight
-/// back" to every one of those empty acquires — a hidden window pegging a
-/// core for as long as its animation runs.
-///
-/// A running animation is next: the `AutoVsync` acquire inside the next draw
-/// is the pace, and taking the turn immediately is what keeps the frames
-/// coming. Anything else is the frame a `refresh` left owed, and `None` is
-/// nothing owed at all — park until something arrives.
-const fn next_turn_delay(
-    swap_chain_empty: bool,
-    animating: bool,
-    redraw_owed: bool,
-) -> Option<Duration> {
-    if swap_chain_empty {
-        return Some(SWAP_CHAIN_RETRY);
-    }
-    if animating {
-        return Some(Duration::ZERO);
-    }
-    if redraw_owed {
-        Some(SWAP_CHAIN_RETRY)
-    } else {
-        None
-    }
-}
-
 /// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
 #[derive(Debug)]
@@ -368,13 +330,6 @@ impl Output {
 /// Kept on that thread by construction — the `Rc` marker makes the whole
 /// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
 /// that built the view is the only one that can ever draw for it.
-#[cfg_attr(
-    test,
-    allow(
-        clippy::struct_excessive_bools,
-        reason = "three of them ship; the fourth is the test-only detached flag"
-    )
-)]
 pub(crate) struct Painter {
     // Keep first: dropping the link closes the sole command sender, which
     // wakes the Lynx main thread before any state it may still refer to is
@@ -392,10 +347,6 @@ pub(crate) struct Painter {
     /// A draw target that failed once cannot be reached again: it is reported
     /// once, and nothing tries to paint it until another target arrives.
     render_failed: bool,
-    /// Whether the last acquire came back with no image. The swap chain
-    /// answers that without waiting for vsync, so it is the one frame the
-    /// painter owes that nothing else paces.
-    swap_chain_empty: bool,
     pub(super) gesture: GestureRouter,
     pub(super) clock: FrameClock,
     pub(super) scroll_intents: ScrollIntents,
@@ -697,7 +648,6 @@ impl Painter {
             output,
             occluded: false,
             render_failed: false,
-            swap_chain_empty: false,
             gesture: GestureRouter::default(),
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::default(),
@@ -948,16 +898,13 @@ impl Painter {
                 unreachable!("the window output was just checked");
             };
             match graphics.acquire(size)? {
-                FrameAcquisition::Ready(acquired) => {
-                    self.swap_chain_empty = false;
-                    acquired
-                }
+                FrameAcquisition::Ready(acquired) => acquired,
                 // No image this frame, and no vsync was waited on to find
-                // that out, so the frame stays owed and `next_turn` asks the
-                // host for another turn after a short delay rather than in a
-                // spin.
+                // that out. The frame stays owed and the host takes it at its
+                // next display frame, like any other — which is what keeps an
+                // empty swap chain from spinning: nothing here asks to come
+                // straight back.
                 FrameAcquisition::Retry => {
-                    self.swap_chain_empty = true;
                     self.link.mark_redraw();
                     return Ok(());
                 }
@@ -1095,20 +1042,23 @@ impl Painter {
         events
     }
 
-    /// When the painter owes itself another turn, and how soon.
+    /// Whether the view has a frame to put on its window.
     ///
-    /// Only ever a visible, working window answers anything: an offscreen
-    /// target has no display to keep up with, and its frames are the host's
-    /// to ask for. [`next_turn_delay`] is the rest of the answer.
-    pub(super) fn next_turn(&self) -> Option<Duration> {
+    /// A running animation, a swap chain that had no image to give, and a
+    /// frame something asked for that no turn has produced yet are one
+    /// answer, because a host serves them all the same way: at its own next
+    /// display frame. No delay is named here — the display's clock belongs to
+    /// the embedder, and this is the whole of what the engine has to say
+    /// about when to read it.
+    ///
+    /// Always false for a window nobody can see, a target that failed, and a
+    /// view that presents to no window at all: an offscreen view's frames are
+    /// the host's to ask for through `tick`.
+    pub(super) fn owes_frame(&self) -> bool {
         if self.render_failed || self.occluded || !matches!(self.output, Output::Window(_)) {
-            return None;
+            return false;
         }
-        next_turn_delay(
-            self.swap_chain_empty,
-            self.is_animating(),
-            self.link.redraw_owed(),
-        )
+        self.is_animating() || self.link.redraw_owed()
     }
 
     /// Advances an offscreen view by one frame.

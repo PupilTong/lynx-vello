@@ -184,10 +184,10 @@ loop answers each wakeup with one `pump` — draw the pending frame, drain the
 events. The same signal is what this Worker arms for *itself*, because the
 view paints here and wakes nobody on its own: a pointer or a resize that
 arrives while the loop is parked applies immediately and then arms the signal
-so the turn it owes actually happens, and a swap chain that had no image to
-give arms it again after the delay `LynxView::next_turn` names, through a
-Worker timer, so the frame is retried rather than dropped and the retry does
-not spin the loop through microtasks. No frame clock stands between a commit and the canvas. The clock is
+so the turn it owes actually happens. A frame the turn leaves owed is not
+armed at all — `owesFrame()` says so, and the loop takes it at the next
+display frame instead, which is `requestAnimationFrame` where a Worker is
+given one. No frame clock stands between a commit and the canvas. The clock is
 the continuation's alone: while `isAnimating` reports that the engine owes the
 timeline another frame, the loop waits for the next display frame instead —
 `requestAnimationFrame` where a Worker is given one, a frame-interval timer

@@ -114,9 +114,9 @@ frame while the latest committed frame reports an active animation, and the
 main thread's recv loop advances the timeline — a Stylo animation-only
 traversal of just the animating elements, no JavaScript involved — and
 commits what changed. The published frame's
-`animations_active` flag is what keeps the loop sustained: `next_turn` keeps
-asking the embedder for turns and each one sends `BeginFrame` until a commit
-reports the timeline idle. Starting and cancelling animations belong to the style
+`animations_active` flag is what keeps the loop sustained: `owes_frame` keeps
+answering yes, the embedder keeps taking a turn per display frame, and each
+one sends `BeginFrame` until a commit reports the timeline idle. Starting and cancelling animations belong to the style
 flush the main thread already runs at `__FlushElementTree`.
 
 `bobcat-core` deliberately does not re-export `dom`. The lower-layer crates
@@ -536,12 +536,11 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    the latest published scene is uploaded if it is new, and the frame
    presents. While the latest frame reports an active animation each turn
    sends the main thread one `BeginFrame` carrying that reading, and the loop
-   sustains without any JavaScript and without waking anyone: `next_turn`
-   answers `Some(Duration::ZERO)`, and the embedder comes straight back —
-   paced natively by the `AutoVsync` acquire the next draw is about to make,
-   and in a browser by the display it holds (`requestAnimationFrame` on a
-   canvas), where `LynxView::is_animating` says the same thing for a target
-   whose acquire never waits.
+   sustains without any JavaScript and without waking anyone: `owes_frame`
+   answers yes, and the embedder takes the next turn at its own display frame
+   — a `CVDisplayLink` on the window's monitor natively, `requestAnimationFrame`
+   in a Worker. The engine names no interval, and an offscreen host, which has
+   no display to pace against, reads `LynxView::is_animating` instead.
 6. The successful boot notification remains queued behind the same wakeup;
    the awakened host observes it through `pump`, which hands it back with
    whatever else the turn produced. A draw that fails arrives the same way,
