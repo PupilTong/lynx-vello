@@ -59,11 +59,11 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     // It applies immediately: the painter is this thread.
     view.prefetch_images(["app:///pixel.png", "app:///missing.png"]);
     assert!(
-        images.id_of("app:///missing.png").is_some(),
-        "a source with no pixels is still named, so it is asked for once"
+        images.was_asked_for("app:///missing.png"),
+        "a source with no pixels is still asked for exactly once"
     );
     assert!(
-        images.id_of("app:///pixel.png").is_some(),
+        images.was_asked_for("app:///pixel.png"),
         "and so is one the store carries"
     );
 }

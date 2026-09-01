@@ -248,11 +248,13 @@ impl ResourceFetcher for FetcherDouble {
         })
     }
 
-    fn request_image(&self, source: &str) -> Option<bobcat_core::ImageId> {
-        self.images.as_ref().map(|images| images.request(source))
+    fn request_image(&self, source: &str) {
+        if let Some(images) = self.images.as_ref() {
+            images.request(source);
+        }
     }
 
-    fn retain_images(&self, frame: &[bobcat_core::ImageRef]) {
+    fn retain_images(&self, frame: &[Arc<str>]) {
         if let Some(images) = self.images.as_ref() {
             images.retain(frame);
         }
@@ -262,8 +264,8 @@ impl ResourceFetcher for FetcherDouble {
 /// A double serves images only when a test gave it a store; otherwise every
 /// image draw resolves to nothing, which is what an unloaded image looks like.
 impl bobcat_core::FrameImages for FetcherDouble {
-    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.images.as_ref().and_then(|images| images.read(image))
+    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.images.as_ref().and_then(|images| images.read(source))
     }
 }
 
@@ -276,8 +278,8 @@ impl bobcat_core::FrameImages for FetcherDouble {
 pub struct SharedFetcher<F>(pub Arc<F>);
 
 impl<F: bobcat_core::FrameImages> bobcat_core::FrameImages for SharedFetcher<F> {
-    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.0.read(image)
+    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.0.read(source)
     }
 }
 
@@ -301,16 +303,12 @@ impl<F: ResourceFetcher> ResourceFetcher for SharedFetcher<F> {
         self.0.fetch_style_sheet(request)
     }
 
-    fn request_image(&self, source: &str) -> Option<bobcat_core::ImageId> {
-        self.0.request_image(source)
+    fn request_image(&self, source: &str) {
+        self.0.request_image(source);
     }
 
-    fn retain_images(&self, frame: &[bobcat_core::ImageRef]) {
+    fn retain_images(&self, frame: &[Arc<str>]) {
         self.0.retain_images(frame);
-    }
-
-    fn release_image(&self, id: bobcat_core::ImageId) {
-        self.0.release_image(id);
     }
 }
 

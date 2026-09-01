@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use dom::{ImageId, ImageRef};
 use http::{HeaderMap, Method, StatusCode};
 use thiserror::Error;
 use tokio::io::AsyncRead;
@@ -64,39 +63,27 @@ pub trait ResourceFetcher: dom::FrameImages {
         fetch_style_sheet_as_text(self, request)
     }
 
-    /// Names `source` and begins loading it, or `None` if this host serves no
-    /// images at all.
-    ///
-    /// Non-blocking: it returns the canonical id immediately and reports the
-    /// outcome later through the [`ImageSink`] the factory was given.
+    /// Names `source` and begins loading it. Non-blocking.
     ///
     /// Idempotent and single-flight: repeated or concurrent requests for one
-    /// source join one load, and a request for an already-loaded source starts
-    /// nothing. Two sources this host canonicalises to one resource MUST
-    /// return the same [`ImageId`] — that is the only place cross-source
-    /// bitmap reuse can happen.
+    /// source join one load, and a request for an already-loaded source
+    /// starts nothing. The engine asks for a source exactly once per
+    /// document, keyed by the raw string the page wrote — two specifiers a
+    /// host canonicalises to one resource are simply asked for twice.
     ///
-    /// For every id it hands out, the host eventually calls exactly one of
-    /// [`ImageSink::loaded`] or [`ImageSink::failed`], unless the view is torn
-    /// down first. It may call `loaded` again later with a greater generation
-    /// when the bytes behind the id change.
+    /// For every source it is asked for, a host eventually calls exactly one
+    /// of [`ImageSink::loaded`] or [`ImageSink::failed`], unless the view is
+    /// torn down first.
     ///
     /// The default serves nothing, which is what a host with no image support
-    /// wants: a source is asked for exactly once and then never drawn.
-    fn request_image(&self, _source: &str) -> Option<ImageId> {
-        None
-    }
+    /// wants: a source is asked for once and then never drawn.
+    fn request_image(&self, _source: &str) {}
 
-    /// The images the frame just encoded, deduplicated in paint order.
+    /// The sources the frame just encoded, deduplicated in paint order.
     ///
     /// Advisory: it informs residency and nothing else, and a host that
     /// ignores it is still correct. Called once per resolve pass.
-    fn retain_images(&self, _frame: &[ImageRef]) {}
-
-    /// No live node or style names `id` any more. Advisory; the host may keep
-    /// the bitmap, and must answer a later [`Self::request_image`] for the
-    /// same source as a fresh load if it did not.
-    fn release_image(&self, _id: ImageId) {}
+    fn retain_images(&self, _frame: &[Arc<str>]) {}
 }
 
 /// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as

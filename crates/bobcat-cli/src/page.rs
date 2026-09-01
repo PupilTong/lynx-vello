@@ -271,7 +271,7 @@ impl ResourceFetcher for ProgramResourceFetcher {
 /// therefore resolves to nothing, which is what an unloaded image looks like
 /// anyway.
 impl bobcat_core::FrameImages for ProgramResourceFetcher {
-    fn read(&self, _image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
         None
     }
 }

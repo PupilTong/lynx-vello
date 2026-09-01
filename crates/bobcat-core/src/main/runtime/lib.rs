@@ -162,10 +162,6 @@ impl<R: EventRequester> TreeHandle<R> {
         if !wanted.is_empty() {
             self.notify.request_images(wanted);
         }
-        let released = self.document.take_released_images();
-        if !released.is_empty() {
-            self.notify.release_images(released);
-        }
     }
 
     /// Commits and publishes only when something is stale — the tail of

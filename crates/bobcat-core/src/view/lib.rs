@@ -622,11 +622,14 @@ pub(crate) enum ToMain {
     ImageEvents(Vec<dom::ImageEvent>),
     /// One startup source, answering exactly one [`ToPainter::FetchSource`].
     ///
-    /// `Err` carries the failure verbatim; `bobcat-main` turns the first one
-    /// into `Started(Err(..))`, so `LynxView::new` has exactly one exit.
+    /// Only ever a success: a fetch that fails is the startup failure, and the
+    /// painter is the side that already holds it, so it returns from
+    /// construction rather than sending the error across and waiting to be
+    /// told back what it just decided. `None` is reserved for a source the
+    /// painter abandoned, which today cannot happen.
     SourceLoaded {
         slot: SourceSlot,
-        result: Result<LoadedSource, LynxViewError>,
+        source: Option<LoadedSource>,
     },
     Shutdown,
     #[cfg(test)]
@@ -672,8 +675,6 @@ pub(crate) enum ToPainter {
     BeginFrameServiced(u64),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
-    /// Ids nothing names any more.
-    ReleaseImages(Vec<dom::ImageId>),
     /// A source `bobcat-main` cannot fetch itself, because it owns no
     /// fetcher.
     ///

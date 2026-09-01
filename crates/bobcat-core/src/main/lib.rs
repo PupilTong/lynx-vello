@@ -191,11 +191,6 @@ impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn request_images(&self, sources: Vec<Arc<str>>) {
         self.send(ToPainter::RequestImages(sources));
     }
-
-    /// Tells the store nothing names these ids any more.
-    pub(crate) fn release_images(&self, ids: Vec<dom::ImageId>) {
-        self.send(ToPainter::ReleaseImages(ids));
-    }
 }
 
 /// The main thread's receiving end of its link to the painter.
@@ -443,12 +438,11 @@ fn boot<R: EventRequester>(
         };
         match command {
             ToMain::Shutdown => return None,
-            ToMain::SourceLoaded { slot, result } => {
+            ToMain::SourceLoaded { slot, source } => {
                 pending.outstanding -= 1;
-                match result {
-                    Err(error) => return Some(Err(error)),
-                    Ok(source) => pending.place(slot, source),
-                }
+                // A failed fetch never reaches here: the painter holds that
+                // failure and returns from construction with it.
+                pending.place(slot, source?);
                 pending.mount_ready_prefix(&mut document);
             }
             _ => unreachable!("a view that has not booted has nothing else to apply"),

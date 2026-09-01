@@ -18,10 +18,12 @@
 //! Translation per chain is the sum of the chain's slot offsets, each
 //! snapped to the device pixel grid so composed edges stay crisp.
 
+use std::sync::Arc;
+
 use euclid::default::Vector2D;
 
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::render::image::{FrameImages, ImageRef};
+use crate::render::image::{FrameImages, is_renderable};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageSampler};
@@ -77,7 +79,9 @@ pub(crate) enum ImageArea {
 /// differ from silently drawing at the wrong size.
 #[derive(Debug)]
 pub(crate) struct ImageDraw {
-    pub(crate) image: ImageRef,
+    /// The raw source string the page wrote — the registry's own key, so
+    /// every draw of one source in one frame shares one allocation.
+    pub(crate) image: Arc<str>,
     /// Item-local space to device px.
     pub(crate) transform: Affine,
     /// Where one copy of the source image starts, item-local.
@@ -100,16 +104,16 @@ pub(crate) fn encode_image(
     outer: Affine,
     pixels: &dyn FrameImages,
 ) {
-    let Some(data) = pixels.read(draw.image) else {
+    let Some(data) = pixels.read(&draw.image) else {
         return;
     };
-    debug_assert!(
-        data.width > 0
-            && data.height > 0
-            && data.width <= crate::render::image::MAX_RENDERABLE_DIMENSION
-            && data.height <= crate::render::image::MAX_RENDERABLE_DIMENSION,
-        "a store must not hand back a bitmap vello cannot place",
-    );
+    // A bitmap vello cannot place draws as nothing — the same one-frame gap a
+    // not-yet-loaded image already produces. This is the only place the bound
+    // is enforced, because it is the only place the bitmap is known, and the
+    // only place the extent is divided by it.
+    if !is_renderable(&data) {
+        return;
+    }
     let transform = outer * draw.transform;
     let brush_transform = Affine::translate(draw.anchor.to_vec2())
         * Affine::scale_non_uniform(

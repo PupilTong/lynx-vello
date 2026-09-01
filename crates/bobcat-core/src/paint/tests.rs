@@ -385,3 +385,85 @@ fn a_booted_view_commits_and_publishes() {
     assert!(connected, "both views are attached");
     assert!(laid_out, "the boot's final flush laid the page out");
 }
+
+/// A startup outcome that arrives while a host fetch is still pending must
+/// still end construction.
+///
+/// This is the hang that shipped in the first draft of the message-driven
+/// startup: the painter served source requests from inside its own inbox
+/// drain, so while it awaited a host future it read nothing, and an outcome
+/// already sitting in the FIFO was never observed. `bobcat-main` sends every
+/// `FetchSource` before its first park, so after any failure is decided there
+/// is always a fetch left to block on.
+///
+/// Natively no ordinary failure lands in that window; on wasm32 under
+/// `panic = "abort"` a trapping main thread's `ScriptRunError` is exactly it,
+/// and it is unreachable from an integration test. So the invariant is pinned
+/// here: whatever the painter is waiting on, it is also watching the link.
+#[tokio::test]
+async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
+    use std::rc::Rc;
+
+    use crate::resource::{
+        ResolveRequest, ResolvedLocator, ResourceFetcher, ResourceFuture, ResourceRequest,
+        ResourceResponse,
+    };
+
+    /// A host that answers nothing, ever.
+    struct NeverAnswers;
+
+    impl dom::FrameImages for NeverAnswers {
+        fn read(&self, _source: &str) -> Option<dom::vello::peniko::ImageData> {
+            None
+        }
+    }
+
+    impl ResourceFetcher for NeverAnswers {
+        fn supports_capability(&self, _capability: crate::resource::ResourceCapability) -> bool {
+            false
+        }
+
+        fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+            Box::pin(std::future::pending())
+        }
+
+        fn fetch_resource(
+            &self,
+            _request: ResourceRequest,
+        ) -> ResourceFuture<'_, ResourceResponse> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let (mut painter, main) = detached();
+    painter.install_resources(Rc::new(NeverAnswers));
+
+    // The source is asked for first, as `bobcat-main` does before its first
+    // park. The outcome is sent from another thread *after* the painter has
+    // had time to suspend on the fetch — which is the whole point: an outcome
+    // already in the FIFO would be seen by the very first drain and would
+    // never exercise the wait.
+    main.notify.send(ToPainter::FetchSource {
+        slot: crate::view::SourceSlot::Entry,
+        specifier: "app:///main.js".to_owned(),
+    });
+    let notify = main.notify.clone();
+    let decided = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        notify.send(ToPainter::Started(Err(crate::view::EngineError::Thread {
+            name: "script",
+            message: "boot failed while a fetch was in flight".to_owned(),
+        }
+        .into())));
+    });
+
+    let error = tokio::time::timeout(Duration::from_secs(10), painter.serve_startup())
+        .await
+        .expect("a decided outcome must not wait on a fetch that never answers")
+        .expect_err("the decided failure ends construction");
+    assert!(
+        format!("{error}").contains("boot failed while a fetch was in flight"),
+        "and it is the failure the main thread decided: {error}"
+    );
+    decided.join().expect("the deciding thread finishes");
+}

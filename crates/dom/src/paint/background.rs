@@ -48,7 +48,7 @@ use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
 use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, TextClip};
-use crate::render::image::{ImageRef, ImageRegistry};
+use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
 use crate::vello::peniko::{self, BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
@@ -442,7 +442,7 @@ pub(super) fn paint_pattern_layer(
         sink.image(
             chain,
             ImageDraw {
-                image: *image,
+                image: std::sync::Arc::clone(image),
                 transform: fragment.transform,
                 anchor: grid.origin,
                 extent: grid.tile,
@@ -547,7 +547,7 @@ enum Source<'a> {
     /// The dimensions come from the registry, which learned them from the
     /// store's load report, so the whole tile grid resolves here without any
     /// bitmap being reachable.
-    Raster(ImageRef, (f64, f64)),
+    Raster(std::sync::Arc<str>, (f64, f64)),
     Gradient(&'a Gradient),
     Solid(Color),
 }

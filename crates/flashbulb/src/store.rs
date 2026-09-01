@@ -6,38 +6,26 @@
 //!
 //! It mints ids itself and reports every load inline from
 //! [`ImageStore::request`], so a test needs no async runtime at all. What it
-//! does honour is the identity contract: one source keeps one [`ImageId`] for
-//! the store's life, and every [`FrameImages::read`] of one [`ImageRef`]
-//! returns a clone sharing the same `Blob`, which is what vello keys its atlas
-//! on.
+//! does honour is the identity contract: every [`FrameImages::read`] of one
+//! source returns a clone sharing the same `Blob`, which is what vello keys
+//! its atlas on.
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink};
-
-/// One named image: its id, the generation of the pixels currently published
-/// for it, and those pixels.
-#[derive(Debug, Clone)]
-struct Entry {
-    id: ImageId,
-    generation: u32,
-    image: Option<ImageData>,
-}
+use dom::{Document, FrameImages, ImageEvent, ImageSink};
 
 /// Decoded images keyed by the source string the paint walk asks for.
 #[derive(Default)]
 pub struct TestImages {
-    entries: Mutex<HashMap<String, Entry>>,
-    /// Ids handed out so far, so one source keeps one id for the store's life.
-    next_id: Mutex<u32>,
+    /// One source, one content — the same shape the engine's own registry has.
+    entries: Mutex<HashMap<String, Option<ImageData>>>,
     /// Where completed loads are reported. Absent until the painter installs
     /// one, which lets a test publish images before the view exists.
     sink: Mutex<Option<Arc<dyn ImageSink>>>,
     /// Every `retain` hint received, so a test can assert on the working set.
-    retained: Mutex<Vec<Vec<ImageRef>>>,
+    retained: Mutex<Vec<Vec<Arc<str>>>>,
     /// Reports not yet drained by [`pump_images`], for tests driving the
     /// protocol by hand instead of through a painter.
     pending: Mutex<Vec<ImageEvent>>,
@@ -58,27 +46,16 @@ impl TestImages {
         Self::default()
     }
 
-    /// Publishes `image` under `source`, replacing any previous entry and
-    /// bumping its generation.
+    /// Publishes `image` under `source`, replacing any previous entry.
     ///
     /// Takes `&self` because a store is shared behind a handle and a test
     /// still has to change what it answers afterwards. If a sink is
     /// installed, the load is reported through it immediately.
     pub fn insert(&self, source: impl Into<String>, image: ImageData) {
         let source = source.into();
-        let (id, generation, width, height) = {
-            let mut entries = self.entries();
-            let entry = entries.entry(source).or_insert_with(|| Entry {
-                id: self.mint(),
-                generation: 0,
-                image: None,
-            });
-            entry.generation += 1;
-            let (width, height) = (image.width, image.height);
-            entry.image = Some(image);
-            (entry.id, entry.generation, width, height)
-        };
-        self.report_loaded(id, generation, width, height);
+        let (width, height) = (image.width, image.height);
+        self.entries().insert(source.clone(), Some(image));
+        self.report_loaded(&source, width, height);
     }
 
     /// Publishes tightly packed, row-major, straight-alpha RGBA8 pixels.
@@ -107,7 +84,7 @@ impl TestImages {
     /// id either, and nothing above the store may observe residency.
     pub fn remove(&self, source: &str) {
         if let Some(entry) = self.entries().get_mut(source) {
-            entry.image = None;
+            *entry = None;
         }
     }
 
@@ -115,39 +92,38 @@ impl TestImages {
     /// image already published so a store warmed before the view still
     /// reports its contents.
     pub fn attach(&self, sink: Arc<dyn ImageSink>) {
-        let published: Vec<(ImageId, u32, u32, u32)> = self
+        let published: Vec<(String, u32, u32)> = self
             .entries()
-            .values()
-            .filter_map(|entry| {
-                entry
-                    .image
+            .iter()
+            .filter_map(|(source, image)| {
+                image
                     .as_ref()
-                    .map(|image| (entry.id, entry.generation, image.width, image.height))
+                    .map(|image| (source.clone(), image.width, image.height))
             })
             .collect();
         *self.sink.lock().expect("test image sink") = Some(sink);
-        for (id, generation, width, height) in published {
-            self.report_loaded(id, generation, width, height);
+        for (source, width, height) in published {
+            self.report_loaded(&source, width, height);
         }
     }
 
-    /// The working sets reported through [`ImageStore::retain`], in order.
+    /// The working sets reported through `retain_images`, in order.
     #[must_use]
-    pub fn retained(&self) -> Vec<Vec<ImageRef>> {
+    pub fn retained(&self) -> Vec<Vec<Arc<str>>> {
         self.retained.lock().expect("test image retain log").clone()
     }
 
-    /// The id this store gave `source`, if it has been asked for one.
+    /// Whether this store has been asked for `source` at all.
     #[must_use]
-    pub fn id_of(&self, source: &str) -> Option<ImageId> {
-        self.entries().get(source).map(|entry| entry.id)
+    pub fn was_asked_for(&self, source: &str) -> bool {
+        self.entries().contains_key(source)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries()
             .values()
-            .filter(|entry| entry.image.is_some())
+            .filter(|image| image.is_some())
             .count()
     }
 
@@ -156,28 +132,21 @@ impl TestImages {
         self.len() == 0
     }
 
-    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Option<ImageData>>> {
         self.entries.lock().expect("test image store")
     }
 
-    fn mint(&self) -> ImageId {
-        let mut next = self.next_id.lock().expect("test image ids");
-        *next += 1;
-        ImageId(NonZeroU32::new(*next).expect("ids start at one"))
-    }
-
-    fn report_loaded(&self, id: ImageId, generation: u32, width: u32, height: u32) {
+    fn report_loaded(&self, source: &str, width: u32, height: u32) {
         self.pending
             .lock()
             .expect("test image reports")
             .push(ImageEvent::Loaded {
-                id,
-                generation,
+                source: Arc::from(source),
                 width,
                 height,
             });
         if let Some(sink) = self.sink.lock().expect("test image sink").as_ref() {
-            sink.loaded(id, generation, width, height);
+            sink.loaded(source, width, height);
         }
     }
 
@@ -189,13 +158,10 @@ impl TestImages {
 
 impl FrameImages for TestImages {
     /// Returns a clone that shares the published `Blob`, so every read of one
-    /// `ImageRef` carries the same `Blob::id()` — the identity vello keys its
+    /// source carries the same `Blob::id()` — the identity vello keys its
     /// atlas on.
-    fn read(&self, image: ImageRef) -> Option<ImageData> {
-        self.entries()
-            .values()
-            .find(|entry| entry.id == image.id && entry.generation == image.generation)
-            .and_then(|entry| entry.image.clone())
+    fn read(&self, source: &str) -> Option<ImageData> {
+        self.entries().get(source)?.clone()
     }
 }
 
@@ -205,30 +171,21 @@ impl TestImages {
     /// Inherent rather than a trait impl: the embedder-facing resource trait
     /// lives in `bobcat-core`, which this crate deliberately does not depend
     /// on. A `bobcat-core` test wraps this in its own adapter.
-    pub fn request(&self, source: &str) -> ImageId {
-        let (id, load) = {
-            let mut entries = self.entries();
-            let entry = entries.entry(source.to_owned()).or_insert_with(|| Entry {
-                id: self.mint(),
-                generation: 0,
-                image: None,
-            });
-            let load = entry
-                .image
-                .as_ref()
-                .map(|image| (entry.generation, image.width, image.height));
-            (entry.id, load)
-        };
+    pub fn request(&self, source: &str) {
         // Single-flight is trivial here: one entry per source, and a source
         // already holding pixels starts no work.
-        if let Some((generation, width, height)) = load {
-            self.report_loaded(id, generation, width, height);
+        let load = {
+            let mut entries = self.entries();
+            let entry = entries.entry(source.to_owned()).or_default();
+            entry.as_ref().map(|image| (image.width, image.height))
+        };
+        if let Some((width, height)) = load {
+            self.report_loaded(source, width, height);
         }
-        id
     }
 
     /// Records the working set a resolve pass reported.
-    pub fn retain(&self, frame: &[ImageRef]) {
+    pub fn retain(&self, frame: &[Arc<str>]) {
         self.retained
             .lock()
             .expect("test image retain log")
@@ -259,15 +216,10 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
 ///
 /// Returns whether anything moved, so a caller can loop to quiescence.
 pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {
-    let mut events: Vec<ImageEvent> = document
-        .take_wanted_images()
-        .into_iter()
-        .map(|source| {
-            let id = store.request(&source);
-            ImageEvent::Bound { source, id }
-        })
-        .collect();
-    events.extend(store.drain_events());
+    for source in document.take_wanted_images() {
+        store.request(&source);
+    }
+    let events = store.drain_events();
     if events.is_empty() {
         return false;
     }

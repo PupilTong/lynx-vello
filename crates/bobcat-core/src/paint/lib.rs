@@ -21,10 +21,13 @@ mod event_loop_tests;
 mod tests;
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -51,12 +54,28 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 use crate::view::Screenshot;
 use crate::view::{
     ComposeKey, DrawTarget, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize,
-    LynxViewError, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
+    LoadedSource, LynxViewError, SourceSlot, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How the wait on one host fetch ended.
+enum FetchOutcome {
+    Loaded(LoadedSource),
+    /// The fetch itself failed; the painter already holds the startup failure.
+    Failed(LynxViewError),
+    /// Startup was decided first, and the fetch is abandoned unfinished.
+    Ended(Result<(), LynxViewError>),
+}
+
+/// Which of the two things a fetch waits on happened first.
+enum FetchStep {
+    Loaded(Result<LoadedSource, LynxViewError>),
+    /// `bobcat-main` spoke; the flag is whether its wake is still open.
+    Woken(bool),
+}
 
 /// The main thread stopped before it could say how startup went.
 fn main_thread_gone() -> LynxViewError {
@@ -148,11 +167,10 @@ pub(crate) struct PainterLink {
     begin_frames_sent: u64,
     begin_frames_serviced: u64,
     redraw_pending: Cell<bool>,
-    /// Sources the document met and wants named, and ids it no longer names.
-    /// Buffered here because applying them needs the store, which the painter
+    /// Sources the document met and wants named. Buffered here because
+    /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
-    image_releases: Vec<dom::ImageId>,
     /// Awaitable only during construction, when the painter has no host turn
     /// to be woken into. Dropped once startup settles.
     startup_wake: Option<StartupWakeReceiver>,
@@ -179,7 +197,6 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
-            image_releases: Vec::new(),
             startup_wake: Some(startup_wake),
             pending_announce: false,
         }
@@ -199,6 +216,19 @@ impl PainterLink {
     fn settle(&mut self) {
         let announced = std::mem::take(&mut self.pending_announce);
         self.adopt_frame(announced);
+    }
+
+    /// Registers `context` on the construction-time wake without consuming a
+    /// tick. `Ready(None)` once that channel is closed, which is
+    /// `bobcat-main` gone.
+    ///
+    /// Exists so the one await that is not on this link — a host fetch — can
+    /// be polled *beside* the inbox instead of in place of it.
+    fn poll_startup_wake(&mut self, context: &mut std::task::Context<'_>) -> Poll<Option<()>> {
+        match self.startup_wake.as_mut() {
+            Some(wake) => wake.poll_recv(context),
+            None => Poll::Ready(None),
+        }
     }
 
     /// Waits for `bobcat-main` to have said something. `None` once that
@@ -248,7 +278,6 @@ impl PainterLink {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::ReleaseImages(ids) => self.image_releases.extend(ids),
             ToPainter::FetchSource { .. } | ToPainter::Started(_) => {
                 unreachable!("startup messages are served before the view exists")
             }
@@ -258,10 +287,6 @@ impl PainterLink {
 
     fn take_image_requests(&mut self) -> Vec<Arc<str>> {
         std::mem::take(&mut self.image_requests)
-    }
-
-    fn take_image_releases(&mut self) -> Vec<dom::ImageId> {
-        std::mem::take(&mut self.image_releases)
     }
 
     fn adopt_frame(&mut self, announced: bool) {
@@ -750,25 +775,101 @@ impl Painter {
     /// this loop sends is what unparks it.
     pub(super) async fn serve_startup(&mut self) -> Result<(), LynxViewError> {
         let mut requests = sources::mint_namespace();
+        // Installed before this loop and never replaced, so one owned handle
+        // serves every fetch. Owned because a `ResourceFuture` borrows the
+        // fetcher across the await and the link is used after it.
+        let fetcher = self.images.fetcher();
+        let mut queued: VecDeque<(SourceSlot, String)> = VecDeque::new();
         let mut closed = false;
         loop {
-            if let Some(result) = self.drain_startup(&mut requests).await {
+            if let Some(result) = self.drain_startup(&mut queued) {
                 return result;
             }
-            if closed {
-                // The wake channel closed and a full drain after that found
-                // nothing terminal, so nothing more can ever arrive.
-                return Err(main_thread_gone());
+            let Some((slot, specifier)) = queued.pop_front() else {
+                if closed {
+                    // The wake closed and a full drain after that found
+                    // nothing terminal, so nothing more can ever arrive.
+                    return Err(main_thread_gone());
+                }
+                closed = self.link.await_startup_wake().await.is_none();
+                continue;
+            };
+            let Some(handle) = fetcher.clone() else {
+                return Err(EngineError::NoResourceFetcher.into());
+            };
+            match self
+                .await_fetch(handle.as_ref(), &mut requests, slot, &specifier)
+                .await
+            {
+                FetchOutcome::Loaded(source) => self.link.send(ToMain::SourceLoaded {
+                    slot,
+                    source: Some(source),
+                }),
+                // The painter already holds the failure; telling the main
+                // thread and waiting for it to tell us back would be a round
+                // trip to learn what we just decided.
+                FetchOutcome::Failed(error) => return Err(error),
+                FetchOutcome::Ended(result) => return result,
             }
-            closed = self.link.await_startup_wake().await.is_none();
         }
     }
 
-    /// Applies everything queued, answering source requests as they come.
-    /// `Some` once startup has an outcome.
-    async fn drain_startup(
+    /// Waits for one host fetch **while still watching the inbox**.
+    ///
+    /// This is the whole of the fix for a startup that could hang: a fetch is
+    /// the one await in construction that is not on the link, and a host is
+    /// under no obligation to ever answer it. Polling it *beside* the wake —
+    /// rather than in place of the drain — is what keeps an outcome that has
+    /// already been decided observable.
+    async fn await_fetch(
         &mut self,
+        fetcher: &dyn crate::resource::ResourceFetcher,
         requests: &mut crate::resource::RequestId,
+        slot: SourceSlot,
+        specifier: &str,
+    ) -> FetchOutcome {
+        let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
+        loop {
+            let step = std::future::poll_fn(|context| {
+                if let Poll::Ready(loaded) = load.as_mut().poll(context) {
+                    return Poll::Ready(FetchStep::Loaded(loaded));
+                }
+                // Registers the waker on the link too, so anything the main
+                // thread says resumes this even though the fetch has not.
+                match self.link.poll_startup_wake(context) {
+                    Poll::Ready(open) => Poll::Ready(FetchStep::Woken(open.is_some())),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await;
+            match step {
+                FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
+                FetchStep::Loaded(Err(error)) => return FetchOutcome::Failed(error),
+                FetchStep::Woken(open) => {
+                    let mut queued = VecDeque::new();
+                    if let Some(result) = self.drain_startup(&mut queued) {
+                        return FetchOutcome::Ended(result);
+                    }
+                    debug_assert!(
+                        queued.is_empty(),
+                        "every source request is sent before the main thread's first park",
+                    );
+                    if !open {
+                        return FetchOutcome::Ended(Err(main_thread_gone()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies everything queued, buffering source requests rather than
+    /// serving them. `Some` once startup has an outcome.
+    ///
+    /// Synchronous on purpose. This is the only thing that observes an
+    /// outcome, so it must never be the thing that is suspended.
+    fn drain_startup(
+        &mut self,
+        queued: &mut VecDeque<(SourceSlot, String)>,
     ) -> Option<Result<(), LynxViewError>> {
         loop {
             match self.link.try_next() {
@@ -778,19 +879,7 @@ impl Painter {
                     return Some(result);
                 }
                 Ok(ToPainter::FetchSource { slot, specifier }) => {
-                    // An owned handle: a `ResourceFuture` borrows the fetcher
-                    // across the await, and the link is used after it.
-                    let fetcher = self.images.fetcher();
-                    let loaded = match fetcher {
-                        Some(fetcher) => {
-                            sources::load(fetcher.as_ref(), requests, slot, &specifier).await
-                        }
-                        None => Err(LynxViewError::from(EngineError::NoResourceFetcher)),
-                    };
-                    self.link.send(ToMain::SourceLoaded {
-                        slot,
-                        result: loaded,
-                    });
+                    queued.push_back((slot, specifier));
                 }
                 // A script error during startup *is* the startup failure. On
                 // wasm32 under `panic = "abort"` it is the only thing a
@@ -837,10 +926,7 @@ impl Painter {
 
     /// Warms sources the walk has not met yet.
     pub(super) fn prefetch_images(&mut self, sources: Vec<Arc<str>>) {
-        let events = self.images.request(sources);
-        if !events.is_empty() {
-            self.link.send(ToMain::ImageEvents(events));
-        }
+        self.images.request(sources);
     }
 
     /// One painter turn's intake: everything the document said, then the
@@ -858,13 +944,8 @@ impl Painter {
     /// about, releases the ids it dropped, and forwards both those bindings
     /// and any completed loads back to it.
     fn service_images(&mut self) {
-        let requests = self.link.take_image_requests();
-        let releases = self.link.take_image_releases();
-        if !releases.is_empty() {
-            self.images.release(&releases);
-        }
-        let mut events = self.images.request(requests);
-        events.extend(self.images.take_reports());
+        self.images.request(self.link.take_image_requests());
+        let events = self.images.take_reports();
         if !events.is_empty() {
             self.link.send(ToMain::ImageEvents(events));
         }

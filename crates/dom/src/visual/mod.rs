@@ -101,7 +101,7 @@ use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
 pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
-use crate::render::image::{ImageEvent, ImageId};
+use crate::render::image::ImageEvent;
 use crate::tree::document::Document;
 use crate::{FrameImages, NodeId};
 
@@ -577,12 +577,6 @@ impl<T> Document<T> {
         self.images.take_wanted()
     }
 
-    /// The image ids nothing names any more, drained for the painter to
-    /// release.
-    pub fn take_released_images(&mut self) -> Vec<ImageId> {
-        self.images.take_released()
-    }
-
     /// Applies the painter's image reports: binds ids to sources, records
     /// completed loads with their intrinsic dimensions, and marks failures.
     ///
@@ -591,12 +585,17 @@ impl<T> Document<T> {
     pub fn apply_image_events(&mut self, events: &[ImageEvent]) {
         let mut changed = false;
         for event in events {
-            let nodes = self.images.apply(event);
+            // `None` is a source reported twice, which one URL with one
+            // content makes a no-op: nothing moved, so nothing is dirtied.
+            let Some(nodes) = self.images.apply(event) else {
+                continue;
+            };
             changed = true;
             if let ImageEvent::Loaded { width, height, .. } = event {
                 #[expect(
                     clippy::cast_precision_loss,
-                    reason = "both axes are bounded to 8192 before this point"
+                    reason = "an intrinsic size large enough to round here is far past \
+                              anything layout can present, and rounds harmlessly"
                 )]
                 let natural = crate::layout::NaturalSize::from_size(hughie::geometry::Size::new(
                     *width as f32,

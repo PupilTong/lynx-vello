@@ -350,13 +350,13 @@ impl CommittedFrame {
     /// This is the frame's whole image working set: what a composer must
     /// resolve before drawing, and the residency hint the store is given.
     /// Linear in the program, which is why the caller keeps the buffer.
-    pub fn collect_images(&self, out: &mut Vec<crate::ImageRef>) {
+    pub fn collect_images(&self, out: &mut Vec<std::sync::Arc<str>>) {
         out.clear();
         for op in &self.presentation.program {
             if let ComposeOp::Image { index, .. } = op {
-                let image = self.presentation.image_draws[*index as usize].image;
-                if !out.contains(&image) {
-                    out.push(image);
+                let image = &self.presentation.image_draws[*index as usize].image;
+                if !out.contains(image) {
+                    out.push(std::sync::Arc::clone(image));
                 }
             }
         }

@@ -1048,7 +1048,7 @@ pub(crate) mod tests {
         );
 
         document.apply_image_events(&[crate::ImageEvent::Failed {
-            id: crate::ImageId(std::num::NonZeroU32::new(1).expect("a non-zero id")),
+            source: std::sync::Arc::from("app:///a.png"),
         }]);
         assert!(document.needs_render());
         assert!(document.render());

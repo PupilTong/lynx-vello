@@ -272,7 +272,7 @@ impl ResourceFetcher for BrowserResources {
 /// stylesheet describes, and nothing here fetches a bitmap. Every image draw
 /// therefore resolves to nothing, which is what an unloaded image looks like.
 impl bobcat_core::FrameImages for BrowserResources {
-    fn read(&self, _image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
+    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
         None
     }
 }
@@ -285,8 +285,8 @@ impl bobcat_core::FrameImages for BrowserResources {
 struct ViewResources(Arc<BrowserResources>);
 
 impl bobcat_core::FrameImages for ViewResources {
-    fn read(&self, image: bobcat_core::ImageRef) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.0.read(image)
+    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.0.read(source)
     }
 }
 
