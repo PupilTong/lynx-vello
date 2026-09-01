@@ -36,7 +36,10 @@ pub use stylo_dom::ElementState;
 pub use vello;
 
 pub use crate::paint::plan::CompositePlan;
-pub use crate::render::image::{ImageFuture, ImageStore, ImageStoreError};
+pub use crate::render::image::{
+    FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, ImageStore, MAX_RENDERABLE_DIMENSION,
+    NoImages,
+};
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;
 #[doc(hidden)]

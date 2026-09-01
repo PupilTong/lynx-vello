@@ -348,7 +348,7 @@ mod probe {
             doc.el(card, "view.chip");
         }
         doc.dom.render();
-        doc.dom.scene().clone()
+        doc.dom.scene(&crate::NoImages).clone()
     }
 
     #[test]
@@ -362,11 +362,11 @@ mod probe {
         let root = doc.root;
         doc.el(root, "view.card");
         doc.dom.render();
-        let first = doc.dom.scene().clone();
+        let first = doc.dom.scene(&crate::NoImages).clone();
         let card = doc.el(root, "view.card");
         doc.el(card, "view.chip");
         doc.dom.render();
-        let second = doc.dom.scene().clone();
+        let second = doc.dom.scene(&crate::NoImages).clone();
         assert!(compare_scenes(&first, &second).is_err());
     }
 }

@@ -5,8 +5,7 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, PageConfig,
-    ViewSources,
+    DrawTarget, EngineError, FontBlob, LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -34,26 +33,37 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     let images = Arc::new(flashbulb::TestImages::new());
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
+    let store = Arc::clone(&images);
     let mut view = view(ViewSources {
-        image_store: Some(Arc::clone(&images) as Arc<dyn ImageStore>),
+        image_store: Some(Box::new(move |sink| {
+            store.attach(sink);
+            flashbulb::shared(&store)
+        })),
         ..sources()
     })
     .await
     .expect("opaque view");
-    // Settled first: only the repaint half of `load_image` needs the document,
-    // and an open batch would refuse it.
     wait_for_script(&mut view).expect("the empty entry module boots");
 
     assert_eq!(view.frame_size().width, 786);
     assert_eq!(view.frame_size().height, 1454);
 
-    view.prefetch_image("app:///pixel.png");
-    view.load_image("app:///pixel.png")
-        .await
-        .expect("published source");
-    view.load_image("app:///missing.png")
-        .await
-        .expect_err("a source the store does not carry cannot load");
+    // Warming is the only image call an embedder makes now: there is no
+    // "load and tell me when", because the paint walk discovers sources by
+    // itself. A source the store carries and one it does not are both
+    // accepted — a missing image is a load failure the document records, not
+    // an error the host has to handle.
+    //
+    // It applies immediately: the painter is this thread.
+    view.prefetch_images(["app:///pixel.png", "app:///missing.png"]);
+    assert!(
+        images.id_of("app:///missing.png").is_some(),
+        "a source with no pixels is still named, so it is asked for once"
+    );
+    assert!(
+        images.id_of("app:///pixel.png").is_some(),
+        "and so is one the store carries"
+    );
 }
 
 /// A default family nothing provides fails the construction rather than being

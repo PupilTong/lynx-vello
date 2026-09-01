@@ -42,17 +42,16 @@ use stylo::values::generics::length::LengthPercentageOrAuto;
 use stylo::values::specified::background::BackgroundRepeatKeyword;
 use stylo::values::specified::position::{HorizontalPositionKeyword, VerticalPositionKeyword};
 
-use crate::ImageStore;
 use crate::layout::NaturalSize;
+use crate::paint::compose::{ComposeChain, ImageArea, ImageDraw};
 use crate::paint::convert::resolve_color;
 use crate::paint::shape::{BoxShape, inner_radii, with_shape};
+use crate::paint::walker::WalkSink;
 use crate::paint::{BoxFragment, TextClip};
-use crate::render::image::is_renderable;
+use crate::render::image::{ImageRef, ImageRegistry};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size, Vec2};
-use crate::vello::peniko::{
-    self, BrushRef, Color, Extend, Fill, ImageBrush, ImageData, ImageQuality, ImageSampler,
-};
+use crate::vello::peniko::{self, BrushRef, Color, Extend, Fill, ImageQuality, ImageSampler};
 
 const EPS: f64 = 1e-6;
 
@@ -69,12 +68,14 @@ pub(crate) fn needs_text_clip(style: &ComputedValues) -> bool {
 }
 
 pub(crate) fn paint(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
     text_clip: Option<&TextClip<'_>>,
 ) {
+    let scene = sink.scene_for(chain);
     let background = style.get_background();
     let layers = background.background_image.0.as_slice();
 
@@ -136,16 +137,59 @@ pub(crate) fn paint(
         match clip {
             UsedClip::Shape(shape) => {
                 let layer = make_layer(shape);
-                paint_pattern_layer(scene, style, fragment, images, &layer);
+                paint_pattern_layer(sink, chain, style, fragment, images, &layer, None);
             }
             UsedClip::Text => {
                 let layer = make_layer(level_shape(fragment, BoxLevel::Border));
-                text_clip_sandwich(scene, fragment, text_clip, |scene| {
-                    paint_pattern_layer(scene, style, fragment, images, &layer);
-                });
+                paint_pattern_layer(sink, chain, style, fragment, images, &layer, text_clip);
             }
         }
     }
+}
+
+/// Opens the `background-clip: text` sandwich as program ops rather than
+/// inside one fragment, so an image fill can sit between the two pushes.
+///
+/// The op sequence is exactly what the inline sandwich encodes — a `SrcOver`
+/// group over the border shape, the glyph silhouettes, then a `SrcIn` group
+/// over the border box — but expressed so a fragment cut may legally land in
+/// the middle of it. Returns whether it opened; a caller that gets `true`
+/// owes two pops.
+fn open_text_clip_ops(
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
+    fragment: &BoxFragment,
+    text_clip: Option<&TextClip<'_>>,
+) -> bool {
+    let Some(text_clip) = text_clip.filter(|clip| !clip.is_empty()) else {
+        return false;
+    };
+    sink.push_layer_box(
+        chain,
+        Fill::NonZero,
+        peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
+        1.0,
+        fragment.transform,
+        level_shape(fragment, BoxLevel::Border),
+    );
+    let scene = sink.scene_for(chain);
+    for (offset, layout) in &text_clip.runs {
+        crate::paint::text::paint_silhouette(
+            scene,
+            layout,
+            fragment.transform * Affine::translate(*offset),
+        );
+    }
+    sink.push_layer_rect(
+        chain,
+        None,
+        Fill::NonZero,
+        peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcIn),
+        1.0,
+        fragment.transform,
+        fragment.border_box,
+    );
+    true
 }
 
 fn text_clip_sandwich(
@@ -185,14 +229,15 @@ fn text_clip_sandwich(
 }
 
 pub(crate) fn paint_replaced_content(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
     source: &str,
     natural: NaturalSize,
 ) {
-    let Some(image) = images.peek(source).filter(is_renderable) else {
+    let Some((image, _)) = images.resolve(source) else {
         return;
     };
     let content = fragment.content_box;
@@ -226,22 +271,23 @@ pub(crate) fn paint_replaced_content(
     );
 
     let shape = level_shape(fragment, BoxLevel::Content);
-    let brush_transform = Affine::translate((destination.x0, destination.y0))
-        * Affine::scale_non_uniform(
-            destination.width() / f64::from(image.width),
-            destination.height() / f64::from(image.height),
-        );
-    let brush = BrushRef::Image(ImageBrush {
-        image: &image,
-        sampler: ImageSampler::default().with_quality(image_quality(style)),
-    });
-    fill_area(
-        scene,
-        fragment.transform,
-        &shape,
-        destination,
-        brush,
-        Some(brush_transform),
+    let Some(area) = image_area(&shape, destination) else {
+        return;
+    };
+    // The destination comes from the node's natural size and the brush scale
+    // from the decoded bitmap. The two may disagree — a store decoding at
+    // reduced scale, or a generation whose dimensions changed — and the image
+    // stretches, which is the same asymmetry the inline path had.
+    sink.image(
+        chain,
+        ImageDraw {
+            image,
+            transform: fragment.transform,
+            anchor: destination.origin(),
+            extent: destination.size(),
+            sampler: ImageSampler::default().with_quality(image_quality(style)),
+            area,
+        },
     );
 }
 
@@ -343,11 +389,13 @@ pub(super) fn level_shape(fragment: &BoxFragment, level: BoxLevel) -> BoxShape {
 }
 
 pub(super) fn paint_pattern_layer(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
     layer: &PatternLayer<'_>,
+    text_clip: Option<&TextClip<'_>>,
 ) {
     let clip_bounds = layer.clip.bounding_box();
     if clip_bounds.width() <= 0.0 || clip_bounds.height() <= 0.0 {
@@ -357,7 +405,7 @@ pub(super) fn paint_pattern_layer(
         return;
     };
     let intrinsic = match &source {
-        Source::Raster(data) => Some((f64::from(data.width), f64::from(data.height))),
+        Source::Raster(_, intrinsic) => Some(*intrinsic),
         Source::Gradient(_) | Source::Solid(_) => None,
     };
     let area = layer.origin;
@@ -381,32 +429,42 @@ pub(super) fn paint_pattern_layer(
         repeat_y: !matches!(layer.repeat.1, BackgroundRepeatKeyword::NoRepeat),
     };
 
-    match &source {
-        Source::Raster(data) => {
-            let sampler = ImageSampler {
-                x_extend: extend_for(grid.repeat_x),
-                y_extend: extend_for(grid.repeat_y),
-                quality: image_quality(style),
-                alpha: 1.0,
-            };
-            let brush_transform = Affine::translate(grid.origin.to_vec2())
-                * Affine::scale_non_uniform(
-                    tile_w / f64::from(data.width),
-                    tile_h / f64::from(data.height),
-                );
-            let brush = BrushRef::Image(ImageBrush {
-                image: data,
-                sampler,
-            });
-            fill_area(
-                scene,
-                fragment.transform,
-                &layer.clip,
-                grid.draw_rect(clip_bounds),
-                brush,
-                Some(brush_transform),
-            );
+    // A raster layer becomes a program op, because its pixels are not
+    // reachable from here. Everything else still encodes inline.
+    if let Source::Raster(image, _) = &source {
+        let Some(area) = image_area(&layer.clip, grid.draw_rect(clip_bounds)) else {
+            return;
+        };
+        let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
+        if text_clip.is_some() && !opened {
+            return;
         }
+        sink.image(
+            chain,
+            ImageDraw {
+                image: *image,
+                transform: fragment.transform,
+                anchor: grid.origin,
+                extent: grid.tile,
+                sampler: ImageSampler {
+                    x_extend: extend_for(grid.repeat_x),
+                    y_extend: extend_for(grid.repeat_y),
+                    quality: image_quality(style),
+                    alpha: 1.0,
+                },
+                area,
+            },
+        );
+        if opened {
+            sink.pop();
+            sink.pop();
+        }
+        return;
+    }
+
+    let scene = sink.scene_for(chain);
+    let inline = |scene: &mut Scene| match &source {
+        Source::Raster(..) => unreachable!("the raster case returned above"),
         Source::Solid(color) => fill_area(
             scene,
             fragment.transform,
@@ -436,6 +494,13 @@ pub(super) fn paint_pattern_layer(
                 );
             }
         },
+    };
+    // Gradients and solids keep the inline sandwich: they carry no late
+    // input, so nothing needs to cut the fragment around them.
+    if text_clip.is_some() {
+        text_clip_sandwich(scene, fragment, text_clip, inline);
+    } else {
+        inline(scene);
     }
 }
 
@@ -478,24 +543,24 @@ fn image_url(url: &ComputedUrl) -> &str {
 }
 
 enum Source<'a> {
-    /// Owned, because the store hands out a reference-counted handle to its
-    /// own buffer rather than lending one: no pixels are copied, and the draw
-    /// stays valid if the store drops its entry mid-frame.
-    Raster(ImageData),
+    /// The image's name and its own intrinsic dimensions — never its pixels.
+    /// The dimensions come from the registry, which learned them from the
+    /// store's load report, so the whole tile grid resolves here without any
+    /// bitmap being reachable.
+    Raster(ImageRef, (f64, f64)),
     Gradient(&'a Gradient),
     Solid(Color),
 }
 
 fn resolve_source<'a>(
     style: &ComputedValues,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
     image: &'a Image,
 ) -> Option<Source<'a>> {
     match image {
         Image::Url(url) => images
-            .peek(image_url(url))
-            .filter(is_renderable)
-            .map(Source::Raster),
+            .resolve(image_url(url))
+            .map(|(reference, intrinsic)| Source::Raster(reference, intrinsic)),
         Image::Gradient(gradient) => Some(Source::Gradient(gradient)),
         Image::Image(color) => {
             let color = resolve_color(style, color);
@@ -591,6 +656,24 @@ pub(super) fn fill_plan(clip: &BoxShape, draw: Rect) -> FillPlan {
         }
     } else {
         FillPlan::Clipped(draw)
+    }
+}
+
+/// The [`ImageArea`] a raster fill of `draw` inside `clip` resolves to, or
+/// `None` when the plan paints nothing at all.
+fn image_area(clip: &BoxShape, draw: Rect) -> Option<ImageArea> {
+    match fill_plan(clip, draw) {
+        FillPlan::None => None,
+        FillPlan::Shape => Some(ImageArea::Fill(crate::paint::compose::CapturedShape::Box(
+            clip.clone(),
+        ))),
+        FillPlan::Rect(both) => Some(ImageArea::Fill(crate::paint::compose::CapturedShape::Rect(
+            both,
+        ))),
+        FillPlan::Clipped(draw) => Some(ImageArea::Clipped {
+            clip: clip.clone(),
+            draw,
+        }),
     }
 }
 

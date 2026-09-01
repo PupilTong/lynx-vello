@@ -39,7 +39,7 @@ pub struct Headless {
 #[derive(Default)]
 pub struct PlaneBank {
     /// The commit the retained textures were baked from.
-    commit: Option<u64>,
+    commit: Option<(u64, u64)>,
     planes: Vec<Plane>,
     images: Vec<vello::peniko::ImageData>,
     bake_scene: vello::Scene,
@@ -75,11 +75,16 @@ impl PlaneBank {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &crate::visual::CommittedFrame,
+        pixels: &dyn crate::FrameImages,
+        image_epoch: u64,
     ) -> Result<(), GpuError> {
         let plan = frame
             .composite_plan()
             .expect("prepare bakes a layered frame's plan");
-        if self.commit == Some(frame.commit_id()) {
+        // Keyed on the image epoch as well as the commit: a plane baked
+        // before its images loaded must re-bake when they arrive, or the
+        // image is permanently absent from that scroller.
+        if self.commit == Some((frame.commit_id(), image_epoch)) {
             for image in &self.images {
                 renderer.mark_override_image_dirty(image);
             }
@@ -120,7 +125,7 @@ impl PlaneBank {
                 }
             }
             self.bake_scene.reset();
-            frame.bake_plane(index, &mut self.bake_scene);
+            frame.bake_plane(index, &mut self.bake_scene, pixels);
             renderer
                 .render_to_texture(
                     device,
@@ -132,7 +137,7 @@ impl PlaneBank {
                 .map_err(|error| GpuError::Render(error.to_string()))?;
             renderer.mark_override_image_dirty(&self.images[index]);
         }
-        self.commit = Some(frame.commit_id());
+        self.commit = Some((frame.commit_id(), image_epoch));
         Ok(())
     }
 
@@ -240,6 +245,8 @@ impl Headless {
     pub fn prepare_planes(
         &mut self,
         frame: &crate::visual::CommittedFrame,
+        pixels: &dyn crate::FrameImages,
+        image_epoch: u64,
     ) -> Result<(), GpuError> {
         let Self {
             context,
@@ -249,7 +256,14 @@ impl Headless {
             ..
         } = self;
         let handle = &context.devices[*device_index];
-        planes.prepare(renderer, &handle.device, &handle.queue, frame)
+        planes.prepare(
+            renderer,
+            &handle.device,
+            &handle.queue,
+            frame,
+            pixels,
+            image_epoch,
+        )
     }
 
     /// The retained planes' registered images; see [`PlaneBank::images`].

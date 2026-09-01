@@ -52,10 +52,8 @@ struct Harness {
 
 impl Harness {
     fn new(css: &str) -> Self {
-        let mut doc = Doc::with_css(&format!("{PAGE} {css}"));
+        let doc = Doc::with_css(&format!("{PAGE} {css}"));
         let images = Arc::new(TestImages::new());
-        doc.dom
-            .set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
         Self { doc, images }
     }
 
@@ -79,8 +77,8 @@ impl Harness {
     }
 
     fn stats(&mut self) -> (usize, u32) {
-        self.doc.dom.render();
-        let scene = self.doc.dom.scene();
+        flashbulb::render_with_images(&mut self.doc.dom, &self.images);
+        let scene = self.doc.dom.scene(self.images.as_ref());
         let encoding = scene.encoding();
         (encoding.draw_tags.len(), encoding.n_open_clips)
     }

@@ -160,6 +160,9 @@ pub struct CommittedFrame {
 pub(crate) struct Presentation {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
+    /// One entry per [`ComposeOp::Image`], in program order. Carries names
+    /// and geometry; never pixels.
+    pub(crate) image_draws: Vec<crate::paint::compose::ImageDraw>,
     pub(crate) plan: Option<crate::paint::plan::CompositePlan>,
 }
 
@@ -204,7 +207,7 @@ impl CommittedFrame {
     /// # Panics
     ///
     /// If the frame has no plan or `index` is out of range.
-    pub fn bake_plane(&self, index: usize, scene: &mut Scene) {
+    pub fn bake_plane(&self, index: usize, scene: &mut Scene, pixels: &dyn crate::FrameImages) {
         let plan = self
             .composite_plan()
             .expect("bake_plane reads the frame's plan");
@@ -215,6 +218,8 @@ impl CommittedFrame {
             scene,
             &self.presentation.fragments,
             &self.presentation.program[ops],
+            &self.presentation.image_draws,
+            pixels,
             spec.slot,
             translate,
         );
@@ -235,6 +240,7 @@ impl CommittedFrame {
         &self,
         scene: &mut Scene,
         plane_images: &[crate::vello::peniko::ImageData],
+        pixels: &dyn crate::FrameImages,
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -257,6 +263,8 @@ impl CommittedFrame {
                         scene,
                         &self.presentation.fragments,
                         &self.presentation.program[ops],
+                        &self.presentation.image_draws,
+                        pixels,
                         &samples,
                         &device_transform,
                     );
@@ -318,6 +326,7 @@ impl CommittedFrame {
     pub fn compose_into(
         &self,
         scene: &mut Scene,
+        pixels: &dyn crate::FrameImages,
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -326,11 +335,31 @@ impl CommittedFrame {
             scene,
             &self.presentation.fragments,
             &self.presentation.program,
+            &self.presentation.image_draws,
+            pixels,
             self.order.slots(),
             &samples,
             self.device_pixel_ratio,
             offset_of,
         );
+    }
+
+    /// Collects the distinct images this frame draws into `out`, in
+    /// first-draw order, replacing whatever `out` held.
+    ///
+    /// This is the frame's whole image working set: what a composer must
+    /// resolve before drawing, and the residency hint the store is given.
+    /// Linear in the program, which is why the caller keeps the buffer.
+    pub fn collect_images(&self, out: &mut Vec<crate::ImageRef>) {
+        out.clear();
+        for op in &self.presentation.program {
+            if let ComposeOp::Image { index, .. } = op {
+                let image = self.presentation.image_draws[*index as usize].image;
+                if !out.contains(&image) {
+                    out.push(image);
+                }
+            }
+        }
     }
 
     /// This frame's commit id. Monotonic across a document's life, so it

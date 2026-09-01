@@ -151,7 +151,7 @@ fn summarize_groups(program: &[ComposeOp]) -> Vec<Option<GroupInfo>> {
     let mut open: Vec<OpenGroup> = Vec::new();
     for (index, op) in program.iter().enumerate() {
         match op {
-            ComposeOp::Fragment { chain, .. } => {
+            ComposeOp::Fragment { chain, .. } | ComposeOp::Image { chain, .. } => {
                 if let Some(top) = open.last_mut() {
                     top.lattice = top.lattice.merge(rides(*chain));
                 }
@@ -262,10 +262,12 @@ pub(crate) fn plan(
         // The head this op (or whole group) bakes under, and the index just
         // past it.
         let (head, next) = match &program[index] {
-            ComposeOp::Fragment { chain, .. } => match rides(*chain) {
-                Rides::Head(slot) => (Some(slot), index + 1),
-                Rides::Foreign => (None, index + 1),
-            },
+            ComposeOp::Fragment { chain, .. } | ComposeOp::Image { chain, .. } => {
+                match rides(*chain) {
+                    Rides::Head(slot) => (Some(slot), index + 1),
+                    Rides::Foreign => (None, index + 1),
+                }
+            }
             ComposeOp::Push { .. } => {
                 let group = info[index]
                     .as_ref()

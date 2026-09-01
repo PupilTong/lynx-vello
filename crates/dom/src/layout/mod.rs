@@ -92,7 +92,7 @@ impl<T> Document<T> {
     /// hides every child, so a source arriving before any natural size is a
     /// layout change on its own.
     pub fn set_image_source(&mut self, id: crate::NodeId, source: Option<&str>) {
-        let (changed, became_replaced) = {
+        let (changed, became_replaced, previous) = {
             let node = self
                 .arenas_mut()
                 .get_mut(id)
@@ -102,11 +102,37 @@ impl<T> Document<T> {
                 "non-element NodeId passed to Document::set_image_source"
             );
             let was_replaced = node.is_replaced();
-            (node.set_image_source(source), !was_replaced)
+            let previous = node.image_source().map(str::to_owned);
+            (node.set_image_source(source), !was_replaced, previous)
         };
-        if changed && became_replaced {
+        if !changed {
+            return;
+        }
+        // The registry has to know which node presents which source, or a
+        // completed load has nobody to hand its intrinsic size to.
+        if let Some(previous) = previous {
+            self.images.unbind_node(&previous, id);
+        }
+        if let Some(source) = source {
+            self.images.bind_node(source, id);
+            // A source already loaded sizes the element in this same call,
+            // so it lays out correctly in the commit that first draws it
+            // rather than a frame later.
+            if let Some((width, height)) = self.images.dimensions_of(source) {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "both axes are bounded to 8192 when the load is recorded"
+                )]
+                let natural = crate::layout::NaturalSize::from_size(hughie::geometry::Size::new(
+                    width as f32,
+                    height as f32,
+                ));
+                self.set_natural_size(id, natural);
+            }
+        }
+        if became_replaced {
             self.invalidate_layout(id);
-        } else if changed {
+        } else {
             self.note_visual_mutation();
         }
     }

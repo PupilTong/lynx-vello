@@ -91,27 +91,27 @@ fn object_fit_matrix_matches_reference() {
         ("r4 c2 fill rounded bordered", &small),
     ];
 
-    let images = std::sync::Arc::new(flashbulb::TestImages::new());
-    doc.dom
-        .set_image_store(std::sync::Arc::clone(&images) as std::sync::Arc<dyn dom::ImageStore>);
+    let images = flashbulb::TestImages::new();
     let root = doc.root;
+    // No `set_natural_size` anywhere: every box below is sized purely by the
+    // dimensions the store reports when its load completes. That is the whole
+    // point of the golden — it fails if the intrinsic size does not travel
+    // from the store through the registry into layout.
     for (class, (width, height, rgba)) in cells {
         let node = doc.el_tag(root, "img", class);
-        #[allow(clippy::cast_precision_loss)]
-        doc.dom.set_natural_size(
-            node,
-            dom::layout::NaturalSize::from_size(dom::layout::Size::new(
-                *width as f32,
-                *height as f32,
-            )),
-        );
         let source = format!("app:///{}.png", node.to_bits());
         images.insert_rgba8(&source, *width, *height, rgba.clone());
         doc.dom.set_image_source(node, Some(&source));
     }
 
-    let actual =
-        screenshot::capture_prebuilt_document("object_fit_matrix_matches_reference", &mut doc.dom);
+    // The natural size now arrives from the store's own load report, through
+    // the same request/report loop the painter runs.
+    flashbulb::render_with_images(&mut doc.dom, &images);
+    let actual = screenshot::capture_prebuilt_document(
+        "object_fit_matrix_matches_reference",
+        &mut doc.dom,
+        &images,
+    );
     screenshot::assert_golden(&["replaced-object-fit"], &actual);
 }
 

@@ -124,10 +124,19 @@ impl WindowGraphics {
     pub(super) fn prepare_planes(
         &mut self,
         frame: &dom::CommittedFrame,
+        pixels: &dyn dom::FrameImages,
+        image_epoch: u64,
     ) -> Result<(), EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
         self.planes
-            .prepare(&mut self.renderer, &handle.device, &handle.queue, frame)
+            .prepare(
+                &mut self.renderer,
+                &handle.device,
+                &handle.queue,
+                frame,
+                pixels,
+                image_epoch,
+            )
             .map_err(|error| EngineError::Gpu(error.to_string()))
     }
 

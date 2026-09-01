@@ -25,7 +25,7 @@ use std::task::Poll;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
-use dom::{CommittedFrame, ImageStore};
+use dom::{CommittedFrame, FontBlob};
 use http::HeaderMap;
 use tokio::sync::oneshot;
 #[cfg(target_arch = "wasm32")]
@@ -51,27 +51,51 @@ pub(crate) struct EntryModule {
 }
 
 /// Everything `bobcat-main` needs before it can enter its command loop.
+/// What actually crosses to `bobcat-main`.
+///
+/// Deliberately *not* a [`ViewSources`]: that carries the embedder's image
+/// store factory, which belongs to the painter. Destructuring here rather
+/// than taking the factory out at the call site is what makes "the main
+/// thread never sees a store" a property of the type — this struct has no
+/// field that could hold one, so it is `Send` for the same reason.
 pub(crate) struct StartupRequest {
     config: PageConfig,
     viewport: Viewport,
-    sources: ViewSources,
+    resource_fetcher: Arc<dyn ResourceFetcher>,
+    fonts: Vec<FontBlob>,
+    default_font_family: Option<String>,
+    style_sheets: Vec<String>,
+    entry: String,
 }
 
 impl StartupRequest {
+    /// Keeps the main-bound half of `sources` and drops the rest.
     pub(crate) fn new(config: PageConfig, viewport: Viewport, sources: ViewSources) -> Self {
+        let ViewSources {
+            resource_fetcher,
+            fonts,
+            default_font_family,
+            style_sheets,
+            entry,
+            // Stays with the painter, which is the thread building this.
+            image_store: _,
+        } = sources;
         Self {
             config,
             viewport,
-            sources,
+            resource_fetcher,
+            fonts,
+            default_font_family,
+            style_sheets,
+            entry,
         }
     }
 }
 
-/// The only owner copied back out of the initialized document. The document
-/// itself is born, booted, served, and destroyed on `bobcat-main`.
-pub(crate) struct StartupSuccess {
-    pub(crate) image_store: Arc<dyn ImageStore>,
-}
+/// Startup produced a live main thread. Carries nothing: the document is
+/// born, booted, served and destroyed on `bobcat-main`, and the image store
+/// the old shape copied back out now belongs to the painter.
+pub(crate) struct StartupSuccess;
 
 pub(crate) type StartupResult = Result<StartupSuccess, LynxViewError>;
 
@@ -162,6 +186,16 @@ impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn publish_frame(&self, frame: Arc<CommittedFrame>) {
         *frame_slot(&self.frames) = Some(frame);
         self.send(ToPainter::FrameChanged);
+    }
+
+    /// Asks the painter's store to name these sources and start loading them.
+    pub(crate) fn request_images(&self, sources: Vec<Arc<str>>) {
+        self.send(ToPainter::RequestImages(sources));
+    }
+
+    /// Tells the store nothing names these ids any more.
+    pub(crate) fn release_images(&self, ids: Vec<dom::ImageId>) {
+        self.send(ToPainter::ReleaseImages(ids));
     }
 }
 
@@ -400,16 +434,12 @@ async fn initialize<R: EventRequester>(
     let StartupRequest {
         config,
         viewport,
-        sources,
-    } = startup;
-    let ViewSources {
         resource_fetcher,
         fonts,
         default_font_family,
-        image_store,
         style_sheets,
         entry,
-    } = sources;
+    } = startup;
 
     let mut document = new_document(viewport, config);
     for font in fonts {
@@ -419,9 +449,6 @@ async fn initialize<R: EventRequester>(
         && !document.set_default_font_family(&family)
     {
         return Err(EngineError::UnknownFontFamily(family).into());
-    }
-    if let Some(store) = image_store {
-        document.set_image_store(store);
     }
 
     let mut requests = RequestId {
@@ -435,7 +462,6 @@ async fn initialize<R: EventRequester>(
     if control.is_cancelled() {
         return Ok(None);
     }
-    let image_store = Arc::clone(document.image_store());
     let mut runtime =
         MainThreadRuntime::new(document, notify).map_err(MainThreadError::into_script_error)?;
     if control.is_cancelled() {
@@ -452,7 +478,7 @@ async fn initialize<R: EventRequester>(
     }
     Ok(Some(StartupReady {
         runtime,
-        success: StartupSuccess { image_store },
+        success: StartupSuccess,
     }))
 }
 
@@ -581,7 +607,7 @@ fn apply_main_command<R: EventRequester>(
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
-        ToMain::NoteImagesChanged => runtime.note_images_changed(),
+        ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
         ToMain::Shutdown => unreachable!("shutdown ends the command loop before dispatch"),
         #[cfg(test)]
         ToMain::Probe(probe) => runtime.with_document(probe),

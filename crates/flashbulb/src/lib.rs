@@ -19,7 +19,10 @@
 //! use flashbulb::{Screenshots, capture_document, headless};
 //!
 //! let mut gpu = headless("my_test");
-//! let image = capture_document(&mut gpu, document, Color::WHITE).expect("capture");
+//! // The pixel source a frame's image draws resolve against. A page with no
+//! // images passes `dom::NoImages`; one with images passes the store.
+//! let image =
+//!     capture_document(&mut gpu, document, Color::WHITE, &dom::NoImages).expect("capture");
 //! Screenshots::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/screenshots"))
 //!     .assert_matches(&["my-case", "index"], &image);
 //! # }
@@ -86,4 +89,6 @@ pub use crate::render::{
     frame_size, headless,
 };
 #[cfg(feature = "render")]
-pub use crate::store::{TestImages, rgba8};
+pub use crate::store::{
+    SharedTestImages, TestImages, pump_images, render_with_images, rgba8, shared,
+};

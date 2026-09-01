@@ -10,6 +10,7 @@
 //! handle that joins them and the link that crosses between them.
 
 use std::fmt;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dom::input::InputEvent;
@@ -164,8 +165,13 @@ impl fmt::Debug for DrawTarget {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
-/// The commit id and scroll-intent generation composing one drawn frame.
-pub(crate) type ComposeKey = (u64, u64);
+/// What a rendered target is identified by: the commit it came from, the
+/// scroll generation it was composed at, and the image epoch whose pixels it
+/// drew.
+///
+/// Without the epoch, a target rendered before an image loaded would be
+/// re-served unchanged after it arrived.
+pub(crate) type ComposeKey = (u64, u64, u64);
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -200,11 +206,6 @@ pub enum LynxViewError {
     InvalidScriptEncoding { url: String, message: String },
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
-    #[error("the image store could not load `{image_source}`: {message}")]
-    Image {
-        image_source: String,
-        message: String,
-    },
 }
 
 #[derive(Debug)]
@@ -262,8 +263,20 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
+/// Builds the embedder's image store.
+///
+/// A factory rather than a built store because the store is owned by the
+/// painter, and the painter is whichever thread constructs the view. The
+/// store may therefore be neither `Send` nor `Sync` and hold `Rc`, `RefCell`
+/// or browser objects directly — nothing about it ever crosses a thread.
+///
+/// The [`ImageSink`] handed in is how completed loads reach the engine, from
+/// whatever thread the store loads on.
+pub type ImageStoreFactory = Box<dyn FnOnce(Arc<dyn dom::ImageSink>) -> Rc<dyn ImageStore>>;
+
 /// Everything transferred to `bobcat-main` before the entry module starts.
-#[derive(Clone)]
+///
+/// Not `Clone`: the image-store factory is a `FnOnce`.
 pub struct ViewSources {
     /// Owned by `bobcat-main` for the complete source-loading phase. The
     /// fetcher's own implementation decides where actual network or file IO
@@ -271,7 +284,7 @@ pub struct ViewSources {
     pub resource_fetcher: Arc<dyn ResourceFetcher>,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
-    pub image_store: Option<Arc<dyn ImageStore>>,
+    pub image_store: Option<ImageStoreFactory>,
     pub style_sheets: Vec<String>,
     pub entry: String,
 }
@@ -317,7 +330,6 @@ impl fmt::Debug for ViewSources {
 pub struct LynxView {
     painter: Painter,
     main: MainThreadHome,
-    image_store: Arc<dyn ImageStore>,
 }
 
 impl fmt::Debug for LynxView {
@@ -369,11 +381,15 @@ impl LynxView {
         height: f32,
         device_pixel_ratio: f32,
         target: DrawTarget,
-        sources: ViewSources,
+        mut sources: ViewSources,
     ) -> Result<Self, LynxViewError> {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (started_sender, started) = oneshot::channel();
+        // The store belongs to the painter, which is this thread.
+        // `StartupRequest` has no field that could carry it onward.
+        let image_store = sources.image_store.take();
+        let sink_requester = Arc::clone(&event_requester);
         let (painter_link, main_link) = main_link(event_requester);
         let main = spawn_main_thread(
             StartupRequest::new(config, viewport, sources),
@@ -385,7 +401,15 @@ impl LynxView {
             main: Some(main),
             started: Some(started),
         };
-        startup.painter = Some(Painter::new(viewport, frame_size, painter_link, target).await?);
+        let mut painter = Painter::new(viewport, frame_size, painter_link, target).await?;
+        // Built here, on the thread that owns the painter and will own the
+        // store. Nothing about the store ever crosses a thread, which is why
+        // it needs neither `Send` nor `Sync`.
+        if let Some(build) = image_store {
+            let sink = painter.image_sink(sink_requester);
+            painter.install_images(build(sink));
+        }
+        startup.painter = Some(painter);
         let success = startup.wait().await?;
         Ok(startup.finish(success))
     }
@@ -481,23 +505,22 @@ impl LynxView {
         self.painter.capture()
     }
 
-    /// Resolves an image through the embedder's store and tells the document
-    /// its pixels are resident.
-    pub async fn load_image(&self, source: &str) -> Result<(), LynxViewError> {
-        let store = Arc::clone(&self.image_store);
-        store
-            .get(source)
-            .await
-            .map_err(|error| LynxViewError::Image {
-                image_source: source.to_owned(),
-                message: error.to_string(),
-            })?;
-        self.painter.note_images_changed();
-        Ok(())
-    }
-
-    pub fn prefetch_image(&self, source: &str) {
-        self.image_store.prefetch(source);
+    /// Warms `sources` in the store, ahead of any paint walk meeting them.
+    ///
+    /// There is no matching "load and tell me when it is done": discovery is
+    /// automatic. The paint walk reports every source it meets, the painter
+    /// names it against the store, and the document relayouts when the pixels
+    /// and their intrinsic size arrive. This only moves that work earlier.
+    ///
+    /// Applies immediately, like every other call here — the painter is this
+    /// thread.
+    pub fn prefetch_images<I, S>(&mut self, sources: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Arc<str>>,
+    {
+        self.painter
+            .prefetch_images(sources.into_iter().map(Into::into).collect());
     }
 }
 
@@ -521,12 +544,11 @@ impl ViewStartup {
             })?
     }
 
-    fn finish(mut self, success: StartupSuccess) -> LynxView {
+    fn finish(mut self, StartupSuccess: StartupSuccess) -> LynxView {
         self.started.take();
         LynxView {
             painter: self.painter.take().expect("startup owns the painter"),
             main: self.main.take().expect("startup owns the Lynx main thread"),
-            image_store: success.image_store,
         }
     }
 }
@@ -575,7 +597,10 @@ pub(crate) enum ToMain {
     Refill {
         offsets: Vec<(NodeId, Vector2D<f32>)>,
     },
-    NoteImagesChanged,
+    /// The store's reports: id bindings and completed or failed loads. No
+    /// variant can carry pixels, which is what makes "`ImageData` never
+    /// crosses a channel" a property of the type.
+    ImageEvents(Vec<dom::ImageEvent>),
     Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
@@ -590,6 +615,10 @@ pub(crate) enum ToPainter {
     ListenerAvailable(Arc<str>),
     ListenerUnavailable(Arc<str>),
     BeginFrameServiced(u64),
+    /// Sources the last paint walk met that the store has not been asked for.
+    RequestImages(Vec<Arc<str>>),
+    /// Ids nothing names any more.
+    ReleaseImages(Vec<dom::ImageId>),
 }
 
 /// The latest committed frame, and only ever the latest.

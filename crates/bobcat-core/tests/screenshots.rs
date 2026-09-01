@@ -9,8 +9,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, FontBlob, ImageStore, LynxView, NoWakeup, PageConfig, PreparsedDeclaration,
-    PreparsedRule, PreparsedStyleSheet, ViewSources,
+    DrawTarget, FontBlob, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -149,6 +149,28 @@ async fn booted_with_sheet_at(
     view
 }
 
+/// Drives the view until the painter has resolved a frame that draws an
+/// image.
+///
+/// The store's retain log is the precise signal: it is written by the
+/// painter's resolve pass, so a non-empty working set means a committed frame
+/// actually named an image and the painter read its pixels. Each round is a
+/// forced tick, which is the one call that waits for the commit behind it.
+fn settle_images(view: &mut LynxView, images: &flashbulb::TestImages) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = view.tick(true);
+        if images.retained().iter().any(|set| !set.is_empty()) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no committed frame ever drew an image"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
@@ -185,22 +207,29 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
     );
 }
 
-/// Requirement: an embedder-owned store reaches the private painter through
-/// the whole public path — install the store, load the source through it, and
-/// the `background-image: url(...)` layer the script wrote draws those pixels.
+/// Requirement: an embedder-owned store reaches the painter through the whole
+/// public path, and does so **without the host asking**.
+///
+/// Nothing here loads the image. The paint walk meets the script's
+/// `background-image: url(...)`, reports the source, the painter names it
+/// against the store and reports the completed load back, the document
+/// records it and republishes, and only then does a frame carry the image for
+/// the painter to resolve. That whole round trip is what this asserts, and
+/// nothing covered it before: the old shape needed an explicit
+/// `view.load_image(...)` from the embedder.
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
+    let images = checker_store();
+    let store = Arc::clone(&images);
     let mut view = booted(ViewSources {
-        image_store: Some(checker_store() as Arc<dyn ImageStore>),
+        image_store: Some(Box::new(move |sink| {
+            store.attach(sink);
+            flashbulb::shared(&store)
+        })),
         ..sources(IMAGE_SCRIPT.as_bytes())
     })
     .await;
-    view.load_image(IMAGE_URL).await.expect("published source");
-    // The store's answer reaches the document as one main-thread command,
-    // and a capture only reads whatever has already been published. A forced
-    // tick is the one call that waits for the commit behind it.
-    view.tick(true)
-        .expect("commit the frame the image belongs to");
+    settle_images(&mut view, &images);
 
     let shot = view.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)

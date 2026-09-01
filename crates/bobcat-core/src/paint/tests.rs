@@ -55,37 +55,6 @@ fn frame_size_rejects_unbounded_targets() {
     assert!(error.to_string().contains("16384"));
 }
 
-/// The store a view is built over is the one the paint walk reads, and
-/// the pixels reach it without a copy: the buffer identity that comes
-/// back out of the main-thread document is the one that went in.
-#[test]
-fn the_installed_image_store_is_the_one_the_document_reads() {
-    let mut document = document();
-    let images = Arc::new(flashbulb::TestImages::new());
-    let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
-    let pixel_id = pixels.data.id();
-    images.insert("app:///pixel.png", pixels);
-    document.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
-
-    let mut view = view_over(
-        Arc::new(NoWakeup),
-        document,
-        "globalThis.renderPage = function () { __CreatePage('card', 0); };",
-    );
-    let (hit, miss) = view
-        .probe_document(move |tree| {
-            (
-                tree.image_store()
-                    .peek("app:///pixel.png")
-                    .map(|image| image.data.id()),
-                tree.image_store().peek("app:///missing.png").is_none(),
-            )
-        })
-        .expect("the main thread answers probes");
-    assert_eq!(hit, Some(pixel_id));
-    assert!(miss);
-}
-
 /// One drain of the notification FIFO applies every kind of thing that
 /// rides it — a lifecycle event `pump` will hand back, a listener edge, a
 /// `BeginFrame` acknowledgement, and the redraw an announced frame asks

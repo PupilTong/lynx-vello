@@ -101,8 +101,9 @@ use euclid::default::{Point2D, Rect, Size2D, Transform3D};
 
 pub(crate) use self::build::BuildScratch;
 pub use self::frame::{AnimationSlot, CommittedFrame, HitTarget, ScrollSlot};
+use crate::render::image::{ImageEvent, ImageId};
 use crate::tree::document::Document;
-use crate::{ImageStore, NodeId};
+use crate::{FrameImages, NodeId};
 
 /// A frame's back-to-front paint order.
 #[derive(Debug)]
@@ -469,13 +470,17 @@ impl<T> Document<T> {
     ///
     /// If nothing has been rendered yet: there is no committed frame to read.
     #[must_use]
-    pub fn scene(&self) -> SceneRef {
+    /// A scene cannot be composed without a pixel source: after the image
+    /// system moved to the painter, the frame names images rather than
+    /// carrying them, so the caller supplies whatever resolves those names.
+    /// Pass [`NoImages`](crate::NoImages) for a page with no images.
+    pub fn scene(&self, pixels: &dyn FrameImages) -> SceneRef {
         let frame = self
             .committed_frame()
             .expect("Document::scene reads the committed frame: render first");
         let composed = frame.scene().is_none().then(|| {
             let mut scene = crate::vello::Scene::new();
-            frame.compose_into(&mut scene, &|_| None, None);
+            frame.compose_into(&mut scene, pixels, &|_| None, None);
             Box::new(scene)
         });
         SceneRef { frame, composed }
@@ -557,31 +562,54 @@ impl<T> Document<T> {
         out
     }
 
-    /// The embedder's decoded-image owner.
-    ///
-    /// Cloning the returned handle is how the layer above this crate reaches
-    /// [`ImageStore::get`] and [`ImageStore::prefetch`] without holding the
-    /// document across the await.
-    #[must_use]
-    pub fn image_store(&self) -> &Arc<dyn ImageStore> {
-        &self.image_store
+    /// The document's image name table.
+    pub(crate) fn images(&self) -> &crate::render::image::ImageRegistry {
+        &self.images
     }
 
-    /// Installs the store every later frame reads, and invalidates the
-    /// retained scene, because a different store draws different pixels.
-    pub fn set_image_store(&mut self, store: Arc<dyn ImageStore>) {
-        self.image_store = store;
-        self.note_visual_mutation();
+    /// The sources the last paint walk met and has not yet asked for, drained
+    /// for the painter to request from its store.
+    ///
+    /// This is how a `url()` in a stylesheet and an element's own source both
+    /// become load requests: the walk is the one place that knows which
+    /// sources a frame actually needs.
+    pub fn take_wanted_images(&mut self) -> Vec<Arc<str>> {
+        self.images.take_wanted()
     }
 
-    /// Invalidates the retained scene because the installed store's answers
-    /// changed — pixels arrived, or entries were dropped.
+    /// The image ids nothing names any more, drained for the painter to
+    /// release.
+    pub fn take_released_images(&mut self) -> Vec<ImageId> {
+        self.images.take_released()
+    }
+
+    /// Applies the painter's image reports: binds ids to sources, records
+    /// completed loads with their intrinsic dimensions, and marks failures.
     ///
-    /// The document cannot observe an embedder-owned store changing under it,
-    /// and the retained scene is only rebuilt when the frame is invalidated, so
-    /// a load that completes without this call paints on no frame at all.
-    pub fn note_images_changed(&mut self) {
-        self.note_visual_mutation();
+    /// A load that lands on replaced nodes sets their natural size in the
+    /// same call, so the element resizes in the commit that first draws it.
+    pub fn apply_image_events(&mut self, events: &[ImageEvent]) {
+        let mut changed = false;
+        for event in events {
+            let nodes = self.images.apply(event);
+            changed = true;
+            if let ImageEvent::Loaded { width, height, .. } = event {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "both axes are bounded to 8192 before this point"
+                )]
+                let natural = crate::layout::NaturalSize::from_size(hughie::geometry::Size::new(
+                    *width as f32,
+                    *height as f32,
+                ));
+                for node in nodes {
+                    self.set_natural_size(node, natural);
+                }
+            }
+        }
+        if changed {
+            self.note_visual_mutation();
+        }
     }
 
     /// Invalidates the retained frame because composition has moved a scroll

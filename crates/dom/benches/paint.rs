@@ -426,7 +426,6 @@ fn tile_page() -> (Document<()>, Arc<TestImages>) {
     let mut dom = page_document(TILE_CSS);
     let images = Arc::new(TestImages::new());
     images.insert(TILE_SOURCE, tile_pixels(0x30));
-    dom.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
     let root = dom.document_element().id();
     let natural = NaturalSize::from_size(Size::new(TILE_PIXELS as f32, TILE_PIXELS as f32));
     for index in 0..TILES {
@@ -514,7 +513,7 @@ fn bench_frames(
         phase = !phase;
         step(&mut page, phase);
         divan::black_box(page.render());
-        divan::black_box(page.scene().encoding().draw_tags.len());
+        divan::black_box(page.scene(&dom::NoImages).encoding().draw_tags.len());
     });
 }
 
@@ -552,7 +551,7 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         .with_inputs(|| card_page(cards).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(dom.scene().encoding().draw_tags.len());
+            divan::black_box(dom.scene(&dom::NoImages).encoding().draw_tags.len());
             dom
         });
 }
@@ -658,7 +657,12 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         phase = !phase;
         scroll_to(&mut dom, phase);
         scene.reset();
-        frame.compose_into(&mut scene, &|slot| Some(dom.scroll_offset(slot.node)), None);
+        frame.compose_into(
+            &mut scene,
+            &dom::NoImages,
+            &|slot| Some(dom.scroll_offset(slot.node)),
+            None,
+        );
         divan::black_box(scene.encoding().draw_tags.len());
     });
 }
@@ -708,6 +712,7 @@ fn frame_scroll_composite(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.composite_into(
             &mut scene,
             &planes,
+            &dom::NoImages,
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
@@ -782,11 +787,11 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
 /// Republishing one source's decoded pixels on a page of `TILES` replaced
 /// boxes that all draw it.
 ///
-/// `Document::note_images_changed` invalidates the retained scene
-/// unconditionally, so one arriving image costs a rebuild of every image draw
-/// on the page — the shape of a page whose images decode one at a time. Both
-/// phases publish the same dimensions and the same byte count, so the encoded
-/// geometry is identical between them.
+/// A load report invalidates the retained scene, so one arriving image costs a
+/// rebuild of every image draw on the page — the shape of a page whose images
+/// decode one at a time. Both phases publish the same dimensions and the same
+/// byte count, so the encoded geometry is identical between them; only the
+/// generation moves.
 #[divan::bench]
 fn frame_image_republish(bencher: divan::Bencher<'_, '_>) {
     let (page, images) = tile_page();
@@ -797,6 +802,6 @@ fn frame_image_republish(bencher: divan::Bencher<'_, '_>) {
             TILE_SOURCE,
             if phase { light.clone() } else { dark.clone() },
         );
-        dom.note_images_changed();
+        flashbulb::pump_images(dom, &images);
     });
 }

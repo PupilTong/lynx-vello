@@ -40,7 +40,9 @@ pub mod input {
     pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use dom::{FontBlob, ImageFuture, ImageStore, ImageStoreError};
+pub use dom::{
+    FontBlob, FrameImages, ImageEvent, ImageId, ImageRef, ImageSink, ImageStore, NoImages,
+};
 pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]

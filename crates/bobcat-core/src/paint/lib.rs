@@ -10,6 +10,7 @@
 
 mod gesture;
 mod graphics;
+pub(crate) mod images;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -48,11 +49,11 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter,
-    frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize, ToMain,
+    ToPainter, frame_slot,
 };
 #[cfg(test)]
-use crate::view::{EventRequester, NoWakeup, main_link};
+use crate::view::{NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -137,6 +138,11 @@ pub(crate) struct PainterLink {
     begin_frames_sent: u64,
     begin_frames_serviced: u64,
     redraw_pending: Cell<bool>,
+    /// Sources the document met and wants named, and ids it no longer names.
+    /// Buffered here because applying them needs the store, which the painter
+    /// owns rather than the link.
+    image_requests: Vec<Arc<str>>,
+    image_releases: Vec<dom::ImageId>,
 }
 
 impl PainterLink {
@@ -155,6 +161,8 @@ impl PainterLink {
             begin_frames_sent: 0,
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
+            image_requests: Vec::new(),
+            image_releases: Vec::new(),
         }
     }
 
@@ -187,8 +195,18 @@ impl PainterLink {
             ToPainter::BeginFrameServiced(seq) => {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
+            ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
+            ToPainter::ReleaseImages(ids) => self.image_releases.extend(ids),
         }
         false
+    }
+
+    fn take_image_requests(&mut self) -> Vec<Arc<str>> {
+        std::mem::take(&mut self.image_requests)
+    }
+
+    fn take_image_releases(&mut self) -> Vec<dom::ImageId> {
+        std::mem::take(&mut self.image_releases)
     }
 
     fn adopt_frame(&mut self, announced: bool) {
@@ -353,6 +371,8 @@ pub(crate) struct Painter {
     composed: Option<ComposeKey>,
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
+    /// The whole image resource system. Owned here and nowhere else.
+    images: images::PainterImages,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -535,6 +555,7 @@ fn scene_for<'frame>(
     intents: &ScrollIntents,
     buffer: &'frame mut Scene,
     frame: &'frame CommittedFrame,
+    pixels: &dyn dom::FrameImages,
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     if intents.offsets.is_empty()
@@ -544,7 +565,12 @@ fn scene_for<'frame>(
         return scene;
     }
     buffer.reset();
-    frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
+    frame.compose_into(
+        buffer,
+        pixels,
+        &|slot| intents.offset_for(slot.node),
+        animation_now,
+    );
     buffer
 }
 
@@ -553,23 +579,31 @@ fn composite_scene<'frame>(
     buffer: &'frame mut Scene,
     frame: &CommittedFrame,
     plane_images: &[dom::vello::peniko::ImageData],
+    pixels: &dyn dom::FrameImages,
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     buffer.reset();
     frame.composite_into(
         buffer,
         plane_images,
+        pixels,
         &|slot| intents.offset_for(slot.node),
         animation_now,
     );
     buffer
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one compose call's full inputs, none of which the painter owns together"
+)]
 fn paint_window(
     graphics: &mut WindowGraphics,
     intents: &ScrollIntents,
     buffer: &mut Scene,
     frame: &CommittedFrame,
+    pixels: &dyn dom::FrameImages,
+    image_epoch: u64,
     size: FrameSize,
     key: ComposeKey,
     animation_now: Option<f64>,
@@ -578,16 +612,17 @@ fn paint_window(
         return Ok(());
     }
     let scene = if frame.composite_plan().is_some() {
-        graphics.prepare_planes(frame)?;
+        graphics.prepare_planes(frame, pixels, image_epoch)?;
         composite_scene(
             intents,
             buffer,
             frame,
             graphics.plane_images(),
+            pixels,
             animation_now,
         )
     } else {
-        scene_for(intents, buffer, frame, animation_now)
+        scene_for(intents, buffer, frame, pixels, animation_now)
     };
     graphics.render_to_target(scene, size, key)
 }
@@ -654,7 +689,62 @@ impl Painter {
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
+            images: images::PainterImages::default(),
             thread_bound: PhantomData,
+        }
+    }
+
+    /// The sink completed loads report through, for the store this view is
+    /// about to build.
+    ///
+    /// Generic over the host's wakeup so no `dyn EventRequester` reappears:
+    /// a load finishing on the store's own thread has to get this thread a
+    /// turn, and the host's requester is the only thing that can.
+    pub(super) fn image_sink<R: EventRequester>(
+        &self,
+        requester: Arc<R>,
+    ) -> Arc<dyn dom::ImageSink> {
+        self.images.sink(requester)
+    }
+
+    /// Installs the embedder's store. Called once, on this thread, before the
+    /// view is handed back.
+    pub(super) fn install_images(&mut self, store: Rc<dyn dom::ImageStore>) {
+        self.images.install(store);
+    }
+
+    /// Warms sources the walk has not met yet.
+    pub(super) fn prefetch_images(&mut self, sources: Vec<Arc<str>>) {
+        let events = self.images.request(sources);
+        if !events.is_empty() {
+            self.link.send(ToMain::ImageEvents(events));
+        }
+    }
+
+    /// One painter turn's intake: everything the document said, then the
+    /// image work that came with it.
+    ///
+    /// The two are one call because they are one fact. A turn that drained
+    /// the link without servicing its image requests would leave the store
+    /// unasked, and the frame that needed those images would never arrive.
+    fn sync(&mut self) {
+        self.link.sync();
+        self.service_images();
+    }
+
+    /// Services the image protocol: names every source the document asked
+    /// about, releases the ids it dropped, and forwards both those bindings
+    /// and any completed loads back to it.
+    fn service_images(&mut self) {
+        let requests = self.link.take_image_requests();
+        let releases = self.link.take_image_releases();
+        if !releases.is_empty() {
+            self.images.release(&releases);
+        }
+        let mut events = self.images.request(requests);
+        events.extend(self.images.take_reports());
+        if !events.is_empty() {
+            self.link.send(ToMain::ImageEvents(events));
         }
     }
 
@@ -690,7 +780,7 @@ impl Painter {
 
     #[cfg(test)]
     pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
-        self.link.sync();
+        self.sync();
         self.link.frame().cloned()
     }
 
@@ -720,13 +810,8 @@ impl Painter {
             || self.gesture.needs_frame()
     }
 
-    pub(super) fn note_images_changed(&self) {
-        self.link.send(ToMain::NoteImagesChanged);
-        self.refresh();
-    }
-
     pub(super) fn dispatch_input(&mut self, event: InputEvent) {
-        self.link.sync();
+        self.sync();
         let at = self.clock.now_seconds();
         let published = self.link.frame().cloned();
         if let Some(frame) = &published {
@@ -805,7 +890,7 @@ impl Painter {
     }
 
     pub(super) fn service_gesture_clock(&mut self, now: f64) {
-        self.link.sync();
+        self.sync();
         let published = self.link.frame().cloned();
         let mut decisions = InputDecisions::new();
         {
@@ -865,7 +950,7 @@ impl Painter {
 
     #[must_use]
     pub(super) fn pump(&mut self) -> Vec<EngineEvent> {
-        self.link.sync();
+        self.sync();
         self.link.take_events()
     }
 
@@ -888,11 +973,18 @@ impl Painter {
         if !matches!(self.output, Output::Window(_)) || self.occluded {
             return Ok(());
         }
-        self.link.sync();
+        self.sync();
         if !self.link.take_redraw() && !self.is_animating() {
             return Ok(());
         }
         let size = self.frame_size;
+        // Resolving reads pixels, and a store is allowed to block restoring
+        // one it evicted. That must happen before a swap-chain image is
+        // acquired: blocking while holding one stalls the chain under vsync.
+        let latest = self.link.frame().cloned();
+        if let Some(frame) = &latest {
+            self.images.resolve(frame);
+        }
         let acquired = {
             let Output::Window(graphics) = &mut self.output else {
                 unreachable!("the window output was just checked");
@@ -913,17 +1005,18 @@ impl Painter {
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
         let _ = self.begin_frame(now, false);
-        let latest = self.link.frame().cloned();
         if let Some(frame) = &latest {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
         }
+        let epoch = self.images.epoch();
         let key = latest
             .as_ref()
-            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation, epoch));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
+        let images = &self.images;
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
@@ -933,6 +1026,8 @@ impl Painter {
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 frame,
+                images,
+                epoch,
                 size,
                 key,
                 animation_now,
@@ -948,14 +1043,19 @@ impl Painter {
     pub(super) fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         let now = self.clock.now_seconds();
-        self.link.sync();
+        self.sync();
         let latest = self.link.frame().cloned();
+        if let Some(frame) = &latest {
+            self.images.resolve(frame);
+        }
+        let epoch = self.images.epoch();
         let key = latest
             .as_ref()
-            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation, epoch));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
+        let images = &self.images;
         match &mut self.output {
             #[cfg(test)]
             Output::None => Err(EngineError::NotOffscreen),
@@ -964,13 +1064,14 @@ impl Painter {
                     && (self.composed != Some(key) || animation_now.is_some())
                 {
                     let scene = if frame.composite_plan().is_some() {
-                        gpu.prepare_planes(frame)
+                        gpu.prepare_planes(frame, images, epoch)
                             .map_err(|error| EngineError::Gpu(error.to_string()))?;
                         composite_scene(
                             &self.scroll_intents,
                             &mut self.composed_scene,
                             frame,
                             gpu.plane_images(),
+                            images,
                             animation_now,
                         )
                     } else {
@@ -978,6 +1079,7 @@ impl Painter {
                             &self.scroll_intents,
                             &mut self.composed_scene,
                             frame,
+                            images,
                             animation_now,
                         )
                     };
@@ -997,6 +1099,8 @@ impl Painter {
                         &self.scroll_intents,
                         &mut self.composed_scene,
                         frame,
+                        images,
+                        epoch,
                         size,
                         key,
                         animation_now,
@@ -1016,6 +1120,9 @@ impl Painter {
     /// message, which is why it is sent explicitly rather than left to the
     /// FIFO closing when the painter is released.
     pub(super) fn shutdown(&self) {
+        // Close the sink before the store drops: a loader still in flight
+        // must find it detached rather than queue into a dead view.
+        self.images.detach();
         self.link.send(ToMain::Shutdown);
     }
 
@@ -1075,28 +1182,32 @@ impl Painter {
         if let Some(seq) = self.begin_frame(now, true) {
             let _ = self.link.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
         }
-        self.link.sync();
+        self.sync();
         let Some(frame) = self.link.frame().cloned() else {
             return Ok(false);
         };
         self.scroll_intents.rebase(&frame);
         self.maybe_request_refill(&frame);
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
+        self.images.resolve(&frame);
+        let epoch = self.images.epoch();
+        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation, epoch);
         let animation_now = frame.has_live_curves().then_some(now);
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
         }
+        let images = &self.images;
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
         };
         let scene = if frame.composite_plan().is_some() {
-            gpu.prepare_planes(&frame)
+            gpu.prepare_planes(&frame, images, epoch)
                 .map_err(|error| EngineError::Gpu(error.to_string()))?;
             composite_scene(
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 &frame,
                 gpu.plane_images(),
+                images,
                 animation_now,
             )
         } else {
@@ -1104,6 +1215,7 @@ impl Painter {
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 &frame,
+                images,
                 animation_now,
             )
         };
