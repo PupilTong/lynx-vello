@@ -91,18 +91,6 @@ impl FetcherDouble {
         self
     }
 
-    /// This double as the one thing a view is built from: a factory that
-    /// hands the painter the whole resource system, images included.
-    #[must_use]
-    pub fn into_factory(self) -> bobcat_core::ResourceFactory {
-        Box::new(move |sink| {
-            if let Some(images) = self.images.as_ref() {
-                images.attach(sink);
-            }
-            std::rc::Rc::new(self)
-        })
-    }
-
     /// Answers stylesheet requests with a host-decoded sheet.
     #[must_use]
     pub fn with_preparsed_style_sheet(mut self, sheet: PreparsedStyleSheet) -> Self {
@@ -161,18 +149,6 @@ impl FetcherDouble {
             cache_status: CacheStatus::Miss,
             timing: ResourceTiming::default(),
         }
-    }
-}
-
-fn unsupported(phase: ResourceErrorPhase) -> ResourceError {
-    ResourceError {
-        request_id: None,
-        kind: ResourceErrorKind::UnsupportedOperation,
-        phase,
-        locator: None,
-        status: None,
-        message: "not advertised by this double".into(),
-        retry: RetryAdvice::Never,
     }
 }
 
@@ -269,53 +245,14 @@ impl bobcat_core::FrameImages for FetcherDouble {
     }
 }
 
-/// A fetcher the painter owns while the test keeps a handle on it.
-///
-/// The painter's handle is an `Rc`, because a fetcher never leaves that
-/// thread; a test still has to inspect the double afterwards, and two of them
-/// assert on when it is *dropped*, which needs the `Arc` to stay weakly
-/// observable.
-pub struct SharedFetcher<F>(pub Arc<F>);
-
-impl<F: bobcat_core::FrameImages> bobcat_core::FrameImages for SharedFetcher<F> {
-    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.0.read(source)
-    }
-}
-
-impl<F: ResourceFetcher> ResourceFetcher for SharedFetcher<F> {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.0.supports_capability(capability)
-    }
-
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-        self.0.resolve_locator(request)
-    }
-
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
-        self.0.fetch_resource(request)
-    }
-
-    fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
-        self.0.fetch_style_sheet(request)
-    }
-
-    fn request_image(&self, source: &str) {
-        self.0.request_image(source);
-    }
-
-    fn retain_images(&self, frame: &[Arc<str>]) {
-        self.0.retain_images(frame);
-    }
-}
-
 /// The one thing a view is built from, over a double the test still holds.
+///
+/// The painter's handle is an `Rc` — a resource system never leaves that
+/// thread — while the test keeps its `Arc`, and two tests assert on when the
+/// double is *dropped*, which needs that handle to stay weakly observable.
 #[must_use]
 pub fn factory<F: ResourceFetcher + 'static>(fetcher: Arc<F>) -> bobcat_core::ResourceFactory {
-    Box::new(move |_sink| std::rc::Rc::new(SharedFetcher(fetcher)))
+    Box::new(move |_sink| std::rc::Rc::new(fetcher))
 }
 
 /// [`factory`], with the view's image sink wired into a test image store, so
@@ -327,6 +264,6 @@ pub fn factory_serving_images<F: ResourceFetcher + 'static>(
 ) -> bobcat_core::ResourceFactory {
     Box::new(move |sink| {
         images.attach(sink);
-        std::rc::Rc::new(SharedFetcher(fetcher))
+        std::rc::Rc::new(fetcher)
     })
 }

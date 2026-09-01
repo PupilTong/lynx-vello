@@ -408,16 +408,15 @@ fn tile_pixels(shade: u8) -> ImageData {
     }
 }
 
-/// The source every tile in [`tile_page`] draws, and the one the republish
-/// benchmark rewrites.
+/// The source every tile in [`tile_page`] draws.
 const TILE_SOURCE: &str = "app:///tile.png";
 
 /// A grid of replaced-content tiles, all inside the viewport, plus the store
 /// holding their pixels.
 ///
 /// Every tile draws the same source, which is what a page of identical
-/// replaced boxes does: the store answers one `peek` per tile per frame and
-/// hands back the same reference-counted buffer each time.
+/// replaced boxes does: one entry in the registry, one resolve per commit,
+/// and the same reference-counted buffer behind every draw.
 #[allow(
     clippy::cast_precision_loss,
     reason = "tile indices are small constants"
@@ -659,7 +658,7 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         scene.reset();
         frame.compose_into(
             &mut scene,
-            &dom::NoImages,
+            &[],
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
@@ -712,7 +711,7 @@ fn frame_scroll_composite(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.composite_into(
             &mut scene,
             &planes,
-            &dom::NoImages,
+            &[],
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
@@ -784,24 +783,23 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
 // Image frames
 // ---------------------------------------------------------------------------
 
-/// Republishing one source's decoded pixels on a page of `TILES` replaced
-/// boxes that all draw it.
+/// A page of `TILES` replaced boxes, all drawing one already-loaded image,
+/// repainting.
 ///
-/// A load report invalidates the retained scene, so one arriving image costs a
-/// rebuild of every image draw on the page — the shape of a page whose images
-/// decode one at a time. Both phases publish the same dimensions and the same
-/// byte count, so the encoded geometry is identical between them; only the
-/// generation moves.
+/// This is the cost that actually recurs. An image *arriving* cannot be
+/// benchmarked in two phases any more: one URL has one content, so a load
+/// report lands exactly once per document and the second phase would
+/// invalidate nothing. What a page pays over and over is rebuilding its image
+/// draws — one `ImageDraw` per tile, and one program op per draw — which is
+/// what this measures, against a mutation that touches no image at all.
 #[divan::bench]
-fn frame_image_republish(bencher: divan::Bencher<'_, '_>) {
-    let (page, images) = tile_page();
-    let dark = tile_pixels(0x30);
-    let light = tile_pixels(0xc0);
+fn frame_image_repaint(bencher: divan::Bencher<'_, '_>) {
+    let (mut page, images) = tile_page();
+    // Load once, before timing: from here the registry is `Ready` and every
+    // commit draws real pixels.
+    flashbulb::render_with_images(&mut page, &images);
+    let root = page.document_element().id();
     bench_frames(bencher, page, Staleness::Repaints, move |dom, phase| {
-        images.insert(
-            TILE_SOURCE,
-            if phase { light.clone() } else { dark.clone() },
-        );
-        flashbulb::pump_images(dom, &images);
+        dom.set_inline_style_property(root, "background-color", flip_color(phase));
     });
 }

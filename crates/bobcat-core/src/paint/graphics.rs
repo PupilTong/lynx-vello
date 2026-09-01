@@ -124,7 +124,7 @@ impl WindowGraphics {
     pub(super) fn prepare_planes(
         &mut self,
         frame: &dom::CommittedFrame,
-        pixels: &dyn dom::FrameImages,
+        images: &[Option<dom::vello::peniko::ImageData>],
         image_epoch: u64,
     ) -> Result<(), EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
@@ -134,7 +134,7 @@ impl WindowGraphics {
                 &handle.device,
                 &handle.queue,
                 frame,
-                pixels,
+                images,
                 image_epoch,
             )
             .map_err(|error| EngineError::Gpu(error.to_string()))

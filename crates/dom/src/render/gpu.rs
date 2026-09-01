@@ -75,7 +75,7 @@ impl PlaneBank {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &crate::visual::CommittedFrame,
-        pixels: &dyn crate::FrameImages,
+        images: &[Option<vello::peniko::ImageData>],
         image_epoch: u64,
     ) -> Result<(), GpuError> {
         let plan = frame
@@ -125,7 +125,7 @@ impl PlaneBank {
                 }
             }
             self.bake_scene.reset();
-            frame.bake_plane(index, &mut self.bake_scene, pixels);
+            frame.bake_plane(index, &mut self.bake_scene, images);
             renderer
                 .render_to_texture(
                     device,
@@ -245,7 +245,7 @@ impl Headless {
     pub fn prepare_planes(
         &mut self,
         frame: &crate::visual::CommittedFrame,
-        pixels: &dyn crate::FrameImages,
+        images: &[Option<vello::peniko::ImageData>],
         image_epoch: u64,
     ) -> Result<(), GpuError> {
         let Self {
@@ -261,7 +261,7 @@ impl Headless {
             &handle.device,
             &handle.queue,
             frame,
-            pixels,
+            images,
             image_epoch,
         )
     }

@@ -64,9 +64,8 @@ const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// How the wait on one host fetch ended.
 enum FetchOutcome {
     Loaded(LoadedSource),
-    /// The fetch itself failed; the painter already holds the startup failure.
-    Failed(LynxViewError),
-    /// Startup was decided first, and the fetch is abandoned unfinished.
+    /// Startup is decided — either the fetch itself failed, which *is* the
+    /// failure, or the main thread spoke first and this fetch is abandoned.
     Ended(Result<(), LynxViewError>),
 }
 
@@ -207,11 +206,6 @@ impl PainterLink {
         self.notifications.try_recv()
     }
 
-    /// Applies one message, remembering a frame announcement for [`Self::settle`].
-    fn apply_announced(&mut self, notification: ToPainter) {
-        self.pending_announce |= self.apply(notification);
-    }
-
     /// Adopts whatever the drains since the last settle announced.
     fn settle(&mut self) {
         let announced = std::mem::take(&mut self.pending_announce);
@@ -259,14 +253,14 @@ impl PainterLink {
     /// announced, the mailbox is read once.
     pub(crate) fn sync(&mut self) {
         while let Ok(notification) = self.notifications.try_recv() {
-            self.apply_announced(notification);
+            self.apply(notification);
         }
         self.settle();
     }
 
-    fn apply(&mut self, notification: ToPainter) -> bool {
+    fn apply(&mut self, notification: ToPainter) {
         match notification {
-            ToPainter::FrameChanged => return true,
+            ToPainter::FrameChanged => self.pending_announce = true,
             ToPainter::Engine(event) => self.events.push(event),
             ToPainter::ListenerAvailable(name) => {
                 self.listener_names.insert(name);
@@ -282,7 +276,6 @@ impl PainterLink {
                 unreachable!("startup messages are served before the view exists")
             }
         }
-        false
     }
 
     fn take_image_requests(&mut self) -> Vec<Arc<str>> {
@@ -341,7 +334,6 @@ impl PainterLink {
     /// target implements, so an offscreen view belongs to a native host.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
-        let mut announced = false;
         while self.begin_frames_serviced < seq {
             let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
                 break;
@@ -349,9 +341,9 @@ impl PainterLink {
             let Ok(notification) = self.notifications.recv_timeout(remaining) else {
                 break;
             };
-            announced |= self.apply(notification);
+            self.apply(notification);
         }
-        self.adopt_frame(announced);
+        self.settle();
         self.begin_frames_serviced >= seq
     }
 
@@ -638,7 +630,7 @@ fn scene_for<'frame>(
     intents: &ScrollIntents,
     buffer: &'frame mut Scene,
     frame: &'frame CommittedFrame,
-    pixels: &dyn dom::FrameImages,
+    images: &[Option<dom::vello::peniko::ImageData>],
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     if intents.offsets.is_empty()
@@ -650,7 +642,7 @@ fn scene_for<'frame>(
     buffer.reset();
     frame.compose_into(
         buffer,
-        pixels,
+        images,
         &|slot| intents.offset_for(slot.node),
         animation_now,
     );
@@ -662,14 +654,14 @@ fn composite_scene<'frame>(
     buffer: &'frame mut Scene,
     frame: &CommittedFrame,
     plane_images: &[dom::vello::peniko::ImageData],
-    pixels: &dyn dom::FrameImages,
+    images: &[Option<dom::vello::peniko::ImageData>],
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     buffer.reset();
     frame.composite_into(
         buffer,
         plane_images,
-        pixels,
+        images,
         &|slot| intents.offset_for(slot.node),
         animation_now,
     );
@@ -685,7 +677,7 @@ fn paint_window(
     intents: &ScrollIntents,
     buffer: &mut Scene,
     frame: &CommittedFrame,
-    pixels: &dyn dom::FrameImages,
+    images: &[Option<dom::vello::peniko::ImageData>],
     image_epoch: u64,
     size: FrameSize,
     key: ComposeKey,
@@ -695,17 +687,17 @@ fn paint_window(
         return Ok(());
     }
     let scene = if frame.composite_plan().is_some() {
-        graphics.prepare_planes(frame, pixels, image_epoch)?;
+        graphics.prepare_planes(frame, images, image_epoch)?;
         composite_scene(
             intents,
             buffer,
             frame,
             graphics.plane_images(),
-            pixels,
+            images,
             animation_now,
         )
     } else {
-        scene_for(intents, buffer, frame, pixels, animation_now)
+        scene_for(intents, buffer, frame, images, animation_now)
     };
     graphics.render_to_target(scene, size, key)
 }
@@ -778,7 +770,9 @@ impl Painter {
         // Installed before this loop and never replaced, so one owned handle
         // serves every fetch. Owned because a `ResourceFuture` borrows the
         // fetcher across the await and the link is used after it.
-        let fetcher = self.images.fetcher();
+        let Some(fetcher) = self.images.fetcher() else {
+            return Err(EngineError::NoResourceFetcher.into());
+        };
         let mut queued: VecDeque<(SourceSlot, String)> = VecDeque::new();
         let mut closed = false;
         loop {
@@ -794,21 +788,23 @@ impl Painter {
                 closed = self.link.await_startup_wake().await.is_none();
                 continue;
             };
-            let Some(handle) = fetcher.clone() else {
-                return Err(EngineError::NoResourceFetcher.into());
-            };
             match self
-                .await_fetch(handle.as_ref(), &mut requests, slot, &specifier)
+                .await_fetch(
+                    fetcher.as_ref(),
+                    &mut requests,
+                    slot,
+                    &specifier,
+                    &mut queued,
+                )
                 .await
             {
                 FetchOutcome::Loaded(source) => self.link.send(ToMain::SourceLoaded {
                     slot,
                     source: Some(source),
                 }),
-                // The painter already holds the failure; telling the main
-                // thread and waiting for it to tell us back would be a round
-                // trip to learn what we just decided.
-                FetchOutcome::Failed(error) => return Err(error),
+                // A fetch failure is the startup failure and the painter is
+                // already holding it: sending it across to be told back would
+                // be a round trip to learn what we just decided.
                 FetchOutcome::Ended(result) => return result,
             }
         }
@@ -827,6 +823,7 @@ impl Painter {
         requests: &mut crate::resource::RequestId,
         slot: SourceSlot,
         specifier: &str,
+        queued: &mut VecDeque<(SourceSlot, String)>,
     ) -> FetchOutcome {
         let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
         loop {
@@ -844,16 +841,11 @@ impl Painter {
             .await;
             match step {
                 FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
-                FetchStep::Loaded(Err(error)) => return FetchOutcome::Failed(error),
+                FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
                 FetchStep::Woken(open) => {
-                    let mut queued = VecDeque::new();
-                    if let Some(result) = self.drain_startup(&mut queued) {
+                    if let Some(result) = self.drain_startup(queued) {
                         return FetchOutcome::Ended(result);
                     }
-                    debug_assert!(
-                        queued.is_empty(),
-                        "every source request is sent before the main thread's first park",
-                    );
                     if !open {
                         return FetchOutcome::Ended(Err(main_thread_gone()));
                     }
@@ -894,7 +886,7 @@ impl Painter {
                 // Frames, lifecycle events, listener edges, boot's image
                 // requests: the steady-state path, so every fact boot
                 // published lands where the host's first turn finds it.
-                Ok(other) => self.link.apply_announced(other),
+                Ok(other) => self.link.apply(other),
                 Err(flume::TryRecvError::Empty) => return None,
                 Err(flume::TryRecvError::Disconnected) => {
                     self.link.settle();
@@ -940,9 +932,8 @@ impl Painter {
         self.service_images();
     }
 
-    /// Services the image protocol: names every source the document asked
-    /// about, releases the ids it dropped, and forwards both those bindings
-    /// and any completed loads back to it.
+    /// Services the image protocol: asks the host for every source the
+    /// document met, and forwards any completed loads back to it.
     fn service_images(&mut self) {
         self.images.request(self.link.take_image_requests());
         let events = self.images.take_reports();
@@ -1219,7 +1210,7 @@ impl Painter {
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
-        let images = &self.images;
+        let images = self.images.resolved();
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
@@ -1258,7 +1249,7 @@ impl Painter {
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
-        let images = &self.images;
+        let images = self.images.resolved();
         match &mut self.output {
             #[cfg(test)]
             Output::None => Err(EngineError::NotOffscreen),
@@ -1398,7 +1389,7 @@ impl Painter {
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
         }
-        let images = &self.images;
+        let images = self.images.resolved();
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
         };

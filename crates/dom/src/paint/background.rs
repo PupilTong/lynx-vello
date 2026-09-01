@@ -99,16 +99,7 @@ pub(crate) fn paint(
                 }
             }
             Some(UsedClip::Text) => {
-                text_clip_sandwich(scene, fragment, text_clip, |scene| {
-                    let shape = level_shape(fragment, BoxLevel::Border);
-                    with_shape!(&shape, |s| scene.fill(
-                        Fill::NonZero,
-                        fragment.transform,
-                        color,
-                        None,
-                        s
-                    ));
-                });
+                paint_text_clipped_color(sink, chain, fragment, text_clip, color);
             }
             None => {}
         }
@@ -145,6 +136,75 @@ pub(crate) fn paint(
             }
         }
     }
+}
+
+/// One `url(...)` layer, as a program op the painter resolves and encodes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one layer's full resolved geometry, none of which the caller groups"
+)]
+fn paint_raster_layer(
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
+    style: &ComputedValues,
+    fragment: &BoxFragment,
+    layer: &PatternLayer<'_>,
+    text_clip: Option<&TextClip<'_>>,
+    grid: &TileGrid,
+    clip_bounds: Rect,
+    image: &std::sync::Arc<str>,
+) {
+    let Some(area) = image_area(&layer.clip, grid.draw_rect(clip_bounds)) else {
+        return;
+    };
+    let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
+    if text_clip.is_some() && !opened {
+        return;
+    }
+    sink.image(
+        chain,
+        ImageDraw {
+            image: std::sync::Arc::clone(image),
+            transform: fragment.transform,
+            anchor: grid.origin,
+            extent: grid.tile,
+            sampler: ImageSampler {
+                x_extend: extend_for(grid.repeat_x),
+                y_extend: extend_for(grid.repeat_y),
+                quality: image_quality(style),
+                alpha: 1.0,
+            },
+            area,
+        },
+    );
+    if opened {
+        sink.pop();
+        sink.pop();
+    }
+}
+
+/// `background-color` under `background-clip: text`: the colour fills the
+/// glyph silhouettes rather than the box.
+fn paint_text_clipped_color(
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
+    fragment: &BoxFragment,
+    text_clip: Option<&TextClip<'_>>,
+    color: Color,
+) {
+    if !open_text_clip_ops(sink, chain, fragment, text_clip) {
+        return;
+    }
+    let shape = level_shape(fragment, BoxLevel::Border);
+    with_shape!(&shape, |s| sink.scene_for(chain).fill(
+        Fill::NonZero,
+        fragment.transform,
+        color,
+        None,
+        s
+    ));
+    sink.pop();
+    sink.pop();
 }
 
 /// Opens the `background-clip: text` sandwich as program ops rather than
@@ -190,42 +250,6 @@ fn open_text_clip_ops(
         fragment.border_box,
     );
     true
-}
-
-fn text_clip_sandwich(
-    scene: &mut Scene,
-    fragment: &BoxFragment,
-    text_clip: Option<&TextClip<'_>>,
-    f: impl FnOnce(&mut Scene),
-) {
-    let Some(text_clip) = text_clip.filter(|clip| !clip.is_empty()) else {
-        return;
-    };
-    let border_shape = level_shape(fragment, BoxLevel::Border);
-    with_shape!(&border_shape, |s| scene.push_layer(
-        Fill::NonZero,
-        peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcOver),
-        1.0,
-        fragment.transform,
-        s,
-    ));
-    for (offset, layout) in &text_clip.runs {
-        crate::paint::text::paint_silhouette(
-            scene,
-            layout,
-            fragment.transform * Affine::translate(*offset),
-        );
-    }
-    scene.push_layer(
-        Fill::NonZero,
-        peniko::BlendMode::new(peniko::Mix::Normal, peniko::Compose::SrcIn),
-        1.0,
-        fragment.transform,
-        &fragment.border_box,
-    );
-    f(scene);
-    scene.pop_layer();
-    scene.pop_layer();
 }
 
 pub(crate) fn paint_replaced_content(
@@ -432,37 +456,20 @@ pub(super) fn paint_pattern_layer(
     // A raster layer becomes a program op, because its pixels are not
     // reachable from here. Everything else still encodes inline.
     if let Source::Raster(image, _) = &source {
-        let Some(area) = image_area(&layer.clip, grid.draw_rect(clip_bounds)) else {
-            return;
-        };
-        let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
-        if text_clip.is_some() && !opened {
-            return;
-        }
-        sink.image(
+        paint_raster_layer(
+            sink,
             chain,
-            ImageDraw {
-                image: std::sync::Arc::clone(image),
-                transform: fragment.transform,
-                anchor: grid.origin,
-                extent: grid.tile,
-                sampler: ImageSampler {
-                    x_extend: extend_for(grid.repeat_x),
-                    y_extend: extend_for(grid.repeat_y),
-                    quality: image_quality(style),
-                    alpha: 1.0,
-                },
-                area,
-            },
+            style,
+            fragment,
+            layer,
+            text_clip,
+            &grid,
+            clip_bounds,
+            image,
         );
-        if opened {
-            sink.pop();
-            sink.pop();
-        }
         return;
     }
 
-    let scene = sink.scene_for(chain);
     let inline = |scene: &mut Scene| match &source {
         Source::Raster(..) => unreachable!("the raster case returned above"),
         Source::Solid(color) => fill_area(
@@ -495,12 +502,18 @@ pub(super) fn paint_pattern_layer(
             }
         },
     };
-    // Gradients and solids keep the inline sandwich: they carry no late
-    // input, so nothing needs to cut the fragment around them.
-    if text_clip.is_some() {
-        text_clip_sandwich(scene, fragment, text_clip, inline);
-    } else {
-        inline(scene);
+    // One encoder for the sandwich, whatever the layer paints. A raster
+    // layer has to take this path — its pixels are late — and giving
+    // gradients and solids a second, inline copy would mean two encodings of
+    // one CSS feature that must stay byte-identical.
+    let opened = open_text_clip_ops(sink, chain, fragment, text_clip);
+    if text_clip.is_some() && !opened {
+        return;
+    }
+    inline(sink.scene_for(chain));
+    if opened {
+        sink.pop();
+        sink.pop();
     }
 }
 

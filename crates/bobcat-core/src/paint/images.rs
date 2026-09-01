@@ -18,8 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::ImageData;
-use dom::{FrameImages, ImageEvent, ImageSink};
-use rustc_hash::FxHashMap;
+use dom::{ImageEvent, ImageSink};
 
 use crate::resource::ResourceFetcher;
 use crate::view::EventRequester;
@@ -109,26 +108,32 @@ impl<R: EventRequester> ImageSink for PainterImageSink<R> {
     }
 }
 
-/// The painter's image state: the store, and the pixels the current commit
-/// draws.
+/// The painter's image state: the host's resource system, and the pixels the
+/// current commit draws.
 ///
-/// The resolved map is deliberately **not** a second cache. It holds one
-/// commit's working set, is cleared whenever the commit or the image epoch
-/// moves, applies no policy of its own, and stores shallow `ImageData` clones
-/// — the same `Blob`, so one entry costs a reference count rather than a
-/// bitmap. Every decision about what stays in memory belongs to the store.
+/// The resolved table is deliberately **not** a second cache. It is one
+/// commit's pixels in draw order, rebuilt whenever the commit or the image
+/// epoch moves, applying no policy of its own and holding shallow
+/// `ImageData` clones — the same `Blob`, so one entry costs a reference count
+/// rather than a bitmap. Every decision about what stays in memory belongs to
+/// the host.
+///
+/// It is indexed rather than keyed: composition replays the program on every
+/// frame that scrolls, and a slice index costs nothing where a URL hash would
+/// have cost a lookup per draw per frame.
 #[derive(Default)]
 pub(crate) struct PainterImages {
     store: Option<Rc<dyn ResourceFetcher>>,
     queue: Arc<ImageQueue>,
-    /// `(commit_id, epoch)` the resolved map was built for.
+    /// `(commit_id, epoch)` the table was built for.
     key: Option<(u64, u64)>,
-    resolved: FxHashMap<Arc<str>, ImageData>,
-    /// This commit's distinct images in first-draw order — the store's
-    /// residency hint, and the set the resolve pass reads.
-    working_set: Vec<Arc<str>>,
-    /// Bumped by every batch of load reports, so a frame composed before an
-    /// image arrived is not mistaken for one composed after.
+    /// One entry per image draw of that commit, in draw order.
+    resolved: Vec<Option<ImageData>>,
+    /// Scratch for the distinct sources of one resolve, reused across
+    /// commits. Only the hint the host is given is read from it.
+    sources: Vec<Arc<str>>,
+    /// Bumped when a report changes what an already-composed frame would
+    /// draw, so a target rendered before that is not re-served after it.
     epoch: u64,
 }
 
@@ -200,33 +205,25 @@ impl PainterImages {
         if self.key == Some(key) {
             return;
         }
-        self.working_set.clear();
-        self.resolved.clear();
         if let Some(store) = &self.store {
-            frame.collect_images(&mut self.working_set);
-            store.retain_images(&self.working_set);
-            for source in &self.working_set {
-                if let Some(data) = store.read(source) {
-                    self.resolved.insert(Arc::clone(source), data);
-                }
-            }
+            frame.resolve_images(store.as_ref(), &mut self.resolved, &mut self.sources);
+            store.retain_images(&self.sources);
+        } else {
+            self.resolved.clear();
+            self.sources.clear();
         }
         self.key = Some(key);
+    }
+
+    /// This commit's pixels, in draw order.
+    pub(crate) fn resolved(&self) -> &[Option<ImageData>] {
+        &self.resolved
     }
 
     /// Stops accepting reports. Called once, at teardown, before the store
     /// drops with the painter.
     pub(crate) fn detach(&self) {
         self.queue.detach();
-    }
-}
-
-impl FrameImages for PainterImages {
-    fn read(&self, source: &str) -> Option<ImageData> {
-        // A clone of the store's own `ImageData`: the same `Blob`, so this is
-        // one reference count and never a pixel copy, and every read of one
-        // source keeps the same `Blob::id()` for vello's atlas.
-        self.resolved.get(source).cloned()
     }
 }
 

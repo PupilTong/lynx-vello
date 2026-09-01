@@ -23,10 +23,10 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::render::image::{FrameImages, is_renderable};
+use crate::render::image::is_renderable;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size};
-use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageSampler};
+use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageData, ImageSampler};
 use crate::visual::{AnimationSample, ScrollSlot};
 
 /// The compose-time coordinate context one op or fragment rides: the scroll
@@ -93,25 +93,35 @@ pub(crate) struct ImageDraw {
     pub(crate) area: ImageArea,
 }
 
-/// Encodes one image draw, resolving its pixels through `pixels`.
+/// Encodes draw `index`, if its pixels resolved.
+///
+/// A draw whose source had no pixels is simply absent from the table's
+/// answer, and draws nothing — the same one-frame gap a not-yet-loaded image
+/// already produces.
+fn encode_draw(
+    scene: &mut Scene,
+    draws: &[ImageDraw],
+    images: &[Option<ImageData>],
+    index: u32,
+    outer: Affine,
+) {
+    let index = index as usize;
+    if let Some(Some(data)) = images.get(index) {
+        encode_image(scene, &draws[index], outer, data);
+    }
+}
+
+/// Encodes one image draw against pixels already resolved for it.
 ///
 /// A read that misses draws nothing, which is the same one-frame gap a
 /// not-yet-loaded image already produces. `outer` is the device chain
 /// transform when replaying, or the plane translation when baking.
-pub(crate) fn encode_image(
-    scene: &mut Scene,
-    draw: &ImageDraw,
-    outer: Affine,
-    pixels: &dyn FrameImages,
-) {
-    let Some(data) = pixels.read(&draw.image) else {
-        return;
-    };
+pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, data: &ImageData) {
     // A bitmap vello cannot place draws as nothing — the same one-frame gap a
     // not-yet-loaded image already produces. This is the only place the bound
     // is enforced, because it is the only place the bitmap is known, and the
     // only place the extent is divided by it.
-    if !is_renderable(&data) {
+    if !is_renderable(data) {
         return;
     }
     let transform = outer * draw.transform;
@@ -121,7 +131,7 @@ pub(crate) fn encode_image(
             draw.extent.height / f64::from(data.height),
         );
     let brush = BrushRef::Image(ImageBrush {
-        image: &data,
+        image: data,
         sampler: draw.sampler,
     });
     match &draw.area {
@@ -359,7 +369,7 @@ pub(crate) fn replay(
     fragments: &[Scene],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
-    pixels: &dyn FrameImages,
+    images: &[Option<ImageData>],
     slots: &[ScrollSlot],
     samples: &[AnimationSample],
     ratio: f32,
@@ -371,7 +381,7 @@ pub(crate) fn replay(
         fragments,
         program,
         image_draws,
-        pixels,
+        images,
         samples,
         &device_transform,
     );
@@ -410,7 +420,7 @@ pub(crate) fn bake_ops(
     fragments: &[Scene],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
-    pixels: &dyn FrameImages,
+    images: &[Option<ImageData>],
     head: u32,
     translate: Affine,
 ) {
@@ -455,7 +465,7 @@ pub(crate) fn bake_ops(
                 }
             }
             ComposeOp::Image { index, .. } => {
-                encode_image(scene, &image_draws[*index as usize], translate, pixels);
+                encode_draw(scene, image_draws, images, *index, translate);
             }
             ComposeOp::Pop => {
                 if kept.pop().expect("a plane run's pushes balance its pops") {
@@ -479,7 +489,7 @@ pub(crate) fn replay_ops(
     fragments: &[Scene],
     program: &[ComposeOp],
     image_draws: &[ImageDraw],
-    pixels: &dyn FrameImages,
+    images: &[Option<ImageData>],
     samples: &[AnimationSample],
     device_transform: &impl Fn(ComposeChain) -> Affine,
 ) {
@@ -519,12 +529,7 @@ pub(crate) fn replay_ops(
                 }
             }
             ComposeOp::Image { index, chain } => {
-                encode_image(
-                    scene,
-                    &image_draws[*index as usize],
-                    device_transform(*chain),
-                    pixels,
-                );
+                encode_draw(scene, image_draws, images, *index, device_transform(*chain));
             }
             ComposeOp::Pop => scene.pop_layer(),
         }

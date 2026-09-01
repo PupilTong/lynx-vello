@@ -86,6 +86,41 @@ pub trait ResourceFetcher: dom::FrameImages {
     fn retain_images(&self, _frame: &[Arc<str>]) {}
 }
 
+/// A shared handle serves whatever it points at.
+///
+/// The painter's handle on a resource system is an `Rc`, because nothing
+/// about it crosses a thread; an embedder whose registry outlives the view
+/// keeps its own `Arc`. This is what joins the two without a per-embedder
+/// forwarding wrapper.
+impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Arc<T> {
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        (**self).supports_capability(capability)
+    }
+
+    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+        (**self).resolve_locator(request)
+    }
+
+    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        (**self).fetch_resource(request)
+    }
+
+    fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> ResourceFuture<'_, StyleSheetResponse> {
+        (**self).fetch_style_sheet(request)
+    }
+
+    fn request_image(&self, source: &str) {
+        (**self).request_image(source);
+    }
+
+    fn retain_images(&self, frame: &[Arc<str>]) {
+        (**self).retain_images(frame);
+    }
+}
+
 /// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as
 /// [`StyleSheetPayload::Text`] — the body of the default
 /// [`ResourceFetcher::fetch_style_sheet`].

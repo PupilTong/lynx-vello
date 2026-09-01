@@ -616,9 +616,9 @@ pub(crate) enum ToMain {
     Refill {
         offsets: Vec<(NodeId, Vector2D<f32>)>,
     },
-    /// The store's reports: id bindings and completed or failed loads. No
-    /// variant can carry pixels, which is what makes "`ImageData` never
-    /// crosses a channel" a property of the type.
+    /// The host's image reports: completed or failed loads. No variant can
+    /// carry pixels, which is what makes "`ImageData` never crosses a
+    /// channel" a property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
     /// One startup source, answering exactly one [`ToPainter::FetchSource`].
     ///

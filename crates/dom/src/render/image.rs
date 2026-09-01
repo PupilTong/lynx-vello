@@ -104,6 +104,14 @@ pub trait FrameImages {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoImages;
 
+/// A shared handle serves whatever it points at, so an embedder holding its
+/// resource system behind an `Arc` needs no forwarding wrapper of its own.
+impl<T: FrameImages + ?Sized> FrameImages for std::sync::Arc<T> {
+    fn read(&self, source: &str) -> Option<ImageData> {
+        (**self).read(source)
+    }
+}
+
 impl FrameImages for NoImages {
     fn read(&self, _source: &str) -> Option<ImageData> {
         None
@@ -222,7 +230,16 @@ impl ImageRegistry {
             // First sighting: ask for it. Taking `&self` is what lets this run
             // inside the walk, the only place that knows which sources a frame
             // actually needs.
-            self.wanted.borrow_mut().push(Arc::from(source));
+            //
+            // Deduplicated here rather than on the way out: a list of 200 rows
+            // sharing one `url(...)` resolves it 200 times on its first
+            // commit, and allocating a copy of the URL per *draw* to request
+            // one image is the wrong shape on the most latency-sensitive
+            // commit there is. The list is tiny, so the scan beats a set.
+            let mut wanted = self.wanted.borrow_mut();
+            if !wanted.iter().any(|pending| &**pending == source) {
+                wanted.push(Arc::from(source));
+            }
             return None;
         };
         match entry.state {
@@ -249,15 +266,14 @@ impl ImageRegistry {
         }
     }
 
-    /// The sources discovered since the last drain, deduplicated, for the
-    /// painter to ask the host for.
+    /// The sources discovered since the last drain, for the painter to ask
+    /// the host for. Already deduplicated — `resolve` never queues one twice.
     ///
     /// Recording each one here is what makes a source asked-for exactly once:
-    /// its entry exists from this moment, so `resolve` never queues it again.
+    /// its entry exists from this moment, so `resolve` finds it and never
+    /// queues it again.
     pub(crate) fn take_wanted(&mut self) -> Vec<Arc<str>> {
-        let mut wanted = std::mem::take(self.wanted.get_mut());
-        wanted.sort_unstable();
-        wanted.dedup();
+        let wanted = std::mem::take(self.wanted.get_mut());
         for source in &wanted {
             self.entries.entry(Arc::clone(source)).or_default();
         }

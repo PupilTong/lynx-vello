@@ -206,13 +206,9 @@ pub fn rgba8(width: u32, height: u32, pixels: Vec<u8>) -> ImageData {
     }
 }
 
-/// Lets a test keep an `Arc` handle on the store while the painter owns its
-/// own reference to the same state: the painter's handle is an `Rc`, because
-/// a store never leaves the painter thread and needs neither `Send` nor
-/// `Sync`, but a test still has to publish images and read the retain log.
-/// Drives one round of the document-to-store image protocol, the same loop a
+/// Drives one round of the document-to-host image protocol, the same loop a
 /// painter runs: request every source the last walk discovered, then apply
-/// whatever the store reported.
+/// whatever the host reported.
 ///
 /// Returns whether anything moved, so a caller can loop to quiescence.
 pub fn pump_images<T>(document: &mut Document<T>, store: &TestImages) -> bool {

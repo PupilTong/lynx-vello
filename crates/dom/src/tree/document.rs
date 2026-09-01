@@ -54,11 +54,9 @@ pub struct Document<T> {
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::Painter>,
-    /// The embedder's decoded-image owner, read by the paint walk and by the
-    /// layer that drives loads. A document starts with the store that is
-    /// resident in nothing, so painting a page with images before an embedder
-    /// installs one skips them rather than failing.
-    /// The document's image name table. Holds no pixels and no store.
+    /// The document's image name table. Holds no pixels and no host handle:
+    /// a page whose images have not loaded paints without them rather than
+    /// failing.
     pub(crate) images: crate::render::image::ImageRegistry,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,

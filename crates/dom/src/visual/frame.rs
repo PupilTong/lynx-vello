@@ -23,6 +23,7 @@ use crate::paint::compose::{self, ComposeOp};
 use crate::scroll::ScrollAxes;
 use crate::vello::Scene;
 use crate::vello::kurbo::Affine;
+use crate::vello::peniko::ImageData;
 
 /// One scroll container in the committed frame, linked to the nearest scroll
 /// container on its containing-block chain.
@@ -207,7 +208,7 @@ impl CommittedFrame {
     /// # Panics
     ///
     /// If the frame has no plan or `index` is out of range.
-    pub fn bake_plane(&self, index: usize, scene: &mut Scene, pixels: &dyn crate::FrameImages) {
+    pub fn bake_plane(&self, index: usize, scene: &mut Scene, images: &[Option<ImageData>]) {
         let plan = self
             .composite_plan()
             .expect("bake_plane reads the frame's plan");
@@ -219,7 +220,7 @@ impl CommittedFrame {
             &self.presentation.fragments,
             &self.presentation.program[ops],
             &self.presentation.image_draws,
-            pixels,
+            images,
             spec.slot,
             translate,
         );
@@ -240,7 +241,7 @@ impl CommittedFrame {
         &self,
         scene: &mut Scene,
         plane_images: &[crate::vello::peniko::ImageData],
-        pixels: &dyn crate::FrameImages,
+        images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -264,7 +265,7 @@ impl CommittedFrame {
                         &self.presentation.fragments,
                         &self.presentation.program[ops],
                         &self.presentation.image_draws,
-                        pixels,
+                        images,
                         &samples,
                         &device_transform,
                     );
@@ -326,7 +327,7 @@ impl CommittedFrame {
     pub fn compose_into(
         &self,
         scene: &mut Scene,
-        pixels: &dyn crate::FrameImages,
+        images: &[Option<ImageData>],
         offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
         animation_now: Option<f64>,
     ) {
@@ -336,7 +337,7 @@ impl CommittedFrame {
             &self.presentation.fragments,
             &self.presentation.program,
             &self.presentation.image_draws,
-            pixels,
+            images,
             self.order.slots(),
             &samples,
             self.device_pixel_ratio,
@@ -344,21 +345,43 @@ impl CommittedFrame {
         );
     }
 
-    /// Collects the distinct images this frame draws into `out`, in
-    /// first-draw order, replacing whatever `out` held.
+    /// Reads this frame's pixels once, into a table the compose path indexes
+    /// by draw rather than by name.
     ///
-    /// This is the frame's whole image working set: what a composer must
-    /// resolve before drawing, and the residency hint the store is given.
-    /// Linear in the program, which is why the caller keeps the buffer.
-    pub fn collect_images(&self, out: &mut Vec<std::sync::Arc<str>>) {
-        out.clear();
-        for op in &self.presentation.program {
-            if let ComposeOp::Image { index, .. } = op {
-                let image = &self.presentation.image_draws[*index as usize].image;
-                if !out.contains(image) {
-                    out.push(std::sync::Arc::clone(image));
-                }
-            }
+    /// Composition replays the program on every frame that scrolls or
+    /// animates, so resolving by source string there would hash a URL and
+    /// clone an `ImageData` per draw per frame to re-learn an answer that
+    /// only changes when the commit does. This runs once per commit instead,
+    /// and encoding a draw becomes a slice index.
+    ///
+    /// `images` ends up with one entry per image draw, in draw order.
+    /// `sources` receives each distinct image once, in first-draw order —
+    /// the frame's working set, and the residency hint a host is given.
+    pub fn resolve_images(
+        &self,
+        pixels: &dyn crate::FrameImages,
+        images: &mut Vec<Option<ImageData>>,
+        sources: &mut Vec<std::sync::Arc<str>>,
+    ) {
+        images.clear();
+        sources.clear();
+        // One entry per distinct source, parallel to `sources`. A frame draws
+        // few distinct images however many draws it has, so this scan is over
+        // a handful of pointers.
+        let mut distinct: Vec<Option<ImageData>> = Vec::new();
+        for draw in &self.presentation.image_draws {
+            // Every draw of one source shares one allocation — the registry
+            // hands back its own key — so pointer identity is the whole
+            // dedup, and no URL is ever compared.
+            let seen = sources
+                .iter()
+                .position(|source| std::sync::Arc::ptr_eq(source, &draw.image));
+            let index = seen.unwrap_or_else(|| {
+                sources.push(std::sync::Arc::clone(&draw.image));
+                distinct.push(pixels.read(&draw.image));
+                sources.len() - 1
+            });
+            images.push(distinct[index].clone());
         }
     }
 

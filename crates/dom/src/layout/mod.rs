@@ -54,6 +54,21 @@ impl<T: Sync> Document<T> {
     }
 }
 
+/// The intrinsic size a completed image load reports, as layout wants it.
+///
+/// One conversion for the two places a load can reach layout — the report
+/// itself, and a source set on a node that had already loaded.
+#[must_use]
+pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an intrinsic size large enough to lose precision here is far past anything \
+                  layout can present, and rounds harmlessly. It is deliberately not bounded: \
+                  the atlas limit applies to the decoded bitmap, not to this."
+    )]
+    NaturalSize::from_size(hughie::geometry::Size::new(width as f32, height as f32))
+}
+
 impl<T> Document<T> {
     /// Updates intrinsic dimensions and invalidates affected layout.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
@@ -119,15 +134,7 @@ impl<T> Document<T> {
             // so it lays out correctly in the commit that first draws it
             // rather than a frame later.
             if let Some((width, height)) = self.images.dimensions_of(source) {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "both axes are bounded to 8192 when the load is recorded"
-                )]
-                let natural = crate::layout::NaturalSize::from_size(hughie::geometry::Size::new(
-                    width as f32,
-                    height as f32,
-                ));
-                self.set_natural_size(id, natural);
+                self.set_natural_size(id, natural_size(width, height));
             }
         }
         if became_replaced {

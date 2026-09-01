@@ -479,8 +479,10 @@ impl<T> Document<T> {
             .committed_frame()
             .expect("Document::scene reads the committed frame: render first");
         let composed = frame.scene().is_none().then(|| {
+            let (mut images, mut sources) = (Vec::new(), Vec::new());
+            frame.resolve_images(pixels, &mut images, &mut sources);
             let mut scene = crate::vello::Scene::new();
-            frame.compose_into(&mut scene, pixels, &|_| None, None);
+            frame.compose_into(&mut scene, &images, &|_| None, None);
             Box::new(scene)
         });
         SceneRef { frame, composed }
@@ -577,8 +579,8 @@ impl<T> Document<T> {
         self.images.take_wanted()
     }
 
-    /// Applies the painter's image reports: binds ids to sources, records
-    /// completed loads with their intrinsic dimensions, and marks failures.
+    /// Applies the host's image reports: records completed loads with their
+    /// intrinsic dimensions, and marks failures.
     ///
     /// A load that lands on replaced nodes sets their natural size in the
     /// same call, so the element resizes in the commit that first draws it.
@@ -592,15 +594,7 @@ impl<T> Document<T> {
             };
             changed = true;
             if let ImageEvent::Loaded { width, height, .. } = event {
-                #[expect(
-                    clippy::cast_precision_loss,
-                    reason = "an intrinsic size large enough to round here is far past \
-                              anything layout can present, and rounds harmlessly"
-                )]
-                let natural = crate::layout::NaturalSize::from_size(hughie::geometry::Size::new(
-                    *width as f32,
-                    *height as f32,
-                ));
+                let natural = crate::layout::natural_size(*width, *height);
                 for node in nodes {
                     self.set_natural_size(node, natural);
                 }

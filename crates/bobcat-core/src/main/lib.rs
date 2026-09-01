@@ -43,10 +43,9 @@ pub(crate) struct EntryModule {
 }
 
 /// Everything `bobcat-main` needs before it can enter its command loop.
-/// What actually crosses to `bobcat-main`.
 ///
-/// Deliberately *not* a [`ViewSources`]: that carries the embedder's image
-/// store factory, which belongs to the painter. Destructuring here rather
+/// Deliberately *not* a [`ViewSources`]: that carries the embedder's resource
+/// factory, which belongs to the painter. Destructuring here rather
 /// than taking the factory out at the call site is what makes "the main
 /// thread never sees a store" a property of the type — this struct has no
 /// field that could hold one, so it is `Send` for the same reason.
@@ -342,13 +341,19 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
 /// order cannot reorder the cascade.
 struct PendingSources {
     sheets: Vec<Option<StyleSheetSource>>,
-    /// How far the ready prefix has been mounted.
+    /// How far the ready prefix has been mounted — also the cascade cursor.
     mounted: usize,
     entry: Option<EntryModule>,
-    outstanding: usize,
 }
 
 impl PendingSources {
+    /// Whether every source has arrived. `mount_ready_prefix` runs after each
+    /// placement, so this is the fact itself rather than a counter kept
+    /// alongside it.
+    fn complete(&self) -> bool {
+        self.mounted == self.sheets.len() && self.entry.is_some()
+    }
+
     fn place(&mut self, slot: SourceSlot, source: LoadedSource) {
         match (slot, source) {
             (SourceSlot::StyleSheet(index), LoadedSource::StyleSheet(sheet)) => {
@@ -417,7 +422,6 @@ fn boot<R: EventRequester>(
         sheets: (0..style_sheets.len()).map(|_| None).collect(),
         mounted: 0,
         entry: None,
-        outstanding: style_sheets.len() + 1,
     };
     for (index, specifier) in style_sheets.into_iter().enumerate() {
         notify.send(ToPainter::FetchSource {
@@ -430,7 +434,7 @@ fn boot<R: EventRequester>(
         specifier: entry,
     });
 
-    while pending.outstanding > 0 {
+    while !pending.complete() {
         // The one park, satisfied by *any* message rather than a particular
         // one — which is what keeps this from being half of a wait cycle.
         let Ok(command) = commands.recv() else {
@@ -439,7 +443,6 @@ fn boot<R: EventRequester>(
         match command {
             ToMain::Shutdown => return None,
             ToMain::SourceLoaded { slot, source } => {
-                pending.outstanding -= 1;
                 // A failed fetch never reaches here: the painter holds that
                 // failure and returns from construction with it.
                 pending.place(slot, source?);

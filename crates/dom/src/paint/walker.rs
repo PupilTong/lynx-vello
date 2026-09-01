@@ -119,7 +119,9 @@ impl WalkSink<'_> {
     pub(super) fn image(&mut self, chain: ComposeChain, draw: crate::paint::compose::ImageDraw) {
         match self {
             Self::Monolithic(scene, pixels) => {
-                crate::paint::compose::encode_image(scene, &draw, Affine::IDENTITY, *pixels);
+                if let Some(data) = pixels.read(&draw.image) {
+                    crate::paint::compose::encode_image(scene, &draw, Affine::IDENTITY, &data);
+                }
             }
             Self::Compose(assembly) => assembly.push_image(chain, draw),
         }

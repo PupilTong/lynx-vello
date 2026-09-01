@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
     ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
-    RetryAdvice, StyleSheetResponse,
+    RetryAdvice,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
@@ -277,40 +277,6 @@ impl bobcat_core::FrameImages for BrowserResources {
     }
 }
 
-/// The per-view handle on the Worker's one resource registry.
-///
-/// The registry outlives every page this Worker shows, so it stays an `Arc`;
-/// the painter's handle is an `Rc`, because a fetcher never leaves the thread
-/// that owns the view.
-struct ViewResources(Arc<BrowserResources>);
-
-impl bobcat_core::FrameImages for ViewResources {
-    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.0.read(source)
-    }
-}
-
-impl ResourceFetcher for ViewResources {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.0.supports_capability(capability)
-    }
-
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-        self.0.resolve_locator(request)
-    }
-
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
-        self.0.fetch_resource(request)
-    }
-
-    fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
-        self.0.fetch_style_sheet(request)
-    }
-}
-
 /// A complete browser embedder, permanently owned by the explicit Render
 /// Worker that constructs it. Its canvas, Wasm instance, resource provider,
 /// and Stylo pool outlive every page it shows; each document, element tree,
@@ -445,7 +411,7 @@ impl BobcatRenderer {
             ..ViewSources::new(
                 {
                     let resources = Arc::clone(&self.resources);
-                    Box::new(move |_sink| Rc::new(ViewResources(resources)))
+                    Box::new(move |_sink| Rc::new(resources))
                 },
                 entry_url,
             )
