@@ -72,6 +72,97 @@ pub struct FrameSize {
     pub height: u32,
 }
 
+impl FrameSize {
+    /// The physical target a CSS viewport at this device scale needs.
+    ///
+    /// The same computation [`LynxView::new`] and [`LynxView::resize`] make,
+    /// exposed because a host that owns the surface's backing store — a
+    /// browser canvas — has to size it before it hands the view a target.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Viewport`] if the metrics are not finite and positive,
+    /// or if the physical target would exceed 16384 pixels on either axis.
+    pub fn for_viewport(
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<Self, EngineError> {
+        if !width.is_finite()
+            || !height.is_finite()
+            || !device_pixel_ratio.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+            || device_pixel_ratio <= 0.0
+        {
+            return Err(EngineError::Viewport(format!(
+                "CSS size and device-pixel ratio must be finite and positive, got \
+                 {width}\u{d7}{height} at {device_pixel_ratio}\u{d7}"
+            )));
+        }
+
+        let physical_width = f64::from(width) * f64::from(device_pixel_ratio);
+        let physical_height = f64::from(height) * f64::from(device_pixel_ratio);
+        if physical_width > f64::from(MAX_RENDER_DIMENSION)
+            || physical_height > f64::from(MAX_RENDER_DIMENSION)
+        {
+            return Err(EngineError::Viewport(format!(
+                "the physical render target may not exceed \
+                 {MAX_RENDER_DIMENSION}\u{d7}{MAX_RENDER_DIMENSION}, got \
+                 {physical_width:.0}\u{d7}{physical_height:.0}"
+            )));
+        }
+
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "finite positive values were bounded to 16384 immediately above"
+        )]
+        Ok(Self {
+            width: physical_width.round().max(1.0) as u32,
+            height: physical_height.round().max(1.0) as u32,
+        })
+    }
+}
+
+/// Where a view's pixels go, named once and kept for the view's whole life.
+///
+/// There is no attaching a target later: [`LynxView::new`] builds it, on the
+/// thread that will draw into it, before the view exists.
+pub enum DrawTarget {
+    /// A window's presentation stack, built from a `'static` surface target —
+    /// a shared window handle or an owned canvas.
+    Window(WindowTarget),
+    /// A texture the view owns and nothing displays. [`LynxView::tick`]
+    /// renders into it and [`LynxView::capture`] reads it back.
+    ///
+    /// Native only in practice: building one blocks the calling thread on a
+    /// device request, and in a browser that thread is the one whose event
+    /// loop would answer it — so a Wasm view is refused this target at
+    /// construction rather than hanging on it.
+    Offscreen,
+}
+
+impl DrawTarget {
+    /// A window target, from anything a surface can be built out of.
+    #[must_use]
+    pub fn window(target: impl Into<WindowTarget>) -> Self {
+        Self::Window(target.into())
+    }
+}
+
+// Hand-written: a `SurfaceTarget` carries a window handle or a canvas, and
+// neither is `Debug`. Which target this is, is the whole of what a formatter
+// can honestly say.
+impl fmt::Debug for DrawTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Window(_) => "DrawTarget::Window",
+            Self::Offscreen => "DrawTarget::Offscreen",
+        })
+    }
+}
+
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
 /// The commit id and scroll-intent generation composing one drawn frame.
@@ -90,10 +181,8 @@ pub enum EngineError {
     Thread { name: &'static str, message: String },
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
-    #[error("the engine has no draw target attached")]
-    NoDrawTarget,
-    #[error("the document is busy in a script batch; retry the repaint request")]
-    ResourceUpdateBusy,
+    #[error("this view presents into a window; `tick` advances an offscreen view")]
+    NotOffscreen,
 }
 
 /// A construction failure. No [`LynxView`] exists for any of these errors:
@@ -216,9 +305,10 @@ impl fmt::Debug for ViewSources {
 /// thread behind it.
 ///
 /// The view stays on the thread that built it, and that thread is where it
-/// paints: it owns the draw targets, the gesture router, the scroll intents
-/// and the composition outright, so an embedder chooses the painting thread
-/// by choosing where it calls [`LynxView::new`]. Nothing here is a queue and
+/// paints: it owns its one draw target, the gesture router, the scroll
+/// intents and the composition outright, so an embedder chooses the painting
+/// thread by choosing where it calls [`LynxView::new`]. The target is chosen
+/// there too, and never afterwards. Nothing here is a queue and
 /// nothing here draws by itself — every call applies immediately, and the
 /// frame those calls owe is produced by the next [`LynxView::pump`], which
 /// is also the turn that hands back what the realm had to say. A host parked
@@ -256,13 +346,20 @@ impl Drop for LynxView {
 }
 
 impl LynxView {
-    /// Starts `bobcat-main` and waits asynchronously until it has created its
+    /// Starts `bobcat-main`, builds the draw target on the calling thread,
+    /// and waits asynchronously until the main thread has created its
     /// document, loaded and mounted every source, and booted the entry
-    /// module. The painter is built here, on the calling thread, which owns
-    /// it from now on.
+    /// module.
+    ///
+    /// The target is an argument rather than something attached afterwards:
+    /// a view that exists has somewhere to put a frame, so nothing has to
+    /// describe — or handle — a view that has run but cannot draw. Its GPU
+    /// objects are built while `bobcat-main` is already fetching, and the
+    /// thread that builds them is the thread that owns them, which on macOS
+    /// is the only thread allowed to create a surface at all.
     ///
     /// Dropping this future before it resolves cancels pending resource work
-    /// or stops startup before `QuickJS` begins, releases the painter, and
+    /// or stops startup before `QuickJS` begins, releases the target, and
     /// joins `bobcat-main`. If synchronous startup JavaScript is already
     /// running, teardown waits for that work to return before the main thread
     /// can be joined.
@@ -272,9 +369,10 @@ impl LynxView {
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
+        target: DrawTarget,
         sources: ViewSources,
     ) -> Result<Self, LynxViewError> {
-        let frame_size = frame_size(width, height, device_pixel_ratio)?;
+        let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (started_sender, started) = oneshot::channel();
         let (painter_link, main_link) = main_link(event_requester);
@@ -284,10 +382,11 @@ impl LynxView {
             started_sender,
         )?;
         let mut startup = ViewStartup {
-            painter: Some(Painter::new(viewport, frame_size, painter_link)),
+            painter: None,
             main: Some(main),
             started: Some(started),
         };
+        startup.painter = Some(Painter::new(viewport, frame_size, painter_link, target).await?);
         let success = startup.wait().await?;
         Ok(startup.finish(success))
     }
@@ -366,29 +465,16 @@ impl LynxView {
         self.painter.frame_size()
     }
 
-    /// Lends the view a draw target.
-    ///
-    /// The presentation stack is built on this thread, the one that owns the
-    /// window, because creating a surface from a window handle is a
-    /// main-thread-only call on macOS — and it is also the thread that will
-    /// draw into it.
-    ///
-    /// It is configured at the view's own frame size rather than one the
-    /// caller names, so the first draw cannot find a surface built for a
-    /// different target than the one it is about to paint.
-    pub async fn attach_target(
-        &mut self,
-        target: impl Into<WindowTarget>,
-    ) -> Result<(), EngineError> {
-        self.painter.attach_target(target).await
-    }
-
-    /// Gives the view a windowless GPU target of its own.
-    pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
-        self.painter.attach_offscreen()
-    }
-
     /// Advances an offscreen view by one frame, answering whether it drew.
+    ///
+    /// The one call that blocks this thread on `bobcat-main`, which is why
+    /// only an offscreen view has it — and why a browser view, which cannot
+    /// have an offscreen target at all, can never reach it.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::NotOffscreen`] if this view presents into a window —
+    /// its frames come from [`Self::pump`], on the host's own clock.
     pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
         self.painter.tick(force)
     }
@@ -529,45 +615,4 @@ pub(crate) fn main_link<R: EventRequester>(requester: Arc<R>) -> (PainterLink, M
         ToPainterSender::new(notifications, frames, requester),
     );
     (painter, main)
-}
-
-pub(crate) fn frame_size(
-    width: f32,
-    height: f32,
-    device_pixel_ratio: f32,
-) -> Result<FrameSize, EngineError> {
-    if !width.is_finite()
-        || !height.is_finite()
-        || !device_pixel_ratio.is_finite()
-        || width <= 0.0
-        || height <= 0.0
-        || device_pixel_ratio <= 0.0
-    {
-        return Err(EngineError::Viewport(format!(
-            "CSS size and device-pixel ratio must be finite and positive, got \
-             {width}\u{d7}{height} at {device_pixel_ratio}\u{d7}"
-        )));
-    }
-
-    let physical_width = f64::from(width) * f64::from(device_pixel_ratio);
-    let physical_height = f64::from(height) * f64::from(device_pixel_ratio);
-    if physical_width > f64::from(MAX_RENDER_DIMENSION)
-        || physical_height > f64::from(MAX_RENDER_DIMENSION)
-    {
-        return Err(EngineError::Viewport(format!(
-            "the physical render target may not exceed \
-             {MAX_RENDER_DIMENSION}\u{d7}{MAX_RENDER_DIMENSION}, got \
-             {physical_width:.0}\u{d7}{physical_height:.0}"
-        )));
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "finite positive values were bounded to 16384 immediately above"
-    )]
-    Ok(FrameSize {
-        width: physical_width.round().max(1.0) as u32,
-        height: physical_height.round().max(1.0) as u32,
-    })
 }

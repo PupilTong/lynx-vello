@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
-    PreparsedStyleSheet, ViewSources,
+    DrawTarget, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedKeyframe,
+    PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -86,6 +86,7 @@ async fn booted() -> LynxView {
         32.0,
         24.0,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
             ..ViewSources::new(fetcher, SCRIPT_URL)
@@ -93,8 +94,6 @@ async fn booted() -> LynxView {
     )
     .await
     .expect("view");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
     wait_for_script(&mut view).expect("script execution");
     view
 }

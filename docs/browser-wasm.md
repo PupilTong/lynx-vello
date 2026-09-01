@@ -31,8 +31,10 @@ limited to canvas creation with `PageConfig`, URL-based page loads, font and
 default-family registration, resize, error observation, disposal, and
 automatic pointer forwarding from the attached HTML canvas.
 
-The Render Worker calls `configure_wasm_workers` once, then builds a `LynxView`
-and attaches the canvas on each `load`. That core API configures the worker
+The Render Worker calls `configure_wasm_workers` once, then on each `load`
+sizes its `OffscreenCanvas` to `FrameSize::for_viewport` and builds a
+`LynxView` over it — the canvas is a construction argument, because the view
+builds its surface before it exists. That core API configures the worker
 bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured

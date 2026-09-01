@@ -14,8 +14,10 @@ capabilities and OS facts:
   generic over it and the Lynx main thread holds it, so the wake is a direct
   call; `NoWakeup` is the implementation for a host with no event loop to
   wake;
-- a draw target: anything convertible into a `WindowTarget`, which is a
-  `'static` surface target, so a shared window handle rather than a borrow;
+- a `DrawTarget`, at construction: `DrawTarget::window(...)` over anything
+  convertible into a `WindowTarget` — a `'static` surface target, so a shared
+  window handle rather than a borrow — or `DrawTarget::Offscreen` for a
+  windowless GPU target. There is no attaching one later;
 - viewport/device metrics and normalized input events;
 - platform initialization, worker bootstrap, and file/network IO.
 
@@ -144,9 +146,9 @@ its Render Worker after fetching one XML URL. Neither embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 
-`LynxView::new` validates the viewport, creates the one link, builds the
-painter on the calling thread, starts `bobcat-main`, and asynchronously
-awaits one startup result.
+`LynxView::new` validates the viewport, creates the one link, starts
+`bobcat-main`, builds the painter and the `DrawTarget` it was given on the
+calling thread, and asynchronously awaits one startup result.
 `bobcat-main` creates the fresh document itself, registers fonts and the image
 store, fetches each author stylesheet through the `ResourceFetcher` owned by
 `ViewSources`, mounts those sheets in cascade order, fetches the UTF-8 entry
@@ -176,8 +178,8 @@ materializes.
 
 ## Public and private boundaries
 
-The public facade is `LynxView`. It applies input, resize, occlusion, target
-attachment, offscreen ticks, capture and image loads, and its `pump` is the
+The public facade is `LynxView`. It applies input, resize, occlusion,
+offscreen ticks, capture and image loads, and its `pump` is the
 view's turn: it draws the frame the view owes and drains the lifecycle events
 that turn produced. It exposes no tree getter, document getter, renderer
 getter, script-realm handle, decomposition method, or way to mount a
@@ -354,9 +356,12 @@ the thread that called LynxView::new (AppKit main, or a Render Worker)
                       style → layout → build → encode
 ```
 
-The surface is built on that thread and stays there, because `create_surface`
-from a window handle panics off the macOS main thread — and because the same
-thread is the one that will acquire, render and present into it. A frame's
+The surface is built on that thread, during construction, and stays there:
+`create_surface` from a window handle panics off the macOS main thread, and
+the same thread is the one that will acquire, render and present into it. A
+view is therefore never in a state where it has run but has nowhere to put a
+frame — the target is an argument to `new`, and there is no attaching one
+afterwards. A frame's
 vsync wait therefore lands inside the embedder's own turn, which is why the
 embedder draws where a wait for the display is acceptable rather than inside
 every input relay. Nothing about this differs by platform any more: the
@@ -509,9 +514,10 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `LynxView::new` validates the metrics, creates the link, builds the
-   painter on the calling thread, starts `bobcat-main`, then awaits a startup
-   oneshot.
+1. `LynxView::new` validates the metrics, creates the link, starts
+   `bobcat-main`, and builds the painter — including the `DrawTarget` the
+   embedder named, whose GPU objects come up while the main thread is already
+   fetching — on the calling thread, then awaits a startup oneshot.
 2. `bobcat-main` creates the private document from `PageConfig` and the device
    metrics, registers fonts and the image store, and awaits the `ViewSources`'
    stylesheets and entry MTS source through its owned `ResourceFetcher`.

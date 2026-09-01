@@ -269,11 +269,17 @@ useful signal for currently-compatible versions of those libraries.
   `OffscreenCanvas` cannot be transferred on again, so the Render Worker
   holds the view and each turn runs inside its `pump` — and now the only
   shape there is.
-  The draw target is `WindowTarget`, a `'static` surface target: a windowing
-  embedder passes a shared handle (`Arc<winit::Window>`), a browser an owned
-  canvas, both through the async `attach_target`, which builds the
-  presentation stack on the view's own thread and keeps it there.
-  `attach_offscreen` gives a view a windowless GPU target instead.
+  **The draw target is an argument to `new`, not something attached
+  afterwards**: `DrawTarget::window(...)` takes anything convertible into
+  `WindowTarget` — a `'static` surface target, so a windowing embedder passes
+  a shared handle (`Arc<winit::Window>`) and a browser an owned canvas — and
+  `DrawTarget::Offscreen` asks for a windowless GPU target instead. Either is
+  built inside `new`, on the calling thread, while `bobcat-main` is already
+  fetching; a view that exists therefore has somewhere to put a frame, and no
+  state, error, or sentence has to describe one that does not.
+  `FrameSize::for_viewport` exposes the physical size that construction will
+  compute, for a host that must size the surface's backing store — a canvas —
+  before it hands the target over.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
   and retains no pixel of its own: a host supplies an `ImageStore`
   (re-exported from `dom`) as its `ViewSources::image_store`, and the engine
@@ -552,10 +558,10 @@ useful signal for currently-compatible versions of those libraries.
   winit window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
-  (`dispatch_input`, `resize`, `draw`, `pump`, clock ticks in
+  (`dispatch_input`, `resize`, `pump`, clock ticks in
   headless mode); the engine owns the tree, commits, scheduling, and its
-  script and render threads. The `MacWindow` it borrows at attach time lends
-  the winit window as the draw target and nothing else: frames and lifecycle
+  script thread. The window it hands `LynxView::new` as a `DrawTarget` is the
+  draw target and nothing else: frames and lifecycle
   events alike wake the event loop through the injected `EventRequester`, and
   the turn that wakeup opens ends in `about_to_wait`, which draws — winit's
   `RedrawRequested` is not relayed at all. Drawing there rather than in the
@@ -567,8 +573,8 @@ useful signal for currently-compatible versions of those libraries.
   any resource or TLA boot failure as `CliError::StartView`; after successful
   construction it consumes the preserved `ScriptFinished` edge and any later
   `ScriptRunError` through `pump`. Headed
-  mode attaches the window as the draw target; headless mode attaches the
-  view's offscreen target and relays synthetic
+  mode names the window as that view's draw target; headless mode names
+  `DrawTarget::Offscreen` and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
   The CLI installs **no** `ImageStore`, so a page's `url(…)` layers and
   replaced content paint as nothing. Fetching and decoding images is embedder

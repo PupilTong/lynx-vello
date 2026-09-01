@@ -5,7 +5,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources,
+    DrawTarget, EngineError, FontBlob, ImageStore, LynxView, LynxViewError, NoWakeup, PageConfig,
+    ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -18,6 +19,7 @@ async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
         393.0,
         727.0,
         2.0,
+        DrawTarget::Offscreen,
         sources,
     )
     .await

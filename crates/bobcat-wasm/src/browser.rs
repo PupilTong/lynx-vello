@@ -17,8 +17,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig, ViewSources,
-    WindowTarget, configure_wasm_workers,
+    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
+    ViewSources, WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -33,7 +33,6 @@ extern "C" {
     fn console_error(value: &JsValue);
 }
 
-const MAX_RENDER_DIMENSION: f64 = 16_384.0;
 const MAX_STYLE_THREADS: u32 = 6;
 const POINTER_DEVICE_MOUSE: u8 = 0;
 const POINTER_DEVICE_TOUCH: u8 = 1;
@@ -341,7 +340,7 @@ impl BobcatRenderer {
         default_overflow_visible: bool,
         enable_css_selector: bool,
     ) -> Result<BobcatRenderer, JsValue> {
-        validate_metrics(width, height, device_pixel_ratio)?;
+        FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
@@ -419,12 +418,20 @@ impl BobcatRenderer {
             style_sheets: style_sheet_urls,
             ..ViewSources::new(self.resources.clone(), entry_url)
         };
+        // A canvas owns its own resolution — configuring a context does not
+        // set it — and the view builds its surface from this canvas during
+        // construction. So it is sized first, to the same physical target
+        // those metrics give the view.
+        let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
+            .map_err(js_error)?;
+        set_canvas_size(&self.canvas, frame_size);
         let built = LynxView::new(
             self.config,
             self.events.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
+            DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
             sources,
         )
         .await;
@@ -433,13 +440,11 @@ impl BobcatRenderer {
         // here keeps a Render Worker that loads page after page from growing a
         // registry of them.
         self.resources.clear();
-        let mut view = built.map_err(js_error)?;
-        set_canvas_size(&self.canvas, view.frame_size());
-        let target: WindowTarget = WindowTarget::OffscreenCanvas(self.canvas.clone());
-        view.attach_target(target).await.map_err(js_error)?;
-        self.view = Some(view);
-        // The first frame is owed to a target that did not exist when the
-        // boot commit was published, so this Worker owes itself the turn.
+        self.view = Some(built.map_err(js_error)?);
+        // Boot published its frame before this Worker took a turn, and a
+        // frame from below wakes through the same signal — but the wakeup it
+        // sent was consumed by the loop that was waiting on the *previous*
+        // page. This Worker therefore owes itself the first turn.
         self.events.request_event();
         Ok(())
     }
@@ -686,7 +691,7 @@ impl BobcatRenderer {
         device_pixel_ratio: f32,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
-        validate_metrics(width, height, device_pixel_ratio)?;
+        FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         self.width = width;
         self.height = height;
         self.device_pixel_ratio = device_pixel_ratio;
@@ -737,28 +742,6 @@ impl BobcatRenderer {
         } else {
             Ok(())
         }
-    }
-}
-
-fn validate_metrics(width: f32, height: f32, ratio: f32) -> Result<(), JsValue> {
-    let physical_width = f64::from(width) * f64::from(ratio);
-    let physical_height = f64::from(height) * f64::from(ratio);
-    if width.is_finite()
-        && height.is_finite()
-        && ratio.is_finite()
-        && width > 0.0
-        && height > 0.0
-        && ratio > 0.0
-        && physical_width <= MAX_RENDER_DIMENSION
-        && physical_height <= MAX_RENDER_DIMENSION
-    {
-        Ok(())
-    } else {
-        Err(js_error(format!(
-            "viewport metrics must be finite, positive, and no larger than \
-             {MAX_RENDER_DIMENSION:.0} physical pixels per axis; got \
-             {width}x{height} at {ratio}x"
-        )))
     }
 }
 

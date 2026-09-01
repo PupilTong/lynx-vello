@@ -21,12 +21,15 @@ fn booted(source: &str) -> Painter {
     let mut engine = Painter::start(
         document,
         crate::main::tree::Viewport::new(393.0, 727.0),
-        super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
+            .expect("the test viewport is valid"),
         Arc::new(super::NoWakeup),
         super::EntryModule {
             source: source.to_owned(),
             url: "app:///main.js".to_owned(),
         },
+        // This suite reads the document and the decisions, never pixels.
+        super::Output::None,
     )
     .expect("the test view starts");
 
@@ -607,7 +610,8 @@ fn booted_animated(animation_css: &str) -> Painter {
     let mut engine = Painter::start(
         document,
         crate::main::tree::Viewport::new(393.0, 727.0),
-        super::frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
+            .expect("the test viewport is valid"),
         Arc::new(super::NoWakeup),
         super::EntryModule {
             source: r"
@@ -622,6 +626,7 @@ fn booted_animated(animation_css: &str) -> Painter {
             .to_owned(),
             url: "app:///animated.js".to_owned(),
         },
+        super::Output::None,
     )
     .expect("the test view starts");
     let deadline = Instant::now() + Duration::from_secs(5);

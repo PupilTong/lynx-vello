@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{EngineEvent, EventRequester, LynxView};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -164,25 +164,25 @@ impl MacApplication {
             .expect("the program is consumed by the first window only");
         program.warn_about_compatibility_limits();
 
-        // One construction: the input's author CSS and its entry MTS module are
-        // this view's sources, so the first commit is already styled and the
-        // Lynx main thread is running before the window is attached.
-        let mut view = pollster::block_on(LynxView::new(
+        // One construction: the window this view draws into, the input's
+        // author CSS, and its entry MTS module are all arguments, so what
+        // comes back is a view whose first commit is already styled and whose
+        // surface already exists. The surface is built on this thread because
+        // `AppKit` allows it nowhere else — and this is also the thread that
+        // will draw into it, for the same reason.
+        let view = pollster::block_on(LynxView::new(
             program.config,
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
+            DrawTarget::window(Arc::clone(window)),
             program.sources(),
         ))
         .map_err(|source| CliError::StartView {
             input: program.input,
             source,
         })?;
-        // The surface is built here, on the thread `AppKit` requires for it,
-        // and this is also the thread that will draw into it: the view paints
-        // wherever it was constructed.
-        pollster::block_on(view.attach_target(Arc::clone(window)))?;
 
         self.view = Some(view);
         Ok(())

@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     HttpRequest, HttpResponse, ResolveRequest, ResolvedLocator, ResourceCapability,
     ResourceFetcher, ResourceFuture, ResourceRequest, ResourceResponse,
 };
-use bobcat_core::{EventRequester, LynxView, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 fn thread_name() -> String {
@@ -122,6 +122,7 @@ async fn resource_continuations_and_boot_stay_on_bobcat_main() {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         sources,
     )
     .await
@@ -223,6 +224,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources::new(fetcher, "main.js"),
     ));
 

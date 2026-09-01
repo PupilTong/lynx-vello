@@ -48,7 +48,7 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter, frame_size,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter,
     frame_slot,
 };
 #[cfg(test)]
@@ -61,6 +61,38 @@ const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// enough that a transient miss costs no visible frame, slow enough that a
 /// window the compositor has stopped serving does not cost a core.
 const SWAP_CHAIN_RETRY: Duration = Duration::from_millis(8);
+
+/// How long a host may sleep before it owes the view another turn, given
+/// what the last one answered. Split from the state it reads so the order
+/// can be pinned without a window.
+///
+/// **A swap chain that had nothing to give is asked first**, and that order
+/// is the whole point: it answers without waiting for vsync, so nothing
+/// paces it, and a running animation would otherwise say "come straight
+/// back" to every one of those empty acquires — a hidden window pegging a
+/// core for as long as its animation runs.
+///
+/// A running animation is next: the `AutoVsync` acquire inside the next draw
+/// is the pace, and taking the turn immediately is what keeps the frames
+/// coming. Anything else is the frame a `refresh` left owed, and `None` is
+/// nothing owed at all — park until something arrives.
+const fn next_turn_delay(
+    swap_chain_empty: bool,
+    animating: bool,
+    redraw_owed: bool,
+) -> Option<Duration> {
+    if swap_chain_empty {
+        return Some(SWAP_CHAIN_RETRY);
+    }
+    if animating {
+        return Some(Duration::ZERO);
+    }
+    if redraw_owed {
+        Some(SWAP_CHAIN_RETRY)
+    } else {
+        None
+    }
+}
 
 /// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
@@ -279,12 +311,56 @@ impl fmt::Debug for PainterLink {
     }
 }
 
-/// Where a view's pixels go: nowhere yet, an offscreen GPU target, or a
-/// window's presentation stack.
-enum Output {
+/// Where a view's pixels go: a window's presentation stack, or a texture the
+/// view owns and nothing displays. One of them exists before the view does,
+/// and it is the one the view has for its whole life.
+pub(super) enum Output {
+    /// A painter with nowhere to draw. Test-only, so a unit test that
+    /// exercises routing alone pays for no GPU device; production has
+    /// exactly the two targets an embedder can name.
+    #[cfg(test)]
     None,
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(
+            dead_code,
+            reason = "a browser view is refused this target at construction"
+        )
+    )]
     Offscreen(Box<Headless>),
     Window(Box<WindowGraphics>),
+}
+
+impl Output {
+    /// Builds the target an embedder named, on the thread that will draw into
+    /// it — the only thread macOS lets a surface be created from.
+    async fn build(target: DrawTarget, frame_size: FrameSize) -> Result<Self, EngineError> {
+        match target {
+            DrawTarget::Window(target) => Ok(Self::Window(Box::new(
+                WindowGraphics::new(target, frame_size).await?,
+            ))),
+            DrawTarget::Offscreen => Self::offscreen(),
+        }
+    }
+
+    /// A windowless GPU target.
+    ///
+    /// `Headless::new` blocks on a device request, and a browser Worker is
+    /// the thread whose event loop would have answered it — so rather than
+    /// hang, a Wasm view is told no.
+    fn offscreen() -> Result<Self, EngineError> {
+        #[cfg(target_arch = "wasm32")]
+        return Err(EngineError::Gpu(
+            "an offscreen target blocks the thread that builds it on a device \
+             request; a browser Worker is the thread that would answer it"
+                .to_owned(),
+        ));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
+            Ok(Self::Offscreen(Box::new(gpu)))
+        }
+    }
 }
 
 /// The painting half of a running view, on the thread that owns it.
@@ -292,6 +368,13 @@ enum Output {
 /// Kept on that thread by construction — the `Rc` marker makes the whole
 /// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
 /// that built the view is the only one that can ever draw for it.
+#[cfg_attr(
+    test,
+    allow(
+        clippy::struct_excessive_bools,
+        reason = "three of them ship; the fourth is the test-only detached flag"
+    )
+)]
 pub(crate) struct Painter {
     // Keep first: dropping the link closes the sole command sender, which
     // wakes the Lynx main thread before any state it may still refer to is
@@ -309,6 +392,10 @@ pub(crate) struct Painter {
     /// A draw target that failed once cannot be reached again: it is reported
     /// once, and nothing tries to paint it until another target arrives.
     render_failed: bool,
+    /// Whether the last acquire came back with no image. The swap chain
+    /// answers that without waiting for vsync, so it is the one frame the
+    /// painter owes that nothing else paces.
+    swap_chain_empty: bool,
     pub(super) gesture: GestureRouter,
     pub(super) clock: FrameClock,
     pub(super) scroll_intents: ScrollIntents,
@@ -579,8 +666,26 @@ fn route_published(
 
 impl Painter {
     /// Creates the painting owner over the link its view established before
-    /// the Lynx main thread began running.
-    pub(super) fn new(viewport: Viewport, frame_size: FrameSize, link: PainterLink) -> Self {
+    /// the Lynx main thread began running, with the draw target it will keep.
+    ///
+    /// The target is built here rather than handed over later: a view is
+    /// never in a state where it has run but has nowhere to put a frame.
+    pub(super) async fn new(
+        viewport: Viewport,
+        frame_size: FrameSize,
+        link: PainterLink,
+        target: DrawTarget,
+    ) -> Result<Self, EngineError> {
+        let output = Output::build(target, frame_size).await?;
+        Ok(Self::with_output(viewport, frame_size, link, output))
+    }
+
+    fn with_output(
+        viewport: Viewport,
+        frame_size: FrameSize,
+        link: PainterLink,
+        output: Output,
+    ) -> Self {
         Self {
             link,
             #[cfg(test)]
@@ -589,9 +694,10 @@ impl Painter {
             detached: true,
             viewport,
             frame_size,
-            output: Output::None,
+            output,
             occluded: false,
             render_failed: false,
+            swap_chain_empty: false,
             gesture: GestureRouter::default(),
             clock: FrameClock::new(),
             scroll_intents: ScrollIntents::default(),
@@ -609,8 +715,9 @@ impl Painter {
         frame_size: FrameSize,
         event_requester: Arc<R>,
         entry: EntryModule,
+        output: Output,
     ) -> Result<Self, EngineError> {
-        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester);
+        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
         painter.main = Some(spawn_test_main_thread(document, entry, main)?);
         painter.detached = false;
         Ok(painter)
@@ -645,9 +752,10 @@ impl Painter {
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<R>,
+        output: Output,
     ) -> (Self, MainLink<R>) {
         let (link, main) = main_link(event_requester);
-        let painter = Self::new(viewport, frame_size, link);
+        let painter = Self::with_output(viewport, frame_size, link, output);
         (painter, main)
     }
 
@@ -770,7 +878,7 @@ impl Painter {
         height: f32,
         device_pixel_ratio: f32,
     ) -> Result<(), EngineError> {
-        let next_size = frame_size(width, height, device_pixel_ratio)?;
+        let next_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let moved = self.viewport.width.to_bits() != width.to_bits()
             || self.viewport.height.to_bits() != height.to_bits()
             || self.viewport.device_pixel_ratio.to_bits() != device_pixel_ratio.to_bits();
@@ -811,20 +919,6 @@ impl Painter {
         self.link.take_events()
     }
 
-    /// Builds the presentation stack for a host-owned draw target and keeps
-    /// it. Both happen here, on the thread that owns the window — the only
-    /// one macOS lets a surface be created from.
-    pub(super) async fn attach_target(
-        &mut self,
-        target: impl Into<WindowTarget>,
-    ) -> Result<(), EngineError> {
-        let graphics = WindowGraphics::new(target, self.frame_size).await?;
-        self.output = Output::Window(Box::new(graphics));
-        self.render_failed = false;
-        self.refresh();
-        Ok(())
-    }
-
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
         #[cfg(test)]
         if self.detached {
@@ -854,12 +948,16 @@ impl Painter {
                 unreachable!("the window output was just checked");
             };
             match graphics.acquire(size)? {
-                FrameAcquisition::Ready(acquired) => acquired,
+                FrameAcquisition::Ready(acquired) => {
+                    self.swap_chain_empty = false;
+                    acquired
+                }
                 // No image this frame, and no vsync was waited on to find
                 // that out, so the frame stays owed and `next_turn` asks the
                 // host for another turn after a short delay rather than in a
                 // spin.
                 FrameAcquisition::Retry => {
+                    self.swap_chain_empty = true;
                     self.link.mark_redraw();
                     return Ok(());
                 }
@@ -912,7 +1010,8 @@ impl Painter {
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
         match &mut self.output {
-            Output::None => Err(EngineError::NoDrawTarget),
+            #[cfg(test)]
+            Output::None => Err(EngineError::NotOffscreen),
             Output::Offscreen(gpu) => {
                 if let (Some(frame), Some(key)) = (&latest, key)
                     && (self.composed != Some(key) || animation_now.is_some())
@@ -966,14 +1065,6 @@ impl Painter {
             }
         }
     }
-    pub(super) fn attach_offscreen(&mut self) -> Result<(), EngineError> {
-        let gpu = Headless::new().map_err(|error| EngineError::Gpu(error.to_string()))?;
-        self.output = Output::Offscreen(Box::new(gpu));
-        self.composed = None;
-        self.render_failed = false;
-        Ok(())
-    }
-
     /// Tells the Lynx main thread to stop. Its command loop returns on this
     /// message, which is why it is sent explicitly rather than left to the
     /// FIFO closing when the painter is released.
@@ -1006,28 +1097,28 @@ impl Painter {
 
     /// When the painter owes itself another turn, and how soon.
     ///
-    /// `None` parks until something arrives. Zero is a running animation:
-    /// the swap chain's `AutoVsync` acquire inside the next draw is the
-    /// pace, and taking the turn immediately is what keeps the frames
-    /// coming. Anything else is a swap chain that had no image to give —
-    /// which it answers without waiting for vsync, so the retry needs a
-    /// delay of its own or it becomes a spin.
-    ///
-    /// Only ever a visible, working window. An offscreen target has no
-    /// display to keep up with: its frames are the host's to ask for.
+    /// Only ever a visible, working window answers anything: an offscreen
+    /// target has no display to keep up with, and its frames are the host's
+    /// to ask for. [`next_turn_delay`] is the rest of the answer.
     pub(super) fn next_turn(&self) -> Option<Duration> {
         if self.render_failed || self.occluded || !matches!(self.output, Output::Window(_)) {
             return None;
         }
-        if self.is_animating() {
-            return Some(Duration::ZERO);
-        }
-        self.link.redraw_owed().then_some(SWAP_CHAIN_RETRY)
+        next_turn_delay(
+            self.swap_chain_empty,
+            self.is_animating(),
+            self.link.redraw_owed(),
+        )
     }
 
+    /// Advances an offscreen view by one frame.
+    ///
+    /// Offscreen only, and the check is load-bearing: this is the one call
+    /// that blocks the embedder's own thread on `bobcat-main`, and a windowed
+    /// view's frames come from `pump` instead.
     pub(super) fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
         if !matches!(self.output, Output::Offscreen(_)) {
-            return Err(EngineError::NoDrawTarget);
+            return Err(EngineError::NotOffscreen);
         }
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);

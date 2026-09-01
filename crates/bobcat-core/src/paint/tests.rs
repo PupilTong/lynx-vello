@@ -1,10 +1,10 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use super::Painter;
+use super::{Output, Painter};
 use crate::main::MainLink;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{EngineEvent, EventRequester, NoWakeup, ToMain, ToPainter, frame_size};
+use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter};
 
 /// A phone-shaped document, ready for a main thread to be started over it.
 fn document() -> LynxDocument {
@@ -17,12 +17,15 @@ fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &
     Painter::start(
         document,
         Viewport::new(393.0, 727.0),
-        frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         events,
         super::EntryModule {
             source: entry.to_owned(),
             url: "app:///main.js".to_owned(),
         },
+        // Nowhere to draw: nothing here reads pixels, and a GPU device per
+        // test is a third of a second each.
+        Output::None,
     )
     .expect("the test view starts")
 }
@@ -34,20 +37,21 @@ fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &
 fn detached() -> (Painter, MainLink<NoWakeup>) {
     Painter::with_link(
         Viewport::new(393.0, 727.0),
-        frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(NoWakeup),
+        Output::None,
     )
 }
 
 #[test]
 fn frame_size_applies_the_device_scale_once() {
-    let size = frame_size(393.0, 727.0, 2.0).unwrap();
+    let size = FrameSize::for_viewport(393.0, 727.0, 2.0).unwrap();
     assert_eq!((size.width, size.height), (786, 1_454));
 }
 
 #[test]
 fn frame_size_rejects_unbounded_targets() {
-    let error = frame_size(20_000.0, 100.0, 1.0).unwrap_err();
+    let error = FrameSize::for_viewport(20_000.0, 100.0, 1.0).unwrap_err();
     assert!(error.to_string().contains("16384"));
 }
 
@@ -292,6 +296,53 @@ impl EventRequester for WakeSignal {
     }
 }
 
+/// The swap chain's own answer paces the turn, ahead of the animation.
+///
+/// An empty acquire costs no vsync wait, so nothing else can pace it. While
+/// an animation runs, "come straight back" would otherwise be the answer to
+/// every one of them — which is a hidden window (wgpu-hal's Metal backend
+/// answers `Occluded` from its own `NSWindow.occlusionState`, for a window
+/// winit has not reported) burning a core for as long as the animation
+/// lasts, at four figures of turns per second.
+#[test]
+fn an_empty_swap_chain_paces_the_turn_before_a_running_animation_does() {
+    assert_eq!(
+        super::next_turn_delay(true, true, true),
+        Some(super::SWAP_CHAIN_RETRY),
+        "an empty acquire is the one thing that must not be answered immediately"
+    );
+    assert_eq!(
+        super::next_turn_delay(true, false, false),
+        Some(super::SWAP_CHAIN_RETRY),
+        "and it is owed a turn even when nothing else asked for one"
+    );
+    assert_eq!(
+        super::next_turn_delay(false, true, true),
+        Some(Duration::ZERO),
+        "an animation over a swap chain that is answering is paced by its acquire"
+    );
+    assert_eq!(
+        super::next_turn_delay(false, false, true),
+        Some(super::SWAP_CHAIN_RETRY),
+        "a frame left owed comes back on the same short delay"
+    );
+    assert_eq!(
+        super::next_turn_delay(false, false, false),
+        None,
+        "and nothing owed parks"
+    );
+}
+
+/// A view with nowhere to present asks for no turns at all: an offscreen
+/// target has no display to keep up with, and its frames are the host's to
+/// ask for.
+#[test]
+fn a_view_that_presents_to_no_window_never_asks_for_a_turn() {
+    let (painter, _main) = detached();
+    painter.refresh();
+    assert_eq!(painter.next_turn(), None);
+}
+
 /// A frame the painter asks of itself wakes nothing.
 ///
 /// Every caller of `refresh` is the painter, on the host's own thread and
@@ -304,8 +355,9 @@ fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = mpsc::channel();
     let (painter, main) = Painter::with_link(
         Viewport::new(393.0, 727.0),
-        frame_size(393.0, 727.0, 1.0).expect("the test viewport is valid"),
+        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(WakeSignal(wake_sender)),
+        Output::None,
     );
 
     painter.refresh();

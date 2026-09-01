@@ -13,7 +13,7 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use bobcat_core::{EngineEvent, EventRequester, LynxView};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
 
 use crate::CliError;
 use crate::args::Options;
@@ -37,22 +37,23 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     program.warn_about_compatibility_limits();
     let (sender, receiver) = mpsc::channel();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
-    // One construction: the input's author CSS and its entry MTS module are
-    // this view's sources, so the first commit is already styled and the Lynx
-    // main thread is running before anything else here happens.
+    // One construction: the windowless GPU target this view renders into,
+    // the input's author CSS, and its entry MTS module are all arguments, so
+    // what comes back is a view whose first commit is already styled and
+    // whose target already exists.
     let mut view = pollster::block_on(LynxView::new(
         program.config,
         event_requester,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
+        DrawTarget::Offscreen,
         program.sources(),
     ))
     .map_err(|source| CliError::StartView {
         input: program.input.clone(),
         source,
     })?;
-    view.attach_offscreen()?;
 
     view.tick(true)?;
     let console = Console::start(move |command| sender.send(HostEvent::Command(command)).is_ok())
