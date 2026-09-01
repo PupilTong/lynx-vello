@@ -1,29 +1,37 @@
 //! The macOS windowed embedder.
 //!
-//! This file owns the embedder's share and nothing more: the winit event
-//! loop, the window, device metrics, input translation, the command prompt,
-//! and PNG output. Every handler is a relay into [`bobcat_core::LynxView`] —
-//! an OS fact goes in (`dispatch_input`, `resize`, `set_occluded`, `pump`),
-//! and the engine decides what the pipeline does with it.
+//! This file owns the embedder's share: the winit event loop, the window,
+//! device metrics, input translation, the command prompt, PNG output — and,
+//! because this is the thread that built the view, the frames themselves. An
+//! OS fact goes in (`dispatch_input`, `resize`, `set_occluded`), and the turn
+//! it opened ends in [`MacApplication::about_to_wait`], which runs the view's
+//! own turn: `pump` draws the frame the view owes and hands back what the
+//! realm had to say.
 //!
-//! This thread does not draw. It creates the surface, because on macOS only
-//! the main thread may, and hands it over; from then on composition,
-//! presentation and the vsync wait live on the engine's presenter thread, so
-//! a slow frame never holds up `AppKit`. What still comes back here are the
-//! engine's lifecycle events, and they arrive through the one
-//! `EventRequester` wakeup this loop answers. Winit's `RedrawRequested` is
-//! not relayed, and the loop always waits — a running animation is the
-//! presenter's own business, paced by the swap chain it owns.
+//! The turn ends there and nowhere else. A frame asks `bobcat-main` for the
+//! commit behind the next one, and `bobcat-main` answers through this very
+//! [`ProxyWakeup`] — so drawing from inside an event relay would post into
+//! the channel winit is still draining, and the run loop would never return
+//! to `AppKit`. Winit's `RedrawRequested` is not relayed either.
+//!
+//! The loop always waits. What wakes it for a *frame* is this window's own
+//! display: while [`bobcat_core::LynxView::owes_frame`] holds, a
+//! [`crate::vsync::DisplayLink`] on the monitor the window is on posts one
+//! wakeup per refresh, and stops the moment nothing is owed. The engine names
+//! no interval and this file owns no timer — an animation runs at the rate
+//! the display actually scans out, and a swap chain that had no image to give
+//! is asked again one refresh later rather than on a guess.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{EngineEvent, EventRequester, LynxView};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::window::{Window, WindowId};
 
 use crate::CliError;
@@ -31,6 +39,7 @@ use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
 use crate::page::Program;
 use crate::screenshot::save_screenshot;
+use crate::vsync::DisplayLink;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -67,7 +76,8 @@ pub(crate) fn run(program: Program, options: &Options) -> Result<(), CliError> {
 }
 
 /// This window's wakeup: a user event on winit's loop proxy, which is the
-/// only thing that reaches the run loop from another thread.
+/// only thing that reaches the run loop from another thread. The Lynx main
+/// thread holds it, and posting one is all it ever does with it.
 #[derive(Debug)]
 struct ProxyWakeup(EventLoopProxy<UserEvent>);
 
@@ -77,19 +87,21 @@ impl EventRequester for ProxyWakeup {
     }
 }
 
-/// The windowed view this embedder drives, woken through its loop proxy.
-type MacLynxView = LynxView<ProxyWakeup>;
-
 struct MacApplication {
     program: Option<Program>,
     input: String,
     initial_width: f32,
     initial_height: f32,
-    /// Declared before the window it draws into: dropping the view joins the
-    /// presenter, so the surface is released before the last handle to the
-    /// window goes — and the window itself is destroyed on this thread,
-    /// which is the only one allowed to destroy it.
-    view: Option<MacLynxView>,
+    /// Declared before the window it draws into: the view owns the surface
+    /// built from that window, so dropping the view first releases the
+    /// surface before the last handle to the window goes — and the window
+    /// itself is destroyed on this thread, which is the only one allowed to
+    /// destroy it.
+    view: Option<LynxView>,
+    /// This window's display clock, running only while a frame is owed.
+    /// Declared before the view so it is stopped — and its callback proven
+    /// finished — before the view it wakes goes away.
+    vsync: Option<DisplayLink>,
     event_requester: Arc<ProxyWakeup>,
     window: Option<Arc<Window>>,
     console: Console,
@@ -123,6 +135,7 @@ impl MacApplication {
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
             view: None,
+            vsync: None,
             event_requester,
             window: None,
             console,
@@ -161,26 +174,38 @@ impl MacApplication {
             .expect("the program is consumed by the first window only");
         program.warn_about_compatibility_limits();
 
-        // One construction: the input's author CSS and its entry MTS module are
-        // this view's sources, so the first commit is already styled and the
-        // Lynx main thread is running before the window is attached.
-        let mut view = pollster::block_on(LynxView::new(
+        // One construction: the window this view draws into, the input's
+        // author CSS, and its entry MTS module are all arguments, so what
+        // comes back is a view whose first commit is already styled and whose
+        // surface already exists. The surface is built on this thread because
+        // `AppKit` allows it nowhere else — and this is also the thread that
+        // will draw into it, for the same reason.
+        let view = pollster::block_on(LynxView::new(
             program.config,
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
+            DrawTarget::window(Arc::clone(window)),
             program.sources(),
         ))
         .map_err(|source| CliError::StartView {
             input: program.input,
             source,
         })?;
-        // The surface is built here, on the thread `AppKit` requires for it,
-        // and handed to the presenter, which owns it from now on.
-        pollster::block_on(view.attach_target(Arc::clone(window)))?;
 
         self.view = Some(view);
+        // The display this window is on is the clock its frames run at. A
+        // monitor winit cannot name, or a link CoreVideo will not open,
+        // leaves the window on the engine's own wakeups: it still paints
+        // every commit, it just cannot pace an animation itself.
+        self.vsync = window.current_monitor().and_then(|monitor| {
+            let requester = Arc::clone(&self.event_requester);
+            DisplayLink::new(monitor.native_id(), move || requester.request_event())
+        });
+        if self.vsync.is_none() {
+            eprintln!("bobcat: no display link for this window; animations will not be paced");
+        }
         Ok(())
     }
 
@@ -314,9 +339,10 @@ impl MacApplication {
         event_loop.exit();
     }
 
-    /// Drains the engine's lifecycle events, the one thing that still
-    /// crosses back to this thread.
-    fn pump(&mut self, event_loop: &ActiveEventLoop) {
+    /// Runs the view's turn: it draws the frame the view owes — which is
+    /// where this thread waits for the display — and hands back the
+    /// lifecycle events that turn produced.
+    fn serve(&mut self, event_loop: &ActiveEventLoop) {
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -329,8 +355,8 @@ impl MacApplication {
                         source,
                     });
                 }
-                // The presenter cannot reach the screen again, so the window
-                // has nothing left to show.
+                // The view cannot reach the screen again, so the window has
+                // nothing left to show.
                 EngineEvent::RenderFailed(error) if fatal.is_none() => {
                     fatal = Some(CliError::Engine(error));
                 }
@@ -378,7 +404,7 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 self.resize(size)
             }
             WindowEvent::Occluded(occluded) => {
-                if let Some(view) = &self.view {
+                if let Some(view) = self.view.as_mut() {
                     view.set_occluded(occluded);
                 }
                 Ok(())
@@ -417,25 +443,47 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         };
         if let Err(error) = result {
             self.fail(event_loop, error);
-        } else {
-            self.pump(event_loop);
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Command(command) => self.command(event_loop, command),
+            // The wakeup itself. Answering it is `about_to_wait`'s job; this
+            // arm exists only because a wakeup had to be shaped as an event.
             UserEvent::Pump => {}
         }
-        self.pump(event_loop);
     }
 
-    /// The turn ends by going back to sleep, always.
+    /// The turn ends here: run the view's turn, then decide how long to
+    /// sleep.
     ///
-    /// Frames are not this thread's work any more: the presenter draws them
-    /// on its own thread, and a running animation is paced there by the swap
-    /// chain's `AutoVsync` acquire. Nothing here polls for one.
+    /// Drawing belongs here and not in the event relays, for two reasons. A
+    /// turn's whole event burst has been handed over by now, so a wheel
+    /// flurry draws one frame carrying its sum. And a frame that asks
+    /// `bobcat-main` for the next commit is answered through this loop's own
+    /// proxy, which winit drains by iterating until the channel is empty —
+    /// from inside that drain the run loop would never return to `AppKit`,
+    /// while a wakeup posted from here simply opens the next turn.
+    ///
+    /// The loop then always waits: the only thing that asks for a frame is
+    /// the display itself. While the view owes one, the display link posts a
+    /// wakeup per refresh; the turn that answers it draws, and the turn that
+    /// finds nothing owed stops the link.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A turn that quit opened draws nothing: this thread is the one
+        // taking the window down, and a frame presented into a surface being
+        // torn down buys nothing. An event the engine queued in that same
+        // turn goes with it, exactly as it does when the window's close
+        // button is what ends the run.
+        if event_loop.exiting() {
+            return;
+        }
+        self.serve(event_loop);
+        let owed = self.view.as_ref().is_some_and(LynxView::owes_frame);
+        if let Some(vsync) = self.vsync.as_mut() {
+            vsync.set_running(owed);
+        }
         event_loop.set_control_flow(ControlFlow::Wait);
     }
 }

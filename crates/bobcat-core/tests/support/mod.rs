@@ -18,7 +18,8 @@ use bytes::Bytes;
 use url::Url;
 
 /// Drains the terminal boot event preserved after construction. `LynxView::new`
-/// has already awaited the same outcome before it returns.
+/// has already awaited the same outcome before it returns, and every `pump`
+/// here runs the view's own turn on this thread.
 pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
@@ -32,7 +33,7 @@ pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
                 // Not a script failure, but a view that cannot draw will
                 // never finish anything either; failing here beats waiting
                 // out the deadline.
-                EngineEvent::RenderFailed(error) => panic!("the presenter failed: {error}"),
+                EngineEvent::RenderFailed(error) => panic!("the painter failed: {error}"),
                 _ => {}
             }
         }

@@ -16,7 +16,7 @@ use dom::event::EventSteps;
 
 use crate::main::runtime::{MainThreadRuntime, entry_module_source};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::paint::PresenterLink;
+use crate::paint::PainterLink;
 use crate::view::{NoWakeup, main_link};
 
 /// A booted Element PAPI realm over a private Lynx document.
@@ -26,9 +26,9 @@ use crate::view::{NoWakeup, main_link};
 #[derive(Debug)]
 pub struct ScriptHarness {
     runtime: MainThreadRuntime<NoWakeup>,
-    /// The presenting end of the same link the engine builds, so a benchmark
+    /// The painting end of the same link the engine builds, so a benchmark
     /// can ask the question the router asks — and pay what it pays.
-    link: PresenterLink,
+    link: PainterLink,
 }
 
 impl ScriptHarness {
@@ -41,12 +41,12 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (presenter, main) = main_link(Arc::new(NoWakeup));
+        let (painter, main) = main_link(Arc::new(NoWakeup));
         let runtime =
             MainThreadRuntime::new(document, main.notify).expect("the benchmark realm boots");
         Self {
             runtime,
-            link: presenter,
+            link: painter,
         }
     }
 
@@ -106,7 +106,7 @@ impl ScriptHarness {
     }
 
     /// Whether the realm has published a listener for this event name — the
-    /// question the presenting side asks before it builds anything.
+    /// question the painting side asks before it builds anything.
     ///
     /// Resyncs first, as the start of a routing pass does, so the answer
     /// accounts for every registration the realm has made so far rather than

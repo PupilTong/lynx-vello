@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
-    LynxView, LynxViewError, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
+    DrawTarget, LynxView, LynxViewError, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
@@ -74,6 +74,7 @@ async fn view_with(sources: ViewSources) -> Result<LynxView, LynxViewError> {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         sources,
     )
     .await

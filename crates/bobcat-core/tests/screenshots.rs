@@ -9,8 +9,8 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    FontBlob, ImageStore, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet, ViewSources,
+    DrawTarget, FontBlob, ImageStore, LynxView, NoWakeup, PageConfig, PreparsedDeclaration,
+    PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -106,12 +106,11 @@ async fn booted(sources: ViewSources) -> LynxView {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         sources,
     )
     .await
     .expect("view");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
     wait_for_script(&mut view).expect("script execution");
     view
 }
@@ -138,6 +137,7 @@ async fn booted_with_sheet_at(
         width,
         height,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
             ..ViewSources::new(fetcher, SCRIPT_URL)
@@ -145,8 +145,6 @@ async fn booted_with_sheet_at(
     )
     .await
     .expect("view");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
     wait_for_script(&mut view).expect("script execution");
     view
 }
@@ -198,6 +196,11 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     })
     .await;
     view.load_image(IMAGE_URL).await.expect("published source");
+    // The store's answer reaches the document as one main-thread command,
+    // and a capture only reads whatever has already been published. A forced
+    // tick is the one call that waits for the commit behind it.
+    view.tick(true)
+        .expect("commit the frame the image belongs to");
 
     let shot = view.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)

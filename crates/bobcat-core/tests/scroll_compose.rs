@@ -8,13 +8,13 @@
 //! it, so the capture after a deep scroll shows the recommitted frame at
 //! its published offsets. Either way the same pixels move the same way;
 //! which path produced them is the engine's business, asserted directly by
-//! `bobcat_core::engine::event_loop_tests`.
+//! `bobcat_core::paint::event_loop_tests`.
 
 mod support;
 
 use std::sync::Arc;
 
-use bobcat_core::{LynxView, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, LynxView, NoWakeup, PageConfig, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
 use support::{FetcherDouble, wait_for_script};
@@ -53,12 +53,11 @@ async fn booted() -> LynxView {
         100.0,
         100.0,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources::new(fetcher, SCRIPT_URL),
     )
     .await
     .expect("view construction fetches and boots the entry script");
-    view.attach_offscreen()
-        .expect("GPU initialization for the offscreen target");
     wait_for_script(&mut view).expect("script execution");
     view
 }

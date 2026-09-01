@@ -1,8 +1,9 @@
 //! Lynx main-thread ownership, startup, and command rounds.
 //!
-//! The user thread starts this owner and the presenter as peers. This thread
-//! creates the document, awaits and applies every startup resource, boots the
-//! realm, and then owns both document and realm until shutdown.
+//! The embedder's own thread starts this owner from `LynxView::new` and keeps
+//! the painter itself. This thread creates the document, awaits and applies
+//! every startup resource, boots the realm, and then owns both document and
+//! realm until shutdown.
 
 mod quickjs;
 #[path = "runtime/lib.rs"]
@@ -16,8 +17,6 @@ use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::str;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Mutex;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,12 +38,9 @@ use crate::resource::{
     ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
-use crate::user::ViewSources;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::view::ToPainter;
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, FrameHub, LynxViewError, ToMain, ToPresenter,
-    Viewport, frame_slot,
+    EngineError, EngineEvent, EventRequester, FrameHub, LynxViewError, ToMain, ToPainter,
+    ViewSources, Viewport, frame_slot,
 };
 
 static NEXT_REQUEST_NAMESPACE: AtomicU64 = AtomicU64::new(1);
@@ -104,7 +100,7 @@ type MainJoinHandle = std::thread::JoinHandle<()>;
 #[cfg(target_arch = "wasm32")]
 type MainJoinHandle = wasm_thread::JoinHandle<()>;
 
-/// The user-thread-owned right to join `bobcat-main`.
+/// The view-owned right to join `bobcat-main`.
 pub(crate) struct MainThreadHome {
     thread: Option<MainJoinHandle>,
     control: Arc<StartupControl>,
@@ -123,16 +119,16 @@ impl MainThreadHome {
 }
 
 /// The main thread's sending end: notification FIFO, newest-frame mailbox,
-/// and the wakeup that announces both to the paint thread.
-pub(crate) struct ToPresenterSender<R: EventRequester> {
-    notifications: mpsc::Sender<ToPresenter>,
+/// and the wakeup that announces both to the thread that paints.
+pub(crate) struct ToPainterSender<R: EventRequester> {
+    notifications: mpsc::Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
 }
 
 // Hand-written: `derive(Clone)` would demand `R: Clone`, while a requester is
 // shared through its `Arc` and is never cloned itself.
-impl<R: EventRequester> Clone for ToPresenterSender<R> {
+impl<R: EventRequester> Clone for ToPainterSender<R> {
     fn clone(&self) -> Self {
         Self {
             notifications: self.notifications.clone(),
@@ -142,9 +138,9 @@ impl<R: EventRequester> Clone for ToPresenterSender<R> {
     }
 }
 
-impl<R: EventRequester> ToPresenterSender<R> {
+impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn new(
-        notifications: mpsc::Sender<ToPresenter>,
+        notifications: mpsc::Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
     ) -> Self {
@@ -155,8 +151,8 @@ impl<R: EventRequester> ToPresenterSender<R> {
         }
     }
 
-    /// Announces one notification, then wakes the paint thread.
-    pub(crate) fn send(&self, notification: ToPresenter) {
+    /// Announces one notification, then wakes the thread that paints.
+    pub(crate) fn send(&self, notification: ToPainter) {
         if self.notifications.send(notification).is_ok() {
             self.requester.request_event();
         }
@@ -165,50 +161,21 @@ impl<R: EventRequester> ToPresenterSender<R> {
     /// Replaces the newest-frame mailbox, then announces it.
     pub(crate) fn publish_frame(&self, frame: Arc<CommittedFrame>) {
         *frame_slot(&self.frames) = Some(frame);
-        self.send(ToPresenter::FrameChanged);
+        self.send(ToPainter::FrameChanged);
     }
 }
 
 /// The main thread's receiving end of its link to the painter.
 pub(crate) struct MainLink<R: EventRequester> {
-    /// Commands from the paint thread, in the order it sent them.
+    /// Commands from the painter, in the order it sent them.
     pub(crate) commands: mpsc::Receiver<ToMain>,
     /// Everything this thread has to say back.
-    pub(crate) notify: ToPresenterSender<R>,
+    pub(crate) notify: ToPainterSender<R>,
 }
 
 impl<R: EventRequester> MainLink<R> {
-    pub(crate) fn new(commands: mpsc::Receiver<ToMain>, notify: ToPresenterSender<R>) -> Self {
+    pub(crate) fn new(commands: mpsc::Receiver<ToMain>, notify: ToPainterSender<R>) -> Self {
         Self { commands, notify }
-    }
-}
-
-/// The wakeup owned by the main thread: one command in the paint inbox.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) struct InboxWakeup(Mutex<mpsc::Sender<ToPainter>>);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl InboxWakeup {
-    pub(crate) fn new(commands: mpsc::Sender<ToPainter>) -> Self {
-        Self(Mutex::new(commands))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl EventRequester for InboxWakeup {
-    fn request_event(&self) {
-        let _ = self
-            .0
-            .lock()
-            .unwrap_or_else(|error| panic!("the presenter inbox is poisoned: {error}"))
-            .send(ToPainter::MainChanged);
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl std::fmt::Debug for InboxWakeup {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("InboxWakeup")
     }
 }
 
@@ -269,9 +236,9 @@ pub fn configure_wasm_workers(
 /// Starts the Lynx main thread, which creates and initializes its own document
 /// before holding the main end of the view's link for the rest of its life.
 ///
-/// Nothing announces its exit: dropping the last `ToPresenterSender` closes
-/// the notification FIFO, which is the same fact — and the one a presenting
-/// side blocked on a `BeginFrame` is already waiting on.
+/// Nothing announces its exit: dropping the last `ToPainterSender` closes
+/// the notification FIFO, which is the same fact — and the one a painter
+/// blocked on a `BeginFrame` is already waiting on.
 pub(crate) fn spawn_main_thread<R: EventRequester>(
     startup: StartupRequest,
     link: MainLink<R>,
@@ -322,13 +289,13 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
             });
             match result {
                 Ok(runtime) => {
-                    notify.send(ToPresenter::Engine(EngineEvent::ScriptFinished));
-                    notify.send(ToPresenter::FrameChanged);
+                    notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
+                    notify.send(ToPainter::FrameChanged);
                     serve_main_commands(runtime, &commands, &notify);
                 }
                 Err(error) => {
-                    notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(error)));
-                    notify.send(ToPresenter::FrameChanged);
+                    notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
+                    notify.send(ToPainter::FrameChanged);
                 }
             }
         })
@@ -362,7 +329,7 @@ fn run_main_thread<R: EventRequester>(
     set_script_panic_reporter(Some({
         let notify = notify.clone();
         Box::new(move |error| {
-            notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(error)));
+            notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
     }));
 
@@ -383,17 +350,17 @@ fn run_main_thread<R: EventRequester>(
         .into()))
     });
     if let Some(Ok(Some(StartupReady { runtime, success }))) = initialized {
-        notify.send(ToPresenter::Engine(EngineEvent::ScriptFinished));
+        notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
         // Boot's outcome and boot's pixels ride one wakeup: whatever the
         // entry committed before it ended reaches the target on the turn
         // that reports the ending, with nobody left to ask for another.
-        notify.send(ToPresenter::FrameChanged);
+        notify.send(ToPainter::FrameChanged);
         if started.send(Ok(success)).is_ok() {
             let served = catch_unwind(AssertUnwindSafe(|| {
                 serve_main_commands(runtime, &commands, &notify);
             }));
             if let Err(payload) = served {
-                notify.send(ToPresenter::Engine(EngineEvent::ScriptRunError(
+                notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
                     platform_script_error(format!(
                         "the Lynx main thread panicked while serving commands: {}",
                         panic_payload(payload.as_ref())
@@ -427,7 +394,7 @@ async fn until_startup_cancelled<T>(
 
 async fn initialize<R: EventRequester>(
     startup: StartupRequest,
-    notify: ToPresenterSender<R>,
+    notify: ToPainterSender<R>,
     control: &StartupControl,
 ) -> Result<StartupOutcome<R>, LynxViewError> {
     let StartupRequest {
@@ -564,7 +531,7 @@ async fn resolve_for_fetch(
 fn serve_main_commands<R: EventRequester>(
     mut runtime: MainThreadRuntime<R>,
     commands: &mpsc::Receiver<ToMain>,
-    notify: &ToPresenterSender<R>,
+    notify: &ToPainterSender<R>,
 ) {
     while let Ok(first) = commands.recv() {
         let mut serviced_begin_frame = None;
@@ -580,7 +547,7 @@ fn serve_main_commands<R: EventRequester>(
         }
         runtime.commit_if_dirty();
         if let Some(seq) = serviced_begin_frame {
-            notify.send(ToPresenter::BeginFrameServiced(seq));
+            notify.send(ToPainter::BeginFrameServiced(seq));
         }
     }
 }
@@ -588,7 +555,7 @@ fn serve_main_commands<R: EventRequester>(
 fn apply_main_command<R: EventRequester>(
     runtime: &mut MainThreadRuntime<R>,
     command: ToMain,
-    notify: &ToPresenterSender<R>,
+    notify: &ToPainterSender<R>,
     serviced_begin_frame: &mut Option<u64>,
 ) {
     match command {
@@ -601,7 +568,7 @@ fn apply_main_command<R: EventRequester>(
                 runtime.dispatch_event(target, name, &detail)
             }));
             if let Ok(Err(error)) = delivered {
-                notify.send(ToPresenter::Engine(EngineEvent::ListenerFailed(
+                notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(
                     error.into_script_error(),
                 )));
             }

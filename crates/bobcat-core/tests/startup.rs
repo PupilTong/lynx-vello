@@ -1,4 +1,5 @@
-//! Startup ownership and cancellation across the user, paint, and main threads.
+//! Startup ownership and cancellation across a view's two threads: the one
+//! that constructed it, which paints, and `bobcat-main`.
 
 mod support;
 
@@ -13,7 +14,7 @@ use bobcat_core::resource::{
     HttpRequest, HttpResponse, ResolveRequest, ResolvedLocator, ResourceCapability,
     ResourceFetcher, ResourceFuture, ResourceRequest, ResourceResponse,
 };
-use bobcat_core::{EventRequester, LynxView, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 fn thread_name() -> String {
@@ -121,6 +122,7 @@ async fn resource_continuations_and_boot_stay_on_bobcat_main() {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         sources,
     )
     .await
@@ -205,7 +207,7 @@ impl EventRequester for DropObservedRequester {
 }
 
 #[tokio::test]
-async fn cancelling_new_drops_the_resource_future_and_reaps_both_threads() {
+async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
     let (dropped_sender, dropped) = mpsc::channel();
     let fetcher = Arc::new(PendingFetcher {
@@ -222,6 +224,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_both_threads() {
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources::new(fetcher, "main.js"),
     ));
 
@@ -244,6 +247,6 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_both_threads() {
     );
     assert!(
         requester_weak.upgrade().is_none(),
-        "the presenter exited and released its requester"
+        "bobcat-main exited and released its requester"
     );
 }

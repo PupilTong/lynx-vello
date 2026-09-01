@@ -1,5 +1,5 @@
-//! Paint-thread `@keyframes` timeline tests, end to end: a decoded rule
-//! reaches Stylo, the presenting side advances it against the engine's own
+//! Painting-side `@keyframes` timeline tests, end to end: a decoded rule
+//! reaches Stylo, the painting side advances it against the engine's own
 //! clock, and the committed frame moves.
 //!
 //! Inside the crate rather than in `tests/`, because the timeline is not an
@@ -72,15 +72,15 @@ fn booted() -> Painter {
     let mut engine = Painter::start(
         document,
         viewport,
-        super::frame_size(32.0, 24.0, 1.0).expect("a bounded target"),
+        crate::view::FrameSize::for_viewport(32.0, 24.0, 1.0).expect("a bounded target"),
         Arc::new(super::NoWakeup),
         EntryModule {
             source: SLIDER_SCRIPT.to_owned(),
             url: "app:///main.js".to_owned(),
         },
+        super::Output::offscreen().expect("offscreen GPU target"),
     )
     .expect("view");
-    engine.attach_offscreen().expect("offscreen GPU target");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

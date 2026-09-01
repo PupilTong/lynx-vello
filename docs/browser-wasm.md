@@ -16,7 +16,8 @@ browser UI thread
 
 Render Worker
   initializes shared Wasm
-  owns opaque LynxView + resource registry
+  owns opaque LynxView + resource registry — and, because it is the thread
+  that constructed the view, it is the thread the view paints on
   owns Vello/wgpu/OffscreenCanvas
   └── core wasm_thread spawn -> Lynx main/VM Worker
                                ├── owner-thread-bound QuickJS realm
@@ -30,8 +31,10 @@ limited to canvas creation with `PageConfig`, URL-based page loads, font and
 default-family registration, resize, error observation, disposal, and
 automatic pointer forwarding from the attached HTML canvas.
 
-The Render Worker calls `configure_wasm_workers` once, then builds a `LynxView`
-and attaches the canvas on each `load`. That core API configures the worker
+The Render Worker calls `configure_wasm_workers` once, then on each `load`
+sizes its `OffscreenCanvas` to `FrameSize::for_viewport` and builds a
+`LynxView` over it — the canvas is a construction argument, because the view
+builds its surface before it exists. That core API configures the worker
 bootstrap used by both the engine-owned Lynx main task and the private Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
 Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
@@ -177,8 +180,14 @@ way as ordered commands. A JavaScript turn therefore cannot expose partial
 mutation or stall the last published frame. One lost-wake-safe event signal
 carries everything back from the Lynx main Worker: it wakes a Promise whenever
 core queues an engine event *or* wants a frame drawn, and the Render Worker's
-loop answers each wakeup with one `pump` — drain the events, draw the pending
-frame. No frame clock stands between a commit and the canvas. The clock is
+loop answers each wakeup with one `pump` — draw the pending frame, drain the
+events. The same signal is what this Worker arms for *itself*, because the
+view paints here and wakes nobody on its own: a pointer or a resize that
+arrives while the loop is parked applies immediately and then arms the signal
+so the turn it owes actually happens. A frame the turn leaves owed is not
+armed at all — `owesFrame()` says so, and the loop takes it at the next
+display frame instead, which is `requestAnimationFrame` where a Worker is
+given one. No frame clock stands between a commit and the canvas. The clock is
 the continuation's alone: while `isAnimating` reports that the engine owes the
 timeline another frame, the loop waits for the next display frame instead —
 `requestAnimationFrame` where a Worker is given one, a frame-interval timer

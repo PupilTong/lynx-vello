@@ -290,9 +290,9 @@ if (renderWorker.includes('renderIfRequested')) {
 }
 // The frame clock is the continuation's alone: a commit must reach the canvas
 // through the engine wakeup, never by waiting for a display frame.
-if (!/if \(renderer\.isAnimating\(\)\) \{\s*await nextDisplayFrame\(\)/.test(renderWorker)) {
+if (!/if \(renderer\.owesFrame\(\)\) \{\s*await nextDisplayFrame\(\)/.test(renderWorker)) {
   throw new Error(
-    'Render Worker must wait for a display frame only while the engine is animating',
+    'Render Worker must wait for a display frame only while the view owes one',
   )
 }
 if (

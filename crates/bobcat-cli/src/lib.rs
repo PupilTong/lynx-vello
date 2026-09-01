@@ -28,6 +28,8 @@ mod macos;
 mod page;
 mod screenshot;
 mod style_info;
+#[cfg(target_os = "macos")]
+mod vsync;
 
 pub use screenshot::ScreenshotError;
 

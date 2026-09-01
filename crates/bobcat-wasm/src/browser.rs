@@ -16,8 +16,8 @@ use bobcat_core::resource::{
     ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
-    EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig, ViewSources,
-    WindowTarget, configure_wasm_workers,
+    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
+    ViewSources, WindowTarget, configure_wasm_workers,
 };
 use http::HeaderMap;
 use js_sys::{Array, Promise};
@@ -32,7 +32,6 @@ extern "C" {
     fn console_error(value: &JsValue);
 }
 
-const MAX_RENDER_DIMENSION: f64 = 16_384.0;
 const MAX_STYLE_THREADS: u32 = 6;
 const POINTER_DEVICE_MOUSE: u8 = 0;
 const POINTER_DEVICE_TOUCH: u8 = 1;
@@ -43,10 +42,12 @@ const POINTER_PHASE_UP: u8 = 2;
 const POINTER_PHASE_CANCEL: u8 = 3;
 static RENDERER_CREATED: AtomicBool = AtomicBool::new(false);
 
-/// Lost-wake-safe engine signal shared between core-owned Workers and the
-/// Render Worker: one durable wakeup covering both a lifecycle event to drain
-/// and a frame to draw. The atomic is the durable edge; the waker list only
-/// turns it into an awaitable browser Promise.
+/// Lost-wake-safe engine signal: one durable wakeup covering both a lifecycle
+/// event to drain and a frame to draw. The Lynx-main Worker arms it whenever
+/// it publishes, and this Worker arms it for itself whenever it hands the
+/// view a fact whose frame it still owes — the view paints on this thread and
+/// wakes nobody on its own. The atomic is the durable edge; the waker list
+/// only turns it into an awaitable browser Promise.
 #[derive(Debug, Default)]
 struct EventSignal {
     pending: AtomicBool,
@@ -109,12 +110,6 @@ impl Future for EventWait {
         Poll::Pending
     }
 }
-
-/// The view this Worker drives. Its presenter is this very thread: `wgpu`'s
-/// handles are not `Send` under shared memory and an `OffscreenCanvas` cannot
-/// be transferred on again, so the painter stays where the canvas is and
-/// [`BobcatRenderer::pump`] is the turn it runs in.
-type BrowserLynxView = LynxView<EventSignal>;
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
@@ -296,7 +291,7 @@ impl ResourceFetcher for BrowserResources {
 /// [`BobcatRenderer::load`] and replaced wholesale by the next load.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: Option<BrowserLynxView>,
+    view: Option<LynxView>,
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
@@ -344,7 +339,7 @@ impl BobcatRenderer {
         default_overflow_visible: bool,
         enable_css_selector: bool,
     ) -> Result<BobcatRenderer, JsValue> {
-        validate_metrics(width, height, device_pixel_ratio)?;
+        FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
@@ -422,12 +417,20 @@ impl BobcatRenderer {
             style_sheets: style_sheet_urls,
             ..ViewSources::new(self.resources.clone(), entry_url)
         };
+        // A canvas owns its own resolution — configuring a context does not
+        // set it — and the view builds its surface from this canvas during
+        // construction. So it is sized first, to the same physical target
+        // those metrics give the view.
+        let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
+            .map_err(js_error)?;
+        set_canvas_size(&self.canvas, frame_size);
         let built = LynxView::new(
             self.config,
             self.events.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
+            DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
             sources,
         )
         .await;
@@ -436,11 +439,12 @@ impl BobcatRenderer {
         // here keeps a Render Worker that loads page after page from growing a
         // registry of them.
         self.resources.clear();
-        let mut view = built.map_err(js_error)?;
-        set_canvas_size(&self.canvas, view.frame_size());
-        let target: WindowTarget = WindowTarget::OffscreenCanvas(self.canvas.clone());
-        view.attach_target(target).await.map_err(js_error)?;
-        self.view = Some(view);
+        self.view = Some(built.map_err(js_error)?);
+        // Boot published its frame before this Worker took a turn, and a
+        // frame from below wakes through the same signal — but the wakeup it
+        // sent was consumed by the loop that was waiting on the *previous*
+        // page. This Worker therefore owes itself the first turn.
+        self.events.request_event();
         Ok(())
     }
 
@@ -559,7 +563,7 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Answer one durable engine wakeup: run the presenter's turn on this
+    /// Answer one durable engine wakeup: run the view's turn on this
     /// Worker — routing whatever was queued, drawing the frame it owes — and
     /// hand back the lifecycle events it produced. Returns whether the entry
     /// module has finished booting.
@@ -570,6 +574,12 @@ impl BobcatRenderer {
     /// callback sits between a committed frame and the canvas. No timestamp
     /// crosses either: the animation timeline is core's own clock, read on
     /// this Worker once the canvas surface has handed over an image.
+    ///
+    /// Anything the turn leaves owed — a running animation, a swap chain
+    /// that had no image to give — is answered by [`Self::owes_frame`], which
+    /// this Worker's loop reads before it parks, and takes at the display's
+    /// own rate. Nothing is re-armed here: the signal carries facts from the
+    /// Lynx main thread, and a frame is not one of them.
     ///
     /// A fatal error is reported after the turn, never instead of it: the
     /// frame a failed script did commit still reaches the canvas, with nobody
@@ -604,15 +614,18 @@ impl BobcatRenderer {
         Ok(self.script_finished)
     }
 
-    /// Whether the engine owes the timeline another frame — a running
-    /// animation, or an armed gesture deadline waiting on the clock.
+    /// Whether the view has a frame to put on the canvas: a running
+    /// animation, a gesture deadline the clock has yet to reach, a swap chain
+    /// that had no image to give, or a commit the last turn did not draw.
     ///
-    /// The Render Worker's continuation signal: while this is true it keeps
-    /// drawing at the display's rate, which on this target means
-    /// `requestAnimationFrame`. Nothing crosses the engine's wakeup for it.
-    #[wasm_bindgen(js_name = isAnimating)]
-    pub fn is_animating(&self) -> bool {
-        self.view.as_ref().is_some_and(LynxView::is_animating)
+    /// The Render Worker's continuation signal. While it holds, the loop
+    /// takes its next turn at the display's own rate —
+    /// `requestAnimationFrame` on this target — instead of parking on the
+    /// engine's wakeup. Nothing crosses a thread for it: on a canvas the
+    /// acquire never waits, so the display is the only honest pace there is.
+    #[wasm_bindgen(js_name = owesFrame)]
+    pub fn owes_frame(&self) -> bool {
+        self.view.as_ref().is_some_and(LynxView::owes_frame)
     }
 
     /// Route one browser `PointerEvent` into the opaque native view.
@@ -658,6 +671,9 @@ impl BobcatRenderer {
         // reach; there is no view to route it against and nothing to buffer.
         if let Some(view) = self.view.as_mut() {
             view.dispatch_input(event);
+            // Routing happened here, on this Worker; the frame it may owe is
+            // this Worker's to take, and the loop is parked until it is told.
+            self.events.request_event();
         }
         Ok(())
     }
@@ -672,7 +688,7 @@ impl BobcatRenderer {
         device_pixel_ratio: f32,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
-        validate_metrics(width, height, device_pixel_ratio)?;
+        FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
         self.width = width;
         self.height = height;
         self.device_pixel_ratio = device_pixel_ratio;
@@ -681,6 +697,7 @@ impl BobcatRenderer {
                 .map_err(js_error)?;
             let frame_size = view.frame_size();
             set_canvas_size(&self.canvas, frame_size);
+            self.events.request_event();
         }
         Ok(())
     }
@@ -703,28 +720,6 @@ impl BobcatRenderer {
         } else {
             Ok(())
         }
-    }
-}
-
-fn validate_metrics(width: f32, height: f32, ratio: f32) -> Result<(), JsValue> {
-    let physical_width = f64::from(width) * f64::from(ratio);
-    let physical_height = f64::from(height) * f64::from(ratio);
-    if width.is_finite()
-        && height.is_finite()
-        && ratio.is_finite()
-        && width > 0.0
-        && height > 0.0
-        && ratio > 0.0
-        && physical_width <= MAX_RENDER_DIMENSION
-        && physical_height <= MAX_RENDER_DIMENSION
-    {
-        Ok(())
-    } else {
-        Err(js_error(format!(
-            "viewport metrics must be finite, positive, and no larger than \
-             {MAX_RENDER_DIMENSION:.0} physical pixels per axis; got \
-             {width}x{height} at {ratio}x"
-        )))
     }
 }
 

@@ -3,7 +3,7 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::script::ScriptError;
-use bobcat_core::{LynxView, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, LynxView, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 const FIXTURES: &[(&str, &[u8])] = &[
@@ -36,6 +36,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
         393.0,
         727.0,
         1.0,
+        DrawTarget::Offscreen,
         ViewSources::new(fetcher, "main.js"),
     )
     .await
