@@ -6,6 +6,10 @@
 //! runtime outright, and the engine, document, and Element-PAPI tree hand-off
 //! remain private runtime implementation.
 //!
+//! A view is two threads: the embedder's own — whichever one called
+//! [`LynxView::new`], which is where every draw happens — and the Lynx main
+//! thread the core owns.
+//!
 //! A view boots once, at construction: [`ViewSources`] carries everything it
 //! runs on and [`LynxView::new`] does the rest. Decoded images are one of
 //! those sources — the core neither fetches, decodes, caches nor retains a
@@ -26,8 +30,6 @@ mod paint;
 pub mod resource;
 pub mod script;
 pub mod style;
-#[path = "user/lib.rs"]
-mod user;
 #[path = "view/lib.rs"]
 mod view;
 

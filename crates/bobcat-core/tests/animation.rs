@@ -4,7 +4,7 @@
 //!
 //! The timeline itself is engine-owned — there is no clock to name, install,
 //! or step from out here. The deterministic sample-by-sample coverage lives in
-//! `bobcat_core::engine::animation_tests`, inside the crate, where the frame
+//! `bobcat_core::paint::animation_tests`, inside the crate, where the frame
 //! clock can be pinned.
 
 mod support;
@@ -119,9 +119,8 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
     let mut view = booted().await;
 
     view.tick(true).expect("first frame");
-    // Read before anything else crosses back: a frame the engine produced
-    // hands over what it implies before it answers, so the host never sees a
-    // reply that is ahead of the state behind it.
+    // The view answers this from the painter it owns, over the frame that
+    // tick just read, so there is no reply to be ahead of.
     assert!(
         view.is_animating(),
         "the engine's clock keeps the animation asking for frames"

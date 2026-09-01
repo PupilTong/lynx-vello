@@ -1,4 +1,5 @@
-//! Startup ownership and cancellation across the user, paint, and main threads.
+//! Startup ownership and cancellation across a view's two threads: the one
+//! that constructed it, which paints, and `bobcat-main`.
 
 mod support;
 
@@ -205,7 +206,7 @@ impl EventRequester for DropObservedRequester {
 }
 
 #[tokio::test]
-async fn cancelling_new_drops_the_resource_future_and_reaps_both_threads() {
+async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
     let (dropped_sender, dropped) = mpsc::channel();
     let fetcher = Arc::new(PendingFetcher {
@@ -244,6 +245,6 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_both_threads() {
     );
     assert!(
         requester_weak.upgrade().is_none(),
-        "the presenter exited and released its requester"
+        "bobcat-main exited and released its requester"
     );
 }

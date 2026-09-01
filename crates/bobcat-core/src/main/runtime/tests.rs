@@ -1,6 +1,6 @@
 use super::*;
 use crate::main::tree::{PageConfig, Viewport, new_document};
-use crate::paint::PresenterLink;
+use crate::paint::PainterLink;
 use crate::view::{NoWakeup, main_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
@@ -11,7 +11,7 @@ fn node_id(bits: u64) -> dom::NodeId {
     dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
-/// The name and detail a dispatch carries, spelled as the presenting side
+/// The name and detail a dispatch carries, spelled as the painting side
 /// already owns them.
 fn tap() -> Arc<str> {
     Arc::from("tap")
@@ -54,10 +54,10 @@ impl DocumentProbe {
     }
 }
 
-/// The presenting side's replica of the realm's name set, driven by
+/// The painting side's replica of the realm's name set, driven by
 /// hand: a test resyncs it where a routing pass would and then asks what
 /// the realm has published.
-struct PublishedNames(PresenterLink);
+struct PublishedNames(PainterLink);
 
 impl PublishedNames {
     fn contains(&mut self, name: &str) -> bool {
@@ -66,15 +66,15 @@ impl PublishedNames {
     }
 }
 
-/// The same runtime, plus the presenting end of its link — so a test can
+/// The same runtime, plus the painting end of its link — so a test can
 /// ask what the realm published.
 fn runtime_over_watching_names(
     document: LynxDocument,
 ) -> (MainThreadRuntime<NoWakeup>, DocumentProbe, PublishedNames) {
-    let (presenter, main) = main_link(Arc::new(NoWakeup));
+    let (painter, main) = main_link(Arc::new(NoWakeup));
     let runtime = MainThreadRuntime::new(document, main.notify).expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
-    (runtime, probe, PublishedNames(presenter))
+    (runtime, probe, PublishedNames(painter))
 }
 
 #[test]
@@ -701,22 +701,22 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 }
 
 /// The two indexes are one fact written twice, so every mutation has to
-/// leave them agreeing — and the presenting side has to hear exactly the
+/// leave them agreeing — and the painting side has to hear exactly the
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut presenter, main) = main_link(Arc::new(NoWakeup));
+    let (mut painter, main) = main_link(Arc::new(NoWakeup));
     let state = EventState::new(main.notify);
     let (a, b) = (node_id(3), node_id(4));
     // The edges as a sequence, so both what crossed and what did not are
     // one assertion rather than a pair of membership questions.
     let mut drain = || {
-        presenter
+        painter
             .drain()
             .into_iter()
             .map(|notification| match notification {
-                ToPresenter::ListenerAvailable(name) => format!("+{name}"),
-                ToPresenter::ListenerUnavailable(name) => format!("-{name}"),
+                ToPainter::ListenerAvailable(name) => format!("+{name}"),
+                ToPainter::ListenerUnavailable(name) => format!("-{name}"),
                 other => panic!("the name index publishes only listener edges, got {other:?}"),
             })
             .collect::<Vec<_>>()
@@ -768,10 +768,10 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     assert_eq!(drain(), ["-tap"], "the last listener unpublishes its name");
 }
 
-/// The replica is what the presenting side filters against, so a
+/// The replica is what the painting side filters against, so a
 /// registration has to reach it as the realm makes it.
 #[test]
-fn registering_a_listener_publishes_its_name_to_the_presenting_side() {
+fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     let (mut runtime, _elements, mut names) = runtime_over_watching_names(new_document(
         Viewport::new(393.0, 727.0),
         PageConfig::default(),

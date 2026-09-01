@@ -1,5 +1,5 @@
-//! Paint-thread `@keyframes` timeline tests, end to end: a decoded rule
-//! reaches Stylo, the presenting side advances it against the engine's own
+//! Painting-side `@keyframes` timeline tests, end to end: a decoded rule
+//! reaches Stylo, the painting side advances it against the engine's own
 //! clock, and the committed frame moves.
 //!
 //! Inside the crate rather than in `tests/`, because the timeline is not an

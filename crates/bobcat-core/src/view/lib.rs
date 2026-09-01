@@ -1,32 +1,37 @@
-//! Shared vocabulary and coordination for one Lynx view's three threads.
+//! One Lynx view: the embedder's handle, and the vocabulary of its one
+//! thread boundary.
 //!
-//! A view spans three owners. The embedder's user thread holds [`LynxView`],
-//! which is a handle and nothing else: it captures input, creates the
-//! surface, and drains lifecycle events. The paint thread owns the
-//! painter — every draw target, the gesture router, the scroll intents,
-//! and the composition — and the Lynx main thread owns the document and the
-//! script realm. The sibling `user`, `paint`, and `main` modules mirror those
-//! owners; this module keeps only the vocabulary and links that cross them.
+//! A view has two owners. The embedder's own thread — whichever one called
+//! [`LynxView::new`] — holds the view and, inside it, the private painter:
+//! it captures input, creates the surface, routes, composes, presents, and
+//! drains lifecycle events, all inside the calls the embedder makes. The
+//! Lynx main thread owns the document and the script realm. The sibling
+//! `paint` and `main` modules mirror those two owners; this module holds the
+//! handle that joins them and the link that crosses between them.
 
 use std::fmt;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::time::Duration;
 
 use dom::input::InputEvent;
-use dom::{CommittedFrame, NodeId, Vector2D};
+use dom::{CommittedFrame, FontBlob, ImageStore, NodeId, Vector2D};
+use tokio::sync::oneshot;
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
-use crate::main::{MainLink, ToPresenterSender};
+use crate::main::tree::PageConfig;
+use crate::main::{
+    MainLink, MainThreadHome, StartupRequest, StartupResult, StartupSuccess, ToPainterSender,
+    spawn_main_thread,
+};
 pub use crate::paint::WindowTarget;
-use crate::paint::{PainterLink, PresenterLink, WindowGraphics};
+use crate::paint::{Painter, PainterLink};
+use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
-use crate::user::HostLink;
-pub use crate::user::{LynxView, ViewSources};
 
-/// View metrics copied across all three thread boundaries.
+/// View metrics, copied across the view's one thread boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Viewport {
     /// Viewport width in CSS pixels.
@@ -124,7 +129,7 @@ pub enum EngineEvent {
     ScriptRunError(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
-    /// The presenter could not produce a frame. Fatal for the draw target:
+    /// The painter could not produce a frame. Fatal for the draw target:
     /// nothing further will reach the screen, so an embedder reports it and
     /// takes the window down.
     RenderFailed(EngineError),
@@ -146,12 +151,16 @@ impl fmt::Debug for Screenshot {
     }
 }
 
-/// Wakes a thread that parks on an event loop the engine does not own.
+/// Wakes the embedder's thread, which parks on an event loop the engine does
+/// not own.
 ///
 /// One implementation per platform — a winit event-loop proxy, an `AppKit`
-/// source, a Worker's signal — and the view is generic over it, so the wake
-/// is a direct call rather than a virtual one. A view's link holds the only
-/// handle to it.
+/// source, a Worker's signal — and [`LynxView::new`] is generic over it, so
+/// the wake is a direct call rather than a virtual one. The Lynx main thread
+/// holds the only handle to it, and calls it whenever it has published
+/// something the embedder's next [`LynxView::pump`] would find: a committed
+/// frame, a lifecycle event. It must never call back into the view, which it
+/// could not anyway — a view never leaves the thread that built it.
 pub trait EventRequester: Send + Sync + 'static {
     fn request_event(&self);
 }
@@ -165,7 +174,307 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
-/// Paint → Lynx main: every fact the document must see.
+/// Everything transferred to `bobcat-main` before the entry module starts.
+#[derive(Clone)]
+pub struct ViewSources {
+    /// Owned by `bobcat-main` for the complete source-loading phase. The
+    /// fetcher's own implementation decides where actual network or file IO
+    /// runs; completion and document mutation resume on the main thread.
+    pub resource_fetcher: Arc<dyn ResourceFetcher>,
+    pub fonts: Vec<FontBlob>,
+    pub default_font_family: Option<String>,
+    pub image_store: Option<Arc<dyn ImageStore>>,
+    pub style_sheets: Vec<String>,
+    pub entry: String,
+}
+
+impl ViewSources {
+    #[must_use]
+    pub fn new(resource_fetcher: Arc<dyn ResourceFetcher>, entry: impl Into<String>) -> Self {
+        Self {
+            resource_fetcher,
+            fonts: Vec::new(),
+            default_font_family: None,
+            image_store: None,
+            style_sheets: Vec::new(),
+            entry: entry.into(),
+        }
+    }
+}
+
+impl fmt::Debug for ViewSources {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ViewSources")
+            .field("style_sheets", &self.style_sheets)
+            .field("entry", &self.entry)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A running Lynx view: a window's worth of Lynx, and the one engine-owned
+/// thread behind it.
+///
+/// The view stays on the thread that built it, and that thread is where it
+/// paints: it owns the draw targets, the gesture router, the scroll intents
+/// and the composition outright, so an embedder chooses the painting thread
+/// by choosing where it calls [`LynxView::new`]. Nothing here is a queue and
+/// nothing here draws by itself — every call applies immediately, and the
+/// frame those calls owe is produced by the next [`LynxView::pump`], which
+/// is also the turn that hands back what the realm had to say. A host parked
+/// on its own event loop therefore takes a turn after it hands a fact in;
+/// facts from the Lynx main thread arrive with the construction-time
+/// [`EventRequester`] wakeup.
+pub struct LynxView {
+    painter: Painter,
+    main: MainThreadHome,
+    image_store: Arc<dyn ImageStore>,
+}
+
+impl fmt::Debug for LynxView {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LynxView")
+            .field("painter", &self.painter)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for LynxView {
+    fn drop(&mut self) {
+        // Goodbye first, join second. The painter holds the only sender on
+        // the FIFO `bobcat-main` parks on, so a shutdown that is not sent
+        // before the join is a shutdown that never arrives. The draw target
+        // goes with the painter, in the drop glue that runs the moment this
+        // returns — still on this thread, and still before the embedder's
+        // next statement, which is what lets it drop the window handle
+        // straight afterwards on a platform where only its own thread may
+        // destroy one.
+        self.painter.shutdown();
+        self.main.shutdown();
+    }
+}
+
+impl LynxView {
+    /// Starts `bobcat-main` and waits asynchronously until it has created its
+    /// document, loaded and mounted every source, and booted the entry
+    /// module. The painter is built here, on the calling thread, which owns
+    /// it from now on.
+    ///
+    /// Dropping this future before it resolves cancels pending resource work
+    /// or stops startup before `QuickJS` begins, releases the painter, and
+    /// joins `bobcat-main`. If synchronous startup JavaScript is already
+    /// running, teardown waits for that work to return before the main thread
+    /// can be joined.
+    pub async fn new<R: EventRequester>(
+        config: PageConfig,
+        event_requester: Arc<R>,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+        sources: ViewSources,
+    ) -> Result<Self, LynxViewError> {
+        let frame_size = frame_size(width, height, device_pixel_ratio)?;
+        let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
+        let (started_sender, started) = oneshot::channel();
+        let (painter_link, main_link) = main_link(event_requester);
+        let main = spawn_main_thread(
+            StartupRequest::new(config, viewport, sources),
+            main_link,
+            started_sender,
+        )?;
+        let mut startup = ViewStartup {
+            painter: Some(Painter::new(viewport, frame_size, painter_link)),
+            main: Some(main),
+            started: Some(started),
+        };
+        let success = startup.wait().await?;
+        Ok(startup.finish(success))
+    }
+
+    /// Routes one normalized OS input event against the frame the painter
+    /// last read.
+    pub fn dispatch_input(&mut self, event: InputEvent) {
+        self.painter.dispatch_input(event);
+    }
+
+    /// Applies new device metrics, if they moved at all.
+    pub fn resize(
+        &mut self,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<(), EngineError> {
+        self.painter.resize(width, height, device_pixel_ratio)
+    }
+
+    /// Asks for a frame nothing else would have asked for.
+    pub fn refresh(&self) {
+        self.painter.refresh();
+    }
+
+    /// Reports whether the window is visible. An occluded one is not drawn,
+    /// and the frame it owed is produced when it comes back.
+    pub fn set_occluded(&mut self, occluded: bool) {
+        self.painter.set_occluded(occluded);
+    }
+
+    /// Runs one turn — draw the frame the view owes, then hand back every
+    /// lifecycle event the engine has produced since the last call.
+    ///
+    /// This is where a windowed view draws, so a host calls it at the point
+    /// in its own turn where a wait for the display is acceptable, and once
+    /// per turn.
+    #[must_use]
+    pub fn pump(&mut self) -> Vec<EngineEvent> {
+        self.painter.serve()
+    }
+
+    /// How long the host may sleep before offering the view another
+    /// [`Self::pump`].
+    ///
+    /// `None` is nothing owed: park until an OS fact or the engine's wakeup
+    /// opens the next turn. `Some(Duration::ZERO)` is a running animation —
+    /// come straight back, because the swap chain's `AutoVsync` acquire
+    /// inside the next draw is the pace, and on a target whose acquire does
+    /// not wait (a browser canvas) it means one display frame instead.
+    /// Anything else is a swap chain that had no image to give and said so
+    /// without waiting for vsync, so the retry needs that delay or it becomes
+    /// a spin.
+    ///
+    /// Only ever a visible window answers anything but `None`; an offscreen
+    /// view's frames are the host's to ask for through [`Self::tick`].
+    #[must_use]
+    pub fn next_turn(&self) -> Option<Duration> {
+        self.painter.next_turn()
+    }
+
+    /// Whether the engine owed the timeline another frame as of the last
+    /// turn.
+    ///
+    /// A host that owns the display clock — a Worker driving
+    /// `requestAnimationFrame` — reads it to decide whether to ask for
+    /// another turn. Unlike [`Self::next_turn`] it answers for an offscreen
+    /// view too, which has no display to pace against.
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
+        self.painter.is_animating()
+    }
+
+    #[must_use]
+    pub const fn frame_size(&self) -> FrameSize {
+        self.painter.frame_size()
+    }
+
+    /// Lends the view a draw target.
+    ///
+    /// The presentation stack is built on this thread, the one that owns the
+    /// window, because creating a surface from a window handle is a
+    /// main-thread-only call on macOS — and it is also the thread that will
+    /// draw into it.
+    ///
+    /// It is configured at the view's own frame size rather than one the
+    /// caller names, so the first draw cannot find a surface built for a
+    /// different target than the one it is about to paint.
+    pub async fn attach_target(
+        &mut self,
+        target: impl Into<WindowTarget>,
+    ) -> Result<(), EngineError> {
+        self.painter.attach_target(target).await
+    }
+
+    /// Gives the view a windowless GPU target of its own.
+    pub fn attach_offscreen(&mut self) -> Result<(), EngineError> {
+        self.painter.attach_offscreen()
+    }
+
+    /// Advances an offscreen view by one frame, answering whether it drew.
+    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
+        self.painter.tick(force)
+    }
+
+    /// Reads back what the view last rendered.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
+        self.painter.capture()
+    }
+
+    /// Resolves an image through the embedder's store and tells the document
+    /// its pixels are resident.
+    pub async fn load_image(&self, source: &str) -> Result<(), LynxViewError> {
+        let store = Arc::clone(&self.image_store);
+        store
+            .get(source)
+            .await
+            .map_err(|error| LynxViewError::Image {
+                image_source: source.to_owned(),
+                message: error.to_string(),
+            })?;
+        self.painter.note_images_changed();
+        Ok(())
+    }
+
+    pub fn prefetch_image(&self, source: &str) {
+        self.image_store.prefetch(source);
+    }
+}
+
+/// A half-built view whose destructor is the cancellation protocol for
+/// [`LynxView::new`].
+struct ViewStartup {
+    painter: Option<Painter>,
+    main: Option<MainThreadHome>,
+    started: Option<oneshot::Receiver<StartupResult>>,
+}
+
+impl ViewStartup {
+    async fn wait(&mut self) -> Result<StartupSuccess, LynxViewError> {
+        self.started
+            .as_mut()
+            .expect("startup result is present until the view is built")
+            .await
+            .map_err(|_| EngineError::Thread {
+                name: "script",
+                message: "the Lynx main thread stopped before startup completed".to_owned(),
+            })?
+    }
+
+    fn finish(mut self, success: StartupSuccess) -> LynxView {
+        self.started.take();
+        LynxView {
+            painter: self.painter.take().expect("startup owns the painter"),
+            main: self.main.take().expect("startup owns the Lynx main thread"),
+            image_store: success.image_store,
+        }
+    }
+}
+
+impl Drop for ViewStartup {
+    fn drop(&mut self) {
+        // Publish cancellation before closing the result receiver, so a
+        // resource that becomes ready in the same poll cannot proceed into
+        // QuickJS before bobcat-main observes the flag.
+        if let Some(main) = self.main.as_ref() {
+            main.cancel();
+        }
+        // Closing wakes `Sender::closed`, which drops any pending
+        // ResourceFuture on bobcat-main.
+        if let Some(started) = self.started.as_mut() {
+            started.close();
+        }
+        // The painter's goodbye must precede the join, exactly as it does in
+        // `Drop for LynxView`: a successfully booted main thread is parked on
+        // the FIFO the painter holds the only sender for.
+        if let Some(painter) = self.painter.as_mut() {
+            painter.shutdown();
+        }
+        if let Some(main) = self.main.as_mut() {
+            main.shutdown();
+        }
+    }
+}
+
+/// Painter → Lynx main: every fact the document must see.
 pub(crate) enum ToMain {
     DispatchEvent {
         target: NodeId,
@@ -190,10 +499,10 @@ pub(crate) enum ToMain {
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
 }
 
-/// Lynx main → paint: everything the main thread has to say back.
+/// Lynx main → painter: everything the main thread has to say back.
 #[derive(Debug)]
-pub(crate) enum ToPresenter {
-    /// The frame mailbox holds something the paint thread has not read.
+pub(crate) enum ToPainter {
+    /// The frame mailbox holds something the painter has not read.
     FrameChanged,
     Engine(EngineEvent),
     ListenerAvailable(Arc<str>),
@@ -209,51 +518,17 @@ pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedF
         .unwrap_or_else(|error| panic!("the frame mailbox is poisoned: {error}"))
 }
 
-/// Builds the link between the paint and Lynx main threads.
-pub(crate) fn main_link<R: EventRequester>(requester: Arc<R>) -> (PresenterLink, MainLink<R>) {
+/// Builds the view's one link: the painter's end and the Lynx main thread's.
+pub(crate) fn main_link<R: EventRequester>(requester: Arc<R>) -> (PainterLink, MainLink<R>) {
     let (commands, command_receiver) = mpsc::channel();
     let (notifications, notification_receiver) = mpsc::channel();
     let frames = Arc::new(FrameHub::new(None));
-    let presenter = PresenterLink::new(commands, notification_receiver, Arc::clone(&frames));
+    let painter = PainterLink::new(commands, notification_receiver, Arc::clone(&frames));
     let main = MainLink::new(
         command_receiver,
-        ToPresenterSender::new(notifications, frames, requester),
+        ToPainterSender::new(notifications, frames, requester),
     );
-    (presenter, main)
-}
-
-/// User → paint: every fact the embedder's thread has to hand over.
-pub(crate) enum ToPainter {
-    Input(InputEvent),
-    Resize {
-        viewport: Viewport,
-        frame_size: FrameSize,
-    },
-    Occluded(bool),
-    Refresh,
-    /// Built on the window-owning user thread, then owned by the painter.
-    Attach(Box<WindowGraphics>),
-    AttachOffscreen(mpsc::Sender<Result<(), EngineError>>),
-    Tick {
-        force: bool,
-        reply: mpsc::Sender<Result<bool, EngineError>>,
-    },
-    #[cfg(not(target_arch = "wasm32"))]
-    Capture(mpsc::Sender<Result<Screenshot, EngineError>>),
-    NoteImagesChanged,
-    #[cfg(not(target_arch = "wasm32"))]
-    MainChanged,
-    Shutdown,
-}
-
-/// Builds the link between the user and paint threads.
-pub(crate) fn paint_link<R: EventRequester>(requester: Arc<R>) -> (HostLink, PainterLink<R>) {
-    let (commands, command_receiver) = mpsc::channel();
-    let (events, event_receiver) = mpsc::channel();
-    let animating = Arc::new(AtomicBool::new(false));
-    let host = HostLink::new(commands, event_receiver, Arc::clone(&animating));
-    let painter = PainterLink::new(command_receiver, events, requester, animating);
-    (host, painter)
+    (painter, main)
 }
 
 pub(crate) fn frame_size(

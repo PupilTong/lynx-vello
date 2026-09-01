@@ -9,11 +9,11 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use super::ToPresenterSender;
+use super::ToPainterSender;
 use super::quickjs::ScriptEngine;
 use crate::main::tree::LynxDocument;
 use crate::script::ScriptError;
-use crate::view::{EventRequester, ToPresenter};
+use crate::view::{EventRequester, ToPainter};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -145,8 +145,8 @@ struct TreeHandle<R: EventRequester> {
     document: LynxDocument,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
-    /// Where committed frames leave for the presenting side.
-    notify: ToPresenterSender<R>,
+    /// Where committed frames leave for the painting side.
+    notify: ToPainterSender<R>,
 }
 
 impl<R: EventRequester> TreeHandle<R> {
@@ -203,7 +203,7 @@ struct EventState<R: EventRequester> {
     /// The same registrations keyed the other way, so dropping an element
     /// costs its own listeners rather than a scan of every name.
     by_node: RefCell<FxHashMap<dom::NodeId, NodeListeners>>,
-    /// Where the presenting thread's replica of the name set is fed from.
+    /// Where the painter's replica of the name set is fed from.
     ///
     /// Sent from here rather than at a batch boundary because this is where
     /// the realm has just been told, and only on a global edge of
@@ -213,7 +213,7 @@ struct EventState<R: EventRequester> {
     /// after the index it announces has been updated and its borrow released,
     /// so the truth is never behind what has crossed, and no `RefCell` is
     /// held across one.
-    notify: ToPresenterSender<R>,
+    notify: ToPainterSender<R>,
     /// Set by the native `stopPropagation` export. A pure flag write: the
     /// realm is inside a `call_module_export` when it runs, and re-entering
     /// the realm from a host function would nest an execution guard, which
@@ -222,7 +222,7 @@ struct EventState<R: EventRequester> {
 }
 
 impl<R: EventRequester> EventState<R> {
-    fn new(notify: ToPresenterSender<R>) -> Self {
+    fn new(notify: ToPainterSender<R>) -> Self {
         Self {
             listeners: RefCell::default(),
             by_node: RefCell::default(),
@@ -253,7 +253,7 @@ impl<R: EventRequester> EventState<R> {
                 .or_default()
                 .push((Arc::clone(&shared), capture));
             if first_for_name {
-                self.notify.send(ToPresenter::ListenerAvailable(shared));
+                self.notify.send(ToPainter::ListenerAvailable(shared));
             }
         }
     }
@@ -277,7 +277,7 @@ impl<R: EventRequester> EventState<R> {
         drop(listeners);
         self.forget_node_listener(node, name, capture);
         if let Some(name) = closed {
-            self.notify.send(ToPresenter::ListenerUnavailable(name));
+            self.notify.send(ToPainter::ListenerUnavailable(name));
         }
     }
 
@@ -301,7 +301,7 @@ impl<R: EventRequester> EventState<R> {
         }
         drop(listeners);
         for name in closed {
-            self.notify.send(ToPresenter::ListenerUnavailable(name));
+            self.notify.send(ToPainter::ListenerUnavailable(name));
         }
     }
 
@@ -340,7 +340,7 @@ impl<R: EventRequester> fmt::Debug for MainThreadRuntime<R> {
 impl<R: EventRequester> MainThreadRuntime<R> {
     pub(crate) fn new(
         document: LynxDocument,
-        notify: ToPresenterSender<R>,
+        notify: ToPainterSender<R>,
     ) -> Result<Self, MainThreadError> {
         let mut engine = ScriptEngine::new()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
@@ -360,16 +360,16 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         self.tree.borrow_mut().commit_if_dirty();
     }
 
-    /// Advances the animation timeline to the presenting side's clock
+    /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
         let _ = self.tree.borrow_mut().document.advance_animations(now);
     }
 
-    /// Writes the presenting side's scroll offsets into the document and
+    /// Writes the painting side's scroll offsets into the document and
     /// repaints: the commit at the end of this round bakes windows
     /// re-centered on them. This is the only way a user scroll reaches the
-    /// document — between refills the offsets live on the presenting side
+    /// document — between refills the offsets live on the painting side
     /// alone.
     pub(crate) fn refill_scroll_windows(&mut self, offsets: &[(dom::NodeId, dom::Vector2D<f32>)]) {
         let mut handle = self.tree.borrow_mut();
@@ -405,7 +405,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         probe(&mut self.tree.borrow_mut().document)
     }
 
-    /// Delivers one routed event the presenting side decided: the type and
+    /// Delivers one routed event the painting side decided: the type and
     /// the target crossed as plain data; the propagation path is computed
     /// here, where the document is.
     ///
@@ -563,7 +563,7 @@ __FlushElementTree();
 fn install_bobcat<R: EventRequester>(
     engine: &mut ScriptEngine,
     document: LynxDocument,
-    notify: ToPresenterSender<R>,
+    notify: ToPainterSender<R>,
     events: &Rc<EventState<R>>,
 ) -> Result<Rc<RefCell<TreeHandle<R>>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
@@ -718,7 +718,7 @@ fn install_host_module<R: EventRequester>(
             ));
         }
         // Before the drop, so an id that somehow fails to free still leaves
-        // the presenting thread's listener index naming nothing.
+        // the painter's listener index naming nothing.
         state.forget_node(node);
         document.drop_element(node);
         Ok(HostValue::Undefined)

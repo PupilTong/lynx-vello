@@ -1,4 +1,4 @@
-//! The paint-thread input router: one place that turns routed input into
+//! The painting side's input router: one place that turns routed input into
 //! every decision the engine executes — which scroll the user-agent performs,
 //! which event is dispatched, and at which target node.
 //!
@@ -86,7 +86,7 @@ pub(crate) const TAP_EVENT: &str = "tap";
 /// The published-frame facts the router may ask for while deciding. Borrowed
 /// for exactly one call; the router retains nothing of the host's. Every
 /// answer comes from the committed frame's scroll-slot table and the
-/// presenting thread's own listener-name replica — never from the document,
+/// painter's own listener-name replica — never from the document,
 /// which lives on the main thread, and never from behind a lock.
 pub(crate) trait RouterHost {
     /// The nearest scroll container on the hit item's containing-block chain
@@ -195,8 +195,8 @@ impl Sequence {
     }
 }
 
-/// The per-view router state. Owned by the engine, fed on the presenting
-/// thread only.
+/// The per-view router state. Owned by the engine, fed on the painting side
+/// only.
 #[derive(Debug, Default)]
 pub(crate) struct GestureRouter {
     /// Every pointer currently down, in down order. Length is what matters

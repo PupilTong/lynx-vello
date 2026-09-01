@@ -198,6 +198,11 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     })
     .await;
     view.load_image(IMAGE_URL).await.expect("published source");
+    // The store's answer reaches the document as one main-thread command,
+    // and a capture only reads whatever has already been published. A forced
+    // tick is the one call that waits for the commit behind it.
+    view.tick(true)
+        .expect("commit the frame the image belongs to");
 
     let shot = view.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)

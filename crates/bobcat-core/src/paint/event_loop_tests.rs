@@ -72,7 +72,7 @@ fn a_host_input_event_reaches_a_listener_in_the_realm() {
               globalThis.held = [page, view];
               __SetInlineStyles(view, 'width:200px;height:200px');
               __AddEventListener(view, 'pointerdown', (event) => {
-                // Observable from the presenting side, and proof delivery ran
+                // Observable from the painting side, and proof delivery ran
                 // where the document is.
                 __SetAttribute(view, 'seen', event.type + ':' + event.detail.x);
               }, {});
@@ -477,7 +477,7 @@ const TWO_ROW_SCROLLER_PAGE: &str = r"
         ";
 
 /// The composed-scroll law, from the engine's side: a user scroll
-/// inside the encode window lands in the presenting side's intents and
+/// inside the encode window lands in the painting side's intents and
 /// nowhere else — no command crosses, the document's offsets stay put,
 /// nothing recommits — and hit testing follows the intent offsets, not
 /// the committed ones, so a tap lands on what the screen shows.
@@ -645,7 +645,7 @@ fn synchronized_tick(engine: &mut Painter, now: f64) {
     );
 }
 
-/// An exported curve animates on the presenting side: after the tick
+/// An exported curve animates on the painting side: after the tick
 /// that promotes it to running, the committed frame carries the curve,
 /// wants no per-frame main-thread ticks, and `begin_frame` sends
 /// nothing.

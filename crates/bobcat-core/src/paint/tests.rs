@@ -4,7 +4,7 @@ use std::time::Duration;
 use super::Painter;
 use crate::main::MainLink;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{EngineEvent, EventRequester, NoWakeup, ToMain, ToPresenter, frame_size};
+use crate::view::{EngineEvent, EventRequester, NoWakeup, ToMain, ToPainter, frame_size};
 
 /// A phone-shaped document, ready for a main thread to be started over it.
 fn document() -> LynxDocument {
@@ -93,10 +93,10 @@ fn one_drain_applies_every_kind_of_notification() {
     assert!(view.pump().is_empty(), "and has nothing to report");
 
     for notification in [
-        ToPresenter::ListenerAvailable(Arc::from("tap")),
-        ToPresenter::Engine(EngineEvent::ScriptFinished),
-        ToPresenter::BeginFrameServiced(7),
-        ToPresenter::FrameChanged,
+        ToPainter::ListenerAvailable(Arc::from("tap")),
+        ToPainter::Engine(EngineEvent::ScriptFinished),
+        ToPainter::BeginFrameServiced(7),
+        ToPainter::FrameChanged,
     ] {
         main.notify.send(notification);
     }
@@ -117,7 +117,7 @@ fn one_drain_applies_every_kind_of_notification() {
     assert!(!view.link.take_redraw(), "and a request is taken once");
 }
 
-/// Frames do not queue: the mailbox holds one slot, so a presenting side
+/// Frames do not queue: the mailbox holds one slot, so a painting side
 /// that syncs after several commits sees the newest and never the ones it
 /// slept through — however many announcements arrived for them.
 #[test]
@@ -173,7 +173,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         "an empty listener set sends nothing"
     );
 
-    publish(ToPresenter::ListenerAvailable(Arc::from("pointerup")));
+    publish(ToPainter::ListenerAvailable(Arc::from("pointerup")));
     view.link.sync();
     emit(&mut view);
     assert!(
@@ -184,7 +184,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     // An update that has not been synced yet is not yet visible: the
     // replica moves at pass boundaries, which is the one pass of
     // staleness this design accepts in exchange for the lock.
-    publish(ToPresenter::ListenerAvailable(Arc::from(TAP_EVENT)));
+    publish(ToPainter::ListenerAvailable(Arc::from(TAP_EVENT)));
     emit(&mut view);
     assert!(
         commands.try_recv().is_err(),
@@ -205,7 +205,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 
     // And the edge closes the name again: the main thread publishes the
     // last removal, and from the next sync nothing crosses.
-    publish(ToPresenter::ListenerUnavailable(Arc::from(TAP_EVENT)));
+    publish(ToPainter::ListenerUnavailable(Arc::from(TAP_EVENT)));
     view.link.sync();
     emit(&mut view);
     assert!(
@@ -231,9 +231,9 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
     );
 
     for edge in [
-        ToPresenter::ListenerAvailable(Arc::from("tap")),
-        ToPresenter::ListenerAvailable(Arc::from("scroll")),
-        ToPresenter::ListenerUnavailable(Arc::from("tap")),
+        ToPainter::ListenerAvailable(Arc::from("tap")),
+        ToPainter::ListenerAvailable(Arc::from("scroll")),
+        ToPainter::ListenerUnavailable(Arc::from("tap")),
     ] {
         main.notify.send(edge);
     }
@@ -257,7 +257,7 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
     );
 }
 
-/// A scroll decision crosses nothing: it lands in the presenting side's
+/// A scroll decision crosses nothing: it lands in the painting side's
 /// intents, which are the offsets composition shows, and the main
 /// thread hears about scrolling only when a refill writes offsets back.
 /// With no published frame there is no geometry to consume against, so
@@ -292,12 +292,13 @@ impl EventRequester for WakeSignal {
     }
 }
 
-/// A frame the presenter asks of itself wakes nothing.
+/// A frame the painter asks of itself wakes nothing.
 ///
-/// Every caller of `refresh` is the presenter, mid-turn, and the turn ends
-/// in the draw that answers it. A wake there would post into the very inbox
-/// the presenter is about to drain — a turn that finds nothing, asks for
-/// another, and never stops. Only the main thread's publish wakes.
+/// Every caller of `refresh` is the painter, on the host's own thread and
+/// inside the host's own call, so the turn that host is already in is what
+/// answers it. A wake there would post into the loop that is running — a
+/// turn that finds nothing, asks for another, and never stops. Only the main
+/// thread's publish wakes.
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = mpsc::channel();
@@ -310,7 +311,7 @@ fn a_self_directed_frame_request_wakes_nobody() {
     painter.refresh();
     assert!(
         wakes.try_recv().is_err(),
-        "a presenter-local request is answered by the turn it was made in"
+        "a painter-local request is answered by the turn it was made in"
     );
     assert!(painter.link.take_redraw(), "and the frame is still owed");
 

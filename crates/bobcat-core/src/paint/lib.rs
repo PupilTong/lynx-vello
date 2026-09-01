@@ -1,10 +1,12 @@
-//! Paint-thread ownership: input routing, scrolling, composition,
-//! and every draw target the view has.
+//! Painting ownership: input routing, scrolling, composition, and every
+//! draw target the view has.
 //!
-//! Everything here runs on one engine-owned thread. It answers the host
-//! through its [`PainterLink`] and the Lynx main thread through its
-//! [`PresenterLink`], and nothing it owns — a surface, a scene buffer, a
-//! gesture arena — is ever touched from anywhere else.
+//! Everything here runs on the thread that constructed the view — the
+//! embedder's own — inside the calls the embedder makes. Its one link is
+//! [`PainterLink`], to the Lynx main thread, and nothing it owns — a
+//! surface, a scene buffer, a gesture arena — is ever touched from anywhere
+//! else. [`Painter`] is `!Send` by construction, which is what makes the
+//! constructing thread the painting thread for the view's whole life.
 
 mod gesture;
 mod graphics;
@@ -20,11 +22,10 @@ use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
-use std::time::{Duration, Instant};
 
 use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
@@ -37,9 +38,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use web_time::Instant as ClockInstant;
 
 use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
-use self::graphics::FrameAcquisition;
-pub(crate) use self::graphics::WindowGraphics;
 pub use self::graphics::WindowTarget;
+use self::graphics::{FrameAcquisition, WindowGraphics};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::Viewport;
@@ -48,21 +48,21 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize, ToMain, ToPainter,
-    ToPresenter, frame_slot,
+    ComposeKey, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter, frame_size,
+    frame_slot,
 };
 #[cfg(test)]
-use crate::view::{NoWakeup, frame_size, main_link};
+use crate::view::{EventRequester, NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long the presenter waits before asking a swap chain that had nothing
-/// to give. Half a display refresh: soon enough that a transient miss costs
-/// no visible frame, slow enough that a window the compositor has stopped
-/// serving does not cost a core.
+/// How long a host is asked to wait before giving the view another turn for
+/// a swap chain that had nothing to give. Half a display refresh: soon
+/// enough that a transient miss costs no visible frame, slow enough that a
+/// window the compositor has stopped serving does not cost a core.
 const SWAP_CHAIN_RETRY: Duration = Duration::from_millis(8);
 
-/// The paint thread's monotonic animation timeline. Its epoch is view
+/// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
 #[derive(Debug)]
 pub(crate) struct FrameClock {
@@ -130,11 +130,12 @@ mod clock_tests {
     }
 }
 
-/// The paint thread's end of its link to the Lynx main thread, including the
-/// replicas it uses while routing and drawing without touching that thread.
-pub(crate) struct PresenterLink {
+/// The painting end of the view's one link — to the Lynx main thread —
+/// including the replicas it uses while routing and drawing without touching
+/// that thread.
+pub(crate) struct PainterLink {
     commands: mpsc::Sender<ToMain>,
-    notifications: mpsc::Receiver<ToPresenter>,
+    notifications: mpsc::Receiver<ToPainter>,
     frames: Arc<FrameHub>,
     frame: Option<Arc<CommittedFrame>>,
     events: Vec<EngineEvent>,
@@ -144,10 +145,10 @@ pub(crate) struct PresenterLink {
     redraw_pending: Cell<bool>,
 }
 
-impl PresenterLink {
+impl PainterLink {
     pub(crate) fn new(
         commands: mpsc::Sender<ToMain>,
-        notifications: mpsc::Receiver<ToPresenter>,
+        notifications: mpsc::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
     ) -> Self {
         Self {
@@ -179,17 +180,17 @@ impl PresenterLink {
         self.adopt_frame(announced);
     }
 
-    fn apply(&mut self, notification: ToPresenter) -> bool {
+    fn apply(&mut self, notification: ToPainter) -> bool {
         match notification {
-            ToPresenter::FrameChanged => return true,
-            ToPresenter::Engine(event) => self.events.push(event),
-            ToPresenter::ListenerAvailable(name) => {
+            ToPainter::FrameChanged => return true,
+            ToPainter::Engine(event) => self.events.push(event),
+            ToPainter::ListenerAvailable(name) => {
                 self.listener_names.insert(name);
             }
-            ToPresenter::ListenerUnavailable(name) => {
+            ToPainter::ListenerUnavailable(name) => {
                 self.listener_names.remove(&name);
             }
-            ToPresenter::BeginFrameServiced(seq) => {
+            ToPainter::BeginFrameServiced(seq) => {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
         }
@@ -215,8 +216,9 @@ impl PresenterLink {
         std::mem::take(&mut self.events)
     }
 
-    /// Marks a paint-thread-local redraw without posting another wakeup into
-    /// the inbox this same turn is about to drain.
+    /// Marks a redraw the painter owes itself. It wakes nobody: every caller
+    /// is on the host's own thread, inside the host's own call, so the turn
+    /// that host is already in is the turn that answers it.
     pub(crate) fn mark_redraw(&self) {
         self.redraw_pending.set(true);
     }
@@ -240,11 +242,16 @@ impl PresenterLink {
 
     /// Waits for a particular main-thread animation round while applying all
     /// notifications that precede its acknowledgement.
+    ///
+    /// The one blocking wait a host's own thread makes on `bobcat-main`, and
+    /// `tick` — offscreen only — is the one call that reaches it. Its
+    /// `recv_timeout` reads the standard library's clock, which no wasm32
+    /// target implements, so an offscreen view belongs to a native host.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+        let deadline = ClockInstant::now() + timeout;
         let mut announced = false;
         while self.begin_frames_serviced < seq {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
                 break;
             };
             let Ok(notification) = self.notifications.recv_timeout(remaining) else {
@@ -257,106 +264,39 @@ impl PresenterLink {
     }
 
     #[cfg(test)]
-    pub(crate) fn drain(&mut self) -> Vec<ToPresenter> {
+    pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
         self.notifications.try_iter().collect()
     }
 }
 
-impl fmt::Debug for PresenterLink {
+impl fmt::Debug for PainterLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PresenterLink")
+            .debug_struct("PainterLink")
             .field("listener_names", &self.listener_names.len())
             .field("begin_frames_sent", &self.begin_frames_sent)
             .finish_non_exhaustive()
     }
 }
 
-/// The paint thread's end of its link to the embedder's user thread.
-pub(crate) struct PainterLink<R: EventRequester> {
-    commands: mpsc::Receiver<ToPainter>,
-    events: mpsc::Sender<EngineEvent>,
-    requester: Arc<R>,
-    animating: Arc<AtomicBool>,
-}
-
-impl<R: EventRequester> PainterLink<R> {
-    pub(crate) fn new(
-        commands: mpsc::Receiver<ToPainter>,
-        events: mpsc::Sender<EngineEvent>,
-        requester: Arc<R>,
-        animating: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            commands,
-            events,
-            requester,
-            animating,
-        }
-    }
-
-    pub(crate) fn try_next(&self) -> Option<ToPainter> {
-        match self.commands.try_recv() {
-            Ok(command) => Some(command),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => Some(ToPainter::Shutdown),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn next(&self) -> ToPainter {
-        self.commands.recv().unwrap_or(ToPainter::Shutdown)
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn next_within(&self, timeout: Duration) -> Option<ToPainter> {
-        match self.commands.recv_timeout(timeout) {
-            Ok(command) => Some(command),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => Some(ToPainter::Shutdown),
-        }
-    }
-
-    pub(crate) fn report(&self, event: EngineEvent) {
-        if self.events.send(event).is_ok() {
-            self.requester.request_event();
-        }
-    }
-
-    pub(crate) fn set_animating(&self, animating: bool) {
-        self.animating.store(animating, Ordering::Relaxed);
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn requester(&self) -> &Arc<R> {
-        &self.requester
-    }
-}
-
-impl<R: EventRequester> fmt::Debug for PainterLink<R> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PainterLink")
-    }
-}
-
 /// Where a view's pixels go: nowhere yet, an offscreen GPU target, or a
 /// window's presentation stack.
-pub(super) enum Output {
+enum Output {
     None,
     Offscreen(Box<Headless>),
     Window(Box<WindowGraphics>),
 }
 
-/// The presenting half of a running view, on the thread that owns it.
+/// The painting half of a running view, on the thread that owns it.
 ///
 /// Kept on that thread by construction — the `Rc` marker makes the whole
-/// struct `!Send`, so the only way it reaches the presenter is to be built
-/// there.
+/// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
+/// that built the view is the only one that can ever draw for it.
 pub(crate) struct Painter {
     // Keep first: dropping the link closes the sole command sender, which
     // wakes the Lynx main thread before any state it may still refer to is
     // released.
-    pub(super) link: PresenterLink,
+    pub(super) link: PainterLink,
     #[cfg(test)]
     main: Option<MainThreadHome>,
     #[cfg(test)]
@@ -411,7 +351,7 @@ fn emit_detail(event: &EmitEvent) -> String {
 
 struct FrameRouterHost<'a> {
     frame: Option<&'a CommittedFrame>,
-    link: &'a PresenterLink,
+    link: &'a PainterLink,
 }
 
 impl RouterHost for FrameRouterHost<'_> {
@@ -638,9 +578,9 @@ fn route_published(
 }
 
 impl Painter {
-    /// Creates the paint-thread owner over links the user thread established
-    /// before either engine-owned thread began running.
-    pub(super) fn new(viewport: Viewport, frame_size: FrameSize, link: PresenterLink) -> Self {
+    /// Creates the painting owner over the link its view established before
+    /// the Lynx main thread began running.
+    pub(super) fn new(viewport: Viewport, frame_size: FrameSize, link: PainterLink) -> Self {
         Self {
             link,
             #[cfg(test)]
@@ -706,13 +646,13 @@ impl Painter {
         frame_size: FrameSize,
         event_requester: Arc<R>,
     ) -> (Self, MainLink<R>) {
-        let (presenter, main) = main_link(event_requester);
-        let painter = Self::new(viewport, frame_size, presenter);
+        let (link, main) = main_link(event_requester);
+        let painter = Self::new(viewport, frame_size, link);
         (painter, main)
     }
 
     /// Whether the engine owes the timeline another frame, as of the last
-    /// pass that drained the link — a `pump`, a `draw`, or an input. That is
+    /// pass that drained the link — a `serve`, a `draw`, or an input. That is
     /// when a host asks: after answering the wakeup that carried the frame.
     #[must_use]
     pub(super) fn is_animating(&self) -> bool {
@@ -722,7 +662,7 @@ impl Painter {
             || self.gesture.needs_frame()
     }
 
-    fn note_images_changed(&self) {
+    pub(super) fn note_images_changed(&self) {
         self.link.send(ToMain::NoteImagesChanged);
         self.refresh();
     }
@@ -820,17 +760,36 @@ impl Painter {
         self.execute_decisions(&mut decisions, published.as_deref());
     }
 
-    /// Applies the host's new metrics. The host validated them and computed
-    /// the frame size, so nothing here can fail.
-    fn resize(&mut self, viewport: Viewport, frame_size: FrameSize) {
+    /// Applies new device metrics, if they moved at all.
+    ///
+    /// The size is validated first, so a target the painter could not render
+    /// is refused before anything else has seen it.
+    pub(super) fn resize(
+        &mut self,
+        width: f32,
+        height: f32,
+        device_pixel_ratio: f32,
+    ) -> Result<(), EngineError> {
+        let next_size = frame_size(width, height, device_pixel_ratio)?;
+        let moved = self.viewport.width.to_bits() != width.to_bits()
+            || self.viewport.height.to_bits() != height.to_bits()
+            || self.viewport.device_pixel_ratio.to_bits() != device_pixel_ratio.to_bits();
+        if !moved {
+            return Ok(());
+        }
+        self.viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
+        self.frame_size = next_size;
         self.link.send(ToMain::Resize {
-            width: viewport.width,
-            height: viewport.height,
-            device_pixel_ratio: viewport.device_pixel_ratio,
+            width,
+            height,
+            device_pixel_ratio,
         });
-        self.viewport = viewport;
-        self.frame_size = frame_size;
         self.refresh();
+        Ok(())
+    }
+
+    pub(super) const fn frame_size(&self) -> FrameSize {
+        self.frame_size
     }
 
     pub(super) fn refresh(&self) {
@@ -839,7 +798,7 @@ impl Painter {
 
     /// A window nobody can see draws nothing, and un-occluding asks again
     /// for the frame that was held back.
-    fn set_occluded(&mut self, occluded: bool) {
+    pub(super) fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
         if !occluded {
             self.refresh();
@@ -852,11 +811,18 @@ impl Painter {
         self.link.take_events()
     }
 
-    /// Takes over the presentation stack the host built on its own thread.
-    fn attach_graphics(&mut self, graphics: Box<WindowGraphics>) {
-        self.output = Output::Window(graphics);
+    /// Builds the presentation stack for a host-owned draw target and keeps
+    /// it. Both happen here, on the thread that owns the window — the only
+    /// one macOS lets a surface be created from.
+    pub(super) async fn attach_target(
+        &mut self,
+        target: impl Into<WindowTarget>,
+    ) -> Result<(), EngineError> {
+        let graphics = WindowGraphics::new(target, self.frame_size).await?;
+        self.output = Output::Window(Box::new(graphics));
         self.render_failed = false;
         self.refresh();
+        Ok(())
     }
 
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
@@ -890,8 +856,9 @@ impl Painter {
             match graphics.acquire(size)? {
                 FrameAcquisition::Ready(acquired) => acquired,
                 // No image this frame, and no vsync was waited on to find
-                // that out, so the frame stays owed and the presenter asks
-                // again on its own short delay rather than in a spin.
+                // that out, so the frame stays owed and `next_turn` asks the
+                // host for another turn after a short delay rather than in a
+                // spin.
                 FrameAcquisition::Retry => {
                     self.link.mark_redraw();
                     return Ok(());
@@ -1007,86 +974,41 @@ impl Painter {
         Ok(())
     }
 
-    /// Applies one host command, answering whether the presenter goes on.
-    ///
-    /// A command the host is blocked on hands back everything the turn has
-    /// produced *before* it answers, so a `tick` that returns has already
-    /// put its events and its animation state in the host's hands.
-    pub(super) fn apply<H: EventRequester>(
-        &mut self,
-        command: ToPainter,
-        host: &PainterLink<H>,
-    ) -> bool {
-        match command {
-            // The turn this opened will sync; there is nothing else to do.
-            #[cfg(not(target_arch = "wasm32"))]
-            ToPainter::MainChanged => {}
-            ToPainter::Input(event) => self.dispatch_input(event),
-            ToPainter::Resize {
-                viewport,
-                frame_size,
-            } => self.resize(viewport, frame_size),
-            ToPainter::Occluded(occluded) => self.set_occluded(occluded),
-            ToPainter::Refresh => self.refresh(),
-            ToPainter::Attach(graphics) => self.attach_graphics(graphics),
-            ToPainter::AttachOffscreen(reply) => {
-                let answer = self.attach_offscreen();
-                self.hand_back(host);
-                let _ = reply.send(answer);
-            }
-            ToPainter::Tick { force, reply } => {
-                let answer = self.tick(force);
-                self.hand_back(host);
-                let _ = reply.send(answer);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            ToPainter::Capture(reply) => {
-                let answer = self.capture();
-                self.hand_back(host);
-                let _ = reply.send(answer);
-            }
-            ToPainter::NoteImagesChanged => self.note_images_changed(),
-            ToPainter::Shutdown => {
-                self.link.send(ToMain::Shutdown);
-                return false;
-            }
-        }
-        true
+    /// Tells the Lynx main thread to stop. Its command loop returns on this
+    /// message, which is why it is sent explicitly rather than left to the
+    /// FIFO closing when the painter is released.
+    pub(super) fn shutdown(&self) {
+        self.link.send(ToMain::Shutdown);
     }
 
-    /// Ends one turn: produce the frame it owes, hand the host what the
-    /// realm had to say, and publish whether the timeline wants another.
+    /// Runs one turn: produce the frame it owes, and hand back everything
+    /// the realm had to say.
     ///
     /// In that order deliberately. Drawing first means the pixels a fatal
     /// script error left behind reach the screen on the turn that reports
     /// it, with nobody left to ask for another frame.
     ///
     /// A draw that fails is reported once. There is no recovering a lost
-    /// surface, and the loop would otherwise report the same failure on
-    /// every turn for as long as the host takes to notice the first.
-    pub(super) fn serve<H: EventRequester>(&mut self, host: &PainterLink<H>) {
+    /// surface, and the turn would otherwise report the same failure for as
+    /// long as the host takes to notice the first.
+    #[must_use]
+    pub(super) fn serve(&mut self) -> Vec<EngineEvent> {
+        let mut events = Vec::new();
         if !self.render_failed
             && let Err(error) = self.draw()
         {
             self.render_failed = true;
-            host.report(EngineEvent::RenderFailed(error));
+            events.push(EngineEvent::RenderFailed(error));
         }
-        self.hand_back(host);
+        events.append(&mut self.pump());
+        events
     }
 
-    /// Hands the host everything this turn produced.
-    fn hand_back<H: EventRequester>(&mut self, host: &PainterLink<H>) {
-        for event in self.pump() {
-            host.report(event);
-        }
-        host.set_animating(self.is_animating());
-    }
-
-    /// When the presenter owes itself another turn, and how soon.
+    /// When the painter owes itself another turn, and how soon.
     ///
     /// `None` parks until something arrives. Zero is a running animation:
     /// the swap chain's `AutoVsync` acquire inside the next draw is the
-    /// pace, and asking for the turn immediately is what keeps the frames
+    /// pace, and taking the turn immediately is what keeps the frames
     /// coming. Anything else is a swap chain that had no image to give —
     /// which it answers without waiting for vsync, so the retry needs a
     /// delay of its own or it becomes a spin.

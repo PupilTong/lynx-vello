@@ -156,7 +156,7 @@ useful signal for currently-compatible versions of those libraries.
   reference embedders own those omitted integration steps and consume this
   crate directly.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
-  opaque `LynxView<R>` facade plus the protocol-only, host-injected
+  opaque `LynxView` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
   lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
@@ -165,9 +165,11 @@ useful signal for currently-compatible versions of those libraries.
   `Arc<dyn ResourceFetcher>`, owned font containers, an optional default font
   family, an optional `ImageStore`, author stylesheet URLs in cascade order,
   and the one entry MTS module URL — passed to the async `LynxView::new` with
-  `PageConfig` and the device metrics. `new` validates the viewport, creates
-  both links, starts the presenter and `bobcat-main`, and awaits one startup
-  result. `bobcat-main` creates the document itself, registers its fonts and
+  `PageConfig`, the device metrics, and the lifecycle wakeup. `new` validates
+  the viewport, creates the one link, builds the painter in place on the
+  calling thread, starts `bobcat-main`, and awaits one startup result. The
+  wakeup is the only thing `new` is generic over, and `bobcat-main` is what
+  holds it; the view itself names no type parameter. `bobcat-main` creates the document itself, registers its fonts and
   image store, awaits and mounts every stylesheet, awaits the entry module,
   creates QuickJS, and boots it before returning success; the fetcher decides
   where actual network or file IO runs, but every future continuation and
@@ -175,8 +177,9 @@ useful signal for currently-compatible versions of those libraries.
   failure yields `LynxViewError` and no view, and nothing later mounts a
   stylesheet or starts a second entry. Cancelling the unresolved `new` future
   drops pending resource work or stops startup before `QuickJS` begins, then
-  stops the presenter and directly joins `bobcat-main`; synchronous startup
-  JavaScript is allowed to finish rather than being externally interrupted.
+  releases the painter it built and directly joins `bobcat-main`; synchronous
+  startup JavaScript is allowed to finish rather than being externally
+  interrupted.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
@@ -219,7 +222,7 @@ useful signal for currently-compatible versions of those libraries.
   callbacks can borrow the owner; it is not a cross-thread sharing mechanism.
   Each `bobcat-internal:host` call is a plain owner-thread mutation, and
   `__FlushElementTree` runs the style + layout + paint commit and publishes one
-  immutable `Arc<CommittedFrame>` to the presenter. The document is never
+  immutable `Arc<CommittedFrame>` to the painter. The document is never
   taken from, returned to, or observed by another thread.
   The core depends on `dom` and re-exports exactly one narrow seam of it: the
   `input` module republishes `dom::Point2D` and
@@ -228,15 +231,16 @@ useful signal for currently-compatible versions of those libraries.
   itself. Wheel deltas crossing that seam are always viewport CSS pixels;
   conversion from physical-pixel, line, or page units is embedder policy.
   Nothing else crosses — no document, no node, no hit-test result —
-  and that list is the whole of it. The private `Painter` retains the newest
-  published frame and runs input routing, gestures, compositor scrolling,
-  composition, and presentation on the presenter; vsync interacts with the OS
-  only there. Commands that require the live tree go to `bobcat-main`, which
+  and that list is the whole of it. The private `Painter` the view owns
+  retains the newest published frame and runs input routing, gestures,
+  compositor scrolling, composition, and presentation inside the embedder's
+  own calls; vsync interacts with the OS only there. Commands that require
+  the live tree go to `bobcat-main`, which
   answers by publishing a later frame. A long JavaScript task therefore cannot
   stop scrolling or re-presentation of the retained frame, while a
   half-applied batch is unobservable because only commits publish. Embedders provide user input, device
   metrics, OS initialization, a draw target, and IO primitives, and relay
-  OS facts in (`dispatch_input`/`resize`/`draw`/`pump`/ticks);
+  OS facts in (`dispatch_input`/`resize`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
   `ScriptFinished` preserves the successful entry-module boot edge after
@@ -245,26 +249,31 @@ useful signal for currently-compatible versions of those libraries.
   threw during event delivery — separate because the last is not fatal:
   the walk continues, the realm stays usable, and later events are delivered
   as normal;
-  a frame the engine wants drawn wakes nobody: the engine-owned presenter
-  thread takes its own next turn, so no OS frame callback and no vsync round
-  trip stands between a commit and its pixels, and the embedder's run loop
-  never waits on one. A continuation is not a wakeup either: while
-  `is_animating` holds, the presenter keeps drawing paced by the `AutoVsync`
-  acquire it owns — nothing schedules across a thread to sustain an animation.
-  A draw that fails arrives once, as `RenderFailed`.
-  **A view spans three threads**: the embedder's own (window lifecycle, input
-  capture, and surface creation — the one call macOS allows nowhere else), the
-  engine's presenter (the private `Painter`: routing, gestures, scrolling,
-  composition, and every GPU call), and the Lynx main thread (document +
-  realm). The browser is the exception: `wgpu`'s handles are not `Send` under
-  shared memory and an `OffscreenCanvas` cannot be transferred on again, so
-  the Render Worker *is* the presenter and each turn runs inside its `pump` —
-  the handle's API is the same either way.
+  a frame the engine wants drawn rides the same wakeup, and the `pump` that
+  answers it is the turn that draws it — so no OS frame callback and no vsync
+  round trip stands between a commit and its pixels. Pacing is the
+  embedder's: after each turn `next_turn` answers `None` to park,
+  `Some(Duration::ZERO)` to come straight back (a running animation, paced by
+  the `AutoVsync` acquire inside the next draw itself), or a short delay for
+  a swap chain that had no image to give. `is_animating` is the same fact in
+  the form a host that owns the display clock — or an offscreen one — can
+  use. A draw that fails arrives once, as `RenderFailed`.
+  **A view spans two threads**: the embedder's own — whichever one called
+  `LynxView::new` — which owns the window, the input capture, the surface
+  (the one call macOS allows nowhere else), and the private `Painter`
+  (routing, gestures, scrolling, composition, and every GPU call), and the
+  Lynx main thread (document + realm). The embedder picks the first by
+  picking where it constructs the view, and the view can never leave it: the
+  painter is `!Send`, so the view is too. That is what the browser always
+  needed — `wgpu`'s handles are not `Send` under shared memory and an
+  `OffscreenCanvas` cannot be transferred on again, so the Render Worker
+  holds the view and each turn runs inside its `pump` — and now the only
+  shape there is.
   The draw target is `WindowTarget`, a `'static` surface target: a windowing
   embedder passes a shared handle (`Arc<winit::Window>`), a browser an owned
   canvas, both through the async `attach_target`, which builds the
-  presentation stack on the calling thread and hands it down. `attach_offscreen`
-  gives a view a windowless GPU target instead.
+  presentation stack on the view's own thread and keeps it there.
+  `attach_offscreen` gives a view a windowless GPU target instead.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
   and retains no pixel of its own: a host supplies an `ImageStore`
   (re-exported from `dom`) as its `ViewSources::image_store`, and the engine
@@ -1093,9 +1102,9 @@ useful signal for currently-compatible versions of those libraries.
   comparison rather than the standard's per-step ancestor walk, and the
   equivalence is argued in `event_path`'s doc comment and pinned by a
   differential test.
-  Dispatch itself belongs to `bobcat-core`, split across its threads
+  Dispatch itself belongs to `bobcat-core`, split across its two threads
   because the realm cannot move and scrolling must stay responsive: the
-  presenter thread routes the input (`route_input`, one hit test), feeds it
+  painter routes the input (`route_input`, one hit test), feeds it
   to the input router — which decides the user-agent scroll and every event's
   type and target in one place — executes those decisions in order, and sends
   each emitted event's type, target, and detail to the script thread. The

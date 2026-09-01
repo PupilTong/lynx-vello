@@ -1,9 +1,10 @@
-//! The paint thread's window presentation stack.
+//! The view's window presentation stack.
 //!
-//! Built on the host thread, because creating a surface from a window handle
-//! is a main-thread-only call on macOS, and then handed to the presenter
-//! thread, which owns it for the rest of the view's life: every acquire,
-//! render and present happens there. Rendering into the retained
+//! Built on the thread that owns the window, because creating a surface from
+//! a window handle is a main-thread-only call on macOS — and that is the same
+//! thread that draws, so it is never handed anywhere: every acquire, render
+//! and present happens on the thread that built the view. Rendering into the
+//! retained
 //! target texture and presenting it are separate steps: the target is
 //! re-rendered only when a new scene was produced, while surface
 //! invalidation and re-exposure re-present the retained target with a blit
@@ -31,9 +32,9 @@ use crate::view::{ComposeKey, EngineError, FrameSize};
 
 /// The draw target an embedder lends a view.
 ///
-/// `'static` deliberately: the surface built from it outlives the host
-/// thread's own borrow of the window, because it is moved to the presenter.
-/// A windowing embedder passes a shared handle — an `Arc<winit::Window>` —
+/// `'static` deliberately: the view owns the surface built from it for the
+/// rest of its life, which outlives any borrow the host could lend. A
+/// windowing embedder passes a shared handle — an `Arc<winit::Window>` —
 /// rather than a reference.
 pub type WindowTarget = vello::wgpu::SurfaceTarget<'static>;
 

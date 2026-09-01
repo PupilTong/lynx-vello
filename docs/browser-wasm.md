@@ -16,7 +16,8 @@ browser UI thread
 
 Render Worker
   initializes shared Wasm
-  owns opaque LynxView + resource registry
+  owns opaque LynxView + resource registry — and, because it is the thread
+  that constructed the view, it is the thread the view paints on
   owns Vello/wgpu/OffscreenCanvas
   └── core wasm_thread spawn -> Lynx main/VM Worker
                                ├── owner-thread-bound QuickJS realm
@@ -177,8 +178,14 @@ way as ordered commands. A JavaScript turn therefore cannot expose partial
 mutation or stall the last published frame. One lost-wake-safe event signal
 carries everything back from the Lynx main Worker: it wakes a Promise whenever
 core queues an engine event *or* wants a frame drawn, and the Render Worker's
-loop answers each wakeup with one `pump` — drain the events, draw the pending
-frame. No frame clock stands between a commit and the canvas. The clock is
+loop answers each wakeup with one `pump` — draw the pending frame, drain the
+events. The same signal is what this Worker arms for *itself*, because the
+view paints here and wakes nobody on its own: a pointer or a resize that
+arrives while the loop is parked applies immediately and then arms the signal
+so the turn it owes actually happens, and a swap chain that had no image to
+give arms it again after the delay `LynxView::next_turn` names, through a
+Worker timer, so the frame is retried rather than dropped and the retry does
+not spin the loop through microtasks. No frame clock stands between a commit and the canvas. The clock is
 the continuation's alone: while `isAnimating` reports that the engine owes the
 timeline another frame, the loop waits for the next display frame instead —
 `requestAnimationFrame` where a Worker is given one, a frame-interval timer

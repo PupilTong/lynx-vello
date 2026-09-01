@@ -200,7 +200,7 @@ fn dispatch_to_listeners(bencher: divan::Bencher) {
 
 /// The same target for an event name nothing listens to.
 ///
-/// The presenting side answers this from its own listener-name replica — a
+/// The painting side answers this from its own listener-name replica — a
 /// pass resync and a set lookup, no lock — so the realistic cost is what
 /// `has_listeners` measures here. The dispatch below covers a stale replica:
 /// the main thread rejects the name before looking up the target or its path.

@@ -4,7 +4,9 @@
 //! The clock is this embedder's substitute for an OS display loop — it
 //! relays ticks; whether a tick becomes GPU work is the view's decision
 //! (`tick` renders only when the document changed). Screenshots come back as
-//! pixels, and writing the PNG is this side's IO.
+//! pixels, and writing the PNG is this side's IO. The view paints on this
+//! thread, the one that built it, so every one of those calls is the work
+//! itself rather than a request for it.
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
@@ -20,7 +22,8 @@ use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
-/// synthetic clock feed, so an engine wakeup is one more loop input.
+/// synthetic clock feed, so a wakeup from the Lynx main thread is one more
+/// loop input.
 #[derive(Debug)]
 struct ChannelWakeup(mpsc::Sender<HostEvent>);
 
@@ -30,9 +33,6 @@ impl EventRequester for ChannelWakeup {
     }
 }
 
-/// The offscreen view this embedder drives, woken through its own channel.
-type HeadlessView = LynxView<ChannelWakeup>;
-
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     program.warn_about_compatibility_limits();
     let (sender, receiver) = mpsc::channel();
@@ -40,7 +40,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     // One construction: the input's author CSS and its entry MTS module are
     // this view's sources, so the first commit is already styled and the Lynx
     // main thread is running before anything else here happens.
-    let mut view = pollster::block_on(HeadlessView::new(
+    let mut view = pollster::block_on(LynxView::new(
         program.config,
         event_requester,
         options.viewport_width,
@@ -75,6 +75,14 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
                 Ok(HostEvent::Pump) => {
                     if check_script(&mut view, &program.input)? {
                         script.finish();
+                    }
+                    // The wakeup answers before the deadline, and the Lynx
+                    // main thread posts one per notification, so a chatty
+                    // commit would otherwise walk the frame clock forward
+                    // without ever letting it fire.
+                    if clock.time_until_tick().is_zero() {
+                        view.tick(false)?;
+                        clock.advance();
                     }
                     None
                 }
@@ -119,7 +127,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
-    view: &mut HeadlessView,
+    view: &mut LynxView,
     clock: &mut FrameClock,
     running: &mut bool,
 ) -> Result<bool, CliError> {
@@ -167,7 +175,7 @@ enum HostEvent {
     Pump,
 }
 
-fn check_script(view: &mut HeadlessView, input: &str) -> Result<bool, CliError> {
+fn check_script(view: &mut LynxView, input: &str) -> Result<bool, CliError> {
     let mut finished = false;
     for event in view.pump() {
         match event {

@@ -8,7 +8,7 @@
 //! it, so the capture after a deep scroll shows the recommitted frame at
 //! its published offsets. Either way the same pixels move the same way;
 //! which path produced them is the engine's business, asserted directly by
-//! `bobcat_core::engine::event_loop_tests`.
+//! `bobcat_core::paint::event_loop_tests`.
 
 mod support;
 
