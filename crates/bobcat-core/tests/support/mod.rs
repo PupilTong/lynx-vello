@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
     CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
-    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
-    RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
+    StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
 use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
@@ -168,70 +168,68 @@ impl ResourceFetcher for FetcherDouble {
         self.capabilities.contains(&capability)
     }
 
-    fn fetch_style_sheet(
+    async fn fetch_style_sheet(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
+    ) -> Result<StyleSheetResponse, ResourceError> {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
         if let Some(sheet) = self.style_sheet.clone() {
             let metadata = self.metadata(request.resource.clone(), request.context.id);
-            return Box::pin(async move {
-                Ok(StyleSheetResponse {
-                    metadata,
-                    payload: StyleSheetPayload::Preparsed(sheet),
-                })
+            return Ok(StyleSheetResponse {
+                metadata,
+                payload: StyleSheetPayload::Preparsed(sheet),
             });
         }
         if let Some(bytes) = self.style_sheet_text.clone() {
             let mut metadata = self.metadata(request.resource, request.context.id);
             metadata.content_length = Some(bytes.len() as u64);
-            return Box::pin(async move {
-                Ok(StyleSheetResponse {
-                    metadata,
-                    payload: StyleSheetPayload::Text(Bytes::from(bytes)),
-                })
+            return Ok(StyleSheetResponse {
+                metadata,
+                payload: StyleSheetPayload::Text(Bytes::from(bytes)),
             });
         }
         // No dedicated sheet registered, so behave like a host that only
         // moves bytes: run the trait's own default.
-        bobcat_core::resource::fetch_style_sheet_as_text(self, request)
+        bobcat_core::resource::fetch_style_sheet_as_text(self, request).await
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
-        Box::pin(async move {
-            let text = override_url
-                .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
-            let url = Url::parse(&text).map_err(|error| ResourceError {
-                request_id: Some(request.context.id),
-                kind: ResourceErrorKind::InvalidUrl,
-                phase: ResourceErrorPhase::Resolve,
-                locator: Some(request.resource.specifier.clone()),
-                status: None,
-                message: error.to_string().into(),
-                retry: RetryAdvice::Never,
-            })?;
-            Ok(ResolvedLocator {
-                resource: request.resource,
-                url,
-                rewrite_chain: Vec::new(),
-                locality: ResourceLocality::Remote,
-                cache_key: cache_key.map(Into::into),
-            })
+        let text = override_url
+            .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
+        let url = Url::parse(&text).map_err(|error| ResourceError {
+            request_id: Some(request.context.id),
+            kind: ResourceErrorKind::InvalidUrl,
+            phase: ResourceErrorPhase::Resolve,
+            locator: Some(request.resource.specifier.clone()),
+            status: None,
+            message: error.to_string().into(),
+            retry: RetryAdvice::Never,
+        })?;
+        Ok(ResolvedLocator {
+            resource: request.resource,
+            url,
+            rewrite_chain: Vec::new(),
+            locality: ResourceLocality::Remote,
+            cache_key: cache_key.map(Into::into),
         })
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
         let id = request.context.id;
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(ResourceResponse {
-                metadata: self.metadata(resource, id),
-                bytes: Bytes::from(self.bytes.clone()),
-            })
+        Ok(ResourceResponse {
+            metadata: self.metadata(resource, id),
+            bytes: Bytes::from(self.bytes.clone()),
         })
     }
 

@@ -1,12 +1,13 @@
-//! An in-memory [`dom::ImageStore`] for tests and benchmarks.
+//! An in-memory image source for tests and benchmarks: a [`dom::FrameImages`]
+//! that answers from whatever a test published into it.
 //!
 //! Production stores fetch, decode, cache and evict; this one does none of
 //! that. It holds exactly the pixels a test put in it, so a render either
 //! draws them or proves it looked the image up under the wrong source.
 //!
-//! It mints ids itself and reports every load inline from
-//! [`ImageStore::request`], so a test needs no async runtime at all. What it
-//! does honour is the identity contract: every [`FrameImages::read`] of one
+//! It reports every load inline through the [`dom::ImageReports`] a view
+//! handed it, so a test needs no async runtime at all. What it does honour is
+//! the identity contract: every [`FrameImages::read`] of one
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 

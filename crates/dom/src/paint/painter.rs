@@ -32,8 +32,8 @@
 //! - Replaced content honors `object-fit`, `object-position`, and `image-rendering`. Concrete size
 //!   comes from the node's natural size; `auto` maps to bilinear and `crisp-edges`/`pixelated` to
 //!   nearest sampling.
-//! - The grammar has no `image-orientation`; the embedder's `ImageStore` is expected to apply EXIF
-//!   orientation before it publishes pixels and natural size.
+//! - The grammar has no `image-orientation`; the embedder's resource system is expected to apply
+//!   EXIF orientation before it reports natural size and serves pixels.
 
 use std::sync::Arc;
 

@@ -12,9 +12,8 @@ use std::{fmt, mem};
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
     CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceFuture, ResourceLocality,
-    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
-    RetryAdvice,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
@@ -163,25 +162,23 @@ impl BrowserResources {
             .cloned()
     }
 
-    fn error<T>(
+    fn error(
         request_id: Option<RequestId>,
         kind: ResourceErrorKind,
         phase: ResourceErrorPhase,
         locator: Option<Arc<str>>,
         message: impl Into<Arc<str>>,
-    ) -> ResourceFuture<'static, T> {
+    ) -> ResourceError {
         let message = message.into();
-        Box::pin(async move {
-            Err(ResourceError {
-                request_id,
-                kind,
-                phase,
-                locator,
-                status: None,
-                message,
-                retry: RetryAdvice::Never,
-            })
-        })
+        ResourceError {
+            request_id,
+            kind,
+            phase,
+            locator,
+            status: None,
+            message,
+            retry: RetryAdvice::Never,
+        }
     }
 }
 
@@ -190,7 +187,10 @@ impl ResourceFetcher for BrowserResources {
         capability == ResourceCapability::BufferedResource
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         let request_id = request.context.id;
         let locator = request.resource.specifier.clone();
 
@@ -203,67 +203,66 @@ impl ResourceFetcher for BrowserResources {
                 .and_then(|base| base.join(&locator))
         });
         let Ok(url) = parsed else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::InvalidUrl,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "resource locator is not a valid URL",
-            );
+            ));
         };
         if !self.contains_url(&url) {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "the Render Worker has not registered this URL",
-            );
+            ));
         }
 
         let resource = request.resource;
         let cache_key = Some(Arc::from(url.as_str()));
-        Box::pin(async move {
-            Ok(ResolvedLocator {
-                resource,
-                url,
-                rewrite_chain: Vec::new(),
-                locality: ResourceLocality::Local,
-                cache_key,
-            })
+        Ok(ResolvedLocator {
+            resource,
+            url,
+            rewrite_chain: Vec::new(),
+            locality: ResourceLocality::Local,
+            cache_key,
         })
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         let request_id = request.context.id;
         let locator: Arc<str> = Arc::from(request.resource.url.as_str());
         let source = self.registered_bytes(&request.resource.url);
         let Some(source) = source else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
                 "the registered resource disappeared before it was loaded",
-            );
+            ));
         };
         let content_length = source.len() as u64;
 
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(ResourceResponse {
-                metadata: ResourceMetadata {
-                    request_id,
-                    resource,
-                    headers: HeaderMap::default(),
-                    content_length: Some(content_length),
-                    media_type: None,
-                    source: ResourceSource::MemoryCache,
-                    cache_status: CacheStatus::default(),
-                    timing: ResourceTiming::default(),
-                },
-                bytes: source.as_ref().to_vec().into(),
-            })
+        Ok(ResourceResponse {
+            metadata: ResourceMetadata {
+                request_id,
+                resource,
+                headers: HeaderMap::default(),
+                content_length: Some(content_length),
+                media_type: None,
+                source: ResourceSource::MemoryCache,
+                cache_status: CacheStatus::default(),
+                timing: ResourceTiming::default(),
+            },
+            bytes: source.as_ref().to_vec().into(),
         })
     }
 }

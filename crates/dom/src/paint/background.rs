@@ -11,8 +11,8 @@
 //! - Then image layers **last-specified first** (CSS lists the first layer topmost): for each
 //!   non-`None` layer resolve origin box (`background-origin`), positioning area, `background-size`
 //!   (`auto`/`cover`/`contain`/lengths), `background-position`, and `background-repeat` per axis.
-//!   `url(…)` layers look up [`ImageStore::peek`] (missing, zero-area, or past the atlas bound →
-//!   skip); gradients resolve via [`gradient_brush`].
+//!   `url(…)` layers look up [`ImageRegistry::resolve`](crate::render::image) (not yet loaded, or a
+//!   zero intrinsic axis → skip); gradients resolve via [`gradient_brush`].
 //! - Repeat via `peniko::Extend::Repeat` on the image sampler where the tile grid is uniform;
 //!   gradients restart per tile, so when more than one tile is visible they are drawn as an
 //!   explicit tile loop. `space` is approximated as `repeat` (recorded v1 limit) and `round`

@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bobcat_core::resource::{
-    ResolveRequest, ResolvedLocator, ResourceCapability, ResourceFetcher, ResourceFuture,
+    ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
     ResourceRequest, ResourceResponse,
 };
 use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, ViewSources};
@@ -92,24 +92,28 @@ impl ResourceFetcher for ThreadedFetcher {
         self.base.supports_capability(capability)
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         self.record("resolve");
-        self.base.resolve_locator(request)
+        self.base.resolve_locator(request).await
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         self.record("fetch");
-        let response = self.base.fetch_resource(request);
+        let response = std::pin::pin!(self.base.fetch_resource(request));
         let state = Arc::new(HopState {
             ready: AtomicBool::new(false),
             started: AtomicBool::new(false),
             waker: Mutex::new(None),
             records: Arc::clone(&self.records),
         });
-        Box::pin(async move {
-            ThreadHop { state }.await;
-            response.await
-        })
+        ThreadHop { state }.await;
+        response.await
     }
 }
 
@@ -196,15 +200,22 @@ impl ResourceFetcher for PendingFetcher {
         self.base.supports_capability(capability)
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-        self.base.resolve_locator(request)
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        self.base.resolve_locator(request).await
     }
 
-    fn fetch_resource(&self, _request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
-        Box::pin(PendingResource {
-            started: self.started.lock().expect("start signal").take(),
-            dropped: self.dropped.lock().expect("drop signal").take(),
-        })
+    async fn fetch_resource(
+        &self,
+        _request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
+        // Bound first: the guards must drop before the await, not live to the
+        // end of the whole expression.
+        let started = self.started.lock().expect("start signal").take();
+        let dropped = self.dropped.lock().expect("drop signal").take();
+        PendingResource { started, dropped }.await
     }
 }
 

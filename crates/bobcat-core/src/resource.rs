@@ -1,7 +1,6 @@
 //! Host-injected resource acquisition contracts for Bobcat.
 
 use std::fmt;
-use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,15 +13,6 @@ use tokio::io::AsyncRead;
 use url::Url;
 
 use crate::style::PreparsedStyleSheet;
-
-/// A resource operation polled directly on the thread that called the fetcher.
-///
-/// During view startup that owner is `bobcat-main`, which deliberately has no
-/// ambient Tokio runtime or IO reactor. Implementations may move actual file or
-/// network IO onto their own executor or worker threads and wake this future,
-/// but the returned future itself must be executor-neutral and must not assume
-/// a caller-provided runtime.
-pub type ResourceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ResourceError>> + 'a>>;
 
 pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
@@ -41,14 +31,29 @@ pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 /// which cannot suspend. That read may block, and after a successful load it
 /// must not miss — see [`dom::FrameImages`].
 ///
-/// Implementations own any executor or reactor their IO requires; Bobcat only
-/// polls the returned [`ResourceFuture`] until it is woken and ready.
+/// Every fetch is polled directly on the painter's thread, which has no
+/// ambient Tokio runtime or IO reactor — the CLI drives the whole of
+/// construction with `pollster`, which supplies neither. Implementations own
+/// any executor or reactor their IO requires: move the real file or network
+/// work onto it, wake the future, and Bobcat polls until it is ready. What
+/// the future must not do is assume a runtime its caller never promised.
+#[expect(
+    async_fn_in_trait,
+    reason = "the absent `Send` is the point: a resource system is thread-bound, \
+              and its futures are polled only on the painter that owns it"
+)]
 pub trait ResourceFetcher: dom::FrameImages {
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator>;
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError>;
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse>;
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError>;
 
     /// Loads a stylesheet in whichever form this host has it.
     ///
@@ -57,11 +62,11 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// moves bytes — a browser embedder cannot decode a `.web.bundle` at all.
     /// A host that reports [`ResourceCapability::PreparsedStyleSheet`]
     /// overrides this to return [`StyleSheetPayload::Preparsed`].
-    fn fetch_style_sheet(
+    async fn fetch_style_sheet(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
-        fetch_style_sheet_as_text(self, request)
+    ) -> Result<StyleSheetResponse, ResourceError> {
+        fetch_style_sheet_as_text(self, request).await
     }
 
     /// Names `source` and begins loading it. Non-blocking.
@@ -108,19 +113,25 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).supports_capability(capability)
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-        (**self).resolve_locator(request)
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        (**self).resolve_locator(request).await
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
-        (**self).fetch_resource(request)
-    }
-
-    fn fetch_style_sheet(
+    async fn fetch_resource(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
-        (**self).fetch_style_sheet(request)
+    ) -> Result<ResourceResponse, ResourceError> {
+        (**self).fetch_resource(request).await
+    }
+
+    async fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<StyleSheetResponse, ResourceError> {
+        (**self).fetch_style_sheet(request).await
     }
 
     fn request_image(&self, source: &str) {
@@ -138,19 +149,17 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 ///
 /// An override that answers only *some* requests pre-parsed calls this for the
 /// rest, rather than re-implementing the byte path.
-pub fn fetch_style_sheet_as_text<F>(
+pub async fn fetch_style_sheet_as_text<F>(
     fetcher: &F,
     request: ResourceRequest,
-) -> ResourceFuture<'_, StyleSheetResponse>
+) -> Result<StyleSheetResponse, ResourceError>
 where
     F: ResourceFetcher + ?Sized,
 {
-    Box::pin(async move {
-        let response = fetcher.fetch_resource(request).await?;
-        Ok(StyleSheetResponse {
-            metadata: response.metadata,
-            payload: StyleSheetPayload::Text(response.bytes),
-        })
+    let response = fetcher.fetch_resource(request).await?;
+    Ok(StyleSheetResponse {
+        metadata: response.metadata,
+        payload: StyleSheetPayload::Text(response.bytes),
     })
 }
 
@@ -498,11 +507,17 @@ impl ResourceFetcher for NeverAnswers {
         false
     }
 
-    fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-        Box::pin(std::future::pending())
+    async fn resolve_locator(
+        &self,
+        _request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        std::future::pending().await
     }
 
-    fn fetch_resource(&self, _request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
-        Box::pin(std::future::pending())
+    async fn fetch_resource(
+        &self,
+        _request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
+        std::future::pending().await
     }
 }
