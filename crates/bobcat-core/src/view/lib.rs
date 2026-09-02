@@ -664,32 +664,15 @@ pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedF
         .unwrap_or_else(|error| panic!("the frame mailbox is poisoned: {error}"))
 }
 
-/// A wake carrying nothing, for the one wait the painter makes before it has
-/// a host turn to be woken into.
-///
-/// `ToPainter` itself stays a `std::sync::mpsc` FIFO, because
-/// `wait_begin_frame` needs `recv_timeout` and a `Receiver` is no `Future`.
-/// So the message goes on that FIFO and a tick goes here, and the painter
-/// awaits the tick and then drains the FIFO. The tick is only a nudge: every
-/// fact is a durable queue entry, never a bare waker edge.
-pub(crate) type StartupWakeSender = tokio::sync::mpsc::UnboundedSender<()>;
-pub(crate) type StartupWakeReceiver = tokio::sync::mpsc::UnboundedReceiver<()>;
-
 /// Builds the view's one link: the painter's end and the Lynx main thread's.
 pub(crate) fn main_link<R: EventRequester>(requester: Arc<R>) -> (PainterLink, MainLink<R>) {
     let (commands, command_receiver) = flume::unbounded();
     let (notifications, notification_receiver) = flume::unbounded();
-    let (wake, wake_receiver) = tokio::sync::mpsc::unbounded_channel();
     let frames = Arc::new(FrameHub::new(None));
-    let painter = PainterLink::new(
-        commands,
-        notification_receiver,
-        Arc::clone(&frames),
-        wake_receiver,
-    );
+    let painter = PainterLink::new(commands, notification_receiver, Arc::clone(&frames));
     let main = MainLink::new(
         command_receiver,
-        ToPainterSender::new(notifications, frames, requester, wake),
+        ToPainterSender::new(notifications, frames, requester),
     );
     (painter, main)
 }

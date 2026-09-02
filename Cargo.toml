@@ -35,7 +35,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cssparser = "0.37"
 divan = { package = "codspeed-divan-compat", version = "5" }
 euclid = "0.22"
-flume = { version = "0.12", default-features = false }
+flume = { version = "0.12", default-features = false, features = ["async"] }
 html5ever = "0.39"
 http = "1"
 getrandom = "0.4.3"
@@ -54,7 +54,7 @@ serde_json = "1"
 slab = "0.4"
 smallvec = { version = "1", features = ["const_new", "union"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt"] }
 url = "2"
 js-sys = "0.3"
 rayon = "1"

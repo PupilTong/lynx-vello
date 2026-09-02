@@ -54,7 +54,7 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 use crate::view::Screenshot;
 use crate::view::{
     ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, LoadedSource,
-    LynxViewError, SourceSlot, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
+    LynxViewError, SourceSlot, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{NoWakeup, main_link};
@@ -72,8 +72,8 @@ enum FetchOutcome {
 /// Which of the two things a fetch waits on happened first.
 enum FetchStep {
     Loaded(Result<LoadedSource, LynxViewError>),
-    /// `bobcat-main` spoke; the flag is whether its wake is still open.
-    Woken(bool),
+    /// `bobcat-main` spoke, or stopped being able to.
+    Received(Result<ToPainter, flume::RecvError>),
 }
 
 /// The main thread stopped before it could say how startup went.
@@ -170,9 +170,6 @@ pub(crate) struct PainterLink {
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
-    /// Awaitable only during construction, when the painter has no host turn
-    /// to be woken into. Dropped once startup settles.
-    startup_wake: Option<StartupWakeReceiver>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// A field rather than a local because a startup drain runs in pieces.
     pending_announce: bool,
@@ -183,7 +180,6 @@ impl PainterLink {
         commands: flume::Sender<ToMain>,
         notifications: flume::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
-        startup_wake: StartupWakeReceiver,
     ) -> Self {
         Self {
             commands,
@@ -196,7 +192,6 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
-            startup_wake: Some(startup_wake),
             pending_announce: false,
         }
     }
@@ -210,37 +205,6 @@ impl PainterLink {
     fn settle(&mut self) {
         let announced = std::mem::take(&mut self.pending_announce);
         self.adopt_frame(announced);
-    }
-
-    /// Registers `context` on the construction-time wake without consuming a
-    /// tick. `Ready(None)` once that channel is closed, which is
-    /// `bobcat-main` gone.
-    ///
-    /// Exists so the one await that is not on this link — a host fetch — can
-    /// be polled *beside* the inbox instead of in place of it.
-    fn poll_startup_wake(&mut self, context: &mut std::task::Context<'_>) -> Poll<Option<()>> {
-        match self.startup_wake.as_mut() {
-            Some(wake) => wake.poll_recv(context),
-            None => Poll::Ready(None),
-        }
-    }
-
-    /// Waits for `bobcat-main` to have said something. `None` once that
-    /// thread is gone.
-    ///
-    /// Only a nudge: every fact is already in the FIFO before the tick that
-    /// announces it, so a missed tick costs a wait, never a message.
-    async fn await_startup_wake(&mut self) -> Option<()> {
-        match self.startup_wake.as_mut() {
-            Some(wake) => wake.recv().await,
-            None => None,
-        }
-    }
-
-    /// Drops the construction-time wake. After this the painter is woken by
-    /// the host's own turns, like everything else.
-    fn finish_startup(&mut self) {
-        self.startup_wake = None;
     }
 
     /// Sends one command. A closed channel is a main thread that has exited;
@@ -356,9 +320,9 @@ impl PainterLink {
     ///
     /// This is the whole of the fix for a startup that could hang: a fetch is
     /// the one await in construction that is not on the link, and a host is
-    /// under no obligation to ever answer it. Polling it *beside* the wake —
-    /// rather than in place of the drain — is what keeps an outcome that has
-    /// already been decided observable.
+    /// under no obligation to ever answer it. Polling the inbox *beside* it —
+    /// rather than in place of it — is what keeps an outcome that has already
+    /// been decided observable.
     async fn await_fetch<F: crate::resource::ResourceFetcher>(
         &mut self,
         fetcher: &F,
@@ -368,30 +332,55 @@ impl PainterLink {
         queued: &mut VecDeque<(SourceSlot, String)>,
     ) -> FetchOutcome {
         let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
+        // A second handle on the same queue, so the wait does not borrow the
+        // link that handling a message needs. Dropping a pending `recv_async`
+        // deregisters its waker and takes no message with it, so abandoning
+        // one to serve the fetch loses nothing.
+        let inbox = self.notifications.clone();
         loop {
+            let mut next = std::pin::pin!(inbox.recv_async());
             let step = std::future::poll_fn(|context| {
                 if let Poll::Ready(loaded) = load.as_mut().poll(context) {
                     return Poll::Ready(FetchStep::Loaded(loaded));
                 }
-                // Registers the waker on the link too, so anything the main
+                // Registers the waker on the inbox too, so anything the main
                 // thread says resumes this even though the fetch has not.
-                match self.poll_startup_wake(context) {
-                    Poll::Ready(open) => Poll::Ready(FetchStep::Woken(open.is_some())),
-                    Poll::Pending => Poll::Pending,
-                }
+                next.as_mut().poll(context).map(FetchStep::Received)
             })
             .await;
             match step {
                 FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
                 FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
-                FetchStep::Woken(open) => {
+                FetchStep::Received(Err(flume::RecvError::Disconnected)) => {
+                    self.settle();
+                    return FetchOutcome::Ended(Err(main_thread_gone()));
+                }
+                FetchStep::Received(Ok(notification)) => {
+                    if let Some(result) = self.take_startup(notification, queued) {
+                        return FetchOutcome::Ended(result);
+                    }
                     if let Some(result) = self.drain_startup(queued) {
                         return FetchOutcome::Ended(result);
                     }
-                    if !open {
-                        return FetchOutcome::Ended(Err(main_thread_gone()));
-                    }
                 }
+            }
+        }
+    }
+
+    /// Waits for one thing `bobcat-main` has to say, and applies it.
+    ///
+    /// The idle half of construction: nothing is queued to fetch, so the only
+    /// thing that can move startup on is a message.
+    async fn await_startup(
+        &mut self,
+        queued: &mut VecDeque<(SourceSlot, String)>,
+    ) -> Option<Result<(), LynxViewError>> {
+        let inbox = self.notifications.clone();
+        match inbox.recv_async().await {
+            Ok(notification) => self.take_startup(notification, queued),
+            Err(flume::RecvError::Disconnected) => {
+                self.settle();
+                Some(Err(main_thread_gone()))
             }
         }
     }
@@ -407,34 +396,54 @@ impl PainterLink {
     ) -> Option<Result<(), LynxViewError>> {
         loop {
             match self.try_next() {
-                Ok(ToPainter::Started(result)) => {
-                    self.settle();
-                    self.finish_startup();
-                    return Some(result);
+                Ok(notification) => {
+                    if let Some(result) = self.take_startup(notification, queued) {
+                        return Some(result);
+                    }
                 }
-                Ok(ToPainter::FetchSource { slot, specifier }) => {
-                    queued.push_back((slot, specifier));
-                }
-                // A script error during startup *is* the startup failure. On
-                // wasm32 under `panic = "abort"` it is the only thing a
-                // trapping main thread can say before it stops running
-                // destructors, so treating it as terminal here is what keeps
-                // construction from waiting forever.
-                Ok(ToPainter::Engine(EngineEvent::ScriptRunError(error))) => {
-                    self.settle();
-                    self.finish_startup();
-                    return Some(Err(error.into()));
-                }
-                // Frames, lifecycle events, listener edges, boot's image
-                // requests: the steady-state path, so every fact boot
-                // published lands where the host's first turn finds it.
-                Ok(other) => self.apply(other),
                 Err(flume::TryRecvError::Empty) => return None,
                 Err(flume::TryRecvError::Disconnected) => {
                     self.settle();
-                    self.finish_startup();
                     return Some(Err(main_thread_gone()));
                 }
+            }
+        }
+    }
+
+    /// What one message means during construction. `Some` once startup has an
+    /// outcome.
+    ///
+    /// The single place that decides; both readers feed it, so awaiting one
+    /// message and draining a queue of them cannot disagree.
+    fn take_startup(
+        &mut self,
+        notification: ToPainter,
+        queued: &mut VecDeque<(SourceSlot, String)>,
+    ) -> Option<Result<(), LynxViewError>> {
+        match notification {
+            ToPainter::Started(result) => {
+                self.settle();
+                Some(result)
+            }
+            ToPainter::FetchSource { slot, specifier } => {
+                queued.push_back((slot, specifier));
+                None
+            }
+            // A script error during startup *is* the startup failure. On
+            // wasm32 under `panic = "abort"` it is the only thing a trapping
+            // main thread can say before it stops running destructors, so
+            // treating it as terminal here is what keeps construction from
+            // waiting forever.
+            ToPainter::Engine(EngineEvent::ScriptRunError(error)) => {
+                self.settle();
+                Some(Err(error.into()))
+            }
+            // Frames, lifecycle events, listener edges, boot's image
+            // requests: the steady-state path, so every fact boot published
+            // lands where the host's first turn finds it.
+            other => {
+                self.apply(other);
+                None
             }
         }
     }
@@ -939,18 +948,17 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         let fetcher = images.store();
         let mut requests = sources::mint_namespace();
         let mut queued: VecDeque<(SourceSlot, String)> = VecDeque::new();
-        let mut closed = false;
         loop {
             if let Some(result) = link.drain_startup(&mut queued) {
                 return result;
             }
             let Some((slot, specifier)) = queued.pop_front() else {
-                if closed {
-                    // The wake closed and a full drain after that found
-                    // nothing terminal, so nothing more can ever arrive.
-                    return Err(main_thread_gone());
+                // Nothing to fetch, so the only thing that can move startup on
+                // is a message. A main thread that has gone is a receive error
+                // here, not a separate flag to carry.
+                if let Some(result) = link.await_startup(&mut queued).await {
+                    return result;
                 }
-                closed = link.await_startup_wake().await.is_none();
                 continue;
             };
             match link

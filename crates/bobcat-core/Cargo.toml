@@ -31,7 +31,7 @@ web-time = { workspace = true }
 divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 lynx-template-decoder = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [[bench]]
 name = "script_boundary"

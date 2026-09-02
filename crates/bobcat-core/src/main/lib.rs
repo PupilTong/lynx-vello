@@ -18,8 +18,7 @@ use std::str;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::task::Poll;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
@@ -34,7 +33,7 @@ use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, SourceSlot,
-    StartupWakeSender, StyleSheetSource, ToMain, ToPainter, ViewSources, Viewport, frame_slot,
+    StyleSheetSource, ToMain, ToPainter, ViewSources, Viewport, frame_slot,
 };
 
 pub(crate) struct EntryModule {
@@ -91,16 +90,6 @@ pub(crate) struct ToPainterSender<R: EventRequester> {
     notifications: flume::Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
-    /// A payload-free nudge for the one wait the painter makes before it has
-    /// a host turn to be woken into.
-    ///
-    /// Declared *after* `notifications` on purpose: fields drop in
-    /// declaration order, so the last sender's death closes the FIFO before
-    /// this, and a painter woken by the closure of this channel then sees a
-    /// disconnected FIFO rather than an empty one. Correctness does not rest
-    /// on that — `serve_startup` drains once more after the wake closes — but
-    /// it keeps the common case one pass shorter.
-    startup_wake: StartupWakeSender,
 }
 
 // Hand-written: `derive(Clone)` would demand `R: Clone`, while a requester is
@@ -111,7 +100,6 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
             notifications: self.notifications.clone(),
             frames: Arc::clone(&self.frames),
             requester: Arc::clone(&self.requester),
-            startup_wake: self.startup_wake.clone(),
         }
     }
 }
@@ -121,25 +109,21 @@ impl<R: EventRequester> ToPainterSender<R> {
         notifications: flume::Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
-        startup_wake: StartupWakeSender,
     ) -> Self {
         Self {
             notifications,
             frames,
             requester,
-            startup_wake,
         }
     }
 
     /// Announces one notification, then wakes the thread that paints.
     ///
-    /// Two wakes, because the painter has two ways of being woken: the host's
-    /// requester once a view exists, and the startup channel before it does.
-    /// The tick is a nudge only — the notification is already queued — and it
-    /// fails harmlessly once construction drops its receiver.
+    /// One wake, not two: the notification is already queued, and the painter
+    /// waits on that queue directly — during construction by awaiting it, and
+    /// afterwards on the host's own turns, which this requester asks for.
     pub(crate) fn send(&self, notification: ToPainter) {
         if self.notifications.send(notification).is_ok() {
-            let _ = self.startup_wake.send(());
             self.requester.request_event();
         }
     }
