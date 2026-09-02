@@ -344,9 +344,25 @@ impl ImageRegistry {
         }
     }
 
-    /// Records that `node` presents `source`, so a completed load knows whose
-    /// natural size to update.
+    /// Records that `node` presents `source`, asking for it if this is the
+    /// registry's first sighting.
+    ///
+    /// Binding has to ask, not merely record. The entry it is about to create
+    /// is exactly what [`ImageRegistry::resolve`] reads as "already asked
+    /// for", so an entry created without a request would suppress the only
+    /// request that source would ever get — and a replaced element binds its
+    /// source in the same call that makes it replaced, always before any walk
+    /// could have resolved it.
     pub(crate) fn bind_node(&mut self, source: &str, node: NodeId) {
+        if !self.entries.contains_key(source) {
+            // Deduplicated against a walk that met the same source first and
+            // whose request has not been drained yet, the same way `resolve`
+            // deduplicates against itself.
+            let wanted = self.wanted.get_mut();
+            if !wanted.iter().any(|pending| &**pending == source) {
+                wanted.push(Arc::from(source));
+            }
+        }
         let entry = self.entry_for(source);
         if !entry.nodes.contains(&node) {
             entry.nodes.push(node);
@@ -441,6 +457,53 @@ impl ImageRegistry {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    /// Regression: a replaced element binds its source in the same call that
+    /// makes it replaced — before any walk can resolve it — so binding is the
+    /// first sighting. If binding creates the entry without asking, `resolve`
+    /// reads that entry as "already asked for" and the source is never
+    /// requested from the host: the image never loads, with no error.
+    #[test]
+    fn binding_a_node_asks_for_its_source() {
+        let mut registry = ImageRegistry::default();
+        registry.bind_node("app:///a.png", node(1));
+
+        assert!(
+            registry.resolve("app:///a.png").is_none(),
+            "a bound source has no pixels yet"
+        );
+        assert_eq!(
+            registry.take_wanted(),
+            vec![Arc::<str>::from("app:///a.png")],
+            "binding asks the host for the source"
+        );
+        assert!(registry.take_wanted().is_empty(), "and asks exactly once");
+    }
+
+    /// A walk that met the source first has already queued it; binding a node
+    /// to it must not queue it twice.
+    #[test]
+    fn binding_a_source_a_walk_already_met_asks_once() {
+        let mut registry = ImageRegistry::default();
+        assert!(registry.resolve("app:///a.png").is_none());
+        registry.bind_node("app:///a.png", node(1));
+
+        assert_eq!(registry.take_wanted().len(), 1, "one source, one request");
+    }
+
+    /// Two elements presenting one source ask for it once between them.
+    #[test]
+    fn two_nodes_on_one_source_ask_once() {
+        let mut registry = ImageRegistry::default();
+        registry.bind_node("app:///a.png", node(1));
+        registry.bind_node("app:///a.png", node(2));
+
+        assert_eq!(registry.take_wanted().len(), 1);
+    }
+
+    fn node(bits: u64) -> crate::NodeId {
+        crate::NodeId::from_bits(bits).expect("a valid node id")
+    }
+
     use super::{ImageInbox, ImageReports};
 
     /// Reports are readable in the order they were made, and a drain empties
