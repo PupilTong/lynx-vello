@@ -1,5 +1,6 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -113,7 +114,11 @@ impl Future for EventWait {
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
-type BrowserResourceRegistry = Mutex<HashMap<String, Arc<[u8]>>>;
+///
+/// `Rc`-held and touched only on the Render Worker — the fetcher never
+/// leaves the painter's thread — so interior mutability is a `RefCell`, not
+/// a lock.
+type BrowserResourceRegistry = RefCell<HashMap<String, Arc<[u8]>>>;
 
 #[derive(Debug, Default)]
 struct BrowserResources {
@@ -122,10 +127,7 @@ struct BrowserResources {
 
 impl BrowserResources {
     fn clear(&self) {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .clear();
+        self.resources.borrow_mut().clear();
     }
 
     fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
@@ -141,25 +143,17 @@ impl BrowserResources {
             .map_err(|error| js_error(format!("the {label} URL `{url}` is invalid: {error}")))?;
         let normalized = url.to_string();
         self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+            .borrow_mut()
             .insert(normalized.clone(), Arc::from(bytes));
         Ok(normalized)
     }
 
     fn contains_url(&self, url: &Url) -> bool {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .contains_key(url.as_str())
+        self.resources.borrow().contains_key(url.as_str())
     }
 
     fn registered_bytes(&self, url: &Url) -> Option<Arc<[u8]>> {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .get(url.as_str())
-            .cloned()
+        self.resources.borrow().get(url.as_str()).cloned()
     }
 
     fn error(
