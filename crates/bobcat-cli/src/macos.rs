@@ -37,7 +37,7 @@ use winit::window::{Window, WindowId};
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::Program;
+use crate::page::{Program, ProgramResourceFetcher};
 use crate::screenshot::save_screenshot;
 use crate::vsync::DisplayLink;
 
@@ -97,7 +97,7 @@ struct MacApplication {
     /// surface before the last handle to the window goes — and the window
     /// itself is destroyed on this thread, which is the only one allowed to
     /// destroy it.
-    view: Option<LynxView>,
+    view: Option<LynxView<ProgramResourceFetcher>>,
     /// This window's display clock, running only while a frame is owed.
     /// Declared before the view so it is stopped — and its callback proven
     /// finished — before the view it wakes goes away.
@@ -181,12 +181,12 @@ impl MacApplication {
         // `AppKit` allows it nowhere else — and this is also the thread that
         // will draw into it, for the same reason.
         let view = pollster::block_on(LynxView::new(
-            program.config,
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
             DrawTarget::window(Arc::clone(window)),
+            program.resources(),
             program.sources(),
         ))
         .map_err(|source| CliError::StartView {

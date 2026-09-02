@@ -20,7 +20,7 @@ use url::Url;
 /// Drains the terminal boot event preserved after construction. `LynxView::new`
 /// has already awaited the same outcome before it returns, and every `pump`
 /// here runs the view's own turn on this thread.
-pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
+pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.
@@ -88,6 +88,16 @@ impl FetcherDouble {
     #[must_use]
     pub fn with_images(mut self, images: Arc<flashbulb::TestImages>) -> Self {
         self.images = Some(images);
+        self
+    }
+
+    /// Points this double's store at the view's sink, so completed loads
+    /// reach the document the way a real host's per-view value would.
+    #[must_use]
+    pub fn serving(self, sink: Arc<dyn bobcat_core::ImageSink>) -> Self {
+        if let Some(images) = self.images.as_ref() {
+            images.attach(sink);
+        }
         self
     }
 
@@ -243,27 +253,4 @@ impl bobcat_core::FrameImages for FetcherDouble {
     fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
         self.images.as_ref().and_then(|images| images.read(source))
     }
-}
-
-/// The one thing a view is built from, over a double the test still holds.
-///
-/// The painter's handle is an `Rc` — a resource system never leaves that
-/// thread — while the test keeps its `Arc`, and two tests assert on when the
-/// double is *dropped*, which needs that handle to stay weakly observable.
-#[must_use]
-pub fn factory<F: ResourceFetcher + 'static>(fetcher: Arc<F>) -> bobcat_core::ResourceFactory {
-    Box::new(move |_sink| std::rc::Rc::new(fetcher))
-}
-
-/// [`factory`], with the view's image sink wired into a test image store, so
-/// completed loads reach the document the way a real host's would.
-#[must_use]
-pub fn factory_serving_images<F: ResourceFetcher + 'static>(
-    fetcher: Arc<F>,
-    images: Arc<flashbulb::TestImages>,
-) -> bobcat_core::ResourceFactory {
-    Box::new(move |sink| {
-        images.attach(sink);
-        std::rc::Rc::new(fetcher)
-    })
 }

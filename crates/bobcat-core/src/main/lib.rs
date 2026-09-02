@@ -23,59 +23,23 @@ use std::task::Poll;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
-use dom::{CommittedFrame, FontBlob};
+use dom::CommittedFrame;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
 #[cfg(test)]
 use self::runtime::MainThreadError;
 use self::runtime::MainThreadRuntime;
-use self::tree::{LynxDocument, PageConfig, new_document};
+use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, SourceSlot,
-    StartupWakeSender, StyleSheetSource, ToMain, ToPainter, Viewport, frame_slot,
+    StartupWakeSender, StyleSheetSource, ToMain, ToPainter, ViewSources, Viewport, frame_slot,
 };
 
 pub(crate) struct EntryModule {
     pub(crate) source: String,
     pub(crate) url: String,
-}
-
-/// Everything `bobcat-main` needs before it can enter its command loop.
-///
-/// Deliberately *not* a [`ViewSources`]: that carries the embedder's resource
-/// factory, which belongs to the painter. Destructuring here rather
-/// than taking the factory out at the call site is what makes "the main
-/// thread never sees a store" a property of the type — this struct has no
-/// field that could hold one, so it is `Send` for the same reason.
-pub(crate) struct StartupRequest {
-    config: PageConfig,
-    viewport: Viewport,
-    fonts: Vec<FontBlob>,
-    default_font_family: Option<String>,
-    style_sheets: Vec<String>,
-    entry: String,
-}
-
-impl StartupRequest {
-    pub(crate) fn new(
-        config: PageConfig,
-        viewport: Viewport,
-        fonts: Vec<FontBlob>,
-        default_font_family: Option<String>,
-        style_sheets: Vec<String>,
-        entry: String,
-    ) -> Self {
-        Self {
-            config,
-            viewport,
-            fonts,
-            default_font_family,
-            style_sheets,
-            entry,
-        }
-    }
 }
 
 /// The construction guard's cancellation flag.
@@ -267,14 +231,15 @@ pub fn configure_wasm_workers(
 /// the notification FIFO, which is the same fact — and the one a painter
 /// blocked on a `BeginFrame` is already waiting on.
 pub(crate) fn spawn_main_thread<R: EventRequester>(
-    startup: StartupRequest,
+    viewport: Viewport,
+    sources: ViewSources,
     link: MainLink<R>,
 ) -> Result<MainThreadHome, EngineError> {
     let control = Arc::new(StartupControl::default());
     let main_control = Arc::clone(&control);
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
-        .spawn(move || run_main_thread(startup, link, &main_control))
+        .spawn(move || run_main_thread(viewport, sources, link, &main_control))
         .map_err(|error| EngineError::Thread {
             name: "script",
             message: error.to_string(),
@@ -394,19 +359,19 @@ impl PendingSources {
 /// `None` means the view was cancelled or the painter is already gone: in
 /// both cases nobody is listening for an outcome.
 fn boot<R: EventRequester>(
-    startup: StartupRequest,
+    viewport: Viewport,
+    sources: ViewSources,
     commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
     control: &StartupControl,
 ) -> Option<Result<MainThreadRuntime<R>, LynxViewError>> {
-    let StartupRequest {
+    let ViewSources {
         config,
-        viewport,
         fonts,
         default_font_family,
         style_sheets,
         entry,
-    } = startup;
+    } = sources;
 
     let mut document = new_document(viewport, config);
     for font in fonts {
@@ -482,7 +447,8 @@ fn boot<R: EventRequester>(
 }
 
 fn run_main_thread<R: EventRequester>(
-    startup: StartupRequest,
+    viewport: Viewport,
+    sources: ViewSources,
     link: MainLink<R>,
     control: &StartupControl,
 ) {
@@ -498,7 +464,7 @@ fn run_main_thread<R: EventRequester>(
     }));
 
     let booted = catch_unwind(AssertUnwindSafe(|| {
-        boot(startup, &commands, &notify, control)
+        boot(viewport, sources, &commands, &notify, control)
     }))
     .unwrap_or_else(|payload| {
         Some(Err(EngineError::Thread {

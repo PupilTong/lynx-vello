@@ -351,6 +351,93 @@ impl PainterLink {
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
         self.notifications.drain().collect()
     }
+
+    /// Waits for one host fetch **while still watching the inbox**.
+    ///
+    /// This is the whole of the fix for a startup that could hang: a fetch is
+    /// the one await in construction that is not on the link, and a host is
+    /// under no obligation to ever answer it. Polling it *beside* the wake —
+    /// rather than in place of the drain — is what keeps an outcome that has
+    /// already been decided observable.
+    async fn await_fetch<F: crate::resource::ResourceFetcher>(
+        &mut self,
+        fetcher: &F,
+        requests: &mut crate::resource::RequestId,
+        slot: SourceSlot,
+        specifier: &str,
+        queued: &mut VecDeque<(SourceSlot, String)>,
+    ) -> FetchOutcome {
+        let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
+        loop {
+            let step = std::future::poll_fn(|context| {
+                if let Poll::Ready(loaded) = load.as_mut().poll(context) {
+                    return Poll::Ready(FetchStep::Loaded(loaded));
+                }
+                // Registers the waker on the link too, so anything the main
+                // thread says resumes this even though the fetch has not.
+                match self.poll_startup_wake(context) {
+                    Poll::Ready(open) => Poll::Ready(FetchStep::Woken(open.is_some())),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await;
+            match step {
+                FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
+                FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
+                FetchStep::Woken(open) => {
+                    if let Some(result) = self.drain_startup(queued) {
+                        return FetchOutcome::Ended(result);
+                    }
+                    if !open {
+                        return FetchOutcome::Ended(Err(main_thread_gone()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies everything queued, buffering source requests rather than
+    /// serving them. `Some` once startup has an outcome.
+    ///
+    /// Synchronous on purpose. This is the only thing that observes an
+    /// outcome, so it must never be the thing that is suspended.
+    fn drain_startup(
+        &mut self,
+        queued: &mut VecDeque<(SourceSlot, String)>,
+    ) -> Option<Result<(), LynxViewError>> {
+        loop {
+            match self.try_next() {
+                Ok(ToPainter::Started(result)) => {
+                    self.settle();
+                    self.finish_startup();
+                    return Some(result);
+                }
+                Ok(ToPainter::FetchSource { slot, specifier }) => {
+                    queued.push_back((slot, specifier));
+                }
+                // A script error during startup *is* the startup failure. On
+                // wasm32 under `panic = "abort"` it is the only thing a
+                // trapping main thread can say before it stops running
+                // destructors, so treating it as terminal here is what keeps
+                // construction from waiting forever.
+                Ok(ToPainter::Engine(EngineEvent::ScriptRunError(error))) => {
+                    self.settle();
+                    self.finish_startup();
+                    return Some(Err(error.into()));
+                }
+                // Frames, lifecycle events, listener edges, boot's image
+                // requests: the steady-state path, so every fact boot
+                // published lands where the host's first turn finds it.
+                Ok(other) => self.apply(other),
+                Err(flume::TryRecvError::Empty) => return None,
+                Err(flume::TryRecvError::Disconnected) => {
+                    self.settle();
+                    self.finish_startup();
+                    return Some(Err(main_thread_gone()));
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for PainterLink {
@@ -423,7 +510,12 @@ impl Output {
 /// Kept on that thread by construction — the `Rc` marker makes the whole
 /// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
 /// that built the view is the only one that can ever draw for it.
-pub(crate) struct Painter {
+/// The painter every in-crate test builds: no test here is about the host's
+/// resource system, so they all share the one that answers nothing.
+#[cfg(test)]
+pub(crate) type TestPainter = Painter<crate::resource::NeverAnswers>;
+
+pub(crate) struct Painter<F> {
     // Keep first: dropping the link closes the sole command sender, which
     // wakes the Lynx main thread before any state it may still refer to is
     // released.
@@ -447,11 +539,11 @@ pub(crate) struct Painter {
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
     /// The whole image resource system. Owned here and nowhere else.
-    images: images::PainterImages,
+    images: images::PainterImages<F>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
-impl std::fmt::Debug for Painter {
+impl<F> std::fmt::Debug for Painter<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Painter")
@@ -462,7 +554,7 @@ impl std::fmt::Debug for Painter {
 }
 
 #[cfg(test)]
-impl Drop for Painter {
+impl<F> Drop for Painter<F> {
     fn drop(&mut self) {
         if let Some(main) = self.main.as_mut() {
             self.link.send(ToMain::Shutdown);
@@ -725,13 +817,95 @@ fn route_published(
     )
 }
 
-impl Painter {
-    pub(super) fn with_output(
+impl<F> Painter<F> {
+    /// Tells the Lynx main thread to stop. Its command loop returns on this
+    /// message, which is why it is sent explicitly rather than left to the
+    /// FIFO closing when the painter is released.
+    ///
+    /// Teardown knows nothing about the store, so it stays reachable for any
+    /// `F` — which is what lets `Drop` run without the trait bound.
+    pub(super) fn shutdown(&self) {
+        // Close the sink before the store drops: a loader still in flight
+        // must find it detached rather than queue into a dead view.
+        self.images.detach();
+        self.link.send(ToMain::Shutdown);
+    }
+}
+
+/// The test constructors pin the fetcher: no in-crate test is about the
+/// host's resource system, so they all build over the one that answers
+/// nothing.
+#[cfg(test)]
+impl TestPainter {
+    pub(super) fn start<R: EventRequester>(
+        document: LynxDocument,
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<R>,
+        entry: EntryModule,
+        output: Output,
+    ) -> Result<Self, EngineError> {
+        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
+        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
+        painter.detached = false;
+        Ok(painter)
+    }
+
+    pub(crate) fn probe_document<T: Send + 'static>(
+        &mut self,
+        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
+        if self.detached {
+            return None;
+        }
+        let (sender, receiver) = flume::unbounded();
+        self.link.send(ToMain::Probe(Box::new(move |document| {
+            let _ = sender.send(probe(document));
+        })));
+        receiver.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.sync();
+        self.link.frame().cloned()
+    }
+
+    /// The painter and the other end of its link, with no Lynx main thread
+    /// started over it yet — the seam `start` spawns through, and the one a
+    /// test plays the main thread's half of.
+    #[cfg(test)]
+    pub(super) fn with_link<R: EventRequester>(
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<R>,
+        output: Output,
+    ) -> (Self, MainLink<R>) {
+        let (link, main) = main_link(Arc::clone(&event_requester));
+        let painter = Self::with_output(
+            viewport,
+            frame_size,
+            link,
+            output,
+            |_sink| crate::resource::NeverAnswers,
+            event_requester,
+        );
+        (painter, main)
+    }
+}
+
+impl<F: crate::resource::ResourceFetcher> Painter<F> {
+    pub(super) fn with_output<R: EventRequester, B>(
         viewport: Viewport,
         frame_size: FrameSize,
         link: PainterLink,
         output: Output,
-    ) -> Self {
+        resources: B,
+        requester: Arc<R>,
+    ) -> Self
+    where
+        B: FnOnce(Arc<dyn dom::ImageSink>) -> F,
+    {
         Self {
             link,
             #[cfg(test)]
@@ -749,7 +923,7 @@ impl Painter {
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
-            images: images::PainterImages::default(),
+            images: images::PainterImages::new(resources, requester),
             thread_bound: PhantomData,
         }
     }
@@ -766,17 +940,15 @@ impl Painter {
     /// request is already queued here when this loop starts, and each reply
     /// this loop sends is what unparks it.
     pub(super) async fn serve_startup(&mut self) -> Result<(), LynxViewError> {
+        // Split borrows: the fetch borrows the store across an await while
+        // the same loop keeps draining the link.
+        let Self { link, images, .. } = self;
+        let fetcher = images.store();
         let mut requests = sources::mint_namespace();
-        // Installed before this loop and never replaced, so one owned handle
-        // serves every fetch. Owned because a `ResourceFuture` borrows the
-        // fetcher across the await and the link is used after it.
-        let Some(fetcher) = self.images.fetcher() else {
-            return Err(EngineError::NoResourceFetcher.into());
-        };
         let mut queued: VecDeque<(SourceSlot, String)> = VecDeque::new();
         let mut closed = false;
         loop {
-            if let Some(result) = self.drain_startup(&mut queued) {
+            if let Some(result) = link.drain_startup(&mut queued) {
                 return result;
             }
             let Some((slot, specifier)) = queued.pop_front() else {
@@ -785,20 +957,14 @@ impl Painter {
                     // nothing terminal, so nothing more can ever arrive.
                     return Err(main_thread_gone());
                 }
-                closed = self.link.await_startup_wake().await.is_none();
+                closed = link.await_startup_wake().await.is_none();
                 continue;
             };
-            match self
-                .await_fetch(
-                    fetcher.as_ref(),
-                    &mut requests,
-                    slot,
-                    &specifier,
-                    &mut queued,
-                )
+            match link
+                .await_fetch(fetcher, &mut requests, slot, &specifier, &mut queued)
                 .await
             {
-                FetchOutcome::Loaded(source) => self.link.send(ToMain::SourceLoaded {
+                FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded {
                     slot,
                     source: Some(source),
                 }),
@@ -808,112 +974,6 @@ impl Painter {
                 FetchOutcome::Ended(result) => return result,
             }
         }
-    }
-
-    /// Waits for one host fetch **while still watching the inbox**.
-    ///
-    /// This is the whole of the fix for a startup that could hang: a fetch is
-    /// the one await in construction that is not on the link, and a host is
-    /// under no obligation to ever answer it. Polling it *beside* the wake —
-    /// rather than in place of the drain — is what keeps an outcome that has
-    /// already been decided observable.
-    async fn await_fetch(
-        &mut self,
-        fetcher: &dyn crate::resource::ResourceFetcher,
-        requests: &mut crate::resource::RequestId,
-        slot: SourceSlot,
-        specifier: &str,
-        queued: &mut VecDeque<(SourceSlot, String)>,
-    ) -> FetchOutcome {
-        let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
-        loop {
-            let step = std::future::poll_fn(|context| {
-                if let Poll::Ready(loaded) = load.as_mut().poll(context) {
-                    return Poll::Ready(FetchStep::Loaded(loaded));
-                }
-                // Registers the waker on the link too, so anything the main
-                // thread says resumes this even though the fetch has not.
-                match self.link.poll_startup_wake(context) {
-                    Poll::Ready(open) => Poll::Ready(FetchStep::Woken(open.is_some())),
-                    Poll::Pending => Poll::Pending,
-                }
-            })
-            .await;
-            match step {
-                FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
-                FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
-                FetchStep::Woken(open) => {
-                    if let Some(result) = self.drain_startup(queued) {
-                        return FetchOutcome::Ended(result);
-                    }
-                    if !open {
-                        return FetchOutcome::Ended(Err(main_thread_gone()));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Applies everything queued, buffering source requests rather than
-    /// serving them. `Some` once startup has an outcome.
-    ///
-    /// Synchronous on purpose. This is the only thing that observes an
-    /// outcome, so it must never be the thing that is suspended.
-    fn drain_startup(
-        &mut self,
-        queued: &mut VecDeque<(SourceSlot, String)>,
-    ) -> Option<Result<(), LynxViewError>> {
-        loop {
-            match self.link.try_next() {
-                Ok(ToPainter::Started(result)) => {
-                    self.link.settle();
-                    self.link.finish_startup();
-                    return Some(result);
-                }
-                Ok(ToPainter::FetchSource { slot, specifier }) => {
-                    queued.push_back((slot, specifier));
-                }
-                // A script error during startup *is* the startup failure. On
-                // wasm32 under `panic = "abort"` it is the only thing a
-                // trapping main thread can say before it stops running
-                // destructors, so treating it as terminal here is what keeps
-                // construction from waiting forever.
-                Ok(ToPainter::Engine(EngineEvent::ScriptRunError(error))) => {
-                    self.link.settle();
-                    self.link.finish_startup();
-                    return Some(Err(error.into()));
-                }
-                // Frames, lifecycle events, listener edges, boot's image
-                // requests: the steady-state path, so every fact boot
-                // published lands where the host's first turn finds it.
-                Ok(other) => self.link.apply(other),
-                Err(flume::TryRecvError::Empty) => return None,
-                Err(flume::TryRecvError::Disconnected) => {
-                    self.link.settle();
-                    self.link.finish_startup();
-                    return Some(Err(main_thread_gone()));
-                }
-            }
-        }
-    }
-
-    /// The sink completed loads report through, for the store this view is
-    /// about to build.
-    ///
-    /// Generic over the host's wakeup so no `dyn EventRequester` reappears:
-    /// a load finishing on the store's own thread has to get this thread a
-    /// turn, and the host's requester is the only thing that can.
-    pub(super) fn image_sink<R: EventRequester>(
-        &self,
-        requester: Arc<R>,
-    ) -> Arc<dyn dom::ImageSink> {
-        self.images.sink(requester)
-    }
-
-    /// Installs the embedder's store. Called once, on this thread, before the
-    /// view is handed back.
-    pub(super) fn install_resources(&mut self, store: Rc<dyn crate::resource::ResourceFetcher>) {
-        self.images.install(store);
     }
 
     /// Warms sources the walk has not met yet.
@@ -940,57 +1000,6 @@ impl Painter {
         if !events.is_empty() {
             self.link.send(ToMain::ImageEvents(events));
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn start<R: EventRequester>(
-        document: LynxDocument,
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        entry: EntryModule,
-        output: Output,
-    ) -> Result<Self, EngineError> {
-        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
-        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
-        painter.detached = false;
-        Ok(painter)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_document<T: Send + 'static>(
-        &mut self,
-        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
-    ) -> Option<T> {
-        if self.detached {
-            return None;
-        }
-        let (sender, receiver) = flume::bounded(1);
-        self.link.send(ToMain::Probe(Box::new(move |document| {
-            let _ = sender.send(probe(document));
-        })));
-        receiver.recv_timeout(Duration::from_secs(10)).ok()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
-        self.sync();
-        self.link.frame().cloned()
-    }
-
-    /// The painter and the other end of its link, with no Lynx main thread
-    /// started over it yet — the seam `start` spawns through, and the one a
-    /// test plays the main thread's half of.
-    #[cfg(test)]
-    pub(super) fn with_link<R: EventRequester>(
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        output: Output,
-    ) -> (Self, MainLink<R>) {
-        let (link, main) = main_link(event_requester);
-        let painter = Self::with_output(viewport, frame_size, link, output);
-        (painter, main)
     }
 
     /// Whether the engine owes the timeline another frame, as of the last
@@ -1310,16 +1319,6 @@ impl Painter {
             }
         }
     }
-    /// Tells the Lynx main thread to stop. Its command loop returns on this
-    /// message, which is why it is sent explicitly rather than left to the
-    /// FIFO closing when the painter is released.
-    pub(super) fn shutdown(&self) {
-        // Close the sink before the store drops: a loader still in flight
-        // must find it detached rather than queue into a dead view.
-        self.images.detach();
-        self.link.send(ToMain::Shutdown);
-    }
-
     /// Runs one turn: produce the frame it owes, and hand back everything
     /// the realm had to say.
     ///

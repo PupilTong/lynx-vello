@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use dom::Point2D;
 use dom::input::{InputEvent, PointerKind, PointerPhase};
 
-use super::Painter;
+use super::TestPainter;
 
 /// The handle a packed id names, the way script spells one.
 fn node_id(bits: u64) -> dom::NodeId {
@@ -13,12 +13,12 @@ fn node_id(bits: u64) -> dom::NodeId {
 
 /// Boots a script and waits for it to finish, leaving the main thread
 /// parked on its command channel with the boot's frame published.
-fn booted(source: &str) -> Painter {
+fn booted(source: &str) -> TestPainter {
     let document = crate::main::tree::new_document(
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::main::tree::PageConfig::default(),
     );
-    let mut engine = Painter::start(
+    let mut engine = TestPainter::start(
         document,
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
@@ -52,7 +52,7 @@ fn booted(source: &str) -> Painter {
 }
 
 /// One attribute of one node, read on the main thread through a probe.
-fn attribute_of(engine: &mut Painter, node: u64, name: &'static str) -> Option<String> {
+fn attribute_of(engine: &mut TestPainter, node: u64, name: &'static str) -> Option<String> {
     engine
         .probe_document(move |tree| {
             tree.get(node_id(node))
@@ -244,7 +244,7 @@ fn touch(id: u32, phase: PointerPhase, x: f32) -> InputEvent {
 /// the wait by showing up in the actual value. The deadline is generous
 /// because the whole suite's realm boots share the machine with this
 /// spin.
-fn wait_for_log(engine: &mut Painter, expected: &str) {
+fn wait_for_log(engine: &mut TestPainter, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let log = attribute_of(engine, 3, "log");
@@ -348,7 +348,7 @@ const SCROLLING_GESTURE_PAGE: &str = r"
         };
         ";
 
-fn scroll_offset_of(engine: &mut Painter, node: u64) -> dom::Vector2D<f32> {
+fn scroll_offset_of(engine: &mut TestPainter, node: u64) -> dom::Vector2D<f32> {
     engine
         .probe_document(move |tree| tree.scroll_offset(node_id(node)))
         .expect("the main thread answers probes")
@@ -601,13 +601,13 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
 
 /// Boots a card whose one view runs `animation_css`, waiting for the
 /// boot flush like [`booted`] does.
-fn booted_animated(animation_css: &str) -> Painter {
+fn booted_animated(animation_css: &str) -> TestPainter {
     let mut document = crate::main::tree::new_document(
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::main::tree::PageConfig::default(),
     );
     crate::style::add_style_sheet_text(&mut document, animation_css);
-    let mut engine = Painter::start(
+    let mut engine = TestPainter::start(
         document,
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
@@ -642,7 +642,7 @@ fn booted_animated(animation_css: &str) -> Painter {
 }
 
 /// Sends one `BeginFrame` and waits for its round's commit to publish.
-fn synchronized_tick(engine: &mut Painter, now: f64) {
+fn synchronized_tick(engine: &mut TestPainter, now: f64) {
     let seq = engine.begin_frame(now, true).expect("a tick crosses");
     assert!(
         engine.link.wait_begin_frame(seq, Duration::from_secs(5)),

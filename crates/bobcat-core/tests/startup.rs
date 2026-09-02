@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceFetcher, ResourceFuture,
     ResourceRequest, ResourceResponse,
 };
-use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, ViewSources};
 use support::{FetcherDouble, wait_for_script};
 
 /// Which thread ran something, by identity rather than by name.
@@ -119,15 +119,14 @@ async fn resource_continuations_stay_on_the_painter() {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         records: Arc::clone(&records),
     });
-    let sources = ViewSources::new(support::factory(fetcher), "main.js");
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        sources,
+        |_sink| fetcher,
+        ViewSources::new("main.js"),
     )
     .await
     .expect("startup completes");
@@ -228,13 +227,13 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     let requester = Arc::new(DropObservedRequester);
     let requester_weak = Arc::downgrade(&requester);
     let mut construction = Box::pin(LynxView::new(
-        PageConfig::default(),
         requester,
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(support::factory(fetcher), "main.js"),
+        |_sink| fetcher,
+        ViewSources::new("main.js"),
     ));
 
     tokio::select! {
@@ -282,18 +281,18 @@ async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host()
     });
 
     let construction = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
+        |_sink| fetcher,
         ViewSources {
             // Nothing registers this family, so `boot` fails on it — before
             // its first park, and so before the fetch it already asked for
             // could possibly have been answered.
             default_font_family: Some("no-such-family".to_owned()),
-            ..ViewSources::new(support::factory(fetcher), "main.js")
+            ..ViewSources::new("main.js")
         },
     );
 

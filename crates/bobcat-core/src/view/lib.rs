@@ -10,7 +10,6 @@
 //! handle that joins them and the link that crosses between them.
 
 use std::fmt;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dom::input::InputEvent;
@@ -21,7 +20,7 @@ pub use crate::main::configure_wasm_workers;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
-use crate::main::{MainLink, MainThreadHome, StartupRequest, ToPainterSender, spawn_main_thread};
+use crate::main::{MainLink, MainThreadHome, ToPainterSender, spawn_main_thread};
 pub use crate::paint::WindowTarget;
 use crate::paint::{Output, Painter, PainterLink};
 use crate::resource::ResourceFetcher;
@@ -175,8 +174,6 @@ pub(crate) type ComposeKey = (u64, u64, u64);
 pub enum EngineError {
     #[error("invalid viewport: {0}")]
     Viewport(String),
-    #[error("this view has no resource fetcher, so it can load no sources")]
-    NoResourceFetcher,
     #[error("GPU operation failed: {0}")]
     Gpu(String),
     #[error("rendering failed: {0}")]
@@ -262,24 +259,16 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
-/// Builds the embedder's resource system.
+/// Everything `bobcat-main` needs before the entry module starts.
 ///
-/// A factory rather than a built value because the resource system is owned
-/// by the painter, and the painter is whichever thread constructs the view.
-/// It may therefore be neither `Send` nor `Sync` and hold `Rc`, `RefCell` or
-/// browser objects directly — nothing about it ever crosses a thread.
-///
-/// The [`ImageSink`](dom::ImageSink) handed in is how completed image loads
-/// reach the engine, from whatever thread the host loads on.
-pub type ResourceFactory = Box<dyn FnOnce(Arc<dyn dom::ImageSink>) -> Rc<dyn ResourceFetcher>>;
-
-/// Everything a view needs before the entry module starts.
-///
-/// Not `Clone`: the resource factory is a `FnOnce`.
+/// It carries no resource system, and has no field that could hold one: the
+/// host's fetcher belongs to the painter, is passed to [`LynxView::new`]
+/// separately, and stays on that thread. That absence is why this is `Send`,
+/// and why "the Lynx main thread never sees a store" is a property of the
+/// type rather than of the call site — this struct *is* the startup message.
+#[derive(Debug)]
 pub struct ViewSources {
-    /// Built on, and owned by, the painter's thread. Every resource
-    /// `bobcat-main` needs is asked for by message; it never holds this.
-    pub resources: ResourceFactory,
+    pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
@@ -288,24 +277,14 @@ pub struct ViewSources {
 
 impl ViewSources {
     #[must_use]
-    pub fn new(resources: ResourceFactory, entry: impl Into<String>) -> Self {
+    pub fn new(entry: impl Into<String>) -> Self {
         Self {
-            resources,
+            config: PageConfig::default(),
             fonts: Vec::new(),
             default_font_family: None,
             style_sheets: Vec::new(),
             entry: entry.into(),
         }
-    }
-}
-
-impl fmt::Debug for ViewSources {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ViewSources")
-            .field("style_sheets", &self.style_sheets)
-            .field("entry", &self.entry)
-            .finish_non_exhaustive()
     }
 }
 
@@ -323,12 +302,12 @@ impl fmt::Debug for ViewSources {
 /// on its own event loop therefore takes a turn after it hands a fact in;
 /// facts from the Lynx main thread arrive with the construction-time
 /// [`EventRequester`] wakeup.
-pub struct LynxView {
-    painter: Painter,
+pub struct LynxView<F> {
+    painter: Painter<F>,
     main: MainThreadHome,
 }
 
-impl fmt::Debug for LynxView {
+impl<F> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
@@ -337,7 +316,7 @@ impl fmt::Debug for LynxView {
     }
 }
 
-impl Drop for LynxView {
+impl<F> Drop for LynxView<F> {
     fn drop(&mut self) {
         // Goodbye first, join second. The painter holds the only sender on
         // the FIFO `bobcat-main` parks on, so a shutdown that is not sent
@@ -352,7 +331,7 @@ impl Drop for LynxView {
     }
 }
 
-impl LynxView {
+impl<F: ResourceFetcher> LynxView<F> {
     /// Starts `bobcat-main`, builds the draw target on the calling thread,
     /// and waits asynchronously until the main thread has created its
     /// document, loaded and mounted every source, and booted the entry
@@ -370,39 +349,25 @@ impl LynxView {
     /// joins `bobcat-main`. If synchronous startup JavaScript is already
     /// running, teardown waits for that work to return before the main thread
     /// can be joined.
-    pub async fn new<R: EventRequester>(
-        config: PageConfig,
+    pub async fn new<R: EventRequester, B>(
         event_requester: Arc<R>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
         target: DrawTarget,
+        resources: B,
         sources: ViewSources,
-    ) -> Result<Self, LynxViewError> {
+    ) -> Result<Self, LynxViewError>
+    where
+        B: FnOnce(Arc<dyn dom::ImageSink>) -> F,
+    {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        // The resource system belongs to the painter, which is this thread.
-        // `StartupRequest` has no field that could carry it onward.
-        let ViewSources {
-            resources,
-            fonts,
-            default_font_family,
-            style_sheets,
-            entry,
-        } = sources;
         let sink_requester = Arc::clone(&event_requester);
         let (painter_link, main_link) = main_link(event_requester);
-        let main = spawn_main_thread(
-            StartupRequest::new(
-                config,
-                viewport,
-                fonts,
-                default_font_family,
-                style_sheets,
-                entry,
-            ),
-            main_link,
-        )?;
+        // `sources` is the startup message itself, and the resource system
+        // is not in it: it stays here, on the painter's thread.
+        let main = spawn_main_thread(viewport, sources, main_link)?;
         // The link goes into the guard before the first await, so every exit
         // path has a real goodbye to send — including the one where the draw
         // target failed and there is no painter yet.
@@ -412,7 +377,12 @@ impl LynxView {
             main: Some(main),
         };
         let output = Output::build(target, frame_size).await?;
-        let mut painter = Painter::with_output(
+        // The store is built here, on the thread that owns the painter and
+        // always will, out of the sink it reports through — one sink, one
+        // store, one view. Nothing about it ever crosses a thread, which is
+        // why it needs neither `Send` nor `Sync`, and why it is a type rather
+        // than a trait object.
+        startup.painter = Some(Painter::with_output(
             viewport,
             frame_size,
             startup
@@ -420,13 +390,9 @@ impl LynxView {
                 .take()
                 .expect("the link is held until the painter is"),
             output,
-        );
-        // Built here, on the thread that owns the painter and will own it.
-        // Nothing about the resource system ever crosses a thread, which is
-        // why it needs neither `Send` nor `Sync`.
-        let sink = painter.image_sink(sink_requester);
-        painter.install_resources(resources(sink));
-        startup.painter = Some(painter);
+            resources,
+            sink_requester,
+        ));
         // Serving `bobcat-main`'s source requests *is* the wait for its
         // startup message: one loop over one inbox, so there is no arm to
         // forget and no second thing to wait on.
@@ -546,15 +512,15 @@ impl LynxView {
 
 /// A half-built view whose destructor is the cancellation protocol for
 /// [`LynxView::new`].
-struct ViewStartup {
+struct ViewStartup<F> {
     /// Held only until the painter exists, so a draw target that fails still
     /// leaves something able to say goodbye to `bobcat-main`.
     link: Option<PainterLink>,
-    painter: Option<Painter>,
+    painter: Option<Painter<F>>,
     main: Option<MainThreadHome>,
 }
 
-impl ViewStartup {
+impl<F: ResourceFetcher> ViewStartup<F> {
     async fn serve(&mut self) -> Result<(), LynxViewError> {
         self.painter
             .as_mut()
@@ -563,7 +529,7 @@ impl ViewStartup {
             .await
     }
 
-    fn finish(mut self) -> LynxView {
+    fn finish(mut self) -> LynxView<F> {
         LynxView {
             painter: self.painter.take().expect("startup owns the painter"),
             main: self.main.take().expect("startup owns the Lynx main thread"),
@@ -571,7 +537,7 @@ impl ViewStartup {
     }
 }
 
-impl Drop for ViewStartup {
+impl<F> Drop for ViewStartup<F> {
     fn drop(&mut self) {
         // Cancellation first: `bobcat-main` checks the flag at every gate
         // between sources, so a source that lands in the same instant cannot

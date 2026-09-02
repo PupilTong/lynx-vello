@@ -31,13 +31,16 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
     let fetcher =
         Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = LynxView::new(
-        config,
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(support::factory(fetcher), "main.js"),
+        |_sink| fetcher,
+        ViewSources {
+            config,
+            ..ViewSources::new("main.js")
+        },
     )
     .await
     .expect("fetch and start");

@@ -5,30 +5,30 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, EngineError, FontBlob, LynxView, LynxViewError, NoWakeup, PageConfig, ViewSources,
+    DrawTarget, EngineError, FontBlob, LynxView, LynxViewError, NoWakeup, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
 const ENTRY: &str = "main.js";
 
-async fn view(sources: ViewSources) -> Result<LynxView, LynxViewError> {
+async fn view(
+    resources: impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble>,
+    sources: ViewSources,
+) -> Result<LynxView<Arc<FetcherDouble>>, LynxViewError> {
     LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         2.0,
         DrawTarget::Offscreen,
+        resources,
         sources,
     )
     .await
 }
 
-fn sources() -> ViewSources {
-    ViewSources::new(
-        support::factory(Arc::new(FetcherDouble::new(Vec::new()))),
-        ENTRY,
-    )
+fn fetcher() -> impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble> {
+    |_sink| Arc::new(FetcherDouble::new(Vec::new()))
 }
 
 #[tokio::test]
@@ -36,13 +36,16 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     let images = Arc::new(flashbulb::TestImages::new());
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
-    let mut view = view(ViewSources::new(
-        support::factory_serving_images(
-            Arc::new(FetcherDouble::new(Vec::new()).with_images(Arc::clone(&images))),
-            Arc::clone(&images),
-        ),
-        ENTRY,
-    ))
+    let mut view = view(
+        |sink| {
+            Arc::new(
+                FetcherDouble::new(Vec::new())
+                    .with_images(Arc::clone(&images))
+                    .serving(sink),
+            )
+        },
+        ViewSources::new(ENTRY),
+    )
     .await
     .expect("opaque view");
     wait_for_script(&mut view).expect("the empty entry module boots");
@@ -77,10 +80,12 @@ async fn a_default_family_nothing_provides_fails_construction() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
-        ..sources()
+        ..ViewSources::new(ENTRY)
     };
     assert!(matches!(
-        view(unusable).await.expect_err("no usable face registered"),
+        view(fetcher(), unusable)
+            .await
+            .expect_err("no usable face registered"),
         LynxViewError::Engine(EngineError::UnknownFontFamily(_))
     ));
 }

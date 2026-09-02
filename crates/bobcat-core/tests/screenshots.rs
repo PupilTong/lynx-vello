@@ -9,7 +9,7 @@ mod support;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, FontBlob, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
+    DrawTarget, FontBlob, LynxView, NoWakeup, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
@@ -94,19 +94,22 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-fn sources(source: &[u8]) -> ViewSources {
-    let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
-    ViewSources::new(support::factory(fetcher), SCRIPT_URL)
+fn fetcher(source: &[u8]) -> impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble> {
+    let source = source.to_vec();
+    move |_sink| Arc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
 }
 
-async fn booted(sources: ViewSources) -> LynxView {
+async fn booted(
+    resources: impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble>,
+    sources: ViewSources,
+) -> LynxView<Arc<FetcherDouble>> {
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
+        resources,
         sources,
     )
     .await
@@ -116,7 +119,10 @@ async fn booted(sources: ViewSources) -> LynxView {
 }
 
 /// A view whose stylesheet request the double answers pre-parsed.
-async fn booted_with_sheet(source: &[u8], sheet: PreparsedStyleSheet) -> LynxView {
+async fn booted_with_sheet(
+    source: &[u8],
+    sheet: PreparsedStyleSheet,
+) -> LynxView<Arc<FetcherDouble>> {
     booted_with_sheet_at(source, sheet, 393.0, 727.0).await
 }
 
@@ -125,22 +131,23 @@ async fn booted_with_sheet_at(
     sheet: PreparsedStyleSheet,
     width: f32,
     height: f32,
-) -> LynxView {
-    let fetcher = Arc::new(
-        FetcherDouble::new(source.to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_preparsed_style_sheet(sheet),
-    );
+) -> LynxView<Arc<FetcherDouble>> {
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         width,
         height,
         1.0,
         DrawTarget::Offscreen,
+        |_sink| {
+            Arc::new(
+                FetcherDouble::new(source.to_vec())
+                    .resolving_to(SCRIPT_URL)
+                    .with_preparsed_style_sheet(sheet),
+            )
+        },
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(support::factory(fetcher), SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL)
         },
     )
     .await
@@ -156,7 +163,7 @@ async fn booted_with_sheet_at(
 /// painter's resolve pass, so a non-empty working set means a committed frame
 /// actually named an image and the painter read its pixels. Each round is a
 /// forced tick, which is the one call that waits for the commit behind it.
-fn settle_images(view: &mut LynxView, images: &flashbulb::TestImages) {
+fn settle_images(view: &mut LynxView<Arc<FetcherDouble>>, images: &flashbulb::TestImages) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let _ = view.tick(true);
@@ -196,7 +203,11 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
 
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
-    let mut view = booted(sources(MAIN_THREAD_SCRIPT.as_bytes())).await;
+    let mut view = booted(
+        fetcher(MAIN_THREAD_SCRIPT.as_bytes()),
+        ViewSources::new(SCRIPT_URL),
+    )
+    .await;
 
     let shot = view.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
@@ -220,15 +231,17 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
-    let fetcher = Arc::new(
-        FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_images(Arc::clone(&images)),
-    );
-    let mut view = booted(ViewSources::new(
-        support::factory_serving_images(fetcher, Arc::clone(&images)),
-        SCRIPT_URL,
-    ))
+    let mut view = booted(
+        |sink| {
+            Arc::new(
+                FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
+                    .resolving_to(SCRIPT_URL)
+                    .with_images(Arc::clone(&images))
+                    .serving(sink),
+            )
+        },
+        ViewSources::new(SCRIPT_URL),
+    )
     .await;
     settle_images(&mut view, &images);
 
@@ -246,11 +259,14 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 
     // Selecting the face by name is what proves the container registered: an
     // unknown default family fails the construction.
-    let mut view = booted(ViewSources {
-        fonts: vec![FontBlob::from_static(ROBOTO)],
-        default_font_family: Some("Roboto".to_owned()),
-        ..sources(TEXT_SCRIPT.as_bytes())
-    })
+    let mut view = booted(
+        fetcher(TEXT_SCRIPT.as_bytes()),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
     .await;
 
     let shot = view.capture().expect("capture the committed page");

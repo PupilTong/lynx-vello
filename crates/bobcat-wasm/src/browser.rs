@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -284,7 +283,7 @@ impl bobcat_core::FrameImages for BrowserResources {
 /// [`BobcatRenderer::load`] and replaced wholesale by the next load.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: Option<LynxView>,
+    view: Option<LynxView<Arc<BrowserResources>>>,
     resources: Arc<BrowserResources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
@@ -405,16 +404,11 @@ impl BobcatRenderer {
         self.script_finished = false;
 
         let sources = ViewSources {
+            config: self.config,
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
-            ..ViewSources::new(
-                {
-                    let resources = Arc::clone(&self.resources);
-                    Box::new(move |_sink| Rc::new(resources))
-                },
-                entry_url,
-            )
+            ..ViewSources::new(entry_url)
         };
         // A canvas owns its own resolution — configuring a context does not
         // set it — and the view builds its surface from this canvas during
@@ -424,12 +418,15 @@ impl BobcatRenderer {
             .map_err(js_error)?;
         set_canvas_size(&self.canvas, frame_size);
         let built = LynxView::new(
-            self.config,
             self.events.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
             DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
+            {
+                let resources = Arc::clone(&self.resources);
+                move |_sink| resources
+            },
             sources,
         )
         .await;

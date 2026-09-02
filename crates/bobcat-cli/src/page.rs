@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
     RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
-use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
+use bobcat_core::{ImageSink, PageConfig, PreparsedStyleSheet, ViewSources};
 use http::HeaderMap;
 use url::Url;
 
@@ -394,20 +394,23 @@ impl Program {
     /// input carried, if any, and its entry MTS module.
     pub(crate) fn sources(&self) -> ViewSources {
         ViewSources {
+            config: self.config,
             style_sheets: self
                 .resource_fetcher
                 .style_sheet_url()
                 .map(Url::to_string)
                 .into_iter()
                 .collect(),
-            ..ViewSources::new(
-                {
-                    let fetcher = self.resource_fetcher.clone();
-                    Box::new(move |_sink| std::rc::Rc::new(fetcher))
-                },
-                self.script_url.to_string(),
-            )
+            ..ViewSources::new(self.script_url.to_string())
         }
+    }
+
+    /// Builds the resource system this input is served by, for the painter
+    /// to own. The CLI loads no image asynchronously, so it has nothing to
+    /// report and drops the sink.
+    pub(crate) fn resources(&self) -> impl FnOnce(Arc<dyn ImageSink>) -> ProgramResourceFetcher {
+        let fetcher = self.resource_fetcher.clone();
+        move |_sink| fetcher
     }
 
     /// Reports input features the current runtime retains only approximately

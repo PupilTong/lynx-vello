@@ -88,10 +88,16 @@ pub trait ResourceFetcher: dom::FrameImages {
 
 /// A shared handle serves whatever it points at.
 ///
-/// The painter's handle on a resource system is an `Rc`, because nothing
-/// about it crosses a thread; an embedder whose registry outlives the view
-/// keeps its own `Arc`. This is what joins the two without a per-embedder
-/// forwarding wrapper.
+/// The painter owns its resource system by value; an embedder whose registry
+/// outlives the view hands in an `Arc` of it instead. This is what joins the
+/// two without a per-embedder forwarding wrapper.
+///
+/// It is the right handle for a registry that answers reads and fetches, and
+/// the wrong one for a registry that *reports* — a sink belongs to one view,
+/// and an `Arc` shared across views has nowhere to put more than one. A host
+/// that loads images asynchronously returns a per-view value from the builder
+/// [`LynxView::new`](crate::LynxView::new) takes, holding this handle plus
+/// that view's sink.
 impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Arc<T> {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         (**self).supports_capability(capability)
@@ -465,14 +471,33 @@ pub enum RetryAdvice {
     After(Duration),
 }
 
+/// A host that answers nothing, ever: every fetch is a future that never
+/// completes and no image is ever readable.
+///
+/// The painter owns a resource system unconditionally, so a test that is not
+/// about resources still needs one to name.
 #[cfg(test)]
-mod tests {
-    use super::ResourceFetcher;
+#[derive(Debug, Default)]
+pub(crate) struct NeverAnswers;
 
-    fn accepts_object_safe_trait(_: Option<&dyn ResourceFetcher>) {}
+#[cfg(test)]
+impl dom::FrameImages for NeverAnswers {
+    fn read(&self, _source: &str) -> Option<dom::vello::peniko::ImageData> {
+        None
+    }
+}
 
-    #[test]
-    fn resource_fetcher_is_object_safe() {
-        accepts_object_safe_trait(None);
+#[cfg(test)]
+impl ResourceFetcher for NeverAnswers {
+    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
+        false
+    }
+
+    fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+        Box::pin(std::future::pending())
+    }
+
+    fn fetch_resource(&self, _request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+        Box::pin(std::future::pending())
     }
 }

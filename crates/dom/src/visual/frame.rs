@@ -357,9 +357,9 @@ impl CommittedFrame {
     /// `images` ends up with one entry per image draw, in draw order.
     /// `sources` receives each distinct image once, in first-draw order —
     /// the frame's working set, and the residency hint a host is given.
-    pub fn resolve_images(
+    pub fn resolve_images<P: crate::FrameImages + ?Sized>(
         &self,
-        pixels: &dyn crate::FrameImages,
+        pixels: &P,
         images: &mut Vec<Option<ImageData>>,
         sources: &mut Vec<std::sync::Arc<str>>,
     ) {

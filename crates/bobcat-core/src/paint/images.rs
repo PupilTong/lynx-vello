@@ -5,15 +5,12 @@
 //! holds names and load states; it never sees a store, a buffer or a
 //! `peniko::ImageData`, and no channel between the two can carry one.
 //!
-//! Because the store never leaves this thread, it is held by [`Rc`] and needs
-//! neither `Send` nor `Sync` — which is what lets a wasm store hold browser
-//! objects directly. Nor does the factory that builds it: a view is painted by
-//! whichever thread constructed it, so the store is built there and stays
-//! there. The one direction that does cross threads is the store's own loaders
-//! reporting completion, and that goes through [`ImageSink`], which is
-//! `Send + Sync`.
+//! Because the store never leaves this thread it is held by value, as a type
+//! parameter rather than a trait object, and needs neither `Send` nor `Sync` —
+//! which is what lets a wasm store hold browser objects directly. The one
+//! direction that does cross threads is the store's own loaders reporting
+//! completion, and that goes through [`ImageSink`], which is `Send + Sync`.
 
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -121,9 +118,8 @@ impl<R: EventRequester> ImageSink for PainterImageSink<R> {
 /// It is indexed rather than keyed: composition replays the program on every
 /// frame that scrolls, and a slice index costs nothing where a URL hash would
 /// have cost a lookup per draw per frame.
-#[derive(Default)]
-pub(crate) struct PainterImages {
-    store: Option<Rc<dyn ResourceFetcher>>,
+pub(crate) struct PainterImages<F> {
+    store: F,
     queue: Arc<ImageQueue>,
     /// `(commit_id, epoch)` the table was built for.
     key: Option<(u64, u64)>,
@@ -137,33 +133,53 @@ pub(crate) struct PainterImages {
     epoch: u64,
 }
 
-impl std::fmt::Debug for PainterImages {
+impl<F> std::fmt::Debug for PainterImages<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PainterImages")
-            .field("installed", &self.store.is_some())
             .field("epoch", &self.epoch)
             .field("resolved", &self.resolved.len())
             .finish_non_exhaustive()
     }
 }
 
-impl PainterImages {
-    /// The sink this view's store reports through.
-    pub(crate) fn sink<R: EventRequester>(&self, requester: Arc<R>) -> Arc<dyn ImageSink> {
-        Arc::new(PainterImageSink::new(Arc::clone(&self.queue), requester))
-    }
-
-    pub(crate) fn install(&mut self, store: Rc<dyn ResourceFetcher>) {
-        self.store = Some(store);
-    }
-
-    /// An owned handle on the host's resource system.
+impl<F: ResourceFetcher> PainterImages<F> {
+    /// Mints this view's sink and builds the host's resource system from it.
     ///
-    /// Owned rather than borrowed because a `ResourceFuture` borrows the
-    /// fetcher across an await, and the caller uses the link afterwards.
-    pub(crate) fn fetcher(&self) -> Option<Rc<dyn ResourceFetcher>> {
-        self.store.clone()
+    /// The sink comes first, and the store is built *from* it, so a store
+    /// that exists without its report channel is unrepresentable and the two
+    /// are paired by construction. That pairing is per view: a host whose
+    /// registry outlives the view returns a per-view value holding a shared
+    /// handle on it, and that value — not the registry — is what carries the
+    /// sink. A load in flight when a view is replaced therefore reports to
+    /// the queue it was started for, which teardown has already detached,
+    /// rather than into its successor's document.
+    ///
+    /// A builder rather than a built value for one more reason: it runs only
+    /// once every fallible step of construction has succeeded, so a host pays
+    /// for a resource system only for a view that will exist.
+    pub(crate) fn new<R: EventRequester, B>(build: B, requester: Arc<R>) -> Self
+    where
+        B: FnOnce(Arc<dyn ImageSink>) -> F,
+    {
+        let queue = Arc::new(ImageQueue::default());
+        let store = build(Arc::new(PainterImageSink::new(
+            Arc::clone(&queue),
+            requester,
+        )));
+        Self {
+            store,
+            queue,
+            key: None,
+            resolved: Vec::new(),
+            sources: Vec::new(),
+            epoch: 0,
+        }
+    }
+
+    /// The host's resource system, for the startup loads that need it.
+    pub(crate) fn store(&self) -> &F {
+        &self.store
     }
 
     pub(crate) fn epoch(&self) -> u64 {
@@ -176,11 +192,8 @@ impl PainterImages {
     /// Non-blocking, and there is nothing to send back: an answer arrives
     /// later through the sink, keyed by the same source string.
     pub(crate) fn request(&self, sources: Vec<Arc<str>>) {
-        let Some(store) = &self.store else {
-            return;
-        };
         for source in sources {
-            store.request_image(source.as_ref());
+            self.store.request_image(source.as_ref());
         }
     }
 
@@ -205,13 +218,8 @@ impl PainterImages {
         if self.key == Some(key) {
             return;
         }
-        if let Some(store) = &self.store {
-            frame.resolve_images(store.as_ref(), &mut self.resolved, &mut self.sources);
-            store.retain_images(&self.sources);
-        } else {
-            self.resolved.clear();
-            self.sources.clear();
-        }
+        frame.resolve_images(&self.store, &mut self.resolved, &mut self.sources);
+        self.store.retain_images(&self.sources);
         self.key = Some(key);
     }
 
@@ -219,7 +227,9 @@ impl PainterImages {
     pub(crate) fn resolved(&self) -> &[Option<ImageData>] {
         &self.resolved
     }
+}
 
+impl<F> PainterImages<F> {
     /// Stops accepting reports. Called once, at teardown, before the store
     /// drops with the painter.
     pub(crate) fn detach(&self) {

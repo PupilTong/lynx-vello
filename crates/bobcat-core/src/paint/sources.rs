@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use http::HeaderMap;
 
 use crate::resource::{
-    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourcePriority,
-    ResourceRequest, StyleSheetPayload,
+    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
+    ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
 use crate::view::{LoadedSource, LynxViewError, SourceSlot, StyleSheetSource};
 
@@ -37,8 +37,8 @@ pub(super) fn mint_namespace() -> RequestId {
 /// The `slot` decides which half of the fetcher answers — a stylesheet may
 /// come back pre-parsed from a host that decoded a bundle, while an entry
 /// module is always bytes.
-pub(super) async fn load(
-    fetcher: &dyn crate::resource::ResourceFetcher,
+pub(super) async fn load<F: ResourceFetcher>(
+    fetcher: &F,
     requests: &mut RequestId,
     slot: SourceSlot,
     specifier: &str,
@@ -74,8 +74,8 @@ pub(super) async fn load(
 
 /// Resolves a specifier and returns the fetch request plus the resolved URL —
 /// which is the name every later error reports against.
-async fn resolve(
-    fetcher: &dyn crate::resource::ResourceFetcher,
+async fn resolve<F: ResourceFetcher>(
+    fetcher: &F,
     requests: &mut RequestId,
     specifier: &str,
 ) -> Result<(ResourceRequest, String), LynxViewError> {

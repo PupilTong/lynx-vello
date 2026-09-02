@@ -18,7 +18,7 @@ use flume::RecvTimeoutError;
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::Program;
+use crate::page::{Program, ProgramResourceFetcher};
 use crate::screenshot::save_screenshot;
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
@@ -42,12 +42,12 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     // what comes back is a view whose first commit is already styled and
     // whose target already exists.
     let mut view = pollster::block_on(LynxView::new(
-        program.config,
         event_requester,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
         DrawTarget::Offscreen,
+        program.resources(),
         program.sources(),
     ))
     .map_err(|source| CliError::StartView {
@@ -128,7 +128,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
-    view: &mut LynxView,
+    view: &mut LynxView<ProgramResourceFetcher>,
     clock: &mut FrameClock,
     running: &mut bool,
 ) -> Result<bool, CliError> {
@@ -176,7 +176,10 @@ enum HostEvent {
     Pump,
 }
 
-fn check_script(view: &mut LynxView, input: &str) -> Result<bool, CliError> {
+fn check_script(
+    view: &mut LynxView<ProgramResourceFetcher>,
+    input: &str,
+) -> Result<bool, CliError> {
     let mut finished = false;
     for event in view.pump() {
         match event {

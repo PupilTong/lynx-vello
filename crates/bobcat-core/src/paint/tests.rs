@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Output, Painter};
+use super::{Output, TestPainter};
 use crate::main::MainLink;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter};
@@ -13,8 +13,12 @@ fn document() -> LynxDocument {
 
 /// Starts a view over `document` and `entry`, the IO-free half of
 /// construction.
-fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &str) -> Painter {
-    Painter::start(
+fn view_over<R: EventRequester>(
+    events: Arc<R>,
+    document: LynxDocument,
+    entry: &str,
+) -> TestPainter {
+    TestPainter::start(
         document,
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
@@ -34,8 +38,8 @@ fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &
 /// link is handed back so a test can play the main thread's whole side of
 /// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
 /// ever service them.
-fn detached() -> (Painter, MainLink<NoWakeup>) {
-    Painter::with_link(
+fn detached() -> (TestPainter, MainLink<NoWakeup>) {
+    TestPainter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(NoWakeup),
@@ -125,7 +129,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     let (mut view, main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
-    let emit = |view: &mut Painter| {
+    let emit = |view: &mut TestPainter| {
         let mut decisions = InputDecisions::new();
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
@@ -295,7 +299,7 @@ fn a_view_that_presents_to_no_window_owes_no_frame() {
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = flume::unbounded();
-    let (painter, main) = Painter::with_link(
+    let (painter, main) = TestPainter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(WakeSignal(wake_sender)),
@@ -402,41 +406,7 @@ fn a_booted_view_commits_and_publishes() {
 /// here: whatever the painter is waiting on, it is also watching the link.
 #[tokio::test]
 async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
-    use std::rc::Rc;
-
-    use crate::resource::{
-        ResolveRequest, ResolvedLocator, ResourceFetcher, ResourceFuture, ResourceRequest,
-        ResourceResponse,
-    };
-
-    /// A host that answers nothing, ever.
-    struct NeverAnswers;
-
-    impl dom::FrameImages for NeverAnswers {
-        fn read(&self, _source: &str) -> Option<dom::vello::peniko::ImageData> {
-            None
-        }
-    }
-
-    impl ResourceFetcher for NeverAnswers {
-        fn supports_capability(&self, _capability: crate::resource::ResourceCapability) -> bool {
-            false
-        }
-
-        fn resolve_locator(&self, _request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
-            Box::pin(std::future::pending())
-        }
-
-        fn fetch_resource(
-            &self,
-            _request: ResourceRequest,
-        ) -> ResourceFuture<'_, ResourceResponse> {
-            Box::pin(std::future::pending())
-        }
-    }
-
     let (mut painter, main) = detached();
-    painter.install_resources(Rc::new(NeverAnswers));
 
     // The source is asked for first, as `bobcat-main` does before its first
     // park. The outcome is sent from another thread *after* the painter has

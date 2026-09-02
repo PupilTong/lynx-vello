@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, LynxView, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedKeyframe,
-    PreparsedRule, PreparsedStyleSheet, ViewSources,
+    DrawTarget, LynxView, NoWakeup, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -78,18 +78,18 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 
 /// A view built the only way there is to build one: its sheet and its entry
 /// module are its construction inputs.
-async fn booted() -> LynxView {
+async fn booted() -> LynxView<Arc<FetcherDouble>> {
     let fetcher = Arc::new(resources(slider_sheet()));
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         32.0,
         24.0,
         1.0,
         DrawTarget::Offscreen,
+        |_sink| fetcher,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
-            ..ViewSources::new(support::factory(fetcher), SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL)
         },
     )
     .await
@@ -99,7 +99,7 @@ async fn booted() -> LynxView {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(view: &mut LynxView) -> usize {
+fn red_left_edge(view: &mut LynxView<Arc<FetcherDouble>>) -> usize {
     let shot = view.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
