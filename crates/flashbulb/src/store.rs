@@ -10,11 +10,12 @@
 //! source returns a clone sharing the same `Blob`, which is what vello keys
 //! its atlas on.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageSink};
+use dom::{Document, FrameImages, ImageEvent, ImageReports};
 
 /// Decoded images keyed by the source string the paint walk asks for.
 #[derive(Default)]
@@ -23,7 +24,11 @@ pub struct TestImages {
     entries: Mutex<HashMap<String, Option<ImageData>>>,
     /// Where completed loads are reported. Absent until the painter installs
     /// one, which lets a test publish images before the view exists.
-    sink: Mutex<Option<Arc<dyn ImageSink>>>,
+    ///
+    /// A `RefCell` rather than a `Mutex` because [`ImageReports`] is
+    /// thread-bound — which is also why this store, and anything holding it,
+    /// is `!Sync`.
+    sink: RefCell<Option<ImageReports>>,
     /// Every `retain` hint received, so a test can assert on the working set.
     retained: Mutex<Vec<Vec<Arc<str>>>>,
     /// Reports not yet drained by [`pump_images`], for tests driving the
@@ -91,7 +96,7 @@ impl TestImages {
     /// Installs the sink completed loads report through, and replays every
     /// image already published so a store warmed before the view still
     /// reports its contents.
-    pub fn attach(&self, sink: Arc<dyn ImageSink>) {
+    pub fn attach(&self, sink: ImageReports) {
         let published: Vec<(String, u32, u32)> = self
             .entries()
             .iter()
@@ -101,7 +106,7 @@ impl TestImages {
                     .map(|image| (source.clone(), image.width, image.height))
             })
             .collect();
-        *self.sink.lock().expect("test image sink") = Some(sink);
+        *self.sink.borrow_mut() = Some(sink);
         for (source, width, height) in published {
             self.report_loaded(&source, width, height);
         }
@@ -145,7 +150,7 @@ impl TestImages {
                 width,
                 height,
             });
-        if let Some(sink) = self.sink.lock().expect("test image sink").as_ref() {
+        if let Some(sink) = self.sink.borrow().as_ref() {
             sink.loaded(source, width, height);
         }
     }

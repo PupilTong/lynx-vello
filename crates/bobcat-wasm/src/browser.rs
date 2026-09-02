@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -283,8 +284,8 @@ impl bobcat_core::FrameImages for BrowserResources {
 /// [`BobcatRenderer::load`] and replaced wholesale by the next load.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: Option<LynxView<Arc<BrowserResources>>>,
-    resources: Arc<BrowserResources>,
+    view: Option<LynxView<Rc<BrowserResources>>>,
+    resources: Rc<BrowserResources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -349,7 +350,7 @@ impl BobcatRenderer {
         let result = async move {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
-            let resources = Arc::new(BrowserResources::default());
+            let resources = Rc::new(BrowserResources::default());
             let events = Arc::new(EventSignal::default());
             let config = PageConfig {
                 default_display_linear,
@@ -424,8 +425,8 @@ impl BobcatRenderer {
             self.device_pixel_ratio,
             DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
             {
-                let resources = Arc::clone(&self.resources);
-                move |_sink| resources
+                let resources = Rc::clone(&self.resources);
+                move |_reports| resources
             },
             sources,
         )

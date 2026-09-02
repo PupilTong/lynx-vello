@@ -62,7 +62,7 @@ pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
-    pixels: &dyn dom::FrameImages,
+    pixels: &impl dom::FrameImages,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
     capture_document_sized(gpu, document, background, pixels, width, height)
@@ -73,7 +73,7 @@ pub fn capture_document_sized<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
-    pixels: &dyn dom::FrameImages,
+    pixels: &impl dom::FrameImages,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {

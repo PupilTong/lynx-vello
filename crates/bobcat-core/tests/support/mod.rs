@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,7 +64,7 @@ pub struct FetcherDouble {
     /// The images this host serves, if a test installed any. Shared with the
     /// test through an `Arc` so it can publish pixels and read the retain log
     /// while the painter owns its own handle.
-    pub images: Option<Arc<flashbulb::TestImages>>,
+    pub images: Option<Rc<flashbulb::TestImages>>,
 }
 
 impl FetcherDouble {
@@ -86,7 +87,7 @@ impl FetcherDouble {
     /// Serves images from `images`, which the test keeps a handle on so it
     /// can publish pixels and read the retain log.
     #[must_use]
-    pub fn with_images(mut self, images: Arc<flashbulb::TestImages>) -> Self {
+    pub fn with_images(mut self, images: Rc<flashbulb::TestImages>) -> Self {
         self.images = Some(images);
         self
     }
@@ -94,7 +95,7 @@ impl FetcherDouble {
     /// Points this double's store at the view's sink, so completed loads
     /// reach the document the way a real host's per-view value would.
     #[must_use]
-    pub fn serving(self, sink: Arc<dyn bobcat_core::ImageSink>) -> Self {
+    pub fn serving(self, sink: bobcat_core::ImageReports) -> Self {
         if let Some(images) = self.images.as_ref() {
             images.attach(sink);
         }

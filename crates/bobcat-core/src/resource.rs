@@ -3,6 +3,7 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 /// The two halves have deliberately different shapes, because their callers
 /// do. Bytes and stylesheets are awaited off the frame path, so they are
 /// futures. Images are named synchronously, loaded on the host's own
-/// concurrency, and reported through an [`ImageSink`]; the pixels are then
+/// concurrency, and reported through [`ImageReports`](dom::ImageReports); the pixels are then
 /// read back synchronously by [`dom::FrameImages::read`] during composition,
 /// which cannot suspend. That read may block, and after a successful load it
 /// must not miss — see [`dom::FrameImages`].
@@ -72,8 +73,10 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// host canonicalises to one resource are simply asked for twice.
     ///
     /// For every source it is asked for, a host eventually calls exactly one
-    /// of [`ImageSink::loaded`] or [`ImageSink::failed`], unless the view is
-    /// torn down first.
+    /// of [`ImageReports::loaded`](dom::ImageReports::loaded) or
+    /// [`ImageReports::failed`](dom::ImageReports::failed), unless the view is
+    /// torn down first. Reporting and asking for the turn that drains the
+    /// report are both the host's, and both happen on this thread.
     ///
     /// The default serves nothing, which is what a host with no image support
     /// wants: a source is asked for once and then never drawn.
@@ -89,16 +92,18 @@ pub trait ResourceFetcher: dom::FrameImages {
 /// A shared handle serves whatever it points at.
 ///
 /// The painter owns its resource system by value; an embedder whose registry
-/// outlives the view hands in an `Arc` of it instead. This is what joins the
-/// two without a per-embedder forwarding wrapper.
+/// outlives the view hands in an [`Rc`] of it instead. This is what joins the
+/// two without a per-embedder forwarding wrapper. `Rc` rather than `Arc`
+/// because nothing on this path crosses a thread — an atomic count here would
+/// be paid on every clone and never used.
 ///
 /// It is the right handle for a registry that answers reads and fetches, and
-/// the wrong one for a registry that *reports* — a sink belongs to one view,
-/// and an `Arc` shared across views has nowhere to put more than one. A host
-/// that loads images asynchronously returns a per-view value from the builder
-/// [`LynxView::new`](crate::LynxView::new) takes, holding this handle plus
-/// that view's sink.
-impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Arc<T> {
+/// the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
+/// belongs to one view, and a handle shared across views has nowhere to put
+/// more than one. A host that loads images asynchronously returns a per-view
+/// value from the builder [`LynxView::new`](crate::LynxView::new) takes,
+/// holding this handle plus that view's reports.
+impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         (**self).supports_capability(capability)
     }

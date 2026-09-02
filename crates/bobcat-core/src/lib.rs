@@ -41,8 +41,8 @@ pub mod input {
 }
 
 pub use dom::{
-    FontBlob, FrameImages, ImageEvent, ImageSink, MAX_RENDERABLE_DIMENSION, NoImages,
-    is_renderable, vello,
+    FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, MAX_RENDERABLE_DIMENSION,
+    NoImages, is_renderable, vello,
 };
 pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};

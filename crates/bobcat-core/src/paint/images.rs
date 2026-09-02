@@ -1,5 +1,5 @@
-//! The painter's end of the image system: the store it owns, the sink the
-//! store reports through, and the pixels one commit draws.
+//! The painter's end of the image system: the store it owns, the inbox it
+//! takes reports from, and the pixels one commit draws.
 //!
 //! The whole image resource system lives on this thread. The Lynx main thread
 //! holds names and load states; it never sees a store, a buffer or a
@@ -7,103 +7,24 @@
 //!
 //! Because the store never leaves this thread it is held by value, as a type
 //! parameter rather than a trait object, and needs neither `Send` nor `Sync` —
-//! which is what lets a wasm store hold browser objects directly. The one
-//! direction that does cross threads is the store's own loaders reporting
-//! completion, and that goes through [`ImageSink`], which is `Send + Sync`.
+//! which is what lets a wasm store hold browser objects directly. Nor does the
+//! handle it reports through: every type on this path is a concrete,
+//! thread-bound value, and the only thing here that crosses a thread is the
+//! batch of [`ImageEvent`]s the painter forwards to the Lynx main thread once
+//! it has drained them.
+//!
+//! A host that decodes off-thread synchronises that itself. It already drives
+//! the painter's turns, so it has somewhere to do it; putting the machinery
+//! here would charge every host for a capability the browser — the one host
+//! that will actually load images — does not use, since its decode callbacks
+//! land on the painter's own event loop.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use dom::vello::peniko::ImageData;
-use dom::{ImageEvent, ImageSink};
+use dom::{ImageEvent, ImageInbox, ImageReports};
 
 use crate::resource::ResourceFetcher;
-use crate::view::EventRequester;
-
-/// Completed loads waiting for the painter to take its next turn.
-///
-/// Shared by the sink and the painter. The sink never touches the `Painter`
-/// itself, so a store that outlives the view holds nothing that could block
-/// the painter thread's join.
-#[derive(Debug, Default)]
-pub(crate) struct ImageQueue {
-    events: Mutex<Vec<ImageEvent>>,
-    /// Set at teardown. Lives here rather than on the sink because the
-    /// painter holds the queue and the sink is owned by the store, which the
-    /// painter cannot reach into once it has handed it over.
-    detached: AtomicBool,
-}
-
-impl ImageQueue {
-    /// Stops reporting, so a load completing against a torn-down view is
-    /// dropped rather than queued into a painter that will never read it.
-    pub(crate) fn detach(&self) {
-        self.detached.store(true, Ordering::Relaxed);
-    }
-
-    fn is_detached(&self) -> bool {
-        self.detached.load(Ordering::Relaxed)
-    }
-
-    fn push(&self, event: ImageEvent) {
-        self.events
-            .lock()
-            .unwrap_or_else(|error| panic!("the image queue is poisoned: {error}"))
-            .push(event);
-    }
-
-    pub(crate) fn drain(&self) -> Vec<ImageEvent> {
-        std::mem::take(
-            &mut *self
-                .events
-                .lock()
-                .unwrap_or_else(|error| panic!("the image queue is poisoned: {error}")),
-        )
-    }
-}
-
-/// The sink handed to the store, generic over the host's wakeup so no
-/// `dyn EventRequester` reappears anywhere.
-///
-/// Announce first, then ask for the turn — the same order the Lynx main
-/// thread's own sender uses, so the fact is already readable when the turn
-/// arrives. There is no command to send: the painter is the host's own
-/// thread, and it drains this queue at the start of every turn. Waking the
-/// host is therefore the whole mechanism, on every platform.
-pub(crate) struct PainterImageSink<R: EventRequester> {
-    queue: Arc<ImageQueue>,
-    requester: Arc<R>,
-}
-
-impl<R: EventRequester> PainterImageSink<R> {
-    pub(crate) fn new(queue: Arc<ImageQueue>, requester: Arc<R>) -> Self {
-        Self { queue, requester }
-    }
-
-    fn post(&self, event: ImageEvent) {
-        if self.queue.is_detached() {
-            return;
-        }
-        self.queue.push(event);
-        self.requester.request_event();
-    }
-}
-
-impl<R: EventRequester> ImageSink for PainterImageSink<R> {
-    fn loaded(&self, source: &str, width: u32, height: u32) {
-        self.post(ImageEvent::Loaded {
-            source: Arc::from(source),
-            width,
-            height,
-        });
-    }
-
-    fn failed(&self, source: &str) {
-        self.post(ImageEvent::Failed {
-            source: Arc::from(source),
-        });
-    }
-}
 
 /// The painter's image state: the host's resource system, and the pixels the
 /// current commit draws.
@@ -120,7 +41,7 @@ impl<R: EventRequester> ImageSink for PainterImageSink<R> {
 /// have cost a lookup per draw per frame.
 pub(crate) struct PainterImages<F> {
     store: F,
-    queue: Arc<ImageQueue>,
+    inbox: ImageInbox,
     /// `(commit_id, epoch)` the table was built for.
     key: Option<(u64, u64)>,
     /// One entry per image draw of that commit, in draw order.
@@ -158,18 +79,15 @@ impl<F: ResourceFetcher> PainterImages<F> {
     /// A builder rather than a built value for one more reason: it runs only
     /// once every fallible step of construction has succeeded, so a host pays
     /// for a resource system only for a view that will exist.
-    pub(crate) fn new<R: EventRequester, B>(build: B, requester: Arc<R>) -> Self
+    pub(crate) fn new<B>(build: B) -> Self
     where
-        B: FnOnce(Arc<dyn ImageSink>) -> F,
+        B: FnOnce(ImageReports) -> F,
     {
-        let queue = Arc::new(ImageQueue::default());
-        let store = build(Arc::new(PainterImageSink::new(
-            Arc::clone(&queue),
-            requester,
-        )));
+        let (reports, inbox) = ImageInbox::new();
+        let store = build(reports);
         Self {
             store,
-            queue,
+            inbox,
             key: None,
             resolved: Vec::new(),
             sources: Vec::new(),
@@ -200,7 +118,7 @@ impl<F: ResourceFetcher> PainterImages<F> {
     /// Takes the reports the store has queued, bumping the epoch when there
     /// are any. Empty when a wakeup raced another drain.
     pub(crate) fn take_reports(&mut self) -> Vec<ImageEvent> {
-        let events = self.queue.drain();
+        let events = self.inbox.drain();
         if !events.is_empty() {
             self.epoch = self.epoch.wrapping_add(1);
         }
@@ -233,60 +151,13 @@ impl<F> PainterImages<F> {
     /// Stops accepting reports. Called once, at teardown, before the store
     /// drops with the painter.
     pub(crate) fn detach(&self) {
-        self.queue.detach();
+        self.inbox.detach();
     }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use dom::{ImageEvent, ImageSink};
-
-    use super::{ImageQueue, PainterImageSink};
-    use crate::view::NoWakeup;
-
-    /// A report is readable before the wakeup that carries it, and each one
-    /// asks the host for exactly one turn.
-    #[test]
-    fn reports_queue_before_the_wakeup_that_carries_them() {
-        #[derive(Default)]
-        struct CountingWakeup(AtomicUsize);
-        impl crate::view::EventRequester for CountingWakeup {
-            fn request_event(&self) {
-                self.0.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        let queue = Arc::new(ImageQueue::default());
-        let requester = Arc::new(CountingWakeup::default());
-        let sink = PainterImageSink::new(Arc::clone(&queue), Arc::clone(&requester));
-
-        sink.loaded("app:///a.png", 4, 4);
-        sink.failed("app:///b.png");
-
-        assert_eq!(
-            queue.drain(),
-            vec![
-                ImageEvent::Loaded {
-                    source: Arc::from("app:///a.png"),
-                    width: 4,
-                    height: 4
-                },
-                ImageEvent::Failed {
-                    source: Arc::from("app:///b.png")
-                },
-            ]
-        );
-        assert!(queue.drain().is_empty(), "a drain empties the queue");
-        assert_eq!(
-            requester.0.load(Ordering::Relaxed),
-            2,
-            "each report asks the host for a turn"
-        );
-    }
 
     /// Decision: one bitmap, reused. Every read of one source must hand back
     /// a clone sharing the *same* `Blob`, because `Blob::id()` is what vello
@@ -327,17 +198,5 @@ mod tests {
 
         let images = flashbulb::TestImages::new();
         assert!(images.read("app:///missing.png").is_none());
-    }
-
-    /// A host outliving its view must not keep queuing into a dead painter.
-    #[test]
-    fn a_detached_sink_reports_nothing() {
-        let queue = Arc::new(ImageQueue::default());
-        let sink = PainterImageSink::new(Arc::clone(&queue), Arc::new(NoWakeup));
-
-        queue.detach();
-        sink.loaded("app:///a.png", 4, 4);
-
-        assert!(queue.drain().is_empty());
     }
 }

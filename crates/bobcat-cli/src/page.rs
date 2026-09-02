@@ -14,7 +14,7 @@ use bobcat_core::resource::{
     ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
     RetryAdvice, StyleSheetPayload, StyleSheetResponse,
 };
-use bobcat_core::{ImageSink, PageConfig, PreparsedStyleSheet, ViewSources};
+use bobcat_core::{ImageReports, PageConfig, PreparsedStyleSheet, ViewSources};
 use http::HeaderMap;
 use url::Url;
 
@@ -408,7 +408,7 @@ impl Program {
     /// Builds the resource system this input is served by, for the painter
     /// to own. The CLI loads no image asynchronously, so it has nothing to
     /// report and drops the sink.
-    pub(crate) fn resources(&self) -> impl FnOnce(Arc<dyn ImageSink>) -> ProgramResourceFetcher {
+    pub(crate) fn resources(&self) -> impl FnOnce(ImageReports) -> ProgramResourceFetcher {
         let fetcher = self.resource_fetcher.clone();
         move |_sink| fetcher
     }

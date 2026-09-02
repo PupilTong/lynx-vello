@@ -6,6 +6,7 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{
@@ -94,15 +95,15 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-fn fetcher(source: &[u8]) -> impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble> {
+fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
     let source = source.to_vec();
-    move |_sink| Arc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
+    move |_sink| Rc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
 }
 
 async fn booted(
-    resources: impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
-) -> LynxView<Arc<FetcherDouble>> {
+) -> LynxView<Rc<FetcherDouble>> {
     let mut view = LynxView::new(
         Arc::new(NoWakeup),
         393.0,
@@ -122,7 +123,7 @@ async fn booted(
 async fn booted_with_sheet(
     source: &[u8],
     sheet: PreparsedStyleSheet,
-) -> LynxView<Arc<FetcherDouble>> {
+) -> LynxView<Rc<FetcherDouble>> {
     booted_with_sheet_at(source, sheet, 393.0, 727.0).await
 }
 
@@ -131,7 +132,7 @@ async fn booted_with_sheet_at(
     sheet: PreparsedStyleSheet,
     width: f32,
     height: f32,
-) -> LynxView<Arc<FetcherDouble>> {
+) -> LynxView<Rc<FetcherDouble>> {
     let mut view = LynxView::new(
         Arc::new(NoWakeup),
         width,
@@ -139,7 +140,7 @@ async fn booted_with_sheet_at(
         1.0,
         DrawTarget::Offscreen,
         |_sink| {
-            Arc::new(
+            Rc::new(
                 FetcherDouble::new(source.to_vec())
                     .resolving_to(SCRIPT_URL)
                     .with_preparsed_style_sheet(sheet),
@@ -163,7 +164,7 @@ async fn booted_with_sheet_at(
 /// painter's resolve pass, so a non-empty working set means a committed frame
 /// actually named an image and the painter read its pixels. Each round is a
 /// forced tick, which is the one call that waits for the commit behind it.
-fn settle_images(view: &mut LynxView<Arc<FetcherDouble>>, images: &flashbulb::TestImages) {
+fn settle_images(view: &mut LynxView<Rc<FetcherDouble>>, images: &flashbulb::TestImages) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let _ = view.tick(true);
@@ -183,7 +184,7 @@ fn screenshots() -> Screenshots {
 }
 
 /// A store carrying the one checker the image page draws.
-fn checker_store() -> Arc<flashbulb::TestImages> {
+fn checker_store() -> Rc<flashbulb::TestImages> {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
         for x in 0..4 {
@@ -196,7 +197,7 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
             rgba.extend_from_slice(&pixel);
         }
     }
-    let images = Arc::new(flashbulb::TestImages::new());
+    let images = Rc::new(flashbulb::TestImages::new());
     images.insert_rgba8(IMAGE_URL, 4, 4, rgba);
     images
 }
@@ -233,10 +234,10 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
     let mut view = booted(
         |sink| {
-            Arc::new(
+            Rc::new(
                 FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
                     .resolving_to(SCRIPT_URL)
-                    .with_images(Arc::clone(&images))
+                    .with_images(Rc::clone(&images))
                     .serving(sink),
             )
         },

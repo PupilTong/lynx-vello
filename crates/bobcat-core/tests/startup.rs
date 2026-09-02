@@ -5,6 +5,7 @@ mod support;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -115,7 +116,7 @@ impl ResourceFetcher for ThreadedFetcher {
 #[tokio::test]
 async fn resource_continuations_stay_on_the_painter() {
     let records = Arc::new(Mutex::new(Vec::new()));
-    let fetcher = Arc::new(ThreadedFetcher {
+    let fetcher = Rc::new(ThreadedFetcher {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         records: Arc::clone(&records),
     });
@@ -125,7 +126,7 @@ async fn resource_continuations_stay_on_the_painter() {
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        |_sink| fetcher,
+        |_reports| fetcher,
         ViewSources::new("main.js"),
     )
     .await
@@ -218,12 +219,12 @@ impl EventRequester for DropObservedRequester {
 async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
     let (dropped_sender, dropped) = flume::unbounded();
-    let fetcher = Arc::new(PendingFetcher {
+    let fetcher = Rc::new(PendingFetcher {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         started: Mutex::new(Some(started_sender)),
         dropped: Mutex::new(Some(dropped_sender)),
     });
-    let fetcher_weak = Arc::downgrade(&fetcher);
+    let fetcher_weak = Rc::downgrade(&fetcher);
     let requester = Arc::new(DropObservedRequester);
     let requester_weak = Arc::downgrade(&requester);
     let mut construction = Box::pin(LynxView::new(
@@ -232,7 +233,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        |_sink| fetcher,
+        |_reports| fetcher,
         ViewSources::new("main.js"),
     ));
 
@@ -273,8 +274,8 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
 #[tokio::test]
 async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
-    let (dropped_sender, _dropped) = mpsc::channel();
-    let fetcher = Arc::new(PendingFetcher {
+    let (dropped_sender, _dropped) = flume::unbounded();
+    let fetcher = Rc::new(PendingFetcher {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         started: Mutex::new(Some(started_sender)),
         dropped: Mutex::new(Some(dropped_sender)),
@@ -286,7 +287,7 @@ async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host()
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        |_sink| fetcher,
+        |_reports| fetcher,
         ViewSources {
             // Nothing registers this family, so `boot` fails on it — before
             // its first park, and so before the fetch it already asked for

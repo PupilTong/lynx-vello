@@ -9,6 +9,7 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,15 +79,15 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 
 /// A view built the only way there is to build one: its sheet and its entry
 /// module are its construction inputs.
-async fn booted() -> LynxView<Arc<FetcherDouble>> {
-    let fetcher = Arc::new(resources(slider_sheet()));
+async fn booted() -> LynxView<Rc<FetcherDouble>> {
+    let fetcher = Rc::new(resources(slider_sheet()));
     let mut view = LynxView::new(
         Arc::new(NoWakeup),
         32.0,
         24.0,
         1.0,
         DrawTarget::Offscreen,
-        |_sink| fetcher,
+        |_reports| fetcher,
         ViewSources {
             style_sheets: vec![STYLE_URL.to_owned()],
             ..ViewSources::new(SCRIPT_URL)
@@ -99,7 +100,7 @@ async fn booted() -> LynxView<Arc<FetcherDouble>> {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(view: &mut LynxView<Arc<FetcherDouble>>) -> usize {
+fn red_left_edge(view: &mut LynxView<Rc<FetcherDouble>>) -> usize {
     let shot = view.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels

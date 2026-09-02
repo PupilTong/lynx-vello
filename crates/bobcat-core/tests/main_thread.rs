@@ -1,5 +1,6 @@
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
@@ -10,15 +11,15 @@ use support::{FetcherDouble, wait_for_script};
 async fn view(
     source: &[u8],
     resolved_url: &str,
-) -> Result<LynxView<Arc<FetcherDouble>>, LynxViewError> {
-    let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(resolved_url));
+) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
+    let fetcher = Rc::new(FetcherDouble::new(source.to_vec()).resolving_to(resolved_url));
     LynxView::new(
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        |_sink| fetcher,
+        |_reports| fetcher,
         ViewSources::new("main.js"),
     )
     .await

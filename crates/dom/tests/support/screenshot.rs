@@ -31,7 +31,7 @@ pub(super) fn capture(test: &str, fragment: &str, width: f32, height: f32) -> Im
 pub(super) fn capture_prebuilt_document<T: Sync>(
     test: &str,
     document: &mut dom::Document<T>,
-    pixels: &dyn dom::FrameImages,
+    pixels: &impl dom::FrameImages,
 ) -> Image {
     let mut gpu = headless(test);
     capture_document(&mut gpu, document, Color::WHITE, pixels).expect("headless screenshot render")

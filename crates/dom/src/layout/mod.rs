@@ -94,8 +94,8 @@ impl<T> Document<T> {
             .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
 
-    /// Sets the source the paint walk presents to the installed
-    /// [`ImageStore`](crate::ImageStore) for this replaced element.
+    /// Sets the source the paint walk presents to the host's resource system
+    /// through [`FrameImages`](crate::FrameImages) for this replaced element.
     ///
     /// A replaced element's geometry comes from [`Self::set_natural_size`],
     /// which the caller sets separately once the store reports the image's

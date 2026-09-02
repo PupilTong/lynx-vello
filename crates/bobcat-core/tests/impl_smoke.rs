@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{
@@ -12,9 +13,9 @@ use support::{FetcherDouble, wait_for_script};
 const ENTRY: &str = "main.js";
 
 async fn view(
-    resources: impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
-) -> Result<LynxView<Arc<FetcherDouble>>, LynxViewError> {
+) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     LynxView::new(
         Arc::new(NoWakeup),
         393.0,
@@ -27,20 +28,20 @@ async fn view(
     .await
 }
 
-fn fetcher() -> impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble> {
-    |_sink| Arc::new(FetcherDouble::new(Vec::new()))
+fn fetcher() -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
+    |_sink| Rc::new(FetcherDouble::new(Vec::new()))
 }
 
 #[tokio::test]
 async fn host_capabilities_compose_into_the_opaque_view() {
-    let images = Arc::new(flashbulb::TestImages::new());
+    let images = Rc::new(flashbulb::TestImages::new());
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
     let mut view = view(
         |sink| {
-            Arc::new(
+            Rc::new(
                 FetcherDouble::new(Vec::new())
-                    .with_images(Arc::clone(&images))
+                    .with_images(Rc::clone(&images))
                     .serving(sink),
             )
         },

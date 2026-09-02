@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
@@ -68,9 +69,9 @@ fn sources(style_sheets: &[&str]) -> ViewSources {
 }
 
 async fn view_with(
-    resources: impl FnOnce(Arc<dyn bobcat_core::ImageSink>) -> Arc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
-) -> Result<LynxView<Arc<FetcherDouble>>, LynxViewError> {
+) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     LynxView::new(
         Arc::new(NoWakeup),
         393.0,
@@ -85,7 +86,7 @@ async fn view_with(
 
 #[tokio::test]
 async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
@@ -105,7 +106,7 @@ async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
 async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
     // The raw-text arm is independent of the entry resource, as it is for an
     // embedder that keeps both URLs in one resource registry.
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(b".basic { width: 100px; height: 100px; }".to_vec())
             .resolving_to(SCRIPT_URL),
@@ -123,7 +124,7 @@ async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
 async fn a_byte_order_mark_prefixed_sheet_mounts() {
     let mut css = "\u{feff}".as_bytes().to_vec();
     css.extend_from_slice(b".basic { width: 100px; }");
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(css)
             .resolving_to(SCRIPT_URL),
@@ -138,7 +139,7 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 /// and no main thread outlive it.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(vec![0xff, 0xfe, 0x00])
             .resolving_to(SCRIPT_URL),
@@ -163,7 +164,7 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
 /// `bobcat_core::style`.)
 #[tokio::test]
 async fn every_listed_sheet_issues_its_own_stylesheet_request() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),

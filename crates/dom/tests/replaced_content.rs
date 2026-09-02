@@ -10,7 +10,7 @@
 
 mod paint_common;
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use dom::layout::{NaturalSize, Size};
 use flashbulb::TestImages;
@@ -47,13 +47,13 @@ fn checker_png(side: u32) -> Vec<u8> {
 
 struct Harness {
     doc: Doc,
-    images: Arc<TestImages>,
+    images: Rc<TestImages>,
 }
 
 impl Harness {
     fn new(css: &str) -> Self {
         let doc = Doc::with_css(&format!("{PAGE} {css}"));
-        let images = Arc::new(TestImages::new());
+        let images = Rc::new(TestImages::new());
         Self { doc, images }
     }
 

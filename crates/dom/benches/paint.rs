@@ -64,6 +64,7 @@
 //!    colors opaque, both transforms non-`none`, both images the same size — so the two frames
 //!    encode the same draw count and the mean is one number rather than an average of two shapes.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use divan::counter::ItemsCount;
@@ -421,9 +422,9 @@ const TILE_SOURCE: &str = "app:///tile.png";
     clippy::cast_precision_loss,
     reason = "tile indices are small constants"
 )]
-fn tile_page() -> (Document<()>, Arc<TestImages>) {
+fn tile_page() -> (Document<()>, Rc<TestImages>) {
     let mut dom = page_document(TILE_CSS);
-    let images = Arc::new(TestImages::new());
+    let images = Rc::new(TestImages::new());
     images.insert(TILE_SOURCE, tile_pixels(0x30));
     let root = dom.document_element().id();
     let natural = NaturalSize::from_size(Size::new(TILE_PIXELS as f32, TILE_PIXELS as f32));

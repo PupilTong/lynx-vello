@@ -359,11 +359,10 @@ impl<F: ResourceFetcher> LynxView<F> {
         sources: ViewSources,
     ) -> Result<Self, LynxViewError>
     where
-        B: FnOnce(Arc<dyn dom::ImageSink>) -> F,
+        B: FnOnce(dom::ImageReports) -> F,
     {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let sink_requester = Arc::clone(&event_requester);
         let (painter_link, main_link) = main_link(event_requester);
         // `sources` is the startup message itself, and the resource system
         // is not in it: it stays here, on the painter's thread.
@@ -391,7 +390,6 @@ impl<F: ResourceFetcher> LynxView<F> {
                 .expect("the link is held until the painter is"),
             output,
             resources,
-            sink_requester,
         ));
         // Serving `bobcat-main`'s source requests *is* the wait for its
         // startup message: one loop over one inbox, so there is no arm to

@@ -53,8 +53,8 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, EventRequester, FrameHub, FrameSize,
-    LoadedSource, LynxViewError, SourceSlot, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, LoadedSource,
+    LynxViewError, SourceSlot, StartupWakeReceiver, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{NoWakeup, main_link};
@@ -837,7 +837,7 @@ impl<F> Painter<F> {
 /// nothing.
 #[cfg(test)]
 impl TestPainter {
-    pub(super) fn start<R: EventRequester>(
+    pub(super) fn start<R: crate::view::EventRequester>(
         document: LynxDocument,
         viewport: Viewport,
         frame_size: FrameSize,
@@ -875,36 +875,30 @@ impl TestPainter {
     /// started over it yet — the seam `start` spawns through, and the one a
     /// test plays the main thread's half of.
     #[cfg(test)]
-    pub(super) fn with_link<R: EventRequester>(
+    pub(super) fn with_link<R: crate::view::EventRequester>(
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<R>,
         output: Output,
     ) -> (Self, MainLink<R>) {
-        let (link, main) = main_link(Arc::clone(&event_requester));
-        let painter = Self::with_output(
-            viewport,
-            frame_size,
-            link,
-            output,
-            |_sink| crate::resource::NeverAnswers,
-            event_requester,
-        );
+        let (link, main) = main_link(event_requester);
+        let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
+            crate::resource::NeverAnswers
+        });
         (painter, main)
     }
 }
 
 impl<F: crate::resource::ResourceFetcher> Painter<F> {
-    pub(super) fn with_output<R: EventRequester, B>(
+    pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
         link: PainterLink,
         output: Output,
         resources: B,
-        requester: Arc<R>,
     ) -> Self
     where
-        B: FnOnce(Arc<dyn dom::ImageSink>) -> F,
+        B: FnOnce(dom::ImageReports) -> F,
     {
         Self {
             link,
@@ -923,7 +917,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
-            images: images::PainterImages::new(resources, requester),
+            images: images::PainterImages::new(resources),
             thread_bound: PhantomData,
         }
     }

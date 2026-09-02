@@ -48,7 +48,8 @@
 //! draws correctly, because an image draw carries its anchor and extent
 //! unmultiplied and divides by the real bitmap dimensions at encode time.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
@@ -105,8 +106,11 @@ pub trait FrameImages {
 pub struct NoImages;
 
 /// A shared handle serves whatever it points at, so an embedder holding its
-/// resource system behind an `Arc` needs no forwarding wrapper of its own.
-impl<T: FrameImages + ?Sized> FrameImages for std::sync::Arc<T> {
+/// resource system behind an [`Rc`] needs no forwarding wrapper of its own.
+///
+/// `Rc` rather than `Arc` because a resource system never leaves the painter's
+/// thread; an atomic count here would be paid on every clone and never used.
+impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
     fn read(&self, source: &str) -> Option<ImageData> {
         (**self).read(source)
     }
@@ -118,34 +122,124 @@ impl FrameImages for NoImages {
     }
 }
 
-/// How a store reports progress. Implemented by the painter; callable from
-/// whatever thread the store loads on.
+/// Completed loads waiting for the painter to take its next turn.
 ///
-/// Every method is non-blocking and must not re-enter the store.
-pub trait ImageSink: Send + Sync {
+/// The buffer exists for re-entrancy and teardown, not for synchronisation: a
+/// store may report from inside the `request_image` the painter is in the
+/// middle of calling, so a report cannot land directly in the `&mut` path
+/// that asked for it.
+#[derive(Debug, Default)]
+struct ImageQueue {
+    events: RefCell<Vec<ImageEvent>>,
+    detached: Cell<bool>,
+}
+
+/// The host's end: how a store says a load finished.
+///
+/// A concrete handle rather than a trait object, so reporting costs a direct
+/// call and no vtable exists to dispatch through. It is thread-bound by
+/// construction — an [`Rc`] cannot be moved to another thread — so a host
+/// that decodes off-thread must marshal completions back to the painter's
+/// thread itself, which costs it nothing it does not already have: it drives
+/// the painter's turns, so it drains its own completions just before the next
+/// one.
+///
+/// Waking the painter is the host's too. A report made between turns needs a
+/// turn to be drained, and the host holds the wakeup it gave the view — it
+/// knows whether it reported inside a turn, where the wake would be
+/// wasted, or outside one, where it is needed.
+#[derive(Clone, Debug)]
+pub struct ImageReports {
+    queue: Rc<ImageQueue>,
+}
+
+impl ImageReports {
     /// `source`'s bytes are readable, and the image's own full-resolution
     /// size is `width` x `height`.
     ///
     /// Reported once per source: one URL has one content, so a second report
     /// for a source already resolved changes nothing. There is deliberately
     /// no way to say that an image stopped being loaded — eviction is
-    /// invisible above this trait, which is what keeps a document's state
-    /// from regressing.
+    /// invisible here, which is what keeps a document's state from
+    /// regressing.
     ///
-    /// Neither dimension is bounded here. This is the image's intrinsic size,
+    /// Neither dimension is bounded. This is the image's intrinsic size,
     /// which layout uses; what a host may actually decode to is bounded, and
     /// checked where the pixels are read.
-    fn loaded(&self, source: &str, width: u32, height: u32);
+    ///
+    /// Non-blocking, and it must not re-enter the store.
+    pub fn loaded(&self, source: &str, width: u32, height: u32) {
+        self.post(ImageEvent::Loaded {
+            source: Arc::from(source),
+            width,
+            height,
+        });
+    }
 
     /// `source` will not produce pixels. Terminal; the engine does not retry.
-    fn failed(&self, source: &str);
+    pub fn failed(&self, source: &str) {
+        self.post(ImageEvent::Failed {
+            source: Arc::from(source),
+        });
+    }
+
+    fn post(&self, event: ImageEvent) {
+        // A load completing against a torn-down view is dropped rather than
+        // buffered into a painter that will never read it.
+        if self.queue.detached.get() {
+            return;
+        }
+        self.queue.events.borrow_mut().push(event);
+    }
+}
+
+/// The painter's end: where reports are taken from.
+///
+/// Separate from [`ImageReports`] so each side holds only what it may do —
+/// the host can report and not drain, the painter can drain and not report.
+#[derive(Debug)]
+pub struct ImageInbox {
+    queue: Rc<ImageQueue>,
+}
+
+impl ImageInbox {
+    /// The host end this inbox receives from, and the inbox itself.
+    #[must_use]
+    pub fn new() -> (ImageReports, Self) {
+        let queue = Rc::new(ImageQueue::default());
+        (
+            ImageReports {
+                queue: Rc::clone(&queue),
+            },
+            Self { queue },
+        )
+    }
+
+    /// Takes everything reported since the last drain.
+    #[must_use]
+    pub fn drain(&self) -> Vec<ImageEvent> {
+        std::mem::take(&mut *self.queue.events.borrow_mut())
+    }
+
+    /// Stops accepting reports, at teardown. The host may still hold its
+    /// [`ImageReports`] and call it; the calls do nothing.
+    ///
+    /// The flag lives on the shared queue rather than on the host's handle
+    /// because the painter cannot reach into the store it handed that handle
+    /// to.
+    pub fn detach(&self) {
+        self.queue.detached.set(true);
+    }
 }
 
 /// One report from the store, on its way to the document.
 ///
-/// `Send` by construction: an `Arc<str>` and integers. There is no variant
-/// that could carry pixels, which is what makes "`ImageData` never crosses a
-/// channel" a property of the type rather than a rule to remember.
+/// `Send` by construction: an `Arc<str>` and integers. Unlike the sink, this
+/// really does cross a thread — the painter forwards a batch of these to the
+/// Lynx main thread — and the `Arc` is what makes that legal. There is no
+/// variant that could carry pixels, which is what makes "`ImageData` never
+/// crosses a channel" a property of the type rather than a rule to
+/// remember.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImageEvent {
     /// Pixels exist for this source, with these intrinsic dimensions.
@@ -347,6 +441,52 @@ impl ImageRegistry {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::{ImageInbox, ImageReports};
+
+    /// Reports are readable in the order they were made, and a drain empties
+    /// the inbox.
+    #[test]
+    fn reports_are_drained_once_in_the_order_they_were_made() {
+        let (reports, inbox) = ImageInbox::new();
+
+        reports.loaded("app:///a.png", 4, 4);
+        reports.failed("app:///b.png");
+
+        assert_eq!(
+            inbox.drain(),
+            vec![
+                super::ImageEvent::Loaded {
+                    source: Arc::from("app:///a.png"),
+                    width: 4,
+                    height: 4
+                },
+                super::ImageEvent::Failed {
+                    source: Arc::from("app:///b.png")
+                },
+            ]
+        );
+        assert!(inbox.drain().is_empty(), "a drain empties the inbox");
+    }
+
+    /// A host outliving its view must not keep buffering into a painter that
+    /// will never read again.
+    #[test]
+    fn a_detached_inbox_takes_nothing() {
+        let (reports, inbox) = ImageInbox::new();
+
+        inbox.detach();
+        reports.loaded("app:///a.png", 4, 4);
+
+        assert!(inbox.drain().is_empty());
+    }
+
+    /// The host's handle is thread-bound by construction, so a store cannot
+    /// hand it to a loader thread even by mistake.
+    const _: () = {
+        const fn assert_not_send<T>() {}
+        assert_not_send::<ImageReports>();
+    };
+
     use std::sync::Arc;
 
     use super::{ImageEvent, ImageRegistry, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable};
