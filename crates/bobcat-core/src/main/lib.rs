@@ -29,11 +29,13 @@ use wasm_thread::Builder as ThreadBuilder;
 #[cfg(test)]
 use self::runtime::MainThreadError;
 use self::runtime::MainThreadRuntime;
-use self::tree::{LynxDocument, new_document};
+#[cfg(test)]
+use self::tree::LynxDocument;
+use self::tree::new_document;
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, SourceSlot,
-    StyleSheetSource, ToMain, ToPainter, ViewSources, Viewport, frame_slot,
+    EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, MainSources,
+    StyleSheetSource, ToMain, ToPainter, Viewport, frame_slot,
 };
 
 pub(crate) struct EntryModule {
@@ -216,7 +218,7 @@ pub fn configure_wasm_workers(
 /// blocked on a `BeginFrame` is already waiting on.
 pub(crate) fn spawn_main_thread<R: EventRequester>(
     viewport: Viewport,
-    sources: ViewSources,
+    sources: MainSources,
     link: MainLink<R>,
 ) -> Result<MainThreadHome, EngineError> {
     let control = Arc::new(StartupControl::default());
@@ -284,77 +286,29 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
     })
 }
 
-/// What boot is still waiting for.
-///
-/// One slot per stylesheet in cascade order, so an answer arriving out of
-/// order cannot reorder the cascade.
-struct PendingSources {
-    sheets: Vec<Option<StyleSheetSource>>,
-    /// How far the ready prefix has been mounted — also the cascade cursor.
-    mounted: usize,
-    entry: Option<EntryModule>,
-}
-
-impl PendingSources {
-    /// Whether every source has arrived. `mount_ready_prefix` runs after each
-    /// placement, so this is the fact itself rather than a counter kept
-    /// alongside it.
-    fn complete(&self) -> bool {
-        self.mounted == self.sheets.len() && self.entry.is_some()
-    }
-
-    fn place(&mut self, slot: SourceSlot, source: LoadedSource) {
-        match (slot, source) {
-            (SourceSlot::StyleSheet(index), LoadedSource::StyleSheet(sheet)) => {
-                self.sheets[index] = Some(sheet);
-            }
-            (SourceSlot::Entry, LoadedSource::Entry { source, url }) => {
-                self.entry = Some(EntryModule { source, url });
-            }
-            (slot, _) => unreachable!("the painter answers {slot:?} in kind"),
-        }
-    }
-
-    /// Mounts every sheet whose turn has come. Parsing CSS here overlaps the
-    /// fetches still in flight on the painter.
-    fn mount_ready_prefix(&mut self, document: &mut LynxDocument) {
-        while let Some(slot) = self.sheets.get_mut(self.mounted)
-            && let Some(sheet) = slot.take()
-        {
-            match sheet {
-                StyleSheetSource::Preparsed(sheet) => {
-                    crate::style::add_preparsed_style_sheet(document, &sheet);
-                }
-                StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(document, &css),
-            }
-            self.mounted += 1;
-        }
-    }
-}
-
 /// Everything between this thread starting and its first served command.
 ///
 /// Synchronous top to bottom. Its only wait is `commands.recv()` — the same
 /// one it spends the rest of its life in — so there is no future here and no
-/// executor to drive one. Every source it will ever need is asked for before
-/// that first park, and afterwards it holds no specifier at all, which is why
-/// no later fetch is even constructible.
+/// executor to drive one. The painter pushes every source unasked, sheets in
+/// cascade order with the entry last, so mounting in arrival order *is* the
+/// cascade and the entry's arrival completes the wait. This thread never
+/// holds a specifier at all, which is why no fetch of its asking is even
+/// constructible.
 ///
 /// `None` means the view was cancelled or the painter is already gone: in
 /// both cases nobody is listening for an outcome.
 fn boot<R: EventRequester>(
     viewport: Viewport,
-    sources: ViewSources,
+    sources: MainSources,
     commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
     control: &StartupControl,
 ) -> Option<Result<MainThreadRuntime<R>, LynxViewError>> {
-    let ViewSources {
+    let MainSources {
         config,
         fonts,
         default_font_family,
-        style_sheets,
-        entry,
     } = sources;
 
     let mut document = new_document(viewport, config);
@@ -367,47 +321,32 @@ fn boot<R: EventRequester>(
         return Some(Err(EngineError::UnknownFontFamily(family).into()));
     }
 
-    let mut pending = PendingSources {
-        sheets: (0..style_sheets.len()).map(|_| None).collect(),
-        mounted: 0,
-        entry: None,
-    };
-    for (index, specifier) in style_sheets.into_iter().enumerate() {
-        notify.send(ToPainter::FetchSource {
-            slot: SourceSlot::StyleSheet(index),
-            specifier,
-        });
-    }
-    notify.send(ToPainter::FetchSource {
-        slot: SourceSlot::Entry,
-        specifier: entry,
-    });
-
-    while !pending.complete() {
+    let entry = loop {
         // The one park, satisfied by *any* message rather than a particular
         // one — which is what keeps this from being half of a wait cycle.
+        // Parsing a mounted sheet here overlaps the fetch still in flight on
+        // the painter. A failed fetch never arrives: the painter holds that
+        // failure and returns from construction with it.
         let Ok(command) = commands.recv() else {
             return None;
         };
         match command {
             ToMain::Shutdown => return None,
-            ToMain::SourceLoaded { slot, source } => {
-                // A failed fetch never reaches here: the painter holds that
-                // failure and returns from construction with it.
-                pending.place(slot, source?);
-                pending.mount_ready_prefix(&mut document);
-            }
+            ToMain::SourceLoaded {
+                source: LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)),
+            } => crate::style::add_preparsed_style_sheet(&mut document, &sheet),
+            ToMain::SourceLoaded {
+                source: LoadedSource::StyleSheet(StyleSheetSource::Text(css)),
+            } => crate::style::add_style_sheet_text(&mut document, &css),
+            ToMain::SourceLoaded {
+                source: LoadedSource::Entry { source, url },
+            } => break EntryModule { source, url },
             _ => unreachable!("a view that has not booted has nothing else to apply"),
         }
         if control.is_cancelled() {
             return None;
         }
-    }
-
-    let entry = pending
-        .entry
-        .take()
-        .expect("the entry is one of the awaited sources");
+    };
     if control.is_cancelled() {
         return None;
     }
@@ -432,7 +371,7 @@ fn boot<R: EventRequester>(
 
 fn run_main_thread<R: EventRequester>(
     viewport: Viewport,
-    sources: ViewSources,
+    sources: MainSources,
     link: MainLink<R>,
     control: &StartupControl,
 ) {

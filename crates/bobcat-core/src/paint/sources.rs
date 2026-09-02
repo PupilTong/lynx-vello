@@ -1,8 +1,9 @@
 //! Loading the view's startup sources, on the thread that owns the fetcher.
 //!
-//! `bobcat-main` names a source and the painter produces it. That split is
-//! what lets the Lynx main thread be purely message-driven: it owns no
-//! fetcher, holds no specifier once it has asked, and never awaits anything.
+//! The painter holds the specifiers and pushes each loaded source across
+//! unasked. That split is what lets the Lynx main thread be purely
+//! message-driven: it owns no fetcher, never holds a specifier, and never
+//! awaits anything.
 //!
 //! Resolution, transport and UTF-8 decoding all happen here, so an encoding
 //! error can name the URL the host actually resolved rather than the
@@ -18,7 +19,7 @@ use crate::resource::{
     CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
     ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
-use crate::view::{LoadedSource, LynxViewError, SourceSlot, StyleSheetSource};
+use crate::view::{LoadedSource, LynxViewError, StyleSheetSource};
 
 /// Namespaces request ids per view, so two views' requests never collide in a
 /// host that keys its own bookkeeping on them.
@@ -32,44 +33,43 @@ pub(super) fn mint_namespace() -> RequestId {
     }
 }
 
-/// Loads one source: resolve, fetch, decode.
-///
-/// The `slot` decides which half of the fetcher answers — a stylesheet may
-/// come back pre-parsed from a host that decoded a bundle, while an entry
-/// module is always bytes.
-pub(super) async fn load<F: ResourceFetcher>(
+/// Loads one stylesheet: resolve, fetch, decode. A sheet may come back
+/// pre-parsed from a host that decoded a bundle.
+pub(super) async fn load_style_sheet<F: ResourceFetcher>(
     fetcher: &F,
     requests: &mut RequestId,
-    slot: SourceSlot,
     specifier: &str,
 ) -> Result<LoadedSource, LynxViewError> {
     let (request, url) = resolve(fetcher, requests, specifier).await?;
-    match slot {
-        SourceSlot::StyleSheet(_) => {
-            let sheet = match fetcher.fetch_style_sheet(request).await?.payload {
-                StyleSheetPayload::Preparsed(sheet) => StyleSheetSource::Preparsed(sheet),
-                StyleSheetPayload::Text(bytes) => StyleSheetSource::Text(
-                    str::from_utf8(&bytes)
-                        .map_err(|error| LynxViewError::InvalidStyleSheetEncoding {
-                            url,
-                            message: error.to_string(),
-                        })?
-                        .to_owned(),
-                ),
-            };
-            Ok(LoadedSource::StyleSheet(sheet))
-        }
-        SourceSlot::Entry => {
-            let response = fetcher.fetch_resource(request).await?;
-            let source = str::from_utf8(&response.bytes)
-                .map_err(|error| LynxViewError::InvalidScriptEncoding {
-                    url: url.clone(),
+    let sheet = match fetcher.fetch_style_sheet(request).await?.payload {
+        StyleSheetPayload::Preparsed(sheet) => StyleSheetSource::Preparsed(sheet),
+        StyleSheetPayload::Text(bytes) => StyleSheetSource::Text(
+            str::from_utf8(&bytes)
+                .map_err(|error| LynxViewError::InvalidStyleSheetEncoding {
+                    url,
                     message: error.to_string(),
                 })?
-                .to_owned();
-            Ok(LoadedSource::Entry { source, url })
-        }
-    }
+                .to_owned(),
+        ),
+    };
+    Ok(LoadedSource::StyleSheet(sheet))
+}
+
+/// Loads the entry module: resolve, fetch, decode. Always bytes.
+pub(super) async fn load_entry<F: ResourceFetcher>(
+    fetcher: &F,
+    requests: &mut RequestId,
+    specifier: &str,
+) -> Result<LoadedSource, LynxViewError> {
+    let (request, url) = resolve(fetcher, requests, specifier).await?;
+    let response = fetcher.fetch_resource(request).await?;
+    let source = str::from_utf8(&response.bytes)
+        .map_err(|error| LynxViewError::InvalidScriptEncoding {
+            url: url.clone(),
+            message: error.to_string(),
+        })?
+        .to_owned();
+    Ok(LoadedSource::Entry { source, url })
 }
 
 /// Resolves a specifier and returns the fetch request plus the resolved URL —

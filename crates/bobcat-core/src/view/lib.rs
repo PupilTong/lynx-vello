@@ -258,13 +258,14 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
-/// Everything `bobcat-main` needs before the entry module starts.
+/// Everything a view is built from.
 ///
 /// It carries no resource system, and has no field that could hold one: the
 /// host's fetcher belongs to the painter, is passed to [`LynxView::new`]
-/// separately, and stays on that thread. That absence is why this is `Send`,
-/// and why "the Lynx main thread never sees a store" is a property of the
-/// type rather than of the call site — this struct *is* the startup message.
+/// separately, and stays on that thread. [`LynxView::new`] splits this in
+/// two — the document inputs cross to `bobcat-main`, while the specifiers
+/// stay with the painter that fetches them, so that thread never holds a
+/// specifier and no fetch of its asking is even constructible.
 #[derive(Debug)]
 pub struct ViewSources {
     pub config: PageConfig,
@@ -272,6 +273,13 @@ pub struct ViewSources {
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
     pub entry: String,
+}
+
+/// The document half of [`ViewSources`]: what crosses to `bobcat-main`.
+pub(crate) struct MainSources {
+    pub(crate) config: PageConfig,
+    pub(crate) fonts: Vec<FontBlob>,
+    pub(crate) default_font_family: Option<String>,
 }
 
 impl ViewSources {
@@ -363,9 +371,25 @@ impl<F: ResourceFetcher> LynxView<F> {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
         let (painter_link, main_link) = main_link(event_requester);
-        // `sources` is the startup message itself, and the resource system
-        // is not in it: it stays here, on the painter's thread.
-        let main = spawn_main_thread(viewport, sources, main_link)?;
+        // The split: document inputs cross to `bobcat-main`, specifiers stay
+        // with the thread that owns the fetcher. Neither side ever asks the
+        // other for what it already holds.
+        let ViewSources {
+            config,
+            fonts,
+            default_font_family,
+            style_sheets,
+            entry,
+        } = sources;
+        let main = spawn_main_thread(
+            viewport,
+            MainSources {
+                config,
+                fonts,
+                default_font_family,
+            },
+            main_link,
+        )?;
         // The link goes into the guard before the first await, so every exit
         // path has a real goodbye to send — including the one where the draw
         // target failed and there is no painter yet.
@@ -390,10 +414,10 @@ impl<F: ResourceFetcher> LynxView<F> {
             output,
             resources,
         ));
-        // Serving `bobcat-main`'s source requests *is* the wait for its
-        // startup message: one loop over one inbox, so there is no arm to
-        // forget and no second thing to wait on.
-        startup.serve().await?;
+        // Pushing the sources *is* the wait for `bobcat-main`'s startup
+        // message: one loop over one inbox, so there is no arm to forget and
+        // no second thing to wait on.
+        startup.serve(style_sheets, entry).await?;
         Ok(startup.finish())
     }
 
@@ -518,11 +542,15 @@ struct ViewStartup<F> {
 }
 
 impl<F: ResourceFetcher> ViewStartup<F> {
-    async fn serve(&mut self) -> Result<(), LynxViewError> {
+    async fn serve(
+        &mut self,
+        style_sheets: Vec<String>,
+        entry: String,
+    ) -> Result<(), LynxViewError> {
         self.painter
             .as_mut()
             .expect("the painter exists before startup is served")
-            .serve_startup()
+            .serve_startup(style_sheets, entry)
             .await
     }
 
@@ -583,31 +611,21 @@ pub(crate) enum ToMain {
     /// carry pixels, which is what makes "`ImageData` never crosses a
     /// channel" a property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
-    /// One startup source, answering exactly one [`ToPainter::FetchSource`].
+    /// One startup source, pushed by the painter unasked.
     ///
-    /// Only ever a success: a fetch that fails is the startup failure, and the
-    /// painter is the side that already holds it, so it returns from
-    /// construction rather than sending the error across and waiting to be
-    /// told back what it just decided. `None` is reserved for a source the
-    /// painter abandoned, which today cannot happen.
+    /// The order of these sends is the protocol: stylesheets in cascade
+    /// order, the entry last, so `bobcat-main` mounts in arrival order and
+    /// the entry's arrival is what completes its wait. Only ever a success:
+    /// a fetch that fails is the startup failure, and the painter is the
+    /// side that already holds it, so it returns from construction rather
+    /// than sending the error across and waiting to be told back what it
+    /// just decided.
     SourceLoaded {
-        slot: SourceSlot,
-        source: Option<LoadedSource>,
+        source: LoadedSource,
     },
     Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
-}
-
-/// Which of the view's sources an answer is for.
-///
-/// `StyleSheet(i)` indexes [`ViewSources::style_sheets`], so cascade order is
-/// a property of the reply rather than a convention about the order answers
-/// happen to arrive in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceSlot {
-    StyleSheet(usize),
-    Entry,
 }
 
 /// A stylesheet in the one shape the document mounts.
@@ -638,16 +656,6 @@ pub(crate) enum ToPainter {
     BeginFrameServiced(u64),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
-    /// A source `bobcat-main` cannot fetch itself, because it owns no
-    /// fetcher.
-    ///
-    /// Every one a view will ever ask for is sent before that thread parks
-    /// for the first time; afterwards it holds no specifier at all, which is
-    /// why no post-startup fetch is constructible.
-    FetchSource {
-        slot: SourceSlot,
-        specifier: String,
-    },
     /// How startup went — the message that replaces the startup oneshot.
     ///
     /// It rides this FIFO *behind* `ScriptFinished` and `FrameChanged`, so a

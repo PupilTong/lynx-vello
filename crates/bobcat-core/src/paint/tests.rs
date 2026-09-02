@@ -394,11 +394,10 @@ fn a_booted_view_commits_and_publishes() {
 /// still end construction.
 ///
 /// This is the hang that shipped in the first draft of the message-driven
-/// startup: the painter served source requests from inside its own inbox
-/// drain, so while it awaited a host future it read nothing, and an outcome
-/// already sitting in the FIFO was never observed. `bobcat-main` sends every
-/// `FetchSource` before its first park, so after any failure is decided there
-/// is always a fetch left to block on.
+/// startup: while the painter awaited a host future it read nothing, and an
+/// outcome already sitting in the FIFO was never observed. `bobcat-main`
+/// mounts each pushed source while the painter's next fetch is already in
+/// flight, so a failure it decides there lands in exactly this window.
 ///
 /// Natively no ordinary failure lands in that window; on wasm32 under
 /// `panic = "abort"` a trapping main thread's `ScriptRunError` is exactly it,
@@ -408,15 +407,11 @@ fn a_booted_view_commits_and_publishes() {
 async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
     let (mut painter, main) = detached();
 
-    // The source is asked for first, as `bobcat-main` does before its first
-    // park. The outcome is sent from another thread *after* the painter has
-    // had time to suspend on the fetch — which is the whole point: an outcome
-    // already in the FIFO would be seen by the very first drain and would
-    // never exercise the wait.
-    main.notify.send(ToPainter::FetchSource {
-        slot: crate::view::SourceSlot::Entry,
-        specifier: "app:///main.js".to_owned(),
-    });
+    // The outcome is sent from another thread *after* the painter has had
+    // time to suspend on the entry fetch — which is the whole point: an
+    // outcome already in the FIFO would be seen before the fetch began and
+    // would never exercise the wait. `NeverAnswers` keeps the fetch pending
+    // forever, as a host is entitled to.
     let notify = main.notify.clone();
     let decided = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(50));
@@ -427,10 +422,13 @@ async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
         .into())));
     });
 
-    let error = tokio::time::timeout(Duration::from_secs(10), painter.serve_startup())
-        .await
-        .expect("a decided outcome must not wait on a fetch that never answers")
-        .expect_err("the decided failure ends construction");
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        painter.serve_startup(Vec::new(), "app:///main.js".to_owned()),
+    )
+    .await
+    .expect("a decided outcome must not wait on a fetch that never answers")
+    .expect_err("the decided failure ends construction");
     assert!(
         format!("{error}").contains("boot failed while a fetch was in flight"),
         "and it is the failure the main thread decided: {error}"

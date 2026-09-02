@@ -21,7 +21,6 @@ mod event_loop_tests;
 mod tests;
 
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -54,7 +53,7 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 use crate::view::Screenshot;
 use crate::view::{
     ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, LoadedSource,
-    LynxViewError, SourceSlot, ToMain, ToPainter, frame_slot,
+    LynxViewError, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{NoWakeup, main_link};
@@ -196,11 +195,6 @@ impl PainterLink {
         }
     }
 
-    /// One message, without applying it.
-    fn try_next(&mut self) -> Result<ToPainter, flume::TryRecvError> {
-        self.notifications.try_recv()
-    }
-
     /// Adopts whatever the drains since the last settle announced.
     fn settle(&mut self) {
         let announced = std::mem::take(&mut self.pending_announce);
@@ -236,7 +230,7 @@ impl PainterLink {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::FetchSource { .. } | ToPainter::Started(_) => {
+            ToPainter::Started(_) => {
                 unreachable!("startup messages are served before the view exists")
             }
         }
@@ -318,20 +312,17 @@ impl PainterLink {
 
     /// Waits for one host fetch **while still watching the inbox**.
     ///
-    /// This is the whole of the fix for a startup that could hang: a fetch is
-    /// the one await in construction that is not on the link, and a host is
-    /// under no obligation to ever answer it. Polling the inbox *beside* it —
-    /// rather than in place of it — is what keeps an outcome that has already
-    /// been decided observable.
-    async fn await_fetch<F: crate::resource::ResourceFetcher>(
+    /// A fetch is the one await in construction that is not on the link, and
+    /// `bobcat-main` mounts each pushed source while the next fetch is
+    /// already in flight — so a failure it decides there, or a trap's last
+    /// words, can land while the host is still holding the answer. Polling
+    /// the inbox *beside* the fetch — rather than in place of it — is what
+    /// keeps an outcome that has already been decided observable.
+    async fn await_fetch(
         &mut self,
-        fetcher: &F,
-        requests: &mut crate::resource::RequestId,
-        slot: SourceSlot,
-        specifier: &str,
-        queued: &mut VecDeque<(SourceSlot, String)>,
+        load: impl Future<Output = Result<LoadedSource, LynxViewError>>,
     ) -> FetchOutcome {
-        let mut load = std::pin::pin!(sources::load(fetcher, requests, slot, specifier));
+        let mut load = std::pin::pin!(load);
         // A second handle on the same queue, so the wait does not borrow the
         // link that handling a message needs. Dropping a pending `recv_async`
         // deregisters its waker and takes no message with it, so abandoning
@@ -356,10 +347,7 @@ impl PainterLink {
                     return FetchOutcome::Ended(Err(main_thread_gone()));
                 }
                 FetchStep::Received(Ok(notification)) => {
-                    if let Some(result) = self.take_startup(notification, queued) {
-                        return FetchOutcome::Ended(result);
-                    }
-                    if let Some(result) = self.drain_startup(queued) {
+                    if let Some(result) = self.take_startup(notification) {
                         return FetchOutcome::Ended(result);
                     }
                 }
@@ -369,43 +357,15 @@ impl PainterLink {
 
     /// Waits for one thing `bobcat-main` has to say, and applies it.
     ///
-    /// The idle half of construction: nothing is queued to fetch, so the only
+    /// The tail of construction: every source has been pushed, so the only
     /// thing that can move startup on is a message.
-    async fn await_startup(
-        &mut self,
-        queued: &mut VecDeque<(SourceSlot, String)>,
-    ) -> Option<Result<(), LynxViewError>> {
+    async fn await_startup(&mut self) -> Option<Result<(), LynxViewError>> {
         let inbox = self.notifications.clone();
         match inbox.recv_async().await {
-            Ok(notification) => self.take_startup(notification, queued),
+            Ok(notification) => self.take_startup(notification),
             Err(flume::RecvError::Disconnected) => {
                 self.settle();
                 Some(Err(main_thread_gone()))
-            }
-        }
-    }
-
-    /// Applies everything queued, buffering source requests rather than
-    /// serving them. `Some` once startup has an outcome.
-    ///
-    /// Synchronous on purpose. This is the only thing that observes an
-    /// outcome, so it must never be the thing that is suspended.
-    fn drain_startup(
-        &mut self,
-        queued: &mut VecDeque<(SourceSlot, String)>,
-    ) -> Option<Result<(), LynxViewError>> {
-        loop {
-            match self.try_next() {
-                Ok(notification) => {
-                    if let Some(result) = self.take_startup(notification, queued) {
-                        return Some(result);
-                    }
-                }
-                Err(flume::TryRecvError::Empty) => return None,
-                Err(flume::TryRecvError::Disconnected) => {
-                    self.settle();
-                    return Some(Err(main_thread_gone()));
-                }
             }
         }
     }
@@ -415,19 +375,11 @@ impl PainterLink {
     ///
     /// The single place that decides; both readers feed it, so awaiting one
     /// message and draining a queue of them cannot disagree.
-    fn take_startup(
-        &mut self,
-        notification: ToPainter,
-        queued: &mut VecDeque<(SourceSlot, String)>,
-    ) -> Option<Result<(), LynxViewError>> {
+    fn take_startup(&mut self, notification: ToPainter) -> Option<Result<(), LynxViewError>> {
         match notification {
             ToPainter::Started(result) => {
                 self.settle();
                 Some(result)
-            }
-            ToPainter::FetchSource { slot, specifier } => {
-                queued.push_back((slot, specifier));
-                None
             }
             // A script error during startup *is* the startup failure. On
             // wasm32 under `panic = "abort"` it is the only thing a trapping
@@ -930,49 +882,51 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         }
     }
 
-    /// Serves `bobcat-main` until it answers startup.
+    /// Pushes every source to `bobcat-main`, then waits until it answers
+    /// startup.
     ///
     /// This is the painter's only wait on the Lynx main thread during
     /// construction, and it is a drain of the same one inbox the steady state
-    /// drains. There is no arm to forget, because serving a source request
-    /// and noticing the answer are one loop over one enum.
+    /// drains. The order of the pushes is the protocol: sheets in cascade
+    /// order, the entry last, so the receiving side mounts in arrival order
+    /// and boots on the entry's arrival.
     ///
-    /// It cannot deadlock against `bobcat-main`: that thread sends every
-    /// source request it will ever make *before* its first park, so each
-    /// request is already queued here when this loop starts, and each reply
-    /// this loop sends is what unparks it.
-    pub(super) async fn serve_startup(&mut self) -> Result<(), LynxViewError> {
+    /// It cannot deadlock against `bobcat-main`: that thread waits on
+    /// nothing but this loop's own sends, and this loop's fetches wait on
+    /// the host, never on that thread.
+    pub(super) async fn serve_startup(
+        &mut self,
+        style_sheets: Vec<String>,
+        entry: String,
+    ) -> Result<(), LynxViewError> {
         // Split borrows: the fetch borrows the store across an await while
         // the same loop keeps draining the link.
         let Self { link, images, .. } = self;
         let fetcher = images.store();
         let mut requests = sources::mint_namespace();
-        let mut queued: VecDeque<(SourceSlot, String)> = VecDeque::new();
-        loop {
-            if let Some(result) = link.drain_startup(&mut queued) {
-                return result;
-            }
-            let Some((slot, specifier)) = queued.pop_front() else {
-                // Nothing to fetch, so the only thing that can move startup on
-                // is a message. A main thread that has gone is a receive error
-                // here, not a separate flag to carry.
-                if let Some(result) = link.await_startup(&mut queued).await {
-                    return result;
-                }
-                continue;
-            };
-            match link
-                .await_fetch(fetcher, &mut requests, slot, &specifier, &mut queued)
-                .await
-            {
-                FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded {
-                    slot,
-                    source: Some(source),
-                }),
+        for specifier in &style_sheets {
+            let load = sources::load_style_sheet(fetcher, &mut requests, specifier);
+            match link.await_fetch(load).await {
+                FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
                 // A fetch failure is the startup failure and the painter is
                 // already holding it: sending it across to be told back would
                 // be a round trip to learn what we just decided.
                 FetchOutcome::Ended(result) => return result,
+            }
+        }
+        match link
+            .await_fetch(sources::load_entry(fetcher, &mut requests, &entry))
+            .await
+        {
+            FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
+            FetchOutcome::Ended(result) => return result,
+        }
+        loop {
+            // Everything is pushed, so the only thing that can move startup
+            // on is a message. A main thread that has gone is a receive
+            // error here, not a separate flag to carry.
+            if let Some(result) = link.await_startup().await {
+                return result;
             }
         }
     }
