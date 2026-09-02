@@ -388,7 +388,9 @@ fn translate_run_style<'family>(
     }
 }
 
-fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
+/// Shared with `crate::text::block` so the two paragraph paths cannot drift on
+/// family translation.
+pub(super) fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
     let families = &family.families.list;
     if families.is_empty() {
         return ParleyGenericFamily::SansSerif.into();

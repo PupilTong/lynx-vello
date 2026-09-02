@@ -1,5 +1,6 @@
 //! Parley text measurement core.
 
+pub mod block;
 mod content;
 mod context;
 mod font;

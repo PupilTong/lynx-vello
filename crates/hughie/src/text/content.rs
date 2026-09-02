@@ -136,7 +136,9 @@ fn flush_pending_whitespace<'a, R: TextRunStyle>(
     }
 }
 
-fn should_remove_segment_break(previous: Option<char>, next: char) -> bool {
+/// Shared with `crate::text::block` so the two paragraph paths cannot drift on
+/// the CSS segment-break transformation rules.
+pub(super) fn should_remove_segment_break(previous: Option<char>, next: char) -> bool {
     previous.is_some_and(|character| character == '\u{200B}')
         || next == '\u{200B}'
         || previous.is_some_and(|character| {
