@@ -34,15 +34,14 @@ use self::quickjs::ScriptRuntime;
 #[cfg(test)]
 use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
-#[cfg(test)]
-use self::tree::LynxDocument;
-use self::tree::new_document;
+use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, MainSources,
     StyleSheetSource, ToMain, ToPainter, Viewport, frame_slot,
 };
 
+#[cfg(test)]
 pub(crate) struct EntryModule {
     pub(crate) source: String,
     pub(crate) url: String,
@@ -286,7 +285,13 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                 Ok((mut js_runtime, runtime)) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
                     notify.send(ToPainter::FrameChanged);
-                    serve_main_commands(&mut js_runtime, runtime, &commands, &notify);
+                    serve_view(
+                        &mut js_runtime,
+                        ViewSlot::Running(runtime),
+                        &commands,
+                        &notify,
+                        &StartupControl::default(),
+                    );
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -304,101 +309,130 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
     })
 }
 
-/// Everything between this thread starting and its first served command.
+/// One view on this thread: still mounting its sources, or booted and
+/// serving.
 ///
-/// Synchronous top to bottom. Its only wait is `commands.recv()` — the same
-/// one it spends the rest of its life in — so there is no future here and no
-/// executor to drive one. The painter pushes every source unasked, sheets in
-/// cascade order with the entry last, so mounting in arrival order *is* the
-/// cascade and the entry's arrival completes the wait. This thread never
-/// holds a specifier at all, which is why no fetch of its asking is even
-/// constructible.
-///
-/// `None` means the view was cancelled or the painter is already gone: in
-/// both cases nobody is listening for an outcome.
-fn boot<R: EventRequester>(
-    js_runtime: &mut ScriptRuntime,
-    viewport: Viewport,
-    sources: MainSources,
-    commands: &flume::Receiver<ToMain>,
-    notify: &ToPainterSender<R>,
-    control: &StartupControl,
-) -> Option<Result<MainThreadRuntime<R>, LynxViewError>> {
-    let MainSources {
-        config,
-        fonts,
-        default_font_family,
-        style_threads,
-    } = sources;
+/// Boot is a state machine rather than a loop because the thread may carry
+/// several views: a view waiting for its entry must not consume a sibling's
+/// commands, so each source is applied as it arrives and the wait belongs to
+/// the thread rather than to any one view.
+enum ViewSlot<R: EventRequester> {
+    /// Boxed: a booting view holds its whole document inline, where a running
+    /// one keeps it behind an `Rc` its host closures share.
+    Booting(Box<Booting<R>>),
+    Running(MainThreadRuntime<R>),
+}
 
-    // First, and on this thread, because it must be: rayon takes the calling
-    // thread over as index zero, so the pool can only be built by the thread
-    // that will flush. A view whose threads cannot start is a view that never
-    // existed, and starting them here overlaps the fetches the painter
-    // already has in flight.
-    let style_pool = match build_style_pool(style_threads.resolve()) {
-        Ok(pool) => pool,
-        Err(error) => return Some(Err(error.into())),
-    };
-    let mut document = new_document(viewport, config);
-    if let Some(pool) = style_pool {
-        document.set_style_pool(pool);
-    }
-    for font in fonts {
-        document.register_fonts(font);
-    }
-    if let Some(family) = default_font_family
-        && !document.set_default_font_family(&family)
-    {
-        return Some(Err(EngineError::UnknownFontFamily(family).into()));
+/// A view's document between its first source and its entry module.
+struct Booting<R: EventRequester> {
+    document: LynxDocument,
+    notify: ToPainterSender<R>,
+}
+
+/// What applying one source did to a booting view.
+enum Booted<R: EventRequester> {
+    /// Still waiting for the entry.
+    Waiting(Box<Booting<R>>),
+    /// The entry arrived and ran; the view is serving now.
+    Running(MainThreadRuntime<R>),
+    /// Cancelled, or the painter is gone: nobody is listening for an outcome.
+    Gone,
+    Failed(LynxViewError),
+}
+
+impl<R: EventRequester> Booting<R> {
+    /// Builds the document every source will be mounted on.
+    ///
+    /// `Err` is a source the document itself refuses — a default family
+    /// neither the containers nor the platform has — which is a failure to
+    /// build the view rather than to run it.
+    fn new(
+        viewport: Viewport,
+        sources: MainSources,
+        notify: ToPainterSender<R>,
+    ) -> Result<Self, LynxViewError> {
+        let MainSources {
+            config,
+            fonts,
+            default_font_family,
+            style_threads,
+        } = sources;
+        // First, and on this thread, because it must be: rayon takes the
+        // calling thread over as index zero, so the pool can only be built by
+        // the thread that will flush. A view whose threads cannot start is a
+        // view that never existed, and starting them here overlaps the fetches
+        // the painter already has in flight.
+        let style_pool = build_style_pool(style_threads.resolve())?;
+        let mut document = new_document(viewport, config);
+        if let Some(pool) = style_pool {
+            document.set_style_pool(pool);
+        }
+        for font in fonts {
+            document.register_fonts(font);
+        }
+        if let Some(family) = default_font_family
+            && !document.set_default_font_family(&family)
+        {
+            return Err(EngineError::UnknownFontFamily(family).into());
+        }
+        Ok(Self { document, notify })
     }
 
-    let entry = loop {
-        // The one park, satisfied by *any* message rather than a particular
-        // one — which is what keeps this from being half of a wait cycle.
-        // Parsing a mounted sheet here overlaps the fetch still in flight on
-        // the painter. A failed fetch never arrives: the painter holds that
-        // failure and returns from construction with it.
-        let Ok(command) = commands.recv() else {
-            return None;
+    /// Applies one pushed source. The entry's arrival is what ends the wait:
+    /// the painter sends stylesheets in cascade order with the entry last, so
+    /// mounting in arrival order *is* the cascade.
+    fn apply(
+        mut self: Box<Self>,
+        js_runtime: &mut ScriptRuntime,
+        source: LoadedSource,
+        control: &StartupControl,
+    ) -> Booted<R> {
+        match source {
+            LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)) => {
+                crate::style::add_preparsed_style_sheet(&mut self.document, &sheet);
+            }
+            LoadedSource::StyleSheet(StyleSheetSource::Text(css)) => {
+                crate::style::add_style_sheet_text(&mut self.document, &css);
+            }
+            LoadedSource::Entry { source, url } => {
+                return self.run_entry(js_runtime, &source, &url, control);
+            }
+        }
+        if control.is_cancelled() {
+            return Booted::Gone;
+        }
+        Booted::Waiting(self)
+    }
+
+    fn run_entry(
+        self: Box<Self>,
+        js_runtime: &mut ScriptRuntime,
+        source: &str,
+        url: &str,
+        control: &StartupControl,
+    ) -> Booted<R> {
+        if control.is_cancelled() {
+            return Booted::Gone;
+        }
+        let Self { document, notify } = *self;
+        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
+            Ok(runtime) => runtime,
+            Err(error) => return Booted::Failed(error.into_script_error().into()),
         };
-        match command {
-            ToMain::Shutdown => return None,
-            ToMain::SourceLoaded {
-                source: LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)),
-            } => crate::style::add_preparsed_style_sheet(&mut document, &sheet),
-            ToMain::SourceLoaded {
-                source: LoadedSource::StyleSheet(StyleSheetSource::Text(css)),
-            } => crate::style::add_style_sheet_text(&mut document, &css),
-            ToMain::SourceLoaded {
-                source: LoadedSource::Entry { source, url },
-            } => break EntryModule { source, url },
-            _ => unreachable!("a view that has not booted has nothing else to apply"),
+        if control.is_cancelled() {
+            return Booted::Gone;
+        }
+        if let Err(error) = runtime.run_main_thread_script(js_runtime, source, url) {
+            if control.is_cancelled() {
+                return Booted::Gone;
+            }
+            return Booted::Failed(error.into_script_error().into());
         }
         if control.is_cancelled() {
-            return None;
+            return Booted::Gone;
         }
-    };
-    if control.is_cancelled() {
-        return None;
+        Booted::Running(runtime)
     }
-    let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify.clone()) {
-        Ok(runtime) => runtime,
-        Err(error) => return Some(Err(error.into_script_error().into())),
-    };
-    if control.is_cancelled() {
-        return None;
-    }
-    if let Err(error) = runtime.run_main_thread_script(js_runtime, &entry.source, &entry.url) {
-        if control.is_cancelled() {
-            return None;
-        }
-        return Some(Err(error.into_script_error().into()));
-    }
-    if control.is_cancelled() {
-        return None;
-    }
-    Some(Ok(runtime))
 }
 
 fn run_main_thread<R: EventRequester>(
@@ -418,8 +452,8 @@ fn run_main_thread<R: EventRequester>(
         })
     }));
 
-    // One runtime per view today; a group hands the same one to every realm
-    // it opens, which is why the modules they share are registered on it.
+    // The runtime is the thread's, not the view's: a group opens one realm on
+    // it per view, which is why the modules they share are registered here.
     let mut js_runtime =
         match ScriptRuntime::new()
             .map_err(LynxViewError::from)
@@ -434,93 +468,110 @@ fn run_main_thread<R: EventRequester>(
                 return;
             }
         };
-    let booted = catch_unwind(AssertUnwindSafe(|| {
-        boot(
-            &mut js_runtime,
-            viewport,
-            sources,
-            &commands,
-            &notify,
-            control,
-        )
-    }))
-    .unwrap_or_else(|payload| {
-        Some(Err(EngineError::Thread {
-            name: "script",
-            message: format!(
-                "the Lynx main thread panicked during startup: {}",
+
+    let slot = match Booting::new(viewport, sources, notify.clone()) {
+        Ok(booting) => ViewSlot::Booting(Box::new(booting)),
+        Err(error) => {
+            notify.send(ToPainter::Started(Err(error)));
+            return;
+        }
+    };
+    let served = catch_unwind(AssertUnwindSafe(|| {
+        serve_view(&mut js_runtime, slot, &commands, &notify, control);
+    }));
+    if let Err(payload) = served {
+        notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
+            platform_script_error(format!(
+                "the Lynx main thread panicked: {}",
                 panic_payload(payload.as_ref())
-            ),
-        }
-        .into()))
-    });
-
-    match booted {
-        Some(Ok(runtime)) => {
-            // Boot's outcome and boot's pixels ride one FIFO, in this order:
-            // whatever the entry committed reaches the target on the turn
-            // that reports the ending, with nobody left to ask for another.
-            notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
-            notify.send(ToPainter::FrameChanged);
-            notify.send(ToPainter::Started(Ok(())));
-            let served = catch_unwind(AssertUnwindSafe(|| {
-                serve_main_commands(&mut js_runtime, runtime, &commands, &notify);
-            }));
-            if let Err(payload) = served {
-                notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
-                    platform_script_error(format!(
-                        "the Lynx main thread panicked while serving commands: {}",
-                        panic_payload(payload.as_ref())
-                    )),
-                )));
-            }
-        }
-        Some(Err(error)) => notify.send(ToPainter::Started(Err(error))),
-        // Cancelled, or the painter is already gone: nobody is listening.
-        None => {}
+            )),
+        )));
     }
-
-    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    set_script_panic_reporter(None);
 }
 
-fn serve_main_commands<R: EventRequester>(
+/// Drives one view from its first source to the end of its life.
+///
+/// One park, `commands.recv()`, whether the view is still mounting sources or
+/// already serving — which is what lets a thread carrying several views wait
+/// once for all of them instead of once per view.
+fn serve_view<R: EventRequester>(
     js_runtime: &mut ScriptRuntime,
-    mut runtime: MainThreadRuntime<R>,
+    slot: ViewSlot<R>,
     commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
+    control: &StartupControl,
 ) {
+    let mut slot = slot;
     loop {
         let mut serviced_begin_frame = None;
-        match wait_for_command(commands, runtime.next_timer_deadline()) {
+        // A booting view has no realm, so nothing can have armed a timer on
+        // it; only a running one can shorten this wait.
+        let deadline = match &mut slot {
+            ViewSlot::Booting(_) => None,
+            ViewSlot::Running(runtime) => runtime.next_timer_deadline(),
+        };
+        match wait_for_command(commands, deadline) {
             Woken::Command(first) => {
                 for command in std::iter::once(first).chain(commands.drain()) {
-                    match command {
-                        ToMain::Shutdown => return,
-                        command => apply_main_command(
-                            js_runtime,
-                            &mut runtime,
-                            command,
-                            notify,
-                            &mut serviced_begin_frame,
-                        ),
+                    if matches!(command, ToMain::Shutdown) {
+                        return;
                     }
+                    slot = match slot {
+                        ViewSlot::Booting(booting) => {
+                            let ToMain::SourceLoaded { source } = command else {
+                                unreachable!("a view that has not booted has nothing else to apply")
+                            };
+                            match booting.apply(js_runtime, source, control) {
+                                Booted::Waiting(booting) => ViewSlot::Booting(booting),
+                                Booted::Running(runtime) => {
+                                    // Boot's outcome and boot's pixels ride one
+                                    // FIFO, in this order: whatever the entry
+                                    // committed reaches the target on the turn
+                                    // that reports the ending, with nobody left
+                                    // to ask for another.
+                                    notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
+                                    notify.send(ToPainter::FrameChanged);
+                                    notify.send(ToPainter::Started(Ok(())));
+                                    ViewSlot::Running(runtime)
+                                }
+                                Booted::Failed(error) => {
+                                    notify.send(ToPainter::Started(Err(error)));
+                                    return;
+                                }
+                                Booted::Gone => return,
+                            }
+                        }
+                        ViewSlot::Running(mut runtime) => {
+                            apply_main_command(
+                                js_runtime,
+                                &mut runtime,
+                                command,
+                                notify,
+                                &mut serviced_begin_frame,
+                            );
+                            ViewSlot::Running(runtime)
+                        }
+                    };
                 }
             }
             // A deadline the realm asked for, and nothing else to serve.
             Woken::Deadline => {}
             Woken::Disconnected => return,
         }
-        // After this round's commands, because a listener one of them
-        // delivered may have cleared a timer that is already due, and on
-        // every round rather than only the ones a deadline woke, because a
-        // command can arrive while a deadline is already behind us.
-        for failure in runtime.run_due_timers(js_runtime) {
-            notify.send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
-        }
-        runtime.commit_if_dirty();
-        if let Some(seq) = serviced_begin_frame {
-            notify.send(ToPainter::BeginFrameServiced(seq));
+        // Only a running view has a round tail: a booting one has published
+        // nothing and armed nothing.
+        if let ViewSlot::Running(runtime) = &mut slot {
+            // After this round's commands, because a listener one of them
+            // delivered may have cleared a timer that is already due, and on
+            // every round rather than only the ones a deadline woke, because a
+            // command can arrive while a deadline is already behind us.
+            for failure in runtime.run_due_timers(js_runtime) {
+                notify.send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
+            }
+            runtime.commit_if_dirty();
+            if let Some(seq) = serviced_begin_frame {
+                notify.send(ToPainter::BeginFrameServiced(seq));
+            }
         }
     }
 }
