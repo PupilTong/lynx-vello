@@ -121,12 +121,19 @@ impl SourceMap {
         self.source_len
     }
 
-    /// Source unit of a normalized byte offset. The end of the text maps to
-    /// the full source length, so a final line's range covers the source
-    /// units its trailing collapsed whitespace consumed.
+    /// Source unit of a normalized byte offset. The end of the text covers
+    /// the units of trailing collapsed whitespace — but never of trailing
+    /// boxes: a box past the last byte is content in its own right, not
+    /// something a text offset consumes.
     pub(in crate::text::block) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
         if byte as usize >= text.len() {
-            return self.source_len;
+            for segment in self.segments.iter().rev() {
+                if segment.kind == SegmentKind::Box && segment.norm.start >= byte {
+                    continue;
+                }
+                return segment.units.end;
+            }
+            return 0;
         }
         let segment = self
             .segments
@@ -311,13 +318,16 @@ impl Normalizer {
         self.units += 1;
     }
 
-    /// A preserved newline drops the open whitespace span, removes a directly
-    /// preceding emitted space, and emits itself.
+    /// A preserved newline drops the open whitespace span and emits itself.
+    ///
+    /// A collapsible space directly before the break is always still pending
+    /// here — an emitted space is only ever produced with its following
+    /// content (a character or a box) already appended — so dropping the span
+    /// is the whole of the space-before-preserved-break rule.
     fn preserved_break(&mut self, character: char, item: u32) {
         if let Some(pending) = self.pending.take() {
             self.close_collapsed(pending.unit_start, 0);
         }
-        self.remove_trailing_space();
         self.emit_verbatim(character, item);
         self.after_preserved_break = true;
     }
@@ -331,7 +341,19 @@ impl Normalizer {
             PendingKind::Suppressed => false,
             PendingKind::Space => true,
             PendingKind::SegmentBreak => {
-                !should_remove_segment_break(self.last_emitted_char(), next)
+                // A box between the last character and the break stands in as
+                // the preceding content, exactly as a box after the break
+                // does on the other side.
+                let previous = if self
+                    .boxes
+                    .last()
+                    .is_some_and(|entry| entry.byte == self.byte_len())
+                {
+                    Some(OBJECT_REPLACEMENT)
+                } else {
+                    self.last_emitted_char()
+                };
+                !should_remove_segment_break(previous, next)
             }
         };
         if emit {
@@ -414,40 +436,6 @@ impl Normalizer {
                 item,
             });
         }
-    }
-
-    /// Removes an emitted trailing space before a preserved newline. Only a
-    /// one-byte collapsed span can end the text with a space, so the segment
-    /// shrinks in place.
-    fn remove_trailing_space(&mut self) {
-        if !self.text.ends_with(' ') {
-            return;
-        }
-        if self
-            .boxes
-            .last()
-            .is_some_and(|entry| entry.byte == self.byte_len())
-        {
-            // The preserved break follows that box, not the space before it;
-            // removing the space would also shift the box off its byte.
-            return;
-        }
-        self.text.pop();
-        let end = self.byte_len();
-        if let Some(last) = self.ranges.last_mut() {
-            last.bytes.end = end;
-            if last.bytes.is_empty() {
-                self.ranges.pop();
-            }
-        }
-        let segment = self
-            .segments
-            .iter_mut()
-            .rev()
-            .find(|segment| segment.kind != SegmentKind::Box)
-            .expect("an emitted space has a segment");
-        debug_assert_eq!(segment.kind, SegmentKind::Collapsed);
-        segment.norm.end = segment.norm.start;
     }
 
     fn last_emitted_char(&self) -> Option<char> {
@@ -704,16 +692,46 @@ mod tests {
     }
 
     #[test]
-    fn a_preserved_break_after_an_emitted_space_removes_that_space() {
+    fn a_space_before_a_preserved_break_is_dropped_unless_a_box_intervenes() {
         let style = RunStyle::default();
-        // The box flushes the pending space into an emitted byte; the
-        // preserved newline then removes it.
+        // The box flushes the pending space into an emitted byte; the break
+        // then follows the box, not the space, so the space stays and the
+        // box keeps its byte position.
         let items = [run(&style, "a "), atom(1), raw(&style, "\nb")];
         let block = normalize(&items);
         assert_eq!(block.text, "a \nb");
+        assert_eq!(block.boxes[0].byte, 2);
 
-        // Without the box the pending space is simply dropped.
+        // Adjacent to the break, the pending space is dropped.
         let plain = normalize(&[run(&style, "a "), raw(&style, "\nb")]);
         assert_eq!(plain.text, "a\nb");
+    }
+
+    #[test]
+    fn the_end_of_the_text_covers_trailing_whitespace_but_never_trailing_boxes() {
+        let style = RunStyle::default();
+        let trailing_box = normalize(&[run(&style, "aaa"), atom(1)]);
+        assert_eq!(trailing_box.map.source_len(), 4);
+        assert_eq!(trailing_box.map.byte_to_unit(&trailing_box.text, 3), 3);
+
+        let box_then_space = normalize(&[run(&style, "a"), atom(1), run(&style, "  ")]);
+        // 'a' = 0, box = 1, collapsed spaces = 2..4; the emitted space is the
+        // last byte, so the text end consumes through the whitespace.
+        assert_eq!(box_then_space.text, "a ");
+        assert_eq!(box_then_space.map.byte_to_unit(&box_then_space.text, 2), 4);
+    }
+
+    #[test]
+    fn a_box_stands_in_as_the_content_before_a_segment_break() {
+        let style = RunStyle::default();
+        // Without the box the break between East Asian characters is
+        // removed; with the box in between, the break is adjacent to the box
+        // and collapses to a space instead.
+        let removed = normalize(&[run(&style, "你\n好")]);
+        assert_eq!(removed.text, "你好");
+
+        let kept = normalize(&[run(&style, "你"), atom(1), run(&style, "\n好")]);
+        assert_eq!(kept.text, "你 好");
+        assert_eq!(kept.boxes[0].byte, 3);
     }
 }

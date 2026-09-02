@@ -2,8 +2,8 @@
 //!
 //! Parley has no vertical-align: it places every in-flow box bottom-on-
 //! baseline and counts the box height as pure ascent. The block keeps
-//! parley's line stacking and works its lever from both sides — what a box
-//! contributes to line height is written into `InlineBox::height` before
+//! parley's line stacking and adjusts the two inputs it does expose — what a
+//! box contributes to line height is written into `InlineBox::height` before
 //! every break (the contribution table), and where the box sits is overridden
 //! per positioned item after alignment (the placement table). The line is
 //! always tall enough — every non-baseline value contributes the full box

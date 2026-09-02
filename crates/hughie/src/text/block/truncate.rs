@@ -4,11 +4,15 @@
 //! (`XTextTruncation.ts`), verified against its source: the maxline candidate
 //! is backed off — three units for the dots, fewer on a short line, or by the
 //! freed width the inline-truncation content needs — while the maxlength
-//! candidate is never backed off; the final cut is the minimum of the two.
-//! Truncation content shows only on maxline overflow: a pure maxlength cut
-//! gets the dots (or nothing under clip). Retreat works at cluster
-//! granularity rather than the web's raw UTF-16 stepping, so a cut never
-//! splits a surrogate pair or grapheme — a recorded deviation.
+//! candidate is never backed off; the final cut is the minimum of the two,
+//! and the dot count decided by the maxline branch applies to whichever
+//! candidate wins, as it does on the web. Truncation content shows only on
+//! maxline overflow, and its presence suppresses the dots marker for every
+//! cut. All cut arithmetic runs against the line's *visible* end — trailing
+//! collapsed whitespace neither counts toward the back-off nor toward the
+//! freed width, matching the web's rect-derived line ranges. Retreat works at
+//! cluster granularity rather than the web's raw UTF-16 stepping, so a cut
+//! never splits a surrogate pair or grapheme — a recorded deviation.
 
 use parley::{Layout, PositionedLayoutItem};
 
@@ -46,7 +50,9 @@ pub(in crate::text::block) enum Tail {
 }
 
 /// Decides whether and where to cut. `truncation_width` is present exactly
-/// when maxline overflowed and truncation content exists.
+/// when maxline overflowed and truncation content exists; `has_truncation`
+/// says whether truncation content exists at all (it suppresses the dots
+/// marker even on a pure maxlength cut).
 #[allow(clippy::too_many_arguments, reason = "one decision reads both spaces")]
 pub(in crate::text::block) fn plan(
     natural: &Layout<TextBrush>,
@@ -57,11 +63,12 @@ pub(in crate::text::block) fn plan(
     slot_units: &[u32],
     style: &BlockStyle,
     maxline_overflow: bool,
+    has_truncation: bool,
     truncation_width: Option<f32>,
     width: Option<f32>,
 ) -> Option<CutPlan> {
     let last = *natural_lines.last()?;
-    let consumed_end = last.end_unit;
+    let consumed_end = last.consumed_end;
 
     let mut truncation_visible = false;
     let mut maxline_dots = None;
@@ -115,7 +122,7 @@ pub(in crate::text::block) fn plan(
 
     let cut_line = natural_lines
         .iter()
-        .position(|line| line.end_unit > cut_unit)
+        .position(|line| line.consumed_end > cut_unit)
         .unwrap_or(natural_lines.len() - 1);
     let cut_byte = map
         .unit_to_byte(text, cut_unit)
@@ -123,17 +130,17 @@ pub(in crate::text::block) fn plan(
 
     let tail = if truncation_visible {
         Tail::Truncation
-    } else if truncation_width.is_some() {
-        // Hidden truncation content suppresses the dots entirely.
+    } else if has_truncation {
+        // Truncation content suppresses the dots marker whether or not it is
+        // shown: the web disables its clipped-marker pseudo-element whenever
+        // an inline-truncation child exists, and the in-place dots path
+        // requires that none does.
         Tail::None
     } else if style.overflow == TextOverflow::Ellipsis {
-        // A maxlength-won cut keeps the full three dots; the shrunk count
-        // applies only when the short maxline line itself is the cut.
-        let count = if maxline_cut == Some(cut_unit) {
-            maxline_dots.unwrap_or(ELLIPSIS_UNITS)
-        } else {
-            ELLIPSIS_UNITS
-        };
+        // The dot count the maxline branch decided applies to whichever
+        // candidate wins — the web computes ellipsisLength before taking the
+        // minimum and appends it regardless.
+        let count = maxline_dots.unwrap_or(ELLIPSIS_UNITS);
         match (count, dots_item(ranges, cut_byte)) {
             (0, _) | (_, None) => Tail::None,
             (count, Some(item)) => Tail::Dots { count, item },
@@ -151,10 +158,14 @@ pub(in crate::text::block) fn plan(
     })
 }
 
-/// Backs the cut off from the line end until the removed atoms free at least
-/// `needed` width — the web's fitting loop, at cluster granularity. Always
-/// removes at least one atom; lands on the line start when even the whole
-/// line does not free enough.
+/// Backs the cut off from the line's visible end until the removed atoms free
+/// at least `needed` width — the web's fitting loop, at cluster granularity.
+/// Trailing collapsed whitespace is outside the visible range and never
+/// counts as freed width. The web's loop starts from an empty measurement at
+/// the line end and decrements before its first width check, so a cut one
+/// unit before the end is never considered; at least two atoms are removed
+/// before the width can stop the walk. Lands on the line start when even the
+/// whole line does not free enough.
 fn retreat_for_width(
     natural: &Layout<TextBrush>,
     line_index: usize,
@@ -169,23 +180,29 @@ fn retreat_for_width(
     for run in parley_line.runs() {
         for cluster in run.clusters() {
             let start = u32::try_from(cluster.text_range().start).expect("text fits u32");
-            atoms.push((map.byte_to_unit(text, start), cluster.advance()));
+            let unit = map.byte_to_unit(text, start);
+            if unit < line.end_unit {
+                atoms.push((unit, cluster.advance()));
+            }
         }
     }
     for item in parley_line.items() {
         if let PositionedLayoutItem::InlineBox(inline_box) = item {
             let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
-            atoms.push((slot_units[slot], inline_box.width));
+            let unit = slot_units[slot];
+            if unit < line.end_unit {
+                atoms.push((unit, inline_box.width));
+            }
         }
     }
     atoms.sort_unstable_by_key(|atom| atom.0);
 
     let mut freed = 0.0;
     let mut cut = line.start_unit;
-    for &(unit, advance) in atoms.iter().rev() {
+    for (removed, &(unit, advance)) in atoms.iter().rev().enumerate() {
         freed += advance;
         cut = unit;
-        if freed >= needed {
+        if removed >= 1 && freed >= needed {
             break;
         }
     }

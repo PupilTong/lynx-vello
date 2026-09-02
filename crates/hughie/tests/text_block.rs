@@ -212,22 +212,12 @@ fn every_vertical_align_value_lands_on_its_table_row() {
     }
 
     // Middle centers on half the x-height above the baseline; Center is its
-    // alias. The x-height is read back from the rendered run.
+    // alias. Ahem's x-height is 0.8em = 8: y = 29 − 4 − 15.
     for value in [VerticalAlign::Middle, VerticalAlign::Center] {
         let items = [run(&style, "aaaa"), atom(1, 10.0, 30.0, value)];
         let block = laid_out(&mut context, BlockStyle::default(), &items, None, None);
-        let x_height = block
-            .display()
-            .get(0)
-            .expect("one line")
-            .runs()
-            .next()
-            .expect("one run")
-            .metrics()
-            .x_height
-            .unwrap_or(0.0);
         let (_, origin, _) = visible_box(&block, 1);
-        assert_close(origin.y, 29.0 - x_height / 2.0 - 15.0);
+        assert_close(origin.y, 10.0);
     }
 
     // A positive raise grows the line (contribution 35 → baseline 34); a
@@ -266,13 +256,14 @@ fn maxline_ellipsis_backs_off_three_units_and_appends_dots() {
     assert!(block.truncated());
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
-    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 5));
-    assert_eq!((lines[1].source_start, lines[1].source_end), (5, 10));
+    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 4));
+    assert_eq!((lines[1].source_start, lines[1].source_end), (5, 9));
     assert_eq!(lines[0].ellipsis_count, 0);
     assert_eq!(lines[1].ellipsis_count, 3);
     assert_close(block.size().height, 20.0);
-    // The cut line renders "aa" plus three dots: five Ahem advances.
-    assert_close(lines[1].advance, 50.0);
+    // The visible line end excludes the wrapped space, so the cut backs off
+    // from unit 9: "a" plus three dots, four Ahem advances.
+    assert_close(lines[1].advance, 40.0);
     // The dots carry their own identity, styled after the cut run.
     let display = block.display();
     let styles = 0..u16::try_from(display.styles().len()).expect("fits");
@@ -300,12 +291,12 @@ fn a_short_cut_line_shrinks_the_dots_to_its_own_length() {
     let mut context = text_context();
     let block = laid_out(&mut context, block_style, &items, None, Some(50.0));
 
-    // Natural line 2 is "a " — two units, fewer than three: the cut moves to
-    // the line start and the dots shrink to two.
+    // Natural line 2 shows "a" — one visible unit, fewer than three: the cut
+    // moves to the line start and the dots shrink to one.
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[1].ellipsis_count, 2);
-    assert_close(lines[1].advance, 20.0);
+    assert_eq!(lines[1].ellipsis_count, 1);
+    assert_close(lines[1].advance, 10.0);
 }
 
 #[test]
@@ -348,7 +339,7 @@ fn the_earlier_of_maxlength_and_maxline_wins() {
         Some(50.0),
     );
     assert_eq!(maxlength_wins.lines().len(), 1);
-    assert_eq!(maxlength_wins.lines()[0].ellipsis_count, 3);
+    assert_eq!(maxlength_wins.lines()[0].ellipsis_count, 2);
 
     let maxline_wins = laid_out(
         &mut context,
@@ -381,9 +372,10 @@ fn truncation_content_reserves_its_width_on_the_cut_line() {
 
     assert!(block.truncated());
     assert!(block.truncation_visible());
-    // The fitting walk frees two 10px clusters for the 20px content.
+    // The fitting walk frees two 10px clusters for the 20px content; the
+    // wrapped space is outside the visible range and never counts as freed.
     assert_eq!(block.lines()[1].ellipsis_count, 2);
-    assert_close(block.lines()[1].advance, 50.0);
+    assert_close(block.lines()[1].advance, 40.0);
     let display = block.display();
     let styles = 0..u16::try_from(display.styles().len()).expect("fits");
     assert!(
@@ -421,7 +413,7 @@ fn truncation_content_wider_than_the_container_is_hidden() {
     // The cut lands at the line start and no dots are appended.
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
-    assert_eq!(lines[1].ellipsis_count, 5);
+    assert_eq!(lines[1].ellipsis_count, 4);
     let display = block.display();
     let styles = 0..u16::try_from(display.styles().len()).expect("fits");
     assert!(
@@ -471,7 +463,7 @@ fn clip_cuts_at_the_line_end_without_dots() {
     let lines = block.lines();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1].ellipsis_count, 0);
-    assert_eq!((lines[1].source_start, lines[1].source_end), (5, 10));
+    assert_eq!((lines[1].source_start, lines[1].source_end), (5, 9));
     let display = block.display();
     let styles = 0..u16::try_from(display.styles().len()).expect("fits");
     assert!(
@@ -794,4 +786,276 @@ fn a_maxlength_cut_inside_a_surrogate_pair_rounds_down() {
         (block.lines()[0].source_start, block.lines()[0].source_end),
         (0, 4)
     );
+}
+
+#[test]
+fn content_that_exactly_fills_max_lines_is_not_truncated() {
+    let style = ahem_style();
+    let mut context = text_context();
+
+    // A trailing preserved newline leaves parley one renderless line short
+    // of done; that must not read as overflow.
+    let trailing_break = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(2),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &[raw(&style, "a\nb\n")],
+        None,
+        Some(100.0),
+    );
+    assert!(!trailing_break.truncated());
+    assert_eq!(trailing_break.lines().len(), 2);
+    assert_eq!(trailing_break.lines()[1].ellipsis_count, 0);
+
+    let single = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &[raw(&style, "a\n")],
+        None,
+        None,
+    );
+    assert!(!single.truncated());
+    assert_close(single.size().width, 10.0);
+
+    // A hanging trailing space overflows the width without being content.
+    let hanging = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "aaaa ")],
+        None,
+        Some(40.0),
+    );
+    assert!(!hanging.truncated());
+    assert_eq!(hanging.lines().len(), 1);
+}
+
+#[test]
+fn a_box_left_past_max_lines_still_counts_as_overflow() {
+    let style = ahem_style();
+    let mut context = text_context();
+    let items = [
+        run(&style, "aaa"),
+        atom(4, 10.0, 10.0, VerticalAlign::Baseline),
+    ];
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        Some(30.0),
+    );
+
+    assert!(block.truncated());
+    assert_hidden(&block, 4);
+    assert_eq!(block.lines().len(), 1);
+    assert_eq!(block.lines()[0].ellipsis_count, 3);
+}
+
+#[test]
+fn a_cut_between_adjacent_boxes_keeps_the_earlier_one() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "a"),
+        atom(1, 10.0, 10.0, VerticalAlign::Baseline),
+        atom(2, 10.0, 10.0, VerticalAlign::Baseline),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_chars: Some(2),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        None,
+    );
+
+    // Both boxes share one byte position; the cut is a unit decision.
+    let (_, origin, _) = visible_box(&block, 1);
+    assert_close(origin.x, 10.0);
+    assert_hidden(&block, 2);
+    assert_eq!(block.lines()[0].ellipsis_count, 1);
+}
+
+#[test]
+fn a_box_directly_before_the_cut_survives_it() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "ab"),
+        atom(9, 10.0, 10.0, VerticalAlign::Baseline),
+        run(&style, "cd"),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_chars: Some(3),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        None,
+    );
+
+    // The box and 'c' share byte 2, but the box's unit (2) precedes the cut
+    // (3): the render is "ab", the box, then the dots.
+    let (_, origin, _) = visible_box(&block, 9);
+    assert_close(origin.x, 20.0);
+    assert_eq!(block.lines()[0].ellipsis_count, 2);
+    assert!(
+        !block
+            .boxes()
+            .iter()
+            .any(|placed| matches!(placed, PlacedBox::Hidden { .. })),
+        "no box is hidden by this cut",
+    );
+}
+
+#[test]
+fn truncation_content_never_shows_on_a_pure_maxlength_cut() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa aaaa")];
+    let tail_style = ahem_style();
+    let tail = [
+        run(&tail_style, "XX"),
+        atom(9, 10.0, 10.0, VerticalAlign::Baseline),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_chars: Some(4),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        Some(&tail),
+        None,
+    );
+
+    assert!(block.truncated());
+    assert!(!block.truncation_visible());
+    assert_hidden(&block, 9);
+    // The presence of truncation content also suppresses the dots.
+    assert_close(block.size().width, 40.0);
+}
+
+#[test]
+fn an_untruncated_block_reports_its_truncation_boxes_hidden() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa")];
+    let tail_style = ahem_style();
+    let tail = [
+        run(&tail_style, "XX"),
+        atom(9, 10.0, 10.0, VerticalAlign::Baseline),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &items,
+        Some(&tail),
+        None,
+    );
+
+    assert!(!block.truncated());
+    assert!(!block.truncation_visible());
+    assert_hidden(&block, 9);
+}
+
+#[test]
+fn an_empty_block_lays_out_to_nothing() {
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            ..BlockStyle::default()
+        },
+        &[],
+        None,
+        Some(50.0),
+    );
+
+    assert!(block.lines().is_empty());
+    assert!(block.boxes().is_empty());
+    assert_close(block.size().width, 0.0);
+    assert_close(block.size().height, 0.0);
+    assert_eq!(block.first_baseline(), None);
+    assert!(!block.truncated());
+}
+
+#[test]
+fn the_paragraph_direction_is_detected_from_the_content() {
+    let style = ahem_style();
+    let mut context = text_context();
+
+    let hebrew = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&style, "אב")],
+        None,
+        Some(100.0),
+    );
+    assert!(hebrew.display().is_rtl());
+
+    let ascii = laid_out(
+        &mut context,
+        BlockStyle::default(),
+        &[run(&style, "ab")],
+        None,
+        Some(100.0),
+    );
+    assert!(!ascii.display().is_rtl());
+}
+
+#[test]
+fn content_widths_track_box_resizes_and_survive_justification() {
+    let style = ahem_style();
+    let mut context = text_context();
+
+    let items = [
+        run(&style, "aaaa aa"),
+        atom(1, 10.0, 10.0, VerticalAlign::Baseline),
+    ];
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+    block.layout(&mut context, None);
+    assert_close(block.content_widths().min, 40.0);
+    block.set_box_size(1, Size::new(55.0, 10.0), None);
+    block.layout(&mut context, None);
+    assert_close(block.content_widths().min, 55.0);
+
+    // Justification mutates cluster advances on the retained layout; the
+    // reported widths come from the unjustified pass and stay put.
+    let mut justified = TextBlock::new(
+        &mut context,
+        BlockStyle {
+            text_align: TextAlign::Justify,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "aa aa aa")],
+        None,
+    );
+    justified.layout(&mut context, Some(70.0));
+    assert_close(justified.content_widths().max, 80.0);
+    justified.layout(&mut context, Some(60.0));
+    assert_close(justified.content_widths().max, 80.0);
 }

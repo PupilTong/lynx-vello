@@ -67,6 +67,9 @@ pub enum SourceItem {
 ///
 /// Source ranges come from the natural (pre-truncation) line layout — the
 /// layout event's contract — while the geometry is the rendered line's.
+/// A range covers the line's visible content only: the collapsed whitespace
+/// a soft wrap consumed belongs to no line, so consecutive ranges can have a
+/// gap, matching the web reference's rect-derived ranges.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineInfo {
     pub source_start: u32,
@@ -170,6 +173,10 @@ struct LayoutResult {
     first_baseline: Option<f32>,
     truncated: bool,
     truncation_visible: bool,
+    /// Read off the unjustified pre-alignment layout with the box sizes this
+    /// layout used, so a justified alignment or a pending box resize can
+    /// never leak into it.
+    content_widths: ContentWidths,
 }
 
 struct DisplayPart {
@@ -292,8 +299,15 @@ impl TextBlock {
         spec.size = size;
         spec.baseline = baseline;
         self.boxes_dirty = true;
-        // A resized truncation box invalidates the cached content width.
-        if let Some(part) = &mut self.truncation {
+        // Only a resized truncation box invalidates the cached truncation
+        // content width; a main-flow resize leaves it valid.
+        if let Some(part) = &mut self.truncation
+            && part
+                .flow
+                .items
+                .iter()
+                .any(|item| matches!(item, OwnedItem::Box(spec) if spec.id == id))
+        {
             part.natural_width = None;
         }
     }
@@ -326,11 +340,14 @@ impl TextBlock {
         self.natural
             .set_text_indent(indent, IndentOptions::default());
 
-        let more_content = shape::break_clamped(
+        shape::break_clamped(
             &mut self.natural,
             width,
             self.style.max_lines.map(NonZeroU32::get),
         );
+        // Content widths are read off the just-unjustified, pre-alignment
+        // layout, with the current box sizes written in.
+        let content_widths = self.natural.calculate_content_widths();
 
         let slot_bytes: Vec<u32> = self
             .content
@@ -352,8 +369,14 @@ impl TextBlock {
             &self.content.block.map,
             &slot_bytes,
             &slot_units,
-            !more_content,
         );
+
+        // Whether content remains past the committed lines is a unit-space
+        // fact, never the breaker's: parley reports itself unfinished while
+        // only a renderless final line is pending.
+        let more_content = natural_lines
+            .last()
+            .is_some_and(|line| line.consumed_end < self.content.block.map.source_len());
 
         let truncation_width = if more_content && self.truncation.is_some() {
             Some(self.measure_truncation(context))
@@ -370,13 +393,21 @@ impl TextBlock {
             &slot_units,
             &self.style,
             more_content,
+            self.truncation.is_some(),
             truncation_width,
             width,
         );
 
         let result = match plan {
-            None => self.finish_untruncated(&natural_lines, width),
-            Some(plan) => self.finish_truncated(context, &plan, &natural_lines, indent, width),
+            None => self.finish_untruncated(&natural_lines, width, content_widths),
+            Some(plan) => self.finish_truncated(
+                context,
+                &plan,
+                &natural_lines,
+                indent,
+                width,
+                content_widths,
+            ),
         };
         self.result = Some(result);
     }
@@ -385,6 +416,7 @@ impl TextBlock {
         &mut self,
         natural_lines: &[NaturalLine],
         width: Option<f32>,
+        content_widths: ContentWidths,
     ) -> LayoutResult {
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         self.natural.align(alignment, AlignmentOptions::default());
@@ -395,6 +427,22 @@ impl TextBlock {
             .iter()
             .map(|entry| *self.content.box_spec(entry.item))
             .collect();
+        // Truncation content is not shown when nothing truncates; its boxes
+        // still report an outcome so a host can drive their visibility.
+        let hidden = self
+            .truncation
+            .iter()
+            .flat_map(|part| part.flow.block.boxes.iter())
+            .map(|entry| PlacedBox::Hidden {
+                id: self
+                    .truncation
+                    .as_ref()
+                    .expect("iterating this part")
+                    .flow
+                    .box_spec(entry.item)
+                    .id,
+            })
+            .collect();
         let (lines, boxes, size, first_baseline) = assemble(
             &self.natural,
             None,
@@ -402,7 +450,7 @@ impl TextBlock {
             natural_lines.len(),
             None,
             &slot_specs,
-            Vec::new(),
+            hidden,
         );
         LayoutResult {
             width,
@@ -413,6 +461,7 @@ impl TextBlock {
             first_baseline,
             truncated: false,
             truncation_visible: false,
+            content_widths,
         }
     }
 
@@ -423,6 +472,7 @@ impl TextBlock {
         natural_lines: &[NaturalLine],
         indent: f32,
         width: Option<f32>,
+        content_widths: ContentWidths,
     ) -> LayoutResult {
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         let visible = plan.cut_line as usize + 1;
@@ -462,6 +512,7 @@ impl TextBlock {
             first_baseline,
             truncated: true,
             truncation_visible: plan.truncation_visible,
+            content_widths,
         }
     }
 
@@ -522,7 +573,10 @@ impl TextBlock {
         let mut slots = Vec::new();
         let mut boxes = Vec::new();
         for entry in &self.content.block.boxes {
-            if entry.byte >= plan.cut_byte {
+            // The cut is a unit-space decision: a box shares its byte with
+            // the character after it, so byte comparison cannot tell a cut
+            // on the box from a cut after it.
+            if entry.unit >= plan.cut_unit {
                 break;
             }
             let spec = self.content.box_spec(entry.item);
@@ -562,15 +616,8 @@ impl TextBlock {
         let mut display = shape::shape(context, &self.style, &text, &spans, boxes, &mut sources);
         drop(spans);
         display.set_text_indent(indent, IndentOptions::default());
-        let advance = width.unwrap_or(f32::MAX);
-        let mut breaker = display.break_lines();
-        breaker.state_mut().set_layout_max_advance(advance);
-        breaker.state_mut().set_line_max_advance(advance);
-        let mut committed = 0;
-        while committed < visible && breaker.break_next().is_some() {
-            committed += 1;
-        }
-        drop(breaker);
+        let limit = u32::try_from(visible).expect("line count fits u32");
+        shape::break_clamped(&mut display, width, Some(limit));
         (display, sources, slots)
     }
 
@@ -579,7 +626,7 @@ impl TextBlock {
     fn hidden_boxes(&self, plan: &CutPlan) -> Vec<PlacedBox> {
         let mut hidden = Vec::new();
         for entry in &self.content.block.boxes {
-            if entry.byte >= plan.cut_byte {
+            if entry.unit >= plan.cut_unit {
                 hidden.push(PlacedBox::Hidden {
                     id: self.content.box_spec(entry.item).id,
                 });
@@ -659,10 +706,11 @@ impl TextBlock {
         self.expect_result().truncation_visible
     }
 
-    /// Min- and max-content widths of the full (untruncated) content.
+    /// Min- and max-content widths of the full (untruncated) content, with
+    /// the box sizes the last layout used. Valid after [`Self::layout`].
     #[must_use]
     pub fn content_widths(&self) -> ContentWidths {
-        self.natural.calculate_content_widths()
+        self.expect_result().content_widths
     }
 
     fn expect_result(&self) -> &LayoutResult {
@@ -718,7 +766,7 @@ fn assemble(
     for (index, &natural_line) in natural_lines.iter().enumerate().take(visible) {
         let rendered = final_layout
             .get(index)
-            .filter(|line| !shape::is_ghost_line(line));
+            .filter(|line| !shape::is_blank_line(line));
         if rendered.is_none() {
             used_fallback = true;
         }
@@ -762,7 +810,7 @@ fn assemble(
     }
     boxes.extend(hidden);
 
-    // Ghost or clamped-away trailing lines still count toward parley's own
+    // Blank or clamped-away trailing lines still count toward parley's own
     // height, so the reported height comes from the last reported line's
     // bottom edge whenever the two disagree.
     let height = if used_fallback || lines.len() < final_layout.len() {
@@ -771,10 +819,9 @@ fn assemble(
         final_layout.height()
     };
     let size = Size::new(final_layout.width(), height);
-    let first_baseline = final_layout
-        .get(0)
-        .filter(|line| !shape::is_ghost_line(line))
-        .map(|line| line.metrics().baseline);
+    // The first reported line's baseline, whichever layout supplied it — so
+    // this can never disagree with `lines()`.
+    let first_baseline = lines.first().map(|line| line.baseline);
     (lines, boxes, size, first_baseline)
 }
 

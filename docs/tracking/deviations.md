@@ -161,22 +161,36 @@ consequential choice about whether to follow the spec or the quirk.
 
 - **`hughie::text::block` ellipsis algorithm** — the standalone Lynx
   text-block module implements the web reference's *slow path*
-  (`XTextTruncation.ts`: back the maxline cut off three source units — fewer
-  on a short line — and append a literal `"..."`; never back off a maxlength
-  cut; take the earlier cut) for **every** ellipsis mode. Default-mode web
-  bundles actually ride the browser's own `-webkit-line-clamp` ellipsis,
-  whose cut point and dot styling can differ by a character; the slow path is
-  the only inspectable algorithm. Further deltas from the web loop, all
-  strictly safer: cuts land on cluster boundaries (the web steps raw UTF-16
-  units and can split a surrogate pair; a `text-maxlength` cut inside a pair
-  rounds down), and a dots-or-truncation tail that wraps is clamped away by
-  the visible-line rebuild (the web overflows it). `text-overflow: clip` is
-  implemented as spec clip — cut at the line end, no marker — both references
-  being opaque there. Truncation content is shown only on maxline overflow
-  (web-verified: `x-show-inline-truncation` is set only in the maxline
-  branch), and `justify` can stretch a truncated last line whose tail wrapped
-  and was clamped (its break reason is then `Regular`), where the web does
-  not.
+  (`XTextTruncation.ts`, source-verified) for **every** ellipsis mode: back
+  the maxline cut off three source units — fewer on a short line — and append
+  a literal `"..."`; never back off a maxlength cut; take the earlier cut,
+  keeping the dot count the maxline branch decided even when maxlength wins
+  (the web computes `ellipsisLength` before taking the minimum); with
+  inline-truncation content, retreat by freed width with a minimum removal of
+  two units (the web's fitting loop starts from an empty measurement and
+  decrements before its first width check), and suppress the dots marker
+  whenever inline-truncation content exists, shown or not. Line ranges — and
+  therefore the back-off basis and `ellipsisCount` — cover visible content
+  only: the collapsed whitespace a soft wrap consumed belongs to no line,
+  matching the web's rect-derived ranges, so consecutive ranges can have a
+  gap. Default-mode web bundles actually delegate to the browser's own
+  `-webkit-line-clamp` ellipsis, whose cut point and dot styling can differ
+  by a character; the slow path is the only inspectable algorithm. Further
+  deltas from the web loop, all strictly safer: cuts land on cluster
+  boundaries (the web steps raw UTF-16 units and can split a surrogate pair;
+  a `text-maxlength` cut inside a pair rounds down), and a dots-or-truncation
+  tail that wraps is clamped away by the visible-line rebuild (the web
+  overflows it). `text-overflow: clip` is implemented as spec clip — cut at
+  the line end, no marker — both references being opaque there. Truncation
+  content is shown only on maxline overflow (web-verified:
+  `x-show-inline-truncation` is set only in the maxline branch), and
+  `justify` can stretch a truncated last line whose tail wrapped and was
+  clamped (its break reason is then `Regular`), where the web does not. A
+  trailing preserved newline, a hanging trailing space, or the renderless
+  line parley commits after a box overflows onto the last line never counts
+  as overflow: whether content remains is decided in source units over the
+  committed lines, and cuts address boxes in unit space (a box shares its
+  byte with the character after it).
 - **`hughie::text::block` vertical alignment of atomic inlines** — parley 0.11
   has no vertical-align: an in-flow box sits bottom-on-baseline and its height
   counts as pure ascent. The module writes each box's line-height

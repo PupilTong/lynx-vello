@@ -24,6 +24,10 @@ pub(in crate::text::block) struct ShapeSpan<'block> {
 /// Shapes one paragraph. `sources` receives the parley style-index → source
 /// identity table: push order is the style index, which is the run-identity
 /// channel that leaves `TextBrush = ()` untouched crate-wide.
+///
+/// Fully empty content short-circuits to an empty layout: parley shapes a
+/// substitute space for an empty build, whose glyph run would carry a style
+/// index this module never pushed.
 pub(in crate::text::block) fn shape(
     context: &mut TextContext,
     block: &BlockStyle,
@@ -33,6 +37,9 @@ pub(in crate::text::block) fn shape(
     sources: &mut Vec<SourceItem>,
 ) -> Layout<TextBrush> {
     sources.clear();
+    if text.is_empty() && boxes.is_empty() {
+        return Layout::default();
+    }
     #[cfg(test)]
     context.record_shape();
     let (font_context, layout_context) = context.font_and_layout_contexts();
@@ -55,8 +62,13 @@ pub(in crate::text::block) fn shape(
     builder.build(text)
 }
 
-/// Breaks lines at `width`, committing at most `max_lines` of them, and
-/// reports whether content remains past what was committed.
+/// Breaks lines at `width`, committing at most `max_lines` of them.
+///
+/// Whether content remains past the committed lines is decided by the caller
+/// from the captured lines' consumed units — never from the breaker: parley
+/// leaves `is_done` false while only an empty final line remains pending
+/// (after a trailing explicit break, or after a box overflowed onto the last
+/// line), which would misreport fully consumed content as overflowing.
 ///
 /// The unlimited path routes through `break_all_lines`, which also covers the
 /// empty-layout width workaround parley applies inside `break_next`. The
@@ -66,10 +78,10 @@ pub(in crate::text::block) fn break_clamped(
     layout: &mut Layout<TextBrush>,
     width: Option<f32>,
     max_lines: Option<u32>,
-) -> bool {
+) {
     let Some(limit) = max_lines else {
         layout.break_all_lines(width);
-        return false;
+        return;
     };
     let advance = width.unwrap_or(f32::MAX);
     let mut breaker = layout.break_lines();
@@ -79,25 +91,13 @@ pub(in crate::text::block) fn break_clamped(
     while committed < limit && breaker.break_next().is_some() {
         committed += 1;
     }
-    !breaker.is_done()
-}
-
-/// One committed line's place in both offset spaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::text::block) struct NaturalLine {
-    pub(in crate::text::block) start_unit: u32,
-    pub(in crate::text::block) end_unit: u32,
-    /// The line's text bytes; for a box-only line both bounds sit at the
-    /// boxes' shared byte position.
-    pub(in crate::text::block) start_byte: u32,
-    pub(in crate::text::block) end_byte: u32,
 }
 
 /// Whether a committed line renders nothing: no boxes and an empty text
 /// range. Parley commits one after a box overflows onto its own line at the
 /// end of content, and after a trailing preserved newline — cases where CSS
 /// produces no line box.
-pub(in crate::text::block) fn is_ghost_line(line: &parley::Line<'_, TextBrush>) -> bool {
+pub(in crate::text::block) fn is_blank_line(line: &parley::Line<'_, TextBrush>) -> bool {
     let range = line.text_range();
     range.start >= range.end
         && !line
@@ -105,41 +105,58 @@ pub(in crate::text::block) fn is_ghost_line(line: &parley::Line<'_, TextBrush>) 
             .any(|item| matches!(item, PositionedLayoutItem::InlineBox(_)))
 }
 
-/// Reads the committed lines back into source space.
+/// One committed line's place in both offset spaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::text::block) struct NaturalLine {
+    pub(in crate::text::block) start_unit: u32,
+    /// End of the line's visible content — trailing collapsed whitespace
+    /// excluded, matching the web reference's rect-derived line ranges. This
+    /// is the basis for the reported range, the ellipsis arithmetic, and the
+    /// dots back-off.
+    pub(in crate::text::block) end_unit: u32,
+    /// Everything the line consumed, trailing whitespace included — the
+    /// basis for locating a cut and for whether content remains.
+    pub(in crate::text::block) consumed_end: u32,
+    /// The line's text bytes; for a box-only line both bounds sit at the
+    /// boxes' shared byte position.
+    pub(in crate::text::block) start_byte: u32,
+    pub(in crate::text::block) end_byte: u32,
+}
+
+/// Reads the committed lines back into source space, dropping trailing blank
+/// lines.
 ///
 /// `Line::text_range()` reports an inverted `usize::MAX..0` range for a line
 /// whose items are all inline boxes, so byte bounds fall back to the line's
-/// first box. Source ranges are contiguous by construction — each line ends
-/// where the next begins — which also absorbs the units of collapsed trailing
-/// whitespace; the final line ends at the full source length when everything
-/// was consumed. Trailing ghost lines are dropped from the report.
+/// first box.
 pub(in crate::text::block) fn capture_lines(
     layout: &Layout<TextBrush>,
     text: &str,
     map: &SourceMap,
     slot_bytes: &[u32],
     slot_units: &[u32],
-    consumed_all: bool,
 ) -> Vec<NaturalLine> {
     let mut lines = Vec::with_capacity(layout.len());
-    let mut ghost_tail = 0;
+    let mut blank_tail = 0;
     for line in layout.lines() {
-        if is_ghost_line(&line) {
-            ghost_tail += 1;
+        if is_blank_line(&line) {
+            blank_tail += 1;
         } else {
-            ghost_tail = 0;
+            blank_tail = 0;
         }
         let range = line.text_range();
         let has_text = range.start <= range.end;
-        let mut first_unit = u32::MAX;
+        let mut start_unit = u32::MAX;
         let mut end_unit = 0;
+        let mut consumed_end = 0;
         let mut first_box_byte = None;
         for item in line.items() {
             if let PositionedLayoutItem::InlineBox(inline_box) = item {
                 let slot = usize::try_from(inline_box.id).expect("slot ids are table indexes");
                 let unit = slot_units[slot];
-                first_unit = first_unit.min(unit);
+                start_unit = start_unit.min(unit);
                 end_unit = end_unit.max(unit + 1);
+                consumed_end = consumed_end.max(unit + 1);
                 if first_box_byte.is_none() {
                     first_box_byte = Some(slot_bytes[slot]);
                 }
@@ -148,31 +165,29 @@ pub(in crate::text::block) fn capture_lines(
         let (start_byte, end_byte) = if has_text {
             let start = u32::try_from(range.start).expect("text fits u32");
             let end = u32::try_from(range.end).expect("text fits u32");
-            first_unit = first_unit.min(map.byte_to_unit(text, start));
-            end_unit = end_unit.max(map.byte_to_unit(text, end));
+            let visible_end = start
+                + u32::try_from(
+                    text[range.start..range.end]
+                        .trim_end_matches([' ', '\n'])
+                        .len(),
+                )
+                .expect("text fits u32");
+            start_unit = start_unit.min(map.byte_to_unit(text, start));
+            end_unit = end_unit.max(map.byte_to_unit(text, visible_end));
+            consumed_end = consumed_end.max(map.byte_to_unit(text, end));
             (start, end)
         } else {
             let byte = first_box_byte.expect("a committed line has items");
             (byte, byte)
         };
         lines.push(NaturalLine {
-            start_unit: first_unit,
+            start_unit,
             end_unit,
+            consumed_end,
             start_byte,
             end_byte,
         });
     }
-    let count = lines.len();
-    for index in 0..count {
-        if index + 1 < count {
-            lines[index].end_unit = lines[index + 1].start_unit;
-        } else if consumed_all {
-            lines[index].end_unit = map.source_len();
-        }
-    }
-    lines.truncate(count - ghost_tail);
-    if consumed_all && let Some(last) = lines.last_mut() {
-        last.end_unit = map.source_len();
-    }
+    lines.truncate(lines.len() - blank_tail);
     lines
 }
