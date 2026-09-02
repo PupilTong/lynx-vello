@@ -1,20 +1,15 @@
 //! Host-injected resource acquisition contracts for Bobcat.
 
-use std::fmt;
-use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, StatusCode};
 use thiserror::Error;
-use tokio::io::AsyncRead;
 use url::Url;
 
 use crate::style::PreparsedStyleSheet;
-
-pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
 
 /// The host's whole resource system: bytes, stylesheets and images.
 ///
@@ -264,85 +259,6 @@ pub struct StyleSheetResponse {
     pub payload: StyleSheetPayload,
 }
 
-/// Input to the HTTP transport behind `lynx.fetch` and `EventSource`.
-pub struct HttpRequest {
-    pub context: RequestContext,
-    pub resource: ResolvedLocator,
-    pub method: Method,
-    pub headers: HeaderMap,
-    pub body: HttpRequestBody,
-    pub redirect_policy: RedirectPolicy,
-    pub cache_policy: CachePolicy,
-    pub credentials: CredentialsMode,
-}
-
-impl fmt::Debug for HttpRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HttpRequest")
-            .field("context", &self.context)
-            .field("resource", &self.resource)
-            .field("method", &self.method)
-            .field("headers", &self.headers)
-            .field("body", &self.body)
-            .field("redirect_policy", &self.redirect_policy)
-            .field("cache_policy", &self.cache_policy)
-            .field("credentials", &self.credentials)
-            .finish()
-    }
-}
-
-pub enum HttpRequestBody {
-    Empty,
-    Bytes(Bytes),
-    Stream(ResourceReader),
-}
-
-impl fmt::Debug for HttpRequestBody {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("Empty"),
-            Self::Bytes(bytes) => formatter
-                .debug_tuple("Bytes")
-                .field(&format_args!("{} bytes", bytes.len()))
-                .finish(),
-            Self::Stream(_) => formatter.write_str("Stream(<tokio::io::AsyncRead>)"),
-        }
-    }
-}
-
-/// HTTP response head plus a pull-based body.
-pub struct HttpResponse {
-    pub request_id: RequestId,
-    pub final_url: Url,
-    pub status: StatusCode,
-    pub status_text: Option<Arc<str>>,
-    pub headers: HeaderMap,
-    pub redirect_chain: Vec<Url>,
-    pub content_length: Option<u64>,
-    pub cache_status: CacheStatus,
-    pub timing: ResourceTiming,
-    pub body: ResourceReader,
-}
-
-impl fmt::Debug for HttpResponse {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HttpResponse")
-            .field("request_id", &self.request_id)
-            .field("final_url", &self.final_url)
-            .field("status", &self.status)
-            .field("status_text", &self.status_text)
-            .field("headers", &self.headers)
-            .field("redirect_chain", &self.redirect_chain)
-            .field("content_length", &self.content_length)
-            .field("cache_status", &self.cache_status)
-            .field("timing", &self.timing)
-            .field("body", &"<tokio::io::AsyncRead>")
-            .finish()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ResourceCapability {
@@ -350,8 +266,6 @@ pub enum ResourceCapability {
     /// Answering a stylesheet request with a host-decoded
     /// [`PreparsedStyleSheet`] instead of CSS text.
     PreparsedStyleSheet,
-    Http,
-    StreamingUpload,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -374,23 +288,6 @@ pub enum CachePolicy {
     NoCache,
     ForceCache,
     OnlyIfCached,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RedirectPolicy {
-    Follow { max_hops: u8 },
-    Manual,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CredentialsMode {
-    Omit,
-    #[default]
-    SameOrigin,
-    Include,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
