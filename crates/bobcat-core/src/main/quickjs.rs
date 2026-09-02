@@ -417,7 +417,7 @@ fn script_error(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, mpsc};
+    use std::sync::Mutex;
     use std::{panic, thread};
 
     use super::*;
@@ -429,7 +429,7 @@ mod tests {
     /// Runs `operation` on its own thread so a wedged interrupt fails the test
     /// instead of hanging the suite.
     fn with_watchdog<T: Send + 'static>(operation: impl FnOnce() -> T + Send + 'static) -> T {
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = flume::bounded(1);
         let worker = thread::spawn(move || {
             let outcome = panic::catch_unwind(panic::AssertUnwindSafe(operation));
             let _ = sender.send(outcome);

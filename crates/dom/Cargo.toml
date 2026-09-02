@@ -11,6 +11,7 @@ rust-version.workspace = true
 layout-test-utils = ["hughie/layout-test-utils"]
 
 [dependencies]
+flume = { workspace = true }
 rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }

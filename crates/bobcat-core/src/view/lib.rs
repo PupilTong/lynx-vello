@@ -10,7 +10,7 @@
 //! handle that joins them and the link that crosses between them.
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, ImageStore, NodeId, Vector2D};
@@ -602,8 +602,8 @@ pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedF
 
 /// Builds the view's one link: the painter's end and the Lynx main thread's.
 pub(crate) fn main_link<R: EventRequester>(requester: Arc<R>) -> (PainterLink, MainLink<R>) {
-    let (commands, command_receiver) = mpsc::channel();
-    let (notifications, notification_receiver) = mpsc::channel();
+    let (commands, command_receiver) = flume::unbounded();
+    let (notifications, notification_receiver) = flume::unbounded();
     let frames = Arc::new(FrameHub::new(None));
     let painter = PainterLink::new(commands, notification_receiver, Arc::clone(&frames));
     let main = MainLink::new(

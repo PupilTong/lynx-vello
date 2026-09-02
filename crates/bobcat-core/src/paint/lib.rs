@@ -22,7 +22,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -128,8 +128,8 @@ mod clock_tests {
 /// including the replicas it uses while routing and drawing without touching
 /// that thread.
 pub(crate) struct PainterLink {
-    commands: mpsc::Sender<ToMain>,
-    notifications: mpsc::Receiver<ToPainter>,
+    commands: flume::Sender<ToMain>,
+    notifications: flume::Receiver<ToPainter>,
     frames: Arc<FrameHub>,
     frame: Option<Arc<CommittedFrame>>,
     events: Vec<EngineEvent>,
@@ -141,8 +141,8 @@ pub(crate) struct PainterLink {
 
 impl PainterLink {
     pub(crate) fn new(
-        commands: mpsc::Sender<ToMain>,
-        notifications: mpsc::Receiver<ToPainter>,
+        commands: flume::Sender<ToMain>,
+        notifications: flume::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
     ) -> Self {
         Self {
@@ -259,7 +259,7 @@ impl PainterLink {
 
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
-        self.notifications.try_iter().collect()
+        self.notifications.drain().collect()
     }
 }
 
@@ -681,7 +681,7 @@ impl Painter {
         if self.detached {
             return None;
         }
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = flume::bounded(1);
         self.link.send(ToMain::Probe(Box::new(move |document| {
             let _ = sender.send(probe(document));
         })));

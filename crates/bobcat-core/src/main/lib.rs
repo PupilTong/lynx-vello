@@ -17,10 +17,10 @@ use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::pin;
 use std::str;
+use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
 use std::task::Poll;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
@@ -121,7 +121,7 @@ impl MainThreadHome {
 /// The main thread's sending end: notification FIFO, newest-frame mailbox,
 /// and the wakeup that announces both to the thread that paints.
 pub(crate) struct ToPainterSender<R: EventRequester> {
-    notifications: mpsc::Sender<ToPainter>,
+    notifications: flume::Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
 }
@@ -140,7 +140,7 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
 
 impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn new(
-        notifications: mpsc::Sender<ToPainter>,
+        notifications: flume::Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
     ) -> Self {
@@ -168,13 +168,13 @@ impl<R: EventRequester> ToPainterSender<R> {
 /// The main thread's receiving end of its link to the painter.
 pub(crate) struct MainLink<R: EventRequester> {
     /// Commands from the painter, in the order it sent them.
-    pub(crate) commands: mpsc::Receiver<ToMain>,
+    pub(crate) commands: flume::Receiver<ToMain>,
     /// Everything this thread has to say back.
     pub(crate) notify: ToPainterSender<R>,
 }
 
 impl<R: EventRequester> MainLink<R> {
-    pub(crate) fn new(commands: mpsc::Receiver<ToMain>, notify: ToPainterSender<R>) -> Self {
+    pub(crate) fn new(commands: flume::Receiver<ToMain>, notify: ToPainterSender<R>) -> Self {
         Self { commands, notify }
     }
 }
@@ -530,20 +530,18 @@ async fn resolve_for_fetch(
 
 fn serve_main_commands<R: EventRequester>(
     mut runtime: MainThreadRuntime<R>,
-    commands: &mpsc::Receiver<ToMain>,
+    commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
 ) {
     while let Ok(first) = commands.recv() {
         let mut serviced_begin_frame = None;
-        let mut command = Some(first);
-        while let Some(current) = command.take() {
-            match current {
+        for command in std::iter::once(first).chain(commands.drain()) {
+            match command {
                 ToMain::Shutdown => return,
-                current => {
-                    apply_main_command(&mut runtime, current, notify, &mut serviced_begin_frame);
+                command => {
+                    apply_main_command(&mut runtime, command, notify, &mut serviced_begin_frame);
                 }
             }
-            command = commands.try_recv().ok();
         }
         runtime.commit_if_dirty();
         if let Some(seq) = serviced_begin_frame {

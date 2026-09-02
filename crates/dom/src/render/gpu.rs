@@ -11,7 +11,6 @@
 //! frame will not match a headless screenshot of the same scene.
 
 use std::fmt;
-use std::sync::mpsc;
 
 use vello::util::RenderContext;
 use vello::wgpu;
@@ -359,7 +358,7 @@ impl Headless {
 
         let error = {
             let slice = readback.buffer.slice(..);
-            let (sender, receiver) = mpsc::channel();
+            let (sender, receiver) = flume::bounded(1);
             slice.map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.send(result);
             });
@@ -504,7 +503,7 @@ pub fn read_texture(
     queue.submit([encoder.finish()]);
 
     let slice = staging.slice(..);
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = flume::bounded(1);
     slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = sender.send(result);
     });
