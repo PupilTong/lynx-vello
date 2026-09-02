@@ -187,3 +187,11 @@ in the paragraph protocol: direction is resolved at style time into a physical
 ## Also see
 
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
+
+Implementation note (2026-09-02): the structural model above — flattening,
+atomic inline boxes with vertical alignment, `text-maxline`/`text-maxlength`/
+`text-overflow` truncation with inline-truncation content, and the layout
+event's line data — is implemented standalone in `hughie::text::block`
+(`crates/hughie/src/text/block/`), deliberately unwired from the box-protocol
+measurement path. Its recorded deviations live in
+[deviations.md](deviations.md) under "Text layout".
