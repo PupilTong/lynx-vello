@@ -196,6 +196,10 @@ fn check_script(
             EngineEvent::ListenerFailed(error) => {
                 eprintln!("event listener failed: {error}");
             }
+            // The same standing: only that one timer's turn was lost.
+            EngineEvent::TimerFailed(error) => {
+                eprintln!("timer callback failed: {error}");
+            }
             EngineEvent::RenderFailed(error) => return Err(CliError::Engine(error)),
             _ => {}
         }

@@ -1,5 +1,7 @@
 //! The Lynx main-thread runtime over its owned `QuickJS` realm.
 
+mod timers;
+
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
 use std::rc::Rc;
@@ -9,6 +11,8 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
+pub(crate) use self::timers::ClockInstant;
+use self::timers::TimerSchedule;
 use super::ToPainterSender;
 use super::quickjs::ScriptEngine;
 use crate::main::tree::LynxDocument;
@@ -19,7 +23,9 @@ const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
 const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
+const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
+const TIMER_RUN_EXPORT: &str = "__BobcatRunTimer";
 
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
@@ -37,6 +43,8 @@ const ELEMENT_PAPI_SOURCE: &str =
     include_str!("../../../../../packages/bobcat-element/src/element-papi.mjs");
 const RUNTIME_MODULE_SOURCE: &str =
     include_str!("../../../../../packages/bobcat-element/src/main-thread-runtime.mjs");
+const TIMER_MODULE_SOURCE: &str =
+    include_str!("../../../../../packages/bobcat-element/src/timers.mjs");
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
@@ -324,11 +332,35 @@ impl<R: EventRequester> EventState<R> {
     }
 }
 
+/// The timer schedule, and the nesting level the next timer inherits.
+///
+/// Shared with the host functions that maintain it, so it is `Rc` like
+/// [`EventState`]: the native `setTimer` export and the loop that fires what
+/// it armed are different stack frames on the same thread.
+struct TimerState {
+    schedule: RefCell<TimerSchedule>,
+    /// HTML's timer nesting level — zero outside a timer's callback, and the
+    /// running timer's level inside one. It is what a timer started from a
+    /// timer inherits, and so what decides when a chain of them stops being
+    /// allowed to ask for no delay at all.
+    nesting: Cell<u32>,
+}
+
+impl TimerState {
+    fn new() -> Self {
+        Self {
+            schedule: RefCell::new(TimerSchedule::new()),
+            nesting: Cell::new(0),
+        }
+    }
+}
+
 /// The private main-thread runtime used by the engine pipeline.
 pub(crate) struct MainThreadRuntime<R: EventRequester> {
     engine: ScriptEngine,
     tree: Rc<RefCell<TreeHandle<R>>>,
     events: Rc<EventState<R>>,
+    timers: Rc<TimerState>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -352,11 +384,13 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         let mut engine = ScriptEngine::new()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(notify.clone()));
-        let tree = install_bobcat(&mut engine, document, notify, &events)?;
+        let timers = Rc::new(TimerState::new());
+        let tree = install_bobcat(&mut engine, document, notify, &events, &timers)?;
         Ok(Self {
             engine,
             tree,
             events,
+            timers,
             next_event_id: 0,
         })
     }
@@ -503,6 +537,57 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         Ok(delivered)
     }
 
+    /// When the earliest armed timer comes due, if one is armed.
+    ///
+    /// The command loop's wait ends there rather than at the next command,
+    /// which is what makes a timer this thread's own business: no host turn,
+    /// no frame, and no other thread stands between a deadline and the
+    /// callback it belongs to.
+    pub(crate) fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
+        self.timers.schedule.borrow_mut().next_deadline()
+    }
+
+    /// Runs every timer due now, in the order the standard fires them.
+    ///
+    /// Returns whatever their callbacks threw. A timer is its own task, so
+    /// one that throws neither stops the ones behind it nor ends the realm —
+    /// the same standing an event listener that throws already has.
+    pub(crate) fn run_due_timers(&mut self) -> Vec<ScriptError> {
+        let due = self
+            .timers
+            .schedule
+            .borrow_mut()
+            .take_due(ClockInstant::now());
+        if due.is_empty() {
+            return Vec::new();
+        }
+        let mut failures = Vec::new();
+        for timer in due {
+            // The level a timer this callback starts inherits. Restored
+            // around every call, thrown or not, because the next one in the
+            // batch is not nested inside this one.
+            self.timers.nesting.set(timer.nesting);
+            let ran = self.engine.call_module_export(
+                TIMER_MODULE_SPECIFIER,
+                TIMER_RUN_EXPORT,
+                &[HostArgument::Number(f64::from(timer.id))],
+            );
+            self.timers.nesting.set(0);
+            if let Err(error) = ran {
+                failures.push(
+                    MainThreadError::from_engine("running a timer callback", error)
+                        .into_script_error(),
+                );
+            }
+        }
+        // Callbacks remove elements like any other realm entry point; the
+        // count they ran up is settled here, at the end of the batch.
+        if let Err(error) = self.finish_batch(true) {
+            failures.push(error.into_script_error());
+        }
+        failures
+    }
+
     pub(crate) fn run_main_thread_script(
         &mut self,
         source: &str,
@@ -519,6 +604,9 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         let boot = format!(
             r#"import {{ lynx }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+// Imported for its effect: it installs the timer globals, and a static
+// import runs before the entry this module then loads.
+import "{TIMER_MODULE_SPECIFIER}";
 
 await import({entry_specifier});
 
@@ -572,6 +660,7 @@ fn install_bobcat<R: EventRequester>(
     document: LynxDocument,
     notify: ToPainterSender<R>,
     events: &Rc<EventState<R>>,
+    timers: &Rc<TimerState>,
 ) -> Result<Rc<RefCell<TreeHandle<R>>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         document,
@@ -581,6 +670,7 @@ fn install_bobcat<R: EventRequester>(
 
     install_host_module(engine, &handle, events)?;
     install_event_members(engine, events)?;
+    install_timer_members(engine, timers)?;
     engine
         .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
         .map_err(|error| {
@@ -591,6 +681,9 @@ fn install_bobcat<R: EventRequester>(
         .map_err(|error| {
             MainThreadError::from_engine("registering the Element PAPI module", error)
         })?;
+    engine
+        .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
 
     Ok(handle)
 }
@@ -770,6 +863,40 @@ fn install_event_members<R: EventRequester>(
     let state = Rc::clone(events);
     install(engine, "stopPropagation", 0, move |_arguments| {
         state.stopped.set(true);
+        Ok(HostValue::Undefined)
+    })?;
+
+    Ok(())
+}
+
+/// Installs the two members the realm's timers speak to.
+///
+/// Neither runs a callback or touches the document: one arms a deadline and
+/// answers with the id it armed, the other disarms one. Firing is the command
+/// loop's, because the deadline it waits on is the schedule these maintain.
+fn install_timer_members(
+    engine: &mut ScriptEngine,
+    timers: &Rc<TimerState>,
+) -> Result<(), MainThreadError> {
+    let state = Rc::clone(timers);
+    install(engine, "setTimer", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.setTimer";
+        let delay = number_argument(NAME, arguments, 0)?;
+        let repeats = boolean_argument(NAME, arguments, 1)?;
+        let id = state.schedule.borrow_mut().arm(
+            delay,
+            repeats,
+            state.nesting.get(),
+            ClockInstant::now(),
+        );
+        Ok(HostValue::Number(f64::from(id)))
+    })?;
+
+    let state = Rc::clone(timers);
+    install(engine, "clearTimer", 1, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.clearTimer";
+        let id = timer_id_argument(NAME, arguments, 0)?;
+        state.schedule.borrow_mut().clear(id);
         Ok(HostValue::Undefined)
     })?;
 
@@ -1079,6 +1206,37 @@ fn capture_argument(function: &str, arguments: &[HostValue], index: usize) -> Re
         HostValue::Number(1.0) => Ok(true),
         _ => Err(format!("{function} expects 0 or 1 for argument {index}")),
     }
+}
+
+fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {
+    match *argument(arguments, index) {
+        HostValue::Number(value) => Ok(value),
+        _ => Err(format!("{function} expects a number for argument {index}")),
+    }
+}
+
+fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+    match *argument(arguments, index) {
+        HostValue::Boolean(value) => Ok(value),
+        _ => Err(format!("{function} expects a boolean for argument {index}")),
+    }
+}
+
+/// A timer id, which the realm only ever passes back after the host handed
+/// it one.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the integer and range checks above make the value a representable id"
+)]
+fn timer_id_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<u32, String> {
+    let value = number_argument(function, arguments, index)?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
+        return Err(format!(
+            "{function} expects a timer id for argument {index}"
+        ));
+    }
+    Ok(value as u32)
 }
 
 fn string_argument<'a>(

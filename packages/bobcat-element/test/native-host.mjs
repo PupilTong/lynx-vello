@@ -24,3 +24,5 @@ export const flushElementTree = native.flushElementTree;
 export const enableEventListener = native.enableEventListener;
 export const disableEventListener = native.disableEventListener;
 export const stopPropagation = native.stopPropagation;
+export const setTimer = native.setTimer;
+export const clearTimer = native.clearTimer;

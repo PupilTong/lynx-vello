@@ -67,6 +67,15 @@ interface BobcatNative {
   disableEventListener(nodeId: number, phase: number, eventName: string): void;
   /** Ends the walk in progress after the current node. */
   stopPropagation(): void;
+  /**
+   * Arms one timer `delayMilliseconds` from now — repeating until cleared
+   * when `repeats` — and returns the id it is armed under. The delay goes
+   * through HTML's `long` conversion and nesting clamp here, so any number
+   * is accepted.
+   */
+  setTimer(delayMilliseconds: number, repeats: boolean): number;
+  /** Disarms a timer, whether or not one is armed under that id. */
+  clearTimer(id: number): void;
 }
 
 declare module "bobcat-internal:host" {
@@ -89,6 +98,8 @@ declare module "bobcat-internal:host" {
   export const enableEventListener: BobcatNative["enableEventListener"];
   export const disableEventListener: BobcatNative["disableEventListener"];
   export const stopPropagation: BobcatNative["stopPropagation"];
+  export const setTimer: BobcatNative["setTimer"];
+  export const clearTimer: BobcatNative["clearTimer"];
 }
 
 /**

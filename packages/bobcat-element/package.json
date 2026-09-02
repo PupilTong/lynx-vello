@@ -2,7 +2,7 @@
   "name": "bobcat-element",
   "version": "0.0.0",
   "private": true,
-  "description": "The bobcat:runtime and bobcat:element ESMs preloaded in Bobcat's QuickJS main-thread realm.",
+  "description": "The bobcat:runtime, bobcat:element, and bobcat:timers ESMs preloaded in Bobcat's QuickJS main-thread realm.",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
