@@ -1,42 +1,54 @@
 //! Host-injected resource acquisition contracts for Bobcat.
 
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode};
+use http::{HeaderMap, StatusCode};
 use thiserror::Error;
-use tokio::io::AsyncRead;
 use url::Url;
 
 use crate::style::PreparsedStyleSheet;
 
-/// A resource operation polled directly on the thread that called the fetcher.
+/// The host's whole resource system: bytes, stylesheets and images.
 ///
-/// During view startup that owner is `bobcat-main`, which deliberately has no
-/// ambient Tokio runtime or IO reactor. Implementations may move actual file or
-/// network IO onto their own executor or worker threads and wake this future,
-/// but the returned future itself must be executor-neutral and must not assume
-/// a caller-provided runtime.
-pub type ResourceFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, ResourceError>> + Send + 'a>>;
-
-pub type ResourceReader = Pin<Box<dyn AsyncRead + Send + 'static>>;
-
-/// Host-owned resource policy whose startup calls and continuations run on
-/// `bobcat-main`.
+/// Owned by the painter, which is the thread that constructed the view, and
+/// never reachable from `bobcat-main` — every resource the document needs is
+/// asked for by message. It is therefore free to be neither `Send` nor `Sync`
+/// and to hold `Rc`, `RefCell` or browser objects directly.
 ///
-/// Implementations own any executor or reactor their IO requires; Bobcat only
-/// polls the returned [`ResourceFuture`] until it is woken and ready.
-pub trait ResourceFetcher: Send + Sync + 'static {
+/// The two halves have deliberately different shapes, because their callers
+/// do. Bytes and stylesheets are awaited off the frame path, so they are
+/// futures. Images are named synchronously, loaded on the host's own
+/// concurrency, and reported through [`ImageReports`](dom::ImageReports); the pixels are then
+/// read back synchronously by [`dom::FrameImages::read`] during composition,
+/// which cannot suspend. That read may block, and after a successful load it
+/// must not miss — see [`dom::FrameImages`].
+///
+/// Every fetch is polled directly on the painter's thread, which has no
+/// ambient Tokio runtime or IO reactor — the CLI drives the whole of
+/// construction with `pollster`, which supplies neither. Implementations own
+/// any executor or reactor their IO requires: move the real file or network
+/// work onto it, wake the future, and Bobcat polls until it is ready. What
+/// the future must not do is assume a runtime its caller never promised.
+#[expect(
+    async_fn_in_trait,
+    reason = "the absent `Send` is the point: a resource system is thread-bound, \
+              and its futures are polled only on the painter that owns it"
+)]
+pub trait ResourceFetcher: dom::FrameImages {
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator>;
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError>;
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse>;
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError>;
 
     /// Loads a stylesheet in whichever form this host has it.
     ///
@@ -45,14 +57,85 @@ pub trait ResourceFetcher: Send + Sync + 'static {
     /// moves bytes — a browser embedder cannot decode a `.web.bundle` at all.
     /// A host that reports [`ResourceCapability::PreparsedStyleSheet`]
     /// overrides this to return [`StyleSheetPayload::Preparsed`].
-    fn fetch_style_sheet(
+    async fn fetch_style_sheet(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
-        fetch_style_sheet_as_text(self, request)
+    ) -> Result<StyleSheetResponse, ResourceError> {
+        fetch_style_sheet_as_text(self, request).await
     }
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse>;
+    /// Names `source` and begins loading it. Non-blocking.
+    ///
+    /// Idempotent and single-flight: repeated or concurrent requests for one
+    /// source join one load, and a request for an already-loaded source
+    /// starts nothing. The engine asks for a source exactly once per
+    /// document, keyed by the raw string the page wrote — two specifiers a
+    /// host canonicalises to one resource are simply asked for twice.
+    ///
+    /// For every source it is asked for, a host eventually calls exactly one
+    /// of [`ImageReports::loaded`](dom::ImageReports::loaded) or
+    /// [`ImageReports::failed`](dom::ImageReports::failed), unless the view is
+    /// torn down first. Reporting and asking for the turn that drains the
+    /// report are both the host's, and both happen on this thread.
+    ///
+    /// The default serves nothing, which is what a host with no image support
+    /// wants: a source is asked for once and then never drawn.
+    fn request_image(&self, _source: &str) {}
+
+    /// The sources the frame just encoded, deduplicated in paint order.
+    ///
+    /// Advisory: it informs residency and nothing else, and a host that
+    /// ignores it is still correct. Called once per resolve pass.
+    fn retain_images(&self, _frame: &[Arc<str>]) {}
+}
+
+/// A shared handle serves whatever it points at.
+///
+/// The painter owns its resource system by value; an embedder whose registry
+/// outlives the view hands in an [`Rc`] of it instead. This is what joins the
+/// two without a per-embedder forwarding wrapper. `Rc` rather than `Arc`
+/// because nothing on this path crosses a thread — an atomic count here would
+/// be paid on every clone and never used.
+///
+/// It is the right handle for a registry that answers reads and fetches, and
+/// the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
+/// belongs to one view, and a handle shared across views has nowhere to put
+/// more than one. A host that loads images asynchronously returns a per-view
+/// value from the builder [`LynxView::new`](crate::LynxView::new) takes,
+/// holding this handle plus that view's reports.
+impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        (**self).supports_capability(capability)
+    }
+
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        (**self).resolve_locator(request).await
+    }
+
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
+        (**self).fetch_resource(request).await
+    }
+
+    async fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<StyleSheetResponse, ResourceError> {
+        (**self).fetch_style_sheet(request).await
+    }
+
+    fn request_image(&self, source: &str) {
+        (**self).request_image(source);
+    }
+
+    fn retain_images(&self, frame: &[Arc<str>]) {
+        (**self).retain_images(frame);
+    }
 }
 
 /// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as
@@ -61,19 +144,17 @@ pub trait ResourceFetcher: Send + Sync + 'static {
 ///
 /// An override that answers only *some* requests pre-parsed calls this for the
 /// rest, rather than re-implementing the byte path.
-pub fn fetch_style_sheet_as_text<F>(
+pub async fn fetch_style_sheet_as_text<F>(
     fetcher: &F,
     request: ResourceRequest,
-) -> ResourceFuture<'_, StyleSheetResponse>
+) -> Result<StyleSheetResponse, ResourceError>
 where
     F: ResourceFetcher + ?Sized,
 {
-    Box::pin(async move {
-        let response = fetcher.fetch_resource(request).await?;
-        Ok(StyleSheetResponse {
-            metadata: response.metadata,
-            payload: StyleSheetPayload::Text(response.bytes),
-        })
+    let response = fetcher.fetch_resource(request).await?;
+    Ok(StyleSheetResponse {
+        metadata: response.metadata,
+        payload: StyleSheetPayload::Text(response.bytes),
     })
 }
 
@@ -178,85 +259,6 @@ pub struct StyleSheetResponse {
     pub payload: StyleSheetPayload,
 }
 
-/// Input to the HTTP transport behind `lynx.fetch` and `EventSource`.
-pub struct HttpRequest {
-    pub context: RequestContext,
-    pub resource: ResolvedLocator,
-    pub method: Method,
-    pub headers: HeaderMap,
-    pub body: HttpRequestBody,
-    pub redirect_policy: RedirectPolicy,
-    pub cache_policy: CachePolicy,
-    pub credentials: CredentialsMode,
-}
-
-impl fmt::Debug for HttpRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HttpRequest")
-            .field("context", &self.context)
-            .field("resource", &self.resource)
-            .field("method", &self.method)
-            .field("headers", &self.headers)
-            .field("body", &self.body)
-            .field("redirect_policy", &self.redirect_policy)
-            .field("cache_policy", &self.cache_policy)
-            .field("credentials", &self.credentials)
-            .finish()
-    }
-}
-
-pub enum HttpRequestBody {
-    Empty,
-    Bytes(Bytes),
-    Stream(ResourceReader),
-}
-
-impl fmt::Debug for HttpRequestBody {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("Empty"),
-            Self::Bytes(bytes) => formatter
-                .debug_tuple("Bytes")
-                .field(&format_args!("{} bytes", bytes.len()))
-                .finish(),
-            Self::Stream(_) => formatter.write_str("Stream(<tokio::io::AsyncRead>)"),
-        }
-    }
-}
-
-/// HTTP response head plus a pull-based body.
-pub struct HttpResponse {
-    pub request_id: RequestId,
-    pub final_url: Url,
-    pub status: StatusCode,
-    pub status_text: Option<Arc<str>>,
-    pub headers: HeaderMap,
-    pub redirect_chain: Vec<Url>,
-    pub content_length: Option<u64>,
-    pub cache_status: CacheStatus,
-    pub timing: ResourceTiming,
-    pub body: ResourceReader,
-}
-
-impl fmt::Debug for HttpResponse {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HttpResponse")
-            .field("request_id", &self.request_id)
-            .field("final_url", &self.final_url)
-            .field("status", &self.status)
-            .field("status_text", &self.status_text)
-            .field("headers", &self.headers)
-            .field("redirect_chain", &self.redirect_chain)
-            .field("content_length", &self.content_length)
-            .field("cache_status", &self.cache_status)
-            .field("timing", &self.timing)
-            .field("body", &"<tokio::io::AsyncRead>")
-            .finish()
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ResourceCapability {
@@ -264,8 +266,6 @@ pub enum ResourceCapability {
     /// Answering a stylesheet request with a host-decoded
     /// [`PreparsedStyleSheet`] instead of CSS text.
     PreparsedStyleSheet,
-    Http,
-    StreamingUpload,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -288,23 +288,6 @@ pub enum CachePolicy {
     NoCache,
     ForceCache,
     OnlyIfCached,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RedirectPolicy {
-    Follow { max_hops: u8 },
-    Manual,
-    Error,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CredentialsMode {
-    Omit,
-    #[default]
-    SameOrigin,
-    Include,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -399,14 +382,39 @@ pub enum RetryAdvice {
     After(Duration),
 }
 
+/// A host that answers nothing, ever: every fetch is a future that never
+/// completes and no image is ever readable.
+///
+/// The painter owns a resource system unconditionally, so a test that is not
+/// about resources still needs one to name.
 #[cfg(test)]
-mod tests {
-    use super::ResourceFetcher;
+#[derive(Debug, Default)]
+pub(crate) struct NeverAnswers;
 
-    fn accepts_object_safe_trait(_: Option<&dyn ResourceFetcher>) {}
+#[cfg(test)]
+impl dom::FrameImages for NeverAnswers {
+    fn read(&self, _source: &str) -> Option<dom::vello::peniko::ImageData> {
+        None
+    }
+}
 
-    #[test]
-    fn resource_fetcher_is_object_safe() {
-        accepts_object_safe_trait(None);
+#[cfg(test)]
+impl ResourceFetcher for NeverAnswers {
+    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
+        false
+    }
+
+    async fn resolve_locator(
+        &self,
+        _request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        std::future::pending().await
+    }
+
+    async fn fetch_resource(
+        &self,
+        _request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
+        std::future::pending().await
     }
 }

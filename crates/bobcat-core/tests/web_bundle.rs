@@ -1,5 +1,6 @@
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::script::ScriptError;
@@ -29,15 +30,18 @@ fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
 
 async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptError> {
     let fetcher =
-        Arc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
+        Rc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = LynxView::new(
-        config,
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
-        ViewSources::new(fetcher, "main.js"),
+        |_reports| fetcher,
+        ViewSources {
+            config,
+            ..ViewSources::new("main.js")
+        },
     )
     .await
     .expect("fetch and start");

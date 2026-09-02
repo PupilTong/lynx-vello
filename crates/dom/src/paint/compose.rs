@@ -18,12 +18,15 @@
 //! Translation per chain is the sum of the chain's slot offsets, each
 //! snapped to the device pixel grid so composed edges stay crisp.
 
+use std::sync::Arc;
+
 use euclid::default::Vector2D;
 
 use crate::paint::shape::{BoxShape, with_shape};
+use crate::render::image::is_renderable;
 use crate::vello::Scene;
-use crate::vello::kurbo::{Affine, Rect};
-use crate::vello::peniko::{BlendMode, Fill};
+use crate::vello::kurbo::{Affine, Point, Rect, Size};
+use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageData, ImageSampler};
 use crate::visual::{AnimationSample, ScrollSlot};
 
 /// The compose-time coordinate context one op or fragment rides: the scroll
@@ -42,6 +45,114 @@ pub(crate) struct ComposeChain {
 pub(crate) enum CapturedShape {
     Rect(Rect),
     Box(BoxShape),
+}
+
+/// The shape a raster fill resolves to, decided from geometry alone.
+///
+/// The clip-layer pair of the rounded-partial case lives *inside* this
+/// variant rather than as surrounding program ops. That is not tidiness:
+/// `Encoding::encode_end_clip` is a silent no-op at `n_open_clips == 0`, so a
+/// fragment cut landing between a `push_clip_layer` and its `pop_layer` would
+/// produce a wrong picture with no error anywhere. Keeping the pair inside one
+/// op makes that cut unrepresentable.
+#[derive(Debug)]
+pub(crate) enum ImageArea {
+    /// The draw covers the clip, or a rectangular clip reduced to the
+    /// intersection: one fill, no layer.
+    Fill(CapturedShape),
+    /// A rounded clip the draw only partly covers: clip layer, fill, pop.
+    Clipped { clip: BoxShape, draw: Rect },
+}
+
+/// One raster image fill whose only late input is the pixels.
+///
+/// Every CSS decision is already resolved here, on the document's thread,
+/// from the intrinsic dimensions the registry holds: `object-fit`, the tile
+/// grid, repeat, position, and which shape to fill. What is deliberately not
+/// resolved is the brush scale, because that is the one quantity that depends
+/// on the decoded bitmap.
+///
+/// `anchor` and `extent` are carried separately rather than pre-multiplied
+/// into a brush transform so the division by the bitmap's own dimensions
+/// happens at encode time. That lets a store decode at reduced scale and still
+/// compose correctly, and stops a superseded generation whose dimensions
+/// differ from silently drawing at the wrong size.
+#[derive(Debug)]
+pub(crate) struct ImageDraw {
+    /// The raw source string the page wrote — the registry's own key, so
+    /// every draw of one source in one frame shares one allocation.
+    pub(crate) image: Arc<str>,
+    /// Item-local space to device px.
+    pub(crate) transform: Affine,
+    /// Where one copy of the source image starts, item-local.
+    pub(crate) anchor: Point,
+    /// How large one copy is, item-local.
+    pub(crate) extent: Size,
+    /// Extend modes, `image-rendering` quality, alpha. Carries no pixels.
+    pub(crate) sampler: ImageSampler,
+    pub(crate) area: ImageArea,
+}
+
+/// Encodes draw `index`, if its pixels resolved.
+///
+/// A draw whose source had no pixels is simply absent from the table's
+/// answer, and draws nothing — the same one-frame gap a not-yet-loaded image
+/// already produces.
+fn encode_draw(
+    scene: &mut Scene,
+    draws: &[ImageDraw],
+    images: &[Option<ImageData>],
+    index: u32,
+    outer: Affine,
+) {
+    let index = index as usize;
+    if let Some(Some(data)) = images.get(index) {
+        encode_image(scene, &draws[index], outer, data);
+    }
+}
+
+/// Encodes one image draw against pixels already resolved for it.
+///
+/// A read that misses draws nothing, which is the same one-frame gap a
+/// not-yet-loaded image already produces. `outer` is the device chain
+/// transform when replaying, or the plane translation when baking.
+pub(crate) fn encode_image(scene: &mut Scene, draw: &ImageDraw, outer: Affine, data: &ImageData) {
+    // A bitmap vello cannot place draws as nothing — the same one-frame gap a
+    // not-yet-loaded image already produces. This is the only place the bound
+    // is enforced, because it is the only place the bitmap is known, and the
+    // only place the extent is divided by it.
+    if !is_renderable(data) {
+        return;
+    }
+    let transform = outer * draw.transform;
+    let brush_transform = Affine::translate(draw.anchor.to_vec2())
+        * Affine::scale_non_uniform(
+            draw.extent.width / f64::from(data.width),
+            draw.extent.height / f64::from(data.height),
+        );
+    let brush = BrushRef::Image(ImageBrush {
+        image: data,
+        sampler: draw.sampler,
+    });
+    match &draw.area {
+        ImageArea::Fill(CapturedShape::Rect(rect)) => {
+            scene.fill(Fill::NonZero, transform, brush, Some(brush_transform), rect);
+        }
+        ImageArea::Fill(CapturedShape::Box(shape)) => {
+            with_shape!(shape, |s| scene.fill(
+                Fill::NonZero,
+                transform,
+                brush,
+                Some(brush_transform),
+                s
+            ));
+        }
+        ImageArea::Clipped { clip, draw: rect } => {
+            with_shape!(clip, |s| scene.push_clip_layer(Fill::NonZero, transform, s));
+            scene.fill(Fill::NonZero, transform, brush, Some(brush_transform), rect);
+            scene.pop_layer();
+        }
+    }
 }
 
 /// One walker-level layer-stack operation, with the chain its shape rides.
@@ -67,6 +178,11 @@ pub(crate) enum ComposeOp {
         alpha_animation: Option<u32>,
     },
     Pop,
+    /// Draw `image_draws[index]`, whose pixels the composer supplies.
+    Image {
+        index: u32,
+        chain: ComposeChain,
+    },
 }
 
 /// The compose sink the walker fills: fragments plus the program over them.
@@ -74,6 +190,7 @@ pub(crate) enum ComposeOp {
 pub(crate) struct ComposeAssembly {
     pub(crate) fragments: Vec<Scene>,
     pub(crate) program: Vec<ComposeOp>,
+    pub(crate) image_draws: Vec<ImageDraw>,
     /// The chain of the currently open fragment, if one is open.
     current: Option<ComposeChain>,
     /// Emptied scenes to encode the next fragments into.
@@ -97,15 +214,17 @@ impl ComposeAssembly {
     pub(crate) fn with_storage(
         fragments: Vec<Scene>,
         program: Vec<ComposeOp>,
+        image_draws: Vec<ImageDraw>,
         pool: Vec<Scene>,
     ) -> Self {
         debug_assert!(
-            fragments.is_empty() && program.is_empty(),
+            fragments.is_empty() && program.is_empty() && image_draws.is_empty(),
             "recycled containers are emptied before they are handed back",
         );
         Self {
             fragments,
             program,
+            image_draws,
             current: None,
             pool,
         }
@@ -133,6 +252,14 @@ impl ComposeAssembly {
         self.program.push(op);
     }
 
+    /// Records one image draw as a program op, sealing any open fragment
+    /// first so the draw lands after the content already encoded.
+    pub(crate) fn push_image(&mut self, chain: ComposeChain, draw: ImageDraw) {
+        let index = u32::try_from(self.image_draws.len()).expect("a frame cannot hold 2^32 images");
+        self.image_draws.push(draw);
+        self.push_op(ComposeOp::Image { index, chain });
+    }
+
     /// Closes the open fragment: an empty one goes back to the pool and
     /// leaves no op, everything else becomes a `Fragment` op in place.
     fn seal_fragment(&mut self) {
@@ -144,6 +271,15 @@ impl ComposeAssembly {
             .last()
             .expect("an open fragment has a scene")
             .encoding();
+        // A cut between a `push_clip_layer` and its `pop_layer` is silently
+        // wrong rather than loud: `Encoding::encode_end_clip` does nothing at
+        // zero open clips, so the pop is dropped and every later draw stays
+        // clipped. Painter-internal layers must therefore close inside the
+        // fragment that opened them.
+        debug_assert_eq!(
+            encoding.n_open_clips, 0,
+            "a fragment must never be cut inside a painter-internal layer",
+        );
         // Glyphs are deferred resources: a text-only fragment has an empty
         // path stream, so `Encoding::is_empty` alone would discard it.
         if encoding.is_empty() && encoding.resources.glyph_runs.is_empty() {
@@ -158,9 +294,9 @@ impl ComposeAssembly {
 
     /// Finishes the assembly, returning fragments, program, and the unused
     /// pool.
-    pub(crate) fn finish(mut self) -> (Vec<Scene>, Vec<ComposeOp>, Vec<Scene>) {
+    pub(crate) fn finish(mut self) -> (Vec<Scene>, Vec<ComposeOp>, Vec<ImageDraw>, Vec<Scene>) {
         self.seal_fragment();
-        (self.fragments, self.program, self.pool)
+        (self.fragments, self.program, self.image_draws, self.pool)
     }
 }
 
@@ -224,17 +360,31 @@ pub(crate) fn snap_offset(offset: Vector2D<f32>, ratio: f32) -> Vector2D<f32> {
 
 /// Replays the program into `scene` with each chain translated by the
 /// offsets `offset_of` reports (falling back to the committed ones).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one replay's full inputs: the program, its two side tables, and the transforms"
+)]
 pub(crate) fn replay(
     scene: &mut Scene,
     fragments: &[Scene],
     program: &[ComposeOp],
+    image_draws: &[ImageDraw],
+    images: &[Option<ImageData>],
     slots: &[ScrollSlot],
     samples: &[AnimationSample],
     ratio: f32,
     offset_of: &dyn Fn(&ScrollSlot) -> Option<Vector2D<f32>>,
 ) {
     let device_transform = device_chain_transform(slots, samples, ratio, offset_of);
-    replay_ops(scene, fragments, program, samples, &device_transform);
+    replay_ops(
+        scene,
+        fragments,
+        program,
+        image_draws,
+        images,
+        samples,
+        &device_transform,
+    );
 }
 
 /// The device-px transform each chain composes at: the CSS-px chain
@@ -269,6 +419,8 @@ pub(crate) fn bake_ops(
     scene: &mut Scene,
     fragments: &[Scene],
     program: &[ComposeOp],
+    image_draws: &[ImageDraw],
+    images: &[Option<ImageData>],
     head: u32,
     translate: Affine,
 ) {
@@ -312,6 +464,9 @@ pub(crate) fn bake_ops(
                     }
                 }
             }
+            ComposeOp::Image { index, .. } => {
+                encode_draw(scene, image_draws, images, *index, translate);
+            }
             ComposeOp::Pop => {
                 if kept.pop().expect("a plane run's pushes balance its pops") {
                     scene.pop_layer();
@@ -321,13 +476,20 @@ pub(crate) fn bake_ops(
     }
 }
 
-/// Replays `program` with each chain placed by `device_transform`. This
-/// only pushes, appends, and pops — never raw geometry between appends —
-/// which is what keeps vello's append-time state merging sound.
+/// Replays `program` with each chain placed by `device_transform`, resolving
+/// image draws through `pixels`.
+///
+/// Besides pushes, appends and pops this also encodes raw geometry between
+/// appends, for image draws. That is sound because `Encoding::append`
+/// left-multiplies the child's transform stream before `encode_transform`'s
+/// dedup compares against the last one, so an elided tag after an append is
+/// genuinely redundant rather than wrong.
 pub(crate) fn replay_ops(
     scene: &mut Scene,
     fragments: &[Scene],
     program: &[ComposeOp],
+    image_draws: &[ImageDraw],
+    images: &[Option<ImageData>],
     samples: &[AnimationSample],
     device_transform: &impl Fn(ComposeChain) -> Affine,
 ) {
@@ -365,6 +527,9 @@ pub(crate) fn replay_ops(
                             .push_layer(*fill, *blend, alpha, transform, s));
                     }
                 }
+            }
+            ComposeOp::Image { index, chain } => {
+                encode_draw(scene, image_draws, images, *index, device_transform(*chain));
             }
             ComposeOp::Pop => scene.pop_layer(),
         }

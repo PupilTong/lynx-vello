@@ -2,15 +2,16 @@
 
 #![allow(dead_code)]
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
+    StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
 use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
@@ -20,7 +21,7 @@ use url::Url;
 /// Drains the terminal boot event preserved after construction. `LynxView::new`
 /// has already awaited the same outcome before it returns, and every `pump`
 /// here runs the view's own turn on this thread.
-pub fn wait_for_script(view: &mut LynxView) -> Result<(), ScriptError> {
+pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.
@@ -60,6 +61,10 @@ pub struct FetcherDouble {
     /// requests keep using `bytes` for the entry module.
     pub style_sheet_text: Option<Vec<u8>>,
     pub style_sheet_fetches: AtomicUsize,
+    /// The images this host serves, if a test installed any. Shared with the
+    /// test through an `Arc` so it can publish pixels and read the retain log
+    /// while the painter owns its own handle.
+    pub images: Option<Rc<flashbulb::TestImages>>,
 }
 
 impl FetcherDouble {
@@ -75,7 +80,26 @@ impl FetcherDouble {
             style_sheet: None,
             style_sheet_text: None,
             style_sheet_fetches: AtomicUsize::new(0),
+            images: None,
         }
+    }
+
+    /// Serves images from `images`, which the test keeps a handle on so it
+    /// can publish pixels and read the retain log.
+    #[must_use]
+    pub fn with_images(mut self, images: Rc<flashbulb::TestImages>) -> Self {
+        self.images = Some(images);
+        self
+    }
+
+    /// Points this double's store at the view's sink, so completed loads
+    /// reach the document the way a real host's per-view value would.
+    #[must_use]
+    pub fn serving(self, sink: bobcat_core::ImageReports) -> Self {
+        if let Some(images) = self.images.as_ref() {
+            images.attach(sink);
+        }
+        self
     }
 
     /// Answers stylesheet requests with a host-decoded sheet.
@@ -139,91 +163,93 @@ impl FetcherDouble {
     }
 }
 
-fn unsupported(phase: ResourceErrorPhase) -> ResourceError {
-    ResourceError {
-        request_id: None,
-        kind: ResourceErrorKind::UnsupportedOperation,
-        phase,
-        locator: None,
-        status: None,
-        message: "not advertised by this double".into(),
-        retry: RetryAdvice::Never,
-    }
-}
-
 impl ResourceFetcher for FetcherDouble {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         self.capabilities.contains(&capability)
     }
 
-    fn fetch_style_sheet(
+    async fn fetch_style_sheet(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
+    ) -> Result<StyleSheetResponse, ResourceError> {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
         if let Some(sheet) = self.style_sheet.clone() {
             let metadata = self.metadata(request.resource.clone(), request.context.id);
-            return Box::pin(async move {
-                Ok(StyleSheetResponse {
-                    metadata,
-                    payload: StyleSheetPayload::Preparsed(sheet),
-                })
+            return Ok(StyleSheetResponse {
+                metadata,
+                payload: StyleSheetPayload::Preparsed(sheet),
             });
         }
         if let Some(bytes) = self.style_sheet_text.clone() {
             let mut metadata = self.metadata(request.resource, request.context.id);
             metadata.content_length = Some(bytes.len() as u64);
-            return Box::pin(async move {
-                Ok(StyleSheetResponse {
-                    metadata,
-                    payload: StyleSheetPayload::Text(Bytes::from(bytes)),
-                })
+            return Ok(StyleSheetResponse {
+                metadata,
+                payload: StyleSheetPayload::Text(Bytes::from(bytes)),
             });
         }
         // No dedicated sheet registered, so behave like a host that only
         // moves bytes: run the trait's own default.
-        bobcat_core::resource::fetch_style_sheet_as_text(self, request)
+        bobcat_core::resource::fetch_style_sheet_as_text(self, request).await
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
-        Box::pin(async move {
-            let text = override_url
-                .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
-            let url = Url::parse(&text).map_err(|error| ResourceError {
-                request_id: Some(request.context.id),
-                kind: ResourceErrorKind::InvalidUrl,
-                phase: ResourceErrorPhase::Resolve,
-                locator: Some(request.resource.specifier.clone()),
-                status: None,
-                message: error.to_string().into(),
-                retry: RetryAdvice::Never,
-            })?;
-            Ok(ResolvedLocator {
-                resource: request.resource,
-                url,
-                rewrite_chain: Vec::new(),
-                locality: ResourceLocality::Remote,
-                cache_key: cache_key.map(Into::into),
-            })
+        let text = override_url
+            .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
+        let url = Url::parse(&text).map_err(|error| ResourceError {
+            request_id: Some(request.context.id),
+            kind: ResourceErrorKind::InvalidUrl,
+            phase: ResourceErrorPhase::Resolve,
+            locator: Some(request.resource.specifier.clone()),
+            status: None,
+            message: error.to_string().into(),
+            retry: RetryAdvice::Never,
+        })?;
+        Ok(ResolvedLocator {
+            resource: request.resource,
+            url,
+            rewrite_chain: Vec::new(),
+            locality: ResourceLocality::Remote,
+            cache_key: cache_key.map(Into::into),
         })
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
         let id = request.context.id;
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(ResourceResponse {
-                metadata: self.metadata(resource, id),
-                bytes: Bytes::from(self.bytes.clone()),
-            })
+        Ok(ResourceResponse {
+            metadata: self.metadata(resource, id),
+            bytes: Bytes::from(self.bytes.clone()),
         })
     }
 
-    fn fetch_http(&self, _request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Box::pin(async { Err(unsupported(ResourceErrorPhase::SendRequest)) })
+    fn request_image(&self, source: &str) {
+        if let Some(images) = self.images.as_ref() {
+            images.request(source);
+        }
+    }
+
+    fn retain_images(&self, frame: &[Arc<str>]) {
+        if let Some(images) = self.images.as_ref() {
+            images.retain(frame);
+        }
+    }
+}
+
+/// A double serves images only when a test gave it a store; otherwise every
+/// image draw resolves to nothing, which is what an unloaded image looks like.
+impl bobcat_core::FrameImages for FetcherDouble {
+    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.images.as_ref().and_then(|images| images.read(source))
     }
 }

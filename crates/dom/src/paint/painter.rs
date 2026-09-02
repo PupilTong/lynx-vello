@@ -32,8 +32,8 @@
 //! - Replaced content honors `object-fit`, `object-position`, and `image-rendering`. Concrete size
 //!   comes from the node's natural size; `auto` maps to bilinear and `crisp-edges`/`pixelated` to
 //!   nearest sampling.
-//! - The grammar has no `image-orientation`; the embedder's `ImageStore` is expected to apply EXIF
-//!   orientation before it publishes pixels and natural size.
+//! - The grammar has no `image-orientation`; the embedder's resource system is expected to apply
+//!   EXIF orientation before it reports natural size and serves pixels.
 
 use std::sync::Arc;
 
@@ -72,6 +72,8 @@ pub(crate) struct Painter {
     spare_fragments: Vec<Scene>,
     /// A retired frame's emptied compose program, capacity intact.
     spare_program: Vec<crate::paint::compose::ComposeOp>,
+    /// A retired frame's emptied image-draw table, capacity intact.
+    spare_image_draws: Vec<crate::paint::compose::ImageDraw>,
 }
 
 impl std::fmt::Debug for Painter {
@@ -93,6 +95,7 @@ impl Painter {
         let mut assembly = crate::paint::compose::ComposeAssembly::with_storage(
             std::mem::take(&mut self.spare_fragments),
             std::mem::take(&mut self.spare_program),
+            std::mem::take(&mut self.spare_image_draws),
             std::mem::take(&mut self.spare_scenes),
         );
         // A panicking walk drops the half-encoded assembly here and leaves
@@ -103,9 +106,9 @@ impl Painter {
             &mut self.scratch,
             document,
             &frame,
-            document.image_store().as_ref(),
+            document.images(),
         );
-        let (fragments, program, pool) = assembly.finish();
+        let (fragments, program, image_draws, pool) = assembly.finish();
         self.spare_scenes = pool;
         // No plan while an unexported animation recommits every tick:
         // re-baking planes each frame would cost more than they save.
@@ -119,6 +122,7 @@ impl Painter {
             presentation: crate::visual::frame::Presentation {
                 fragments,
                 program,
+                image_draws,
                 plan,
             },
             animations_active,
@@ -147,6 +151,7 @@ impl Painter {
         let crate::visual::frame::Presentation {
             mut fragments,
             mut program,
+            mut image_draws,
             ..
         } = inner.presentation;
         for mut scene in fragments.drain(..) {
@@ -156,6 +161,8 @@ impl Painter {
         self.spare_fragments = fragments;
         program.clear();
         self.spare_program = program;
+        image_draws.clear();
+        self.spare_image_draws = image_draws;
     }
 
     /// The spare frame buffers' and the build scratch's capacities, for the

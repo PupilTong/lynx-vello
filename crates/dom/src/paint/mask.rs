@@ -18,10 +18,11 @@ use stylo::computed_values::mask_origin::single_value::T as MaskOrigin;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{BackgroundClip, Image};
 
-use crate::ImageStore;
 use crate::paint::BoxFragment;
 use crate::paint::background::{self, BoxLevel, PatternLayer};
-use crate::vello::Scene;
+use crate::paint::compose::ComposeChain;
+use crate::paint::walker::WalkSink;
+use crate::render::image::ImageRegistry;
 
 pub(crate) fn has_mask(style: &ComputedValues) -> bool {
     style
@@ -33,10 +34,11 @@ pub(crate) fn has_mask(style: &ComputedValues) -> bool {
 }
 
 pub(crate) fn paint(
-    scene: &mut Scene,
+    sink: &mut WalkSink<'_>,
+    chain: ComposeChain,
     style: &ComputedValues,
     fragment: &BoxFragment,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
 ) {
     let svg = style.get_svg();
     let layers = svg.mask_image.0.as_slice();
@@ -67,5 +69,5 @@ pub(crate) fn paint(
         origin: background::level_rect(fragment, origin),
         clip: background::level_shape(fragment, clip),
     };
-    background::paint_pattern_layer(scene, style, fragment, images, &layer);
+    background::paint_pattern_layer(sink, chain, style, fragment, images, &layer, None);
 }

@@ -7,11 +7,12 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
-    DrawTarget, LynxView, LynxViewError, NoWakeup, PageConfig, PreparsedDeclaration, PreparsedRule,
+    DrawTarget, LynxView, LynxViewError, NoWakeup, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
@@ -60,21 +61,24 @@ fn basic_sheet() -> PreparsedStyleSheet {
     }
 }
 
-fn sources(fetcher: Arc<dyn ResourceFetcher>, style_sheets: &[&str]) -> ViewSources {
+fn sources(style_sheets: &[&str]) -> ViewSources {
     ViewSources {
         style_sheets: style_sheets.iter().map(|url| (*url).to_owned()).collect(),
-        ..ViewSources::new(fetcher, SCRIPT_URL)
+        ..ViewSources::new(SCRIPT_URL)
     }
 }
 
-async fn view_with(sources: ViewSources) -> Result<LynxView, LynxViewError> {
+async fn view_with(
+    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
+    sources: ViewSources,
+) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
+        resources,
         sources,
     )
     .await
@@ -82,7 +86,7 @@ async fn view_with(sources: ViewSources) -> Result<LynxView, LynxViewError> {
 
 #[tokio::test]
 async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
@@ -92,7 +96,7 @@ async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
         "a decoding host advertises the pre-parsed arm"
     );
 
-    let mut view = view_with(sources(fetcher, &[SHEET_URL]))
+    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the pre-parsed arm mounts");
     wait_for_script(&mut view).expect("script execution");
@@ -102,13 +106,13 @@ async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
 async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
     // The raw-text arm is independent of the entry resource, as it is for an
     // embedder that keeps both URLs in one resource registry.
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(b".basic { width: 100px; height: 100px; }".to_vec())
             .resolving_to(SCRIPT_URL),
     );
 
-    view_with(sources(fetcher, &[SHEET_URL]))
+    view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the text arm mounts");
 }
@@ -120,13 +124,13 @@ async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
 async fn a_byte_order_mark_prefixed_sheet_mounts() {
     let mut css = "\u{feff}".as_bytes().to_vec();
     css.extend_from_slice(b".basic { width: 100px; }");
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(css)
             .resolving_to(SCRIPT_URL),
     );
 
-    view_with(sources(fetcher, &[SHEET_URL]))
+    view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("a BOM-prefixed sheet mounts");
 }
@@ -135,13 +139,13 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
 /// and no main thread outlive it.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_style_sheet_text(vec![0xff, 0xfe, 0x00])
             .resolving_to(SCRIPT_URL),
     );
 
-    let error = view_with(sources(fetcher, &[SHEET_URL]))
+    let error = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
     // The reported URL is the resolved one, as it is for a script.
@@ -160,13 +164,13 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
 /// `bobcat_core::style`.)
 #[tokio::test]
 async fn every_listed_sheet_issues_its_own_stylesheet_request() {
-    let fetcher = Arc::new(
+    let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
     );
 
-    let mut view = view_with(sources(fetcher.clone(), &[SHEET_URL, SHEET_URL]))
+    let mut view = view_with(|_sink| fetcher.clone(), sources(&[SHEET_URL, SHEET_URL]))
         .await
         .expect("both sheets mount");
     assert_eq!(fetcher.style_sheet_fetch_count(), 2);

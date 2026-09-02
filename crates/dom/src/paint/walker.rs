@@ -71,16 +71,17 @@
 
 use euclid::default::Vector2D;
 
+use crate::Document;
 use crate::paint::compose::{CapturedShape, ComposeAssembly, ComposeChain, ComposeOp};
 use crate::paint::shape::{BoxShape, with_shape};
 use crate::paint::{
     BoxFragment, PathScratch, background, border, convert, filters, mask, shadow, text,
 };
+use crate::render::image::ImageRegistry;
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect};
 use crate::vello::peniko::{BlendMode, Compose, Fill, Mix};
 use crate::visual::{ClipNode, PaintItem, PaintItemKind, PaintOrder, RenderLayer, ScrollSlot};
-use crate::{Document, ImageStore};
 
 /// Where one walk's output goes.
 ///
@@ -96,16 +97,33 @@ pub(crate) enum WalkSink<'s> {
             reason = "constructed only by the equivalence tests' monolithic walk"
         )
     )]
-    Monolithic(&'s mut Scene),
+    Monolithic(&'s mut Scene, &'s dyn crate::render::image::FrameImages),
     Compose(&'s mut ComposeAssembly),
 }
 
 impl WalkSink<'_> {
     /// The scene content riding `chain` encodes into.
-    fn scene_for(&mut self, chain: ComposeChain) -> &mut Scene {
+    pub(super) fn scene_for(&mut self, chain: ComposeChain) -> &mut Scene {
         match self {
-            Self::Monolithic(scene) => scene,
+            Self::Monolithic(scene, _) => scene,
             Self::Compose(assembly) => assembly.fragment_for(chain),
+        }
+    }
+
+    /// One image draw.
+    ///
+    /// In compose mode it is a program op the painter resolves and encodes.
+    /// In the monolithic mode the equivalence tests use it is encoded inline
+    /// against that walk's own pixel source, so a culling regression in image
+    /// draws stays observable to the culling oracle.
+    pub(super) fn image(&mut self, chain: ComposeChain, draw: crate::paint::compose::ImageDraw) {
+        match self {
+            Self::Monolithic(scene, pixels) => {
+                if let Some(data) = pixels.read(&draw.image) {
+                    crate::paint::compose::encode_image(scene, &draw, Affine::IDENTITY, &data);
+                }
+            }
+            Self::Compose(assembly) => assembly.push_image(chain, draw),
         }
     }
 
@@ -113,7 +131,7 @@ impl WalkSink<'_> {
         clippy::too_many_arguments,
         reason = "mirrors vello's push_layer plus the compose tags"
     )]
-    fn push_layer_rect(
+    pub(super) fn push_layer_rect(
         &mut self,
         chain: ComposeChain,
         alpha_animation: Option<u32>,
@@ -124,7 +142,7 @@ impl WalkSink<'_> {
         rect: Rect,
     ) {
         match self {
-            Self::Monolithic(scene) => scene.push_layer(fill, blend, alpha, transform, &rect),
+            Self::Monolithic(scene, _) => scene.push_layer(fill, blend, alpha, transform, &rect),
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Push {
                 clip_only: false,
                 fill,
@@ -138,7 +156,7 @@ impl WalkSink<'_> {
         }
     }
 
-    fn push_layer_box(
+    pub(super) fn push_layer_box(
         &mut self,
         chain: ComposeChain,
         fill: Fill,
@@ -148,7 +166,7 @@ impl WalkSink<'_> {
         shape: BoxShape,
     ) {
         match self {
-            Self::Monolithic(scene) => {
+            Self::Monolithic(scene, _) => {
                 with_shape!(&shape, |s| scene
                     .push_layer(fill, blend, alpha, transform, s));
             }
@@ -165,7 +183,7 @@ impl WalkSink<'_> {
         }
     }
 
-    fn push_clip_box(
+    pub(super) fn push_clip_box(
         &mut self,
         chain: ComposeChain,
         fill: Fill,
@@ -173,7 +191,7 @@ impl WalkSink<'_> {
         shape: BoxShape,
     ) {
         match self {
-            Self::Monolithic(scene) => {
+            Self::Monolithic(scene, _) => {
                 with_shape!(&shape, |s| scene.push_clip_layer(fill, transform, s));
             }
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Push {
@@ -191,7 +209,7 @@ impl WalkSink<'_> {
 
     fn push_clip_empty(&mut self, chain: ComposeChain) {
         match self {
-            Self::Monolithic(scene) => {
+            Self::Monolithic(scene, _) => {
                 scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &Rect::ZERO);
             }
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Push {
@@ -207,9 +225,9 @@ impl WalkSink<'_> {
         }
     }
 
-    fn pop(&mut self) {
+    pub(super) fn pop(&mut self) {
         match self {
-            Self::Monolithic(scene) => scene.pop_layer(),
+            Self::Monolithic(scene, _) => scene.pop_layer(),
             Self::Compose(assembly) => assembly.push_op(ComposeOp::Pop),
         }
     }
@@ -269,7 +287,7 @@ struct Extents {
 struct Painting<'a, T> {
     document: &'a Document<T>,
     frame: &'a PaintOrder,
-    images: &'a dyn ImageStore,
+    images: &'a ImageRegistry,
     /// The document's device scale, applied once at the root: the paint order
     /// is in viewport CSS px and the scene is in device px.
     scale: Affine,
@@ -301,12 +319,13 @@ pub(crate) fn walk<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
+    pixels: &dyn crate::render::image::FrameImages,
 ) {
     let device = document.device();
     let ratio = f64::from(device.device_pixel_ratio().get());
     let cull = cull_rect(device.viewport_size(), ratio);
-    let mut sink = WalkSink::Monolithic(scene);
+    let mut sink = WalkSink::Monolithic(scene, pixels);
     walk_within(
         &mut sink,
         scratch,
@@ -325,7 +344,7 @@ pub(crate) fn walk_compose<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
 ) {
     let device = document.device();
     let ratio = f64::from(device.device_pixel_ratio().get());
@@ -352,10 +371,11 @@ pub(crate) fn walk_uncultured<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
+    pixels: &dyn crate::render::image::FrameImages,
 ) {
     let ratio = f64::from(document.device().device_pixel_ratio().get());
-    let mut sink = WalkSink::Monolithic(scene);
+    let mut sink = WalkSink::Monolithic(scene, pixels);
     walk_within(&mut sink, scratch, document, frame, images, ratio, None);
 }
 
@@ -366,7 +386,7 @@ fn walk_within<T>(
     scratch: &mut Scratch,
     document: &Document<T>,
     frame: &PaintOrder,
-    images: &dyn ImageStore,
+    images: &ImageRegistry,
     ratio: f64,
     cull: Option<Rect>,
 ) {
@@ -681,7 +701,7 @@ fn open_scope<T>(
 
     if mask::has_mask(style) {
         if let Some(fragment) = fragment.as_ref() {
-            mask::paint(sink.scene_for(chain), style, fragment, images);
+            mask::paint(sink, chain, style, fragment, images);
         }
         sink.push_layer_rect(
             chain,
@@ -749,7 +769,7 @@ fn paint_item<T>(
         scale,
     } = painting;
     sync_clips(sink, scratch, frame, item, scale);
-    let scene = sink.scene_for(frame.item_compose_chain(item));
+    let chain = frame.item_compose_chain(item);
     let transform = scale * local;
 
     match item.kind {
@@ -763,12 +783,18 @@ fn paint_item<T>(
             let fragment = BoxFragment::new(transform, item.size, item.radii, layout);
             let text_clip =
                 background::needs_text_clip(style).then(|| collect_text_clip(document, item.node));
-            shadow::paint_outset(scene, &mut scratch.paths, style, &fragment);
-            background::paint(scene, style, &fragment, images, text_clip.as_ref());
-            shadow::paint_inset(scene, &mut scratch.paths, style, &fragment);
+            // Each painter re-acquires the fragment rather than sharing one
+            // borrow across the item: an image draw between them is a
+            // program op, which cuts the open fragment. `fragment_for` cuts
+            // only when the chain actually changed, so re-acquiring where
+            // nothing was emitted costs a comparison.
+            shadow::paint_outset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            background::paint(sink, chain, style, &fragment, images, text_clip.as_ref());
+            shadow::paint_inset(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
             if let Some(source) = document.image_source(item.node) {
                 background::paint_replaced_content(
-                    scene,
+                    sink,
+                    chain,
                     style,
                     &fragment,
                     images,
@@ -776,8 +802,8 @@ fn paint_item<T>(
                     document.natural_size(item.node),
                 );
             }
-            border::paint(scene, &mut scratch.paths, style, &fragment);
-            border::paint_outline(scene, &mut scratch.paths, style, &fragment);
+            border::paint(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
+            border::paint_outline(sink.scene_for(chain), &mut scratch.paths, style, &fragment);
         }
         PaintItemKind::TextRun { element } => {
             let Some(style) = document.paint_style(element) else {
@@ -789,7 +815,14 @@ fn paint_item<T>(
             let decorations = text::propagated_decorations(document, element);
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
-            text::paint(scene, style, layout, transform, &decorations, gradient_box);
+            text::paint(
+                sink.scene_for(chain),
+                style,
+                layout,
+                transform,
+                &decorations,
+                gradient_box,
+            );
         }
     }
 }
@@ -1252,7 +1285,6 @@ mod tests {
     };
     use crate::Size2D;
     use crate::paint::equivalence::assert_scenes_identical;
-    use crate::render::image::NoImages;
     use crate::test_common::Doc;
     use crate::visual::CornerRadii;
 
@@ -1276,7 +1308,7 @@ mod tests {
 
     fn walk_twice(doc: &mut Doc) -> Frames {
         let frame = doc.dom.build_paint_order();
-        let images = NoImages;
+        let images = crate::render::image::ImageRegistry::default();
         let mut cultured = Scene::default();
         let mut cultured_scratch = Scratch::default();
         walk(
@@ -1285,6 +1317,7 @@ mod tests {
             &doc.dom,
             &frame,
             &images,
+            &crate::NoImages,
         );
         let mut uncultured = Scene::default();
         let mut uncultured_scratch = Scratch::default();
@@ -1294,6 +1327,7 @@ mod tests {
             &doc.dom,
             &frame,
             &images,
+            &crate::NoImages,
         );
         Frames {
             cultured,

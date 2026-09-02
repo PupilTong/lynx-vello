@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Output, Painter};
+use super::{Output, TestPainter};
 use crate::main::MainLink;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter};
@@ -13,8 +13,12 @@ fn document() -> LynxDocument {
 
 /// Starts a view over `document` and `entry`, the IO-free half of
 /// construction.
-fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &str) -> Painter {
-    Painter::start(
+fn view_over<R: EventRequester>(
+    events: Arc<R>,
+    document: LynxDocument,
+    entry: &str,
+) -> TestPainter {
+    TestPainter::start(
         document,
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
@@ -34,8 +38,8 @@ fn view_over<R: EventRequester>(events: Arc<R>, document: LynxDocument, entry: &
 /// link is handed back so a test can play the main thread's whole side of
 /// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
 /// ever service them.
-fn detached() -> (Painter, MainLink<NoWakeup>) {
-    Painter::with_link(
+fn detached() -> (TestPainter, MainLink<NoWakeup>) {
+    TestPainter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(NoWakeup),
@@ -53,37 +57,6 @@ fn frame_size_applies_the_device_scale_once() {
 fn frame_size_rejects_unbounded_targets() {
     let error = FrameSize::for_viewport(20_000.0, 100.0, 1.0).unwrap_err();
     assert!(error.to_string().contains("16384"));
-}
-
-/// The store a view is built over is the one the paint walk reads, and
-/// the pixels reach it without a copy: the buffer identity that comes
-/// back out of the main-thread document is the one that went in.
-#[test]
-fn the_installed_image_store_is_the_one_the_document_reads() {
-    let mut document = document();
-    let images = Arc::new(flashbulb::TestImages::new());
-    let pixels = flashbulb::rgba8(1, 1, vec![1, 2, 3, 255]);
-    let pixel_id = pixels.data.id();
-    images.insert("app:///pixel.png", pixels);
-    document.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
-
-    let mut view = view_over(
-        Arc::new(NoWakeup),
-        document,
-        "globalThis.renderPage = function () { __CreatePage('card', 0); };",
-    );
-    let (hit, miss) = view
-        .probe_document(move |tree| {
-            (
-                tree.image_store()
-                    .peek("app:///pixel.png")
-                    .map(|image| image.data.id()),
-                tree.image_store().peek("app:///missing.png").is_none(),
-            )
-        })
-        .expect("the main thread answers probes");
-    assert_eq!(hit, Some(pixel_id));
-    assert!(miss);
 }
 
 /// One drain of the notification FIFO applies every kind of thing that
@@ -156,7 +129,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     let (mut view, main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
-    let emit = |view: &mut Painter| {
+    let emit = |view: &mut TestPainter| {
         let mut decisions = InputDecisions::new();
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
@@ -326,7 +299,7 @@ fn a_view_that_presents_to_no_window_owes_no_frame() {
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = flume::unbounded();
-    let (painter, main) = Painter::with_link(
+    let (painter, main) = TestPainter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         Arc::new(WakeSignal(wake_sender)),
@@ -415,4 +388,50 @@ fn a_booted_view_commits_and_publishes() {
     assert_eq!(views, 2, "the boot script appends two views");
     assert!(connected, "both views are attached");
     assert!(laid_out, "the boot's final flush laid the page out");
+}
+
+/// A startup outcome that arrives while a host fetch is still pending must
+/// still end construction.
+///
+/// This is the hang that shipped in the first draft of the message-driven
+/// startup: while the painter awaited a host future it read nothing, and an
+/// outcome already sitting in the FIFO was never observed. `bobcat-main`
+/// mounts each pushed source while the painter's next fetch is already in
+/// flight, so a failure it decides there lands in exactly this window.
+///
+/// Natively no ordinary failure lands in that window; on wasm32 under
+/// `panic = "abort"` a trapping main thread's `ScriptRunError` is exactly it,
+/// and it is unreachable from an integration test. So the invariant is pinned
+/// here: whatever the painter is waiting on, it is also watching the link.
+#[tokio::test]
+async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
+    let (mut painter, main) = detached();
+
+    // The outcome is sent from another thread *after* the painter has had
+    // time to suspend on the entry fetch — which is the whole point: an
+    // outcome already in the FIFO would be seen before the fetch began and
+    // would never exercise the wait. `NeverAnswers` keeps the fetch pending
+    // forever, as a host is entitled to.
+    let notify = main.notify.clone();
+    let decided = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        notify.send(ToPainter::Started(Err(crate::view::EngineError::Thread {
+            name: "script",
+            message: "boot failed while a fetch was in flight".to_owned(),
+        }
+        .into())));
+    });
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        painter.serve_startup(Vec::new(), "app:///main.js".to_owned()),
+    )
+    .await
+    .expect("a decided outcome must not wait on a fetch that never answers")
+    .expect_err("the decided failure ends construction");
+    assert!(
+        format!("{error}").contains("boot failed while a fetch was in flight"),
+        "and it is the failure the main thread decided: {error}"
+    );
+    decided.join().expect("the deciding thread finishes");
 }

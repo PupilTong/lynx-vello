@@ -74,10 +74,13 @@ enum NodeContent {
     Text(String),
     Replaced {
         natural_size: NaturalSize,
-        /// The image source the paint walk presents to the document's
-        /// [`ImageStore`](crate::ImageStore), independent of `natural_size`:
-        /// the two arrive from different places and neither waits for the
-        /// other.
+        /// The image source the paint walk resolves against the document's
+        /// image registry, independent of `natural_size`.
+        ///
+        /// The two no longer arrive independently: a completed load carries
+        /// the image's own dimensions, and the registry sets `natural_size`
+        /// from them. A source with no size yet is one whose load has not
+        /// finished.
         source: Option<Box<str>>,
     },
     #[cfg(feature = "layout-test-utils")]

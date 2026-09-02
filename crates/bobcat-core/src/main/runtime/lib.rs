@@ -155,6 +155,13 @@ impl<R: EventRequester> TreeHandle<R> {
     /// this thread.
     fn flush(&mut self) {
         self.notify.publish_frame(self.document.commit());
+        // The walk that just ran is the one place that knows which image
+        // sources this frame needs; ask the painter to name them. Empty on
+        // every commit that met no new image, which is almost all of them.
+        let wanted = self.document.take_wanted_images();
+        if !wanted.is_empty() {
+            self.notify.request_images(wanted);
+        }
     }
 
     /// Commits and publishes only when something is stale — the tail of
@@ -395,8 +402,8 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         }
     }
 
-    pub(crate) fn note_images_changed(&mut self) {
-        self.tree.borrow_mut().document.note_images_changed();
+    pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
+        self.tree.borrow_mut().document.apply_image_events(events);
     }
 
     /// Runs `probe` against the owned document — the observation seam for

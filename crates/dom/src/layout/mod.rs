@@ -54,6 +54,21 @@ impl<T: Sync> Document<T> {
     }
 }
 
+/// The intrinsic size a completed image load reports, as layout wants it.
+///
+/// One conversion for the two places a load can reach layout — the report
+/// itself, and a source set on a node that had already loaded.
+#[must_use]
+pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "an intrinsic size large enough to lose precision here is far past anything \
+                  layout can present, and rounds harmlessly. It is deliberately not bounded: \
+                  the atlas limit applies to the decoded bitmap, not to this."
+    )]
+    NaturalSize::from_size(hughie::geometry::Size::new(width as f32, height as f32))
+}
+
 impl<T> Document<T> {
     /// Updates intrinsic dimensions and invalidates affected layout.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
@@ -79,8 +94,8 @@ impl<T> Document<T> {
             .map_or(NaturalSize::NONE, crate::Node::natural_size)
     }
 
-    /// Sets the source the paint walk presents to the installed
-    /// [`ImageStore`](crate::ImageStore) for this replaced element.
+    /// Sets the source the paint walk presents to the host's resource system
+    /// through [`FrameImages`](crate::FrameImages) for this replaced element.
     ///
     /// A replaced element's geometry comes from [`Self::set_natural_size`],
     /// which the caller sets separately once the store reports the image's
@@ -92,7 +107,7 @@ impl<T> Document<T> {
     /// hides every child, so a source arriving before any natural size is a
     /// layout change on its own.
     pub fn set_image_source(&mut self, id: crate::NodeId, source: Option<&str>) {
-        let (changed, became_replaced) = {
+        let (changed, became_replaced, previous) = {
             let node = self
                 .arenas_mut()
                 .get_mut(id)
@@ -102,11 +117,29 @@ impl<T> Document<T> {
                 "non-element NodeId passed to Document::set_image_source"
             );
             let was_replaced = node.is_replaced();
-            (node.set_image_source(source), !was_replaced)
+            let previous = node.image_source().map(str::to_owned);
+            (node.set_image_source(source), !was_replaced, previous)
         };
-        if changed && became_replaced {
+        if !changed {
+            return;
+        }
+        // The registry has to know which node presents which source, or a
+        // completed load has nobody to hand its intrinsic size to.
+        if let Some(previous) = previous {
+            self.images.unbind_node(&previous, id);
+        }
+        if let Some(source) = source {
+            self.images.bind_node(source, id);
+            // A source already loaded sizes the element in this same call,
+            // so it lays out correctly in the commit that first draws it
+            // rather than a frame later.
+            if let Some((width, height)) = self.images.dimensions_of(source) {
+                self.set_natural_size(id, natural_size(width, height));
+            }
+        }
+        if became_replaced {
             self.invalidate_layout(id);
-        } else if changed {
+        } else {
             self.note_visual_mutation();
         }
     }

@@ -3,7 +3,6 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hughie::geometry::Size;
@@ -55,11 +54,10 @@ pub struct Document<T> {
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::Painter>,
-    /// The embedder's decoded-image owner, read by the paint walk and by the
-    /// layer that drives loads. A document starts with the store that is
-    /// resident in nothing, so painting a page with images before an embedder
-    /// installs one skips them rather than failing.
-    pub(crate) image_store: Arc<dyn crate::render::image::ImageStore>,
+    /// The document's image name table. Holds no pixels and no host handle:
+    /// a page whose images have not loaded paints without them rather than
+    /// failing.
+    pub(crate) images: crate::render::image::ImageRegistry,
     pending_snapshots: SnapshotMap,
     relayout_roots: Vec<PendingRelayout>,
     relayout_root_ids: FxHashSet<NodeId>,
@@ -110,7 +108,7 @@ impl<T> Document<T> {
             tree,
             layout,
             painter: RefCell::new(crate::paint::painter::Painter::default()),
-            image_store: Arc::new(crate::render::image::NoImages),
+            images: crate::render::image::ImageRegistry::default(),
             pending_snapshots: SnapshotMap::new(),
             relayout_roots: Vec::new(),
             relayout_root_ids: FxHashSet::default(),
@@ -1039,9 +1037,17 @@ pub(crate) mod tests {
         assert!(document.render());
         assert!(!document.needs_render());
         assert!(!document.render());
-        assert!(!document.scene().encoding().draw_tags.is_empty());
+        assert!(
+            !document
+                .scene(&crate::NoImages)
+                .encoding()
+                .draw_tags
+                .is_empty()
+        );
 
-        document.note_images_changed();
+        document.apply_image_events(&[crate::ImageEvent::Failed {
+            source: std::sync::Arc::from("app:///a.png"),
+        }]);
         assert!(document.needs_render());
         assert!(document.render());
     }

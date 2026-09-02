@@ -62,9 +62,10 @@ pub fn capture_document<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
+    pixels: &impl dom::FrameImages,
 ) -> Result<Image, CaptureError> {
     let (width, height) = frame_size(document);
-    capture_document_sized(gpu, document, background, width, height)
+    capture_document_sized(gpu, document, background, pixels, width, height)
 }
 
 /// [`capture_document`] at an explicit pixel size.
@@ -72,11 +73,12 @@ pub fn capture_document_sized<T: Sync>(
     gpu: &mut Headless,
     document: &mut Document<T>,
     background: Color,
+    pixels: &impl dom::FrameImages,
     width: u32,
     height: u32,
 ) -> Result<Image, CaptureError> {
     document.render();
-    capture_scene_sized(gpu, &document.scene(), background, width, height)
+    capture_scene_sized(gpu, &document.scene(pixels), background, width, height)
 }
 
 /// Captures a scene retained by a document's painter.

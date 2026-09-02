@@ -13,9 +13,10 @@
 //! A view boots once, at construction: [`ViewSources`] carries everything it
 //! runs on and [`LynxView::new`] does the rest. Decoded images are one of
 //! those sources — the core neither fetches, decodes, caches nor retains a
-//! single pixel, and asks an embedder-supplied [`ImageStore`] for them by
-//! source string. Wiring that store into the future Lynx `<image>` element
-//! remains pending.
+//! single pixel. It asks the embedder's [`ResourceFetcher`](resource::ResourceFetcher),
+//! which is the one resource system a view has, for them by source string:
+//! named through `request_image`, answered through [`ImageReports`], and read
+//! back synchronously while the frame composes.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -40,7 +41,10 @@ pub mod input {
     pub use dom::input::{InputEvent, InputKind, PointerId, PointerKind, PointerPhase};
 }
 
-pub use dom::{FontBlob, ImageFuture, ImageStore, ImageStoreError};
+pub use dom::{
+    FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, MAX_RENDERABLE_DIMENSION,
+    NoImages, is_renderable, vello,
+};
 pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]

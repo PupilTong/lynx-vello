@@ -75,10 +75,14 @@ impl PlaneBank {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         frame: &crate::visual::CommittedFrame,
+        images: &[Option<vello::peniko::ImageData>],
     ) -> Result<(), GpuError> {
         let plan = frame
             .composite_plan()
             .expect("prepare bakes a layered frame's plan");
+        // The commit alone: a load that changes what a plane draws also
+        // dirties the document, and every rebuild takes a new commit id, so
+        // there is nothing an image could change that this does not catch.
         if self.commit == Some(frame.commit_id()) {
             for image in &self.images {
                 renderer.mark_override_image_dirty(image);
@@ -120,7 +124,7 @@ impl PlaneBank {
                 }
             }
             self.bake_scene.reset();
-            frame.bake_plane(index, &mut self.bake_scene);
+            frame.bake_plane(index, &mut self.bake_scene, images);
             renderer
                 .render_to_texture(
                     device,
@@ -240,6 +244,7 @@ impl Headless {
     pub fn prepare_planes(
         &mut self,
         frame: &crate::visual::CommittedFrame,
+        images: &[Option<vello::peniko::ImageData>],
     ) -> Result<(), GpuError> {
         let Self {
             context,
@@ -249,7 +254,7 @@ impl Headless {
             ..
         } = self;
         let handle = &context.devices[*device_index];
-        planes.prepare(renderer, &handle.device, &handle.queue, frame)
+        planes.prepare(renderer, &handle.device, &handle.queue, frame, images)
     }
 
     /// The retained planes' registered images; see [`PlaneBank::images`].

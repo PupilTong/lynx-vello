@@ -7,9 +7,10 @@
 //! paint, frame scheduling, the script and render threads — is the engine's;
 //! every CLI event handler is a relay into it.
 //!
-//! It installs no `bobcat_core::ImageStore`, so a page's images paint as
-//! nothing: fetching and decoding them is embedder work this runner does not
-//! do.
+//! Its resource system serves the decoded input's own bytes and nothing
+//! else — `FrameImages::read` always answers `None` — so a page's images
+//! paint as nothing: fetching and decoding them is embedder work this runner
+//! does not do.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // The workspace-wide `unsafe_code = "warn"` says a block may exist; this says

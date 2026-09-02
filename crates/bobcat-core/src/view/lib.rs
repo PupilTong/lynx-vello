@@ -13,22 +13,19 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dom::input::InputEvent;
-use dom::{CommittedFrame, FontBlob, ImageStore, NodeId, Vector2D};
-use tokio::sync::oneshot;
+use dom::{CommittedFrame, FontBlob, NodeId, Vector2D};
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
-use crate::main::{
-    MainLink, MainThreadHome, StartupRequest, StartupResult, StartupSuccess, ToPainterSender,
-    spawn_main_thread,
-};
+use crate::main::{MainLink, MainThreadHome, ToPainterSender, spawn_main_thread};
 pub use crate::paint::WindowTarget;
-use crate::paint::{Painter, PainterLink};
+use crate::paint::{Output, Painter, PainterLink};
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
+use crate::style::PreparsedStyleSheet;
 
 /// View metrics, copied across the view's one thread boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,7 +161,11 @@ impl fmt::Debug for DrawTarget {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
-/// The commit id and scroll-intent generation composing one drawn frame.
+/// What a rendered target is identified by: the commit it came from, and
+/// the scroll generation it was composed at.
+///
+/// Images need no term of their own. A load that changes what a frame draws
+/// dirties the document, and every rebuild takes a new commit id.
 pub(crate) type ComposeKey = (u64, u64);
 
 #[derive(Debug, thiserror::Error)]
@@ -200,11 +201,6 @@ pub enum LynxViewError {
     InvalidScriptEncoding { url: String, message: String },
     #[error("stylesheet `{url}` is not valid UTF-8: {message}")]
     InvalidStyleSheetEncoding { url: String, message: String },
-    #[error("the image store could not load `{image_source}`: {message}")]
-    Image {
-        image_source: String,
-        message: String,
-    },
 }
 
 #[derive(Debug)]
@@ -262,41 +258,40 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
-/// Everything transferred to `bobcat-main` before the entry module starts.
-#[derive(Clone)]
+/// Everything a view is built from.
+///
+/// It carries no resource system, and has no field that could hold one: the
+/// host's fetcher belongs to the painter, is passed to [`LynxView::new`]
+/// separately, and stays on that thread. [`LynxView::new`] splits this in
+/// two — the document inputs cross to `bobcat-main`, while the specifiers
+/// stay with the painter that fetches them, so that thread never holds a
+/// specifier and no fetch of its asking is even constructible.
+#[derive(Debug)]
 pub struct ViewSources {
-    /// Owned by `bobcat-main` for the complete source-loading phase. The
-    /// fetcher's own implementation decides where actual network or file IO
-    /// runs; completion and document mutation resume on the main thread.
-    pub resource_fetcher: Arc<dyn ResourceFetcher>,
+    pub config: PageConfig,
     pub fonts: Vec<FontBlob>,
     pub default_font_family: Option<String>,
-    pub image_store: Option<Arc<dyn ImageStore>>,
     pub style_sheets: Vec<String>,
     pub entry: String,
 }
 
+/// The document half of [`ViewSources`]: what crosses to `bobcat-main`.
+pub(crate) struct MainSources {
+    pub(crate) config: PageConfig,
+    pub(crate) fonts: Vec<FontBlob>,
+    pub(crate) default_font_family: Option<String>,
+}
+
 impl ViewSources {
     #[must_use]
-    pub fn new(resource_fetcher: Arc<dyn ResourceFetcher>, entry: impl Into<String>) -> Self {
+    pub fn new(entry: impl Into<String>) -> Self {
         Self {
-            resource_fetcher,
+            config: PageConfig::default(),
             fonts: Vec::new(),
             default_font_family: None,
-            image_store: None,
             style_sheets: Vec::new(),
             entry: entry.into(),
         }
-    }
-}
-
-impl fmt::Debug for ViewSources {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ViewSources")
-            .field("style_sheets", &self.style_sheets)
-            .field("entry", &self.entry)
-            .finish_non_exhaustive()
     }
 }
 
@@ -314,13 +309,12 @@ impl fmt::Debug for ViewSources {
 /// on its own event loop therefore takes a turn after it hands a fact in;
 /// facts from the Lynx main thread arrive with the construction-time
 /// [`EventRequester`] wakeup.
-pub struct LynxView {
-    painter: Painter,
+pub struct LynxView<F> {
+    painter: Painter<F>,
     main: MainThreadHome,
-    image_store: Arc<dyn ImageStore>,
 }
 
-impl fmt::Debug for LynxView {
+impl<F> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
@@ -329,7 +323,7 @@ impl fmt::Debug for LynxView {
     }
 }
 
-impl Drop for LynxView {
+impl<F> Drop for LynxView<F> {
     fn drop(&mut self) {
         // Goodbye first, join second. The painter holds the only sender on
         // the FIFO `bobcat-main` parks on, so a shutdown that is not sent
@@ -344,7 +338,7 @@ impl Drop for LynxView {
     }
 }
 
-impl LynxView {
+impl<F: ResourceFetcher> LynxView<F> {
     /// Starts `bobcat-main`, builds the draw target on the calling thread,
     /// and waits asynchronously until the main thread has created its
     /// document, loaded and mounted every source, and booted the entry
@@ -361,33 +355,72 @@ impl LynxView {
     /// or stops startup before `QuickJS` begins, releases the target, and
     /// joins `bobcat-main`. If synchronous startup JavaScript is already
     /// running, teardown waits for that work to return before the main thread
-    /// can be joined.
-    pub async fn new<R: EventRequester>(
-        config: PageConfig,
+    /// can be joined — except on wasm32 under `panic = "abort"`, where a
+    /// trapped Worker could never signal the join and teardown therefore
+    /// never joins: the thread is told to stop and left to exit on its own.
+    pub async fn new<R: EventRequester, B>(
         event_requester: Arc<R>,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
         target: DrawTarget,
+        resources: B,
         sources: ViewSources,
-    ) -> Result<Self, LynxViewError> {
+    ) -> Result<Self, LynxViewError>
+    where
+        B: FnOnce(dom::ImageReports) -> F,
+    {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        let (started_sender, started) = oneshot::channel();
         let (painter_link, main_link) = main_link(event_requester);
+        // The split: document inputs cross to `bobcat-main`, specifiers stay
+        // with the thread that owns the fetcher. Neither side ever asks the
+        // other for what it already holds.
+        let ViewSources {
+            config,
+            fonts,
+            default_font_family,
+            style_sheets,
+            entry,
+        } = sources;
         let main = spawn_main_thread(
-            StartupRequest::new(config, viewport, sources),
+            viewport,
+            MainSources {
+                config,
+                fonts,
+                default_font_family,
+            },
             main_link,
-            started_sender,
         )?;
+        // The link goes into the guard before the first await, so every exit
+        // path has a real goodbye to send — including the one where the draw
+        // target failed and there is no painter yet.
         let mut startup = ViewStartup {
+            link: Some(painter_link),
             painter: None,
             main: Some(main),
-            started: Some(started),
         };
-        startup.painter = Some(Painter::new(viewport, frame_size, painter_link, target).await?);
-        let success = startup.wait().await?;
-        Ok(startup.finish(success))
+        let output = Output::build(target, frame_size).await?;
+        // The store is built here, on the thread that owns the painter and
+        // always will, out of the sink it reports through — one sink, one
+        // store, one view. Nothing about it ever crosses a thread, which is
+        // why it needs neither `Send` nor `Sync`, and why it is a type rather
+        // than a trait object.
+        startup.painter = Some(Painter::with_output(
+            viewport,
+            frame_size,
+            startup
+                .link
+                .take()
+                .expect("the link is held until the painter is"),
+            output,
+            resources,
+        ));
+        // Pushing the sources *is* the wait for `bobcat-main`'s startup
+        // message: one loop over one inbox, so there is no arm to forget and
+        // no second thing to wait on.
+        startup.serve(style_sheets, entry).await?;
+        Ok(startup.finish())
     }
 
     /// Routes one normalized OS input event against the frame the painter
@@ -481,74 +514,75 @@ impl LynxView {
         self.painter.capture()
     }
 
-    /// Resolves an image through the embedder's store and tells the document
-    /// its pixels are resident.
-    pub async fn load_image(&self, source: &str) -> Result<(), LynxViewError> {
-        let store = Arc::clone(&self.image_store);
-        store
-            .get(source)
-            .await
-            .map_err(|error| LynxViewError::Image {
-                image_source: source.to_owned(),
-                message: error.to_string(),
-            })?;
-        self.painter.note_images_changed();
-        Ok(())
-    }
-
-    pub fn prefetch_image(&self, source: &str) {
-        self.image_store.prefetch(source);
+    /// Warms `sources` in the store, ahead of any paint walk meeting them.
+    ///
+    /// There is no matching "load and tell me when it is done": discovery is
+    /// automatic. The paint walk reports every source it meets, the painter
+    /// names it against the store, and the document relayouts when the pixels
+    /// and their intrinsic size arrive. This only moves that work earlier.
+    ///
+    /// Applies immediately, like every other call here — the painter is this
+    /// thread.
+    pub fn prefetch_images<I, S>(&mut self, sources: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Arc<str>>,
+    {
+        self.painter
+            .prefetch_images(sources.into_iter().map(Into::into).collect());
     }
 }
 
 /// A half-built view whose destructor is the cancellation protocol for
 /// [`LynxView::new`].
-struct ViewStartup {
-    painter: Option<Painter>,
+struct ViewStartup<F> {
+    /// Held only until the painter exists, so a draw target that fails still
+    /// leaves something able to say goodbye to `bobcat-main`.
+    link: Option<PainterLink>,
+    painter: Option<Painter<F>>,
     main: Option<MainThreadHome>,
-    started: Option<oneshot::Receiver<StartupResult>>,
 }
 
-impl ViewStartup {
-    async fn wait(&mut self) -> Result<StartupSuccess, LynxViewError> {
-        self.started
+impl<F: ResourceFetcher> ViewStartup<F> {
+    async fn serve(
+        &mut self,
+        style_sheets: Vec<String>,
+        entry: String,
+    ) -> Result<(), LynxViewError> {
+        self.painter
             .as_mut()
-            .expect("startup result is present until the view is built")
+            .expect("the painter exists before startup is served")
+            .serve_startup(style_sheets, entry)
             .await
-            .map_err(|_| EngineError::Thread {
-                name: "script",
-                message: "the Lynx main thread stopped before startup completed".to_owned(),
-            })?
     }
 
-    fn finish(mut self, success: StartupSuccess) -> LynxView {
-        self.started.take();
+    fn finish(mut self) -> LynxView<F> {
         LynxView {
             painter: self.painter.take().expect("startup owns the painter"),
             main: self.main.take().expect("startup owns the Lynx main thread"),
-            image_store: success.image_store,
         }
     }
 }
 
-impl Drop for ViewStartup {
+impl<F> Drop for ViewStartup<F> {
     fn drop(&mut self) {
-        // Publish cancellation before closing the result receiver, so a
-        // resource that becomes ready in the same poll cannot proceed into
-        // QuickJS before bobcat-main observes the flag.
+        // Cancellation first: `bobcat-main` checks the flag at every gate
+        // between sources, so a source that lands in the same instant cannot
+        // carry boot onward into QuickJS.
         if let Some(main) = self.main.as_ref() {
             main.cancel();
         }
-        // Closing wakes `Sender::closed`, which drops any pending
-        // ResourceFuture on bobcat-main.
-        if let Some(started) = self.started.as_mut() {
-            started.close();
-        }
-        // The painter's goodbye must precede the join, exactly as it does in
-        // `Drop for LynxView`: a successfully booted main thread is parked on
-        // the FIFO the painter holds the only sender for.
+        // Then the goodbye, which must precede the join exactly as it does in
+        // `Drop for LynxView`: `bobcat-main` parks on the FIFO whose only
+        // sender lives on this side, so a shutdown not sent is a shutdown
+        // that never arrives. Either the painter holds that sender, or — if
+        // the draw target failed before one existed — the bare link still
+        // does. Pending resource futures die with the painter, on this
+        // thread, which is the thread that created them.
         if let Some(painter) = self.painter.as_mut() {
             painter.shutdown();
+        } else if let Some(link) = self.link.as_ref() {
+            link.send(ToMain::Shutdown);
         }
         if let Some(main) = self.main.as_mut() {
             main.shutdown();
@@ -575,10 +609,42 @@ pub(crate) enum ToMain {
     Refill {
         offsets: Vec<(NodeId, Vector2D<f32>)>,
     },
-    NoteImagesChanged,
+    /// The host's image reports: completed or failed loads. No variant can
+    /// carry pixels, which is what makes "`ImageData` never crosses a
+    /// channel" a property of the type.
+    ImageEvents(Vec<dom::ImageEvent>),
+    /// One startup source, pushed by the painter unasked.
+    ///
+    /// The order of these sends is the protocol: stylesheets in cascade
+    /// order, the entry last, so `bobcat-main` mounts in arrival order and
+    /// the entry's arrival is what completes its wait. Only ever a success:
+    /// a fetch that fails is the startup failure, and the painter is the
+    /// side that already holds it, so it returns from construction rather
+    /// than sending the error across and waiting to be told back what it
+    /// just decided.
+    SourceLoaded {
+        source: LoadedSource,
+    },
     Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
+}
+
+/// A stylesheet in the one shape the document mounts.
+///
+/// Text arrives as `String` rather than bytes: UTF-8 validation happens on
+/// the painter, where the resolved URL the error has to name is in hand.
+#[derive(Debug)]
+pub(crate) enum StyleSheetSource {
+    Preparsed(Arc<PreparsedStyleSheet>),
+    Text(String),
+}
+
+/// A source, resolved and decoded by the thread that owns the fetcher.
+#[derive(Debug)]
+pub(crate) enum LoadedSource {
+    StyleSheet(StyleSheetSource),
+    Entry { source: String, url: String },
 }
 
 /// Lynx main → painter: everything the main thread has to say back.
@@ -590,6 +656,14 @@ pub(crate) enum ToPainter {
     ListenerAvailable(Arc<str>),
     ListenerUnavailable(Arc<str>),
     BeginFrameServiced(u64),
+    /// Sources the last paint walk met that the store has not been asked for.
+    RequestImages(Vec<Arc<str>>),
+    /// How startup went — the message that replaces the startup oneshot.
+    ///
+    /// It rides this FIFO *behind* `ScriptFinished` and `FrameChanged`, so a
+    /// painter that has seen it has already adopted boot's frame and buffered
+    /// boot's lifecycle event for the host's first `pump`.
+    Started(Result<(), LynxViewError>),
 }
 
 /// The latest committed frame, and only ever the latest.

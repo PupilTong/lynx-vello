@@ -9,12 +9,12 @@
 use std::sync::Arc;
 
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice, StyleSheetPayload, StyleSheetResponse,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
+    StyleSheetPayload, StyleSheetResponse,
 };
-use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
+use bobcat_core::{ImageReports, PageConfig, PreparsedStyleSheet, ViewSources};
 use http::HeaderMap;
 use url::Url;
 
@@ -94,37 +94,22 @@ impl ProgramResourceFetcher {
         self.style_sheet_url.as_ref()
     }
 
-    fn error<T>(
+    fn error(
         request_id: Option<RequestId>,
         kind: ResourceErrorKind,
         phase: ResourceErrorPhase,
         locator: Option<Arc<str>>,
         message: &'static str,
-    ) -> ResourceFuture<'static, T> {
-        Box::pin(async move {
-            Err(ResourceError {
-                request_id,
-                kind,
-                phase,
-                locator,
-                status: None,
-                message: Arc::from(message),
-                retry: RetryAdvice::Never,
-            })
-        })
-    }
-
-    fn unsupported<T>(
-        request_id: Option<RequestId>,
-        phase: ResourceErrorPhase,
-    ) -> ResourceFuture<'static, T> {
-        Self::error(
+    ) -> ResourceError {
+        ResourceError {
             request_id,
-            ResourceErrorKind::UnsupportedOperation,
+            kind,
             phase,
-            None,
-            "the CLI in-memory fetcher does not support this operation",
-        )
+            locator,
+            status: None,
+            message: Arc::from(message),
+            retry: RetryAdvice::Never,
+        }
     }
 }
 
@@ -140,7 +125,10 @@ impl ResourceFetcher for ProgramResourceFetcher {
         }
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         let request_id = request.context.id;
         let locator = request.resource.specifier.clone();
 
@@ -153,13 +141,13 @@ impl ResourceFetcher for ProgramResourceFetcher {
                 .and_then(|base_url| base_url.join(&locator))
         });
         let Ok(url) = resolved_url else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::InvalidUrl,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "resource locator is not a valid URL",
-            );
+            ));
         };
         let is_background_script = self
             .background_script
@@ -169,29 +157,30 @@ impl ResourceFetcher for ProgramResourceFetcher {
             && !is_background_script
             && Some(&url) != self.style_sheet_url.as_ref()
         {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "resource is not present in the decoded input",
-            );
+            ));
         }
 
         let resource = request.resource;
         let cache_key = Some(Arc::from(url.as_str()));
-        Box::pin(async move {
-            Ok(ResolvedLocator {
-                resource,
-                url,
-                rewrite_chain: Vec::new(),
-                locality: ResourceLocality::Local,
-                cache_key,
-            })
+        Ok(ResolvedLocator {
+            resource,
+            url,
+            rewrite_chain: Vec::new(),
+            locality: ResourceLocality::Local,
+            cache_key,
         })
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         let request_id = request.context.id;
         let locator: Arc<str> = Arc::from(request.resource.url.as_str());
         let source = if request.resource.url == self.script_url {
@@ -203,38 +192,36 @@ impl ResourceFetcher for ProgramResourceFetcher {
         {
             source.clone()
         } else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
                 "resource is not present in the decoded input",
-            );
+            ));
         };
         let content_length = source.len() as u64;
 
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(ResourceResponse {
-                metadata: ResourceMetadata {
-                    request_id,
-                    resource,
-                    headers: HeaderMap::default(),
-                    content_length: Some(content_length),
-                    media_type: Some(Arc::from("text/javascript; charset=utf-8")),
-                    source: ResourceSource::MemoryCache,
-                    cache_status: CacheStatus::default(),
-                    timing: ResourceTiming::default(),
-                },
-                bytes: source.as_bytes().to_vec().into(),
-            })
+        Ok(ResourceResponse {
+            metadata: ResourceMetadata {
+                request_id,
+                resource,
+                headers: HeaderMap::default(),
+                content_length: Some(content_length),
+                media_type: Some(Arc::from("text/javascript; charset=utf-8")),
+                source: ResourceSource::MemoryCache,
+                cache_status: CacheStatus::default(),
+                timing: ResourceTiming::default(),
+            },
+            bytes: source.as_bytes().to_vec().into(),
         })
     }
 
-    fn fetch_style_sheet(
+    async fn fetch_style_sheet(
         &self,
         request: ResourceRequest,
-    ) -> ResourceFuture<'_, StyleSheetResponse> {
+    ) -> Result<StyleSheetResponse, ResourceError> {
         let request_id = request.context.id;
         let locator: Arc<str> = Arc::from(request.resource.url.as_str());
         let Some(sheet) = self
@@ -242,13 +229,13 @@ impl ResourceFetcher for ProgramResourceFetcher {
             .clone()
             .filter(|_| Some(&request.resource.url) == self.style_sheet_url.as_ref())
         else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
                 "the decoded input carries no stylesheet at this URL",
-            );
+            ));
         };
         let (content_length, payload) = match sheet {
             ProgramStyleSheet::Text(source) => {
@@ -261,25 +248,29 @@ impl ResourceFetcher for ProgramResourceFetcher {
             ProgramStyleSheet::Preparsed(sheet) => (None, StyleSheetPayload::Preparsed(sheet)),
         };
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(StyleSheetResponse {
-                metadata: ResourceMetadata {
-                    request_id,
-                    resource,
-                    headers: HeaderMap::default(),
-                    content_length,
-                    media_type: Some(Arc::from("text/css; charset=utf-8")),
-                    source: ResourceSource::MemoryCache,
-                    cache_status: CacheStatus::default(),
-                    timing: ResourceTiming::default(),
-                },
-                payload,
-            })
+        Ok(StyleSheetResponse {
+            metadata: ResourceMetadata {
+                request_id,
+                resource,
+                headers: HeaderMap::default(),
+                content_length,
+                media_type: Some(Arc::from("text/css; charset=utf-8")),
+                source: ResourceSource::MemoryCache,
+                cache_status: CacheStatus::default(),
+                timing: ResourceTiming::default(),
+            },
+            payload,
         })
     }
+}
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
+/// The CLI serves no images: a page it renders draws whatever its own
+/// stylesheet describes, and nothing fetches a bitmap. Every image draw
+/// therefore resolves to nothing, which is what an unloaded image looks like
+/// anyway.
+impl bobcat_core::FrameImages for ProgramResourceFetcher {
+    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        None
     }
 }
 
@@ -401,17 +392,23 @@ impl Program {
     /// input carried, if any, and its entry MTS module.
     pub(crate) fn sources(&self) -> ViewSources {
         ViewSources {
+            config: self.config,
             style_sheets: self
                 .resource_fetcher
                 .style_sheet_url()
                 .map(Url::to_string)
                 .into_iter()
                 .collect(),
-            ..ViewSources::new(
-                Arc::new(self.resource_fetcher.clone()),
-                self.script_url.to_string(),
-            )
+            ..ViewSources::new(self.script_url.to_string())
         }
+    }
+
+    /// Builds the resource system this input is served by, for the painter
+    /// to own. The CLI loads no image asynchronously, so it has nothing to
+    /// report and drops the sink.
+    pub(crate) fn resources(&self) -> impl FnOnce(ImageReports) -> ProgramResourceFetcher {
+        let fetcher = self.resource_fetcher.clone();
+        move |_sink| fetcher
     }
 
     /// Reports input features the current runtime retains only approximately

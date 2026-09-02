@@ -36,7 +36,7 @@ fn background_clip_text_clips_to_glyph_ink() {
     doc.text(holder, "HH HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene();
+    let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -71,7 +71,7 @@ fn plain_background_covers_the_box() {
     doc.text(holder, "HH HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene();
+    let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -99,7 +99,7 @@ fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     doc.text(holder, "HH");
 
     doc.dom.render();
-    let scene = doc.dom.scene();
+    let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -132,7 +132,7 @@ fn outline_rings_the_border_box() {
     doc.el(root, "out");
 
     doc.dom.render();
-    let scene = doc.dom.scene();
+    let scene = doc.dom.scene(&dom::NoImages);
     let pixels = gpu
         .render(&scene, 200, 100, Color::WHITE)
         .expect("headless render");
@@ -168,7 +168,7 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
     doc.el(root, "effect");
 
     doc.dom.render();
-    let scene = doc.dom.scene();
+    let scene = doc.dom.scene(&dom::NoImages);
     let standalone = gpu
         .render(&scene, 128, 128, Color::WHITE)
         .expect("standalone headless render");
@@ -230,5 +230,106 @@ fn isolated_atlas_cell_matches_standalone_group_effects() {
         pixel(&appended, ISOLATION_ATLAS_WIDTH, 264, 96),
         [219, 39, 119, 255],
         "outset effects leaked into the right neighbor"
+    );
+}
+
+/// An intervening image-free render costs the atlas its contents. This
+/// test currently FAILS, and it documents a live defect rather than a
+/// migration hazard.
+///
+/// Mechanism, confirmed in vello 0.9.0's own source: an encoding with no
+/// patches at all — solid paths only, so no image, no gradient ramp and no
+/// glyph run — takes `Resolver::resolve`'s early return and reports
+/// `Images::default()` (`vello_encoding/src/resolve.rs:188-192`). That
+/// zero-sized report clamps the atlas to 1x1
+/// (`vello/src/render.rs:160-161`), which no longer matches the persistent
+/// proxy, so the renderer frees the real atlas texture and installs a 1x1
+/// one (`render.rs:166-171`). `ImageCache` is not told: its entries stay
+/// resident and clean (`image_cache.rs:148-160`), so the next render
+/// re-uses the freed slot and samples nothing. The control render below
+/// pins that renderer reuse alone is fine — only the intervening
+/// patch-free render breaks it.
+///
+/// Fixing it needs the set of images the next frame will draw, so those
+/// entries can be marked dirty (`Renderer::mark_override_image_dirty` →
+/// `Resolver::mark_image_dirty`, which applies to any resident image, not
+/// only overrides). Nothing in the tree holds that set today — the images
+/// are buried inside scene encodings. The painter-side image migration
+/// creates it, and un-ignores this test.
+#[test]
+#[ignore = "known defect: a patch-free render frees the atlas; fixed with the painter-side image set"]
+fn an_image_survives_an_intervening_image_free_render() {
+    use dom::vello::peniko::{ImageBrush, ImageQuality, ImageSampler};
+
+    let mut gpu = headless("an_image_survives_an_intervening_image_free_render");
+
+    // A 2x2 image whose four texels are distinct, so a blank-atlas read is
+    // not mistakable for a correct one.
+    let image = flashbulb::rgba8(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ],
+    );
+
+    let draw_image = || {
+        let mut scene = Scene::new();
+        scene.draw_image(
+            ImageBrush {
+                image: &image,
+                // Nearest, so a texel reads back exactly and a filtered
+                // edge cannot be mistaken for a wrong atlas.
+                sampler: ImageSampler::default().with_quality(ImageQuality::Low),
+            },
+            // 2x2 texels scaled to fill the 64x64 target.
+            Affine::scale(32.0),
+        );
+        scene
+    };
+
+    let mut solids = Scene::new();
+    solids.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        Color::from_rgb8(0x11, 0x22, 0x33),
+        None,
+        &Rect::new(0.0, 0.0, 64.0, 64.0),
+    );
+
+    let first = gpu
+        .render(&draw_image(), 64, 64, Color::WHITE)
+        .expect("first image render");
+    assert_eq!(
+        pixel(&first, 64, 16, 16),
+        [255, 0, 0, 255],
+        "the first render must show the image's own texels"
+    );
+
+    // Control: back-to-back image renders, nothing in between. This isolates
+    // the intervening render as the cause rather than renderer reuse itself.
+    let control = gpu
+        .render(&draw_image(), 64, 64, Color::WHITE)
+        .expect("control image render");
+    assert_eq!(
+        control, first,
+        "two image renders in a row must agree — renderer reuse alone is fine"
+    );
+
+    let _ = gpu
+        .render(&solids, 64, 64, Color::WHITE)
+        .expect("intervening image-free render");
+    let third = gpu
+        .render(&draw_image(), 64, 64, Color::WHITE)
+        .expect("image render after the image-free one");
+
+    assert_eq!(
+        pixel(&third, 64, 16, 16),
+        [255, 0, 0, 255],
+        "an image-free render between two identical image renders must not \
+         change what the second one draws"
     );
 }

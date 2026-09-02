@@ -1,8 +1,10 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -10,10 +12,9 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::resource::{
-    CacheStatus, HttpRequest, HttpResponse, RequestId, ResolveRequest, ResolvedLocator,
-    ResourceCapability, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
-    ResourceFuture, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
-    ResourceSource, ResourceTiming, RetryAdvice,
+    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
+    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
@@ -113,7 +114,11 @@ impl Future for EventWait {
 
 /// Browser-owned resources registered by the Render Worker after it applies
 /// the browser's URL, fetch, CORS, cache, and credentials policies.
-type BrowserResourceRegistry = Mutex<HashMap<String, Arc<[u8]>>>;
+///
+/// `Rc`-held and touched only on the Render Worker — the fetcher never
+/// leaves the painter's thread — so interior mutability is a `RefCell`, not
+/// a lock.
+type BrowserResourceRegistry = RefCell<HashMap<String, Arc<[u8]>>>;
 
 #[derive(Debug, Default)]
 struct BrowserResources {
@@ -122,10 +127,7 @@ struct BrowserResources {
 
 impl BrowserResources {
     fn clear(&self) {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .clear();
+        self.resources.borrow_mut().clear();
     }
 
     fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
@@ -141,59 +143,36 @@ impl BrowserResources {
             .map_err(|error| js_error(format!("the {label} URL `{url}` is invalid: {error}")))?;
         let normalized = url.to_string();
         self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
+            .borrow_mut()
             .insert(normalized.clone(), Arc::from(bytes));
         Ok(normalized)
     }
 
     fn contains_url(&self, url: &Url) -> bool {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .contains_key(url.as_str())
+        self.resources.borrow().contains_key(url.as_str())
     }
 
     fn registered_bytes(&self, url: &Url) -> Option<Arc<[u8]>> {
-        self.resources
-            .lock()
-            .unwrap_or_else(|error| panic!("the browser resource map is poisoned: {error}"))
-            .get(url.as_str())
-            .cloned()
+        self.resources.borrow().get(url.as_str()).cloned()
     }
 
-    fn error<T>(
+    fn error(
         request_id: Option<RequestId>,
         kind: ResourceErrorKind,
         phase: ResourceErrorPhase,
         locator: Option<Arc<str>>,
         message: impl Into<Arc<str>>,
-    ) -> ResourceFuture<'static, T> {
+    ) -> ResourceError {
         let message = message.into();
-        Box::pin(async move {
-            Err(ResourceError {
-                request_id,
-                kind,
-                phase,
-                locator,
-                status: None,
-                message,
-                retry: RetryAdvice::Never,
-            })
-        })
-    }
-
-    fn unsupported<T>(
-        request_id: Option<RequestId>,
-        phase: ResourceErrorPhase,
-    ) -> ResourceFuture<'static, T> {
-        Self::error(
+        ResourceError {
             request_id,
-            ResourceErrorKind::UnsupportedOperation,
+            kind,
             phase,
-            None,
-            "the browser source registry does not support this operation",
-        )
+            locator,
+            status: None,
+            message,
+            retry: RetryAdvice::Never,
+        }
     }
 }
 
@@ -202,7 +181,10 @@ impl ResourceFetcher for BrowserResources {
         capability == ResourceCapability::BufferedResource
     }
 
-    fn resolve_locator(&self, request: ResolveRequest) -> ResourceFuture<'_, ResolvedLocator> {
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
         let request_id = request.context.id;
         let locator = request.resource.specifier.clone();
 
@@ -215,72 +197,76 @@ impl ResourceFetcher for BrowserResources {
                 .and_then(|base| base.join(&locator))
         });
         let Ok(url) = parsed else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::InvalidUrl,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "resource locator is not a valid URL",
-            );
+            ));
         };
         if !self.contains_url(&url) {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Resolve,
                 Some(locator),
                 "the Render Worker has not registered this URL",
-            );
+            ));
         }
 
         let resource = request.resource;
         let cache_key = Some(Arc::from(url.as_str()));
-        Box::pin(async move {
-            Ok(ResolvedLocator {
-                resource,
-                url,
-                rewrite_chain: Vec::new(),
-                locality: ResourceLocality::Local,
-                cache_key,
-            })
+        Ok(ResolvedLocator {
+            resource,
+            url,
+            rewrite_chain: Vec::new(),
+            locality: ResourceLocality::Local,
+            cache_key,
         })
     }
 
-    fn fetch_resource(&self, request: ResourceRequest) -> ResourceFuture<'_, ResourceResponse> {
+    async fn fetch_resource(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<ResourceResponse, ResourceError> {
         let request_id = request.context.id;
         let locator: Arc<str> = Arc::from(request.resource.url.as_str());
         let source = self.registered_bytes(&request.resource.url);
         let Some(source) = source else {
-            return Self::error(
+            return Err(Self::error(
                 Some(request_id),
                 ResourceErrorKind::NotFound,
                 ResourceErrorPhase::Open,
                 Some(locator),
                 "the registered resource disappeared before it was loaded",
-            );
+            ));
         };
         let content_length = source.len() as u64;
 
         let resource = request.resource;
-        Box::pin(async move {
-            Ok(ResourceResponse {
-                metadata: ResourceMetadata {
-                    request_id,
-                    resource,
-                    headers: HeaderMap::default(),
-                    content_length: Some(content_length),
-                    media_type: None,
-                    source: ResourceSource::MemoryCache,
-                    cache_status: CacheStatus::default(),
-                    timing: ResourceTiming::default(),
-                },
-                bytes: source.as_ref().to_vec().into(),
-            })
+        Ok(ResourceResponse {
+            metadata: ResourceMetadata {
+                request_id,
+                resource,
+                headers: HeaderMap::default(),
+                content_length: Some(content_length),
+                media_type: None,
+                source: ResourceSource::MemoryCache,
+                cache_status: CacheStatus::default(),
+                timing: ResourceTiming::default(),
+            },
+            bytes: source.as_ref().to_vec().into(),
         })
     }
+}
 
-    fn fetch_http(&self, request: HttpRequest) -> ResourceFuture<'_, HttpResponse> {
-        Self::unsupported(Some(request.context.id), ResourceErrorPhase::Connect)
+/// The browser embedder serves no images yet: a page draws whatever its own
+/// stylesheet describes, and nothing here fetches a bitmap. Every image draw
+/// therefore resolves to nothing, which is what an unloaded image looks like.
+impl bobcat_core::FrameImages for BrowserResources {
+    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
+        None
     }
 }
 
@@ -291,8 +277,8 @@ impl ResourceFetcher for BrowserResources {
 /// [`BobcatRenderer::load`] and replaced wholesale by the next load.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: Option<LynxView>,
-    resources: Arc<BrowserResources>,
+    view: Option<LynxView<Rc<BrowserResources>>>,
+    resources: Rc<BrowserResources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -357,7 +343,7 @@ impl BobcatRenderer {
         let result = async move {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
-            let resources = Arc::new(BrowserResources::default());
+            let resources = Rc::new(BrowserResources::default());
             let events = Arc::new(EventSignal::default());
             let config = PageConfig {
                 default_display_linear,
@@ -412,10 +398,11 @@ impl BobcatRenderer {
         self.script_finished = false;
 
         let sources = ViewSources {
+            config: self.config,
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
-            ..ViewSources::new(self.resources.clone(), entry_url)
+            ..ViewSources::new(entry_url)
         };
         // A canvas owns its own resolution — configuring a context does not
         // set it — and the view builds its surface from this canvas during
@@ -425,12 +412,15 @@ impl BobcatRenderer {
             .map_err(js_error)?;
         set_canvas_size(&self.canvas, frame_size);
         let built = LynxView::new(
-            self.config,
             self.events.clone(),
             self.width,
             self.height,
             self.device_pixel_ratio,
             DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
+            {
+                let resources = Rc::clone(&self.resources);
+                move |_reports| resources
+            },
             sources,
         )
         .await;

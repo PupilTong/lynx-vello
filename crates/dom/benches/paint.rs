@@ -64,6 +64,7 @@
 //!    colors opaque, both transforms non-`none`, both images the same size — so the two frames
 //!    encode the same draw count and the mean is one number rather than an average of two shapes.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use divan::counter::ItemsCount;
@@ -408,25 +409,23 @@ fn tile_pixels(shade: u8) -> ImageData {
     }
 }
 
-/// The source every tile in [`tile_page`] draws, and the one the republish
-/// benchmark rewrites.
+/// The source every tile in [`tile_page`] draws.
 const TILE_SOURCE: &str = "app:///tile.png";
 
 /// A grid of replaced-content tiles, all inside the viewport, plus the store
 /// holding their pixels.
 ///
 /// Every tile draws the same source, which is what a page of identical
-/// replaced boxes does: the store answers one `peek` per tile per frame and
-/// hands back the same reference-counted buffer each time.
+/// replaced boxes does: one entry in the registry, one resolve per commit,
+/// and the same reference-counted buffer behind every draw.
 #[allow(
     clippy::cast_precision_loss,
     reason = "tile indices are small constants"
 )]
-fn tile_page() -> (Document<()>, Arc<TestImages>) {
+fn tile_page() -> (Document<()>, Rc<TestImages>) {
     let mut dom = page_document(TILE_CSS);
-    let images = Arc::new(TestImages::new());
+    let images = Rc::new(TestImages::new());
     images.insert(TILE_SOURCE, tile_pixels(0x30));
-    dom.set_image_store(Arc::clone(&images) as Arc<dyn dom::ImageStore>);
     let root = dom.document_element().id();
     let natural = NaturalSize::from_size(Size::new(TILE_PIXELS as f32, TILE_PIXELS as f32));
     for index in 0..TILES {
@@ -514,7 +513,7 @@ fn bench_frames(
         phase = !phase;
         step(&mut page, phase);
         divan::black_box(page.render());
-        divan::black_box(page.scene().encoding().draw_tags.len());
+        divan::black_box(page.scene(&dom::NoImages).encoding().draw_tags.len());
     });
 }
 
@@ -552,7 +551,7 @@ fn render_document(bencher: divan::Bencher<'_, '_>, cards: usize) {
         .with_inputs(|| card_page(cards).0)
         .bench_local_values(|mut dom| {
             divan::black_box(dom.render());
-            divan::black_box(dom.scene().encoding().draw_tags.len());
+            divan::black_box(dom.scene(&dom::NoImages).encoding().draw_tags.len());
             dom
         });
 }
@@ -658,7 +657,12 @@ fn frame_scroll_tick(bencher: divan::Bencher<'_, '_>, rows: usize) {
         phase = !phase;
         scroll_to(&mut dom, phase);
         scene.reset();
-        frame.compose_into(&mut scene, &|slot| Some(dom.scroll_offset(slot.node)), None);
+        frame.compose_into(
+            &mut scene,
+            &[],
+            &|slot| Some(dom.scroll_offset(slot.node)),
+            None,
+        );
         divan::black_box(scene.encoding().draw_tags.len());
     });
 }
@@ -708,6 +712,7 @@ fn frame_scroll_composite(bencher: divan::Bencher<'_, '_>, rows: usize) {
         frame.composite_into(
             &mut scene,
             &planes,
+            &[],
             &|slot| Some(dom.scroll_offset(slot.node)),
             None,
         );
@@ -779,24 +784,23 @@ fn frame_without_text_runs(bencher: divan::Bencher<'_, '_>) {
 // Image frames
 // ---------------------------------------------------------------------------
 
-/// Republishing one source's decoded pixels on a page of `TILES` replaced
-/// boxes that all draw it.
+/// A page of `TILES` replaced boxes, all drawing one already-loaded image,
+/// repainting.
 ///
-/// `Document::note_images_changed` invalidates the retained scene
-/// unconditionally, so one arriving image costs a rebuild of every image draw
-/// on the page — the shape of a page whose images decode one at a time. Both
-/// phases publish the same dimensions and the same byte count, so the encoded
-/// geometry is identical between them.
+/// This is the cost that actually recurs. An image *arriving* cannot be
+/// benchmarked in two phases any more: one URL has one content, so a load
+/// report lands exactly once per document and the second phase would
+/// invalidate nothing. What a page pays over and over is rebuilding its image
+/// draws — one `ImageDraw` per tile, and one program op per draw — which is
+/// what this measures, against a mutation that touches no image at all.
 #[divan::bench]
-fn frame_image_republish(bencher: divan::Bencher<'_, '_>) {
-    let (page, images) = tile_page();
-    let dark = tile_pixels(0x30);
-    let light = tile_pixels(0xc0);
+fn frame_image_repaint(bencher: divan::Bencher<'_, '_>) {
+    let (mut page, images) = tile_page();
+    // Load once, before timing: from here the registry is `Ready` and every
+    // commit draws real pixels.
+    flashbulb::render_with_images(&mut page, &images);
+    let root = page.document_element().id();
     bench_frames(bencher, page, Staleness::Repaints, move |dom, phase| {
-        images.insert(
-            TILE_SOURCE,
-            if phase { light.clone() } else { dark.clone() },
-        );
-        dom.note_images_changed();
+        dom.set_inline_style_property(root, "background-color", flip_color(phase));
     });
 }

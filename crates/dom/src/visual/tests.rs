@@ -1722,7 +1722,7 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
     scroll_to(&mut h.doc.dom, scroller, 37.0);
     nudge(&mut h.doc.dom, scroller, false);
     h.doc.dom.render();
-    let cold = h.doc.dom.scene().clone();
+    let cold = h.doc.dom.scene(&crate::NoImages).clone();
 
     // A repaint of an unchanged document is refused, so each round flips the
     // nudge and flips it back. The second render of each pair sees the
@@ -1734,7 +1734,7 @@ fn a_warm_frame_encodes_the_scene_a_cold_frame_encodes() {
         nudge(&mut h.doc.dom, scroller, false);
         h.doc.dom.render();
     }
-    crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene());
+    crate::paint::equivalence::assert_scenes_identical(&cold, &h.doc.dom.scene(&crate::NoImages));
 }
 
 #[test]

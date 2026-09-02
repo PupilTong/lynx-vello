@@ -6,11 +6,12 @@
 
 mod support;
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, FontBlob, ImageStore, LynxView, NoWakeup, PageConfig, PreparsedDeclaration,
-    PreparsedRule, PreparsedStyleSheet, ViewSources,
+    DrawTarget, FontBlob, LynxView, NoWakeup, PreparsedDeclaration, PreparsedRule,
+    PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
 use support::{FetcherDouble, wait_for_script};
@@ -94,19 +95,22 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-fn sources(source: &[u8]) -> ViewSources {
-    let fetcher = Arc::new(FetcherDouble::new(source.to_vec()).resolving_to(SCRIPT_URL));
-    ViewSources::new(fetcher, SCRIPT_URL)
+fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
+    let source = source.to_vec();
+    move |_sink| Rc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
 }
 
-async fn booted(sources: ViewSources) -> LynxView {
+async fn booted(
+    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
+    sources: ViewSources,
+) -> LynxView<Rc<FetcherDouble>> {
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         393.0,
         727.0,
         1.0,
         DrawTarget::Offscreen,
+        resources,
         sources,
     )
     .await
@@ -116,7 +120,10 @@ async fn booted(sources: ViewSources) -> LynxView {
 }
 
 /// A view whose stylesheet request the double answers pre-parsed.
-async fn booted_with_sheet(source: &[u8], sheet: PreparsedStyleSheet) -> LynxView {
+async fn booted_with_sheet(
+    source: &[u8],
+    sheet: PreparsedStyleSheet,
+) -> LynxView<Rc<FetcherDouble>> {
     booted_with_sheet_at(source, sheet, 393.0, 727.0).await
 }
 
@@ -125,22 +132,23 @@ async fn booted_with_sheet_at(
     sheet: PreparsedStyleSheet,
     width: f32,
     height: f32,
-) -> LynxView {
-    let fetcher = Arc::new(
-        FetcherDouble::new(source.to_vec())
-            .resolving_to(SCRIPT_URL)
-            .with_preparsed_style_sheet(sheet),
-    );
+) -> LynxView<Rc<FetcherDouble>> {
     let mut view = LynxView::new(
-        PageConfig::default(),
         Arc::new(NoWakeup),
         width,
         height,
         1.0,
         DrawTarget::Offscreen,
+        |_sink| {
+            Rc::new(
+                FetcherDouble::new(source.to_vec())
+                    .resolving_to(SCRIPT_URL)
+                    .with_preparsed_style_sheet(sheet),
+            )
+        },
         ViewSources {
             style_sheets: vec!["app:///author.css".to_owned()],
-            ..ViewSources::new(fetcher, SCRIPT_URL)
+            ..ViewSources::new(SCRIPT_URL)
         },
     )
     .await
@@ -149,12 +157,34 @@ async fn booted_with_sheet_at(
     view
 }
 
+/// Drives the view until the painter has resolved a frame that draws an
+/// image.
+///
+/// The store's retain log is the precise signal: it is written by the
+/// painter's resolve pass, so a non-empty working set means a committed frame
+/// actually named an image and the painter read its pixels. Each round is a
+/// forced tick, which is the one call that waits for the commit behind it.
+fn settle_images(view: &mut LynxView<Rc<FetcherDouble>>, images: &flashbulb::TestImages) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let _ = view.tick(true);
+        if images.retained().iter().any(|set| !set.is_empty()) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no committed frame ever drew an image"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 fn screenshots() -> Screenshots {
     flashbulb::screenshots_in(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// A store carrying the one checker the image page draws.
-fn checker_store() -> Arc<flashbulb::TestImages> {
+fn checker_store() -> Rc<flashbulb::TestImages> {
     let mut rgba = Vec::with_capacity(4 * 4 * 4);
     for y in 0..4 {
         for x in 0..4 {
@@ -167,14 +197,18 @@ fn checker_store() -> Arc<flashbulb::TestImages> {
             rgba.extend_from_slice(&pixel);
         }
     }
-    let images = Arc::new(flashbulb::TestImages::new());
+    let images = Rc::new(flashbulb::TestImages::new());
     images.insert_rgba8(IMAGE_URL, 4, 4, rgba);
     images
 }
 
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
-    let mut view = booted(sources(MAIN_THREAD_SCRIPT.as_bytes())).await;
+    let mut view = booted(
+        fetcher(MAIN_THREAD_SCRIPT.as_bytes()),
+        ViewSources::new(SCRIPT_URL),
+    )
+    .await;
 
     let shot = view.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
@@ -185,22 +219,32 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
     );
 }
 
-/// Requirement: an embedder-owned store reaches the private painter through
-/// the whole public path — install the store, load the source through it, and
-/// the `background-image: url(...)` layer the script wrote draws those pixels.
+/// Requirement: an embedder-owned store reaches the painter through the whole
+/// public path, and does so **without the host asking**.
+///
+/// Nothing here loads the image. The paint walk meets the script's
+/// `background-image: url(...)`, reports the source, the painter names it
+/// against the store and reports the completed load back, the document
+/// records it and republishes, and only then does a frame carry the image for
+/// the painter to resolve. That whole round trip is what this asserts, and
+/// nothing covered it before: the old shape needed an explicit
+/// `view.load_image(...)` from the embedder.
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
-    let mut view = booted(ViewSources {
-        image_store: Some(checker_store() as Arc<dyn ImageStore>),
-        ..sources(IMAGE_SCRIPT.as_bytes())
-    })
+    let images = checker_store();
+    let mut view = booted(
+        |sink| {
+            Rc::new(
+                FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
+                    .resolving_to(SCRIPT_URL)
+                    .with_images(Rc::clone(&images))
+                    .serving(sink),
+            )
+        },
+        ViewSources::new(SCRIPT_URL),
+    )
     .await;
-    view.load_image(IMAGE_URL).await.expect("published source");
-    // The store's answer reaches the document as one main-thread command,
-    // and a capture only reads whatever has already been published. A forced
-    // tick is the one call that waits for the commit behind it.
-    view.tick(true)
-        .expect("commit the frame the image belongs to");
+    settle_images(&mut view, &images);
 
     let shot = view.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
@@ -216,11 +260,14 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 
     // Selecting the face by name is what proves the container registered: an
     // unknown default family fails the construction.
-    let mut view = booted(ViewSources {
-        fonts: vec![FontBlob::from_static(ROBOTO)],
-        default_font_family: Some("Roboto".to_owned()),
-        ..sources(TEXT_SCRIPT.as_bytes())
-    })
+    let mut view = booted(
+        fetcher(TEXT_SCRIPT.as_bytes()),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(ROBOTO)],
+            default_font_family: Some("Roboto".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
     .await;
 
     let shot = view.capture().expect("capture the committed page");

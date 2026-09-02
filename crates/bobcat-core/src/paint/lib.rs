@@ -10,6 +10,8 @@
 
 mod gesture;
 mod graphics;
+pub(crate) mod images;
+mod sources;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -20,9 +22,11 @@ mod tests;
 
 use std::cell::Cell;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -48,13 +52,37 @@ use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread}
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter,
-    frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, LoadedSource,
+    LynxViewError, ToMain, ToPainter, frame_slot,
 };
 #[cfg(test)]
-use crate::view::{EventRequester, NoWakeup, main_link};
+use crate::view::{NoWakeup, main_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How the wait on one host fetch ended.
+enum FetchOutcome {
+    Loaded(LoadedSource),
+    /// Startup is decided — either the fetch itself failed, which *is* the
+    /// failure, or the main thread spoke first and this fetch is abandoned.
+    Ended(Result<(), LynxViewError>),
+}
+
+/// Which of the two things a fetch waits on happened first.
+enum FetchStep {
+    Loaded(Result<LoadedSource, LynxViewError>),
+    /// `bobcat-main` spoke, or stopped being able to.
+    Received(Result<ToPainter, flume::RecvError>),
+}
+
+/// The main thread stopped before it could say how startup went.
+fn main_thread_gone() -> LynxViewError {
+    EngineError::Thread {
+        name: "script",
+        message: "the Lynx main thread stopped before startup completed".to_owned(),
+    }
+    .into()
+}
 
 /// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
@@ -137,6 +165,13 @@ pub(crate) struct PainterLink {
     begin_frames_sent: u64,
     begin_frames_serviced: u64,
     redraw_pending: Cell<bool>,
+    /// Sources the document met and wants named. Buffered here because
+    /// asking for them needs the host's resource system, which the painter
+    /// owns rather than the link.
+    image_requests: Vec<Arc<str>>,
+    /// Whether a drain has seen a frame announcement it has not adopted yet.
+    /// A field rather than a local because a startup drain runs in pieces.
+    pending_announce: bool,
 }
 
 impl PainterLink {
@@ -155,7 +190,15 @@ impl PainterLink {
             begin_frames_sent: 0,
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
+            image_requests: Vec::new(),
+            pending_announce: false,
         }
+    }
+
+    /// Adopts whatever the drains since the last settle announced.
+    fn settle(&mut self) {
+        let announced = std::mem::take(&mut self.pending_announce);
+        self.adopt_frame(announced);
     }
 
     /// Sends one command. A closed channel is a main thread that has exited;
@@ -167,16 +210,15 @@ impl PainterLink {
     /// Applies everything that has arrived. However many frames were
     /// announced, the mailbox is read once.
     pub(crate) fn sync(&mut self) {
-        let mut announced = false;
         while let Ok(notification) = self.notifications.try_recv() {
-            announced |= self.apply(notification);
+            self.apply(notification);
         }
-        self.adopt_frame(announced);
+        self.settle();
     }
 
-    fn apply(&mut self, notification: ToPainter) -> bool {
+    fn apply(&mut self, notification: ToPainter) {
         match notification {
-            ToPainter::FrameChanged => return true,
+            ToPainter::FrameChanged => self.pending_announce = true,
             ToPainter::Engine(event) => self.events.push(event),
             ToPainter::ListenerAvailable(name) => {
                 self.listener_names.insert(name);
@@ -187,8 +229,15 @@ impl PainterLink {
             ToPainter::BeginFrameServiced(seq) => {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
+            ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
+            ToPainter::Started(_) => {
+                unreachable!("startup messages are served before the view exists")
+            }
         }
-        false
+    }
+
+    fn take_image_requests(&mut self) -> Vec<Arc<str>> {
+        std::mem::take(&mut self.image_requests)
     }
 
     fn adopt_frame(&mut self, announced: bool) {
@@ -243,7 +292,6 @@ impl PainterLink {
     /// target implements, so an offscreen view belongs to a native host.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
-        let mut announced = false;
         while self.begin_frames_serviced < seq {
             let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
                 break;
@@ -251,15 +299,105 @@ impl PainterLink {
             let Ok(notification) = self.notifications.recv_timeout(remaining) else {
                 break;
             };
-            announced |= self.apply(notification);
+            self.apply(notification);
         }
-        self.adopt_frame(announced);
+        self.settle();
         self.begin_frames_serviced >= seq
     }
 
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
         self.notifications.drain().collect()
+    }
+
+    /// Waits for one host fetch **while still watching the inbox**.
+    ///
+    /// A fetch is the one await in construction that is not on the link, and
+    /// `bobcat-main` mounts each pushed source while the next fetch is
+    /// already in flight — so a failure it decides there, or a trap's last
+    /// words, can land while the host is still holding the answer. Polling
+    /// the inbox *beside* the fetch — rather than in place of it — is what
+    /// keeps an outcome that has already been decided observable.
+    async fn await_fetch(
+        &mut self,
+        load: impl Future<Output = Result<LoadedSource, LynxViewError>>,
+    ) -> FetchOutcome {
+        let mut load = std::pin::pin!(load);
+        // A second handle on the same queue, so the wait does not borrow the
+        // link that handling a message needs. Dropping a pending `recv_async`
+        // deregisters its waker and takes no message with it, so abandoning
+        // one to serve the fetch loses nothing.
+        let inbox = self.notifications.clone();
+        loop {
+            let mut next = std::pin::pin!(inbox.recv_async());
+            let step = std::future::poll_fn(|context| {
+                if let Poll::Ready(loaded) = load.as_mut().poll(context) {
+                    return Poll::Ready(FetchStep::Loaded(loaded));
+                }
+                // Registers the waker on the inbox too, so anything the main
+                // thread says resumes this even though the fetch has not.
+                next.as_mut().poll(context).map(FetchStep::Received)
+            })
+            .await;
+            match step {
+                FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
+                FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
+                FetchStep::Received(Err(flume::RecvError::Disconnected)) => {
+                    self.settle();
+                    return FetchOutcome::Ended(Err(main_thread_gone()));
+                }
+                FetchStep::Received(Ok(notification)) => {
+                    if let Some(result) = self.take_startup(notification) {
+                        return FetchOutcome::Ended(result);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Waits for one thing `bobcat-main` has to say, and applies it.
+    ///
+    /// The tail of construction: every source has been pushed, so the only
+    /// thing that can move startup on is a message.
+    async fn await_startup(&mut self) -> Option<Result<(), LynxViewError>> {
+        let inbox = self.notifications.clone();
+        match inbox.recv_async().await {
+            Ok(notification) => self.take_startup(notification),
+            Err(flume::RecvError::Disconnected) => {
+                self.settle();
+                Some(Err(main_thread_gone()))
+            }
+        }
+    }
+
+    /// What one message means during construction. `Some` once startup has an
+    /// outcome.
+    ///
+    /// The single place that decides; both readers feed it, so awaiting one
+    /// message and draining a queue of them cannot disagree.
+    fn take_startup(&mut self, notification: ToPainter) -> Option<Result<(), LynxViewError>> {
+        match notification {
+            ToPainter::Started(result) => {
+                self.settle();
+                Some(result)
+            }
+            // A script error during startup *is* the startup failure. On
+            // wasm32 under `panic = "abort"` it is the only thing a trapping
+            // main thread can say before it stops running destructors, so
+            // treating it as terminal here is what keeps construction from
+            // waiting forever.
+            ToPainter::Engine(EngineEvent::ScriptRunError(error)) => {
+                self.settle();
+                Some(Err(error.into()))
+            }
+            // Frames, lifecycle events, listener edges, boot's image
+            // requests: the steady-state path, so every fact boot published
+            // lands where the host's first turn finds it.
+            other => {
+                self.apply(other);
+                None
+            }
+        }
     }
 }
 
@@ -276,7 +414,7 @@ impl fmt::Debug for PainterLink {
 /// Where a view's pixels go: a window's presentation stack, or a texture the
 /// view owns and nothing displays. One of them exists before the view does,
 /// and it is the one the view has for its whole life.
-pub(super) enum Output {
+pub(crate) enum Output {
     /// A painter with nowhere to draw. Test-only, so a unit test that
     /// exercises routing alone pays for no GPU device; production has
     /// exactly the two targets an embedder can name.
@@ -296,7 +434,10 @@ pub(super) enum Output {
 impl Output {
     /// Builds the target an embedder named, on the thread that will draw into
     /// it — the only thread macOS lets a surface be created from.
-    async fn build(target: DrawTarget, frame_size: FrameSize) -> Result<Self, EngineError> {
+    pub(crate) async fn build(
+        target: DrawTarget,
+        frame_size: FrameSize,
+    ) -> Result<Self, EngineError> {
         match target {
             DrawTarget::Window(target) => Ok(Self::Window(Box::new(
                 WindowGraphics::new(target, frame_size).await?,
@@ -330,7 +471,12 @@ impl Output {
 /// Kept on that thread by construction — the `Rc` marker makes the whole
 /// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
 /// that built the view is the only one that can ever draw for it.
-pub(crate) struct Painter {
+/// The painter every in-crate test builds: no test here is about the host's
+/// resource system, so they all share the one that answers nothing.
+#[cfg(test)]
+pub(crate) type TestPainter = Painter<crate::resource::NeverAnswers>;
+
+pub(crate) struct Painter<F> {
     // Keep first: dropping the link closes the sole command sender, which
     // wakes the Lynx main thread before any state it may still refer to is
     // released.
@@ -353,10 +499,12 @@ pub(crate) struct Painter {
     composed: Option<ComposeKey>,
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
+    /// The whole image resource system. Owned here and nowhere else.
+    images: images::PainterImages<F>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
-impl std::fmt::Debug for Painter {
+impl<F> std::fmt::Debug for Painter<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Painter")
@@ -367,7 +515,7 @@ impl std::fmt::Debug for Painter {
 }
 
 #[cfg(test)]
-impl Drop for Painter {
+impl<F> Drop for Painter<F> {
     fn drop(&mut self) {
         if let Some(main) = self.main.as_mut() {
             self.link.send(ToMain::Shutdown);
@@ -535,6 +683,7 @@ fn scene_for<'frame>(
     intents: &ScrollIntents,
     buffer: &'frame mut Scene,
     frame: &'frame CommittedFrame,
+    images: &[Option<dom::vello::peniko::ImageData>],
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     if intents.offsets.is_empty()
@@ -544,7 +693,12 @@ fn scene_for<'frame>(
         return scene;
     }
     buffer.reset();
-    frame.compose_into(buffer, &|slot| intents.offset_for(slot.node), animation_now);
+    frame.compose_into(
+        buffer,
+        images,
+        &|slot| intents.offset_for(slot.node),
+        animation_now,
+    );
     buffer
 }
 
@@ -553,23 +707,30 @@ fn composite_scene<'frame>(
     buffer: &'frame mut Scene,
     frame: &CommittedFrame,
     plane_images: &[dom::vello::peniko::ImageData],
+    images: &[Option<dom::vello::peniko::ImageData>],
     animation_now: Option<f64>,
 ) -> &'frame Scene {
     buffer.reset();
     frame.composite_into(
         buffer,
         plane_images,
+        images,
         &|slot| intents.offset_for(slot.node),
         animation_now,
     );
     buffer
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one compose call's full inputs, none of which the painter owns together"
+)]
 fn paint_window(
     graphics: &mut WindowGraphics,
     intents: &ScrollIntents,
     buffer: &mut Scene,
     frame: &CommittedFrame,
+    images: &[Option<dom::vello::peniko::ImageData>],
     size: FrameSize,
     key: ComposeKey,
     animation_now: Option<f64>,
@@ -578,16 +739,17 @@ fn paint_window(
         return Ok(());
     }
     let scene = if frame.composite_plan().is_some() {
-        graphics.prepare_planes(frame)?;
+        graphics.prepare_planes(frame, images)?;
         composite_scene(
             intents,
             buffer,
             frame,
             graphics.plane_images(),
+            images,
             animation_now,
         )
     } else {
-        scene_for(intents, buffer, frame, animation_now)
+        scene_for(intents, buffer, frame, images, animation_now)
     };
     graphics.render_to_target(scene, size, key)
 }
@@ -615,28 +777,89 @@ fn route_published(
     )
 }
 
-impl Painter {
-    /// Creates the painting owner over the link its view established before
-    /// the Lynx main thread began running, with the draw target it will keep.
+impl<F> Painter<F> {
+    /// Tells the Lynx main thread to stop. Its command loop returns on this
+    /// message, which is why it is sent explicitly rather than left to the
+    /// FIFO closing when the painter is released.
     ///
-    /// The target is built here rather than handed over later: a view is
-    /// never in a state where it has run but has nowhere to put a frame.
-    pub(super) async fn new(
+    /// Teardown knows nothing about the store, so it stays reachable for any
+    /// `F` — which is what lets `Drop` run without the trait bound.
+    pub(super) fn shutdown(&self) {
+        // Close the sink before the store drops: a loader still in flight
+        // must find it detached rather than queue into a dead view.
+        self.images.detach();
+        self.link.send(ToMain::Shutdown);
+    }
+}
+
+/// The test constructors pin the fetcher: no in-crate test is about the
+/// host's resource system, so they all build over the one that answers
+/// nothing.
+#[cfg(test)]
+impl TestPainter {
+    pub(super) fn start<R: crate::view::EventRequester>(
+        document: LynxDocument,
         viewport: Viewport,
         frame_size: FrameSize,
-        link: PainterLink,
-        target: DrawTarget,
+        event_requester: Arc<R>,
+        entry: EntryModule,
+        output: Output,
     ) -> Result<Self, EngineError> {
-        let output = Output::build(target, frame_size).await?;
-        Ok(Self::with_output(viewport, frame_size, link, output))
+        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
+        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
+        painter.detached = false;
+        Ok(painter)
     }
 
-    fn with_output(
+    pub(crate) fn probe_document<T: Send + 'static>(
+        &mut self,
+        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
+        if self.detached {
+            return None;
+        }
+        let (sender, receiver) = flume::unbounded();
+        self.link.send(ToMain::Probe(Box::new(move |document| {
+            let _ = sender.send(probe(document));
+        })));
+        receiver.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.sync();
+        self.link.frame().cloned()
+    }
+
+    /// The painter and the other end of its link, with no Lynx main thread
+    /// started over it yet — the seam `start` spawns through, and the one a
+    /// test plays the main thread's half of.
+    #[cfg(test)]
+    pub(super) fn with_link<R: crate::view::EventRequester>(
+        viewport: Viewport,
+        frame_size: FrameSize,
+        event_requester: Arc<R>,
+        output: Output,
+    ) -> (Self, MainLink<R>) {
+        let (link, main) = main_link(event_requester);
+        let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
+            crate::resource::NeverAnswers
+        });
+        (painter, main)
+    }
+}
+
+impl<F: crate::resource::ResourceFetcher> Painter<F> {
+    pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
         link: PainterLink,
         output: Output,
-    ) -> Self {
+        resources: B,
+    ) -> Self
+    where
+        B: FnOnce(dom::ImageReports) -> F,
+    {
         Self {
             link,
             #[cfg(test)]
@@ -654,59 +877,84 @@ impl Painter {
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
+            images: images::PainterImages::new(resources),
             thread_bound: PhantomData,
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn start<R: EventRequester>(
-        document: LynxDocument,
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        entry: EntryModule,
-        output: Output,
-    ) -> Result<Self, EngineError> {
-        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
-        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
-        painter.detached = false;
-        Ok(painter)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn probe_document<T: Send + 'static>(
+    /// Pushes every source to `bobcat-main`, then waits until it answers
+    /// startup.
+    ///
+    /// This is the painter's only wait on the Lynx main thread during
+    /// construction, and it is a drain of the same one inbox the steady state
+    /// drains. The order of the pushes is the protocol: sheets in cascade
+    /// order, the entry last, so the receiving side mounts in arrival order
+    /// and boots on the entry's arrival.
+    ///
+    /// It cannot deadlock against `bobcat-main`: that thread waits on
+    /// nothing but this loop's own sends, and this loop's fetches wait on
+    /// the host, never on that thread.
+    pub(super) async fn serve_startup(
         &mut self,
-        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
-    ) -> Option<T> {
-        if self.detached {
-            return None;
+        style_sheets: Vec<String>,
+        entry: String,
+    ) -> Result<(), LynxViewError> {
+        // Split borrows: the fetch borrows the store across an await while
+        // the same loop keeps draining the link.
+        let Self { link, images, .. } = self;
+        let fetcher = images.store();
+        let mut requests = sources::mint_namespace();
+        for specifier in &style_sheets {
+            let load = sources::load_style_sheet(fetcher, &mut requests, specifier);
+            match link.await_fetch(load).await {
+                FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
+                // A fetch failure is the startup failure and the painter is
+                // already holding it: sending it across to be told back would
+                // be a round trip to learn what we just decided.
+                FetchOutcome::Ended(result) => return result,
+            }
         }
-        let (sender, receiver) = flume::bounded(1);
-        self.link.send(ToMain::Probe(Box::new(move |document| {
-            let _ = sender.send(probe(document));
-        })));
-        receiver.recv_timeout(Duration::from_secs(10)).ok()
+        match link
+            .await_fetch(sources::load_entry(fetcher, &mut requests, &entry))
+            .await
+        {
+            FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
+            FetchOutcome::Ended(result) => return result,
+        }
+        loop {
+            // Everything is pushed, so the only thing that can move startup
+            // on is a message. A main thread that has gone is a receive
+            // error here, not a separate flag to carry.
+            if let Some(result) = link.await_startup().await {
+                return result;
+            }
+        }
     }
 
-    #[cfg(test)]
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+    /// Warms sources the walk has not met yet.
+    pub(super) fn prefetch_images(&mut self, sources: Vec<Arc<str>>) {
+        self.images.request(sources);
+    }
+
+    /// One painter turn's intake: everything the document said, then the
+    /// image work that came with it.
+    ///
+    /// The two are one call because they are one fact. A turn that drained
+    /// the link without servicing its image requests would leave the store
+    /// unasked, and the frame that needed those images would never arrive.
+    fn sync(&mut self) {
         self.link.sync();
-        self.link.frame().cloned()
+        self.service_images();
     }
 
-    /// The painter and the other end of its link, with no Lynx main thread
-    /// started over it yet — the seam `start` spawns through, and the one a
-    /// test plays the main thread's half of.
-    #[cfg(test)]
-    pub(super) fn with_link<R: EventRequester>(
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        output: Output,
-    ) -> (Self, MainLink<R>) {
-        let (link, main) = main_link(event_requester);
-        let painter = Self::with_output(viewport, frame_size, link, output);
-        (painter, main)
+    /// Services the image protocol: asks the host for every source the
+    /// document met, and forwards any completed loads back to it.
+    fn service_images(&mut self) {
+        self.images.request(self.link.take_image_requests());
+        let events = self.images.take_reports();
+        if !events.is_empty() {
+            self.link.send(ToMain::ImageEvents(events));
+        }
     }
 
     /// Whether the engine owes the timeline another frame, as of the last
@@ -720,13 +968,8 @@ impl Painter {
             || self.gesture.needs_frame()
     }
 
-    pub(super) fn note_images_changed(&self) {
-        self.link.send(ToMain::NoteImagesChanged);
-        self.refresh();
-    }
-
     pub(super) fn dispatch_input(&mut self, event: InputEvent) {
-        self.link.sync();
+        self.sync();
         let at = self.clock.now_seconds();
         let published = self.link.frame().cloned();
         if let Some(frame) = &published {
@@ -805,7 +1048,7 @@ impl Painter {
     }
 
     pub(super) fn service_gesture_clock(&mut self, now: f64) {
-        self.link.sync();
+        self.sync();
         let published = self.link.frame().cloned();
         let mut decisions = InputDecisions::new();
         {
@@ -865,7 +1108,7 @@ impl Painter {
 
     #[must_use]
     pub(super) fn pump(&mut self) -> Vec<EngineEvent> {
-        self.link.sync();
+        self.sync();
         self.link.take_events()
     }
 
@@ -888,11 +1131,18 @@ impl Painter {
         if !matches!(self.output, Output::Window(_)) || self.occluded {
             return Ok(());
         }
-        self.link.sync();
+        self.sync();
         if !self.link.take_redraw() && !self.is_animating() {
             return Ok(());
         }
         let size = self.frame_size;
+        // Resolving reads pixels, and a store is allowed to block restoring
+        // one it evicted. That must happen before a swap-chain image is
+        // acquired: blocking while holding one stalls the chain under vsync.
+        let latest = self.link.frame().cloned();
+        if let Some(frame) = &latest {
+            self.images.resolve(frame);
+        }
         let acquired = {
             let Output::Window(graphics) = &mut self.output else {
                 unreachable!("the window output was just checked");
@@ -913,7 +1163,6 @@ impl Painter {
         let now = self.clock.now_seconds();
         self.service_gesture_clock(now);
         let _ = self.begin_frame(now, false);
-        let latest = self.link.frame().cloned();
         if let Some(frame) = &latest {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
@@ -924,6 +1173,7 @@ impl Painter {
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
+        let images = self.images.resolved();
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
@@ -933,6 +1183,7 @@ impl Painter {
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 frame,
+                images,
                 size,
                 key,
                 animation_now,
@@ -948,14 +1199,18 @@ impl Painter {
     pub(super) fn capture(&mut self) -> Result<Screenshot, EngineError> {
         let size = self.frame_size;
         let now = self.clock.now_seconds();
-        self.link.sync();
+        self.sync();
         let latest = self.link.frame().cloned();
+        if let Some(frame) = &latest {
+            self.images.resolve(frame);
+        }
         let key = latest
             .as_ref()
             .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
+        let images = self.images.resolved();
         match &mut self.output {
             #[cfg(test)]
             Output::None => Err(EngineError::NotOffscreen),
@@ -964,13 +1219,14 @@ impl Painter {
                     && (self.composed != Some(key) || animation_now.is_some())
                 {
                     let scene = if frame.composite_plan().is_some() {
-                        gpu.prepare_planes(frame)
+                        gpu.prepare_planes(frame, images)
                             .map_err(|error| EngineError::Gpu(error.to_string()))?;
                         composite_scene(
                             &self.scroll_intents,
                             &mut self.composed_scene,
                             frame,
                             gpu.plane_images(),
+                            images,
                             animation_now,
                         )
                     } else {
@@ -978,6 +1234,7 @@ impl Painter {
                             &self.scroll_intents,
                             &mut self.composed_scene,
                             frame,
+                            images,
                             animation_now,
                         )
                     };
@@ -997,6 +1254,7 @@ impl Painter {
                         &self.scroll_intents,
                         &mut self.composed_scene,
                         frame,
+                        images,
                         size,
                         key,
                         animation_now,
@@ -1012,13 +1270,6 @@ impl Painter {
             }
         }
     }
-    /// Tells the Lynx main thread to stop. Its command loop returns on this
-    /// message, which is why it is sent explicitly rather than left to the
-    /// FIFO closing when the painter is released.
-    pub(super) fn shutdown(&self) {
-        self.link.send(ToMain::Shutdown);
-    }
-
     /// Runs one turn: produce the frame it owes, and hand back everything
     /// the realm had to say.
     ///
@@ -1075,28 +1326,31 @@ impl Painter {
         if let Some(seq) = self.begin_frame(now, true) {
             let _ = self.link.wait_begin_frame(seq, BEGIN_FRAME_TIMEOUT);
         }
-        self.link.sync();
+        self.sync();
         let Some(frame) = self.link.frame().cloned() else {
             return Ok(false);
         };
         self.scroll_intents.rebase(&frame);
         self.maybe_request_refill(&frame);
+        self.images.resolve(&frame);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
         }
+        let images = self.images.resolved();
         let Output::Offscreen(gpu) = &mut self.output else {
             unreachable!("the offscreen output was just checked");
         };
         let scene = if frame.composite_plan().is_some() {
-            gpu.prepare_planes(&frame)
+            gpu.prepare_planes(&frame, images)
                 .map_err(|error| EngineError::Gpu(error.to_string()))?;
             composite_scene(
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 &frame,
                 gpu.plane_images(),
+                images,
                 animation_now,
             )
         } else {
@@ -1104,6 +1358,7 @@ impl Painter {
                 &self.scroll_intents,
                 &mut self.composed_scene,
                 &frame,
+                images,
                 animation_now,
             )
         };
