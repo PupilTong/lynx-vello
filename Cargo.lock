@@ -195,6 +195,7 @@ version = "0.1.0"
 dependencies = [
  "bobcat-core",
  "flashbulb",
+ "flume",
  "http",
  "lynx-template-decoder",
  "lynx-xml",
@@ -214,6 +215,7 @@ dependencies = [
  "codspeed-divan-compat",
  "dom",
  "flashbulb",
+ "flume",
  "http",
  "lynx-template-decoder",
  "pollster",
@@ -731,6 +733,7 @@ dependencies = [
  "cssparser",
  "euclid",
  "flashbulb",
+ "flume",
  "html5ever",
  "hughie",
  "markup5ever_rcdom",
@@ -849,6 +852,15 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "spin",
 ]
 
 [[package]]
@@ -2919,6 +2931,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
 ]
 
 [[package]]

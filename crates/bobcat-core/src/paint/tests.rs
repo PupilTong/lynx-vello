@@ -1,4 +1,4 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::{Output, Painter};
@@ -288,7 +288,7 @@ fn a_scroll_decision_sends_no_command() {
 
 /// A requester that records every wake, so a test can wait on the host
 /// loop actually being asked to run.
-struct WakeSignal(mpsc::Sender<()>);
+struct WakeSignal(flume::Sender<()>);
 
 impl EventRequester for WakeSignal {
     fn request_event(&self) {
@@ -325,7 +325,7 @@ fn a_view_that_presents_to_no_window_owes_no_frame() {
 /// thread's publish wakes.
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
-    let (wake_sender, wakes) = mpsc::channel();
+    let (wake_sender, wakes) = flume::unbounded();
     let (painter, main) = Painter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
@@ -357,7 +357,7 @@ fn a_booted_view_commits_and_publishes() {
 
     use crate::view::EngineEvent;
 
-    let (wake_sender, wake_receiver) = mpsc::channel();
+    let (wake_sender, wake_receiver) = flume::unbounded();
     let mut view = view_over(
         Arc::new(WakeSignal(wake_sender)),
         document(),

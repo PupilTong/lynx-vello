@@ -6,7 +6,7 @@ mod support;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -150,7 +150,7 @@ async fn resource_continuations_and_boot_stay_on_bobcat_main() {
 
 struct PendingResource {
     started: Option<tokio::sync::oneshot::Sender<()>>,
-    dropped: Option<mpsc::Sender<String>>,
+    dropped: Option<flume::Sender<String>>,
 }
 
 impl Future for PendingResource {
@@ -175,7 +175,7 @@ impl Drop for PendingResource {
 struct PendingFetcher {
     base: FetcherDouble,
     started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    dropped: Mutex<Option<mpsc::Sender<String>>>,
+    dropped: Mutex<Option<flume::Sender<String>>>,
 }
 
 impl ResourceFetcher for PendingFetcher {
@@ -209,7 +209,7 @@ impl EventRequester for DropObservedRequester {
 #[tokio::test]
 async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
-    let (dropped_sender, dropped) = mpsc::channel();
+    let (dropped_sender, dropped) = flume::unbounded();
     let fetcher = Arc::new(PendingFetcher {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         started: Mutex::new(Some(started_sender)),

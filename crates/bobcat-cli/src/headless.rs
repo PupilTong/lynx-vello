@@ -10,10 +10,10 @@
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
+use flume::RecvTimeoutError;
 
 use crate::CliError;
 use crate::args::Options;
@@ -25,7 +25,7 @@ use crate::screenshot::save_screenshot;
 /// synthetic clock feed, so a wakeup from the Lynx main thread is one more
 /// loop input.
 #[derive(Debug)]
-struct ChannelWakeup(mpsc::Sender<HostEvent>);
+struct ChannelWakeup(flume::Sender<HostEvent>);
 
 impl EventRequester for ChannelWakeup {
     fn request_event(&self) {
@@ -35,7 +35,7 @@ impl EventRequester for ChannelWakeup {
 
 pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> {
     program.warn_about_compatibility_limits();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = flume::unbounded();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
     // One construction: the windowless GPU target this view renders into,
     // the input's author CSS, and its entry MTS module are all arguments, so
