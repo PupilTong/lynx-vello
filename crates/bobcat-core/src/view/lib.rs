@@ -355,7 +355,9 @@ impl<F: ResourceFetcher> LynxView<F> {
     /// or stops startup before `QuickJS` begins, releases the target, and
     /// joins `bobcat-main`. If synchronous startup JavaScript is already
     /// running, teardown waits for that work to return before the main thread
-    /// can be joined.
+    /// can be joined — except on wasm32 under `panic = "abort"`, where a
+    /// trapped Worker could never signal the join and teardown therefore
+    /// never joins: the thread is told to stop and left to exit on its own.
     pub async fn new<R: EventRequester, B>(
         event_requester: Arc<R>,
         width: f32,

@@ -47,7 +47,8 @@ pub(crate) struct EntryModule {
 ///
 /// It only prevents work that has not entered synchronous JavaScript yet.
 /// Once `QuickJS` is executing, teardown waits for that call and joins the
-/// owner thread without trying to interrupt it.
+/// owner thread without trying to interrupt it — on the targets that join
+/// at all; see [`MainThreadHome::shutdown`].
 #[derive(Default)]
 pub(crate) struct StartupControl {
     cancelled: AtomicBool,
@@ -81,7 +82,18 @@ impl MainThreadHome {
 
     pub(crate) fn shutdown(&mut self) {
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // Under `panic = "abort"` a trapped `bobcat-main` runs no
+            // destructors and never signals its join handle, and no check
+            // can outrun a trap that lands between the check and the wait —
+            // so wasm teardown never joins. The goodbye is already sent: a
+            // healthy main thread exits on its own, and a trapped one is
+            // already gone.
+            #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+            drop(thread);
+            #[cfg(not(all(target_arch = "wasm32", panic = "abort")))]
+            {
+                let _ = thread.join();
+            }
         }
     }
 }
