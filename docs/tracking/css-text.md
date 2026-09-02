@@ -90,6 +90,100 @@ The C++ enum *definitions* for `TextAlignType`, `WhiteSpaceType`, `WordBreakType
 
 ---
 
+## Structural inline content model
+
+> Research 2026-09-02: multi-agent sweep over the native fiber/textra layout path
+> (`lynx/core/renderer/dom/fiber/`, `lynx/core/renderer/ui_wrapper/layout/`) and the
+> web reference implementation (`lynx-stack/packages/web-platform/web-elements/src/elements/XText/`).
+> This section covers what the CSS tables above cannot: which nodes a `<text>` accepts,
+> how the subtree becomes one paragraph, and how atomic inline elements behave.
+
+### Inline-ness is structural, not display-driven
+
+`TextElement::OnNodeAdded` converts every added child via `ConvertToInlineElement()`
+(`lynx/core/renderer/dom/fiber/text_element.cc:68-74`); a node is inline iff its parent
+is a text or a non-view inline element (`lynx/core/renderer/dom/element.cc:562-571`).
+There is no `display: inline` involved anywhere — a W3C divergence. Only view, text,
+image and wrapper elements may be converted (`lynx/core/renderer/dom/element.h:942-950`).
+Children of components are exempt (`fiber_element.cc:1018-1033`).
+
+| Child kind | Paragraph role | Key facts | Source refs |
+|---|---|---|---|
+| `raw-text` | Text run | Holds a `text` attribute (non-string values coerced: `NaN`→`"NaN"`, nil→`"null"`, undefined→`"undefined"`); literal `\n` preserved (web hardcodes `white-space-collapse: preserve-breaks` on it) | `raw_text_element.cc:16-47`; `x-text.css:249-260` |
+| nested `<text>` | Style scope | Renamed `inline-text`/`x-inline-text`; contributes a scoped style overlay (child applies only its own declared properties over the inherited run state), then its children recurse; unlimited depth; **never establishes its own paragraph** (inline `Measure` returns 0×0, `DispatchLayoutBefore` early-returns) | `text_element.cc:197-206,283-337`; `text_layout_textra.cc:123-132,576-585` |
+| `<image>` | Atomic placeholder | Renamed `inline-image`; native sizes it from **specified** CSS width/height (+margins, indefinite→0, no intrinsic sizing); web diverges (auto→intrinsic image size, `display: inline-block` part); `vertical-align` forwarded | `text_layout_textra.cc:448-537`; `x-text.css:69-82,109-135` |
+| `<view>` | Atomic inline block | No tag rename; `ConvertToInlineElement` does **not** recurse into its children; stays a real layout node (COMMON), measured by starlight as an independent subtree; enters the paragraph as a fixed-size placeholder | `view_element.cc:26`; `element_manager.cc:981-994` |
+| `wrapper` | Transparent glue | Children iterated in place, no style scope pushed | `wrapper_element.cc:14-21`; `text_layout_textra.cc:608-613` |
+| `inline-truncation` | Custom ellipsis content | Generic element detected by tag string; may contain runs and inline views; web honors only the first (`inline-truncation ~ inline-truncation { display: none }`) | `element_manager.cc:1283-1284`; `InlineTruncation.ts:8-30` |
+| anything else | Silently skipped | The paragraph builders have no else branch (`scroll-view`, `list`, custom components vanish from the paragraph) | `text_layout_textra.cc:561-614` |
+
+### One flattened paragraph
+
+Only the outermost `<text>` owns a paragraph. The build appends the element's own
+`content_` first, then walks render children in document order, so runs and
+placeholders appear in source order in one flattened string
+(`text_layout_textra.cc:426-446,715-753`). Property split in the textra path:
+per-run = font-size/weight/style/family, color, background-color, letter-spacing,
+text-decoration family; container-only = text-align, text-maxline, text-overflow,
+white-space, line-height (paragraph-level in Lynx — a W3C divergence from per-inline-box
+line-height), and the auto-font-size family (`text_layout_textra.cc:236-424`).
+`vertical-align` is forwarded for image/view placeholders only, never for text runs.
+Runs and placeholders carry `EventTargetInfo` so the platform can hit-test inside a
+text and route events to nested inline elements (`text_layout_api.h:86-104`).
+
+### The atomic inline view
+
+A `<view>` inside `<text>` is a complete block; its inner text never joins the outer
+paragraph. Confirmed four independent ways: no conversion recursion
+(`view_element.cc:26`), inline-ness propagation stops at an inline view
+(`element.cc:566-570`), all three native paragraph builders treat `is_view()` as an
+atomic placeholder (`text_layout_textra.cc:587-607`), and the web truncation walker
+`FILTER_REJECT`s any node under an `X-VIEW` ancestor (`XTextTruncation.ts:672-699`).
+
+Measurement: the paragraph engine calls back into starlight, which runs the full
+layout of the view subtree and returns margin-box width/height plus baseline
+(`text_layout_textra.cc:151-195`; `layout_object.cc:638-658`). Baseline rule:
+margin-top + own baseline, or the full border-box height when the view has none —
+i.e. a baseline-less view sits with its bottom edge on the text baseline
+(`layout_object.cc:1118-1124`). The engine then positions the view via
+`AlignmentByPlatform(offset_top, offset_left)` and hides truncation-clipped views
+via `LayoutDisplayNone`. `vertical-align` values forwarded: default, baseline, sub,
+super, top, text-top, middle, bottom, text-bottom, length, percent, plus the
+Lynx-only `center` (`css_type.h:225-238`); the per-value line-box math is inside the
+opaque Textra engine (web behavior = standard CSS `inline-flex` line boxes).
+
+### Truncation, offsets, and the layout event
+
+All truncation offsets and character counts are UTF-16 code units in the source
+flattened text, with each atomic placeholder counting as exactly one unit
+(`text_props.h:14,71-177`; `XTextTruncation.ts:39-66`). The effective cut is
+`min(text-maxlength cut, text-maxline cut)`. The web fitting algorithm for
+`inline-truncation` (the inspectable ground truth): if the truncation content is
+narrower than the container, back the cut offset off from the last visible line's
+end until the truncation content fits the remaining width; otherwise hide the
+truncation content entirely and cut at line start. Without `inline-truncation`,
+cut 3 characters before the line end (fewer on a short line) and render literal
+`"..."` (`XTextTruncation.ts:183-298`).
+
+The `layout` event fires only when a listener is registered. Native detail =
+`{ lineCount, lines: [{start, end, ellipsisCount}], size: {width, height} }`
+(content-box); the web detail omits `size` (`text_fragment_behavior.cc:65-126`;
+`XTextTruncation.ts:369-445`). `ellipsisCount` for a line = `line.end - truncateAt`
+when the cut falls inside that line, else 0.
+
+### Layout-in-element wiring gaps (native)
+
+`word-break` and `text-indent` are computed by the CSS layer but never forwarded to
+the paragraph builder in the layout-in-element path — no `TextPropertyKeyID` exists
+for either (`text_props.h:15-56`; `text_attributes.h:76,113`). `text-shadow` is an
+explicit TODO stub in textra (`text_layout_textra.cc:287-289`). A live copy-paste
+defect makes all four inline-image border-radius corners read the top-left radius
+(`text_layout_textra.cc:503-510`) — do not replicate. There is no bidi/direction key
+in the paragraph protocol: direction is resolved at style time into a physical
+`text-align`, and actual bidi reordering is inside the opaque platform text engine.
+
+---
+
 ## Also see
 
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
