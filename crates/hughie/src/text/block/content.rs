@@ -121,25 +121,16 @@ impl SourceMap {
         self.source_len
     }
 
-    /// Source unit of a normalized byte offset. The end of the text covers
-    /// the units of trailing collapsed whitespace — but never of trailing
-    /// boxes: a box past the last byte is content in its own right, not
-    /// something a text offset consumes.
+    /// Source unit of a normalized byte offset used as a *start*: the unit
+    /// of the character at that byte. A box or a dropped whitespace span
+    /// sharing the byte lies before that character and is not part of what
+    /// starts here.
     pub(in crate::text::block) fn byte_to_unit(&self, text: &str, byte: u32) -> u32 {
-        if byte as usize >= text.len() {
-            for segment in self.segments.iter().rev() {
-                if segment.kind == SegmentKind::Box && segment.norm.start >= byte {
-                    continue;
-                }
-                return segment.units.end;
-            }
-            return 0;
-        }
         let segment = self
             .segments
             .iter()
             .find(|segment| segment.norm.start <= byte && byte < segment.norm.end)
-            .expect("every normalized byte lies in a segment");
+            .expect("a start offset lies inside the normalized text");
         match segment.kind {
             SegmentKind::Verbatim => {
                 let prefix = &text[segment.norm.start as usize..byte as usize];
@@ -148,6 +139,33 @@ impl SourceMap {
             SegmentKind::Collapsed => segment.units.start,
             SegmentKind::Box => unreachable!("a box segment spans no bytes"),
         }
+    }
+
+    /// Source unit boundary at `byte` used as an *end*: everything strictly
+    /// before the byte, plus collapsed whitespace sitting at it — but never a
+    /// box at it, whether the byte is mid-text or the text end. A box at the
+    /// boundary is content of whatever follows, and a caller whose range
+    /// includes the box accounts for its unit separately.
+    pub(in crate::text::block) fn unit_before(&self, text: &str, byte: u32) -> u32 {
+        let mut result = 0;
+        for segment in &self.segments {
+            if segment.norm.end < byte || (segment.norm.end == byte && segment.norm.start < byte) {
+                result = segment.units.end;
+            } else if segment.norm.start == byte && segment.norm.end == byte {
+                match segment.kind {
+                    SegmentKind::Box => break,
+                    SegmentKind::Collapsed => result = segment.units.end,
+                    SegmentKind::Verbatim => unreachable!("verbatim segments are never empty"),
+                }
+            } else if segment.kind == SegmentKind::Verbatim && segment.norm.start < byte {
+                let prefix = &text[segment.norm.start as usize..byte as usize];
+                result = segment.units.start + utf16_len(prefix);
+                break;
+            } else {
+                break;
+            }
+        }
+        result
     }
 
     /// Normalized byte of a source cut, or `None` when the cut lies at or
@@ -530,9 +548,9 @@ mod tests {
         // The collapsed span covers units 1..7 and answers with its start.
         assert_eq!(block.map.byte_to_unit(&block.text, 1), 1);
         assert_eq!(block.map.byte_to_unit(&block.text, 2), 7);
-        // End of text maps to the full source length.
+        // An end offset at the text end covers the trailing units.
         let end = u32::try_from(block.text.len()).expect("fits");
-        assert_eq!(block.map.byte_to_unit(&block.text, end), 10);
+        assert_eq!(block.map.unit_before(&block.text, end), 10);
         // A cut anywhere inside the collapsed span lands on the emitted space.
         for unit in 1..7 {
             assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(1));
@@ -685,7 +703,7 @@ mod tests {
         assert_eq!(block.text, "ab ");
         assert_eq!(block.map.source_len(), 5);
         assert_eq!(block.map.byte_to_unit(&block.text, 2), 2);
-        assert_eq!(block.map.byte_to_unit(&block.text, 3), 5);
+        assert_eq!(block.map.unit_before(&block.text, 3), 5);
         for unit in 2..5 {
             assert_eq!(block.map.unit_to_byte(&block.text, unit), Some(2));
         }
@@ -708,17 +726,30 @@ mod tests {
     }
 
     #[test]
-    fn the_end_of_the_text_covers_trailing_whitespace_but_never_trailing_boxes() {
+    fn an_end_offset_covers_collapsed_whitespace_but_stops_at_a_box() {
         let style = RunStyle::default();
         let trailing_box = normalize(&[run(&style, "aaa"), atom(1)]);
         assert_eq!(trailing_box.map.source_len(), 4);
-        assert_eq!(trailing_box.map.byte_to_unit(&trailing_box.text, 3), 3);
+        assert_eq!(trailing_box.map.unit_before(&trailing_box.text, 3), 3);
 
         let box_then_space = normalize(&[run(&style, "a"), atom(1), run(&style, "  ")]);
-        // 'a' = 0, box = 1, collapsed spaces = 2..4; the emitted space is the
-        // last byte, so the text end consumes through the whitespace.
+        // 'a' = 0, box = 1, collapsed spaces = 2..4. An end at the box's own
+        // byte stops before it; an end past the emitted space consumes the
+        // box and the whitespace both.
         assert_eq!(box_then_space.text, "a ");
-        assert_eq!(box_then_space.map.byte_to_unit(&box_then_space.text, 2), 4);
+        assert_eq!(box_then_space.map.unit_before(&box_then_space.text, 1), 1);
+        assert_eq!(box_then_space.map.unit_before(&box_then_space.text, 2), 4);
+
+        // Mid-text: a box sharing its byte with the following character is
+        // not consumed by an end at that byte, while a dropped-whitespace
+        // span at the boundary is.
+        let mid = normalize(&[run(&style, "a"), atom(1), run(&style, "b")]);
+        assert_eq!(mid.text, "ab");
+        assert_eq!(mid.map.unit_before(&mid.text, 1), 1);
+        assert_eq!(mid.map.byte_to_unit(&mid.text, 1), 2);
+
+        let east_asian = normalize(&[run(&style, "\u{4f60}\n\u{597d}")]);
+        assert_eq!(east_asian.map.unit_before(&east_asian.text, 3), 2);
     }
 
     #[test]

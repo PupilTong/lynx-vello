@@ -439,12 +439,15 @@ fn retreating_across_a_box_hides_it() {
         ..BlockStyle::default()
     };
     let mut context = text_context();
-    // Natural line 2 is "aaa" + the box + " " (units 5..10); freeing 20px
-    // removes the trailing space cluster and the box.
+    // Natural line 2 shows "aaa" plus the box (units 5..9; the wrapped
+    // space belongs to no line and never counts as freed): freeing 20px
+    // removes the 'a' at unit 7 and the box at unit 8.
     let block = laid_out(&mut context, block_style, &items, Some(&tail), Some(50.0));
 
     assert!(block.truncation_visible());
     assert_hidden(&block, 4);
+    assert_eq!(block.lines()[1].ellipsis_count, 2);
+    assert_close(block.lines()[1].advance, 40.0);
 }
 
 #[test]
@@ -1025,6 +1028,39 @@ fn the_paragraph_direction_is_detected_from_the_content() {
         Some(100.0),
     );
     assert!(!ascii.display().is_rtl());
+
+    // The declared direction still decides alignment on detected-RTL
+    // content: Start under declared Ltr stays left, under declared Rtl it
+    // moves right by the line's free space.
+    let left = laid_out(
+        &mut context,
+        BlockStyle {
+            text_align: TextAlign::Start,
+            direction: Direction::Ltr,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "אב")],
+        None,
+        Some(100.0),
+    );
+    let right = laid_out(
+        &mut context,
+        BlockStyle {
+            text_align: TextAlign::Start,
+            direction: Direction::Rtl,
+            ..BlockStyle::default()
+        },
+        &[run(&style, "אב")],
+        None,
+        Some(100.0),
+    );
+    let left_offset = left.display().get(0).expect("one line").metrics().offset;
+    let right_offset = right.display().get(0).expect("one line").metrics().offset;
+    assert_close(left_offset, 0.0);
+    assert!(
+        right_offset > left_offset + 20.0,
+        "declared Rtl right-aligns the detected-RTL line",
+    );
 }
 
 #[test]
@@ -1058,4 +1094,102 @@ fn content_widths_track_box_resizes_and_survive_justification() {
     assert_close(justified.content_widths().max, 80.0);
     justified.layout(&mut context, Some(60.0));
     assert_close(justified.content_widths().max, 80.0);
+}
+
+#[test]
+fn a_maxlength_cut_on_a_wrapped_box_keeps_the_dots() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "aa"),
+        atom(5, 10.0, 10.0, VerticalAlign::Baseline),
+        run(&style, "bb"),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_chars: Some(2),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        Some(20.0),
+    );
+
+    // "bb" wraps as a whole word, so the box takes natural line 2 alone;
+    // the cut at unit 2 addresses that line — the box's unit before it kept
+    // line 1 out of it — and the dots render there instead of being clamped
+    // away with a mislocated cut.
+    assert!(block.truncated());
+    assert_hidden(&block, 5);
+    let lines = block.lines();
+    assert_eq!(lines.len(), 2);
+    assert_eq!((lines[1].source_start, lines[1].source_end), (2, 3));
+    assert_eq!(lines[1].ellipsis_count, 1);
+    let display = block.display();
+    let styles = 0..u16::try_from(display.styles().len()).expect("fits");
+    assert!(
+        styles
+            .clone()
+            .any(|i| block.source_of(i) == SourceItem::Ellipsis)
+    );
+}
+
+#[test]
+fn a_wrapped_box_does_not_widen_the_dots_back_off() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "aaaa"),
+        atom(5, 10.0, 10.0, VerticalAlign::Baseline),
+        run(&style, "bb"),
+    ];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(1),
+            overflow: TextOverflow::Ellipsis,
+            ..BlockStyle::default()
+        },
+        &items,
+        None,
+        Some(40.0),
+    );
+
+    // Line 1 shows "aaaa" (units 0..4); the box shares byte 4 with 'b' but
+    // sits on the uncommitted line, so the back-off is 4 − 3 = 1 and the
+    // dots fit: "a...".
+    assert!(block.truncated());
+    let lines = block.lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!((lines[0].source_start, lines[0].source_end), (0, 4));
+    assert_eq!(lines[0].ellipsis_count, 3);
+    assert_close(lines[0].advance, 40.0);
+    assert_hidden(&block, 5);
+}
+
+#[test]
+fn the_fitting_walk_removes_at_least_two_units() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa aaaa aaaa")];
+    let tail_style = ahem_style();
+    let tail = [run(&tail_style, "X")];
+    let mut context = text_context();
+    let block = laid_out(
+        &mut context,
+        BlockStyle {
+            max_lines: core::num::NonZeroU32::new(2),
+            ..BlockStyle::default()
+        },
+        &items,
+        Some(&tail),
+        Some(50.0),
+    );
+
+    // A 10px tail would fit in the space of the final cluster alone, but the
+    // web's loop decrements before its first width check: two units go.
+    assert!(block.truncation_visible());
+    assert_eq!(block.lines()[1].ellipsis_count, 2);
+    assert_close(block.lines()[1].advance, 30.0);
 }

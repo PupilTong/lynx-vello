@@ -140,10 +140,21 @@ pub(in crate::text::block) fn capture_lines(
     let mut blank_tail = 0;
     for line in layout.lines() {
         if is_blank_line(&line) {
+            // Blank lines only ever trail (every interior line carries its
+            // break byte or a box) and are about to be popped; a zeroed
+            // record keeps the indexes aligned without consulting the map at
+            // an offset that may sit past the text.
             blank_tail += 1;
-        } else {
-            blank_tail = 0;
+            lines.push(NaturalLine {
+                start_unit: 0,
+                end_unit: 0,
+                consumed_end: 0,
+                start_byte: 0,
+                end_byte: 0,
+            });
+            continue;
         }
+        blank_tail = 0;
         let range = line.text_range();
         let has_text = range.start <= range.end;
         let mut start_unit = u32::MAX;
@@ -173,8 +184,11 @@ pub(in crate::text::block) fn capture_lines(
                 )
                 .expect("text fits u32");
             start_unit = start_unit.min(map.byte_to_unit(text, start));
-            end_unit = end_unit.max(map.byte_to_unit(text, visible_end));
-            consumed_end = consumed_end.max(map.byte_to_unit(text, end));
+            // End offsets go through the end-sided lookup: a box sharing the
+            // end byte belongs to a later line unless the items walk above
+            // already counted it as this line's.
+            end_unit = end_unit.max(map.unit_before(text, visible_end));
+            consumed_end = consumed_end.max(map.unit_before(text, end));
             (start, end)
         } else {
             let byte = first_box_byte.expect("a committed line has items");

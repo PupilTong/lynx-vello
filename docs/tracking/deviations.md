@@ -173,7 +173,11 @@ consequential choice about whether to follow the spec or the quirk.
   therefore the back-off basis and `ellipsisCount` — cover visible content
   only: the collapsed whitespace a soft wrap consumed belongs to no line,
   matching the web's rect-derived ranges, so consecutive ranges can have a
-  gap. Default-mode web bundles actually delegate to the browser's own
+  gap. One start-side delta remains: the web steps the next line's start to
+  the previous end plus exactly one, so when a wrap collapsed more than one
+  whitespace unit the web counts the extras into the next line's range (and
+  its short-line dot arithmetic) while this module starts the line at its
+  first actually-present unit. Default-mode web bundles actually delegate to the browser's own
   `-webkit-line-clamp` ellipsis, whose cut point and dot styling can differ
   by a character; the slow path is the only inspectable algorithm. Further
   deltas from the web loop, all strictly safer: cuts land on cluster
