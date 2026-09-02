@@ -39,7 +39,7 @@ pub struct Headless {
 #[derive(Default)]
 pub struct PlaneBank {
     /// The commit the retained textures were baked from.
-    commit: Option<(u64, u64)>,
+    commit: Option<u64>,
     planes: Vec<Plane>,
     images: Vec<vello::peniko::ImageData>,
     bake_scene: vello::Scene,
@@ -76,15 +76,14 @@ impl PlaneBank {
         queue: &wgpu::Queue,
         frame: &crate::visual::CommittedFrame,
         images: &[Option<vello::peniko::ImageData>],
-        image_epoch: u64,
     ) -> Result<(), GpuError> {
         let plan = frame
             .composite_plan()
             .expect("prepare bakes a layered frame's plan");
-        // Keyed on the image epoch as well as the commit: a plane baked
-        // before its images loaded must re-bake when they arrive, or the
-        // image is permanently absent from that scroller.
-        if self.commit == Some((frame.commit_id(), image_epoch)) {
+        // The commit alone: a load that changes what a plane draws also
+        // dirties the document, and every rebuild takes a new commit id, so
+        // there is nothing an image could change that this does not catch.
+        if self.commit == Some(frame.commit_id()) {
             for image in &self.images {
                 renderer.mark_override_image_dirty(image);
             }
@@ -137,7 +136,7 @@ impl PlaneBank {
                 .map_err(|error| GpuError::Render(error.to_string()))?;
             renderer.mark_override_image_dirty(&self.images[index]);
         }
-        self.commit = Some((frame.commit_id(), image_epoch));
+        self.commit = Some(frame.commit_id());
         Ok(())
     }
 
@@ -246,7 +245,6 @@ impl Headless {
         &mut self,
         frame: &crate::visual::CommittedFrame,
         images: &[Option<vello::peniko::ImageData>],
-        image_epoch: u64,
     ) -> Result<(), GpuError> {
         let Self {
             context,
@@ -256,14 +254,7 @@ impl Headless {
             ..
         } = self;
         let handle = &context.devices[*device_index];
-        planes.prepare(
-            renderer,
-            &handle.device,
-            &handle.queue,
-            frame,
-            images,
-            image_epoch,
-        )
+        planes.prepare(renderer, &handle.device, &handle.queue, frame, images)
     }
 
     /// The retained planes' registered images; see [`PlaneBank::images`].

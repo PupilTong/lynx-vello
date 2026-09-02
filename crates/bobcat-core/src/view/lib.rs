@@ -161,13 +161,12 @@ impl fmt::Debug for DrawTarget {
 
 const MAX_RENDER_DIMENSION: u32 = 16_384;
 
-/// What a rendered target is identified by: the commit it came from, the
-/// scroll generation it was composed at, and the image epoch whose pixels it
-/// drew.
+/// What a rendered target is identified by: the commit it came from, and
+/// the scroll generation it was composed at.
 ///
-/// Without the epoch, a target rendered before an image loaded would be
-/// re-served unchanged after it arrived.
-pub(crate) type ComposeKey = (u64, u64, u64);
+/// Images need no term of their own. A load that changes what a frame draws
+/// dirties the document, and every rebuild takes a new commit id.
+pub(crate) type ComposeKey = (u64, u64);
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

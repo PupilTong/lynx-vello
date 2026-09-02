@@ -30,8 +30,8 @@ use crate::resource::ResourceFetcher;
 /// current commit draws.
 ///
 /// The resolved table is deliberately **not** a second cache. It is one
-/// commit's pixels in draw order, rebuilt whenever the commit or the image
-/// epoch moves, applying no policy of its own and holding shallow
+/// commit's pixels in draw order, rebuilt whenever the commit moves,
+/// applying no policy of its own and holding shallow
 /// `ImageData` clones — the same `Blob`, so one entry costs a reference count
 /// rather than a bitmap. Every decision about what stays in memory belongs to
 /// the host.
@@ -42,23 +42,19 @@ use crate::resource::ResourceFetcher;
 pub(crate) struct PainterImages<F> {
     store: F,
     inbox: ImageInbox,
-    /// `(commit_id, epoch)` the table was built for.
-    key: Option<(u64, u64)>,
+    /// The commit the table was built for.
+    key: Option<u64>,
     /// One entry per image draw of that commit, in draw order.
     resolved: Vec<Option<ImageData>>,
     /// Scratch for the distinct sources of one resolve, reused across
     /// commits. Only the hint the host is given is read from it.
     sources: Vec<Arc<str>>,
-    /// Bumped when a report changes what an already-composed frame would
-    /// draw, so a target rendered before that is not re-served after it.
-    epoch: u64,
 }
 
 impl<F> std::fmt::Debug for PainterImages<F> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PainterImages")
-            .field("epoch", &self.epoch)
             .field("resolved", &self.resolved.len())
             .finish_non_exhaustive()
     }
@@ -91,17 +87,12 @@ impl<F: ResourceFetcher> PainterImages<F> {
             key: None,
             resolved: Vec::new(),
             sources: Vec::new(),
-            epoch: 0,
         }
     }
 
     /// The host's resource system, for the startup loads that need it.
     pub(crate) fn store(&self) -> &F {
         &self.store
-    }
-
-    pub(crate) fn epoch(&self) -> u64 {
-        self.epoch
     }
 
     /// Names every source the document asked about, starting whatever load
@@ -115,24 +106,24 @@ impl<F: ResourceFetcher> PainterImages<F> {
         }
     }
 
-    /// Takes the reports the store has queued, bumping the epoch when there
-    /// are any. Empty when a wakeup raced another drain.
+    /// Takes the reports the store has queued. Empty when a wakeup raced
+    /// another drain.
     pub(crate) fn take_reports(&mut self) -> Vec<ImageEvent> {
-        let events = self.inbox.drain();
-        if !events.is_empty() {
-            self.epoch = self.epoch.wrapping_add(1);
-        }
-        events
+        self.inbox.drain()
     }
 
-    /// Reads every image `frame` draws, once per `(commit, epoch)`.
+    /// Reads every image `frame` draws, once per commit.
+    ///
+    /// The commit is the whole key. A report that changes what a frame draws
+    /// dirties the document, and every rebuild takes a new commit id, so a
+    /// separate image counter would only ever agree with this one.
     ///
     /// **May block.** A store is allowed — required, in fact — to restore a
     /// bitmap it evicted, and doing so inside this call is the whole point of
     /// the synchronous read. It therefore runs before a swap-chain image is
     /// acquired, never while one is held.
     pub(crate) fn resolve(&mut self, frame: &dom::CommittedFrame) {
-        let key = (frame.commit_id(), self.epoch);
+        let key = frame.commit_id();
         if self.key == Some(key) {
             return;
         }

@@ -770,7 +770,6 @@ fn paint_window(
     buffer: &mut Scene,
     frame: &CommittedFrame,
     images: &[Option<dom::vello::peniko::ImageData>],
-    image_epoch: u64,
     size: FrameSize,
     key: ComposeKey,
     animation_now: Option<f64>,
@@ -779,7 +778,7 @@ fn paint_window(
         return Ok(());
     }
     let scene = if frame.composite_plan().is_some() {
-        graphics.prepare_planes(frame, images, image_epoch)?;
+        graphics.prepare_planes(frame, images)?;
         composite_scene(
             intents,
             buffer,
@@ -1206,10 +1205,9 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             self.scroll_intents.rebase(frame);
             self.maybe_request_refill(frame);
         }
-        let epoch = self.images.epoch();
         let key = latest
             .as_ref()
-            .map(|frame| (frame.commit_id(), self.scroll_intents.generation, epoch));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
@@ -1224,7 +1222,6 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
                 &mut self.composed_scene,
                 frame,
                 images,
-                epoch,
                 size,
                 key,
                 animation_now,
@@ -1245,10 +1242,9 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         if let Some(frame) = &latest {
             self.images.resolve(frame);
         }
-        let epoch = self.images.epoch();
         let key = latest
             .as_ref()
-            .map(|frame| (frame.commit_id(), self.scroll_intents.generation, epoch));
+            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
         let animation_now = latest
             .as_ref()
             .and_then(|frame| frame.has_live_curves().then_some(now));
@@ -1261,7 +1257,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
                     && (self.composed != Some(key) || animation_now.is_some())
                 {
                     let scene = if frame.composite_plan().is_some() {
-                        gpu.prepare_planes(frame, images, epoch)
+                        gpu.prepare_planes(frame, images)
                             .map_err(|error| EngineError::Gpu(error.to_string()))?;
                         composite_scene(
                             &self.scroll_intents,
@@ -1297,7 +1293,6 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
                         &mut self.composed_scene,
                         frame,
                         images,
-                        epoch,
                         size,
                         key,
                         animation_now,
@@ -1376,8 +1371,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         self.scroll_intents.rebase(&frame);
         self.maybe_request_refill(&frame);
         self.images.resolve(&frame);
-        let epoch = self.images.epoch();
-        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation, epoch);
+        let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
         if self.composed == Some(key) && !force && animation_now.is_none() {
             return Ok(false);
@@ -1387,7 +1381,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             unreachable!("the offscreen output was just checked");
         };
         let scene = if frame.composite_plan().is_some() {
-            gpu.prepare_planes(&frame, images, epoch)
+            gpu.prepare_planes(&frame, images)
                 .map_err(|error| EngineError::Gpu(error.to_string()))?;
             composite_scene(
                 &self.scroll_intents,

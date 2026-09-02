@@ -45,7 +45,7 @@ fn scrolling_doc() -> (Doc, dom::NodeId) {
 /// One composite render, prepared the way a target renders every frame:
 /// planes brought up to the commit, then the plan composed and rendered.
 fn render_layered(gpu: &mut Headless, frame: &Arc<CommittedFrame>, offset: f32) -> Vec<u8> {
-    gpu.prepare_planes(frame, &[], 0).expect("plane bake");
+    gpu.prepare_planes(frame, &[]).expect("plane bake");
     let offsets = move |_: &dom::ScrollSlot| Some(Vector2D::new(0.0, offset));
     let mut layered = Scene::new();
     frame.composite_into(&mut layered, gpu.plane_images(), &[], &offsets, None);

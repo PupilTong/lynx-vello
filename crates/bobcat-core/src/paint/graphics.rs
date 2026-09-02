@@ -125,7 +125,6 @@ impl WindowGraphics {
         &mut self,
         frame: &dom::CommittedFrame,
         images: &[Option<dom::vello::peniko::ImageData>],
-        image_epoch: u64,
     ) -> Result<(), EngineError> {
         let handle = &self.context.devices[self.surface.dev_id];
         self.planes
@@ -135,7 +134,6 @@ impl WindowGraphics {
                 &handle.queue,
                 frame,
                 images,
-                image_epoch,
             )
             .map_err(|error| EngineError::Gpu(error.to_string()))
     }
