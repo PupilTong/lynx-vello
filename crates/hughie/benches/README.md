@@ -10,6 +10,16 @@ Each layout algorithm has one Cargo benchmark target and one scenario module:
 `text.rs` measures the Parley-backed text core directly; its committed box
 cache workload also uses the shared production host.
 
+`text_block.rs` measures the standalone Lynx text-block path
+(`hughie::text::block`) through its public API only — no dom involvement.
+Its scenarios are lifted from the reference suites (the
+`lynx-stack` web-elements x-text fixtures and e2e cases, and the paragraph
+benchmarks the native repo vendors from libtxt), split into the module's
+cost tiers: cold build+layout, retained re-break at an alternating width,
+the steady-state no-op, truncating layouts (dots, inline-truncation content,
+maxlength), the `set_box_size` measure/align round trip, and a
+thousand-style-run fragmentation case.
+
 The box-layout targets also include 20 text-bearing production-host workloads:
 five clones of existing complex scenarios per algorithm. Flex clones its five
 owner/direction/alignment/distribution/wrapping matrices. Grid clones dense

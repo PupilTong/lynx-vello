@@ -56,6 +56,10 @@ name = "text"
 harness = false
 
 [[bench]]
+name = "text_block"
+harness = false
+
+[[bench]]
 name = "hughie_flex"
 harness = false
 
