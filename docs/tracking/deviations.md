@@ -73,6 +73,20 @@ consequential choice about whether to follow the spec or the quirk.
   `LinearLayout`/`RelativeLayout`-derived) with no CSS equivalent at all;
   not a spec violation, just extensions to implement faithfully as their
   own algorithms (not flex polyfills, unlike how `web-core` does it).
+- **`display: -lynx-text`** — a fork-only display value naming one flattened
+  Lynx paragraph, added because Lynx's own inline-ness is **structural, not
+  display-driven**: `TextElement::OnNodeAdded` converts every added child via
+  `ConvertToInlineElement()` (`lynx/core/renderer/dom/fiber/text_element.cc`),
+  a node is inline iff its parent is a text or a non-view inline element
+  (`element.cc:562-571`), and there is no `display: inline` anywhere in the
+  native model. This engine cascades, so the structural rule needs a computed
+  value to ride on; `-lynx-text` is it. Block-level, and deliberately **not**
+  an item container (`is_item_container() == false`, like `LynxRelative` and
+  unlike `LynxLinear`): a text block's subtree is inline content — runs,
+  nested text scopes, atomic inline boxes — not flex or grid items. The
+  keyword is vendor-prefixed because it is neither a W3C value nor a value
+  Lynx itself spells: no bundle author writes it, and it is unreachable from
+  a plain `servo` build (pinned by `lynx_feature_off_parity`).
 - **Relative logical/physical precedence (temporary implementation
   deviation)** — Starlight remaps logical relative-property IDs to a physical
   slot during style application, so a logical and physical declaration that

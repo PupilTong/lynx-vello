@@ -1225,7 +1225,7 @@ useful signal for currently-compatible versions of those libraries.
   Lynx computed defaults (border-box, `overflow: hidden`, `display: linear`
   on every element, …) stay embedder cascade policy (UA sheet). Relies on
   the vendored stylo fork (`vendor/stylo`, tracking the
-  canonical `lynx` branch, tip `9e647b249`): `contain` was already seeded
+  canonical `lynx` branch, tip `18d8981f2`): `contain` was already seeded
   in the fork's lynx grammar; fork PR #9 (squash-merged into `lynx`) added
   `content-visibility` / `contain-intrinsic-size` under the `lynx` feature,
   pref-gated for stock servo builds; fork PR #10 (squash-merged into
@@ -1249,12 +1249,20 @@ useful signal for currently-compatible versions of those libraries.
   draggable). The three non-`visible` values stay genuinely distinct:
   `scroll` is user-scrollable, `hidden` is a scroll container that moves only
   programmatically, `clip` is not a scroll container at all.
-  Three commits have landed on `lynx` since #12, and the tip above is the last
+  Four commits have landed on `lynx` since #12, and the tip above is the last
   of them: fork PR #14 requires `Send` of `FontMetricsProvider` implementations
   (what lets a `Document` cross to the presenting thread at all), fork PR #13
-  corrects `ElementData` reference documentation, and fork PR #21 moves the
+  corrects `ElementData` reference documentation, fork PR #21 moves the
   `display` longhand's initial value from `inline` to `Display::initial()`,
-  which under the `lynx` feature is `flex`. Read that last one against the
+  which under the `lynx` feature is `flex`, and the `-lynx-text` patch adds
+  `DisplayInside::LynxText` — the block-level, **non**-item-container value
+  naming one flattened Lynx paragraph. It is the cascade's way of saying what
+  Lynx says structurally (`TextElement::OnNodeAdded` converts every added
+  child; no author CSS can undo it), so a `<text>`'s subtree is inline content
+  rather than child boxes. The variant carries
+  `#[css(keyword = "-lynx-text")]` because the derived `DisplayInside` `ToCss`
+  would otherwise kebab-case the variant name and silently drop the vendor
+  prefix. Read that last one against the
   paragraph above rather than as a contradiction of it: the *initial* value is
   what an element computes to with no declaration reaching it at all, while
   Lynx's `display: linear` default is a UA-sheet declaration this embedder

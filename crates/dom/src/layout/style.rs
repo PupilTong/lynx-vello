@@ -21,6 +21,13 @@ pub(crate) enum DisplayMode {
     Grid,
     Linear,
     Relative,
+    /// The `display: -lynx-text` block: one flattened Lynx paragraph.
+    ///
+    /// The value exists in the cascade and computes here today, but the
+    /// [`hughie::text::block`] paragraph it names is not wired yet, so the
+    /// box it produces is still the flex container `text` has always been —
+    /// the mode is a distinct arm precisely so that swap is one place.
+    Text,
     Leaf,
 }
 
@@ -32,6 +39,7 @@ pub(crate) fn display_mode(display: Display) -> DisplayMode {
         Display::Grid => DisplayMode::Grid,
         Display::Linear => DisplayMode::Linear,
         Display::LynxRelative => DisplayMode::Relative,
+        Display::LynxText => DisplayMode::Text,
         unsupported => panic!(
             "Bobcat does not support Stylo computed display {unsupported:?} \
              (raw={:#06x}, outside={:?}, inside={:?})",
@@ -338,6 +346,7 @@ mod tests {
         assert_eq!(display_mode(Display::Grid), DisplayMode::Grid);
         assert_eq!(display_mode(Display::Linear), DisplayMode::Linear);
         assert_eq!(display_mode(Display::LynxRelative), DisplayMode::Relative);
+        assert_eq!(display_mode(Display::LynxText), DisplayMode::Text);
     }
 
     #[test]
