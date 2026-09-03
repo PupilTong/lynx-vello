@@ -156,30 +156,30 @@ useful signal for currently-compatible versions of those libraries.
   unsupported background body. See `docs/source-architecture.md` for boundaries,
   migration and parser resource bounds.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
-  opaque `LynxView` facade plus the protocol-only, host-injected
-  `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
+  opaque `LynxView<F>` facade plus the protocol-only, host-injected
+  `ResourceFetcher`, draw-target, OS-input, and
   lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
   embedder sees is the sanitized `script::ScriptError` a failure is reported
-  with. A view is built from one `ViewSources` — an owned
-  `Arc<dyn ResourceFetcher>`, owned font containers, an optional default font
-  family, an optional `ImageStore`, author stylesheet URLs in cascade order,
-  and the one entry MTS module URL — passed to the async `LynxView::new` with
-  `PageConfig`, the device metrics, and the lifecycle wakeup. `new` validates
-  the viewport, creates the one link, builds the painter in place on the
-  calling thread, starts `bobcat-main`, and awaits one startup result. The
-  wakeup is the only thing `new` is generic over, and `bobcat-main` is what
-  holds it; the view itself names no type parameter. `bobcat-main` creates the document itself, registers its fonts and
-  image store, awaits and mounts every stylesheet, awaits the entry module,
-  creates QuickJS, and boots it before returning success; the fetcher decides
-  where actual network or file IO runs, but every future continuation and
-  document mutation remains on `bobcat-main`. A resource, font, realm, or boot
-  failure yields `LynxViewError` and no view, and nothing later mounts a
-  stylesheet or starts a second entry. Cancelling the unresolved `new` future
-  drops pending resource work or stops startup before `QuickJS` begins, then
-  releases the painter it built and directly joins `bobcat-main`; synchronous
-  startup JavaScript is allowed to finish rather than being externally
-  interrupted.
+  with. A view is built from one `ViewSources` — `PageConfig`, owned font
+  containers, an optional default font family, author stylesheet URLs in
+  cascade order, and the one entry MTS module URL — plus a builder that turns
+  the view's `ImageReports` into its concrete `ResourceFetcher`. Both are
+  passed to the async `LynxView::new` with device metrics, `DrawTarget`, and
+  the lifecycle wakeup. `new` validates the viewport, creates the one link,
+  starts `bobcat-main`, and builds the painter, draw target, and fetcher in
+  place on the calling thread. The view's `F` parameter is that painter-owned
+  fetcher; the wakeup is a separate constructor generic held by
+  `bobcat-main`. The calling thread drives stylesheet and entry fetches and
+  sends only loaded sources across the link. `bobcat-main` creates the
+  document itself, registers its fonts, mounts each received stylesheet,
+  creates QuickJS when the entry arrives, and boots it before returning
+  success. A resource, font, realm, or boot failure yields `LynxViewError` and
+  no view, and nothing later mounts a stylesheet or starts a second entry.
+  Cancelling the unresolved `new` future drops pending resource work on the
+  calling thread or stops startup before `QuickJS` begins, then releases the
+  painter it built and directly joins `bobcat-main`; synchronous startup
+  JavaScript is allowed to finish rather than being externally interrupted.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
@@ -301,7 +301,7 @@ useful signal for currently-compatible versions of those libraries.
   transform and unioned per source — so a host decodes to the draw rather
   than to the file. No container sniffing, no codec contract, no cache
   policy and no byte budget lives in `bobcat-core` or `dom`; the reference
-  implementation of all of that is `crates/bobcat-resources`, which both
+  implementation of all of that is `crates/bobcat-resources`, which all
   shipped embedders use. `LynxView::prefetch_images` warms sources ahead of
   the walk that would discover them. Automatic loading for the Lynx
   `<image>` element remains unwired, as does its element surface (`mode`,
@@ -568,7 +568,7 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-resources` — the cross-platform reference resource system:
-  one `ResourceFetcher` for macOS, Linux and the browser, which both shipped
+  one `ResourceFetcher` for macOS, Linux and the browser, which all shipped
   embedders use instead of the in-memory fetchers they used to carry. It is
   the worked example of what the protocol expects, not part of the
   protocol, and core stays exactly as free of resources as before. Four
@@ -627,9 +627,9 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
   raw Lynx XML source card; other URL schemes remain rejected at the boundary.
   The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
-  argument parsing, input bytes, bundle decoding or XML parsing, `PageConfig`
-  mapping, the reference resource system with the extracted scripts/styles
-  registered, the winit window and event loop, device metrics, input
+  argument parsing, local input IO, the `PageSource` instance, the reference
+  resource system with the extracted scripts/styles registered, the winit
+  window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `pump`, clock ticks in
@@ -666,18 +666,54 @@ useful signal for currently-compatible versions of those libraries.
   `set/show vsync`). Screenshots are captured only through that live prompt;
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
   It must not
-  duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
-  remains a precise `bobcat-core` QuickJS error. Its `style_info` module lowers
-  a decoded `StyleInfo` into `bobcat_core::PreparsedStyleSheet` — flattening
-  every `css_id` fragment in reverse-topological order, imported before
-  importing — and registers it in the fetcher under the URL both runners name in
-  `ViewSources::style_sheets`. A bundle carrying non-zero fragment ids warns that
-  per-component scoping is not implemented rather than claiming compatibility.
+  duplicate runtime, DOM, layout, painting, or source-lowering policy: missing
+  MTS/PAPI support remains a precise `bobcat-core` QuickJS error.
+  `bobcat-source` lowers a decoded `StyleInfo` into
+  `bobcat_core::PreparsedStyleSheet`, flattening every `css_id` fragment in
+  reverse-topological order so imported fragments precede their importers.
+  Each native embedder registers that sheet in `bobcat-resources` under the
+  URL it names in `ViewSources::style_sheets`. A bundle carrying non-zero
+  fragment ids warns that per-component scoping is not implemented rather
+  than claiming compatibility.
   For XML, a present `<style>` body instead uses the fetcher's raw CSS-text arm
   and the fixed page configuration is `false`/`false`/`true` for default
   linear display, visible overflow, and selector support. A present background
   section is retained under `/app-service.js` and warned about, but not
   executed until Bobcat has a background-thread realm.
+- `crates/bobcat-server` — a native HTTP screenshot **embedder**, not runtime
+  infrastructure inside `bobcat-core`. It follows UI Judge's public capture
+  surface: `GET /health`, and `POST /screenshot` with required `url` and
+  `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +
+  64 KiB body bound, and raw `image/jpeg` success output. Captures use a fixed
+  800×600 physical viewport at DPR 1 and JPEG quality 90, source-over
+  composited onto white before encoding. Scoring-only fields are accepted and
+  ignored; non-empty `globalProps`, `initialData`, and interaction `steps` are
+  rejected with 422 instead of pretending the current opaque core has data
+  injection or DOM automation seams.
+  Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
+  jobs feeds one dedicated capture thread. That is the embedder thread for
+  each job: it constructs and destroys the non-`Send` `LynxView` with
+  `DrawTarget::Offscreen`, owns the view's `Painter` and every GPU operation,
+  ticks, settles, and returns its RGBA capture. The Lynx main thread it spawns
+  is the view's only other runtime thread; the server adds no separate
+  rendering owner.
+  JPEG encoding then runs on Tokio's blocking pool after the view is gone, so
+  it cannot retain the view or hold the GPU lane. Queue saturation and an
+  unavailable worker are 503, input/render failures are 422, and encoding
+  failures are 500. A worker panic makes `/health` unavailable and initiates
+  graceful server shutdown.
+  The server loads the top-level `file://`, `http://`, or `https://` input,
+  delegates container mapping to `bobcat-source`, registers its extracted
+  scripts and stylesheet with a per-job `bobcat-resources` system, and lets
+  that system resolve, fetch, cache, and decode page subresources. Native
+  `.lynx.bundle` therefore fails explicitly until its separate support lands.
+  It listens on all IPv4 and IPv6 interfaces like UI Judge and has no auth,
+  TLS, CORS, or URL sandbox, so its arbitrary file/network reads are suitable
+  only for a trusted environment, including only trusted page JavaScript:
+  `timeoutMs` cannot preempt synchronous QuickJS execution, a blocking GPU
+  driver call on the capture/embedder thread, or synchronous view teardown
+  while it joins the Lynx main thread. It must not move source fetching, HTTP
+  policy, JPEG encoding, queueing, or server lifecycle into `bobcat-core`.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
