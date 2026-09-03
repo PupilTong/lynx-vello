@@ -1,9 +1,9 @@
-//! macOS: ImageIO and CoreGraphics, the decoder every Apple image view uses.
+//! macOS: `ImageIO` and `CoreGraphics`, the decoder every Apple image view uses.
 //!
 //! `CGImageSourceCreateThumbnailAtIndex` with a maximum pixel size decodes a
 //! downsampled image directly — for JPEG, at a reduced DCT scale — which is
 //! what makes a large photo shown small cost its shown size. The result is
-//! drawn once into an RGBA bitmap context, which is how CoreGraphics hands
+//! drawn once into an RGBA bitmap context, which is how `CoreGraphics` hands
 //! pixels out; that context is premultiplied, and the bitmap says so.
 //!
 //! Reached through raw FFI declarations against the system frameworks
@@ -125,7 +125,7 @@ unsafe extern "C" {
     ) -> CFTypeRef;
 }
 
-/// A CoreFoundation object released on drop.
+/// A `CoreFoundation` object released on drop.
 struct Owned(CFTypeRef);
 
 impl Drop for Owned {
@@ -138,7 +138,7 @@ impl Drop for Owned {
     }
 }
 
-/// Reads a CFNumber property out of an ImageIO property dictionary.
+/// Reads a `CFNumber` property out of an `ImageIO` property dictionary.
 fn number_property(properties: CFTypeRef, key: CFTypeRef) -> Option<i64> {
     // SAFETY: `properties` is a live dictionary; the value under an ImageIO
     // pixel-size or orientation key is a CFNumber, which
@@ -163,167 +163,11 @@ pub(crate) fn decode(
     header: Option<ImageHeader>,
     max: (u32, u32),
 ) -> Result<Bitmap, DecodeError> {
-    let length = CFIndex::try_from(bytes.len()).map_err(|_| {
-        DecodeError::Malformed("the image is larger than CFData can hold".to_owned())
-    })?;
-    // SAFETY: `CFDataCreate` copies `length` bytes readable at the pointer.
-    let data = Owned(unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), length) });
-    if data.0.is_null() {
-        return Err(DecodeError::Malformed("CFDataCreate failed".to_owned()));
-    }
-    // SAFETY: the data object is live; a null source means ImageIO does not
-    // recognise the container at all.
-    let source = Owned(unsafe { CGImageSourceCreateWithData(data.0, std::ptr::null()) });
-    if source.0.is_null() {
-        return Err(DecodeError::Unsupported(
-            "ImageIO does not recognise this image".to_owned(),
-        ));
-    }
-    // SAFETY: the source is live.
-    if unsafe { CGImageSourceGetCount(source.0) } == 0 {
-        return Err(DecodeError::Malformed("the image has no frames".to_owned()));
-    }
-
-    // Intrinsic size and orientation from the properties, which ImageIO
-    // reads from the header without decoding.
-    // SAFETY: the source is live; a null dictionary is handled.
-    let properties =
-        Owned(unsafe { CGImageSourceCopyPropertiesAtIndex(source.0, 0, std::ptr::null()) });
-    let (mut source_width, mut source_height) = if properties.0.is_null() {
-        header.map_or((0, 0), |header| (header.width, header.height))
-    } else {
-        // SAFETY: reading framework-exported constant keys.
-        let (width, height, orientation) = unsafe {
-            (
-                number_property(properties.0, kCGImagePropertyPixelWidth),
-                number_property(properties.0, kCGImagePropertyPixelHeight),
-                number_property(properties.0, kCGImagePropertyOrientation).unwrap_or(1),
-            )
-        };
-        let width = width
-            .and_then(|width| u32::try_from(width).ok())
-            .unwrap_or(0);
-        let height = height
-            .and_then(|height| u32::try_from(height).ok())
-            .unwrap_or(0);
-        if (5..=8).contains(&orientation) {
-            (height, width)
-        } else {
-            (width, height)
-        }
-    };
-    drop(properties);
-    if source_width == 0 || source_height == 0 {
-        if let Some(header) = header {
-            (source_width, source_height) = (header.width, header.height);
-        }
-    }
-
-    let max_pixel = if source_width == 0 || source_height == 0 {
-        max.0.max(max.1)
-    } else {
-        let (width, height) = target_size(source_width, source_height, max);
-        width.max(height)
-    };
-    let max_pixel = i32::try_from(max_pixel).unwrap_or(i32::MAX);
-    // SAFETY: `CFNumberCreate` copies the 32-bit integer at the pointer.
-    let max_pixel_number = Owned(unsafe {
-        CFNumberCreate(
-            std::ptr::null(),
-            K_CF_NUMBER_SINT32_TYPE,
-            (&raw const max_pixel).cast::<c_void>(),
-        )
-    });
-    // SAFETY: the keys and `kCFBooleanTrue` are framework-exported constants,
-    // the arrays are three live values each, and the CFType callbacks retain
-    // them for the dictionary's life.
-    let options = unsafe {
-        let keys: [CFTypeRef; 3] = [
-            kCGImageSourceThumbnailMaxPixelSize,
-            kCGImageSourceCreateThumbnailFromImageAlways,
-            kCGImageSourceCreateThumbnailWithTransform,
-        ];
-        let values: [CFTypeRef; 3] = [max_pixel_number.0, kCFBooleanTrue, kCFBooleanTrue];
-        Owned(CFDictionaryCreate(
-            std::ptr::null(),
-            keys.as_ptr(),
-            values.as_ptr(),
-            3,
-            &raw const kCFTypeDictionaryKeyCallBacks,
-            &raw const kCFTypeDictionaryValueCallBacks,
-        ))
-    };
-    if options.0.is_null() {
-        return Err(DecodeError::Malformed(
-            "CFDictionaryCreate failed".to_owned(),
-        ));
-    }
-    // SAFETY: the source and options are live; a null image is a decode
-    // failure.
-    let image = unsafe { CGImageSourceCreateThumbnailAtIndex(source.0, 0, options.0) };
-    if image.is_null() {
-        return Err(DecodeError::Malformed(
-            "ImageIO could not decode the image".to_owned(),
-        ));
-    }
-    let image = CgImage(image);
-    // SAFETY: accessors on a live image.
-    let (width, height) = unsafe { (CGImageGetWidth(image.0), CGImageGetHeight(image.0)) };
-    if width == 0 || height == 0 {
-        return Err(DecodeError::Malformed(
-            "the decoded image is empty".to_owned(),
-        ));
-    }
-    let stride = width
-        .checked_mul(4)
-        .ok_or_else(|| DecodeError::Malformed("the image is too wide".to_owned()))?;
-    let mut rgba =
-        vec![
-            0_u8;
-            stride
-                .checked_mul(height)
-                .ok_or_else(|| DecodeError::Malformed("the image is too large".to_owned()))?
-        ];
-    // SAFETY: the bitmap context draws into `rgba`, which is exactly
-    // `stride * height` bytes and outlives the context; the colour space and
-    // context are released after the draw.
-    unsafe {
-        let space = CGColorSpaceCreateDeviceRGB();
-        let context = CGBitmapContextCreate(
-            rgba.as_mut_ptr().cast::<c_void>(),
-            width,
-            height,
-            8,
-            stride,
-            space,
-            RGBA_PREMULTIPLIED,
-        );
-        if context.is_null() {
-            CGColorSpaceRelease(space);
-            return Err(DecodeError::Malformed(
-                "CGBitmapContextCreate failed".to_owned(),
-            ));
-        }
-        CGContextDrawImage(
-            context,
-            CGRect {
-                origin: CGPoint { x: 0.0, y: 0.0 },
-                size: CGSize {
-                    width: width as f64,
-                    height: height as f64,
-                },
-            },
-            image.0,
-        );
-        CGContextRelease(context);
-        CGColorSpaceRelease(space);
-    }
-    let (width, height) = (
-        u32::try_from(width)
-            .map_err(|_| DecodeError::Malformed("the image is too wide".to_owned()))?,
-        u32::try_from(height)
-            .map_err(|_| DecodeError::Malformed("the image is too tall".to_owned()))?,
-    );
+    let source = ImageSource::open(bytes)?;
+    let (source_width, source_height) = source.intrinsic_size(header);
+    let image = source.thumbnail(max_pixel_for((source_width, source_height), max))?;
+    let (width, height) = image.size()?;
+    let rgba = render_rgba(&image, width, height)?;
     Ok(Bitmap {
         width,
         height,
@@ -342,8 +186,199 @@ pub(crate) fn decode(
     })
 }
 
+/// The `kCGImageSourceThumbnailMaxPixelSize` that fits a `source`-sized
+/// image inside `max`: the longer side of the target, since the thumbnail
+/// keeps the ratio. Without a known source size the bound itself stands.
+fn max_pixel_for(source: (u32, u32), max: (u32, u32)) -> i32 {
+    let longest = if source.0 == 0 || source.1 == 0 {
+        max.0.max(max.1)
+    } else {
+        let (width, height) = target_size(source.0, source.1, max);
+        width.max(height)
+    };
+    i32::try_from(longest).unwrap_or(i32::MAX)
+}
+
+/// An `ImageIO` source over a copy of the encoded bytes.
+struct ImageSource {
+    source: Owned,
+    _data: Owned,
+}
+
+impl ImageSource {
+    fn open(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let length = CFIndex::try_from(bytes.len()).map_err(|_| {
+            DecodeError::Malformed("the image is larger than CFData can hold".to_owned())
+        })?;
+        // SAFETY: `CFDataCreate` copies `length` bytes readable at the pointer.
+        let data = Owned(unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), length) });
+        if data.0.is_null() {
+            return Err(DecodeError::Malformed("CFDataCreate failed".to_owned()));
+        }
+        // SAFETY: the data object is live; a null source means `ImageIO` does
+        // not recognise the container at all.
+        let source = Owned(unsafe { CGImageSourceCreateWithData(data.0, std::ptr::null()) });
+        if source.0.is_null() {
+            return Err(DecodeError::Unsupported(
+                "ImageIO does not recognise this image".to_owned(),
+            ));
+        }
+        // SAFETY: the source is live.
+        if unsafe { CGImageSourceGetCount(source.0) } == 0 {
+            return Err(DecodeError::Malformed("the image has no frames".to_owned()));
+        }
+        Ok(Self {
+            source,
+            _data: data,
+        })
+    }
+
+    /// The image's own size, oriented upright, read from its properties
+    /// without decoding; the header's size when the properties say nothing.
+    fn intrinsic_size(&self, header: Option<ImageHeader>) -> (u32, u32) {
+        let fallback = header.map_or((0, 0), |header| (header.width, header.height));
+        // SAFETY: the source is live; a null dictionary is handled.
+        let properties = Owned(unsafe {
+            CGImageSourceCopyPropertiesAtIndex(self.source.0, 0, std::ptr::null())
+        });
+        if properties.0.is_null() {
+            return fallback;
+        }
+        // SAFETY: reading framework-exported constant keys from a live
+        // dictionary.
+        let (width, height, orientation) = unsafe {
+            (
+                number_property(properties.0, kCGImagePropertyPixelWidth),
+                number_property(properties.0, kCGImagePropertyPixelHeight),
+                number_property(properties.0, kCGImagePropertyOrientation).unwrap_or(1),
+            )
+        };
+        let axis = |value: Option<i64>| value.and_then(|value| u32::try_from(value).ok());
+        let (Some(width), Some(height)) = (axis(width), axis(height)) else {
+            return fallback;
+        };
+        if width == 0 || height == 0 {
+            return fallback;
+        }
+        // Orientations 5 to 8 are the transposing ones.
+        if (5..=8).contains(&orientation) {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    }
+
+    /// Decodes the first frame, downsampled so its longer side is at most
+    /// `max_pixel`, with any EXIF orientation applied.
+    fn thumbnail(&self, max_pixel: i32) -> Result<CgImage, DecodeError> {
+        // SAFETY: `CFNumberCreate` copies the 32-bit integer at the pointer.
+        let max_pixel_number = Owned(unsafe {
+            CFNumberCreate(
+                std::ptr::null(),
+                K_CF_NUMBER_SINT32_TYPE,
+                (&raw const max_pixel).cast::<c_void>(),
+            )
+        });
+        // SAFETY: the keys and `kCFBooleanTrue` are framework-exported
+        // constants, the arrays are three live values each, and the CFType
+        // callbacks retain them for the dictionary's life.
+        let options = unsafe {
+            let keys: [CFTypeRef; 3] = [
+                kCGImageSourceThumbnailMaxPixelSize,
+                kCGImageSourceCreateThumbnailFromImageAlways,
+                kCGImageSourceCreateThumbnailWithTransform,
+            ];
+            let values: [CFTypeRef; 3] = [max_pixel_number.0, kCFBooleanTrue, kCFBooleanTrue];
+            Owned(CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                3,
+                &raw const kCFTypeDictionaryKeyCallBacks,
+                &raw const kCFTypeDictionaryValueCallBacks,
+            ))
+        };
+        if options.0.is_null() {
+            return Err(DecodeError::Malformed(
+                "CFDictionaryCreate failed".to_owned(),
+            ));
+        }
+        // SAFETY: the source and options are live; a null image is a decode
+        // failure.
+        let image = unsafe { CGImageSourceCreateThumbnailAtIndex(self.source.0, 0, options.0) };
+        if image.is_null() {
+            return Err(DecodeError::Malformed(
+                "ImageIO could not decode the image".to_owned(),
+            ));
+        }
+        Ok(CgImage(image))
+    }
+}
+
+/// Draws `image` into a `width` x `height` premultiplied RGBA8 buffer.
+fn render_rgba(image: &CgImage, width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
+    let too_large = || DecodeError::Malformed("the image is too large".to_owned());
+    let columns = usize::try_from(width).map_err(|_| too_large())?;
+    let rows = usize::try_from(height).map_err(|_| too_large())?;
+    let stride = columns.checked_mul(4).ok_or_else(too_large)?;
+    let mut rgba = vec![0_u8; stride.checked_mul(rows).ok_or_else(too_large)?];
+    // SAFETY: the bitmap context draws into `rgba`, which is exactly
+    // `stride * rows` bytes and outlives the context; the colour space and
+    // context are released after the draw.
+    unsafe {
+        let space = CGColorSpaceCreateDeviceRGB();
+        let context = CGBitmapContextCreate(
+            rgba.as_mut_ptr().cast::<c_void>(),
+            columns,
+            rows,
+            8,
+            stride,
+            space,
+            RGBA_PREMULTIPLIED,
+        );
+        if context.is_null() {
+            CGColorSpaceRelease(space);
+            return Err(DecodeError::Malformed(
+                "CGBitmapContextCreate failed".to_owned(),
+            ));
+        }
+        CGContextDrawImage(
+            context,
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: f64::from(width),
+                    height: f64::from(height),
+                },
+            },
+            image.0,
+        );
+        CGContextRelease(context);
+        CGColorSpaceRelease(space);
+    }
+    Ok(rgba)
+}
+
 /// A `CGImage` released on drop.
 struct CgImage(CFTypeRef);
+
+impl CgImage {
+    /// The bitmap's size, refused when either axis is empty.
+    fn size(&self) -> Result<(u32, u32), DecodeError> {
+        // SAFETY: accessors on a live image.
+        let (width, height) = unsafe { (CGImageGetWidth(self.0), CGImageGetHeight(self.0)) };
+        let width = u32::try_from(width)
+            .map_err(|_| DecodeError::Malformed("the image is too wide".to_owned()))?;
+        let height = u32::try_from(height)
+            .map_err(|_| DecodeError::Malformed("the image is too tall".to_owned()))?;
+        if width == 0 || height == 0 {
+            return Err(DecodeError::Malformed(
+                "the decoded image is empty".to_owned(),
+            ));
+        }
+        Ok((width, height))
+    }
+}
 
 impl Drop for CgImage {
     fn drop(&mut self) {

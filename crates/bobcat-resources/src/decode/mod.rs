@@ -135,7 +135,9 @@ pub fn available() -> Result<(), DecodeError> {
 /// Reconciles a header's size with what the decoder produced: an EXIF
 /// orientation the header probe cannot see may have transposed the image,
 /// and the intrinsic size layout is told must be the oriented one.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// gdk-pixbuf's helper: `ImageIO` reports the oriented size itself.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn oriented_source_size(header: (u32, u32), decoded: (u32, u32)) -> (u32, u32) {
     let (header_landscape, decoded_landscape) = (header.0 > header.1, decoded.0 > decoded.1);
     if header.0 != header.1 && decoded.0 != decoded.1 && header_landscape != decoded_landscape {
@@ -147,7 +149,9 @@ fn oriented_source_size(header: (u32, u32), decoded: (u32, u32)) -> (u32, u32) {
 
 /// Packs a decoder's rows — `channels` bytes per pixel, `stride` bytes per
 /// row — into tightly packed RGBA8, filling alpha where the source has none.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// gdk-pixbuf's helper: `ImageIO` draws straight into an RGBA8 context.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn pack_rgba(
     pixels: &[u8],
     width: usize,
@@ -198,7 +202,7 @@ mod tests {
         assert_eq!(target_size(0, 0, (200, 200)), (1, 1));
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn rows_pack_from_rgb_and_rgba_with_stride() {
         let rgb = [1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0];
@@ -222,7 +226,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn a_transposing_orientation_is_reconciled_from_the_decoded_shape() {
         assert_eq!(oriented_source_size((4000, 3000), (200, 150)), (4000, 3000));
