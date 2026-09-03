@@ -14,12 +14,13 @@ fn node_id(bits: u64) -> dom::NodeId {
 /// Boots a script and waits for it to finish, leaving the main thread
 /// parked on its command channel with the boot's frame published.
 fn booted(source: &str) -> TestPainter {
-    let document = crate::main::tree::new_document(
-        crate::main::tree::Viewport::new(393.0, 727.0),
-        crate::main::tree::PageConfig::default(),
-    );
     let mut engine = TestPainter::start(
-        document,
+        || {
+            crate::main::tree::new_document(
+                crate::main::tree::Viewport::new(393.0, 727.0),
+                crate::main::tree::PageConfig::default(),
+            )
+        },
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
             .expect("the test viewport is valid"),
@@ -602,13 +603,18 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
 /// Boots a card whose one view runs `animation_css`, waiting for the
 /// boot flush like [`booted`] does.
 fn booted_animated(animation_css: &str) -> TestPainter {
-    let mut document = crate::main::tree::new_document(
-        crate::main::tree::Viewport::new(393.0, 727.0),
-        crate::main::tree::PageConfig::default(),
-    );
-    crate::style::add_style_sheet_text(&mut document, animation_css);
+    // The builder runs on `bobcat-main`, so it owns its sheet text rather
+    // than borrowing the caller's.
+    let animation_css = animation_css.to_owned();
     let mut engine = TestPainter::start(
-        document,
+        move || {
+            let mut document = crate::main::tree::new_document(
+                crate::main::tree::Viewport::new(393.0, 727.0),
+                crate::main::tree::PageConfig::default(),
+            );
+            crate::style::add_style_sheet_text(&mut document, &animation_css);
+            document
+        },
         crate::main::tree::Viewport::new(393.0, 727.0),
         crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
             .expect("the test viewport is valid"),

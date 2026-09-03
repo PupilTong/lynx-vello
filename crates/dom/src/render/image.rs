@@ -657,12 +657,23 @@ mod tests {
         }
     }
 
-    /// A document must still cross threads with a registry on it: it is built
-    /// on one thread and run on another.
+    /// A decoded-image report must cross to the thread that owns the tree.
+    ///
+    /// This used to assert `Document<()>: Send`, because a document was built
+    /// on one thread and moved to the one that ran it. A document does not
+    /// move any more — `spawn_main_thread` hands `bobcat-main` the *sources*
+    /// and the document is created there — and it is now structurally unable
+    /// to (`Node`'s arena backpointer is a raw pointer). The registry itself
+    /// therefore needs nothing.
+    ///
+    /// What still genuinely crosses is the report: a host answers an image
+    /// load on whatever thread it likes, the painter forwards the batch as
+    /// `ToMain::ImageEvents`, and `bobcat-main` applies it. That send is the
+    /// requirement worth pinning here.
     #[test]
-    fn a_document_carrying_a_registry_still_crosses_threads() {
+    fn an_image_report_crosses_to_the_thread_that_owns_the_tree() {
         const fn assert_send<T: Send>() {}
-        assert_send::<crate::Document<()>>();
+        assert_send::<ImageEvent>();
     }
 
     #[test]

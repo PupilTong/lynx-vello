@@ -15,11 +15,11 @@ fn document() -> LynxDocument {
 /// construction.
 fn view_over<R: EventRequester>(
     events: Arc<R>,
-    document: LynxDocument,
+    build_document: impl FnOnce() -> LynxDocument + Send + 'static,
     entry: &str,
 ) -> TestPainter {
     TestPainter::start(
-        document,
+        build_document,
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
         events,
@@ -333,7 +333,7 @@ fn a_booted_view_commits_and_publishes() {
     let (wake_sender, wake_receiver) = flume::unbounded();
     let mut view = view_over(
         Arc::new(WakeSignal(wake_sender)),
-        document(),
+        document,
         r"
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);

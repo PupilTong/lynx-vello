@@ -820,7 +820,7 @@ mod tests {
 
     /// The mark a resize leaves on the document element has to still be there
     /// at the next style flush. An animation tick runs between the two on the
-    /// presenting thread, and it strips `RECASCADE_SELF` from every hint it
+    /// document's owner thread, and it strips `RECASCADE_SELF` from every hint it
     /// walks past — see [`Document::mark_subtree_recascade`].
     #[test]
     fn a_resize_mark_on_the_root_survives_an_animation_tick() {

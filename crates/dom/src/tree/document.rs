@@ -49,6 +49,13 @@ pub(crate) struct PendingRelayout {
 
 /// One DOM tree, including its actual document node at primary-arena slot
 /// zero.
+///
+/// A document belongs to the thread that created it and cannot leave: it is
+/// not `Send`, twice over. Its [`Node`](crate::Node)s hold a raw backpointer
+/// into the arena set that owns them, and the [`Device`](crate::Device)
+/// it is built with owns a Stylo `Box<dyn FontMetricsProvider>` that is `Sync`
+/// but not `Send`. An embedder therefore builds a document *on* its owning
+/// thread rather than handing one over — which is what `bobcat-main` does.
 pub struct Document<T> {
     style_engine: StyleEngine,
     tree: Box<TreeArenas<T>>,

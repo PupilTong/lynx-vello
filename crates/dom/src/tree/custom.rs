@@ -112,7 +112,14 @@ const MAX_REACTION_DEPTH: usize = 64;
 const MAX_REACTIONS_PER_SCOPE: usize = 1 << 20;
 
 /// Lifecycle behavior shared by elements with one local name.
-pub trait CustomElement<T>: Send + Sync {
+///
+/// No `Send + Sync` supertrait. It was justified as what kept `Document<T>`
+/// `Send`, which is no longer a property a document has or wants, and nothing
+/// else ever needed it: the registry holding these handlers lives on the
+/// document, a `Node` carries only a `DefinitionId` into it, and a node is
+/// all Stylo's parallel traversal can reach — so no Rayon worker can name a
+/// handler, and the document itself cannot leave the thread that built it.
+pub trait CustomElement<T> {
     fn observed_attributes(&self) -> Vec<String> {
         Vec::new()
     }

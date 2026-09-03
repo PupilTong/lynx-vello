@@ -4,7 +4,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc as StdArc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(feature = "layout-test-utils")]
 use hughie::compute::LeafMetrics;
@@ -89,7 +89,7 @@ enum NodeContent {
 
 /// A single node in a [`Document`](crate::Document) tree.
 pub struct Node<T> {
-    owner: AtomicPtr<TreeArenas<T>>,
+    owner: *mut TreeArenas<T>,
     /// This node's handle: both its identity and the arena position it
     /// occupies, because those are now one thing. A walk that follows
     /// `parent`/`children` indexes the arena directly — there is no id table
@@ -190,7 +190,7 @@ impl<T> Node<T> {
         text: Option<String>,
     ) -> Self {
         Self {
-            owner: AtomicPtr::new(owner),
+            owner,
             id,
             data,
             payload: PhantomData,
@@ -221,12 +221,19 @@ impl<T> Node<T> {
         // set. The arenas therefore outlive every node inside them, including
         // one `remove_node` has handed back. The reborrow is shared, and every
         // caller reaches it from a `&Node` already lent out of these same
-        // arenas, so no `&mut TreeArenas<T>` is live across it. `Relaxed`
-        // orders nothing it needs to: the pointer is atomic only so that a
-        // bare `*mut` does not cost `Node<T>` the `Sync` that Stylo's parallel
-        // traversal requires.
+        // arenas, so no `&mut TreeArenas<T>` is live across it.
+        //
+        // The raw pointer is also what states this tree's thread affinity. It
+        // costs `Node<T>` its `Send`, and with it `Document<T>`'s — which is
+        // the point: a document is created on the thread that owns it
+        // (`bobcat-main`) and never leaves. It costs no `Sync`, because
+        // `Node<T>` never had any — `StylingData`'s `UnsafeCell<ElementData>`
+        // denies it whatever this field is. The `AtomicPtr` that used to sit
+        // here was justified as buying that `Sync`; it did not, and the only
+        // property it actually conferred was the `Send` a document must not
+        // have.
         unsafe {
-            &*self.owner.load(Ordering::Relaxed)
+            &*self.owner
         }
     }
 
@@ -458,7 +465,7 @@ impl<T> Node<T> {
     pub fn census_field_sizes() -> &'static [(&'static str, usize, bool)] {
         use std::mem::size_of;
         &[
-            ("owner", size_of::<AtomicPtr<TreeArenas<()>>>(), false),
+            ("owner", size_of::<*mut TreeArenas<()>>(), false),
             ("id", size_of::<NodeId>(), false),
             ("data", size_of::<NodeData>(), false),
             ("parent", size_of::<Option<NodeSlot>>(), false),
