@@ -1,19 +1,21 @@
-//! Browser: `createImageBitmap` in a dedicated image worker, with a
-//! shared-memory mailbox so a read that must not miss can wait for it.
+//! Browser: the main thread's `Image` element, reached over a `MessagePort`,
+//! with a shared-memory mailbox so a read that must not miss can wait for it.
 //!
-//! The browser's decoder is asynchronous and lives behind `createImageBitmap`
-//! and an `OffscreenCanvas`, neither of which the Render Worker can call
-//! synchronously — and a load's first decode does not need to. A restore
-//! does: after an eviction, `FrameImages::read` has to hand back pixels
-//! inside the call. So decoding runs in its own Worker, which never blocks,
-//! and every job has a mailbox in Wasm memory — a few `i32` words the two
-//! sides read with `Atomics`. The image worker writes the decoded size and
-//! signals; this side allocates the pixel buffer in its own heap and
-//! signals back; the image worker copies the pixels straight into that
+//! The browser's decoder is `HTMLImageElement`, which only the main thread
+//! has, and it is asynchronous — which a load's first decode does not mind.
+//! A restore does: after an eviction, `FrameImages::read` has to hand back
+//! pixels inside the call. So the Render Worker fetches the bytes and hands
+//! them to the main thread, which decodes them through a Blob URL and never
+//! blocks, and every job has a mailbox in Wasm memory — a few `i32` words
+//! the two sides read with `Atomics`. The main thread writes the decoded
+//! size and signals; this side allocates the pixel buffer in its own heap
+//! and signals back; the main thread copies the pixels straight into that
 //! buffer and signals once more. An asynchronous load waits for those
 //! signals through `postMessage` echoes on the event loop; a restore waits
-//! on them with `Atomics.wait`, which a dedicated Worker may do. The
-//! protocol lives in `image-worker.js`, shipped by `bobcat-wasm`.
+//! on them with `Atomics.wait`, which a dedicated Worker may do and a main
+//! thread may not — which is why the main thread is the side that never
+//! waits. Its half of the protocol is `image-decoder.js`, shipped by
+//! `bobcat-wasm`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -24,10 +26,9 @@ use js_sys::{Array, Int32Array, Object, Reflect, Uint8Array};
 use rustc_hash::FxHashMap;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{MessageEvent, Worker};
+use web_sys::{MessageEvent, MessagePort};
 
 use super::{Bitmap, DecodeError};
-use crate::image_header::ImageHeader;
 
 const STATE_DECODING: i32 = 0;
 const STATE_DIMENSIONS: i32 = 1;
@@ -55,52 +56,57 @@ type Mailbox = Box<[AtomicI32; WORDS]>;
 
 struct Job {
     mailbox: Mailbox,
-    /// The pixel buffer, allocated once the size is known; the image worker
+    /// The pixel buffer, allocated once the size is known; the main thread
     /// writes into it directly.
     buffer: Option<Vec<u8>>,
     /// Where an asynchronous decode's result goes.
     reply: Option<flume::Sender<Result<Bitmap, DecodeError>>>,
 }
 
-/// The image worker and the jobs in flight on it.
-pub(crate) struct ImageWorker {
-    worker: Worker,
+/// The main thread's decoder and the jobs in flight on it.
+pub(crate) struct ImageDecoder {
+    port: MessagePort,
     memory: js_sys::WebAssembly::Memory,
     jobs: RefCell<FxHashMap<u32, Job>>,
     next_id: Cell<u32>,
     _on_message: Closure<dyn FnMut(MessageEvent)>,
 }
 
-impl std::fmt::Debug for ImageWorker {
+impl std::fmt::Debug for ImageDecoder {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ImageWorker")
+            .debug_struct("ImageDecoder")
             .field("jobs", &self.jobs.borrow().len())
             .finish_non_exhaustive()
     }
 }
 
-impl ImageWorker {
-    /// Starts the worker at `url` and hands it this instance's memory.
-    pub(crate) fn new(url: &str) -> Result<Rc<Self>, String> {
-        let worker = Worker::new(url).map_err(|error| describe(&error))?;
+impl Drop for ImageDecoder {
+    fn drop(&mut self) {
+        self.port.close();
+    }
+}
+
+impl ImageDecoder {
+    /// Takes this Worker's end of the channel whose other end the main
+    /// thread's decoder listens on, and hands it this instance's memory.
+    pub(crate) fn new(port: MessagePort) -> Result<Rc<Self>, String> {
         let memory = wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>();
         let init = Object::new();
         set(&init, "type", &"init".into());
         set(&init, "memory", &memory);
-        worker
-            .post_message(&init)
-            .map_err(|error| describe(&error))?;
+        port.post_message(&init).map_err(|error| describe(&error))?;
         Ok(Rc::new_cyclic(|weak: &Weak<Self>| {
             let weak = weak.clone();
             let on_message = Closure::new(move |event: MessageEvent| {
-                if let Some(worker) = weak.upgrade() {
-                    worker.on_message(&event.data());
+                if let Some(decoder) = weak.upgrade() {
+                    decoder.on_message(&event.data());
                 }
             });
-            worker.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+            // Assigning `onmessage` is also what starts the port.
+            port.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
             Self {
-                worker,
+                port,
                 memory,
                 jobs: RefCell::new(FxHashMap::default()),
                 next_id: Cell::new(1),
@@ -113,14 +119,14 @@ impl ImageWorker {
     pub(crate) async fn decode(
         &self,
         bytes: &[u8],
-        header: Option<ImageHeader>,
+        media_type: &str,
         max: (u32, u32),
     ) -> Result<Bitmap, DecodeError> {
         let (sender, receiver) = flume::bounded(1);
-        self.start(bytes, header, max, Some(sender))?;
+        self.start(bytes, media_type, max, Some(sender))?;
         receiver.recv_async().await.unwrap_or_else(|_| {
             Err(DecodeError::Unavailable(
-                "the image worker went away before answering".to_owned(),
+                "the image decoder went away before answering".to_owned(),
             ))
         })
     }
@@ -129,17 +135,17 @@ impl ImageWorker {
     pub(crate) fn decode_blocking(
         &self,
         bytes: &[u8],
-        header: Option<ImageHeader>,
+        media_type: &str,
         max: (u32, u32),
     ) -> Result<Bitmap, DecodeError> {
-        let id = self.start(bytes, header, max, None)?;
+        let id = self.start(bytes, media_type, max, None)?;
         let view = self.mailbox_view(id)?;
         let deadline = web_time::Instant::now() + RESTORE_TIMEOUT;
         let outcome = (|| {
             let state = wait_until(&view, deadline, |state| state != STATE_DECODING)?;
             if state == STATE_FAILED {
                 return Err(DecodeError::Malformed(
-                    "the image worker could not decode the image".to_owned(),
+                    "the main thread could not decode the image".to_owned(),
                 ));
             }
             self.provide_buffer(id)?;
@@ -148,7 +154,7 @@ impl ImageWorker {
             })?;
             if state == STATE_FAILED {
                 return Err(DecodeError::Malformed(
-                    "the image worker could not deliver the pixels".to_owned(),
+                    "the main thread could not deliver the pixels".to_owned(),
                 ));
             }
             Ok(())
@@ -158,9 +164,9 @@ impl ImageWorker {
                 .finish(id)
                 .ok_or_else(|| DecodeError::Unavailable("the decode job vanished".to_owned())),
             Err(error) => {
-                // On a timeout the worker may still write into the mailbox
-                // and buffer later, so the job — and its allocations — must
-                // stay until an echo retires it.
+                // On a timeout the main thread may still write into the
+                // mailbox and buffer later, so the job — and its allocations
+                // — must stay until an echo retires it.
                 if !matches!(&error, DecodeError::Unavailable(message) if message.contains("timed out"))
                 {
                     self.jobs.borrow_mut().remove(&id);
@@ -170,14 +176,14 @@ impl ImageWorker {
         }
     }
 
+    /// Posts a job: the bytes, moved rather than copied, and the size to
+    /// stay within. The main thread sizes its resize from the image it
+    /// decoded rather than from any header, which cannot see an EXIF
+    /// orientation.
     fn start(
         &self,
         bytes: &[u8],
-        // The worker sizes its resize from the bitmap it decoded rather than
-        // from the header, which cannot see an EXIF orientation; the header
-        // is accepted for parity with the native decoders and otherwise
-        // unused here.
-        _header: Option<ImageHeader>,
+        media_type: &str,
         max: (u32, u32),
         reply: Option<flume::Sender<Result<Bitmap, DecodeError>>>,
     ) -> Result<u32, DecodeError> {
@@ -191,6 +197,7 @@ impl ImageWorker {
         set(&message, "id", &JsValue::from_f64(f64::from(id)));
         set(&message, "mailbox", &JsValue::from_f64(f64::from(address)));
         set(&message, "bytes", &payload);
+        set(&message, "mediaType", &media_type.into());
         set(&message, "maxWidth", &JsValue::from_f64(f64::from(max.0)));
         set(&message, "maxHeight", &JsValue::from_f64(f64::from(max.1)));
         let transfer = Array::new();
@@ -203,14 +210,17 @@ impl ImageWorker {
                 reply,
             },
         );
-        if let Err(error) = self.worker.post_message_with_transfer(&message, &transfer) {
+        if let Err(error) = self
+            .port
+            .post_message_with_transferable(&message, &transfer)
+        {
             self.jobs.borrow_mut().remove(&id);
             return Err(DecodeError::Unavailable(describe(&error)));
         }
         Ok(id)
     }
 
-    /// The image worker's echoes: `dims`, `done`, `error`.
+    /// The main thread's echoes: `dims`, `done`, `error`.
     fn on_message(&self, data: &JsValue) {
         let kind = Reflect::get(data, &"type".into())
             .ok()
@@ -246,7 +256,7 @@ impl ImageWorker {
                 let message = Reflect::get(data, &"message".into())
                     .ok()
                     .and_then(|value| value.as_string())
-                    .unwrap_or_else(|| "unknown image worker failure".to_owned());
+                    .unwrap_or_else(|| "unknown image decoder failure".to_owned());
                 self.fail(id, DecodeError::Malformed(message));
             }
             _ => {}
@@ -254,7 +264,7 @@ impl ImageWorker {
     }
 
     /// Allocates the pixel buffer the mailbox's size asks for and tells the
-    /// image worker where it is.
+    /// main thread where it is.
     fn provide_buffer(&self, id: u32) -> Result<(), DecodeError> {
         let mut jobs = self.jobs.borrow_mut();
         let Some(job) = jobs.get_mut(&id) else {
@@ -285,7 +295,7 @@ impl ImageWorker {
         let message = Object::new();
         set(&message, "type", &"buffer".into());
         set(&message, "id", &JsValue::from_f64(f64::from(id)));
-        self.worker
+        self.port
             .post_message(&message)
             .map_err(|error| DecodeError::Unavailable(describe(&error)))
     }
@@ -297,7 +307,7 @@ impl ImageWorker {
         if job.mailbox[WORD_STATE].load(Ordering::SeqCst) != STATE_DONE {
             return None;
         }
-        // The image worker wrote the buffer before it stored `DONE`; the
+        // The main thread wrote the buffer before it stored `DONE`; the
         // acquire above orders those writes before the reads below.
         fence(Ordering::SeqCst);
         let buffer = job.buffer.take()?;
@@ -368,7 +378,7 @@ fn wait_until(
         let remaining = deadline.saturating_duration_since(web_time::Instant::now());
         if remaining.is_zero() {
             return Err(DecodeError::Unavailable(
-                "the image worker timed out".to_owned(),
+                "the image decoder timed out".to_owned(),
             ));
         }
         js_sys::Atomics::wait_with_timeout(

@@ -2,12 +2,12 @@
 //!
 //! This crate contains no codec and links no decoding library. macOS decodes
 //! through `ImageIO`, Linux through the desktop's gdk-pixbuf loaded at
-//! runtime, and the browser through `createImageBitmap` — each the same
-//! decoder the platform's own image views use, with the same format
-//! coverage, and each able to downsample *during* decode so a 4000px photo
-//! shown at 200px never materialises at full size. What this module owns is
-//! the shape every platform decoder answers in, [`Bitmap`], and the one
-//! sizing rule they share.
+//! runtime, and the browser through the main thread's `Image` element —
+//! each the same decoder the platform's own image views use, with the same
+//! format coverage, and each able to downsample *during* decode so a 4000px
+//! photo shown at 200px never materialises at full size. What this module
+//! owns is the shape every platform decoder answers in, [`Bitmap`], and the
+//! one sizing rule they share.
 
 use bobcat_core::ImageSizeHint;
 use bobcat_core::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat as PixelFormat};

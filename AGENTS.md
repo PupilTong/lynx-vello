@@ -585,8 +585,9 @@ useful signal for currently-compatible versions of those libraries.
   `ImageIO` on macOS (`CGImageSourceCreateThumbnailAtIndex` with a maximum
   pixel size, so a photo shown small is decoded small), gdk-pixbuf on Linux
   (loaded at runtime; `gdk_pixbuf_loader_set_size` from the header probe),
-  and `createImageBitmap` in a dedicated image worker in the browser, each
-  asked to downsample during decode. Loads complete on the crate's own
+  and the main thread's `Image` element in the browser (the Render Worker
+  fetches the bytes and hands them over as a Blob), each asked to downsample
+  during decode. Loads complete on the crate's own
   worker threads (local tasks in the browser), are delivered through the
   wakeup the embedder supplies, and are applied in the painter's next turn
   through the protocol's `service_images` hook. The frame reads each image
@@ -595,10 +596,10 @@ useful signal for currently-compatible versions of those libraries.
   was evicted is restored inside the read from the retained bytes or the
   disk tier, and one drawn larger than it was decoded is refined back up as
   long as the image has more to give. In the browser that restore is the one
-  place the Render Worker blocks: the image worker never waits, so a job's
+  place the Render Worker blocks: the main thread never waits, so a job's
   mailbox in shared Wasm memory and `Atomics.wait` are what let a read that
-  must not miss wait for it (`crates/bobcat-wasm/image-worker.js` is the
-  worker's half). Shape: `Resources` is the shared system (registry, caches,
+  must not miss wait for it (`crates/bobcat-wasm/image-decoder.js` is the
+  main thread's half). Shape: `Resources` is the shared system (registry, caches,
   workers, decoder; cheaply cloned, bound to the painter's thread) and
   `Resources::builder` yields the per-view `ViewResources` that
   `LynxView::new` takes and that carries that view's `ImageReports`.
@@ -738,9 +739,10 @@ useful signal for currently-compatible versions of those libraries.
   `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's final
   response URL is the ESM specifier imported by `bobcat:boot` and the base
   its images resolve against. Images a page names are fetched by the
-  resource system itself through the same Worker `fetch` and decoded by
-  `createImageBitmap` in the package's `image-worker.js`, whose URL the
-  Render Worker hands to `BobcatRenderer::create`.
+  resource system itself through the same Worker `fetch` and decoded on the
+  main thread by an `Image` element in the package's `image-decoder.js`,
+  over a `MessageChannel` whose Worker end the facade hands to
+  `BobcatRenderer::create` at init.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
   loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, and hands any
   raw stylesheet and its main-thread body to the same `load`; both are repeatable. The

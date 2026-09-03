@@ -5,9 +5,9 @@
 //! their own. Natively that is a small pool of plain threads: a job is a
 //! closure, a completion is a value sent back over a channel, and the
 //! painter drains that channel in its turn. In the browser the Render Worker
-//! is single-threaded and `fetch` and `createImageBitmap` are asynchronous
-//! anyway, so a job is a local future and the same channel carries its
-//! result.
+//! is single-threaded and `fetch` and the main thread's decoder are
+//! asynchronous anyway, so a job is a local future and the same channel
+//! carries its result.
 //!
 //! Either way a completion is followed by the host's wakeup, which is what
 //! turns "finished" into "the painter takes a turn".

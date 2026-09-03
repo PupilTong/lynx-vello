@@ -114,8 +114,9 @@ impl Future for EventWait {
 ///
 /// The resource system is `bobcat-resources`: the Render Worker registers
 /// the script and stylesheet bytes its own `fetch` produced, and the system
-/// fetches and decodes everything else a page names — its images through
-/// the image worker — on this Worker, waking it through the same signal a
+/// fetches everything else a page names on this Worker, has its images
+/// decoded by the main thread's `Image` element over the port the facade
+/// hands over at init, and wakes this Worker through the same signal a
 /// commit uses.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
@@ -162,7 +163,7 @@ impl BobcatRenderer {
         height: f32,
         device_pixel_ratio: f32,
         worker_url: String,
-        image_worker_url: String,
+        image_port: web_sys::MessagePort,
         style_thread_count: u32,
         default_display_linear: bool,
         default_overflow_visible: bool,
@@ -189,7 +190,7 @@ impl BobcatRenderer {
             let events = Arc::new(EventSignal::default());
             let resources = Resources::new(
                 ResourcesConfig {
-                    image_worker_url: Some(image_worker_url).filter(|url| !url.is_empty()),
+                    image_port: Some(image_port),
                     ..ResourcesConfig::default()
                 },
                 {

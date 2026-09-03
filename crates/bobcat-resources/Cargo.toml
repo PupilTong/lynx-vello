@@ -29,14 +29,12 @@ web-time = { workspace = true }
 web-sys = { workspace = true, features = [
     "Headers",
     "MessageEvent",
+    "MessagePort",
     "Request",
     "RequestCache",
     "RequestInit",
     "Response",
-    "Worker",
     "WorkerGlobalScope",
-    "WorkerOptions",
-    "WorkerType",
 ] }
 
 [dev-dependencies]

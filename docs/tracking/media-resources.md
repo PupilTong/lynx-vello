@@ -40,7 +40,7 @@ memory cache, disk cache and eviction are the `ResourceFetcher`'s — the seam
 native reaches through `LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
 one layer lower so the engine never owns a byte. `crates/bobcat-resources` is
 the reference implementation of that seam, and what both shipped embedders
-use: platform decoding only (ImageIO, gdk-pixbuf, `createImageBitmap` — no
+use: platform decoding only (ImageIO, gdk-pixbuf, the browser's `Image` element — no
 codec is compiled in), a memory tier for bitmaps under a byte budget with the
 frame's working set pinned, a disk tier for fetched bytes with HTTP freshness
 and revalidation, a MIME-keyed preprocessing pipeline, and native's default

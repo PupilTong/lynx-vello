@@ -21,7 +21,8 @@
 //!   HTTP freshness and revalidation semantics ([`cache::disk`], [`cache::http`]), natively; the
 //!   browser's HTTP cache plays that role there.
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
-//!   `createImageBitmap` in the browser, each asked to downsample during decode ([`decode`]).
+//!   the main thread's `Image` element in the browser, each asked to downsample during decode
+//!   ([`decode`]).
 //! - **Draw-sized decoding.** The frame reads each image with the size it draws it at
 //!   ([`bobcat_core::ImageSizeHint`]); a bitmap far larger than its draw is re-decoded at the drawn
 //!   size in the background, so a photo shown as a thumbnail costs a thumbnail.
@@ -117,10 +118,11 @@ pub struct ResourcesConfig {
     pub worker_threads: usize,
     /// Whether image failures are also printed to standard error, natively.
     pub log_to_stderr: bool,
-    /// The URL of the image decode worker script (`image-worker.js` in the
+    /// This Worker's end of the channel whose other end the host's
+    /// main-thread image decoder listens on (`image-decoder.js` in the
     /// `bobcat-wasm` package), in the browser. Without it no image decodes.
     #[cfg(target_arch = "wasm32")]
-    pub image_worker_url: Option<String>,
+    pub image_port: Option<web_sys::MessagePort>,
 }
 
 impl Default for ResourcesConfig {
@@ -139,7 +141,7 @@ impl Default for ResourcesConfig {
                 .map_or(2, |count| count.get().clamp(1, 4)),
             log_to_stderr: cfg!(not(target_arch = "wasm32")),
             #[cfg(target_arch = "wasm32")]
-            image_worker_url: None,
+            image_port: None,
         }
     }
 }
@@ -161,7 +163,7 @@ pub(crate) struct Shared {
     #[cfg(not(target_arch = "wasm32"))]
     executor: executor::Executor,
     #[cfg(target_arch = "wasm32")]
-    decoder: Option<Rc<decode::browser::ImageWorker>>,
+    decoder: Option<Rc<decode::browser::ImageDecoder>>,
     completions: flume::Sender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
@@ -174,14 +176,18 @@ impl Shared {
         (self.wakeup)();
     }
 
+    /// Decodes `bytes`, which preprocessing found to be a `format` image
+    /// with `header`, at most `max` large. The native decoders take the
+    /// header; the browser's takes the media type instead.
     #[cfg(not(target_arch = "wasm32"))]
     #[expect(
         clippy::unused_self,
-        reason = "the browser variant decodes through a worker this holds; one call shape serves both"
+        reason = "the browser variant decodes through a port this holds; one call shape serves both"
     )]
     fn decode_bytes(
         &self,
         bytes: &[u8],
+        _format: mime::ImageFormat,
         header: Option<image_header::ImageHeader>,
         max: (u32, u32),
     ) -> Result<decode::Bitmap, decode::DecodeError> {
@@ -192,28 +198,32 @@ impl Shared {
     fn decode_bytes(
         &self,
         bytes: &[u8],
-        header: Option<image_header::ImageHeader>,
+        format: mime::ImageFormat,
+        _header: Option<image_header::ImageHeader>,
         max: (u32, u32),
     ) -> Result<decode::Bitmap, decode::DecodeError> {
-        self.decoder
-            .as_ref()
-            .ok_or_else(|| {
-                decode::DecodeError::Unavailable("no image worker was configured".to_owned())
-            })?
-            .decode_blocking(bytes, header, max)
+        self.image_decoder()?
+            .decode_blocking(bytes, format.media_type(), max)
     }
 
     #[cfg(target_arch = "wasm32")]
     async fn decode_bytes_async(
         &self,
         bytes: &[u8],
-        header: Option<image_header::ImageHeader>,
+        format: mime::ImageFormat,
+        _header: Option<image_header::ImageHeader>,
         max: (u32, u32),
     ) -> Result<decode::Bitmap, decode::DecodeError> {
-        let decoder = self.decoder.as_ref().ok_or_else(|| {
-            decode::DecodeError::Unavailable("no image worker was configured".to_owned())
-        })?;
-        decoder.decode(bytes, header, max).await
+        self.image_decoder()?
+            .decode(bytes, format.media_type(), max)
+            .await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn image_decoder(&self) -> Result<&decode::browser::ImageDecoder, decode::DecodeError> {
+        self.decoder.as_deref().ok_or_else(|| {
+            decode::DecodeError::Unavailable("no image decoder was configured".to_owned())
+        })
     }
 }
 
@@ -277,12 +287,12 @@ impl Resources {
             notes.push(format!("images will not decode: {error}"));
         }
         #[cfg(target_arch = "wasm32")]
-        let decoder = if let Some(url) = config.image_worker_url.as_deref() {
-            decode::browser::ImageWorker::new(url)
+        let decoder = if let Some(port) = config.image_port.clone() {
+            decode::browser::ImageDecoder::new(port)
                 .inspect_err(|error| notes.push(format!("images will not decode: {error}")))
                 .ok()
         } else {
-            notes.push("images will not decode: no image worker URL was configured".to_owned());
+            notes.push("images will not decode: no image decode port was configured".to_owned());
             None
         };
         let (completions, receiver) = flume::unbounded();

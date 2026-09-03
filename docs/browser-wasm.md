@@ -72,17 +72,19 @@ decoder. That 16 MiB bound is browser-embedder policy and does not cross in
 Everything else a page names — its images — the resource system fetches
 itself, in Rust, through the same Worker `fetch` (so the same origin, CORS,
 credentials and HTTP-cache policy apply), and decodes with the platform's
-`createImageBitmap` in a dedicated image worker: `image-worker.js`, shipped in
-the package beside `render-worker.js`, whose URL the Render Worker passes to
-`BobcatRenderer::create`. The two Workers share the Wasm memory; each decode
-job has a small mailbox there, and the image worker copies the decoded RGBA
-pixels straight into a buffer the Render Worker allocated. An ordinary load
-completes on the event loop and wakes the page loop through the engine signal;
-a restore after eviction is the one call that blocks the Render Worker, with
-`Atomics.wait` on the mailbox, because a read after a reported load must not
-miss. The image worker never waits, which is what keeps the two from
-deadlocking. The resource system's diagnostics — an image that failed, a
-missing worker — reach `console.warn`.
+`Image` element on the main thread: `image-decoder.js`, shipped in the package
+beside `facade.js`, which the facade connects to the Render Worker over a
+`MessageChannel` at init. The Render Worker hands the fetched bytes over; the
+main thread turns them into a Blob URL, decodes and resizes them through a 2D
+canvas, and copies the RGBA pixels straight into a buffer the Render Worker
+allocated in the shared Wasm memory, where each decode job has a small
+mailbox. An ordinary load completes on the event loop and wakes the page loop
+through the engine signal; a restore after eviction is the one call that
+blocks the Render Worker, with `Atomics.wait` on the mailbox, because a read
+after a reported load must not miss. The main thread never waits, which is
+what keeps the two from deadlocking, and its only cost per image is the pixel
+read-back. The resource system's diagnostics — an image that failed, a missing
+decoder — reach `console.warn`.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's

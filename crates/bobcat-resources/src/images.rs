@@ -32,8 +32,13 @@ use url::Url;
 use crate::cache::memory::MemoryCache;
 use crate::decode::{Bitmap, DecodeError};
 use crate::image_header::ImageHeader;
+use crate::mime::ImageFormat;
 use crate::preprocess::{self, Payload};
 use crate::{Resources, Shared, SharedHandle};
+
+/// What a load job hands back: the bitmap, what the bytes were, and the
+/// bytes themselves when nothing else could restore them.
+type LoadedImage = (Bitmap, ImageFormat, Option<ImageHeader>, Option<Bytes>);
 
 /// The painter-thread half: what is known about every source asked for.
 pub(crate) struct ImageState {
@@ -55,6 +60,8 @@ enum Entry {
 struct Loaded {
     url: Url,
     intrinsic: (u32, u32),
+    /// The container, for a decoder that wants to be told what it is given.
+    format: ImageFormat,
     header: Option<ImageHeader>,
     /// The encoded bytes, kept when no other tier can hand them back: a
     /// registration that may be cleared, a `data:` URL, a response the disk
@@ -70,6 +77,7 @@ pub(crate) enum Completion {
         source: Arc<str>,
         url: Url,
         bitmap: Bitmap,
+        format: ImageFormat,
         header: Option<ImageHeader>,
         encoded: Option<Bytes>,
     },
@@ -198,6 +206,7 @@ fn apply(resources: &Resources, completion: Completion) {
             source,
             url,
             bitmap,
+            format,
             header,
             encoded,
         } => {
@@ -213,6 +222,7 @@ fn apply(resources: &Resources, completion: Completion) {
                 Entry::Loaded(Loaded {
                     url,
                     intrinsic,
+                    format,
                     header,
                     encoded,
                     refining: None,
@@ -293,6 +303,7 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
                 Arc::from(source),
                 loaded.url.clone(),
                 loaded.encoded.clone(),
+                loaded.format,
                 loaded.header,
                 target,
             );
@@ -311,7 +322,13 @@ pub(crate) fn read(resources: &Resources, source: &str, hint: ImageSizeHint) -> 
             }
         },
     };
-    match decode_blocking(&resources.shared, &bytes, loaded.header, target) {
+    match decode_blocking(
+        &resources.shared,
+        &bytes,
+        loaded.format,
+        loaded.header,
+        target,
+    ) {
         Ok(bitmap) => {
             let bytes = bitmap.byte_len();
             let image = bitmap.into_image_data();
@@ -360,23 +377,23 @@ fn load(
     url: &Url,
     fetched: Result<crate::transport::Fetched, crate::error::Failure>,
     bound: (u32, u32),
-) -> Result<(Bitmap, Option<ImageHeader>, Option<Bytes>), String> {
+) -> Result<LoadedImage, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
     let preprocessed =
         preprocess::preprocess(fetched.bytes, fetched.media_type.as_ref(), Some(url))
             .map_err(|error| error.to_string())?;
-    let Payload::Image { header, .. } = preprocessed.payload else {
+    let Payload::Image { format, header } = preprocessed.payload else {
         return Err(format!(
             "`{}` is {}, not an image",
             source, preprocessed.media_type
         ));
     };
     let bitmap = shared
-        .decode_bytes(&preprocessed.bytes, header, bound)
+        .decode_bytes(&preprocessed.bytes, format, header, bound)
         .map_err(|error| error.to_string())?;
     let encoded = (!restorable).then_some(preprocessed.bytes);
-    Ok((bitmap, header, encoded))
+    Ok((bitmap, format, header, encoded))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -389,10 +406,11 @@ fn spawn_load(shared: &SharedHandle, source: Arc<str>, url: Url, bound: (u32, u3
             &http::HeaderMap::new(),
         );
         let completion = match load(&shared, &source, &url, fetched, bound) {
-            Ok((bitmap, header, encoded)) => Completion::Loaded {
+            Ok((bitmap, format, header, encoded)) => Completion::Loaded {
                 source,
                 url,
                 bitmap,
+                format,
                 header,
                 encoded,
             },
@@ -415,10 +433,11 @@ fn spawn_load(shared: &SharedHandle, source: Arc<str>, url: Url, bound: (u32, u3
             )
             .await;
         let completion = match load_async(&shared, &source, &url, fetched, bound).await {
-            Ok((bitmap, header, encoded)) => Completion::Loaded {
+            Ok((bitmap, format, header, encoded)) => Completion::Loaded {
                 source,
                 url,
                 bitmap,
+                format,
                 header,
                 encoded,
             },
@@ -435,24 +454,24 @@ async fn load_async(
     url: &Url,
     fetched: Result<crate::transport::Fetched, crate::error::Failure>,
     bound: (u32, u32),
-) -> Result<(Bitmap, Option<ImageHeader>, Option<Bytes>), String> {
+) -> Result<LoadedImage, String> {
     let fetched = fetched.map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
     let preprocessed =
         preprocess::preprocess(fetched.bytes, fetched.media_type.as_ref(), Some(url))
             .map_err(|error| error.to_string())?;
-    let Payload::Image { header, .. } = preprocessed.payload else {
+    let Payload::Image { format, header } = preprocessed.payload else {
         return Err(format!(
             "`{}` is {}, not an image",
             source, preprocessed.media_type
         ));
     };
     let bitmap = shared
-        .decode_bytes_async(&preprocessed.bytes, header, bound)
+        .decode_bytes_async(&preprocessed.bytes, format, header, bound)
         .await
         .map_err(|error| error.to_string())?;
     let encoded = (!restorable).then_some(preprocessed.bytes);
-    Ok((bitmap, header, encoded))
+    Ok((bitmap, format, header, encoded))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -461,6 +480,7 @@ fn spawn_refine(
     source: Arc<str>,
     url: Url,
     encoded: Option<Bytes>,
+    format: ImageFormat,
     header: Option<ImageHeader>,
     target: (u32, u32),
 ) {
@@ -472,7 +492,7 @@ fn spawn_refine(
         };
         let completion = match bytes.and_then(|bytes| {
             shared
-                .decode_bytes(&bytes, header, target)
+                .decode_bytes(&bytes, format, header, target)
                 .map_err(|error| error.to_string())
         }) {
             Ok(bitmap) => Completion::Refined {
@@ -492,6 +512,7 @@ fn spawn_refine(
     source: Arc<str>,
     url: Url,
     encoded: Option<Bytes>,
+    format: ImageFormat,
     header: Option<ImageHeader>,
     target: (u32, u32),
 ) {
@@ -502,7 +523,10 @@ fn spawn_refine(
             None => restore_bytes(&shared, &url),
         };
         let completion = match bytes {
-            Ok(bytes) => match shared.decode_bytes_async(&bytes, header, target).await {
+            Ok(bytes) => match shared
+                .decode_bytes_async(&bytes, format, header, target)
+                .await
+            {
                 Ok(bitmap) => Completion::Refined {
                     source,
                     target,
@@ -554,10 +578,11 @@ fn restore_bytes(shared: &Shared, url: &Url) -> Result<Bytes, String> {
 fn decode_blocking(
     shared: &Shared,
     bytes: &[u8],
+    format: ImageFormat,
     header: Option<ImageHeader>,
     target: (u32, u32),
 ) -> Result<Bitmap, DecodeError> {
-    shared.decode_bytes(bytes, header, target)
+    shared.decode_bytes(bytes, format, header, target)
 }
 
 #[cfg(test)]
