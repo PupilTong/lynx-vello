@@ -81,6 +81,77 @@ pub fn is_renderable(data: &ImageData) -> bool {
         && data.height <= MAX_RENDERABLE_DIMENSION
 }
 
+/// How large a frame draws an image, in device pixels.
+///
+/// Per axis, the largest extent of one copy of the source across every draw
+/// in the frame that names it — a tiled background counts one tile, a
+/// `cover`-fitted replaced element the fitted rect — under the draw's own
+/// transform, so a scaled or high-DPR draw asks for more pixels than its CSS
+/// size says. It is the one fact a host needs to size a decode: a bitmap
+/// larger than the draw is resampled down at composition and pays its memory
+/// for nothing, while one smaller than the draw is upsampled and blurs. The
+/// engine composes correctly against either, so the hint is advisory — a
+/// host may decode at it, below it, or ignore it.
+///
+/// [`ImageSizeHint::UNBOUNDED`] names a read with no frame behind it, where
+/// the only right answer is the image's own size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImageSizeHint {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ImageSizeHint {
+    /// No bound on either axis.
+    pub const UNBOUNDED: Self = Self {
+        width: u32::MAX,
+        height: u32::MAX,
+    };
+
+    #[must_use]
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    /// Whether this hint bounds nothing.
+    #[must_use]
+    pub const fn is_unbounded(self) -> bool {
+        self.width == u32::MAX && self.height == u32::MAX
+    }
+
+    /// The hint covering both this one and `other`: per-axis maximum, so a
+    /// source drawn at two sizes in one frame is decoded for the larger.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            width: self.width.max(other.width),
+            height: self.height.max(other.height),
+        }
+    }
+
+    /// The size to decode a `width`x`height` image to under this hint: the
+    /// largest size inside the hint that keeps the image's ratio, never
+    /// larger than the image itself, never smaller than one pixel.
+    ///
+    /// This is the whole downsampling decision, kept beside the type so every
+    /// host makes it the same way.
+    #[must_use]
+    pub fn fit(self, width: u32, height: u32) -> (u32, u32) {
+        if self.is_unbounded() || (width <= self.width && height <= self.height) {
+            return (width.max(1), height.max(1));
+        }
+        let scale = (f64::from(self.width) / f64::from(width.max(1)))
+            .min(f64::from(self.height) / f64::from(height.max(1)));
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the product is at most the image's own axis, a u32, and floored positive"
+        )]
+        let axis = |length: u32| ((f64::from(length) * scale).floor() as u32).max(1);
+        (axis(width), axis(height))
+    }
+}
+
 /// The synchronous pixel source a frame's image draws resolve against.
 ///
 /// The embedder's resource system is one implementation; the painter's
@@ -93,10 +164,12 @@ pub trait FrameImages {
     /// here: after a successful load, this must not miss.
     ///
     /// `source` is the raw string the page wrote, and it is only ever one the
-    /// host has already reported loaded. The bitmap need not match the
-    /// intrinsic size that was reported with it: a reduced-scale decode
-    /// composes correctly.
-    fn read(&self, source: &str) -> Option<ImageData>;
+    /// host has already reported loaded. `hint` is how large the frame draws
+    /// it; a store that decodes on demand sizes its decode from it, and one
+    /// that already holds pixels may ignore it. The bitmap need not match
+    /// the hint or the intrinsic size that was reported with the load: a
+    /// reduced-scale decode composes correctly.
+    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData>;
 }
 
 /// Composes every image draw as nothing: the pixel source for a scene built
@@ -111,13 +184,13 @@ pub struct NoImages;
 /// `Rc` rather than `Arc` because a resource system never leaves the painter's
 /// thread; an atomic count here would be paid on every clone and never used.
 impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
-    fn read(&self, source: &str) -> Option<ImageData> {
-        (**self).read(source)
+    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
+        (**self).read(source, hint)
     }
 }
 
 impl FrameImages for NoImages {
-    fn read(&self, _source: &str) -> Option<ImageData> {
+    fn read(&self, _source: &str, _hint: ImageSizeHint) -> Option<ImageData> {
         None
     }
 }
@@ -552,7 +625,9 @@ mod tests {
 
     use std::sync::Arc;
 
-    use super::{ImageEvent, ImageRegistry, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable};
+    use super::{
+        ImageEvent, ImageRegistry, ImageSizeHint, MAX_RENDERABLE_DIMENSION, NoImages, is_renderable,
+    };
     use crate::render::image::FrameImages;
 
     fn loaded(source: &str, width: u32, height: u32) -> ImageEvent {
@@ -730,6 +805,46 @@ mod tests {
 
     #[test]
     fn the_empty_pixel_source_draws_nothing() {
-        assert!(NoImages.read("app:///a.png").is_none());
+        assert!(
+            NoImages
+                .read("app:///a.png", ImageSizeHint::UNBOUNDED)
+                .is_none()
+        );
+    }
+
+    /// The downsampling decision every host shares: inside the hint, keep
+    /// the ratio, never grow, never vanish.
+    #[test]
+    fn a_hint_fits_an_image_without_growing_it_or_breaking_its_ratio() {
+        assert_eq!(
+            ImageSizeHint::UNBOUNDED.fit(4000, 1000),
+            (4000, 1000),
+            "no bound decodes the image as it is"
+        );
+        assert_eq!(
+            ImageSizeHint::new(8000, 8000).fit(4000, 1000),
+            (4000, 1000),
+            "a hint larger than the image never upsamples"
+        );
+        assert_eq!(
+            ImageSizeHint::new(500, 500).fit(4000, 1000),
+            (500, 125),
+            "the binding axis lands on the hint and the other keeps the ratio"
+        );
+        assert_eq!(ImageSizeHint::new(500, 200).fit(1000, 4000), (50, 200));
+        assert_eq!(
+            ImageSizeHint::new(0, 0).fit(1000, 4000),
+            (1, 1),
+            "a degenerate draw still asks for a pixel, never a zero-sized bitmap"
+        );
+        assert_eq!(ImageSizeHint::new(300, 300).fit(0, 0), (1, 1));
+    }
+
+    #[test]
+    fn a_union_of_hints_covers_the_larger_draw_on_each_axis() {
+        let hint = ImageSizeHint::new(100, 900).union(ImageSizeHint::new(800, 50));
+        assert_eq!(hint, ImageSizeHint::new(800, 900));
+        assert!(!hint.is_unbounded());
+        assert!(hint.union(ImageSizeHint::UNBOUNDED).is_unbounded());
     }
 }

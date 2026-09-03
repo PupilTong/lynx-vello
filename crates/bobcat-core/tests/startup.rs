@@ -82,8 +82,12 @@ impl ThreadedFetcher {
 }
 
 impl bobcat_core::FrameImages for ThreadedFetcher {
-    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.base.read(source)
+    fn read(
+        &self,
+        source: &str,
+        hint: bobcat_core::ImageSizeHint,
+    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.base.read(source, hint)
     }
 }
 
@@ -190,8 +194,12 @@ struct PendingFetcher {
 }
 
 impl bobcat_core::FrameImages for PendingFetcher {
-    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.base.read(source)
+    fn read(
+        &self,
+        source: &str,
+        hint: bobcat_core::ImageSizeHint,
+    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.base.read(source, hint)
     }
 }
 

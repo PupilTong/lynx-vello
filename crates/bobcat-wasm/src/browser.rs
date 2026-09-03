@@ -1,26 +1,18 @@
 //! Shared-memory browser composition exported through `wasm-bindgen`.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::resource::{
-    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
-    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
-};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
     ViewSources, WindowTarget, configure_wasm_workers,
 };
-use http::HeaderMap;
+use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
@@ -31,6 +23,8 @@ use web_sys::OffscreenCanvas;
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn console_error(value: &JsValue);
+    #[wasm_bindgen(js_namespace = console, js_name = warn)]
+    fn console_warn(value: &JsValue);
 }
 
 const MAX_STYLE_THREADS: u32 = 6;
@@ -112,173 +106,21 @@ impl Future for EventWait {
     }
 }
 
-/// Browser-owned resources registered by the Render Worker after it applies
-/// the browser's URL, fetch, CORS, cache, and credentials policies.
-///
-/// `Rc`-held and touched only on the Render Worker — the fetcher never
-/// leaves the painter's thread — so interior mutability is a `RefCell`, not
-/// a lock.
-type BrowserResourceRegistry = RefCell<HashMap<String, Arc<[u8]>>>;
-
-#[derive(Debug, Default)]
-struct BrowserResources {
-    resources: BrowserResourceRegistry,
-}
-
-impl BrowserResources {
-    fn clear(&self) {
-        self.resources.borrow_mut().clear();
-    }
-
-    fn register_script(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
-        self.register("script", url, bytes)
-    }
-
-    fn register_style_sheet(&self, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
-        self.register("stylesheet", url, bytes)
-    }
-
-    fn register(&self, label: &str, url: &str, bytes: Vec<u8>) -> Result<String, JsValue> {
-        let url = Url::parse(url)
-            .map_err(|error| js_error(format!("the {label} URL `{url}` is invalid: {error}")))?;
-        let normalized = url.to_string();
-        self.resources
-            .borrow_mut()
-            .insert(normalized.clone(), Arc::from(bytes));
-        Ok(normalized)
-    }
-
-    fn contains_url(&self, url: &Url) -> bool {
-        self.resources.borrow().contains_key(url.as_str())
-    }
-
-    fn registered_bytes(&self, url: &Url) -> Option<Arc<[u8]>> {
-        self.resources.borrow().get(url.as_str()).cloned()
-    }
-
-    fn error(
-        request_id: Option<RequestId>,
-        kind: ResourceErrorKind,
-        phase: ResourceErrorPhase,
-        locator: Option<Arc<str>>,
-        message: impl Into<Arc<str>>,
-    ) -> ResourceError {
-        let message = message.into();
-        ResourceError {
-            request_id,
-            kind,
-            phase,
-            locator,
-            status: None,
-            message,
-            retry: RetryAdvice::Never,
-        }
-    }
-}
-
-impl ResourceFetcher for BrowserResources {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        capability == ResourceCapability::BufferedResource
-    }
-
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        let request_id = request.context.id;
-        let locator = request.resource.specifier.clone();
-
-        let parsed = Url::parse(&locator).or_else(|_| {
-            request
-                .resource
-                .base_url
-                .as_ref()
-                .ok_or(url::ParseError::RelativeUrlWithoutBase)
-                .and_then(|base| base.join(&locator))
-        });
-        let Ok(url) = parsed else {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::InvalidUrl,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "resource locator is not a valid URL",
-            ));
-        };
-        if !self.contains_url(&url) {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::NotFound,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "the Render Worker has not registered this URL",
-            ));
-        }
-
-        let resource = request.resource;
-        let cache_key = Some(Arc::from(url.as_str()));
-        Ok(ResolvedLocator {
-            resource,
-            url,
-            rewrite_chain: Vec::new(),
-            locality: ResourceLocality::Local,
-            cache_key,
-        })
-    }
-
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        let request_id = request.context.id;
-        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
-        let source = self.registered_bytes(&request.resource.url);
-        let Some(source) = source else {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::NotFound,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "the registered resource disappeared before it was loaded",
-            ));
-        };
-        let content_length = source.len() as u64;
-
-        let resource = request.resource;
-        Ok(ResourceResponse {
-            metadata: ResourceMetadata {
-                request_id,
-                resource,
-                headers: HeaderMap::default(),
-                content_length: Some(content_length),
-                media_type: None,
-                source: ResourceSource::MemoryCache,
-                cache_status: CacheStatus::default(),
-                timing: ResourceTiming::default(),
-            },
-            bytes: source.as_ref().to_vec().into(),
-        })
-    }
-}
-
-/// The browser embedder serves no images yet: a page draws whatever its own
-/// stylesheet describes, and nothing here fetches a bitmap. Every image draw
-/// therefore resolves to nothing, which is what an unloaded image looks like.
-impl bobcat_core::FrameImages for BrowserResources {
-    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        None
-    }
-}
-
 /// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. Its canvas, Wasm instance, resource provider,
+/// Worker that constructs it. Its canvas, Wasm instance, resource system,
 /// and Stylo pool outlive every page it shows; each document, element tree,
 /// `QuickJS` realm, and engine stays behind one opaque `LynxView`, built by
 /// [`BobcatRenderer::load`] and replaced wholesale by the next load.
+///
+/// The resource system is `bobcat-resources`: the Render Worker registers
+/// the script and stylesheet bytes its own `fetch` produced, and the system
+/// fetches and decodes everything else a page names — its images through
+/// the image worker — on this Worker, waking it through the same signal a
+/// commit uses.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
-    view: Option<LynxView<Rc<BrowserResources>>>,
-    resources: Rc<BrowserResources>,
+    view: Option<LynxView<ViewResources>>,
+    resources: Resources,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -320,6 +162,7 @@ impl BobcatRenderer {
         height: f32,
         device_pixel_ratio: f32,
         worker_url: String,
+        image_worker_url: String,
         style_thread_count: u32,
         default_display_linear: bool,
         default_overflow_visible: bool,
@@ -343,8 +186,18 @@ impl BobcatRenderer {
         let result = async move {
             configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
 
-            let resources = Rc::new(BrowserResources::default());
             let events = Arc::new(EventSignal::default());
+            let resources = Resources::new(
+                ResourcesConfig {
+                    image_worker_url: Some(image_worker_url).filter(|url| !url.is_empty()),
+                    ..ResourcesConfig::default()
+                },
+                {
+                    let events = Arc::clone(&events);
+                    move || events.request_event()
+                },
+            );
+            warn_notes(&resources);
             let config = PageConfig {
                 default_display_linear,
                 default_overflow_visible,
@@ -397,6 +250,8 @@ impl BobcatRenderer {
         self.events.request_event();
         self.script_finished = false;
 
+        // A relative `url(...)` in the page's CSS resolves against the page.
+        self.resources.set_base_url(Url::parse(&entry_url).ok());
         let sources = ViewSources {
             config: self.config,
             fonts: self.fonts.clone(),
@@ -417,18 +272,16 @@ impl BobcatRenderer {
             self.height,
             self.device_pixel_ratio,
             DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
-            {
-                let resources = Rc::clone(&self.resources);
-                move |_reports| resources
-            },
+            self.resources.builder(),
             sources,
         )
         .await;
-        // Construction has finished every source load and released its fetcher
-        // clone, so this page's registered bytes are dead either way. Clearing
-        // here keeps a Render Worker that loads page after page from growing a
-        // registry of them.
-        self.resources.clear();
+        // Construction has finished every source load, so this page's
+        // registered bytes are dead either way. Clearing here keeps a Render
+        // Worker that loads page after page from growing a registry of them;
+        // an image decoded from a registration keeps its own bytes.
+        self.resources.clear_registered();
+        warn_notes(&self.resources);
         self.view = Some(built.map_err(js_error)?);
         // Boot published its frame before this Worker took a turn, and a
         // frame from below wakes through the same signal — but the wakeup it
@@ -447,7 +300,7 @@ impl BobcatRenderer {
     )]
     pub fn register_script(&self, url: String, bytes: Vec<u8>) -> Result<String, JsValue> {
         self.ensure_running()?;
-        self.resources.register_script(&url, bytes)
+        self.register(&url, bytes, "text/javascript")
     }
 
     /// Parse one browser-decoded Lynx XML source envelope and register its
@@ -479,16 +332,14 @@ impl BobcatRenderer {
         let style_section_url = section_url("style")?;
         let background_section_url = section_url("background-thread")?;
 
-        let main_url = self.resources.register_script(
+        let main_url = self.register(
             &main_section_url,
             parsed.main_thread_script.as_bytes().to_vec(),
+            "text/javascript",
         )?;
         let style_url = parsed
             .style
-            .map(|style| {
-                self.resources
-                    .register_style_sheet(&style_section_url, style.as_bytes().to_vec())
-            })
+            .map(|style| self.register(&style_section_url, style.as_bytes().to_vec(), "text/css"))
             .transpose()?;
         // The background body is named, not retained: nothing executes it, and
         // a view's construction copies only what it loads.
@@ -516,7 +367,7 @@ impl BobcatRenderer {
     )]
     pub fn register_style_sheet(&self, url: String, bytes: Vec<u8>) -> Result<String, JsValue> {
         self.ensure_running()?;
-        self.resources.register_style_sheet(&url, bytes)
+        self.register(&url, bytes, "text/css")
     }
 
     /// Retain a font container for every view this renderer builds. Faces are
@@ -584,6 +435,7 @@ impl BobcatRenderer {
             return Ok(self.script_finished);
         };
         let mut fatal = None;
+        warn_notes(&self.resources);
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => self.script_finished = true,
@@ -704,12 +556,30 @@ impl BobcatRenderer {
 }
 
 impl BobcatRenderer {
+    /// Retains bytes the browser host already fetched under its URL policy,
+    /// labelled the way a `Content-Type` would. Returns the normalized
+    /// absolute URL.
+    fn register(&self, url: &str, bytes: Vec<u8>, media_type: &str) -> Result<String, JsValue> {
+        self.resources
+            .register(url, bytes, Some(media_type))
+            .map(|url| url.to_string())
+            .map_err(js_error)
+    }
+
     fn ensure_running(&self) -> Result<(), JsValue> {
         if self.disposed {
             Err(js_error("the Bobcat renderer is disposed"))
         } else {
             Ok(())
         }
+    }
+}
+
+/// Surfaces what the resource system recorded — an image that failed, a
+/// decoder that is missing — on the console, where a browser host looks.
+fn warn_notes(resources: &Resources) {
+    for note in resources.take_notes() {
+        console_warn(&JsValue::from(format!("bobcat-resources: {note}")));
     }
 }
 

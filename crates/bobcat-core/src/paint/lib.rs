@@ -947,9 +947,11 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         self.service_images();
     }
 
-    /// Services the image protocol: asks the host for every source the
-    /// document met, and forwards any completed loads back to it.
+    /// Services the image protocol: gives the host its moment in the turn,
+    /// asks it for every source the document met, and forwards any completed
+    /// loads back to the document.
     fn service_images(&mut self) {
+        self.images.service();
         self.images.request(self.link.take_image_requests());
         let events = self.images.take_reports();
         if !events.is_empty() {

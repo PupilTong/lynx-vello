@@ -10,6 +10,9 @@ let requestQueue = Promise.resolve()
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
 const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024
+// The image decode worker the resource system drives; it lives beside this
+// script in the package.
+const IMAGE_WORKER_URL = new URL('./image-worker.js', import.meta.url).href
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
@@ -76,6 +79,7 @@ async function initialize(message) {
     message.height,
     message.devicePixelRatio,
     message.workerUrl,
+    IMAGE_WORKER_URL,
     message.threadCount,
     message.config.defaultDisplayLinear,
     message.config.defaultOverflowVisible,

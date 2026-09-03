@@ -87,6 +87,18 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// Advisory: it informs residency and nothing else, and a host that
     /// ignores it is still correct. Called once per resolve pass.
     fn retain_images(&self, _frame: &[Arc<str>]) {}
+
+    /// The host's own moment in every painter turn, on this thread, before
+    /// the turn reads the reports queued so far.
+    ///
+    /// A host whose loads finish somewhere else — a decode thread, a
+    /// browser worker — forwards each completion into its
+    /// [`ImageReports`](dom::ImageReports) here, so a load that completed
+    /// between turns is reported in the next one whether or not that turn
+    /// requested or resolved anything. Waking the painter for that turn is
+    /// still the host's, through the wakeup it gave the view. A host that
+    /// reports inline has nothing to do, and the default does nothing.
+    fn service_images(&self) {}
 }
 
 /// A shared handle serves whatever it points at.
@@ -135,6 +147,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 
     fn retain_images(&self, frame: &[Arc<str>]) {
         (**self).retain_images(frame);
+    }
+
+    fn service_images(&self) {
+        (**self).service_images();
     }
 }
 
@@ -393,7 +409,11 @@ pub(crate) struct NeverAnswers;
 
 #[cfg(test)]
 impl dom::FrameImages for NeverAnswers {
-    fn read(&self, _source: &str) -> Option<dom::vello::peniko::ImageData> {
+    fn read(
+        &self,
+        _source: &str,
+        _hint: dom::ImageSizeHint,
+    ) -> Option<dom::vello::peniko::ImageData> {
         None
     }
 }

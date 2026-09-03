@@ -164,3 +164,30 @@ fn object_position_and_image_rendering_are_accepted_together() {
     assert!(draws > 0);
     assert_eq!(open, 0);
 }
+
+/// The frame reads each source with the size it draws it at: the fitted rect
+/// for a replaced element, so a store can size its decode to the draw rather
+/// than to the intrinsic size. `object-fit: cover` on a square image in a
+/// 200x100 box draws a 200x200 copy clipped to the box, and that is what the
+/// hint has to say — the copy's size, not the box's.
+#[test]
+fn a_read_carries_the_drawn_size_as_its_hint() {
+    for (fit, expected) in [
+        ("fill", (200, 100)),
+        ("cover", (200, 200)),
+        ("contain", (100, 100)),
+    ] {
+        let mut h = Harness::new(&format!(".box {{ object-fit: {fit}; }}"));
+        h.img("box", &checker_png(4));
+        let _ = h.stats();
+        let reads = h.images.reads();
+        let (_, hint) = reads.last().expect("the frame read the image");
+        assert_eq!(
+            (hint.width, hint.height),
+            expected,
+            "object-fit: {fit} draws a {}x{} copy",
+            expected.0,
+            expected.1
+        );
+    }
+}

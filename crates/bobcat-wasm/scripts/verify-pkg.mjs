@@ -11,6 +11,7 @@ const wasmPath = path.join(packageDirectory, 'pkg/bobcat_wasm_bg.wasm')
 for (const script of [
   path.join(packageDirectory, 'dom-worker.js'),
   path.join(packageDirectory, 'facade.js'),
+  path.join(packageDirectory, 'image-worker.js'),
   path.join(packageDirectory, 'render-worker.js'),
   gluePath,
 ]) {

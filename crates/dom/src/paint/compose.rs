@@ -23,7 +23,7 @@ use std::sync::Arc;
 use euclid::default::Vector2D;
 
 use crate::paint::shape::{BoxShape, with_shape};
-use crate::render::image::is_renderable;
+use crate::render::image::{ImageSizeHint, is_renderable};
 use crate::vello::Scene;
 use crate::vello::kurbo::{Affine, Point, Rect, Size};
 use crate::vello::peniko::{BlendMode, BrushRef, Fill, ImageBrush, ImageData, ImageSampler};
@@ -91,6 +91,37 @@ pub(crate) struct ImageDraw {
     /// Extend modes, `image-rendering` quality, alpha. Carries no pixels.
     pub(crate) sampler: ImageSampler,
     pub(crate) area: ImageArea,
+}
+
+impl ImageDraw {
+    /// How large this draw puts one copy of the image on the device: the
+    /// extent under the per-axis scale of its transform, rounded up.
+    ///
+    /// Rotation and skew fold into the axis lengths, which over-estimates a
+    /// rotated draw a little — the right direction for a hint that bounds a
+    /// decode. A non-finite length bounds nothing.
+    pub(crate) fn size_hint(&self) -> ImageSizeHint {
+        let [a, b, c, d, _, _] = self.transform.as_coeffs();
+        ImageSizeHint::new(
+            device_length(self.extent.width * a.hypot(b)),
+            device_length(self.extent.height * c.hypot(d)),
+        )
+    }
+}
+
+/// A device-pixel length as a hint axis: rounded up so a fractional draw is
+/// never decoded a pixel short, saturating past `u32`.
+fn device_length(length: f64) -> u32 {
+    if !length.is_finite() {
+        return u32::MAX;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to the u32 range immediately before the cast"
+    )]
+    let length = length.ceil().clamp(0.0, f64::from(u32::MAX)) as u32;
+    length
 }
 
 /// Encodes draw `index`, if its pixels resolved.

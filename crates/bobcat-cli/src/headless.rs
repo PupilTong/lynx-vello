@@ -13,12 +13,13 @@ use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
+use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
 
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::{Program, ProgramResourceFetcher};
+use crate::page::Program;
 use crate::screenshot::save_screenshot;
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
@@ -37,6 +38,13 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     program.warn_about_compatibility_limits();
     let (sender, receiver) = flume::unbounded();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
+    // The resource system completes image loads on its own workers; each
+    // completion wakes this loop the same way a commit does, so the next turn
+    // reports it.
+    let resources = program.resources({
+        let requester = std::sync::Arc::clone(&event_requester);
+        move || requester.request_event()
+    });
     // One construction: the windowless GPU target this view renders into,
     // the input's author CSS, and its entry MTS module are all arguments, so
     // what comes back is a view whose first commit is already styled and
@@ -47,7 +55,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         options.viewport_height,
         options.device_pixel_ratio,
         DrawTarget::Offscreen,
-        program.resources(),
+        resources.builder(),
         program.sources(),
     ))
     .map_err(|source| CliError::StartView {
@@ -128,7 +136,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
-    view: &mut LynxView<ProgramResourceFetcher>,
+    view: &mut LynxView<ViewResources>,
     clock: &mut FrameClock,
     running: &mut bool,
 ) -> Result<bool, CliError> {
@@ -176,10 +184,7 @@ enum HostEvent {
     Pump,
 }
 
-fn check_script(
-    view: &mut LynxView<ProgramResourceFetcher>,
-    input: &str,
-) -> Result<bool, CliError> {
+fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool, CliError> {
     let mut finished = false;
     for event in view.pump() {
         match event {

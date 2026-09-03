@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 bobcat-core = { workspace = true }
+bobcat-resources = { workspace = true }
 flume = { workspace = true }
 http = { workspace = true }
 lynx-template-decoder = { workspace = true }
