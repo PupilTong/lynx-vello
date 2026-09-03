@@ -1,4 +1,5 @@
 import { defineConfig } from '@rsbuild/core';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -6,6 +7,13 @@ const packageDirectory = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../crates/bobcat-wasm',
 );
+// These modules execute as native ESM, so the npm package allowlist is also
+// the Pages asset manifest. A new facade dependency then reaches both outputs.
+const browserScripts = (
+  JSON.parse(
+    readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'),
+  ) as { files: string[] }
+).files.filter((file) => path.extname(file) === '.js');
 
 function pagesBasePath(value: string | undefined): string {
   const segments = (value ?? '')
@@ -44,21 +52,11 @@ export default defineConfig({
         to: 'Roboto-Regular.ttf',
         info: { minimized: true },
       },
-      {
-        from: path.join(packageDirectory, 'dom-worker.js'),
-        to: 'bobcat-wasm/dom-worker.js',
+      ...browserScripts.map((file) => ({
+        from: path.join(packageDirectory, file),
+        to: path.posix.join('bobcat-wasm', file),
         info: { minimized: true },
-      },
-      {
-        from: path.join(packageDirectory, 'facade.js'),
-        to: 'bobcat-wasm/facade.js',
-        info: { minimized: true },
-      },
-      {
-        from: path.join(packageDirectory, 'render-worker.js'),
-        to: 'bobcat-wasm/render-worker.js',
-        info: { minimized: true },
-      },
+      })),
       {
         from: path.join(packageDirectory, 'pkg'),
         to: 'bobcat-wasm/pkg',
