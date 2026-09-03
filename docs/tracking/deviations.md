@@ -457,7 +457,13 @@ consequential choice about whether to follow the spec or the quirk.
   [docs/style-assumptions.md](../style-assumptions.md) §D.15 forbids in this
   sheet (web-elements' defaults are author origin, ours are user-agent origin,
   and an important UA declaration would outrank author `!important` instead of
-  losing to it), so §D.15 hands forced modes to the layout engine's element
+  losing to it). §D.15 gained one exception on 2026-09-03 —
+  `display: -lynx-text` on `text`/`inline-text` — and this row is the case
+  that exception deliberately does **not** cover: a scroller's display is a
+  *default*, gated on page config by web-core itself, where the only question
+  is which layout mode the box gets; a text's inline-ness is a *structural
+  invariant* Lynx establishes at tree-mutation time and no author CSS can
+  undo. So §D.15 still hands forced modes to the layout engine's element
   policy — which is the piece not yet built, and what this row records. It
   shows only with `defaultDisplayLinear` off for `scroll-view` and only with it
   on for `list`, and with the main axis pinned the same way in both modes what

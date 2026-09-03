@@ -35,7 +35,8 @@ const TEXT_ATTRIBUTE: &str = "text";
 /// that suppression on specificity, not on source order.
 pub(super) const UA_RULES: &str = "\
 raw-text { display: none; white-space-collapse: preserve-breaks; }
-text > raw-text, text > wrapper > raw-text { display: contents; }
+text > raw-text, text > wrapper > raw-text,
+inline-text > raw-text, inline-text > wrapper > raw-text { display: contents; }
 ";
 
 /// Installs the component. Must run before any element could carry the tag,
@@ -268,7 +269,7 @@ mod tests {
         let stray = raw_text(&mut document, view, "stray");
         document.layout();
 
-        assert_eq!(display(&document, text), Display::Flex);
+        assert_eq!(display(&document, text), Display::LynxText);
         assert_eq!(display(&document, wrapper), Display::Contents);
         assert_eq!(display(&document, direct), Display::Contents);
         assert_eq!(display(&document, inside), Display::Contents);

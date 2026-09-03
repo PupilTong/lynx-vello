@@ -25,10 +25,12 @@
 /// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
 /// lives.
 pub(super) const UA_RULES: &str = "\
-text { box-sizing: border-box; display: flex; color: initial; }
+text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
+inline-text { display: -lynx-text !important; }
+inline-image, inline-truncation { display: none; }
 text > * { display: none; }
 text > wrapper { display: contents; }
-text > view, text > image, text > text { display: flex; }
+text > view, text > image { display: flex; }
 text > text, text > wrapper > text { color: inherit; }
 ";
 
@@ -111,8 +113,9 @@ mod tests {
     fn a_text_renders_text_and_the_tags_that_are_content() {
         let mut document = document();
         let text = child(&mut document, "text", "");
-        let boxes =
-            ["view", "image", "text"].map(|tag| (tag, element_under(&mut document, text, tag, "")));
+        let boxes = ["view", "image"].map(|tag| (tag, element_under(&mut document, text, tag, "")));
+        let nested = element_under(&mut document, text, "text", "");
+        let nested_inline = element_under(&mut document, text, "inline-text", "");
         let wrapper = element_under(&mut document, text, "wrapper", "");
         let through_wrapper = element_under(&mut document, wrapper, "view", "");
         let foreign = element_under(&mut document, text, "x-foreign", "");
@@ -121,6 +124,13 @@ mod tests {
 
         for (tag, content) in boxes {
             assert_eq!(display(&document, content), Display::Flex, "{tag}");
+        }
+        for (tag, scope) in [("text", nested), ("inline-text", nested_inline)] {
+            assert_eq!(
+                display(&document, scope),
+                Display::LynxText,
+                "a nested text scope is part of the paragraph, not a box in it: {tag}"
+            );
         }
         assert_eq!(display(&document, wrapper), Display::Contents);
         assert_eq!(display(&document, through_wrapper), Display::Linear);
