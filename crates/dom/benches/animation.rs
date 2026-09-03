@@ -1,5 +1,6 @@
 //! Animation frame benchmarks: what one frame of a running `@keyframes`
-//! animation costs on the presenting thread, CPU-side only (no GPU dispatch).
+//! animation costs on the document's owner thread — the Lynx main thread —
+//! CPU-side only (no GPU dispatch).
 //!
 //! One iteration is one frame — advance the timeline, then produce the scene —
 //! so the reported time reads directly as per-frame cost. Three axes matter:

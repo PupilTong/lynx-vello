@@ -66,11 +66,13 @@ fn slider_sheet() -> PreparsedStyleSheet {
 /// A 32x24 offscreen engine with the sheet mounted and the page built.
 fn booted() -> TestPainter {
     let viewport = crate::main::tree::Viewport::new(32.0, 24.0);
-    let mut document =
-        crate::main::tree::new_document(viewport, crate::main::tree::PageConfig::default());
-    crate::style::add_preparsed_style_sheet(&mut document, &slider_sheet());
     let mut engine = TestPainter::start(
-        document,
+        move || {
+            let mut document =
+                crate::main::tree::new_document(viewport, crate::main::tree::PageConfig::default());
+            crate::style::add_preparsed_style_sheet(&mut document, &slider_sheet());
+            document
+        },
         viewport,
         crate::view::FrameSize::for_viewport(32.0, 24.0, 1.0).expect("a bounded target"),
         Arc::new(super::NoWakeup),

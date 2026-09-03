@@ -251,12 +251,18 @@ pub(crate) fn spawn_main_thread<R: EventRequester>(
     })
 }
 
-/// Unit-test seam for paint tests that exercise a prebuilt document. The
-/// production startup path above is the only non-test caller and creates the
-/// document on `bobcat-main`.
+/// Unit-test seam for paint tests that supply their own document, skipping
+/// the IO half of startup.
+///
+/// It takes a *builder* rather than a document for the same reason the
+/// production path above creates one itself: a `LynxDocument` owns a stylo
+/// `Device`, whose `Box<dyn FontMetricsProvider>` is `Sync` but not `Send`,
+/// so a document cannot cross a thread boundary. The builder runs on
+/// `bobcat-main`, which is the thread that owns the document for the rest of
+/// its life.
 #[cfg(test)]
 pub(crate) fn spawn_test_main_thread<R: EventRequester>(
-    document: LynxDocument,
+    build_document: impl FnOnce() -> LynxDocument + Send + 'static,
     entry: EntryModule,
     link: MainLink<R>,
 ) -> Result<MainThreadHome, EngineError> {
@@ -266,7 +272,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let MainLink { commands, notify } = link;
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut runtime = MainThreadRuntime::new(document, notify.clone())
+                let mut runtime = MainThreadRuntime::new(build_document(), notify.clone())
                     .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&entry.source, &entry.url)

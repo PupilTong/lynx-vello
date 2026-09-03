@@ -480,8 +480,8 @@ impl<T: Sync> Document<T> {
             if token.should_traverse() {
                 let _thread_state = LayoutThreadStateGuard::enter();
                 // Sequential: an animation touches a handful of elements, and
-                // on Wasm worker zero of the Stylo pool is the Lynx main
-                // thread, which is not this one.
+                // on Wasm worker zero of the Stylo pool is the Render
+                // Worker — the thread that paints — which is not this one.
                 Some(Node::id(driver::traverse_dom(&traversal, token, None)))
             } else {
                 None

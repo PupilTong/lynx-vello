@@ -798,7 +798,7 @@ impl<F> Painter<F> {
 #[cfg(test)]
 impl TestPainter {
     pub(super) fn start<R: crate::view::EventRequester>(
-        document: LynxDocument,
+        build_document: impl FnOnce() -> LynxDocument + Send + 'static,
         viewport: Viewport,
         frame_size: FrameSize,
         event_requester: Arc<R>,
@@ -806,7 +806,7 @@ impl TestPainter {
         output: Output,
     ) -> Result<Self, EngineError> {
         let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
-        painter.main = Some(spawn_test_main_thread(document, entry, main)?);
+        painter.main = Some(spawn_test_main_thread(build_document, entry, main)?);
         painter.detached = false;
         Ok(painter)
     }

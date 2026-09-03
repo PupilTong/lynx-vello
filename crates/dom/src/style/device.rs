@@ -16,6 +16,16 @@ use stylo::values::specified::font::{FONT_MEDIUM_PX, QueryFontMetricsFlags};
 use stylo_traits::{CSSPixel, DevicePixel};
 
 /// A document's viewport and device-pixel rendering environment.
+///
+/// Thread-bound by construction: the Stylo device it wraps owns a
+/// `Box<dyn FontMetricsProvider>`, whose bound is `Debug + Sync` and
+/// deliberately not `Send`, so a `Device` — and every [`Document`] that owns
+/// one — belongs to the thread that built it. `Sync` is what Stylo actually
+/// needs, because the parallel traversal shares one device across Rayon
+/// workers by reference; `Send` would only buy the right to *move* a document
+/// between threads, which nothing does.
+///
+/// [`Document`]: crate::Document
 #[derive(Debug)]
 pub struct Device {
     stylo: stylo::device::Device,
