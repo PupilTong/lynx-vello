@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use dom::vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
-use dom::{Document, FrameImages, ImageEvent, ImageReports};
+use dom::{Document, FrameImages, ImageEvent, ImageReports, ImageSizeHint};
 
 /// Decoded images keyed by the source string the paint walk asks for.
 #[derive(Default)]
@@ -35,6 +35,9 @@ pub struct TestImages {
     /// Reports not yet drained by [`pump_images`], for tests driving the
     /// protocol by hand instead of through a painter.
     pending: Mutex<Vec<ImageEvent>>,
+    /// Every read, with the size hint the frame passed for it, so a test can
+    /// assert on what a store would have been told to decode.
+    reads: Mutex<Vec<(String, ImageSizeHint)>>,
 }
 
 impl std::fmt::Debug for TestImages {
@@ -119,6 +122,13 @@ impl TestImages {
         self.retained.lock().expect("test image retain log").clone()
     }
 
+    /// Every read so far with its size hint, in order — the sizes a decoding
+    /// store would have been asked for.
+    #[must_use]
+    pub fn reads(&self) -> Vec<(String, ImageSizeHint)> {
+        self.reads.lock().expect("test image read log").clone()
+    }
+
     /// Whether this store has been asked for `source` at all.
     #[must_use]
     pub fn was_asked_for(&self, source: &str) -> bool {
@@ -165,8 +175,13 @@ impl TestImages {
 impl FrameImages for TestImages {
     /// Returns a clone that shares the published `Blob`, so every read of one
     /// source carries the same `Blob::id()` — the identity vello keys its
-    /// atlas on.
-    fn read(&self, source: &str) -> Option<ImageData> {
+    /// atlas on. The hint is recorded and otherwise ignored: this store
+    /// decodes nothing, so there is nothing to size.
+    fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
+        self.reads
+            .lock()
+            .expect("test image read log")
+            .push((source.to_owned(), hint));
         self.entries().get(source)?.clone()
     }
 }

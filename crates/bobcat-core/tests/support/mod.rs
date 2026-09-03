@@ -249,7 +249,13 @@ impl ResourceFetcher for FetcherDouble {
 /// A double serves images only when a test gave it a store; otherwise every
 /// image draw resolves to nothing, which is what an unloaded image looks like.
 impl bobcat_core::FrameImages for FetcherDouble {
-    fn read(&self, source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        self.images.as_ref().and_then(|images| images.read(source))
+    fn read(
+        &self,
+        source: &str,
+        hint: bobcat_core::ImageSizeHint,
+    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.images
+            .as_ref()
+            .and_then(|images| images.read(source, hint))
     }
 }

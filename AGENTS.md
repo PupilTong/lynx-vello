@@ -285,17 +285,25 @@ useful signal for currently-compatible versions of those libraries.
   compute, for a host that must size the surface's backing store — a canvas —
   before it hands the target over.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
-  and retains no pixel of its own: a host supplies an `ImageStore`
-  (re-exported from `dom`) as its `ViewSources::image_store`, and the engine
-  asks it for one image at a time by source string — the `url(…)` value CSS
-  produced, or a replaced element's source. No container sniffing, no codec
-  contract, no cache policy and no byte budget lives in this workspace, and
-  the resource protocol carries no image request. `LynxView::load_image`
-  awaits `ImageStore::get` outside the frame and then invalidates the retained
-  scene; `LynxView::prefetch_image` starts the same work without waiting.
-  Automatic loading for the Lynx `<image>` element remains unwired, as does
-  its element surface (`mode`, `placeholder` racing, `cap-insets`,
-  `blur-radius`, `load`/`error` events).
+  and retains no pixel of its own. The one resource system a view has — its
+  `ResourceFetcher`, which is also its `dom::FrameImages` — is asked for one
+  image at a time by source string (the `url(…)` value CSS produced, or a
+  replaced element's source): named through `request_image`, answered
+  through `ImageReports` with the intrinsic size layout needs, given its
+  moment in every painter turn through `service_images` (where a host whose
+  loads complete off-thread forwards them into the reports), and read back
+  synchronously while the frame composes through `FrameImages::read`, which
+  carries a `dom::ImageSizeHint` — the largest device-pixel extent the frame
+  draws that source at, computed per draw from its extent under its
+  transform and unioned per source — so a host decodes to the draw rather
+  than to the file. No container sniffing, no codec contract, no cache
+  policy and no byte budget lives in `bobcat-core` or `dom`; the reference
+  implementation of all of that is `crates/bobcat-resources`, which both
+  shipped embedders use. `LynxView::prefetch_images` warms sources ahead of
+  the walk that would discover them. Automatic loading for the Lynx
+  `<image>` element remains unwired, as does its element surface (`mode`,
+  `placeholder` racing, `cap-insets`, `blur-radius`, `load`/`error`
+  events).
   `Painter`, `LynxDocument`, `Viewport`, `new_document`, `MainThreadRuntime`,
   the startup owner/guard, and the concrete QuickJS adapter are all
   crate-private.
@@ -556,16 +564,70 @@ useful signal for currently-compatible versions of those libraries.
   reference cycle that leaks the realm unless the function is collected first.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
+- `crates/bobcat-resources` — the cross-platform reference resource system:
+  one `ResourceFetcher` for macOS, Linux and the browser, which both shipped
+  embedders use instead of the in-memory fetchers they used to carry. It is
+  the worked example of what the protocol expects, not part of the
+  protocol, and core stays exactly as free of resources as before. Four
+  things live here and nowhere else in the workspace. **Transports**:
+  contents the embedder registers under any URL (`Resources::register` and
+  `register_style_sheet` — a decoded bundle's scripts and `StyleInfo` sheet,
+  a browser-fetched script's bytes, a test's PNG), `data:` URLs, `file:`
+  URLs natively, and `http(s)` through the platform's own client: libcurl
+  loaded at runtime with `libloading` on macOS and Linux (no build-time
+  link, no bundled HTTP or TLS stack; a host without it gets a precise
+  `Unavailable`), and the Render Worker's `fetch` in the browser.
+  **A MIME-keyed preprocessing pipeline**: every payload is sniffed (image
+  magic beats the label, a label beats a byte scan, a BOM names a charset),
+  classified, and treated by class — text transcoded to UTF-8 with its BOM
+  removed so the engine's strict validation sees what a browser's decoder
+  would have produced, JSON validated, images container-sniffed and
+  header-probed for their intrinsic size without decoding a pixel, the rest
+  passed through. **Tiered caching**: decoded bitmaps in a memory tier under
+  a byte budget with the frame's working set pinned against eviction, and
+  fetched bytes in a disk tier under its own budget with RFC 9111
+  freshness, `ETag`/`Last-Modified` revalidation, and the fetch cache modes
+  mapped from `CachePolicy` (natively; the browser's HTTP cache plays that
+  role there). **Platform image decoding**: no codec is compiled in —
+  `ImageIO` on macOS (`CGImageSourceCreateThumbnailAtIndex` with a maximum
+  pixel size, so a photo shown small is decoded small), gdk-pixbuf on Linux
+  (loaded at runtime; `gdk_pixbuf_loader_set_size` from the header probe),
+  and the main thread's `Image` element in the browser (the Render Worker
+  fetches the bytes and hands them over as a Blob), each asked to downsample
+  during decode. Loads complete on the crate's own
+  worker threads (local tasks in the browser), are delivered through the
+  wakeup the embedder supplies, and are applied in the painter's next turn
+  through the protocol's `service_images` hook. The frame reads each image
+  with the size it draws it at: a resident bitmap far larger than its draw
+  is re-decoded at the drawn size in the background and replaced, one that
+  was evicted is restored inside the read from the retained bytes or the
+  disk tier, and one drawn larger than it was decoded is refined back up as
+  long as the image has more to give. In the browser that restore is the one
+  place the Render Worker blocks: the main thread never waits, so a job's
+  mailbox in shared Wasm memory and `Atomics.wait` are what let a read that
+  must not miss wait for it (`crates/bobcat-wasm/image-decoder.js` is the
+  main thread's half). Shape: `Resources` is the shared system (registry, caches,
+  workers, decoder; cheaply cloned, bound to the painter's thread) and
+  `Resources::builder` yields the per-view `ViewResources` that
+  `LynxView::new` takes and that carries that view's `ImageReports`.
+  Recorded limits: only an image's first frame is decoded (no animated
+  playback), no `region-to-decode`, no `blur-radius` post-processing, and no
+  `<image>` element surface — the pipeline serves whatever source string the
+  paint walk names, today `url(…)` layers and `Document::set_image_source`.
+  The macOS decoder is type-checked against the Apple target but exercised
+  only where ImageIO exists; the Linux decoder and libcurl transport are
+  tested for real against the system libraries, and the browser path is
+  linted for wasm32 and exercised only in a browser.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
-  `bobcat-core`, the sibling `lynx-template-decoder` utility, and the
-  `lynx-xml` source parser.
+  `bobcat-core`, `bobcat-resources`, the sibling `lynx-template-decoder`
+  utility, and the `lynx-xml` source parser.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
   raw Lynx XML source card; other URL schemes remain rejected at the boundary.
   The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
   argument parsing, input bytes, bundle decoding or XML parsing, `PageConfig`
-  mapping, an in-memory `ResourceFetcher` for extracted scripts/styles, the
-  winit window and event loop, device metrics, input
+  mapping, the reference resource system with the extracted scripts/styles
+  registered, the winit window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `pump`, clock ticks in
@@ -586,11 +648,13 @@ useful signal for currently-compatible versions of those libraries.
   mode names the window as that view's draw target; headless mode names
   `DrawTarget::Offscreen` and relays synthetic
   vsync ticks — whether a tick becomes GPU work is the engine's decision.
-  The CLI installs **no** `ImageStore`, so a page's `url(…)` layers and
-  replaced content paint as nothing. Fetching and decoding images is embedder
-  work, and this runner does not do it: its in-memory `ResourceFetcher` serves
-  the entry script, the background script and the one stylesheet, and rejects
-  every other URL.
+  The CLI's resource system is `bobcat-resources`: the decoded input's
+  scripts and stylesheet are registered under `bobcat-memory://` URLs, the
+  input's own `file://` URL is the base every relative `url(…)` resolves
+  against, and a disk tier lives under the user's cache directory — so a
+  page's images, beside the input, inline as `data:`, or on the network,
+  load and decode through the platform. A load completing on a worker wakes
+  the event loop exactly as a commit does.
   Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -676,10 +740,16 @@ useful signal for currently-compatible versions of those libraries.
   `spawn_from_worker` change because its crates.io release otherwise forwards
   nested spawns to a parent protocol handler that an explicit embedder Worker
   does not have; Chrome 135 supports the resulting nested module Worker.
-  Browser `fetch` remains outside Wasm: the Render Worker
-  registers raw fetched stylesheet and entry-MTS bytes in its `ResourceFetcher`
-  and calls `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's
-  final response URL is the ESM specifier imported by `bobcat:boot`.
+  Page sources still arrive through the Render Worker's own `fetch`: it
+  registers the raw stylesheet and entry-MTS bytes with the
+  `bobcat-resources` system it owns and calls
+  `BobcatRenderer::load(entry_url, style_sheet_urls)`; the entry's final
+  response URL is the ESM specifier imported by `bobcat:boot` and the base
+  its images resolve against. Images a page names are fetched by the
+  resource system itself through the same Worker `fetch` and decoded on the
+  main thread by an `Image` element in the package's `image-decoder.js`,
+  over a `MessageChannel` whose Worker end the facade hands to
+  `BobcatRenderer::create` at init.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
   loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, and hands any
   raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
@@ -818,8 +888,8 @@ useful signal for currently-compatible versions of those libraries.
   seams windowed embedders build against); the crate root re-exports the one
   workspace `vello` version, and embedders configure wgpu/peniko/kurbo
   exclusively through that re-export; the root likewise re-exports `stylo` as the CSS
-  vocabulary door for the layers above (strict linear chain: cli → core →
-  element → dom). The embedder-facing `dom::Device` profile exposes exactly
+  vocabulary door for the layers above (strict linear chain: cli → resources
+  → core → element → dom). The embedder-facing `dom::Device` profile exposes exactly
   the inputs that vary between views — `Device::new(width, height,
   device_pixel_ratio)` — and locks the rest: screen media type, standards
   (no-quirks) mode, light color scheme, coarse touch pointers, and

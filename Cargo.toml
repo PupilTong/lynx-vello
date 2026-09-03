@@ -12,6 +12,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 bobcat-core = { path = "crates/bobcat-core" }
+bobcat-resources = { path = "crates/bobcat-resources" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
 lynx-xml = { path = "crates/lynx-xml" }
 hughie = { path = "crates/hughie" }
@@ -57,6 +58,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 url = "2"
 js-sys = "0.3"
+libloading = "0.8"
 rayon = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

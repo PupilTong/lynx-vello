@@ -57,14 +57,34 @@ service style work.
 
 ## Resource and script boundaries
 
-Browser fetch policy stays in JavaScript. For `load(url, styleSheetUrls)`, the
-Render Worker uses browser `fetch`, reads each response stream with a 16 MiB
-bound, and registers the raw stylesheet and entry-MTS bytes in its
-`BrowserResources` under their final response URLs, then calls
-`BobcatRenderer::load(entry_url, style_sheet_urls)`. Core reads them through
-`ResourceFetcher`, validates UTF-8 strictly, and uses the entry's final URL as
-the ESM entry specifier; it never receives a bundle decoder. That 16 MiB bound
-is browser-embedder policy and does not cross in `ResourceRequest`.
+Page sources keep their browser fetch policy in JavaScript. For
+`load(url, styleSheetUrls)`, the Render Worker uses browser `fetch`, reads
+each response stream with a 16 MiB bound, and registers the raw stylesheet and
+entry-MTS bytes with the `bobcat-resources` system it owns
+(`BobcatRenderer` holds one `Resources` for its whole life) under their final
+response URLs, then calls `BobcatRenderer::load(entry_url, style_sheet_urls)`.
+Core reads them through `ResourceFetcher`, validates UTF-8 strictly, and uses
+the entry's final URL as the ESM entry specifier; it never receives a bundle
+decoder. That 16 MiB bound is browser-embedder policy and does not cross in
+`ResourceRequest`. The load also makes the entry URL the base a relative
+`url(...)` in the page's CSS resolves against.
+
+Everything else a page names — its images — the resource system fetches
+itself, in Rust, through the same Worker `fetch` (so the same origin, CORS,
+credentials and HTTP-cache policy apply), and decodes with the platform's
+`Image` element on the main thread: `image-decoder.js`, shipped in the package
+beside `facade.js`, which the facade connects to the Render Worker over a
+`MessageChannel` at init. The Render Worker hands the fetched bytes over; the
+main thread turns them into a Blob URL, decodes and resizes them through a 2D
+canvas, and copies the RGBA pixels straight into a buffer the Render Worker
+allocated in the shared Wasm memory, where each decode job has a small
+mailbox. An ordinary load completes on the event loop and wakes the page loop
+through the engine signal; a restore after eviction is the one call that
+blocks the Render Worker, with `Atomics.wait` on the mailbox, because a read
+after a reported load must not miss. The main thread never waits, which is
+what keeps the two from deadlocking, and its only cost per image is the pixel
+read-back. The resource system's diagnostics — an image that failed, a missing
+decoder — reach `console.warn`.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's

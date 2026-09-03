@@ -1,51 +1,39 @@
 //! Loading a `.web.bundle` or raw Lynx XML into the values the engine consumes.
 //!
 //! This is embedder IO: read and sniff the bytes, decode the selected source
-//! container, retain its scripts and author CSS behind the resource-fetching
-//! contract, and hand the root URL plus page config to Bobcat. The pipeline
+//! container, register its scripts and author CSS with the reference resource
+//! system, and hand the root URL plus page config to Bobcat. The pipeline
 //! itself — tree, commits, style, layout, paint, scheduling — remains the
-//! engine's.
+//! engine's, and everything else a page fetches — its images, above all —
+//! goes through `bobcat-resources` like any other embedder's would.
 
 use std::sync::Arc;
 
-use bobcat_core::resource::{
-    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
-    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
-    StyleSheetPayload, StyleSheetResponse,
-};
-use bobcat_core::{ImageReports, PageConfig, PreparsedStyleSheet, ViewSources};
-use http::HeaderMap;
+use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
+use bobcat_resources::{DiskCacheConfig, Resources, ResourcesConfig};
 use url::Url;
 
 use crate::CliError;
 
+/// The disk tier the runner keeps under the user's cache directory.
+const DISK_CACHE_BUDGET: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug)]
 pub(crate) struct Program {
     pub(crate) input: String,
+    /// The input's own URL: what a relative `url(...)` in its CSS resolves
+    /// against.
+    input_url: Url,
     script_url: Url,
+    script: Arc<str>,
     /// The conventional background chunk URL for raw XML that contains a
     /// background section. Its presence is retained even when the source is
     /// empty; the current runtime does not execute it.
-    background_script_url: Option<Url>,
+    background_script: Option<(Url, Arc<str>)>,
+    style_sheet: Option<(Url, ProgramStyleSheet)>,
     /// The non-global CSS fragment ids a decoded bundle carries, if any.
     scoped_css_ids: Vec<i32>,
-    pub(crate) resource_fetcher: ProgramResourceFetcher,
     pub(crate) config: PageConfig,
-}
-
-/// The CLI's resource provider for sources extracted from one input.
-///
-/// Container loading and decoding/parsing deliberately stay in the embedder.
-/// The engine sees the root script through the same URL-based resource
-/// boundary that a networked or packaged embedder would implement.
-#[derive(Clone, Debug)]
-pub(crate) struct ProgramResourceFetcher {
-    script_url: Url,
-    source: Arc<str>,
-    background_script: Option<(Url, Arc<str>)>,
-    style_sheet_url: Option<Url>,
-    style_sheet: Option<ProgramStyleSheet>,
 }
 
 /// Author CSS in the most direct form supplied by the input container.
@@ -54,224 +42,7 @@ enum ProgramStyleSheet {
     /// Verbatim UTF-8 CSS from a raw Lynx XML `<style>` section.
     Text(Arc<str>),
     /// A web bundle's rkyv `StyleInfo`, lowered without reserializing it.
-    Preparsed(Arc<PreparsedStyleSheet>),
-}
-
-impl ProgramResourceFetcher {
-    fn new(script_url: Url, source: String) -> Self {
-        Self {
-            script_url,
-            source: Arc::from(source),
-            background_script: None,
-            style_sheet_url: None,
-            style_sheet: None,
-        }
-    }
-
-    fn with_background_script(mut self, url: Url, source: String) -> Self {
-        self.background_script = Some((url, Arc::from(source)));
-        self
-    }
-
-    fn with_preparsed_style_sheet(mut self, url: Url, sheet: PreparsedStyleSheet) -> Self {
-        self.style_sheet_url = Some(url);
-        self.style_sheet = Some(ProgramStyleSheet::Preparsed(Arc::new(sheet)));
-        self
-    }
-
-    fn with_text_style_sheet(mut self, url: Url, source: String) -> Self {
-        self.style_sheet_url = Some(url);
-        self.style_sheet = Some(ProgramStyleSheet::Text(Arc::from(source)));
-        self
-    }
-
-    /// The URL the input's author CSS is registered under, if it carried any.
-    ///
-    /// The registration is the single source of truth: an input whose sheet
-    /// was never registered has no URL to load, and one that was cannot be
-    /// missed.
-    fn style_sheet_url(&self) -> Option<&Url> {
-        self.style_sheet_url.as_ref()
-    }
-
-    fn error(
-        request_id: Option<RequestId>,
-        kind: ResourceErrorKind,
-        phase: ResourceErrorPhase,
-        locator: Option<Arc<str>>,
-        message: &'static str,
-    ) -> ResourceError {
-        ResourceError {
-            request_id,
-            kind,
-            phase,
-            locator,
-            status: None,
-            message: Arc::from(message),
-            retry: RetryAdvice::Never,
-        }
-    }
-}
-
-impl ResourceFetcher for ProgramResourceFetcher {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        match capability {
-            ResourceCapability::BufferedResource => true,
-            ResourceCapability::PreparsedStyleSheet => matches!(
-                self.style_sheet.as_ref(),
-                Some(ProgramStyleSheet::Preparsed(_))
-            ),
-            _ => false,
-        }
-    }
-
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        let request_id = request.context.id;
-        let locator = request.resource.specifier.clone();
-
-        let resolved_url = Url::parse(&locator).or_else(|_| {
-            request
-                .resource
-                .base_url
-                .as_ref()
-                .ok_or(url::ParseError::RelativeUrlWithoutBase)
-                .and_then(|base_url| base_url.join(&locator))
-        });
-        let Ok(url) = resolved_url else {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::InvalidUrl,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "resource locator is not a valid URL",
-            ));
-        };
-        let is_background_script = self
-            .background_script
-            .as_ref()
-            .is_some_and(|(script_url, _)| &url == script_url);
-        if url != self.script_url
-            && !is_background_script
-            && Some(&url) != self.style_sheet_url.as_ref()
-        {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::NotFound,
-                ResourceErrorPhase::Resolve,
-                Some(locator),
-                "resource is not present in the decoded input",
-            ));
-        }
-
-        let resource = request.resource;
-        let cache_key = Some(Arc::from(url.as_str()));
-        Ok(ResolvedLocator {
-            resource,
-            url,
-            rewrite_chain: Vec::new(),
-            locality: ResourceLocality::Local,
-            cache_key,
-        })
-    }
-
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        let request_id = request.context.id;
-        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
-        let source = if request.resource.url == self.script_url {
-            self.source.clone()
-        } else if let Some((_, source)) = self
-            .background_script
-            .as_ref()
-            .filter(|(url, _)| &request.resource.url == url)
-        {
-            source.clone()
-        } else {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::NotFound,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "resource is not present in the decoded input",
-            ));
-        };
-        let content_length = source.len() as u64;
-
-        let resource = request.resource;
-        Ok(ResourceResponse {
-            metadata: ResourceMetadata {
-                request_id,
-                resource,
-                headers: HeaderMap::default(),
-                content_length: Some(content_length),
-                media_type: Some(Arc::from("text/javascript; charset=utf-8")),
-                source: ResourceSource::MemoryCache,
-                cache_status: CacheStatus::default(),
-                timing: ResourceTiming::default(),
-            },
-            bytes: source.as_bytes().to_vec().into(),
-        })
-    }
-
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
-        let request_id = request.context.id;
-        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
-        let Some(sheet) = self
-            .style_sheet
-            .clone()
-            .filter(|_| Some(&request.resource.url) == self.style_sheet_url.as_ref())
-        else {
-            return Err(Self::error(
-                Some(request_id),
-                ResourceErrorKind::NotFound,
-                ResourceErrorPhase::Open,
-                Some(locator),
-                "the decoded input carries no stylesheet at this URL",
-            ));
-        };
-        let (content_length, payload) = match sheet {
-            ProgramStyleSheet::Text(source) => {
-                let content_length = source.len() as u64;
-                (
-                    Some(content_length),
-                    StyleSheetPayload::Text(source.as_bytes().to_vec().into()),
-                )
-            }
-            ProgramStyleSheet::Preparsed(sheet) => (None, StyleSheetPayload::Preparsed(sheet)),
-        };
-        let resource = request.resource;
-        Ok(StyleSheetResponse {
-            metadata: ResourceMetadata {
-                request_id,
-                resource,
-                headers: HeaderMap::default(),
-                content_length,
-                media_type: Some(Arc::from("text/css; charset=utf-8")),
-                source: ResourceSource::MemoryCache,
-                cache_status: CacheStatus::default(),
-                timing: ResourceTiming::default(),
-            },
-            payload,
-        })
-    }
-}
-
-/// The CLI serves no images: a page it renders draws whatever its own
-/// stylesheet describes, and nothing fetches a bitmap. Every image draw
-/// therefore resolves to nothing, which is what an unloaded image looks like
-/// anyway.
-impl bobcat_core::FrameImages for ProgramResourceFetcher {
-    fn read(&self, _source: &str) -> Option<bobcat_core::vello::peniko::ImageData> {
-        None
-    }
+    Preparsed(PreparsedStyleSheet),
 }
 
 impl Program {
@@ -306,12 +77,16 @@ impl Program {
             .ok_or_else(|| CliError::MissingRoot(input.to_string()))?;
         let script_url = Url::parse("bobcat-memory://bundle/lepus-root.js")
             .expect("the built-in root-script URL must be valid");
-        let mut fetcher = ProgramResourceFetcher::new(script_url.clone(), source);
         let style_sheet = template
             .style_info
             .as_ref()
             .map(crate::style_info::to_preparsed_style_sheet)
-            .filter(|sheet| !sheet.is_empty());
+            .filter(|sheet| !sheet.is_empty())
+            .map(|sheet| {
+                let url = Url::parse("bobcat-memory://bundle/style-info.css")
+                    .expect("the built-in stylesheet URL must be valid");
+                (url, ProgramStyleSheet::Preparsed(sheet))
+            });
         let scoped_css_ids = template
             .style_info
             .as_ref()
@@ -325,11 +100,6 @@ impl Program {
                 ids.sort_unstable();
                 ids
             });
-        if let Some(sheet) = style_sheet {
-            let url = Url::parse("bobcat-memory://bundle/style-info.css")
-                .expect("the built-in stylesheet URL must be valid");
-            fetcher = fetcher.with_preparsed_style_sheet(url, sheet);
-        }
         let config = PageConfig {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
@@ -337,10 +107,12 @@ impl Program {
         };
         Ok(Self {
             input: input.to_string(),
+            input_url: input.clone(),
             script_url,
-            background_script_url: None,
+            script: Arc::from(source),
+            background_script: None,
+            style_sheet,
             scoped_css_ids,
-            resource_fetcher: fetcher,
             config,
         })
     }
@@ -357,29 +129,25 @@ impl Program {
         })?;
         let script_url = Url::parse("bobcat-memory://lynx-xml/main-thread.js")
             .expect("the built-in XML main-script URL must be valid");
-        let mut fetcher =
-            ProgramResourceFetcher::new(script_url.clone(), xml.main_thread_script.to_owned());
-
-        let background_script_url = if let Some(source) = xml.background_thread_script {
+        let background_script = xml.background_thread_script.map(|source| {
             let url = Url::parse("bobcat-memory://lynx-xml/app-service.js")
                 .expect("the built-in XML background-script URL must be valid");
-            fetcher = fetcher.with_background_script(url.clone(), source.to_owned());
-            Some(url)
-        } else {
-            None
-        };
-        if let Some(source) = xml.style {
+            (url, Arc::from(source))
+        });
+        let style_sheet = xml.style.map(|source| {
             let url = Url::parse("bobcat-memory://lynx-xml/style.css")
                 .expect("the built-in XML stylesheet URL must be valid");
-            fetcher = fetcher.with_text_style_sheet(url, source.to_owned());
-        }
+            (url, ProgramStyleSheet::Text(Arc::from(source)))
+        });
 
         Ok(Self {
             input: input.to_string(),
+            input_url: input.clone(),
             script_url,
-            background_script_url,
+            script: Arc::from(xml.main_thread_script),
+            background_script,
+            style_sheet,
             scoped_css_ids: Vec::new(),
-            resource_fetcher: fetcher,
             config: PageConfig {
                 default_display_linear: false,
                 default_overflow_visible: false,
@@ -388,13 +156,17 @@ impl Program {
         })
     }
 
+    /// The URL the input's author CSS is registered under, if it carried any.
+    fn style_sheet_url(&self) -> Option<&Url> {
+        self.style_sheet.as_ref().map(|(url, _)| url)
+    }
+
     /// The sources a view for this input is built from: the author CSS this
     /// input carried, if any, and its entry MTS module.
     pub(crate) fn sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
             style_sheets: self
-                .resource_fetcher
                 .style_sheet_url()
                 .map(Url::to_string)
                 .into_iter()
@@ -403,12 +175,62 @@ impl Program {
         }
     }
 
-    /// Builds the resource system this input is served by, for the painter
-    /// to own. The CLI loads no image asynchronously, so it has nothing to
-    /// report and drops the sink.
-    pub(crate) fn resources(&self) -> impl FnOnce(ImageReports) -> ProgramResourceFetcher {
-        let fetcher = self.resource_fetcher.clone();
-        move |_sink| fetcher
+    /// Builds the resource system this input is served by: the reference
+    /// fetcher with the input's extracted sources registered under their
+    /// `bobcat-memory://` URLs, the input's own URL as the base every
+    /// relative `url(...)` resolves against, and a disk tier under the
+    /// user's cache directory. Everything else a page names — a file beside
+    /// the input, a `data:` image, an `https:` one — the system fetches and
+    /// decodes itself.
+    ///
+    /// `wakeup` is what a load completing on a worker thread calls; it must
+    /// wake the event loop that pumps the view.
+    pub(crate) fn resources(&self, wakeup: impl Fn() + Send + Sync + 'static) -> Resources {
+        self.resources_with(
+            DiskCacheConfig::at_default_location(DISK_CACHE_BUDGET),
+            wakeup,
+        )
+    }
+
+    fn resources_with(
+        &self,
+        disk_cache: Option<DiskCacheConfig>,
+        wakeup: impl Fn() + Send + Sync + 'static,
+    ) -> Resources {
+        let config = ResourcesConfig {
+            base_url: Some(self.input_url.clone()),
+            disk_cache,
+            ..ResourcesConfig::default()
+        };
+        let resources = Resources::new(config, wakeup);
+        let register = |url: &Url, source: &Arc<str>, media_type: &str| {
+            resources
+                .register(url.as_str(), source.as_bytes().to_vec(), Some(media_type))
+                .expect("the built-in URLs are valid");
+        };
+        register(
+            &self.script_url,
+            &self.script,
+            "text/javascript; charset=utf-8",
+        );
+        if let Some((url, source)) = self.background_script.as_ref() {
+            register(url, source, "text/javascript; charset=utf-8");
+        }
+        match self.style_sheet.as_ref() {
+            Some((url, ProgramStyleSheet::Text(source))) => {
+                register(url, source, "text/css; charset=utf-8");
+            }
+            Some((url, ProgramStyleSheet::Preparsed(sheet))) => {
+                resources
+                    .register_style_sheet(url.as_str(), sheet.clone())
+                    .expect("the built-in URLs are valid");
+            }
+            None => {}
+        }
+        for note in resources.take_notes() {
+            eprintln!("bobcat: warning: {note}");
+        }
+        resources
     }
 
     /// Reports input features the current runtime retains only approximately
@@ -434,7 +256,7 @@ impl Program {
                 ids.join(", ")
             );
         }
-        if let Some(url) = self.background_script_url.as_ref() {
+        if let Some((url, _)) = self.background_script.as_ref() {
             eprintln!(
                 "bobcat: warning: {} carries a Lynx XML background-thread script at {}; \
                  background-thread JavaScript is retained but not executed",
@@ -492,20 +314,20 @@ mod tests {
         assert!(!program.config.default_display_linear);
         assert!(!program.config.default_overflow_visible);
         assert!(program.config.enable_css_selector);
+        assert_eq!(program.style_sheet_url().map(Url::path), Some("/style.css"));
         assert_eq!(
-            program.resource_fetcher.style_sheet_url().map(Url::path),
-            Some("/style.css")
-        );
-        assert_eq!(
-            program.background_script_url.as_ref().map(Url::path),
+            program
+                .background_script
+                .as_ref()
+                .map(|(url, _)| url.path()),
             Some("/app-service.js")
         );
         assert!(matches!(
-            program.resource_fetcher.style_sheet.as_ref(),
-            Some(ProgramStyleSheet::Text(source)) if source.is_empty()
+            program.style_sheet.as_ref(),
+            Some((_, ProgramStyleSheet::Text(source))) if source.is_empty()
         ));
         assert!(matches!(
-            program.resource_fetcher.background_script.as_ref(),
+            program.background_script.as_ref(),
             Some((_, source)) if source.is_empty()
         ));
     }
@@ -518,8 +340,8 @@ mod tests {
         )
         .expect("valid XML program");
 
-        assert!(program.resource_fetcher.style_sheet_url().is_none());
-        assert!(program.background_script_url.is_none());
+        assert!(program.style_sheet_url().is_none());
+        assert!(program.background_script.is_none());
     }
 
     #[test]
@@ -542,5 +364,21 @@ mod tests {
         .expect_err("malformed XML must fail");
 
         assert!(matches!(error, CliError::ParseLynxXml { .. }));
+    }
+
+    /// The extracted sources reach the resource system under their
+    /// `bobcat-memory://` URLs, and the input URL is the base for the rest.
+    #[test]
+    fn the_program_registers_its_sources_with_the_resource_system() {
+        let program = Program::from_bytes(
+            &input_url(),
+            b"<lynx engine-version=\"4.2\"><style>a{}</style><script thread=\"main\">main</script></lynx>",
+        )
+        .expect("valid XML program");
+        let resources = program.resources_with(None, || {});
+        assert_eq!(resources.base_url(), Some(input_url()));
+        assert!(resources.unregister("bobcat-memory://lynx-xml/main-thread.js"));
+        assert!(resources.unregister("bobcat-memory://lynx-xml/style.css"));
+        assert!(!resources.unregister("bobcat-memory://lynx-xml/app-service.js"));
     }
 }

@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
+use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent};
@@ -37,7 +38,7 @@ use winit::window::{Window, WindowId};
 use crate::CliError;
 use crate::args::Options;
 use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::{Program, ProgramResourceFetcher};
+use crate::page::Program;
 use crate::screenshot::save_screenshot;
 use crate::vsync::DisplayLink;
 
@@ -97,7 +98,7 @@ struct MacApplication {
     /// surface before the last handle to the window goes — and the window
     /// itself is destroyed on this thread, which is the only one allowed to
     /// destroy it.
-    view: Option<LynxView<ProgramResourceFetcher>>,
+    view: Option<LynxView<ViewResources>>,
     /// This window's display clock, running only while a frame is owed.
     /// Declared before the view so it is stopped — and its callback proven
     /// finished — before the view it wakes goes away.
@@ -180,13 +181,19 @@ impl MacApplication {
         // surface already exists. The surface is built on this thread because
         // `AppKit` allows it nowhere else — and this is also the thread that
         // will draw into it, for the same reason.
+        // The resource system completes image loads on its own workers; each
+        // completion wakes the event loop the same way a commit does.
+        let resources = program.resources({
+            let requester = Arc::clone(&self.event_requester);
+            move || requester.request_event()
+        });
         let view = pollster::block_on(LynxView::new(
             Arc::clone(&self.event_requester),
             css_width,
             css_height,
             scale_factor,
             DrawTarget::window(Arc::clone(window)),
-            program.resources(),
+            resources.builder(),
             program.sources(),
         ))
         .map_err(|source| CliError::StartView {

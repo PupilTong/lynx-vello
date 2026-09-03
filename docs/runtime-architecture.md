@@ -5,10 +5,12 @@ The document, Element-PAPI tree, script realm, renderer scheduler, and the
 commit/publish protocol are implementation state. An embedder supplies only
 capabilities and OS facts:
 
-- a `ViewSources`: an owned `Arc<dyn ResourceFetcher>`, owned font bytes, an
-  optional default font family, an
-  optional `ImageStore` — which owns every decoded image the view draws —
-  author stylesheet URLs in cascade order, and the one entry MTS module URL;
+- a `ViewSources` — page config, owned font bytes, an optional default font
+  family, author stylesheet URLs in cascade order, and the one entry MTS
+  module URL — and, as a separate argument, the builder of the view's
+  `ResourceFetcher`, which is also its `FrameImages` and owns every byte and
+  pixel the view ever loads (`crates/bobcat-resources` is the reference
+  implementation both shipped embedders use);
 - an `EventRequester`, the one wakeup the engine has for the embedder's
   thread. It is a platform type, not a trait object — `LynxView::new` is
   generic over it and the Lynx main thread holds it, so the wake is a direct
@@ -48,10 +50,10 @@ The dependency graph is:
 
 ```text
 bobcat-cli  ─┐
-             ├──▶ bobcat-core ──▶ dom ─┬─▶ hughie
-bobcat-wasm ─┘          │              ├─▶ vendor/stylo
-                        │              └─▶ vello/wgpu
-                        └──▶ quickjs-rust-bridge
+             ├──▶ bobcat-resources ──▶ bobcat-core ──▶ dom ─┬─▶ hughie
+bobcat-wasm ─┘                              │              ├─▶ vendor/stylo
+                                            │              └─▶ vello/wgpu
+                                            └──▶ quickjs-rust-bridge
 
 QuickJS preloaded ESM graph
   bobcat:boot
@@ -149,9 +151,9 @@ background-thread realm; both report that limitation explicitly.
 `LynxView::new` validates the viewport, creates the one link, starts
 `bobcat-main`, builds the painter and the `DrawTarget` it was given on the
 calling thread, and asynchronously awaits one startup result.
-`bobcat-main` creates the fresh document itself, registers fonts and the image
-store, fetches each author stylesheet through the `ResourceFetcher` owned by
-`ViewSources`, mounts those sheets in cascade order, fetches the UTF-8 entry
+`bobcat-main` creates the fresh document itself, registers fonts, receives
+each author stylesheet — fetched by the painter through the view's
+`ResourceFetcher` — and mounts those sheets in cascade order, fetches the UTF-8 entry
 MTS module, creates QuickJS, and completes boot before answering. The actual
 network or file IO may run wherever the fetcher chooses; every fetch call,
 future continuation, document mutation, and post-fetch action runs on
@@ -295,7 +297,7 @@ inside and generates no box anywhere else.
 private Document<()>
   ├── DOM + Stylo arenas
   ├── layout/text state
-  ├── Arc<dyn ImageStore>   (the embedder's; the document holds no pixels)
+  ├── ImageRegistry          (source names and load states; no pixels)
   └── private Painter
         ├── retained Arc<CommittedFrame>   (paint tables + scroll-slot table +
         │                                   the split scene: per-chain fragments
@@ -314,16 +316,22 @@ does not expose the engine that consumes it. There is no frame-scheduling
 capability: a commit records that it wants a frame and wakes the embedder,
 whose next `pump` draws it — no OS frame callback is asked for or waited on.
 
-Images are the host-implemented `ImageStore` contract and nothing else. No
-container sniffing, codec, cache, byte budget or eviction policy exists in this
-workspace: an embedder supplies a store as its `ViewSources::image_store`, and
-the engine asks it for one image at a time by source string. The paint walk
-calls only the store's non-blocking `peek`, because encoding runs inside a
-commit on the document's owner thread and must not stall it; a miss paints
-nothing that frame, the same not-yet-loaded state a browser shows. `LynxView::load_image` awaits the store's `get` outside the
-frame and then invalidates the retained scene, and `prefetch_image` starts the
-same work without waiting. The `<image>` element has not yet wired the store
-into automatic loading.
+Images are the host's `ResourceFetcher` and nothing else; no container
+sniffing, codec, cache, byte budget or eviction policy exists in `bobcat-core`
+or `dom`. The paint walk names each source it meets; the painter asks the
+fetcher for it (`request_image`), the fetcher answers through the view's
+`ImageReports` with the intrinsic size, and the document records the load and
+recommits. A frame that names a source not yet loaded paints nothing for it,
+the same not-yet-loaded state a browser shows. Each painter turn gives the
+fetcher a moment of its own (`service_images`) to forward loads that completed
+elsewhere. Composition then reads the frame's images once per commit through
+`FrameImages::read`, synchronously and off the swap-chain window, each with the
+`ImageSizeHint` of its largest draw in the frame — the size a host decodes to.
+That read may block, because after a reported load it must not miss: a store
+that evicted a bitmap restores it inside the call. `crates/bobcat-resources`
+is the reference implementation of all of this, and `LynxView::prefetch_images`
+warms sources ahead of the walk that would discover them. The `<image>`
+element has not yet wired automatic loading.
 
 ## Commit, publish, and visibility
 

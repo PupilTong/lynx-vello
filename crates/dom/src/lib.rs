@@ -37,8 +37,8 @@ pub use vello;
 
 pub use crate::paint::plan::CompositePlan;
 pub use crate::render::image::{
-    FrameImages, ImageEvent, ImageInbox, ImageReports, MAX_RENDERABLE_DIMENSION, NoImages,
-    is_renderable,
+    FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint, MAX_RENDERABLE_DIMENSION,
+    NoImages, is_renderable,
 };
 pub use crate::style::animation::AnimationTick;
 pub use crate::style::device::Device;

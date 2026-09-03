@@ -10,6 +10,7 @@
     "dom-worker.js",
     "facade.d.ts",
     "facade.js",
+    "image-decoder.js",
     "pkg",
     "render-worker.js"
   ],

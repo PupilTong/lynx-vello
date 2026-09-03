@@ -106,6 +106,12 @@ impl<F: ResourceFetcher> PainterImages<F> {
         }
     }
 
+    /// Gives the store its moment in the turn: loads that completed off this
+    /// thread since the last turn are forwarded into the sink here.
+    pub(crate) fn service(&self) {
+        self.store.service_images();
+    }
+
     /// Takes the reports the store has queued. Empty when a wakeup raced
     /// another drain.
     pub(crate) fn take_reports(&mut self) -> Vec<ImageEvent> {
@@ -164,10 +170,10 @@ mod tests {
         images.insert("app:///pixel.png", pixels);
 
         let first = images
-            .read("app:///pixel.png")
+            .read("app:///pixel.png", dom::ImageSizeHint::UNBOUNDED)
             .expect("a published image reads back");
         let second = images
-            .read("app:///pixel.png")
+            .read("app:///pixel.png", dom::ImageSizeHint::UNBOUNDED)
             .expect("and reads back again");
         assert_eq!(
             first.data.id(),
@@ -188,6 +194,10 @@ mod tests {
         use dom::FrameImages as _;
 
         let images = flashbulb::TestImages::new();
-        assert!(images.read("app:///missing.png").is_none());
+        assert!(
+            images
+                .read("app:///missing.png", dom::ImageSizeHint::UNBOUNDED)
+                .is_none()
+        );
     }
 }

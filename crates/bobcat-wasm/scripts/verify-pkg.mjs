@@ -11,6 +11,7 @@ const wasmPath = path.join(packageDirectory, 'pkg/bobcat_wasm_bg.wasm')
 for (const script of [
   path.join(packageDirectory, 'dom-worker.js'),
   path.join(packageDirectory, 'facade.js'),
+  path.join(packageDirectory, 'image-decoder.js'),
   path.join(packageDirectory, 'render-worker.js'),
   gluePath,
 ]) {
@@ -76,6 +77,14 @@ const declarations = await readFile(
 )
 if (facade.includes('./pkg/bobcat_wasm.js')) {
   throw new Error('browser UI facade must not instantiate the Wasm module')
+}
+// Images decode on the main thread: the facade owns the decoder and hands
+// the Render Worker its end of the channel at init.
+if (
+  !facade.includes("from './image-decoder.js'") ||
+  !facade.includes('imagePort: images.port2')
+) {
+  throw new Error('browser facade must connect the main-thread image decoder')
 }
 for (const requiredDeclaration of [
   'pageConfig: PageConfig',
@@ -155,6 +164,9 @@ const domWorker = await readFile(
 const engineConstruction = renderWorker.indexOf('await BobcatRenderer.create(')
 if (engineConstruction === -1 || !renderWorker.includes('message.threadCount')) {
   throw new Error('Render Worker must pass the style thread count to view construction')
+}
+if (!renderWorker.includes('message.imagePort')) {
+  throw new Error('Render Worker must pass the image decode port to view construction')
 }
 if (renderWorker.includes('initThreadPool')) {
   throw new Error('Render Worker still initializes wasm-bindgen-rayon')
@@ -423,6 +435,7 @@ const required = [
   'dom-worker.js',
   'facade.d.ts',
   'facade.js',
+  'image-decoder.js',
   'pkg/bobcat_wasm.js',
   'pkg/bobcat_wasm_bg.wasm',
   'render-worker.js',

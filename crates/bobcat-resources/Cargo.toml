@@ -1,0 +1,46 @@
+[package]
+name = "bobcat-resources"
+description = "Cross-platform reference ResourceFetcher for Bobcat: MIME preprocessing, tiered caching, and platform image decoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bobcat-core = { workspace = true }
+bytes = { workspace = true }
+flume = { workspace = true }
+http = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libloading = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+web-time = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Headers",
+    "MessageEvent",
+    "MessagePort",
+    "Request",
+    "RequestCache",
+    "RequestInit",
+    "Response",
+    "WorkerGlobalScope",
+] }
+
+[dev-dependencies]
+flashbulb = { workspace = true, features = ["render"] }
+png = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

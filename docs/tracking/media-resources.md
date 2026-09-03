@@ -34,14 +34,21 @@ Key architectural facts (native): request lifecycle is driven by a dirty-flag di
 
 `auto-size` triggers a genuine **post-decode relayout**: `AutoSizeImage.measure()` (`lynx/platform/android/.../image/AutoSizeImage.java`) returns the *previous/placeholder* measured size until the real bitmap dimensions are known, then `justSizeIfNeeded()` calls `markDirty()`/relayout once decode completes and the intrinsic aspect ratio differs meaningfully (>0.05) from the current box — i.e. native Lynx has the same "layout jank on late-arriving intrinsic size" behavior as an `<img>` without explicit `width`/`height`, and a bitmap-size cache (`ILynxViewRuntimeCacheManager.setBitmapSizeCache`) is used to avoid the jank on repeat mounts of the same URL. web-platform sidesteps this entirely by keeping `auto-size` a pure-CSS affair (`x-image.css:55-81`: `display:contents` + `width/height: inherit`/`max-width/max-height:100%` on the inner `<img>`), relying on the browser's native intrinsic-size layout — no JS remeasurement needed.
 
-lynx-vello takes the opposite position from the one sketched above: it builds
-no Fresco/UIImage equivalent at all. Fetch, decode, memory cache, disk cache
-and eviction are the embedder's, behind the `dom::ImageStore` trait an
-embedder hands to `LynxView::new` as `ViewSources::image_store` — which is the
-same seam native reaches through
-`LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
-one layer lower so the engine never owns a byte. The workspace holds no codec,
-no container sniffing and no cache policy.
+lynx-vello keeps the engine out of it and puts the Fresco/UIImage equivalent
+where native puts it: behind the embedder-supplied fetcher. Fetch, decode,
+memory cache, disk cache and eviction are the `ResourceFetcher`'s — the seam
+native reaches through `LynxMediaResourceFetcher`/`LynxImageFetcher`, placed
+one layer lower so the engine never owns a byte. `crates/bobcat-resources` is
+the reference implementation of that seam, and what both shipped embedders
+use: platform decoding only (ImageIO, gdk-pixbuf, the browser's `Image` element — no
+codec is compiled in), a memory tier for bitmaps under a byte budget with the
+frame's working set pinned, a disk tier for fetched bytes with HTTP freshness
+and revalidation, a MIME-keyed preprocessing pipeline, and native's default
+"decode to the view size" as the engine's `ImageSizeHint`: the frame reads
+each image with the size it draws it at, and a bitmap far larger than its draw
+is re-decoded at that size. The prefetch API row below maps to
+`LynxView::prefetch_images`; the bitmap-size cache is the fetcher's remembered
+intrinsic size, answered inline on a second request.
 
 Both halves of the replaced-content handoff exist on the `dom` side.
 `Document::set_natural_size` installs the `NaturalSize`, invalidating the

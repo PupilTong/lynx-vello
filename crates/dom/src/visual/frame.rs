@@ -357,6 +357,11 @@ impl CommittedFrame {
     /// `images` ends up with one entry per image draw, in draw order.
     /// `sources` receives each distinct image once, in first-draw order —
     /// the frame's working set, and the residency hint a host is given.
+    ///
+    /// Each source is read once, with the size hint covering every draw of
+    /// it in this frame — which is why the draws are walked before the first
+    /// read: a source drawn small first and large later must be decoded for
+    /// the large draw.
     pub fn resolve_images<P: crate::FrameImages + ?Sized>(
         &self,
         pixels: &P,
@@ -368,7 +373,8 @@ impl CommittedFrame {
         // One entry per distinct source, parallel to `sources`. A frame draws
         // few distinct images however many draws it has, so this scan is over
         // a handful of pointers.
-        let mut distinct: Vec<Option<ImageData>> = Vec::new();
+        let mut hints: Vec<crate::ImageSizeHint> = Vec::new();
+        let mut indices: Vec<usize> = Vec::with_capacity(self.presentation.image_draws.len());
         for draw in &self.presentation.image_draws {
             // Every draw of one source shares one allocation — the registry
             // hands back its own key — so pointer identity is the whole
@@ -376,13 +382,21 @@ impl CommittedFrame {
             let seen = sources
                 .iter()
                 .position(|source| std::sync::Arc::ptr_eq(source, &draw.image));
+            let hint = draw.size_hint();
             let index = seen.unwrap_or_else(|| {
                 sources.push(std::sync::Arc::clone(&draw.image));
-                distinct.push(pixels.read(&draw.image));
+                hints.push(hint);
                 sources.len() - 1
             });
-            images.push(distinct[index].clone());
+            hints[index] = hints[index].union(hint);
+            indices.push(index);
         }
+        let distinct: Vec<Option<ImageData>> = sources
+            .iter()
+            .zip(&hints)
+            .map(|(source, hint)| pixels.read(source, *hint))
+            .collect();
+        images.extend(indices.into_iter().map(|index| distinct[index].clone()));
     }
 
     /// This frame's commit id. Monotonic across a document's life, so it
