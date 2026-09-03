@@ -365,6 +365,10 @@ impl MacApplication {
                 EngineEvent::ListenerFailed(error) => {
                     eprintln!("event listener failed: {error}");
                 }
+                // The same standing: only that one timer's turn was lost.
+                EngineEvent::TimerFailed(error) => {
+                    eprintln!("timer callback failed: {error}");
+                }
                 _ => {}
             }
         }

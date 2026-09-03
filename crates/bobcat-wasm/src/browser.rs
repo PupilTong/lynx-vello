@@ -594,7 +594,9 @@ impl BobcatRenderer {
                 EngineEvent::RenderFailed(error) if fatal.is_none() => {
                     fatal = Some(js_error(error));
                 }
-                EngineEvent::ListenerFailed(error) => console_error(&js_error(error)),
+                EngineEvent::ListenerFailed(error) | EngineEvent::TimerFailed(error) => {
+                    console_error(&js_error(error));
+                }
                 _ => {}
             }
         }

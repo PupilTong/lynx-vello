@@ -13,14 +13,17 @@ pub(crate) mod tree;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::str;
+use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
+use std::{str, thread};
 
 use dom::CommittedFrame;
 #[cfg(target_arch = "wasm32")]
@@ -28,7 +31,7 @@ use wasm_thread::Builder as ThreadBuilder;
 
 #[cfg(test)]
 use self::runtime::MainThreadError;
-use self::runtime::MainThreadRuntime;
+use self::runtime::{ClockInstant, MainThreadRuntime};
 #[cfg(test)]
 use self::tree::LynxDocument;
 use self::tree::new_document;
@@ -446,20 +449,91 @@ fn serve_main_commands<R: EventRequester>(
     commands: &flume::Receiver<ToMain>,
     notify: &ToPainterSender<R>,
 ) {
-    while let Ok(first) = commands.recv() {
+    loop {
         let mut serviced_begin_frame = None;
-        for command in std::iter::once(first).chain(commands.drain()) {
-            match command {
-                ToMain::Shutdown => return,
-                command => {
-                    apply_main_command(&mut runtime, command, notify, &mut serviced_begin_frame);
+        match wait_for_command(commands, runtime.next_timer_deadline()) {
+            Woken::Command(first) => {
+                for command in std::iter::once(first).chain(commands.drain()) {
+                    match command {
+                        ToMain::Shutdown => return,
+                        command => apply_main_command(
+                            &mut runtime,
+                            command,
+                            notify,
+                            &mut serviced_begin_frame,
+                        ),
+                    }
                 }
             }
+            // A deadline the realm asked for, and nothing else to serve.
+            Woken::Deadline => {}
+            Woken::Disconnected => return,
+        }
+        // After this round's commands, because a listener one of them
+        // delivered may have cleared a timer that is already due, and on
+        // every round rather than only the ones a deadline woke, because a
+        // command can arrive while a deadline is already behind us.
+        for failure in runtime.run_due_timers() {
+            notify.send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
         }
         runtime.commit_if_dirty();
         if let Some(seq) = serviced_begin_frame {
             notify.send(ToPainter::BeginFrameServiced(seq));
         }
+    }
+}
+
+/// What ended one round's wait.
+enum Woken {
+    /// A command arrived; more may be queued behind it.
+    Command(ToMain),
+    /// The earliest armed timer came due with no command to serve.
+    Deadline,
+    /// The painter is gone, and nothing more will be asked of this thread.
+    Disconnected,
+}
+
+/// Waits for the next command, or until `deadline` when a timer names one.
+///
+/// `flume`'s own timed receive reads the standard library's clock, which
+/// wasm32 does not implement, so the wait is assembled here out of the two
+/// pieces both targets do have: the receiver's future, and `park_timeout` —
+/// which is exactly what `flume` blocks on itself. Nothing drives the future
+/// but this loop, and the waker only unparks this thread, so this is a
+/// blocking wait spelled with a future rather than an executor.
+fn wait_for_command(commands: &flume::Receiver<ToMain>, deadline: Option<ClockInstant>) -> Woken {
+    let Some(deadline) = deadline else {
+        return commands.recv().map_or(Woken::Disconnected, Woken::Command);
+    };
+    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut receiving = commands.recv_async();
+    loop {
+        match Pin::new(&mut receiving).poll(&mut context) {
+            Poll::Ready(Ok(command)) => return Woken::Command(command),
+            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
+            Poll::Pending => {}
+        }
+        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
+            return Woken::Deadline;
+        };
+        // A spurious wake just polls again; a real one has already queued the
+        // command the poll will find.
+        thread::park_timeout(remaining);
+    }
+}
+
+/// The waker [`wait_for_command`] hands the receiver: the only thing a send
+/// has to do is end this thread's park.
+struct UnparkWaker(thread::Thread);
+
+impl Wake for UnparkWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
     }
 }
 

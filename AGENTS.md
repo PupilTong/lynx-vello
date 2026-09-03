@@ -245,10 +245,11 @@ useful signal for currently-compatible versions of those libraries.
   wake the host's `pump` through the construction-time `EventRequester`;
   `ScriptFinished` preserves the successful entry-module boot edge after
   `new` has awaited it, `ScriptRunError` reports a fatal script-runtime failure
-  during later owner-thread work, and `ListenerFailed` reports a listener that
-  threw during event delivery — separate because the last is not fatal:
-  the walk continues, the realm stays usable, and later events are delivered
-  as normal;
+  during later owner-thread work, `ListenerFailed` reports a listener that
+  threw during event delivery, and `TimerFailed` reports a `setTimeout` or
+  `setInterval` callback that threw when it came due — the last two separate
+  because neither is fatal: the walk continues, a repeating timer stays armed,
+  the realm stays usable, and later events and timers are delivered as normal;
   a frame the engine wants drawn rides the same wakeup, and the `pump` that
   answers it is the turn that draws it — so no OS frame callback and no vsync
   round trip stands between a commit and its pixels. Pacing is the
@@ -305,22 +306,28 @@ useful signal for currently-compatible versions of those libraries.
   `tagName`, `attributeNames`, `childElementIds`, `parentNode`,
   `insertBefore`, `removeElement`, `replaceElement`,
   `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
-  `disableEventListener`, and `stopPropagation` — all speaking DOM vocabulary
+  `disableEventListener`, `stopPropagation`, `setTimer`, and `clearTimer` —
+  all but the last two speaking DOM vocabulary
   over numeric `NodeId`s; the two that answer with a list encode it in the
   return string, since the boundary's value type carries no array —
   `attributeNames` as the same length-prefixed record `setInlineStyles`
   accepts, and `childElementIds` as comma-joined ids, which need no length
   prefix because a decimal id cannot contain the separator), then registers the
-  core-owned compatibility shell as `bobcat:runtime` and the Element PAPI
-  runtime as `bobcat:element` in QuickJS's synchronous preloaded ESM loader.
-  Both JavaScript sources live together in `packages/bobcat-element/src` and
-  are embedded by core with `include_str!`. The Element module imports native
-  operations directly from `bobcat-internal:host`; no host object or host
-  function is installed on `globalThis`. A `.web.bundle`'s `lepusCode.root` or
+  core-owned compatibility shell as `bobcat:runtime`, the Element PAPI
+  runtime as `bobcat:element`, and the timer runtime as `bobcat:timers` in
+  QuickJS's synchronous preloaded ESM loader.
+  All three JavaScript sources live together in `packages/bobcat-element/src`
+  and are embedded by core with `include_str!`. The Element module imports
+  native
+  operations directly from `bobcat-internal:host`; no host object and no
+  element member is installed on `globalThis`. A `.web.bundle`'s
+  `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx` from `bobcat:runtime` and `__FlushElementTree` from
-  `bobcat:element`, uses top-level await on `import(entry_url)`, and then runs
+  `lynx` from `bobcat:runtime`, `__FlushElementTree` from
+  `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
+  the timer globals exist before the entry loads — uses top-level await on
+  `import(entry_url)`, and then runs
   `processData` → (`globalThis.renderPage` when present, otherwise the
   `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
   JavaScript; the global function is a compatibility path, not a boot
@@ -700,9 +707,10 @@ useful signal for currently-compatible versions of those libraries.
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the dependency-free JavaScript sources for the
-  two ESMs `bobcat-core` preloads into the QuickJS main-thread realm:
-  `src/main-thread-runtime.mjs` provides `bobcat:runtime`, while
-  `src/element-papi.mjs` provides `bobcat:element`. Core embeds both with
+  three ESMs `bobcat-core` preloads into the QuickJS main-thread realm:
+  `src/main-thread-runtime.mjs` provides `bobcat:runtime`,
+  `src/element-papi.mjs` provides `bobcat:element`, and `src/timers.mjs`
+  provides `bobcat:timers`. Core embeds all three with
   `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
   and verifies every named export. The package owns the
   supported `__*` PAPI members and their web-core arities,
@@ -735,10 +743,16 @@ useful signal for currently-compatible versions of those libraries.
   not validate handles: a foreign handle resolves to `undefined`, which the
   private native boundary rejects as a JavaScript error before entering
   `dom`. Native access is limited to named imports from the native
-  `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat` and no
-  `console`/`setTimeout`/DOM. Named exports are the only Element-PAPI surface
+  `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
+  `console`, and no DOM. Named exports are the only Element-PAPI surface
   for transformed MTS entries; the module installs no `__*` globals. Rstest
   imports the ESM normally and `tsc --noEmit` checks it under `checkJs`.
+  `src/timers.mjs` is the one module here that does install globals, because
+  bare `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a
+  card reaches them. It keeps only the callbacks, filed under the id the
+  host's `setTimer` hands back; the schedule, the clock, and HTML's `long`
+  delay conversion and nesting clamp are `bobcat-main`'s, which is also what
+  waits on the deadline and calls the module's `__BobcatRunTimer` back.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a

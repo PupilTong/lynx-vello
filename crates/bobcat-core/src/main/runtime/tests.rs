@@ -1891,3 +1891,231 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
 
     assert!(error.to_string().contains("update-list-info"), "{error}");
 }
+
+/// The realm's timers, from the four globals a card calls to the schedule
+/// the command loop waits on. A zero delay is due the moment it is armed, so
+/// a test spends a round by asking the runtime to run what is due — which is
+/// exactly what the loop does when its wait ends.
+#[test]
+fn a_timeout_runs_once_with_the_arguments_it_was_given() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.fired = [];
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  const handle = setTimeout((a, b) => fired.push(a + b), 0, 'x', 'y');
+                  if (!handle) throw new Error('a timer id must survive a truth test');
+                };
+                ",
+            "app:///timeout.js",
+        )
+        .expect("main-thread script");
+
+    assert!(runtime.run_due_timers().is_empty(), "the callback returned");
+    // Nothing is armed any more, so a second round finds nothing to run.
+    assert!(runtime.run_due_timers().is_empty());
+    assert_eq!(runtime.next_timer_deadline(), None);
+
+    runtime
+        .evaluate_module(
+            "if (fired.join('|') !== 'xy') throw new Error(fired.join('|'));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+#[test]
+fn a_cleared_timeout_never_runs() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.fired = [];
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  clearTimeout(setTimeout(() => fired.push('no'), 0));
+                };
+                ",
+            "app:///cleared.js",
+        )
+        .expect("main-thread script");
+
+    assert_eq!(runtime.next_timer_deadline(), None, "nothing stays armed");
+    assert!(runtime.run_due_timers().is_empty());
+
+    runtime
+        .evaluate_module(
+            "if (fired.length !== 0) throw new Error(fired.join('|'));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+#[test]
+fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.ticks = 0;
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  const handle = setInterval(() => {
+                    ticks += 1;
+                    if (ticks === 3) {
+                      clearInterval(handle);
+                    }
+                  }, 0);
+                };
+                ",
+            "app:///interval.js",
+        )
+        .expect("main-thread script");
+
+    for _ in 0..6 {
+        assert!(runtime.run_due_timers().is_empty());
+    }
+
+    // Three rounds ran it and the third disarmed it, so the last three found
+    // nothing — a repeat neither runs twice in one round nor outlives its
+    // own `clearInterval`.
+    runtime
+        .evaluate_module(
+            "if (ticks !== 3) throw new Error(String(ticks));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+    assert_eq!(runtime.next_timer_deadline(), None);
+}
+
+#[test]
+fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.fired = [];
+                globalThis.victim = 0;
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  // Armed first, so it runs first: ids are handed out in
+                  // arming order and that is the order they come due in.
+                  setTimeout(() => clearTimeout(victim), 0);
+                  victim = setTimeout(() => fired.push('victim'), 0);
+                };
+                ",
+            "app:///same-round.js",
+        )
+        .expect("main-thread script");
+
+    assert!(runtime.run_due_timers().is_empty());
+
+    runtime
+        .evaluate_module(
+            "if (fired.length !== 0) throw new Error(fired.join('|'));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+#[test]
+fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.fired = [];
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  setTimeout(() => { throw new Error('boom'); }, 0);
+                  setTimeout(() => fired.push('after'), 0);
+                };
+                ",
+            "app:///throwing.js",
+        )
+        .expect("main-thread script");
+
+    let failures = runtime.run_due_timers();
+    assert_eq!(failures.len(), 1, "one callback threw");
+    assert!(failures[0].to_string().contains("boom"), "{}", failures[0]);
+
+    runtime
+        .evaluate_module(
+            "if (fired.join('|') !== 'after') throw new Error(fired.join('|'));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("verification");
+}
+
+#[test]
+fn a_timer_callback_mutates_the_document_the_realm_shares() {
+    let (mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  const view = __CreateView(0);
+                  __AppendElement(page, view);
+                  globalThis.held = [page, view];
+                  setTimeout(() => __SetAttribute(view, 'ticked', 'yes'), 0);
+                };
+                ",
+            "app:///mutating-timer.js",
+        )
+        .expect("main-thread script");
+
+    assert!(runtime.run_due_timers().is_empty());
+
+    assert_eq!(
+        elements
+            .tree()
+            .get(node_id(3))
+            .expect("the view is live")
+            .attribute("ticked"),
+        Some("yes")
+    );
+}
+
+/// A chain of zero-delay timers is exactly what the standard's nesting clamp
+/// exists for: it runs unclamped to the fifth link and waits from there on,
+/// which is what keeps such a chain from spinning `bobcat-main`.
+#[test]
+fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
+    let (mut runtime, _elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.depth = 0;
+                globalThis.renderPage = function () {
+                  __CreatePage('card', 0);
+                  const tick = () => {
+                    depth += 1;
+                    setTimeout(tick, 0);
+                  };
+                  setTimeout(tick, 0);
+                };
+                ",
+            "app:///nested.js",
+        )
+        .expect("main-thread script");
+
+    for level in 1..=5 {
+        assert!(runtime.run_due_timers().is_empty());
+        let armed = ClockInstant::now();
+        let deadline = runtime.next_timer_deadline().expect("the chain goes on");
+        assert!(deadline <= armed, "level {level} still asks for no delay");
+    }
+
+    let before = ClockInstant::now();
+    assert!(runtime.run_due_timers().is_empty());
+    let deadline = runtime.next_timer_deadline().expect("the chain goes on");
+    assert!(deadline > before, "the sixth link waits");
+}

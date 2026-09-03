@@ -213,6 +213,10 @@ pub enum EngineEvent {
     ScriptRunError(ScriptError),
     /// A listener threw while an event was being delivered to it.
     ListenerFailed(ScriptError),
+    /// A `setTimeout` or `setInterval` callback threw when it came due.
+    /// Not fatal either: only the timer that threw is affected, a repeating
+    /// one stays armed, and the realm goes on.
+    TimerFailed(ScriptError),
     /// The painter could not produce a frame. Fatal for the draw target:
     /// nothing further will reach the screen, so an embedder reports it and
     /// takes the window down.

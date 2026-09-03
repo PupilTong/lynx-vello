@@ -731,3 +731,83 @@ fn independent_views_can_own_live_script_threads_in_one_process() {
         assert_eq!(children, 1);
     }
 }
+
+/// A timer is `bobcat-main`'s own business: it comes due while that thread is
+/// parked on a channel nobody is sending to, and the frame its callback
+/// commits is published without a host turn having asked for anything.
+#[test]
+fn a_timer_wakes_the_parked_main_thread_with_no_command_to_serve() {
+    let mut engine = booted(
+        r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              setTimeout(() => __SetAttribute(view, 'ticked', 'yes'), 10);
+              __FlushElementTree();
+            };
+            ",
+    );
+    let booted_commit = engine
+        .published_frame()
+        .expect("boot published a frame")
+        .commit_id();
+
+    // Nothing is sent to `bobcat-main` across this wait — no probe, no
+    // input, no frame request — so only the deadline can end its park. The
+    // single probe below is what makes that testable: a round applies its
+    // commands before running what is due, so a wait that ended at the probe
+    // instead would answer with the attribute still unset.
+    std::thread::sleep(Duration::from_millis(250));
+
+    assert_eq!(
+        attribute_of(&mut engine, 3, "ticked").as_deref(),
+        Some("yes"),
+        "the deadline, not a command, is what ended the wait"
+    );
+    assert_ne!(
+        engine
+            .published_frame()
+            .expect("a frame is published")
+            .commit_id(),
+        booted_commit,
+        "and the round the timer ran in committed and published its mutation"
+    );
+}
+
+/// A timer that throws has an event listener's standing, not a script
+/// failure's: it is reported, the repeat stays armed, and the loop goes on.
+#[test]
+fn a_throwing_interval_is_reported_and_keeps_its_place_in_the_schedule() {
+    let mut engine = booted(
+        r"
+            globalThis.ticks = 0;
+            globalThis.renderPage = function () {
+              __CreatePage('card', 0);
+              setInterval(() => {
+                ticks += 1;
+                throw new Error('a timer may fail');
+              }, 1);
+            };
+            ",
+    );
+
+    let mut reported = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reported < 2 {
+        reported += engine
+            .pump()
+            .into_iter()
+            .filter(|event| {
+                matches!(event, crate::EngineEvent::TimerFailed(error)
+                        if error.message.contains("a timer may fail"))
+            })
+            .count();
+        assert!(
+            Instant::now() < deadline,
+            "a thrown timer callback must neither be swallowed nor disarm its interval"
+        );
+        std::thread::yield_now();
+    }
+}

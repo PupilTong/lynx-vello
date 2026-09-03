@@ -36,6 +36,8 @@ rstest.mockRequire("bobcat-internal:host", () => {
     enableEventListener: native.enableEventListener,
     disableEventListener: native.disableEventListener,
     stopPropagation: native.stopPropagation,
+    setTimer: native.setTimer,
+    clearTimer: native.clearTimer,
   };
 });
 
@@ -354,6 +356,20 @@ function createMockBobcat(issuedIds) {
     },
     stopPropagation: () => {
       calls.push(["stopPropagation"]);
+    },
+    // The Element PAPI reaches neither of these; they are here because the
+    // mock stands in for the whole native module, not part of it.
+    /**
+     * @param {number} delayMilliseconds
+     * @param {boolean} repeats
+     */
+    setTimer: (delayMilliseconds, repeats) => {
+      calls.push(["setTimer", delayMilliseconds, repeats]);
+      return 1;
+    },
+    /** @param {number} id */
+    clearTimer: (id) => {
+      calls.push(["clearTimer", id]);
     },
   };
   return host;
