@@ -1,6 +1,5 @@
 import { ImageDecoder } from './image-decoder.js'
 
-const MAX_THREADS = 6
 const MAX_RENDER_DIMENSION = 16_384
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
 const THREAD_WORKER_URL = new URL('./dom-worker.js', import.meta.url).href
@@ -22,12 +21,11 @@ export const LYNX_XML_PAGE_CONFIG = Object.freeze({
   enableCSSSelector: true,
 })
 
-function preferredThreadCount() {
-  const hardwareThreads = Math.max(
-    1,
-    globalThis.navigator?.hardwareConcurrency ?? 1,
-  )
-  return Math.max(2, Math.min(MAX_THREADS, hardwareThreads - 1 || 2))
+// The machine's parallelism, raw. Core turns it into a pool with the same
+// heuristic and the same cap a native view gets, so this side does no
+// arithmetic of its own, and the cap is not restated here.
+function hardwareConcurrency() {
+  return Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 1)
 }
 
 function asError(error) {
@@ -539,7 +537,7 @@ export class BobcatCanvas {
           devicePixelRatio,
           height,
           imagePort: images.port2,
-          threadCount: preferredThreadCount(),
+          hardwareConcurrency: hardwareConcurrency(),
           workerUrl: THREAD_WORKER_URL,
           width,
         },

@@ -273,6 +273,42 @@ useful signal for currently-compatible versions of those libraries.
   `OffscreenCanvas` cannot be transferred on again, so the Render Worker
   holds the view and each turn runs inside its `pump` — and now the only
   shape there is.
+  **Each view brings its own Stylo pool.** `bobcat-main` builds one
+  `dom::StylePool` — sized by `ViewSources::style_threads`,
+  `StyleThreads::Auto` by default — as the first thing it does, on the thread
+  that owns the document that pool will serve and before that document
+  exists, and gives it to that one document. That is what lets a host put a
+  view on each of several threads and have their restyles overlap. Stylo's
+  bloom filter and style-sharing cache are per-OS-thread borrows held for a
+  whole traversal, so a thread serving two traversals at once is an aliasing
+  bug; disjoint pools make that unrepresentable rather than guarded, and the
+  process-wide mutex that used to serialize every document's flush against
+  every other's is gone with them.
+  **`bobcat-main` is index zero of its own pool**, taken over in place by
+  rayon's `use_current_thread` — which is why the pool can only be built on
+  `bobcat-main`, and why `StyleThreads` counts it: `Fixed(3)` starts two
+  threads, not three. Stylo's global pool did exactly this and Gecko relies on
+  it, so a lone view restyles on the same threads, with the same parallelism
+  and with the same inline root closure it had before these pools became
+  per-view; the managed members take over only where a level is wider than the
+  traversal's work unit. The takeover is permanent: rayon leaks about 25 KB per
+  pool (the managed threads still exit on drop; the `WorkerThread` box and
+  `Registry` do not) and refuses a second pool on the same thread forever,
+  which is affordable only because `bobcat-main` is created for one view and
+  dies with it. A host that replaces views — every `BobcatRenderer::load` —
+  pays that 25 KB per replacement, in the same Wasm linear memory.
+  `StyleThreads::Sequential` — and `Auto` where the pool would have held
+  `bobcat-main` and nothing else — gives a view no pool at all and traverses on
+  `bobcat-main` alone, which is a configuration rather than a fallback.
+  `dom::MAX_STYLE_THREADS` is six, counted the same way Stylo counts its own
+  six: a ceiling, not a tuning knob, because Stylo indexes its per-traversal
+  thread-local storage by Rayon thread index into an array that long, so a
+  wider pool is a construction error rather than a silent clamp — reported the
+  way any other boot failure is, so no view exists for it.
+  **Wasm takes the same path.** `navigator.hardwareConcurrency` reaches
+  `StyleThreads::for_parallelism`, which is `Auto`'s own arithmetic, so
+  comparable hardware gets the same pool on both targets and the facade does no
+  thread arithmetic of its own.
   **The draw target is an argument to `new`, not something attached
   afterwards**: `DrawTarget::window(...)` takes anything convertible into
   `WindowTarget` — a `'static` surface target, so a windowing embedder passes
@@ -684,9 +720,9 @@ useful signal for currently-compatible versions of those libraries.
   opaque `LynxView` per page through `BobcatRenderer::load`, permanently owns
   every thread-affine GPU object — crates.io Vello 0.9/wgpu 29 Device, Queue,
   Surface, Renderer, and OffscreenCanvas — and uses `wasm_thread` to create its
-  nested Lynx main/VM Worker. Core builds Stylo's ordinary private Rayon pool
-  there with `wasm_thread` as its browser thread spawner, leaving the vendored
-  Stylo sources unchanged. Core creates its owner-thread-bound QuickJS realm
+  nested Lynx main/VM Worker. That Worker in turn spawns its own view's Rayon
+  style Workers the same way, with `wasm_thread` as the spawner, leaving the
+  vendored Stylo sources unchanged. Core creates its owner-thread-bound QuickJS realm
   inside that Worker; Element-PAPI
   batches, Stylo/Rayon, layout, and
   render hand-off then synchronize through Rust channels, mutexes, atomics,
@@ -703,9 +739,11 @@ useful signal for currently-compatible versions of those libraries.
   checkpoint; there is no browser microtask-completion protocol. The
   underlying QuickJS bridge retains an
   opt-in execution timeout for its direct users and tests.
-  A Wasm instance owns a process-wide Stylo pool, while each `LynxView` owns
-  its own Lynx-main Worker, QuickJS realm, document, and endpoints just as a
-  native view does. Every public `BobcatCanvas` gets a separate Render Worker
+  A Wasm instance owns nothing of Stylo's but the Worker bootstrap
+  `configure_wasm_workers` installs — one script URL, which is what every
+  Worker a view spawns is made of — while each `LynxView` owns its own
+  Lynx-main Worker, style Workers, QuickJS realm, document, and endpoints just
+  as a native view does. Every public `BobcatCanvas` gets a separate Render Worker
   and Wasm instance; a renderer holds no view until `BobcatRenderer::load` builds
   one, and each later load replaces the current native `LynxView`. Dropping the
   view explicitly stops and joins its Lynx-main Worker after the Worker drops
@@ -713,14 +751,15 @@ useful signal for currently-compatible versions of those libraries.
   only after that teardown. The
   transferred OffscreenCanvas, module instance, configuration, latest metrics,
   resource provider, registered font containers, selected default font family,
-  and Stylo pool are the renderer's own, reapplied to each view it builds; a
-  load clears the registered script and stylesheet bytes once copied. The
-  persistent Render Worker is
-  Stylo's Rayon index-zero owner; the pool also contains managed style Workers.
-  A per-view script owner enters traversal from outside that pool, and Stylo
-  transfers its root closure onto a managed worker. The configured style-pool
-  minimum is two: the Render Worker plus at least one managed Stylo Worker;
-  each live view's Lynx-main Worker is separate. The UI never
+  and Stylo worker *count* are the renderer's own, reapplied to each view it
+  builds; the workers themselves belong to the view and retire when it is
+  dropped, and a load clears the registered script and stylesheet bytes once
+  copied. Every style Worker is a managed one: the Render Worker is not a pool
+  member and neither is the view's Lynx-main Worker, which enters traversal
+  from outside the pool so Stylo transfers its root closure onto a managed
+  worker. `BobcatRenderer::create` therefore takes a count of one to
+  `MAX_STYLE_THREADS` dedicated style Workers, and the facade asks for the
+  machine's threads less the Render and Lynx-main Workers. The UI never
   blocks, while Worker-side Rust may block wherever the native runtime does.
   The browser target enables `parking_lot_core/nightly` so transitive
   Stylo/wgpu parking_lot locks use Wasm atomic wait/notify instead of the
@@ -1036,7 +1075,15 @@ useful signal for currently-compatible versions of those libraries.
   own snapshot/restyle scheduling, while stylesheet and device methods on the
   document schedule its root in the same call — embedders cannot
   set/clear dirty state or write computed styles. Mutation APIs follow a let-it-crash contract
-  (`debug_assert` + panic on stale handles rather than silent no-ops). Style
+  (`debug_assert` + panic on stale handles rather than silent no-ops).
+  A document's style traversal runs on the workers
+  `Document::set_style_pool` gives it and on no others: one `StylePool` per
+  document, moved in rather than shared, which is what lets two documents
+  restyle at the same time with nothing serializing them. A document that was
+  never given one — every test and benchmark here, and any embedder asking
+  for a sequential view — traverses on the thread that flushed it, so the CSS
+  benchmarks measure cascade and matching work rather than Rayon dispatch.
+  Style
   flush and its per-node `StyleDamage` (repaint / stacking / overflow /
   relayout classes) are internal parts of `Document::layout`; harvested
   damage is then **cleared** (the fix for stylo's never-cleared-damage

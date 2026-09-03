@@ -10,10 +10,11 @@
 //! handle that joins them and the link that crosses between them.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use dom::input::InputEvent;
-use dom::{CommittedFrame, FontBlob, NodeId, Vector2D};
+use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
 
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
@@ -262,6 +263,57 @@ impl EventRequester for NoWakeup {
     fn request_event(&self) {}
 }
 
+/// How large a style pool one view's traversals get, `bobcat-main` included:
+/// it is index zero of that pool, so a view starts one fewer thread than the
+/// count says.
+///
+/// The threads are the view's own and no other view's, which is what lets
+/// two views on two threads restyle at the same time; the cost of that is
+/// that a host running many views multiplies them, so the count is a
+/// construction-time choice rather than a fixed one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StyleThreads {
+    /// Stylo's own heuristic for this machine, under [`dom::MAX_STYLE_THREADS`].
+    /// A machine whose parallelism the platform cannot answer for — Wasm,
+    /// where the embedder passes it to [`StyleThreads::for_parallelism`]
+    /// instead — resolves to [`StyleThreads::Sequential`].
+    #[default]
+    Auto,
+    /// Exactly this many threads, `bobcat-main` included, so `Fixed(3)` is
+    /// `bobcat-main` and two more. More than [`dom::MAX_STYLE_THREADS`] is a
+    /// construction error rather than a silent clamp: Stylo indexes its
+    /// per-traversal thread-local storage by rayon thread index into an
+    /// array that long.
+    Fixed(NonZeroUsize),
+    /// No pool: traversal runs on `bobcat-main` alone.
+    Sequential,
+}
+
+impl StyleThreads {
+    /// The policy a machine with this much parallelism gets, by the same
+    /// heuristic and the same arithmetic [`StyleThreads::Auto`] applies to a
+    /// machine that can answer for its own.
+    ///
+    /// For an embedder on a target where the standard library cannot answer —
+    /// Wasm, which has `navigator.hardwareConcurrency` instead. Passing the
+    /// raw number here rather than a count worked out by hand is what keeps a
+    /// Wasm view and a native view on comparable hardware on the same pool.
+    #[must_use]
+    pub fn for_parallelism(available: usize) -> Self {
+        StylePool::thread_count_for(available).map_or(Self::Sequential, Self::Fixed)
+    }
+
+    /// The thread count this policy resolves to on this machine, the flushing
+    /// thread included.
+    pub(crate) fn resolve(self) -> Option<NonZeroUsize> {
+        match self {
+            Self::Auto => StylePool::default_thread_count(),
+            Self::Fixed(threads) => Some(threads),
+            Self::Sequential => None,
+        }
+    }
+}
+
 /// Everything a view is built from.
 ///
 /// It carries no resource system, and has no field that could hold one: the
@@ -277,6 +329,10 @@ pub struct ViewSources {
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
     pub entry: String,
+    /// How large a style pool `bobcat-main` builds for this view's document,
+    /// itself included. Threads that will not start are a construction
+    /// failure, reported the same way a failed boot is.
+    pub style_threads: StyleThreads,
 }
 
 /// The document half of [`ViewSources`]: what crosses to `bobcat-main`.
@@ -284,6 +340,10 @@ pub(crate) struct MainSources {
     pub(crate) config: PageConfig,
     pub(crate) fonts: Vec<FontBlob>,
     pub(crate) default_font_family: Option<String>,
+    /// A size, not a pool: `bobcat-main` builds it itself, because rayon
+    /// takes over the calling thread and `bobcat-main` is the member that
+    /// matters.
+    pub(crate) style_threads: StyleThreads,
 }
 
 impl ViewSources {
@@ -295,6 +355,7 @@ impl ViewSources {
             default_font_family: None,
             style_sheets: Vec::new(),
             entry: entry.into(),
+            style_threads: StyleThreads::Auto,
         }
     }
 }
@@ -386,6 +447,7 @@ impl<F: ResourceFetcher> LynxView<F> {
             default_font_family,
             style_sheets,
             entry,
+            style_threads,
         } = sources;
         let main = spawn_main_thread(
             viewport,
@@ -393,6 +455,7 @@ impl<F: ResourceFetcher> LynxView<F> {
                 config,
                 fonts,
                 default_font_family,
+                style_threads,
             },
             main_link,
         )?;

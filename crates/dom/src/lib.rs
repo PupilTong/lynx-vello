@@ -45,9 +45,7 @@ pub use crate::style::device::Device;
 #[doc(hidden)]
 pub use crate::style::device::standards_device;
 pub use crate::style::engine::{CssDeclaration, CssKeyframe, CssRule, StylesheetOrigin};
-#[cfg(target_arch = "wasm32")]
-#[doc(hidden)]
-pub use crate::style::flush::install_style_thread_pool;
+pub use crate::style::pool::{MAX_STYLE_THREADS, StylePool, StylePoolError, StyleWorker};
 pub use crate::style::query::InvalidSelector;
 pub use crate::tree::custom::CustomElement;
 pub use crate::tree::document::{Document, NodeId};

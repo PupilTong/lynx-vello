@@ -10,7 +10,7 @@ use std::{fmt, mem};
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
-    ViewSources, WindowTarget, configure_wasm_workers,
+    StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use js_sys::{Array, Promise};
@@ -27,7 +27,6 @@ extern "C" {
     fn console_warn(value: &JsValue);
 }
 
-const MAX_STYLE_THREADS: u32 = 6;
 const POINTER_DEVICE_MOUSE: u8 = 0;
 const POINTER_DEVICE_TOUCH: u8 = 1;
 const POINTER_DEVICE_PEN: u8 = 2;
@@ -107,10 +106,11 @@ impl Future for EventWait {
 }
 
 /// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. Its canvas, Wasm instance, resource system,
-/// and Stylo pool outlive every page it shows; each document, element tree,
-/// `QuickJS` realm, and engine stays behind one opaque `LynxView`, built by
-/// [`BobcatRenderer::load`] and replaced wholesale by the next load.
+/// Worker that constructs it. Its canvas, Wasm instance, and resource system
+/// outlive every page it shows; each document, element tree,
+/// `QuickJS` realm, engine, and set of Stylo workers stays behind one opaque
+/// `LynxView`, built by [`BobcatRenderer::load`] and replaced wholesale by
+/// the next load.
 ///
 /// The resource system is `bobcat-resources`: the Render Worker registers
 /// the script and stylesheet bytes its own `fetch` produced, and the system
@@ -135,6 +135,10 @@ pub struct BobcatRenderer {
     /// The selected embedder default is stable wrapper state too; every view
     /// this renderer builds gets the same generic-family map.
     default_font_family: Option<String>,
+    /// The Stylo worker count each view this renderer builds gets. The
+    /// workers themselves are the view's and retire with it; only the size
+    /// is wrapper state.
+    style_threads: StyleThreads,
     script_finished: bool,
     disposed: bool,
 }
@@ -164,7 +168,7 @@ impl BobcatRenderer {
         device_pixel_ratio: f32,
         worker_url: String,
         image_port: web_sys::MessagePort,
-        style_thread_count: u32,
+        hardware_concurrency: u32,
         default_display_linear: bool,
         default_overflow_visible: bool,
         enable_css_selector: bool,
@@ -173,11 +177,12 @@ impl BobcatRenderer {
         if worker_url.is_empty() {
             return Err(js_error("the Bobcat worker URL must not be empty"));
         }
-        if !(2..=MAX_STYLE_THREADS).contains(&style_thread_count) {
-            return Err(js_error(format!(
-                "the style thread count must be between 2 and {MAX_STYLE_THREADS}"
-            )));
-        }
+        // `available_parallelism` cannot answer on Wasm, so the machine's
+        // parallelism arrives from `navigator.hardwareConcurrency` — and then
+        // takes exactly the path a native view's does, through the same
+        // function, so comparable hardware gets the same pool on both.
+        let style_threads = usize::try_from(hardware_concurrency)
+            .map_or(StyleThreads::Sequential, StyleThreads::for_parallelism);
         if RENDERER_CREATED.swap(true, Ordering::AcqRel) {
             return Err(js_error(
                 "one Bobcat Wasm instance supports exactly one renderer; load another page into the existing renderer to replace its native view",
@@ -185,7 +190,7 @@ impl BobcatRenderer {
         }
 
         let result = async move {
-            configure_wasm_workers(worker_url, style_thread_count as usize).map_err(js_error)?;
+            configure_wasm_workers(worker_url).map_err(js_error)?;
 
             let events = Arc::new(EventSignal::default());
             let resources = Resources::new(
@@ -216,6 +221,7 @@ impl BobcatRenderer {
                 device_pixel_ratio,
                 fonts: Vec::new(),
                 default_font_family: None,
+                style_threads,
                 script_finished: false,
                 disposed: false,
             })
@@ -231,9 +237,11 @@ impl BobcatRenderer {
     /// Worker-owned `OffscreenCanvas`.
     ///
     /// A view is its page, so loading a second one replaces the view rather
-    /// than mutating the running one. The Wasm instance, Stylo pool, resource
-    /// provider, page configuration, metrics, font containers, and default
-    /// family are this wrapper's and are reapplied to each new view.
+    /// than mutating the running one. The Wasm instance, resource provider,
+    /// page configuration, metrics, font containers, default family, and
+    /// Stylo worker count are this wrapper's and are reapplied to each new
+    /// view; the Stylo workers themselves belong to the view and retire when
+    /// it is dropped.
     #[wasm_bindgen(js_name = load)]
     pub async fn load(
         &mut self,
@@ -258,6 +266,7 @@ impl BobcatRenderer {
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
+            style_threads: self.style_threads,
             ..ViewSources::new(entry_url)
         };
         // A canvas owns its own resolution — configuring a context does not

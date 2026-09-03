@@ -1,5 +1,11 @@
 //! CSS commit benchmarks for `dom`, tracked by `CodSpeed` (walltime mode on
 //! the macOS CI runner). Commits use the production `Document::layout` path.
+//!
+//! These documents are given no [`dom::StylePool`], so their traversals run
+//! on this thread: what is measured is cascade, matching and invalidation
+//! work rather than Rayon dispatch, and a batch built inside `with_inputs`
+//! does not pay for a pool per sample. A view in production is given one —
+//! its own, never shared — which is what lets two of them restyle at once.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
