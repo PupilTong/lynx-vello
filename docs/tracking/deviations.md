@@ -159,6 +159,62 @@ consequential choice about whether to follow the spec or the quirk.
   exposes its base-level input (or if a narrowly-scoped upstream patch is
   adopted).
 
+- **`hughie::text::block` ellipsis algorithm** — the standalone Lynx
+  text-block module implements the web reference's *slow path*
+  (`XTextTruncation.ts`, source-verified) for **every** ellipsis mode: back
+  the maxline cut off three source units — fewer on a short line — and append
+  a literal `"..."`; never back off a maxlength cut; take the earlier cut,
+  keeping the dot count the maxline branch decided even when maxlength wins
+  (the web computes `ellipsisLength` before taking the minimum); with
+  inline-truncation content, retreat by freed width with a minimum removal of
+  two units (the web's fitting loop starts from an empty measurement and
+  decrements before its first width check), and suppress the dots marker
+  whenever inline-truncation content exists, shown or not. Line ranges — and
+  therefore the back-off basis and `ellipsisCount` — cover visible content
+  only: the collapsed whitespace a soft wrap consumed belongs to no line,
+  matching the web's rect-derived ranges, so consecutive ranges can have a
+  gap. One start-side delta remains: the web steps the next line's start to
+  the previous end plus exactly one, so when a wrap collapsed more than one
+  whitespace unit the web counts the extras into the next line's range (and
+  its short-line dot arithmetic) while this module starts the line at its
+  first actually-present unit. Default-mode web bundles actually delegate to the browser's own
+  `-webkit-line-clamp` ellipsis, whose cut point and dot styling can differ
+  by a character; the slow path is the only inspectable algorithm. Further
+  deltas from the web loop, all strictly safer: cuts land on cluster
+  boundaries (the web steps raw UTF-16 units and can split a surrogate pair;
+  a `text-maxlength` cut inside a pair rounds down), and a dots-or-truncation
+  tail that wraps is clamped away by the visible-line rebuild (the web
+  overflows it). `text-overflow: clip` is implemented as spec clip — cut at
+  the line end, no marker — both references being opaque there. Truncation
+  content is shown only on maxline overflow (web-verified:
+  `x-show-inline-truncation` is set only in the maxline branch), and
+  `justify` can stretch a truncated last line whose tail wrapped and was
+  clamped (its break reason is then `Regular`), where the web does not. A
+  trailing preserved newline, a hanging trailing space, or the renderless
+  line parley commits after a box overflows onto the last line never counts
+  as overflow: whether content remains is decided in source units over the
+  committed lines, and cuts address boxes in unit space (a box shares its
+  byte with the character after it).
+- **`hughie::text::block` vertical alignment of atomic inlines** — parley 0.11
+  has no vertical-align: an in-flow box sits bottom-on-baseline and its height
+  counts as pure ascent. The module writes each box's line-height
+  *contribution* into `InlineBox::height` (above-baseline part for
+  baseline-anchored values, full height otherwise) and overrides each box's
+  `y` from a placement table, so lines are always tall enough — but the
+  baseline's position inside a line grown by a non-baseline-aligned tall box
+  follows parley's all-ascent rule rather than the CSS ascent/descent split,
+  a baseline-aligned box's below-baseline part does not reserve descent, and
+  `super`'s raise is placement-only. `sub`/`super` offsets are named UA
+  constants (0.20/0.34 of the reference font size), `Percent`'s basis is the
+  line's resolved line height, and the Lynx-only `center` behaves as
+  `middle`.
+- **`hughie::text::block` line-height scope** — per-run (the web target's CSS
+  inheritance behavior), not paragraph-wide as native textra applies it
+  (`ApplyParagraphStyle`); the paragraph-wide behavior is the degenerate case
+  where every run carries the same value, which inheritance produces on its
+  own. This is the D4 question `docs/text-measurement-and-ifc.md` reserves;
+  the block module ships the web-shaped answer and records it here.
+
 ## Event model & gestures (see [dom-events.md](dom-events.md))
 
 - **`bind`/`catch`/`capture-bind`/`capture-catch`/`global-bindEvent`** — phase
