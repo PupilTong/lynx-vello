@@ -102,7 +102,13 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
                 }
-                DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
+                // A Lynx text block is still laid out as the flex container
+                // `text` has always been: the `hughie::text::block` paragraph
+                // the value names replaces this arm, and nothing else, once
+                // the box-protocol seam for it exists.
+                DisplayMode::Flex | DisplayMode::Text => {
+                    compute_flexbox_layout(tree, state, node, input)
+                }
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
