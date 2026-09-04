@@ -813,17 +813,14 @@ fn paint_item<T>(
                 return;
             };
             let layout = block.display();
-            let decorations = text::propagated_decorations(document, element);
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
-            text::paint(
-                sink.scene_for(chain),
-                style,
-                layout,
-                transform,
-                &decorations,
-                gradient_box,
-            );
+            // One entry per parley style index, so a glyph run resolves its own
+            // element's paint in O(1). A nested scope carries its own colour,
+            // shadow, stroke and decorations; the establishing element answers
+            // for the synthesized ellipsis and for anything unresolvable.
+            let runs = text::RunPaints::resolve(document, element, block, gradient_box);
+            text::paint(sink.scene_for(chain), layout, transform, &runs);
         }
     }
 }

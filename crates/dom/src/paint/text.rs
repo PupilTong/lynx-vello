@@ -89,43 +89,130 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
     }
 }
 
-pub(crate) fn paint(
-    scene: &mut Scene,
-    style: &ComputedValues,
-    layout: &Layout<crate::layout::TextBrush>,
-    transform: Affine,
-    decorations: &[Decorations],
+/// Everything one glyph run paints with, resolved once per paint item.
+///
+/// A paragraph is flattened from a subtree, so a glyph run can belong to a
+/// nested scope with its own `color`, `text-shadow`, `-webkit-text-stroke` and
+/// decorations. parley splits runs at every style-index change, so this is
+/// indexed by that index and the lookup is O(1).
+///
+/// The establishing element answers for anything with no element of its own —
+/// the synthesized ellipsis, the truncation flow, an index the block cannot
+/// resolve — which is also what the whole paragraph used to paint with.
+pub(crate) struct RunPaints<'doc> {
+    by_style: Vec<RunPaint<'doc>>,
+    fallback: RunPaint<'doc>,
+    /// The tile a gradient-valued `color` fills from. A paragraph-level
+    /// decision: the ramp spans the block's padding box however many runs
+    /// sample it.
     gradient_box: Option<Rect>,
-) {
-    for shadow in style.get_inherited_text().text_shadow.0.iter().rev() {
-        let color = convert::resolve_color(style, &shadow.color);
-        let offset = Affine::translate((
-            f64::from(shadow.horizontal.px()),
-            f64::from(shadow.vertical.px()),
-        ));
-        let shadowed: SmallVec<[Decorations; 2]> = decorations
-            .iter()
-            .map(|deco| Decorations { color, ..*deco })
-            .collect();
-        paint_pass(
-            scene,
-            layout,
-            transform * offset,
-            &TextFill::Solid(color),
-            None,
-            &shadowed,
-        );
+}
+
+pub(crate) struct RunPaint<'doc> {
+    style: &'doc ComputedValues,
+    decorations: SmallVec<[Decorations; 2]>,
+}
+
+impl<'doc> RunPaints<'doc> {
+    pub(crate) fn resolve<T>(
+        document: &'doc crate::Document<T>,
+        element: crate::NodeId,
+        block: &hughie::text::block::TextBlock,
+        gradient_box: Option<Rect>,
+    ) -> Self {
+        use hughie::text::block::SourceItem;
+
+        let fallback = RunPaint {
+            style: document
+                .paint_style(element)
+                .unwrap_or_else(|| unreachable!("the caller resolved this style already")),
+            decorations: propagated_decorations(document, element),
+        };
+        let sources = document.text_block_sources(element).unwrap_or_default();
+        let mut by_style = Vec::new();
+        for index in 0..block.style_count() {
+            let resolved = match block.source_of(u16::try_from(index).unwrap_or(u16::MAX)) {
+                SourceItem::Content(item) => sources
+                    .get(item as usize)
+                    .copied()
+                    .and_then(|node| document.paint_style(node).map(|style| (node, style))),
+                // Neither the truncation flow nor the dots has an element of
+                // its own; both wear the block's own style, which is what
+                // `tail-color-convert` would later override.
+                SourceItem::Truncation(_) | SourceItem::Ellipsis => None,
+            };
+            by_style.push(match resolved {
+                Some((node, style)) => RunPaint {
+                    style,
+                    decorations: propagated_decorations(document, node),
+                },
+                None => RunPaint {
+                    style: fallback.style,
+                    decorations: fallback.decorations.clone(),
+                },
+            });
+        }
+        Self {
+            by_style,
+            fallback,
+            gradient_box,
+        }
     }
 
-    let fill = text_fill(style, gradient_box);
-    paint_pass(
-        scene,
-        layout,
-        transform,
-        &fill,
-        text_stroke(style),
-        decorations,
-    );
+    fn at(&self, style_index: usize) -> &RunPaint<'doc> {
+        self.by_style.get(style_index).unwrap_or(&self.fallback)
+    }
+
+    fn block_style_run(&self) -> &RunPaint<'doc> {
+        &self.fallback
+    }
+
+    /// The style the block itself carries — what a whole-paragraph decision
+    /// (the gradient tile, the ink extent) is made from.
+    pub(crate) fn block_style(&self) -> &'doc ComputedValues {
+        self.fallback.style
+    }
+}
+
+pub(crate) fn paint(
+    scene: &mut Scene,
+    layout: &Layout<crate::layout::TextBrush>,
+    transform: Affine,
+    runs: &RunPaints<'_>,
+) {
+    // Two sweeps, not one per run: every shadow in the paragraph paints under
+    // every glyph in it, which is what a single-run block already did and what
+    // keeps one run's ink from landing under the next run's shadow.
+    paint_shadows(scene, layout, transform, runs);
+    paint_pass(scene, layout, transform, runs, Layer::Ink);
+}
+
+fn paint_shadows(
+    scene: &mut Scene,
+    layout: &Layout<crate::layout::TextBrush>,
+    transform: Affine,
+    runs: &RunPaints<'_>,
+) {
+    // Depth first: the last-specified shadow sits deepest, so it paints first.
+    let depth = runs
+        .by_style
+        .iter()
+        .chain(std::iter::once(&runs.fallback))
+        .map(|run| run.style.get_inherited_text().text_shadow.0.len())
+        .max()
+        .unwrap_or(0);
+    for level in (0..depth).rev() {
+        paint_pass(scene, layout, transform, runs, Layer::Shadow(level));
+    }
+}
+
+/// Which of a run's two appearances is being drawn.
+#[derive(Clone, Copy)]
+enum Layer {
+    /// The `text-shadow` at this depth, if the run has one that deep.
+    Shadow(usize),
+    /// The glyphs themselves, with the run's fill, stroke and decorations.
+    Ink,
 }
 
 pub(crate) fn propagated_decorations<T>(
@@ -207,34 +294,77 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
     })
 }
 
+/// Draws the paragraph's glyph ink as an opaque mask.
+///
+/// `background-clip: text` needs the shape, not the appearance, so this takes
+/// no per-run styles and no decorations: every run contributes the same solid
+/// coverage whatever colour it would otherwise paint in.
 pub(crate) fn paint_silhouette(
     scene: &mut Scene,
     layout: &Layout<crate::layout::TextBrush>,
     transform: Affine,
 ) {
-    paint_pass(
-        scene,
-        layout,
-        transform,
-        &TextFill::Solid(Color::BLACK),
-        None,
-        &[],
-    );
+    let fill = TextFill::Solid(Color::BLACK);
+    for line in layout.lines() {
+        for item in line.items() {
+            if let PositionedLayoutItem::GlyphRun(glyph_run) = item {
+                draw_glyph_run(scene, &glyph_run, transform, Fill::NonZero.into(), &fill);
+            }
+        }
+    }
 }
 
 fn paint_pass(
     scene: &mut Scene,
     layout: &Layout<()>,
     transform: Affine,
-    fill: &TextFill,
-    stroke: Option<(f64, Color)>,
-    decorations: &[Decorations],
+    runs: &RunPaints<'_>,
+    layer: Layer,
 ) {
     for line in layout.lines() {
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                 continue;
             };
+            // parley splits a glyph run at every style-index change, so every
+            // glyph here shares one, and the first answers for the run. The
+            // index is only reachable through a glyph — `GlyphRun` exposes the
+            // brush but not the index, and the brush carries no identity.
+            let run = glyph_run.glyphs().next().map_or_else(
+                || runs.block_style_run(),
+                |glyph| runs.at(glyph.style_index()),
+            );
+            let (transform, fill, stroke, decorations) = match layer {
+                Layer::Shadow(level) => {
+                    let shadows = &run.style.get_inherited_text().text_shadow.0;
+                    let Some(shadow) = shadows.get(level) else {
+                        continue;
+                    };
+                    let color = convert::resolve_color(run.style, &shadow.color);
+                    let shadowed: SmallVec<[Decorations; 2]> = run
+                        .decorations
+                        .iter()
+                        .map(|deco| Decorations { color, ..*deco })
+                        .collect();
+                    (
+                        transform
+                            * Affine::translate((
+                                f64::from(shadow.horizontal.px()),
+                                f64::from(shadow.vertical.px()),
+                            )),
+                        TextFill::Solid(color),
+                        None,
+                        shadowed,
+                    )
+                }
+                Layer::Ink => (
+                    transform,
+                    text_fill(run.style, runs.gradient_box),
+                    text_stroke(run.style),
+                    run.decorations.clone(),
+                ),
+            };
+            let (fill, decorations) = (&fill, &decorations[..]);
             let metrics = *glyph_run.run().metrics();
             let baseline = f64::from(glyph_run.baseline());
             let x = f64::from(glyph_run.offset());

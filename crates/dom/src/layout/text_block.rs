@@ -35,7 +35,7 @@ use hughie::text::block::{
 use crate::layout::style::{
     DisplayMode, StyleView, TextContainerView, TextRunView, display_mode, inline_style_of,
 };
-use crate::tree::document::{DocumentLayoutState, NodeSlot, TreeArenas};
+use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
 /// One element's paragraph, plus the table that maps it back to the DOM.
@@ -45,11 +45,7 @@ pub(crate) struct TextBlockStore {
     /// Item index → the node that contributed it. This *is*
     /// `SourceItem::Content(u32)`'s index space and *is* `InlineBoxSpec::id`,
     /// so one table serves painting, box placement and hiding.
-    #[allow(
-        dead_code,
-        reason = "the per-run painter that resolves through this lands next"
-    )]
-    pub(crate) sources: Vec<NodeSlot>,
+    pub(crate) source_ids: Vec<NodeId>,
     /// What the block was built from. A paragraph is rebuilt, never patched —
     /// parley's own mutability contract — so this is the whole invalidation
     /// question for the shaped half.
@@ -128,7 +124,13 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
                     style: RunStyle::from_run_style(&run),
                     preserve_newlines: preserves_newlines(node),
                 },
-                source: slot,
+                // The *element* the run's style came from, not the text node:
+                // a text node carries no computed style, so it could never
+                // answer the painter, and this is the same node
+                // `TextRunView` read the run's font and colour from.
+                source: node
+                    .flat_parent()
+                    .map_or(slot, |parent| tree.slot(parent.id()).unwrap_or(slot)),
             });
             continue;
         }
@@ -268,13 +270,16 @@ pub(crate) fn refresh<T>(
 
     if needs_build {
         let items = as_items(&collected);
-        let sources = collected.iter().map(|entry| entry.source).collect();
+        let source_ids = collected
+            .iter()
+            .map(|entry| tree.at(entry.source).id())
+            .collect();
         let (context, slot) = state.text_block_parts(element);
         let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds + 1);
         let block = TextBlock::new(context, style.clone(), &items, None);
         *slot = Some(Box::new(TextBlockStore {
             block,
-            sources,
+            source_ids,
             fingerprint: stamp,
             style,
             run_styles,

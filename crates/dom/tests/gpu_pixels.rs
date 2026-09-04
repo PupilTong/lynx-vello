@@ -333,3 +333,45 @@ fn an_image_survives_an_intervening_image_free_render() {
          change what the second one draws"
     );
 }
+
+/// A nested scope paints in its own colour, not the paragraph root's.
+///
+/// This is the property per-run painting exists for, and the one thing the
+/// golden suites cannot check: they would pass identically if every glyph in a
+/// paragraph still wore the establishing element's style. Ahem gives every
+/// glyph a full em square, so each run's colour is readable at an exact pixel.
+#[test]
+fn a_nested_scope_paints_in_its_own_colour() {
+    let mut gpu = headless("a_nested_scope_paints_in_its_own_colour");
+    let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
+        .text { display: -lynx-text; position: absolute; left: 0px; top: 10px;
+                width: 200px; height: 50px;
+                font-family: Ahem; font-size: 20px; color: #ff0000; }
+        .scope { display: -lynx-text; color: #0000ff; }";
+    let mut doc = Doc::with_css(css);
+    doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
+    let root = doc.root;
+    let holder = doc.el(root, "text");
+    // "AA" in the root's red, then a nested scope's "BB" in blue.
+    doc.text(holder, "AA");
+    let scope = doc.el(holder, "scope");
+    doc.text(scope, "BB");
+
+    doc.dom.render();
+    let scene = doc.dom.scene(&dom::NoImages);
+    let pixels = gpu
+        .render(&scene, 200, 100, Color::WHITE)
+        .expect("headless render");
+
+    // First em square is the root run, third is the nested scope's.
+    let root_run = pixel(&pixels, 200, 10, 20);
+    let nested = pixel(&pixels, 200, 50, 20);
+    assert!(
+        root_run[0] > 200 && root_run[2] < 60,
+        "the root's own run stays red ({root_run:?})"
+    );
+    assert!(
+        nested[2] > 200 && nested[0] < 60,
+        "the nested scope paints in its own blue, not the root's red ({nested:?})"
+    );
+}
