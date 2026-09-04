@@ -25,7 +25,7 @@ fn pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 fn background_clip_text_clips_to_glyph_ink() {
     let mut gpu = headless("background_clip_text_clips_to_glyph_ink");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: flex; position: absolute; left: 10px; top: 10px;
+        .text { display: -lynx-text; position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: transparent;
                 background-color: rebeccapurple; background-clip: text; }";
@@ -60,7 +60,7 @@ fn background_clip_text_clips_to_glyph_ink() {
 fn plain_background_covers_the_box() {
     let mut gpu = headless("plain_background_covers_the_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: flex; position: absolute; left: 10px; top: 10px;
+        .text { display: -lynx-text; position: absolute; left: 10px; top: 10px;
                 width: 180px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black;
                 background-color: rebeccapurple; }";
@@ -87,7 +87,7 @@ fn plain_background_covers_the_box() {
 fn gradient_color_fills_glyph_ink_from_the_padding_box() {
     let mut gpu = headless("gradient_color_fills_glyph_ink_from_the_padding_box");
     let css = "page { display: flex; position: relative; width: 200px; height: 100px; }
-        .text { display: flex; position: absolute; left: 0px; top: 10px;
+        .text { display: -lynx-text; position: absolute; left: 0px; top: 10px;
                 width: 120px; height: 50px; box-sizing: border-box;
                 border-left: 20px solid black;
                 font-family: Ahem; font-size: 20px;

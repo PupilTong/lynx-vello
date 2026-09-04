@@ -494,7 +494,7 @@ fn clip_border_radius_rounds_descendant_hit_regions() {
 fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .label { display: flex; width: 200px; height: 50px;
+         .label { display: -lynx-text; width: 200px; height: 50px;
                   font-family: Ahem; font-size: 20px; }",
     );
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
@@ -503,12 +503,17 @@ fn text_runs_paint_with_their_element_and_hit_as_the_element() {
     let text = h.doc.dom.create_text_node("hello", ());
     h.doc.dom.append_child(label, text);
     let paint = h.paint();
+    // The paragraph is the establishing element's item: a text node is
+    // content of the block, and generates nothing of its own.
+    assert!(
+        paint.items().iter().all(|item| item.node != text),
+        "a text node paints no item of its own"
+    );
     let item = paint
         .items()
         .iter()
-        .find(|item| item.node == text)
-        .expect("the text leaf paints as its own run");
-    assert_eq!(item.kind, PaintItemKind::TextRun { element: label });
+        .find(|item| item.kind == PaintItemKind::TextRun { element: label })
+        .expect("the block paints one paragraph item");
     assert!(item.size.width > 0.0 && item.size.height > 0.0);
     assert_eq!(h.hit(10.0, 10.0), Some(label));
     assert_eq!(
@@ -760,7 +765,7 @@ fn pointer_events_none_on_a_context_root_lets_auto_descendants_hit() {
 fn text_runs_are_clipped_by_their_element() {
     let mut h = Harness::new(
         "page { display: flex; position: relative; width: 800px; height: 600px; }
-         .clipper { display: flex; overflow: hidden; width: 60px; height: 20px;
+         .clipper { display: -lynx-text; overflow: hidden; width: 60px; height: 20px;
                     font-family: Ahem; font-size: 20px; }",
     );
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
@@ -769,13 +774,14 @@ fn text_runs_are_clipped_by_their_element() {
     let text = h.doc.dom.create_text_node("hellohello", ());
     h.doc.dom.append_child(clipper, text);
     let paint = h.paint();
-    let item = paint.items().iter().find(|item| item.node == text).unwrap();
+    let _ = text;
+    let item = paint
+        .items()
+        .iter()
+        .find(|item| item.kind == PaintItemKind::TextRun { element: clipper })
+        .expect("the block paints one paragraph item");
     let clip = &paint.clips()[item.clip.expect("text is clipped by its element")];
     assert_eq!(clip.node, clipper);
-    assert!(
-        item.size.width > 60.0,
-        "the run itself is wider than the clip"
-    );
     assert_eq!(h.hit(30.0, 10.0), Some(clipper));
     assert_eq!(h.hit(100.0, 10.0), Some(root));
 }
@@ -932,7 +938,7 @@ fn visibility_and_pointer_events_inherit_through_contents() {
 #[test]
 fn text_in_contents_hits_the_contents_element() {
     let mut h = Harness::new(
-        "page { display: flex; position: relative; width: 800px; height: 600px;
+        "page { display: -lynx-text; position: relative; width: 800px; height: 600px;
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }",
     );
@@ -942,9 +948,18 @@ fn text_in_contents_hits_the_contents_element() {
     let text = h.doc.dom.create_text_node("hello", ());
     h.doc.dom.append_child(wrap, text);
     let paint = h.paint();
-    let item = paint.items().iter().find(|item| item.node == text).unwrap();
-    assert_eq!(item.kind, PaintItemKind::TextRun { element: wrap });
-    assert_eq!(h.hit(10.0, 10.0), Some(wrap));
+    let _ = (text, wrap);
+    // A `display: contents` element generates no box, so it cannot establish
+    // a paragraph: the text is content of the block above it, and the walk
+    // flattens straight through.
+    assert!(
+        paint
+            .items()
+            .iter()
+            .any(|item| item.kind == PaintItemKind::TextRun { element: root }),
+        "the nearest establishing element owns the paragraph"
+    );
+    assert_eq!(h.hit(10.0, 10.0), Some(root));
 }
 
 #[test]

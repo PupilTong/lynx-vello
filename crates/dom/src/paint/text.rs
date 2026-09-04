@@ -3,11 +3,10 @@
 //! limit), and `text-stroke`.
 //!
 //! Spec sketch:
-//! - Walk `layout.parley_layout().lines()` → `line.items()` → `PositionedLayoutItem::GlyphRun`; for
-//!   each run: `scene.draw_glyphs(run.font())` with `font_size`, the run's `normalized_coords`
-//!   (parley coord i16s convert to `crate::vello::NormalizedCoord`), `hint(false)` (transforms are
-//!   arbitrary), `brush` = the element's used `color`, glyphs mapped from
-//!   `glyph_run.positioned_glyphs()`.
+//! - Walk `layout.lines()` → `line.items()` → `PositionedLayoutItem::GlyphRun`; for each run:
+//!   `scene.draw_glyphs(run.font())` with `font_size`, the run's `normalized_coords` (parley coord
+//!   i16s convert to `crate::vello::NormalizedCoord`), `hint(false)` (transforms are arbitrary),
+//!   `brush` = the element's used `color`, glyphs mapped from `glyph_run.positioned_glyphs()`.
 //! - Synthesis (fake bold/oblique) from `run.synthesis()`: embolden via
 //!   `DrawGlyphs::font_embolden`, oblique via `glyph_transform` skew.
 //! - `text-shadow`: repeat the glyph pass per shadow (last-specified first, under the main pass),
@@ -30,7 +29,6 @@ use stylo::computed_values::text_decoration_style::T as TextDecorationStyle;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{ColorPropertyValue, TextDecorationLine};
 
-use crate::layout::TextLayout;
 use crate::paint::background::{GradientBrush, gradient_brush};
 use crate::paint::convert;
 use crate::vello::kurbo::{Affine, BezPath, Diagonal2, Line, Rect, Stroke};
@@ -94,13 +92,11 @@ fn text_fill(style: &ComputedValues, gradient_box: Option<Rect>) -> TextFill {
 pub(crate) fn paint(
     scene: &mut Scene,
     style: &ComputedValues,
-    layout: &TextLayout,
+    layout: &Layout<crate::layout::TextBrush>,
     transform: Affine,
     decorations: &[Decorations],
     gradient_box: Option<Rect>,
 ) {
-    let layout = layout.parley_layout();
-
     for shadow in style.get_inherited_text().text_shadow.0.iter().rev() {
         let color = convert::resolve_color(style, &shadow.color);
         let offset = Affine::translate((
@@ -211,10 +207,14 @@ fn text_stroke(style: &ComputedValues) -> Option<(f64, Color)> {
     })
 }
 
-pub(crate) fn paint_silhouette(scene: &mut Scene, layout: &TextLayout, transform: Affine) {
+pub(crate) fn paint_silhouette(
+    scene: &mut Scene,
+    layout: &Layout<crate::layout::TextBrush>,
+    transform: Affine,
+) {
     paint_pass(
         scene,
-        layout.parley_layout(),
+        layout,
         transform,
         &TextFill::Solid(Color::BLACK),
         None,

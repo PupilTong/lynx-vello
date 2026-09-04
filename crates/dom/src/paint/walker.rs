@@ -809,9 +809,10 @@ fn paint_item<T>(
             let Some(style) = document.paint_style(element) else {
                 return;
             };
-            let Some(layout) = document.text_layout(item.node) else {
+            let Some(block) = document.text_block(item.node) else {
                 return;
             };
+            let layout = block.display();
             let decorations = text::propagated_decorations(document, element);
             let gradient_box = text::needs_gradient_box(style)
                 .then(|| color_gradient_box(document, item, element));
@@ -834,10 +835,7 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
         f64::from(item.size.width),
         f64::from(item.size.height),
     );
-    let (Some(element_layout), Some(run_layout)) = (
-        document.rounded_layout(element),
-        document.rounded_layout(item.node),
-    ) else {
+    let Some(element_layout) = document.rounded_layout(element) else {
         return own_box;
     };
     let size = element_layout.size;
@@ -851,11 +849,15 @@ fn color_gradient_box<T>(document: &Document<T>, item: &PaintItem, element: crat
     if padding_box.width() <= 0.0 || padding_box.height() <= 0.0 {
         return own_box;
     }
-    padding_box
-        - crate::vello::kurbo::Vec2::new(
-            f64::from(run_layout.location.x),
-            f64::from(run_layout.location.y),
-        )
+    // Into the paragraph's own space. A block paints its glyphs from its
+    // content box, so that origin — border plus padding — is the offset
+    // between the two, and the paint item is the establishing element itself
+    // rather than a run inside it.
+    let content_origin = crate::vello::kurbo::Vec2::new(
+        f64::from(element_layout.border.left + element_layout.padding.left),
+        f64::from(element_layout.border.top + element_layout.padding.top),
+    );
+    padding_box - content_origin
 }
 
 fn collect_text_clip<T>(
@@ -882,27 +884,26 @@ fn collect_text_clip_under<'doc, T>(
     let Some(node_ref) = document.get(node) else {
         return;
     };
+    // A paragraph belongs to the element that establishes it, so the node
+    // being walked can be the one holding the silhouette. Text nodes hold
+    // none — they are content of the block above them.
+    let visible = document.paint_style(node).is_none_or(|style| {
+        matches!(
+            style.clone_visibility(),
+            stylo::computed_values::visibility::T::Visible
+        )
+    });
+    if visible
+        && let Some(block) = document.text_block(node)
+        && !block.lines().is_empty()
+    {
+        // An element with no runs still establishes a paragraph; it just has
+        // no ink, and a silhouette of nothing would clip everything away.
+        clip.runs.push((offset, block.display()));
+    }
+
     for child in node_ref.flat_children_iter() {
-        if child.is_text_node() {
-            let visible = document.paint_style(node).is_none_or(|style| {
-                matches!(
-                    style.clone_visibility(),
-                    stylo::computed_values::visibility::T::Visible
-                )
-            });
-            if !visible {
-                continue;
-            }
-            if let (Some(layout), Some(text)) = (
-                document.rounded_layout(child.id()),
-                document.text_layout(child.id()),
-            ) {
-                clip.runs.push((
-                    offset + Vec2::new(f64::from(layout.location.x), f64::from(layout.location.y)),
-                    text,
-                ));
-            }
-        } else if child.is_element() {
+        if child.is_element() {
             let child_offset = document
                 .rounded_layout(child.id())
                 .map_or(offset, |layout| {

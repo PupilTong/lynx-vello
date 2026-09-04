@@ -18,18 +18,17 @@ use hughie::compute::{
 };
 use hughie::geometry::{Point, Size};
 use hughie::invalidate::is_relayout_boundary;
-use hughie::style::{CoreStyle, PositionProperty, TextRun};
-use hughie::text::TextMeasurer;
+use hughie::style::{CoreStyle, PositionProperty};
 use hughie::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
 };
 use rustc_hash::FxHashSet;
 
 use super::style::{
-    DisplayMode, StyleView, TextContainerView, TextRunView, box_parent, display_mode,
-    establishes_absolute_containing_block, establishes_fixed_containing_block, resolve_position,
-    skips_contents,
+    DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
+    establishes_fixed_containing_block, resolve_position, skips_contents,
 };
+use super::text_block::compute_text_block_layout;
 use crate::tree::document::{
     Document, DocumentLayoutState, NodeId, NodeSlot, PendingRelayout, RelayoutKind, TreeArenas,
 };
@@ -102,36 +101,19 @@ impl<T> LayoutTree for TreeArenas<T> {
                 DisplayMode::None | DisplayMode::Contents => {
                     unreachable!("a box-less element has no box to lay out")
                 }
-                // A Lynx text block is still laid out as the flex container
-                // `text` has always been: the `hughie::text::block` paragraph
-                // the value names replaces this arm, and nothing else, once
-                // the box-protocol seam for it exists.
-                DisplayMode::Flex | DisplayMode::Text => {
-                    compute_flexbox_layout(tree, state, node, input)
-                }
+                DisplayMode::Flex => compute_flexbox_layout(tree, state, node, input),
+                DisplayMode::Text => compute_text_block_layout(tree, state, node, input),
                 DisplayMode::Grid => compute_grid_layout(tree, state, node, input),
                 DisplayMode::Linear => compute_linear_layout(tree, state, node, input),
                 DisplayMode::Relative => compute_relative_layout(tree, state, node, input),
                 DisplayMode::Leaf => {
                     let node_ref = tree.at(node);
+                    // A text node is content of the block above it, never a
+                    // box of its own. One outside a text block lays out
+                    // nothing at all: in Lynx text exists only inside a
+                    // `display: -lynx-text` container.
                     let output = if node_ref.is_text_node() {
-                        let paragraph = TextContainerView::of(node_ref);
-                        let run_style = TextRunView::of(node_ref);
-                        let run = TextRun {
-                            text: node_ref.text().unwrap_or_default(),
-                            style: &run_style,
-                            preserve_newlines: false,
-                        };
-                        let (context, artifacts) = state.text_parts(node);
-                        let mut measurer =
-                            TextMeasurer::new(context, artifacts, &paragraph, std::iter::once(run));
-                        let text_output = measurer.compute_layout(input);
-                        if input.goal != LayoutGoal::Commit {
-                            // A probe re-breaks the same retained layout the
-                            // commit uses, so it owes the pass a restore.
-                            state.note_probed_text(node);
-                        }
-                        text_output
+                        LayoutOutput::HIDDEN
                     } else {
                         let view = tree.style(node);
                         #[cfg(feature = "layout-test-utils")]

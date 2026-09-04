@@ -14,6 +14,25 @@ pub(crate) use leaf::compute_leaf_layout_with_measurement;
 #[doc(hidden)]
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;
 pub use leaf::{LeafMeasureInput, LeafMetrics, NaturalSize, compute_leaf_layout};
+
+/// The box-model wrapper a `display: -lynx-text` block lays out through.
+///
+/// Not a general host-measurer door: leaf content stays closed, and this exists
+/// because a text block's content is a paragraph the host owns rather than a
+/// natural size it can report. `requires_known_measurement` is `true` and
+/// chosen here, where the reason lives — a paragraph must be laid out even when
+/// both dimensions are known, because its line breaks are what paint reads.
+pub fn compute_text_block_layout<Style, Measure>(
+    input: crate::tree::LayoutInput,
+    style: &Style,
+    measure: Measure,
+) -> crate::tree::LayoutOutput
+where
+    Style: crate::style::CoreStyle,
+    Measure: FnMut(LeafMeasureInput) -> LeafMetrics,
+{
+    leaf::compute_leaf_layout_with_measurement(input, style, None, true, measure)
+}
 pub use linear::compute_linear_layout;
 pub use relative::compute_relative_layout;
 use stylo::computed_values::direction;

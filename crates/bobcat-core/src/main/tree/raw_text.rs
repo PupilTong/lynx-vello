@@ -285,17 +285,17 @@ mod tests {
         let mut document = document();
         assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
         let text = text_element(&mut document);
-        let raw = raw_text(&mut document, text, "hello");
+        let _raw = raw_text(&mut document, text, "hello");
         document.layout();
 
+        // A text node generates no box: the paragraph belongs to the element
+        // that establishes it, and its content size is what the run measures.
         let run = document
-            .rounded_layout(run_of(&document, raw))
-            .expect("the run is laid out");
+            .text_block_size(text)
+            .expect("the text element established a paragraph");
         assert!(
-            (run.size.width - 100.0).abs() < f32::EPSILON
-                && (run.size.height - 20.0).abs() < f32::EPSILON,
-            "five Ahem em squares at 20px, got {:?}",
-            run.size
+            (run.width - 100.0).abs() < f32::EPSILON && (run.height - 20.0).abs() < f32::EPSILON,
+            "five Ahem em squares at 20px, got {run:?}"
         );
 
         let box_ = document.rounded_layout(text).expect("the text is laid out");
@@ -314,14 +314,13 @@ mod tests {
         let raw = raw_text(&mut document, text, "ab\ncd");
         document.layout();
 
+        let _ = raw;
         let run = document
-            .rounded_layout(run_of(&document, raw))
-            .expect("the run is laid out");
+            .text_block_size(text)
+            .expect("the text element established a paragraph");
         assert!(
-            (run.size.width - 40.0).abs() < f32::EPSILON
-                && (run.size.height - 40.0).abs() < f32::EPSILON,
-            "two lines of two em squares, got {:?}",
-            run.size
+            (run.width - 40.0).abs() < f32::EPSILON && (run.height - 40.0).abs() < f32::EPSILON,
+            "two lines of two em squares, got {run:?}"
         );
     }
 }

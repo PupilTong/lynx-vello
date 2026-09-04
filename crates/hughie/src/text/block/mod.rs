@@ -349,6 +349,27 @@ impl TextBlock {
         }
     }
 
+    /// Replaces the paragraph parameters without re-shaping.
+    ///
+    /// Sound only for values parley does not shape from: alignment and
+    /// direction are applied after breaking, and truncation is decided from a
+    /// finished layout. A font, a letter-spacing or a word-break change is a
+    /// different paragraph and needs a new block — the host decides which it
+    /// has, because it is the one holding the old style to compare.
+    ///
+    /// Invalidates the break memo, since `text-align` moves line offsets and
+    /// `max_lines` moves the reported size.
+    pub fn set_style(&mut self, style: BlockStyle) {
+        if self.style == style {
+            return;
+        }
+        self.style = style;
+        self.measured = [None; MEASURED_BREAKS as usize];
+        self.next_measured = 0;
+        self.result = None;
+        self.min_content = None;
+    }
+
     /// Reports `constraint` without disturbing the committed line breaks when
     /// the same constraint has already been answered.
     ///

@@ -487,6 +487,10 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one linear pass over a context's own box, then its members"
+    )]
     fn build_stacking_context(
         &mut self,
         root: NodeId,
@@ -556,6 +560,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             return;
         }
         let ctx = self.enter_element(root, values, &world, seed, own_slot, own_animation);
+        if mode == DisplayMode::Text {
+            // A text block paints its whole subtree as one paragraph.
+            if visible {
+                self.push_paragraph(root, &world, size, hit_testable, ctx);
+            }
+            self.close_layer(layer);
+            return;
+        }
 
         // This context's members and in-flow records occupy the tail of the
         // two shared stacks. Anything a nested context pushes lands above
@@ -777,6 +789,42 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         })
     }
 
+    /// Emits the one item a `display: -lynx-text` element paints its whole
+    /// paragraph through.
+    ///
+    /// The walk stops at a text block — descending would emit a second item
+    /// for each absorbed scope and paint the glyphs twice — so this is the
+    /// only record its runs ever get. Two details it must get right: the
+    /// glyphs sit in the element's *content* box, so the transform carries
+    /// that origin; and they take the element's *inner* clip, so an
+    /// `overflow: hidden` block clips its own paragraph.
+    fn push_paragraph(
+        &mut self,
+        root: NodeId,
+        world: &Transform3D<f32>,
+        size: Size2D<f32>,
+        hit_testable: bool,
+        ctx: ClipContexts,
+    ) {
+        let inset = self.rounded(root);
+        let glyph_origin = world.then_translate(euclid::vec3(
+            inset.border.left + inset.padding.left,
+            inset.border.top + inset.padding.top,
+            0.0,
+        ));
+        self.items.push(PaintItem {
+            node: root,
+            kind: PaintItemKind::TextRun { element: root },
+            transform: glyph_origin,
+            clip: ctx.current.clip,
+            size,
+            radii: CornerRadii::ZERO,
+            hit_testable,
+            slot: ctx.current.chain,
+            animation: ctx.current.animation,
+        });
+    }
+
     fn collect_child(
         &mut self,
         child_slot: NodeSlot,
@@ -787,9 +835,14 @@ impl<'doc, T: Sync> Builder<'doc, T> {
         let ctx = *cursor.ctx;
         let child_node = self.tree.at(child_slot);
         if child_node.is_text_node() {
-            if let Some(record) = self.text_record(child_node, cursor.offset, ctx) {
-                self.push_stream(target, record);
-            }
+            // Content of the paragraph above it, never a box. The establishing
+            // element paints every glyph in one item.
+            return;
+        }
+        // A hidden layout generates nothing. This is what keeps a text block's
+        // absorbed children out of the frame while still letting the walk
+        // reach the out-of-flow ones it never consumed.
+        if self.state.at(child_slot).slot.is_hidden() {
             return;
         }
         if !child_node.is_element() {
@@ -859,6 +912,35 @@ impl<'doc, T: Sync> Builder<'doc, T> {
                     outer.current.animation,
                 ),
             );
+            if child.mode == DisplayMode::Text {
+                // A second record, after the element's own box, so the glyphs
+                // paint over the background and border the block draws.
+                //
+                // Offset to the element's *content* box: a paragraph is laid
+                // out inside the border and padding, so its origin is not the
+                // element's own.
+                let inset = self.rounded(child.node);
+                let content_offset = Point2D::new(
+                    child.offset.x + inset.border.left + inset.padding.left,
+                    child.offset.y + inset.border.top + inset.padding.top,
+                );
+                self.push_stream(
+                    target,
+                    ItemRecord {
+                        node: child.node,
+                        kind: PaintItemKind::TextRun {
+                            element: child.node,
+                        },
+                        offset: content_offset,
+                        clip: outer.current.clip,
+                        size: child.size,
+                        radii: CornerRadii::ZERO,
+                        hit_testable,
+                        slot: outer.current.chain,
+                        animation: outer.current.animation,
+                    },
+                );
+            }
         }
         if descend {
             let inner = self.enter_element(
@@ -1009,36 +1091,6 @@ impl<'doc, T: Sync> Builder<'doc, T> {
             inner.fixed = inner.current;
         }
         inner
-    }
-
-    fn text_record(
-        &self,
-        child: &Node<T>,
-        node_offset: Point2D<f32>,
-        ctx: ClipContexts,
-    ) -> Option<ItemRecord> {
-        let parent = child.flat_parent()?;
-        let (visible, hit_testable) = item_flags(StyleView::try_of(parent)?.values());
-        if !visible {
-            return None;
-        }
-        let layout = self.rounded(child.id());
-        Some(ItemRecord {
-            node: child.id(),
-            kind: PaintItemKind::TextRun {
-                element: parent.id(),
-            },
-            offset: Point2D::new(
-                node_offset.x + layout.location.x,
-                node_offset.y + layout.location.y,
-            ),
-            clip: ctx.current.clip,
-            size: Size2D::new(layout.size.width, layout.size.height),
-            radii: CornerRadii::ZERO,
-            hit_testable,
-            slot: ctx.current.chain,
-            animation: ctx.current.animation,
-        })
     }
 }
 

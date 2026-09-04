@@ -51,6 +51,17 @@ impl LayoutSnapshot {
     }
 }
 
+/// The measured ink of the paragraph `holder` establishes.
+///
+/// What the text tests were really asserting: a text node has no box of its
+/// own any more, and the element's box may be stretched by its parent.
+fn text_ink(dom: &dom::Document<()>, holder: dom::NodeId) -> (f32, f32) {
+    let size = dom
+        .text_block_size(holder)
+        .expect("holder establishes a block");
+    (size.width, size.height)
+}
+
 fn dom_rect(dom: &dom::Document<()>, id: NodeId) -> (f32, f32, f32, f32) {
     let layout = dom.rounded_layout(id).expect("node id is live");
     (
@@ -419,7 +430,7 @@ fn display_contents_works_across_every_container_algorithm() {
 fn display_contents_inherits_to_its_children_without_boxing_them() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+        "page { display: -lynx-text; width: 200px; height: 100px;
                 font-family: Ahem; font-size: 16px; }
          .wrapper { display: contents; font-size: 8px; }",
         dom::StylesheetOrigin::Author,
@@ -433,7 +444,10 @@ fn display_contents_inherits_to_its_children_without_boxing_them() {
     dom.append_child(wrapper, text);
     dom.layout();
 
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 40.0, 8.0));
+    // The wrapper generates no box, but its style still reaches the run
+    // inside it: the paragraph measures at 8px, not the page's 16px.
+    let _ = text;
+    assert_eq!(text_ink(&dom, root), (40.0, 8.0));
     assert_eq!(dom_rect(&dom, wrapper), (0.0, 0.0, 0.0, 0.0));
 }
 
@@ -750,7 +764,8 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
-         .sibling { width: 50px; height: 10px; }",
+         .sibling { width: 50px; height: 10px; }
+         .label { display: -lynx-text; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -758,23 +773,27 @@ fn text_nodes_use_parley_with_their_parents_inherited_style() {
     let sibling = dom.create_element("view", ());
     dom.add_class(sibling, "sibling");
     dom.append_child(root, sibling);
+    let label = dom.create_element("view", ());
+    dom.add_class(label, "label");
+    dom.append_child(root, label);
     let text = dom.create_text_node("hello", ());
-    dom.append_child(root, text);
+    dom.append_child(label, text);
     dom.layout();
 
     assert_eq!(dom_rect(&dom, sibling), (0.0, 0.0, 50.0, 10.0));
-    assert_eq!(dom_rect(&dom, text), (50.0, 0.0, 80.0, 16.0));
+    assert_eq!(dom_rect(&dom, label), (50.0, 0.0, 80.0, 16.0));
+    assert_eq!(text_ink(&dom, label), (80.0, 16.0));
 
     dom.set_text_node_data(text, "hi");
     dom.layout();
-    assert_eq!(dom_rect(&dom, text), (50.0, 0.0, 32.0, 16.0));
+    assert_eq!(text_ink(&dom, label), (32.0, 16.0));
 }
 
 #[test]
 fn embedder_default_family_shapes_text_without_an_authored_font_family() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+        "page { display: -lynx-text; width: 200px; height: 100px;
                 font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
@@ -787,14 +806,15 @@ fn embedder_default_family_shapes_text_without_an_authored_font_family() {
     assert!(dom.set_default_font_family("Ahem"));
     dom.layout();
 
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    let _ = text;
+    assert_eq!(text_ink(&dom, root), (80.0, 16.0));
 }
 
 #[test]
 fn inherited_text_style_change_remeasures_text_child() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+        "page { display: -lynx-text; width: 200px; height: 100px;
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
@@ -804,21 +824,22 @@ fn inherited_text_style_change_remeasures_text_child() {
     dom.append_child(root, text);
 
     dom.layout();
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    let _ = text;
+    assert_eq!(text_ink(&dom, root), (80.0, 16.0));
 
     dom.set_inline_style(root, "font-size: 32px");
     dom.layout();
 
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
+    assert_eq!(text_ink(&dom, root), (160.0, 32.0));
 }
 
 #[test]
 fn inherited_text_style_change_remeasures_nested_text_child() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
-        "page, view { display: flex; width: 200px; height: 100px;
-                      align-items: flex-start; }
-         page { font-family: Ahem; font-size: 16px; }",
+        "page { display: flex; width: 200px; height: 100px;
+                font-family: Ahem; font-size: 16px; }
+         view { display: -lynx-text; width: 200px; height: 100px; }",
         dom::StylesheetOrigin::Author,
     );
     assert_eq!(dom.register_fonts(FontBlob::from_static(AHEM)), 1);
@@ -829,12 +850,13 @@ fn inherited_text_style_change_remeasures_nested_text_child() {
     dom.append_child(parent, text);
 
     dom.layout();
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    let _ = text;
+    assert_eq!(text_ink(&dom, parent), (80.0, 16.0));
 
     dom.set_inline_style(root, "font-size: 32px");
     dom.layout();
 
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 160.0, 32.0));
+    assert_eq!(text_ink(&dom, parent), (160.0, 32.0));
 }
 
 #[test]
@@ -988,7 +1010,7 @@ fn a_removed_boundary_does_not_replay_onto_the_node_that_replaces_it() {
 fn color_only_change_preserves_text_geometry() {
     let mut dom = dom::Document::new(common::device(800.0, 600.0), "page", ());
     dom.add_stylesheet(
-        "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
+        "page { display: -lynx-text; width: 200px; height: 100px;
                 font-family: Ahem; font-size: 16px; }",
         dom::StylesheetOrigin::Author,
     );
@@ -998,11 +1020,12 @@ fn color_only_change_preserves_text_geometry() {
     dom.append_child(root, text);
 
     dom.layout();
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    let _ = text;
+    assert_eq!(text_ink(&dom, root), (80.0, 16.0));
 
     dom.set_inline_style(root, "color: rgb(0, 0, 255)");
     dom.layout();
-    assert_eq!(dom_rect(&dom, text), (0.0, 0.0, 80.0, 16.0));
+    assert_eq!(text_ink(&dom, root), (80.0, 16.0));
     assert_eq!(
         dom.get(root)
             .unwrap()
@@ -1296,7 +1319,7 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
     dom.add_stylesheet(
         "page { display: flex; width: 200px; height: 100px; align-items: flex-start;
                 font-family: Ahem; font-size: 16px; }
-         .container { display: flex; width: 60px; height: 80px; align-items: flex-start; }
+         .container { display: -lynx-text; width: 60px; height: 80px; }
          .fixed { position: fixed; left: 10px; top: 20px; width: 30px; height: 40px; }",
         dom::StylesheetOrigin::Author,
     );
@@ -1319,13 +1342,17 @@ fn content_visibility_hidden_skips_descendant_layout_and_measurement() {
         (l.location.x, l.location.y, l.size.width, l.size.height)
     };
     assert_eq!(rect(&dom, container), (0.0, 0.0, 60.0, 80.0));
-    assert_eq!(rect(&dom, text), (0.0, 0.0, 0.0, 0.0));
     assert_eq!(rect(&dom, fixed), (0.0, 0.0, 0.0, 0.0));
+    assert!(
+        dom.text_block_size(container).is_none(),
+        "a skipped container lays out no paragraph at all"
+    );
     dom.set_inline_style(container, "");
     dom.layout();
+    let _ = text;
     assert_eq!(
-        rect(&dom, text),
-        (0.0, 0.0, 32.0, 16.0),
+        dom.text_block_size(container).map(|s| (s.width, s.height)),
+        Some((32.0, 16.0)),
         "revealing the container lays its text back out",
     );
 }
@@ -1674,17 +1701,21 @@ fn text_children_of_contents_measure_as_container_items() {
         "page { display: flex; width: 800px; height: 100px;
                 font-family: Ahem; font-size: 20px; }
          .wrap { display: contents; }
+         .label { display: -lynx-text; }
          .cell { display: flex; width: 100px; height: 100px; }",
     );
     h.doc.dom.register_fonts(FontBlob::from_static(AHEM));
     let root = h.doc.root;
     let wrap = h.doc.el(root, "view.wrap");
+    // Text needs a block to live in, so what `display: contents` flattens into
+    // the container's item list is that block — which is the subject here.
+    let label = h.doc.el(wrap, "view.label");
     let text = h.doc.dom.create_text_node("hi", ());
-    h.doc.dom.append_child(wrap, text);
+    h.doc.dom.append_child(label, text);
     let after = h.doc.el(root, "view.cell");
     h.layout();
-    let text_rect = dom_rect(&h.doc.dom, text);
-    assert_eq!((text_rect.0, text_rect.2), (0.0, 40.0));
+    let label_rect = dom_rect(&h.doc.dom, label);
+    assert_eq!((label_rect.0, label_rect.2), (0.0, 40.0));
     assert_eq!(h.rect(after).0, 40.0);
 }
 
