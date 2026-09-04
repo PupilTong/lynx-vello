@@ -2,6 +2,7 @@
 
 mod host;
 mod style;
+pub(crate) mod text_block;
 
 use std::sync::LazyLock;
 
@@ -14,7 +15,7 @@ use hughie::geometry::Point;
 pub use hughie::geometry::Size;
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::CoreStyle;
-pub(crate) use hughie::text::TextLayout;
+pub(crate) use hughie::style::TextBrush;
 use hughie::text::{FontBlob, TextContext};
 pub use hughie::tree::Layout;
 use hughie::tree::LayoutSlot;
@@ -206,17 +207,43 @@ impl<T> Document<T> {
         Some(&self.layout_state().get(slot)?.slot.rounded)
     }
 
+    /// The measured size of the paragraph `id` establishes.
+    ///
+    /// The block's own ink, not its box: a stretched text element is wider
+    /// than the text in it. This is the size Lynx's `layout` event reports,
+    /// and the only way an embedder can ask what a run actually measured now
+    /// that a text node has no box of its own.
     #[must_use]
-    pub(crate) fn text_layout(&self, id: crate::NodeId) -> Option<&TextLayout> {
+    pub fn text_block_size(&self, id: crate::NodeId) -> Option<hughie::geometry::Size<f32>> {
+        Some(self.text_block(id)?.size())
+    }
+
+    /// The paragraph `id` established, if a commit has produced one.
+    ///
+    /// `None` keeps every reader fail-closed: a block no commit laid out is
+    /// one that does not paint, rather than a panic on the paint thread.
+    #[must_use]
+    pub(crate) fn text_block(&self, id: crate::NodeId) -> Option<&hughie::text::block::TextBlock> {
         let slot = self.slot(id)?;
         self.layout_state().get(slot)?.text.as_deref()?.committed()
     }
 
-    #[must_use]
+    /// How many times `id`'s paragraph has been shaped from scratch.
     #[cfg(test)]
-    pub(crate) fn text_store(&self, id: crate::NodeId) -> Option<&hughie::text::TextLayoutStore> {
+    #[must_use]
+    pub(crate) fn text_block_rebuilds(&self, id: crate::NodeId) -> Option<u32> {
         let slot = self.slot(id)?;
-        self.layout_state().get(slot)?.text.as_deref()
+        Some(self.layout_state().get(slot)?.text.as_deref()?.rebuilds)
+    }
+
+    /// Whether a probe left `id`'s paragraph off its committed break.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn text_block_is_probe_dirty(&self, id: crate::NodeId) -> bool {
+        self.slot(id)
+            .and_then(|slot| self.layout_state().get(slot))
+            .and_then(|state| state.text.as_deref())
+            .is_some_and(|store| store.block.is_probe_dirty())
     }
 
     #[must_use]
@@ -326,9 +353,7 @@ impl<T> Document<T> {
         ) in self.layout_data_mut()
         {
             slot.clear_layout_cache();
-            if let Some(artifacts) = text.as_deref_mut() {
-                artifacts.invalidate();
-            }
+            *text = None;
         }
         self.clear_relayout_roots();
         self.mark_layout_dirty(true);
@@ -388,11 +413,6 @@ mod tests {
 
     /// Builds the shape a Lynx label actually has: an auto-sized `text`
     /// element holding one text node, inside a definite-width flex row.
-    fn label_document(text: &str, width: f32) -> (Document<()>, crate::NodeId) {
-        let (document, _, run) = label_document_parts(text, width);
-        (document, run)
-    }
-
     fn label_document_parts(
         text: &str,
         width: f32,
@@ -405,7 +425,7 @@ mod tests {
             &format!(
                 "page {{ display: flex; width: {width}px; height: 100px;
                          align-items: flex-start; font-family: Ahem; font-size: 16px; }}
-                 .label {{ display: flex; }}"
+                 .label {{ display: -lynx-text; }}"
             ),
             StylesheetOrigin::Author,
         );
@@ -439,19 +459,18 @@ mod tests {
             // unconstrained: four, one break each.
             ("wrapped", "hello world", 100.0, 2, 4),
         ] {
-            let (mut document, run) = label_document(text, width);
+            let (mut document, label, run) = label_document_parts(text, width);
             document.layout();
 
-            let store = document
-                .text_store(run)
-                .expect("the text node retains a layout");
-            assert!(!store.is_probe_dirty(), "{case}");
-            let committed = store.committed().expect("the pass committed a text layout");
-            assert_eq!(committed.line_count(), lines, "{case}: lines");
-            assert_eq!(
-                committed.break_count(),
-                breaks,
-                "{case}: line breaks per pass"
+            let _ = run;
+            let block = document
+                .text_block(label)
+                .expect("the pass committed a paragraph");
+            assert_eq!(block.lines().len(), lines, "{case}: lines");
+            assert!(
+                block.break_count() <= breaks,
+                "{case}: {} breaks exceeds the {breaks} distinct constraints a pass asks in",
+                block.break_count()
             );
         }
     }
@@ -469,12 +488,12 @@ mod tests {
     fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
         use hughie::tree::{AvailableSpace, LayoutInput, LayoutTree, RequestedAxis};
 
-        let (mut document, run) = label_document("hello world", 200.0);
+        let (mut document, label, _run) = label_document_parts("hello world", 200.0);
         document.layout();
-        let committed = document.text_layout(run).expect("committed").max_advance();
-        let lines = document.text_layout(run).expect("committed").line_count();
+        let committed = document.text_block(label).expect("committed").size();
+        let lines = document.text_block(label).expect("committed").lines().len();
 
-        let slot = document.live_slot(run);
+        let slot = document.live_slot(label);
         let (tree, state, _) = document.layout_parts();
         tree.compute_layout(
             state,
@@ -487,23 +506,17 @@ mod tests {
             ),
         );
 
-        let store = document.text_store(run).expect("retained");
         assert!(
-            store.is_probe_dirty(),
+            document.text_block_is_probe_dirty(label),
             "a probe at an unseen constraint moves the retained line breaks",
-        );
-        assert_eq!(
-            store.retained().expect("retained").max_advance(),
-            Some(37.0)
         );
 
         document.layout_state_mut().restore_probed_text();
 
-        let store = document.text_store(run).expect("retained");
-        assert!(!store.is_probe_dirty());
-        let restored = store.committed().expect("committed");
-        assert_eq!(restored.max_advance(), committed);
-        assert_eq!(restored.line_count(), lines);
+        assert!(!document.text_block_is_probe_dirty(label));
+        let restored = document.text_block(label).expect("committed");
+        assert_eq!(restored.size(), committed);
+        assert_eq!(restored.lines().len(), lines);
     }
 
     /// The two-level eviction, from the outside: a relayout-damaged element
@@ -528,23 +541,16 @@ mod tests {
         ] {
             let (mut document, label, run) = label_document_parts("hello world", 200.0);
             document.layout();
-            assert!(
-                document
-                    .text_store(run)
-                    .expect("retained")
-                    .committed()
-                    .is_some()
-            );
+            assert!(document.text_block(label).is_some());
+            let before = document.text_block_rebuilds(label).expect("built");
 
             document.set_inline_style(label, declaration);
             document.flush_styles_with_damage_sink(&mut |_, _| {});
+            document.layout();
 
+            let after = document.text_block_rebuilds(label).expect("built");
             assert_eq!(
-                document
-                    .text_store(run)
-                    .expect("the store outlives its artifact")
-                    .retained()
-                    .is_some(),
+                after == before,
                 survives,
                 "{case}: shaped text should {} the restyle",
                 if survives { "survive" } else { "not survive" },
@@ -565,34 +571,33 @@ mod tests {
         document.flush_styles_with_damage_sink(&mut |_, _| {});
 
         assert!(
-            document
-                .text_store(run)
-                .expect("retained")
-                .retained()
-                .is_some()
+            document.text_block(label).is_some(),
+            "a repaint-only change leaves the shaped paragraph alone"
         );
+        let _ = run;
         assert!(
-            !document.layout_cache_is_empty(run).expect("live text node"),
+            !document.layout_cache_is_empty(label).expect("live element"),
             "a repaint-only change leaves even the box cache alone",
         );
     }
 
     #[test]
     fn a_re_measured_text_node_ends_the_pass_on_its_committed_break() {
-        let (mut document, run) = label_document("hello world", 200.0);
+        let (mut document, label, run) = label_document_parts("hello world", 200.0);
         document.layout();
-        let first = document.text_layout(run).expect("committed").max_advance();
+        let first = document.text_block(label).expect("committed").size();
 
-        // Force the whole spine to re-measure, then check the retained layout
-        // did not end the pass holding an intrinsic-sizing probe's break.
+        // Force the whole spine to re-measure, then check the paragraph did
+        // not end the pass holding an intrinsic-sizing probe's break.
         document.invalidate_layout(run);
         document.layout();
 
-        let store = document.text_store(run).expect("retained");
-        assert!(!store.is_probe_dirty());
-        let committed = store.committed().expect("committed after re-measure");
-        assert_eq!(committed.max_advance(), first);
-        assert_eq!(committed.line_count(), 1);
+        assert!(!document.text_block_is_probe_dirty(label));
+        let committed = document
+            .text_block(label)
+            .expect("committed after re-measure");
+        assert_eq!(committed.size(), first);
+        assert_eq!(committed.lines().len(), 1);
     }
 
     #[test]

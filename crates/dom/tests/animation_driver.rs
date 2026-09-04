@@ -46,7 +46,7 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
         "@keyframes grow { from { font-size: 16px; } to { font-size: 32px; } }
          page { display: flex; width: 400px; height: 100px; align-items: flex-start;
                 font-family: Ahem; }
-         .label { display: flex; animation: grow 10s linear; }",
+         .label { display: -lynx-text; animation: grow 10s linear; }",
     );
     assert_eq!(
         doc.dom.register_fonts(dom::FontBlob::from_static(AHEM)),
@@ -60,7 +60,8 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
 
     doc.dom.advance_animations(0.0);
     doc.flush();
-    let start = box_of(&doc, run).1;
+    // The paragraph is the element's, so its box is what the animation moves.
+    let start = box_of(&doc, label).1;
     assert_eq!(start.width, 80.0, "five Ahem glyphs at 16px");
 
     let tick = doc.dom.advance_animations(5.0);
@@ -68,7 +69,7 @@ fn an_animated_font_size_remeasures_the_text_it_scales() {
     doc.flush();
 
     assert_eq!(
-        box_of(&doc, run).1.width,
+        box_of(&doc, label).1.width,
         120.0,
         "the text re-measures at the animated 24px"
     );

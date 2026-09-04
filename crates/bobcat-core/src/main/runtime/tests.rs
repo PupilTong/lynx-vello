@@ -1220,12 +1220,15 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
     let run = carrier.first_child().expect("the reflected run").id();
     assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hello"));
 
-    let layout = tree.rounded_layout(run).expect("the run is laid out");
+    // The run is content of the paragraph its `text` element owns, so the
+    // measured size lives on the element (node 3), not on the text node.
+    let measured = tree
+        .text_block_size(node_id(3))
+        .expect("the text element established a paragraph");
     assert!(
-        (layout.size.width - 100.0).abs() < f32::EPSILON
-            && (layout.size.height - 20.0).abs() < f32::EPSILON,
-        "five Ahem em squares at 20px, got {:?}",
-        layout.size
+        (measured.width - 100.0).abs() < f32::EPSILON
+            && (measured.height - 20.0).abs() < f32::EPSILON,
+        "five Ahem em squares at 20px, got {measured:?}"
     );
     assert!(
         tree.rounded_layout(node_id(3))
@@ -1267,8 +1270,8 @@ fn rewriting_the_text_attribute_relays_out_the_same_run() {
     );
     assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hi"));
     assert!(
-        tree.rounded_layout(run)
-            .is_some_and(|layout| (layout.size.width - 40.0).abs() < f32::EPSILON),
+        tree.text_block_size(node_id(3))
+            .is_some_and(|size| (size.width - 40.0).abs() < f32::EPSILON),
         "the shorter run is re-measured, not left at its old width"
     );
 }

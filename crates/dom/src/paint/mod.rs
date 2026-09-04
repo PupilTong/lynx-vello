@@ -23,7 +23,7 @@ mod shape;
 mod text;
 pub(crate) mod walker;
 
-use crate::layout::{Edges, Layout, TextLayout};
+use crate::layout::{Edges, Layout, TextBrush};
 use crate::paint::shape::ReferenceBoxes;
 use crate::vello::kurbo::{Affine, BezPath, Rect, Vec2};
 use crate::visual::CornerRadii;
@@ -31,7 +31,7 @@ use crate::visual::CornerRadii;
 /// Descendant glyph silhouettes used by `background-clip: text`.
 #[derive(Debug, Default)]
 pub(crate) struct TextClip<'doc> {
-    pub runs: Vec<(Vec2, &'doc TextLayout)>,
+    pub runs: Vec<(Vec2, &'doc parley::Layout<TextBrush>)>,
 }
 
 impl TextClip<'_> {

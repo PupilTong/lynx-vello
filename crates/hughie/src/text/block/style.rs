@@ -272,6 +272,77 @@ pub(in crate::text::block) fn parley_style<'style>(
     }
 }
 
+/// Builds the paragraph parameters from a container's computed style.
+///
+/// `max_lines` / `max_chars` stay `None`: they are element attributes with no
+/// computed-style home, so a host that has them supplies them itself.
+/// `text_indent` is absent by design — it is a [`BlockConstraint`] input,
+/// because a percentage resolves against the definite inline size.
+///
+/// [`BlockConstraint`]: super::BlockConstraint
+impl BlockStyle {
+    #[must_use]
+    pub fn from_container_style<S: crate::style::TextContainerStyle>(style: &S) -> Self {
+        use stylo::computed_values::direction;
+        use stylo::computed_values::text_wrap_mode::T as WrapMode;
+        use stylo::values::computed::TextAlign as StyloAlign;
+
+        Self {
+            text_align: match style.text_align() {
+                StyloAlign::Start => TextAlign::Start,
+                StyloAlign::End => TextAlign::End,
+                StyloAlign::Left => TextAlign::Left,
+                StyloAlign::Right => TextAlign::Right,
+                StyloAlign::Center => TextAlign::Center,
+            },
+            direction: match style.direction() {
+                direction::T::Rtl => Direction::Rtl,
+                direction::T::Ltr => Direction::Ltr,
+            },
+            text_wrap: match style.text_wrap_mode() {
+                WrapMode::Wrap => TextWrap::Wrap,
+                WrapMode::Nowrap => TextWrap::NoWrap,
+            },
+            word_break: match style.word_break() {
+                stylo::values::computed::WordBreak::BreakAll => WordBreak::BreakAll,
+                stylo::values::computed::WordBreak::KeepAll => WordBreak::KeepAll,
+                stylo::values::computed::WordBreak::Normal => WordBreak::Normal,
+            },
+            overflow: TextOverflow::Clip,
+            max_lines: None,
+            max_chars: None,
+        }
+    }
+}
+
+/// Builds one run's parameters from the style of the innermost element its
+/// characters sit in.
+impl RunStyle {
+    #[must_use]
+    pub fn from_run_style<S: crate::style::TextRunStyle>(style: &S) -> Self {
+        use stylo::values::computed::LineHeight as StyloLineHeight;
+
+        Self {
+            font_family: style.font_family(),
+            font_size: style.font_size(),
+            font_weight: style.font_weight(),
+            font_style: style.font_style(),
+            font_features: style.font_feature_settings(),
+            font_variations: style.font_variation_settings(),
+            letter_spacing: style
+                .letter_spacing()
+                .0
+                .resolve(stylo::values::computed::Length::new(0.0))
+                .px(),
+            line_height: match style.line_height() {
+                StyloLineHeight::Normal => LineHeight::Normal,
+                StyloLineHeight::Number(factor) => LineHeight::Number(factor.0),
+                StyloLineHeight::Length(length) => LineHeight::Px(length.0.px()),
+            },
+        }
+    }
+}
+
 /// Translates a stylo family list into parley's.
 ///
 /// Lives with the block rather than with the measurement path because the

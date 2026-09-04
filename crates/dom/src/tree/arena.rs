@@ -12,10 +12,11 @@ use core::fmt;
 use std::hint::likely;
 use std::num::{NonZeroU32, NonZeroU64};
 
-use hughie::text::{TextContext, TextLayoutStore};
+use hughie::text::TextContext;
 use hughie::tree::LayoutSlot;
 use slab::Slab;
 
+use crate::layout::text_block::TextBlockStore;
 use crate::tree::node::Node;
 
 /// A node's identity *and* the position its state occupies: the arena key it
@@ -347,7 +348,9 @@ impl<T> TreeArenas<T> {
 #[derive(Default)]
 pub(crate) struct NodeLayoutState {
     pub(crate) slot: LayoutSlot,
-    pub(crate) text: Option<Box<TextLayoutStore>>,
+    /// The paragraph a `display: -lynx-text` element owns. A text node
+    /// holds none: it is content of the block above it, not a box.
+    pub(crate) text: Option<Box<TextBlockStore>>,
     pub(crate) scroll_offset: euclid::default::Vector2D<f32>,
 }
 
@@ -413,7 +416,15 @@ impl DocumentLayoutState {
         &mut self.nodes[slot.arena_key()]
     }
 
-    pub(crate) fn text_parts(&mut self, slot: NodeId) -> (&mut TextContext, &mut TextLayoutStore) {
+    /// The shared shaping context beside one element's paragraph slot.
+    ///
+    /// Disjoint field borrows: laying a paragraph out needs the context and
+    /// the block at once, and child layout needs the whole state, so the two
+    /// can never be live together by construction.
+    pub(crate) fn text_block_parts(
+        &mut self,
+        slot: NodeId,
+    ) -> (&mut TextContext, &mut Option<Box<TextBlockStore>>) {
         self.ensure_covers(slot.arena_key() + 1);
         let Self {
             nodes,
@@ -423,11 +434,13 @@ impl DocumentLayoutState {
         let context = text_context
             .get_or_insert_with(|| Box::new(TextContext::new()))
             .as_mut();
-        let artifacts = nodes[slot.arena_key()]
-            .text
-            .get_or_insert_with(|| Box::new(TextLayoutStore::default()))
-            .as_mut();
-        (context, artifacts)
+        (context, &mut nodes[slot.arena_key()].text)
+    }
+
+    pub(crate) fn text_block(&self, slot: NodeId) -> Option<&TextBlockStore> {
+        self.nodes
+            .get(slot.arena_key())
+            .and_then(|node| node.text.as_deref())
     }
 
     /// Records that `slot`'s probe left its retained text layout off the
@@ -439,7 +452,7 @@ impl DocumentLayoutState {
             .nodes
             .get(slot.arena_key())
             .and_then(|node| node.text.as_deref())
-            .is_some_and(TextLayoutStore::is_probe_dirty)
+            .is_some_and(|store| store.block.is_probe_dirty())
         {
             self.probed_text.push(slot);
         }
@@ -453,26 +466,36 @@ impl DocumentLayoutState {
     /// reads.
     pub(crate) fn restore_probed_text(&mut self) {
         let mut probed = std::mem::take(&mut self.probed_text);
+        let Self {
+            nodes,
+            text_context,
+            probed_text: _,
+        } = self;
+        // Unlike the path this replaces, restoring can re-enter the shaper —
+        // a truncating block rebuilds its display layout — so the context is
+        // borrowed disjointly beside the slot rather than not at all.
+        let context = text_context
+            .get_or_insert_with(|| Box::new(TextContext::new()))
+            .as_mut();
         for slot in probed.drain(..) {
-            if let Some(artifacts) = self
-                .nodes
+            if let Some(store) = nodes
                 .get_mut(slot.arena_key())
                 .and_then(|node| node.text.as_deref_mut())
             {
-                artifacts.restore_committed();
+                store.block.restore_committed(context);
             }
         }
         self.probed_text = probed;
-        // The queue is only as good as the pushes that fill it, and a text
-        // node missing from it paints its probe's line breaks with no other
+        // The queue is only as good as the pushes that fill it, and a block
+        // missing from it paints its probe's line breaks with no other
         // symptom. Debug builds re-derive the answer the expensive way.
         debug_assert!(
             !self
                 .nodes
                 .iter()
                 .filter_map(|node| node.text.as_deref())
-                .any(TextLayoutStore::is_probe_dirty),
-            "a probed text node never reached the restore queue"
+                .any(|store| store.block.is_probe_dirty()),
+            "a probed text block never reached the restore queue"
         );
     }
 
@@ -497,13 +520,13 @@ impl DocumentLayoutState {
     /// moves, a shaped paragraph only when the text or the style it was
     /// shaped from changes. Re-shaping is the expensive half, so the eviction
     /// that costs it is never implied by the one that does not.
+    /// Drops a node's shaped paragraph, keeping its box measurements.
+    ///
+    /// A paragraph is rebuilt rather than patched — parley's own mutability
+    /// contract — so eviction is simply dropping it.
     pub(crate) fn clear_text_artifact(&mut self, slot: NodeId) {
-        if let Some(artifacts) = self
-            .nodes
-            .get_mut(slot.arena_key())
-            .and_then(|node| node.text.as_deref_mut())
-        {
-            artifacts.invalidate();
+        if let Some(node) = self.nodes.get_mut(slot.arena_key()) {
+            node.text = None;
         }
     }
 

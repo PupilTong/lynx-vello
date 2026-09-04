@@ -1098,15 +1098,10 @@ mod tests {
                 .is_none_or(|state| state.text.is_none())
         );
 
-        let first = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
-            std::ptr::from_mut(artifacts)
-        };
-        assert!(document.layout_state().at(text_slot).text.is_some());
-        let second = {
-            let (_, artifacts) = document.layout_state_mut().text_parts(text_slot);
-            std::ptr::from_mut(artifacts)
-        };
-        assert_eq!(first, second);
+        // A text node never gains a paragraph slot: it is content of the
+        // block above it, and the block lives on the element that
+        // establishes it.
+        let (_, slot) = document.layout_state_mut().text_block_parts(text_slot);
+        assert!(slot.is_none());
     }
 }

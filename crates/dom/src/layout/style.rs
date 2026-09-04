@@ -269,9 +269,16 @@ impl<'dom> TextContainerView<'dom> {
     /// The paragraph style for `node`'s anonymous box — the style of the
     /// element that establishes its formatting context, which for a lone text
     /// child is its flat parent.
-    pub(crate) fn of<T>(node: &'dom Node<T>) -> Self {
+    /// The paragraph style of an element that *establishes* a text block.
+    ///
+    /// Its own computed style, not its parent's: a `display: -lynx-text`
+    /// element is the formatting context, where a text node merely sits in
+    /// one.
+    pub(crate) fn of_establishing_element<T>(node: &'dom Node<T>) -> Self {
         Self {
-            paragraph: inline_style_of(node),
+            paragraph: node
+                .layout_computed_style()
+                .unwrap_or(&super::ANONYMOUS_STYLE),
         }
     }
 }
@@ -321,7 +328,7 @@ impl TextRunStyle for TextRunView<'_> {
     }
 }
 
-fn inline_style_of<T>(node: &Node<T>) -> &ComputedValues {
+pub(crate) fn inline_style_of<T>(node: &Node<T>) -> &ComputedValues {
     debug_assert!(node.is_text_node(), "text style requires a text node");
     node.flat_parent()
         .and_then(Node::layout_computed_style)

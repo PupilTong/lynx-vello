@@ -96,7 +96,7 @@ fn singular_transforms_paint_nothing() {
 #[test]
 fn text_runs_encode_glyphs() {
     let mut h = Harness::new(
-        ".text { display: flex; width: 200px; height: 50px;
+        ".text { display: -lynx-text; width: 200px; height: 50px;
                  font-family: Ahem; font-size: 20px; color: black; }",
     );
     h.doc.dom.register_fonts(dom::FontBlob::from_static(AHEM));
@@ -137,7 +137,7 @@ fn hidden_group_roots_still_composite_children() {
 
 #[test]
 fn background_clip_text_sandwiches_the_layer() {
-    let css = ".text { display: flex; width: 200px; height: 50px;
+    let css = ".text { display: -lynx-text; width: 200px; height: 50px;
                         font-family: Ahem; font-size: 20px; color: black;
                         background-color: rebeccapurple; background-clip: text; }";
     let mut with_text = Harness::new(css);
@@ -226,7 +226,7 @@ fn transparent_border_sides_reject_the_uniform_fast_path() {
 #[test]
 fn text_decorations_propagate_through_nested_boxes() {
     let css = ".u { text-decoration-line: underline; }
-        .inner { display: flex; }
+        .inner { display: -lynx-text; }
         .text { display: flex; width: 200px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black; }";
     let mut plain = Harness::new(css);
@@ -258,9 +258,9 @@ fn text_decorations_propagate_through_nested_boxes() {
     );
 
     let abs_css = ".u { text-decoration-line: underline; }
-        .inner { display: flex; position: absolute; left: 0; top: 0;
+        .inner { display: -lynx-text; position: absolute; left: 0; top: 0;
                  width: 200px; height: 50px; }
-        .text { display: flex; width: 200px; height: 50px;
+        .text { display: -lynx-text; width: 200px; height: 50px;
                 font-family: Ahem; font-size: 20px; color: black; }";
     let mut escaped = Harness::new(abs_css);
     escaped
