@@ -161,9 +161,61 @@ enum SlotSource {
     Truncation(u32),
 }
 
-/// The output of one `layout` call.
+/// Everything a block's line breaking depends on.
+///
+/// Two `layout_at` calls at the same constraint produce the same lines, which
+/// is what makes the memo below sound — the same guarantee
+/// [`BreakConstraint`](crate::text::TextLayout) relies on one level down.
+/// `max_advance` is stored the way the breaker itself stores it, as
+/// `f32::INFINITY` for max-content, so a remembered constraint costs one
+/// `f32` pair rather than an `Option`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockConstraint {
+    max_advance: f32,
+    indent: f32,
+}
+
+impl BlockConstraint {
+    /// `max_advance` of `None` is max-content. `indent` is the **resolved**
+    /// `text-indent` in px: a percentage's basis is the definite inline size,
+    /// which only the caller knows, so the block never resolves one itself.
+    #[must_use]
+    pub fn new(max_advance: Option<f32>, indent: f32) -> Self {
+        Self {
+            max_advance: max_advance.map_or(f32::INFINITY, |value| value.max(0.0)),
+            indent,
+        }
+    }
+
+    fn max_advance(self) -> Option<f32> {
+        self.max_advance.is_finite().then_some(self.max_advance)
+    }
+}
+
+/// What one constraint reported, so a repeat answers without touching parley.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockMetrics {
+    pub size: Size<f32>,
+    pub first_baseline: Option<f32>,
+}
+
+/// How many already-answered constraints one block remembers.
+///
+/// Three, for the reason `MEASURED_BREAKS` is three on the measurement path:
+/// containers cycle a leaf through max-content, min-content and its used
+/// width, so anything smaller thrashes and anything larger only pays for
+/// itself on a constraint set no algorithm here produces.
+const MEASURED_BREAKS: u8 = 3;
+
+#[derive(Debug, Clone, Copy)]
+struct MeasuredBreak {
+    constraint: BlockConstraint,
+    metrics: BlockMetrics,
+}
+
+/// The output of one `layout_at` call.
 struct LayoutResult {
-    width: Option<f32>,
+    constraint: BlockConstraint,
     /// The truncated display layout and its style/slot tables; absent when
     /// the natural layout is the display.
     display: Option<DisplayPart>,
@@ -193,6 +245,21 @@ pub struct TextBlock {
     natural_sources: Vec<SourceItem>,
     boxes_dirty: bool,
     result: Option<LayoutResult>,
+    /// Constraints already answered, so a repeat reports without re-breaking
+    /// and — the part that matters — without moving the retained lines away
+    /// from the committed ones.
+    measured: [Option<MeasuredBreak>; MEASURED_BREAKS as usize],
+    next_measured: u8,
+    /// The constraint the last [`Self::commit`] left. `None` until one has
+    /// happened, which is what [`Self::has_committed`] reports and what stops
+    /// a reader seeing a paragraph no commit ever produced.
+    committed: Option<BlockConstraint>,
+    /// `content_widths.min` from a layout that had box sizes written in,
+    /// never from `new` (where no atom has a size yet).
+    min_content: Option<f32>,
+    /// How many times parley has actually broken these lines. The memo is
+    /// only worth its state if a caller can see it working.
+    breaks: u32,
 }
 
 #[derive(Debug)]
@@ -274,7 +341,153 @@ impl TextBlock {
             natural_sources,
             boxes_dirty: false,
             result: None,
+            measured: [None; MEASURED_BREAKS as usize],
+            next_measured: 0,
+            committed: None,
+            min_content: None,
+            breaks: 0,
         }
+    }
+
+    /// Reports `constraint` without disturbing the committed line breaks when
+    /// the same constraint has already been answered.
+    ///
+    /// A probe is what a container issues while sizing — max-content,
+    /// min-content, a trial width — and none of those answers is what paint
+    /// reads. A memo hit therefore returns without re-entering parley *and*
+    /// without moving the retained layout, which is the whole reason the memo
+    /// exists rather than a single-entry cache.
+    pub fn probe(
+        &mut self,
+        context: &mut TextContext,
+        constraint: BlockConstraint,
+    ) -> BlockMetrics {
+        if let Some(remembered) = self.remembered(constraint) {
+            return remembered;
+        }
+        self.layout_at(context, constraint);
+        self.remember(constraint)
+    }
+
+    /// Lays the block out for real. A commit's line breaks are the ones paint
+    /// reads, so this can never be answered from the memo.
+    pub fn commit(
+        &mut self,
+        context: &mut TextContext,
+        constraint: BlockConstraint,
+    ) -> BlockMetrics {
+        self.layout_at(context, constraint);
+        let metrics = self.remember(constraint);
+        self.committed = Some(constraint);
+        metrics
+    }
+
+    /// Whether a commit has ever produced this block's retained result.
+    ///
+    /// Every reader below panics if it has not; this is the question a host
+    /// asks first, so a paragraph no commit produced is a paragraph that does
+    /// not paint rather than one that panics.
+    #[must_use]
+    pub const fn has_committed(&self) -> bool {
+        self.committed.is_some()
+    }
+
+    /// Whether a probe left the retained result somewhere the committed
+    /// constraint did not put it.
+    ///
+    /// Tolerates a missing result on purpose: the host's measure closure is
+    /// not guaranteed to have run, and this is the one reader that must answer
+    /// before that is known.
+    #[must_use]
+    pub fn is_probe_dirty(&self) -> bool {
+        let Some(committed) = self.committed else {
+            return false;
+        };
+        self.boxes_dirty
+            || self
+                .result
+                .as_ref()
+                .is_none_or(|result| result.constraint != committed)
+    }
+
+    /// Puts the retained layout back where the last commit left it, so what
+    /// paint reads is never a probe's line breaks.
+    ///
+    /// Unlike the measurement path's namesake this needs a context: a
+    /// truncating block rebuilds its display layout, which re-shapes.
+    /// Answers whether parley was re-entered.
+    pub fn restore_committed(&mut self, context: &mut TextContext) -> bool {
+        let Some(committed) = self.committed else {
+            return false;
+        };
+        if !self.is_probe_dirty() {
+            return false;
+        }
+        self.layout_at(context, committed);
+        true
+    }
+
+    /// The narrowest this block's content can be, in px.
+    ///
+    /// Read off a laid-out result rather than recomputed, because parley's
+    /// `calculate_content_widths` reflects the box sizes currently written
+    /// into the layout — and at `new` no atom has a size yet. Forces one
+    /// unconstrained layout when cold.
+    pub fn min_content_width(&mut self, context: &mut TextContext) -> f32 {
+        if let Some(width) = self.min_content {
+            return width;
+        }
+        if self.result.is_none() || self.boxes_dirty {
+            let constraint = BlockConstraint::new(None, 0.0);
+            self.layout_at(context, constraint);
+            self.remember(constraint);
+        }
+        let width = self.expect_result().content_widths.min;
+        self.min_content = Some(width);
+        width
+    }
+
+    /// How many times parley has broken these lines. Tests and benchmarks
+    /// assert on it; nothing else should.
+    #[must_use]
+    pub const fn break_count(&self) -> u32 {
+        self.breaks
+    }
+
+    fn remembered(&self, constraint: BlockConstraint) -> Option<BlockMetrics> {
+        self.measured
+            .iter()
+            .flatten()
+            .find(|entry| entry.constraint == constraint)
+            .map(|entry| entry.metrics)
+    }
+
+    fn remember(&mut self, constraint: BlockConstraint) -> BlockMetrics {
+        let result = self.expect_result();
+        let metrics = BlockMetrics {
+            size: result.size,
+            first_baseline: result.first_baseline,
+        };
+        let entry = MeasuredBreak {
+            constraint,
+            metrics,
+        };
+        // Re-recording a constraint the memo already holds — a commit landing
+        // on the width a probe asked about — overwrites that entry rather than
+        // consuming a fresh slot, which would evict a constraint the pass is
+        // still going to ask for.
+        if let Some(existing) = self
+            .measured
+            .iter_mut()
+            .flatten()
+            .find(|held| held.constraint == constraint)
+        {
+            *existing = entry;
+            return metrics;
+        }
+        self.measured[usize::from(self.next_measured)] = Some(entry);
+        self.next_measured = (self.next_measured + 1) % MEASURED_BREAKS;
+        metrics
     }
 
     /// Updates one atomic box's measured size — the Lynx measure/align round
@@ -296,9 +509,22 @@ impl TextBlock {
                 _ => None,
             })
             .expect("set_box_size addresses a box this block was built with");
+        if spec.size == size && spec.baseline == baseline {
+            // A host re-asserting the size it already gave must not invalidate
+            // anything: the measure/align round trip repeats every pass, and
+            // treating a repeat as a change would defeat the memo outright.
+            return;
+        }
         spec.size = size;
         spec.baseline = baseline;
         self.boxes_dirty = true;
+        // A resized atom changes both the break and the intrinsic widths, so
+        // every remembered answer is stale. `committed` deliberately survives:
+        // it names where the retained layout must be put back, and clearing it
+        // would make `has_committed` false and drop the paragraph from paint.
+        self.measured = [None; MEASURED_BREAKS as usize];
+        self.next_measured = 0;
+        self.min_content = None;
         // Only a resized truncation box invalidates the cached truncation
         // content width; a main-flow resize leaves it valid.
         if let Some(part) = &mut self.truncation
@@ -312,19 +538,23 @@ impl TextBlock {
         }
     }
 
-    /// Lays the block out at `width` (`None` = unconstrained). A repeat call
-    /// with unchanged inputs returns without touching parley.
-    pub fn layout(&mut self, context: &mut TextContext, width: Option<f32>) {
-        let width = width.map(|value| value.max(0.0));
+    /// Lays the block out at `constraint`, re-entering parley only when the
+    /// retained result is not already the answer.
+    ///
+    /// Private: callers reach it through [`Self::probe`] or [`Self::commit`],
+    /// which differ in what they are allowed to do with the memo.
+    fn layout_at(&mut self, context: &mut TextContext, constraint: BlockConstraint) {
         if !self.boxes_dirty
             && self
                 .result
                 .as_ref()
-                .is_some_and(|result| result.width == width)
+                .is_some_and(|result| result.constraint == constraint)
         {
             return;
         }
         self.boxes_dirty = false;
+        self.breaks = self.breaks.saturating_add(1);
+        let width = constraint.max_advance();
 
         // Box widths and vertical-align line contributions feed the breaker.
         for (slot, entry) in self.natural.inline_boxes_mut().iter_mut().enumerate() {
@@ -333,10 +563,7 @@ impl TextBlock {
             entry.height = position::line_contribution(spec);
         }
 
-        let indent = match self.style.text_indent {
-            TextIndent::Px(value) => value,
-            TextIndent::Percent(fraction) => width.map_or(0.0, |basis| fraction * basis),
-        };
+        let indent = constraint.indent;
         self.natural
             .set_text_indent(indent, IndentOptions::default());
 
@@ -399,15 +626,10 @@ impl TextBlock {
         );
 
         let result = match plan {
-            None => self.finish_untruncated(&natural_lines, width, content_widths),
-            Some(plan) => self.finish_truncated(
-                context,
-                &plan,
-                &natural_lines,
-                indent,
-                width,
-                content_widths,
-            ),
+            None => self.finish_untruncated(&natural_lines, constraint, content_widths),
+            Some(plan) => {
+                self.finish_truncated(context, &plan, &natural_lines, constraint, content_widths)
+            }
         };
         self.result = Some(result);
     }
@@ -415,7 +637,7 @@ impl TextBlock {
     fn finish_untruncated(
         &mut self,
         natural_lines: &[NaturalLine],
-        width: Option<f32>,
+        constraint: BlockConstraint,
         content_widths: ContentWidths,
     ) -> LayoutResult {
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
@@ -453,7 +675,7 @@ impl TextBlock {
             hidden,
         );
         LayoutResult {
-            width,
+            constraint,
             display: None,
             lines,
             boxes,
@@ -470,13 +692,14 @@ impl TextBlock {
         context: &mut TextContext,
         plan: &CutPlan,
         natural_lines: &[NaturalLine],
-        indent: f32,
-        width: Option<f32>,
+        constraint: BlockConstraint,
         content_widths: ContentWidths,
     ) -> LayoutResult {
+        let width = constraint.max_advance();
         let alignment = resolve_alignment(self.style.text_align, self.style.direction);
         let visible = plan.cut_line as usize + 1;
-        let (mut display, sources, slots) = self.rebuild(context, plan, indent, width, visible);
+        let (mut display, sources, slots) =
+            self.rebuild(context, plan, constraint.indent, width, visible);
         display.align(alignment, AlignmentOptions::default());
         let slot_specs: Vec<InlineBoxSpec> = slots
             .iter()
@@ -501,7 +724,7 @@ impl TextBlock {
             hidden,
         );
         LayoutResult {
-            width,
+            constraint,
             display: Some(DisplayPart {
                 layout: display,
                 sources,
@@ -883,20 +1106,20 @@ mod tests {
         let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
         assert_eq!(context.shape_count(), 1);
 
-        block.layout(&mut context, Some(50.0));
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
         assert_eq!(context.shape_count(), 1, "breaking never re-shapes");
         let broken_lines = block.lines().len();
 
-        block.layout(&mut context, Some(50.0));
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
         assert_eq!(context.shape_count(), 1, "a repeated layout is a no-op");
 
-        block.layout(&mut context, None);
+        block.commit(&mut context, BlockConstraint::new(None, 0.0));
         assert_eq!(context.shape_count(), 1);
         assert_eq!(block.lines().len(), 1);
         assert_ne!(block.lines().len(), broken_lines);
 
         block.set_box_size(1, Size::new(40.0, 40.0), None);
-        block.layout(&mut context, Some(50.0));
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
         assert_eq!(context.shape_count(), 1, "a box resize re-breaks in place");
         assert_eq!(block.lines().len(), 3);
     }
@@ -927,7 +1150,7 @@ mod tests {
             "truncation content is not shaped up front"
         );
 
-        block.layout(&mut context, Some(50.0));
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
         assert_eq!(
             context.shape_count(),
             3,
@@ -935,10 +1158,10 @@ mod tests {
         );
         assert!(block.truncation_visible());
 
-        block.layout(&mut context, Some(50.0));
+        block.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
         assert_eq!(context.shape_count(), 3, "a repeated layout is a no-op");
 
-        block.layout(&mut context, Some(60.0));
+        block.commit(&mut context, BlockConstraint::new(Some(60.0), 0.0));
         assert_eq!(
             context.shape_count(),
             4,

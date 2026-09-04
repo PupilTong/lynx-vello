@@ -6,8 +6,9 @@
 
 use hughie::geometry::{Point, Size};
 use hughie::text::block::{
-    BlockStyle, Direction, InlineBoxSpec, InlineItem, PlacedBox, RunStyle, SourceItem, TextAlign,
-    TextBlock, TextIndent, TextOverflow, TextRunItem, TextWrap, VerticalAlign,
+    BlockConstraint, BlockStyle, Direction, InlineBoxSpec, InlineItem, PlacedBox, RunStyle,
+    SourceItem, TextAlign, TextBlock, TextIndent, TextOverflow, TextRunItem, TextWrap,
+    VerticalAlign,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::Atom;
@@ -86,8 +87,25 @@ fn laid_out(
     truncation: Option<&[InlineItem<'_>]>,
     width: Option<f32>,
 ) -> TextBlock {
+    laid_out_at(
+        context,
+        style,
+        items,
+        truncation,
+        BlockConstraint::new(width, 0.0),
+    )
+}
+
+fn laid_out_at(
+    context: &mut TextContext,
+    style: BlockStyle,
+    items: &[InlineItem<'_>],
+    truncation: Option<&[InlineItem<'_>]>,
+    constraint: BlockConstraint,
+) -> TextBlock {
     let mut block = TextBlock::new(context, style, items, truncation);
-    block.layout(context, width);
+    // A test reads the laid-out result, which is a commit's to produce.
+    block.commit(context, constraint);
     block
 }
 
@@ -619,26 +637,31 @@ fn nowrap_suppresses_soft_wrapping_but_not_preserved_breaks() {
 fn text_indent_shifts_and_shortens_the_first_line_only() {
     let style = ahem_style();
     let items = [run(&style, "aaaa aaaa")];
-    let block_style = BlockStyle {
-        text_indent: TextIndent::Px(10.0),
-        ..BlockStyle::default()
-    };
     let mut context = text_context();
-    let block = laid_out(&mut context, block_style, &items, None, Some(50.0));
+    // The caller resolves `text-indent` and hands the block the px, because a
+    // percentage's basis is the definite inline size and not the break width.
+    let resolve = |indent: TextIndent, basis: f32| match indent {
+        TextIndent::Px(value) => value,
+        TextIndent::Percent(fraction) => fraction * basis,
+    };
+    let block = laid_out_at(
+        &mut context,
+        BlockStyle::default(),
+        &items,
+        None,
+        BlockConstraint::new(Some(50.0), resolve(TextIndent::Px(10.0), 50.0)),
+    );
 
     let display = block.display();
     assert_close(display.get(0).expect("first").metrics().offset, 10.0);
     assert_close(display.get(1).expect("second").metrics().offset, 0.0);
 
-    let percent = laid_out(
+    let percent = laid_out_at(
         &mut context,
-        BlockStyle {
-            text_indent: TextIndent::Percent(0.2),
-            ..BlockStyle::default()
-        },
+        BlockStyle::default(),
         &items,
         None,
-        Some(50.0),
+        BlockConstraint::new(Some(50.0), resolve(TextIndent::Percent(0.2), 50.0)),
     );
     assert_close(
         percent.display().get(0).expect("first").metrics().offset,
@@ -696,9 +719,9 @@ fn resizing_a_box_rebreaks_into_the_same_geometry_as_a_fresh_build() {
     let mut context = text_context();
 
     let mut resized = TextBlock::new(&mut context, BlockStyle::default(), &small, None);
-    resized.layout(&mut context, Some(50.0));
+    resized.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
     resized.set_box_size(5, Size::new(25.0, 25.0), Some(20.0));
-    resized.layout(&mut context, Some(50.0));
+    resized.commit(&mut context, BlockConstraint::new(Some(50.0), 0.0));
 
     let fresh = laid_out(
         &mut context,
@@ -1073,10 +1096,10 @@ fn content_widths_track_box_resizes_and_survive_justification() {
         atom(1, 10.0, 10.0, VerticalAlign::Baseline),
     ];
     let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
-    block.layout(&mut context, None);
+    block.commit(&mut context, BlockConstraint::new(None, 0.0));
     assert_close(block.content_widths().min, 40.0);
     block.set_box_size(1, Size::new(55.0, 10.0), None);
-    block.layout(&mut context, None);
+    block.commit(&mut context, BlockConstraint::new(None, 0.0));
     assert_close(block.content_widths().min, 55.0);
 
     // Justification mutates cluster advances on the retained layout; the
@@ -1090,9 +1113,9 @@ fn content_widths_track_box_resizes_and_survive_justification() {
         &[run(&style, "aa aa aa")],
         None,
     );
-    justified.layout(&mut context, Some(70.0));
+    justified.commit(&mut context, BlockConstraint::new(Some(70.0), 0.0));
     assert_close(justified.content_widths().max, 80.0);
-    justified.layout(&mut context, Some(60.0));
+    justified.commit(&mut context, BlockConstraint::new(Some(60.0), 0.0));
     assert_close(justified.content_widths().max, 80.0);
 }
 
@@ -1192,4 +1215,222 @@ fn the_fitting_walk_removes_at_least_two_units() {
     assert!(block.truncation_visible());
     assert_eq!(block.lines()[1].ellipsis_count, 2);
     assert_close(block.lines()[1].advance, 30.0);
+}
+
+// ---------------------------------------------------------------------------
+// The probe/commit contract.
+//
+// A container sizes a block by asking it several questions — max-content,
+// min-content, a trial width — and only the last answer is the one paint
+// reads. These pin that a question never becomes the answer.
+// ---------------------------------------------------------------------------
+
+/// A repeated constraint is answered from the memo, without re-breaking.
+#[test]
+fn a_remembered_constraint_costs_no_break() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa bbbb cccc dddd")];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let wide = BlockConstraint::new(Some(200.0), 0.0);
+    let first = block.probe(&mut context, wide);
+    let after_first = block.break_count();
+    let again = block.probe(&mut context, wide);
+
+    assert_eq!(first, again);
+    assert_eq!(
+        block.break_count(),
+        after_first,
+        "a repeat of a remembered constraint must not re-enter parley"
+    );
+}
+
+/// The memo holds three constraints, because that is what a container cycles
+/// a leaf through — max-content, min-content, used width — in one pass.
+#[test]
+fn the_memo_absorbs_the_constraint_cycle_a_container_produces() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa bbbb cccc dddd")];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let cycle = [
+        BlockConstraint::new(None, 0.0),
+        BlockConstraint::new(Some(40.0), 0.0),
+        BlockConstraint::new(Some(120.0), 0.0),
+    ];
+    for constraint in cycle {
+        block.probe(&mut context, constraint);
+    }
+    let after_cold = block.break_count();
+
+    // The alternation a single-entry cache thrashes on.
+    for constraint in [cycle[0], cycle[2], cycle[1], cycle[0]] {
+        block.probe(&mut context, constraint);
+    }
+    assert_eq!(
+        block.break_count(),
+        after_cold,
+        "three remembered constraints must absorb the cycle a container asks in"
+    );
+}
+
+/// A commit is never answered from the memo: its line breaks are what paint
+/// reads, so it must actually put the retained layout there.
+#[test]
+fn a_commit_is_never_served_from_the_memo() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa bbbb cccc")];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let narrow = BlockConstraint::new(Some(40.0), 0.0);
+    let wide = BlockConstraint::new(None, 0.0);
+
+    // The memo now holds `narrow`, but the retained layout has moved to `wide`.
+    let probed = block.probe(&mut context, narrow);
+    block.probe(&mut context, wide);
+    let after_probes = block.break_count();
+
+    // A commit at `narrow` must put the layout back there rather than reply
+    // from the memo — those lines are the ones paint reads.
+    let committed = block.commit(&mut context, narrow);
+    assert!(
+        block.break_count() > after_probes,
+        "a commit must re-break when the retained layout sits at another constraint"
+    );
+    assert_eq!(
+        committed, probed,
+        "and it must land on the same answer the probe reported"
+    );
+    assert!(block.has_committed());
+    assert!(!block.is_probe_dirty());
+
+    // Re-committing where the layout already sits is free, exactly as
+    // `TextLayout::break_to` is on the path this replaces.
+    let settled = block.break_count();
+    block.commit(&mut context, narrow);
+    assert_eq!(block.break_count(), settled);
+}
+
+/// A probe that follows a commit leaves the block owing a restore, and the
+/// restore puts the committed geometry back exactly.
+#[test]
+fn a_probe_that_never_commits_is_handed_back_to_its_committed_break() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa bbbb cccc dddd")];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let used = BlockConstraint::new(Some(80.0), 0.0);
+    let committed = block.commit(&mut context, used);
+    let committed_lines = block.lines().len();
+
+    // A later pass probes a different width and never commits it.
+    block.probe(&mut context, BlockConstraint::new(None, 0.0));
+    assert!(
+        block.is_probe_dirty(),
+        "a probe away from the committed constraint owes a restore"
+    );
+
+    assert!(block.restore_committed(&mut context));
+    assert!(!block.is_probe_dirty());
+    assert_eq!(block.size(), committed.size);
+    assert_eq!(block.lines().len(), committed_lines);
+    assert!(
+        !block.restore_committed(&mut context),
+        "a block already at its committed constraint restores nothing"
+    );
+}
+
+/// Nothing may read a paragraph no commit produced.
+#[test]
+fn a_block_reports_no_commit_until_one_has_happened() {
+    let style = ahem_style();
+    let items = [run(&style, "aaaa")];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    assert!(!block.has_committed());
+    assert!(
+        !block.is_probe_dirty(),
+        "with nothing committed there is nothing to be dirty against"
+    );
+
+    block.probe(&mut context, BlockConstraint::new(Some(40.0), 0.0));
+    assert!(
+        !block.has_committed(),
+        "a probe must not make a block look painted"
+    );
+
+    block.commit(&mut context, BlockConstraint::new(Some(40.0), 0.0));
+    assert!(block.has_committed());
+}
+
+/// Re-asserting a size a box already has must not invalidate anything: the
+/// measure/align round trip repeats every pass.
+#[test]
+fn re_asserting_an_unchanged_box_size_costs_nothing() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "aa"),
+        InlineItem::Box(InlineBoxSpec {
+            id: 1,
+            size: Size::new(10.0, 10.0),
+            baseline: None,
+            vertical_align: VerticalAlign::Baseline,
+        }),
+    ];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let constraint = BlockConstraint::new(Some(100.0), 0.0);
+    block.commit(&mut context, constraint);
+    let after_commit = block.break_count();
+
+    block.set_box_size(1, Size::new(10.0, 10.0), None);
+    block.probe(&mut context, constraint);
+    assert_eq!(
+        block.break_count(),
+        after_commit,
+        "a host re-asserting the same box size must not defeat the memo"
+    );
+    assert!(!block.is_probe_dirty());
+
+    // A real change does invalidate, but keeps the block paintable: clearing
+    // `committed` would drop the paragraph from paint entirely.
+    block.set_box_size(1, Size::new(30.0, 10.0), None);
+    assert!(
+        block.has_committed(),
+        "a resized atom is not an unpainted block"
+    );
+    assert!(block.is_probe_dirty(), "and it owes a re-layout");
+}
+
+/// The min-content width is read off a layout that has box sizes written in,
+/// never from construction, where no atom has a size yet.
+#[test]
+fn min_content_width_accounts_for_a_resized_atom() {
+    let style = ahem_style();
+    let items = [
+        run(&style, "aa"),
+        InlineItem::Box(InlineBoxSpec {
+            id: 1,
+            size: Size::new(10.0, 10.0),
+            baseline: None,
+            vertical_align: VerticalAlign::Baseline,
+        }),
+    ];
+    let mut context = text_context();
+    let mut block = TextBlock::new(&mut context, BlockStyle::default(), &items, None);
+
+    let cold = block.min_content_width(&mut context);
+    block.set_box_size(1, Size::new(80.0, 10.0), None);
+    let after = block.min_content_width(&mut context);
+
+    assert!(
+        after > cold,
+        "a wider unbreakable atom raises the min-content width: {cold} -> {after}"
+    );
 }
