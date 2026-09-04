@@ -34,18 +34,25 @@ impl Default for PageConfig {
 /// `web-elements`' common block: a border box, and the display mode
 /// `defaultDisplayLinear` picks — a per-tag exception to that switch would
 /// have to be `!important`, so it is a recorded deviation instead
-/// (`docs/tracking/deviations.md`). `text` is a flex container whatever the
-/// switch says, and `wrapper` generates no box — both from `web-elements`'
-/// own sheet, where the linear toggle covers container tags only.
+/// (`docs/tracking/deviations.md`). `text` is a text block whatever the switch
+/// says, and `wrapper` generates no box — both from `web-elements`' own sheet,
+/// where the linear toggle covers container tags only.
 /// `defaultOverflowVisible` reaches `page` and `view` alone, the way web-core
 /// spends it on `x-view` alone; a scroller carries its own axes regardless.
 ///
-/// Nothing here is `!important`. web-elements' defaults are author origin in
-/// the browser and several of them lean on `!important`; ours are user-agent
-/// origin, where an important declaration outranks author `!important` instead
-/// of losing to it, so the sheet stays important-free and what web-elements
-/// forces is written as a plain declaration a page's own CSS can still
-/// override (`docs/style-assumptions.md` §D.15).
+/// Almost nothing here is `!important`. web-elements' defaults are author
+/// origin in the browser and several of them lean on `!important`; ours are
+/// user-agent origin, where an important declaration outranks author
+/// `!important` — and inline style — instead of losing to them, so what
+/// web-elements merely forces is written here as a plain declaration a page's
+/// own CSS can still override (`docs/style-assumptions.md` §D.15).
+///
+/// The one exception is `display: -lynx-text` on `text` and `inline-text`.
+/// Lynx does not decide inline-ness by cascade at all: `ConvertToInlineElement`
+/// runs when a child is *added* to a text, and no author CSS can undo it. A
+/// declaration a page could override would therefore misdescribe the engine,
+/// not merely permit a different one. `the_ua_sheet_is_important_free_apart_from_the_text_block`
+/// pins the exception to exactly those two rules.
 #[must_use]
 pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     let display = if config.default_display_linear {
@@ -178,8 +185,24 @@ mod tests {
         assert!(sheet.contains("page, view { overflow: hidden; }"));
     }
 
+    /// The sheet's important declarations are exactly the text-block ones.
+    ///
+    /// A UA-origin `!important` outranks author `!important` *and* inline
+    /// style, so every one of them removes a knob a page would otherwise
+    /// have. `display: -lynx-text` is the recorded exception
+    /// (`docs/style-assumptions.md` §D.15): in Lynx a `<text>`'s inline-ness
+    /// is established structurally, at tree-mutation time, and no author CSS
+    /// can undo it — so the cascade value naming it has to be equally
+    /// unconditional. This pins the exception rather than dropping the
+    /// invariant: a new important declaration fails here until someone
+    /// decides it deserves the same argument.
     #[test]
-    fn the_ua_sheet_carries_no_important_declaration() {
+    fn the_ua_sheet_is_important_free_apart_from_the_text_block() {
+        const ALLOWED: [&str; 2] = [
+            "text { box-sizing: border-box; display: -lynx-text !important; color: initial; }",
+            "inline-text { display: -lynx-text !important; }",
+        ];
+
         for config in [
             PageConfig::default(),
             PageConfig {
@@ -188,9 +211,12 @@ mod tests {
                 enable_css_selector: false,
             },
         ] {
-            assert!(
-                !ua_stylesheet(config).contains('!'),
-                "a UA-origin important declaration would outrank author `!important`"
+            let sheet = ua_stylesheet(config);
+            let important: Vec<&str> = sheet.lines().filter(|line| line.contains('!')).collect();
+            assert_eq!(
+                important, ALLOWED,
+                "a UA-origin important declaration outranks author `!important`, \
+                 so the set of them is fixed by §D.15's one recorded exception"
             );
         }
     }

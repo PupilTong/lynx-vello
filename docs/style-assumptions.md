@@ -196,10 +196,27 @@ the semantics are stylo's.** Everything below refines that sentence.
     **author**-origin CSS, and several carry `!important`. Ours are UA
     origin, where an important declaration would **outrank author
     `!important`** (cascade origin order inverts for important
-    declarations) — so the generated UA sheet must stay `!important`-free.
-    Component behaviors web-elements enforces via `!important` (e.g.
-    `scroll-view { display: flex !important }`) are instead owned by the
-    native layout engine's element policy, not fought out in the cascade.
+    declarations) — and inline style with it — so the generated UA sheet
+    stays `!important`-free. Component behaviors web-elements enforces via
+    `!important` (e.g. `scroll-view { display: flex !important }`) are
+    instead owned by the native layout engine's element policy, not fought
+    out in the cascade.
+
+    *The one exception* (user decision, 2026-09-03): `display: -lynx-text`
+    on `text` and `inline-text`. The test distinguishing it from the
+    `scroll-view` case above is **whether the fact is a default or a
+    structural invariant**. A scroller's display mode is a default — web-core
+    itself gates it on page config, and the question is only *which* layout
+    mode the box gets. A text's inline-ness is not a mode at all: Lynx
+    establishes it at tree-mutation time (`TextElement::OnNodeAdded` calls
+    `ConvertToInlineElement`, which renames the tag and marks the node
+    inline), the paragraph builder never reads `display`, and no author CSS
+    can undo any of it. A cascade value a page could override would therefore
+    describe an engine we do not have. So the exception is spent on facts the
+    cascade is merely *reporting*, never on defaults it is *choosing* —
+    and it is pinned by
+    `the_ua_sheet_is_important_free_apart_from_the_text_block`, which fails
+    on any new important declaration until it earns the same argument.
 
 16. **cssId scoping is a runtime-adapter concern.** The feature exists for
     pageConfig `enableRemoveCSSScope = false` (that is the exact
