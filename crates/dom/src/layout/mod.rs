@@ -218,6 +218,16 @@ impl<T> Document<T> {
         Some(self.text_block(id)?.size())
     }
 
+    /// The nodes behind `id`'s paragraph items, indexed the way
+    /// [`SourceItem::Content`](hughie::text::block::SourceItem) indexes them.
+    ///
+    /// How a glyph run finds the element whose style painted it.
+    #[must_use]
+    pub(crate) fn text_block_sources(&self, id: crate::NodeId) -> Option<&[crate::NodeId]> {
+        let slot = self.slot(id)?;
+        Some(&self.layout_state().get(slot)?.text.as_deref()?.source_ids)
+    }
+
     /// The paragraph `id` established, if a commit has produced one.
     ///
     /// `None` keeps every reader fail-closed: a block no commit laid out is

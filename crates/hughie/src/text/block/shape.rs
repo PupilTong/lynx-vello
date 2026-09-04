@@ -43,6 +43,16 @@ pub(in crate::text::block) fn shape(
     #[cfg(test)]
     context.record_shape();
     let (font_context, layout_context) = context.font_and_layout_contexts();
+    // `text` is already whitespace-normalized by `super::content::normalize`,
+    // and `style_run_builder` takes it verbatim — parley's own
+    // `WhiteSpaceCollapse` lives on the `TreeBuilder` path, which this does not
+    // use. That division is load-bearing rather than incidental: parley's
+    // collapse only recognises `is_ascii_whitespace` and has no notion of a
+    // segment break, so it would fold `\n` between two CJK characters into a
+    // visible space — the case `should_remove_segment_break` exists to delete.
+    // Moving to `TreeBuilder` would collapse this text a second time under
+    // those weaker rules, and the symptom would be stray spaces in East Asian
+    // text rather than an error.
     let mut builder = layout_context.style_run_builder(font_context, text, 1.0, false);
     if block.word_break != WordBreak::BreakAll {
         builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
