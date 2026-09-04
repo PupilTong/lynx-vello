@@ -1216,8 +1216,11 @@ useful signal for currently-compatible versions of those libraries.
   suppressing a user-agent default action stays gesture arbitration's job,
   arriving on the separate `InputEvent::default_prevented` seam.
   `DocumentLayoutState` lazily boxes the shared Parley `TextContext`; each
-  text node's layout-state entry lazily boxes its probe/commit
-  `TextLayoutStore` and reads inherited font/text values from its parent.
+  `display: -lynx-text` element's layout-state entry lazily boxes the
+  probe/commit `TextBlockStore` holding the one paragraph its whole subtree
+  flattens into. A text node generates no box and retains nothing: it is
+  content of the block above it, and its run reads inherited font/text values
+  from its innermost element ancestor.
   Font registration takes the shared `FontBlob` resource through
   `Engine` → `Document` → `TextContext`; an owned loader
   buffer is moved into Parley without copying its payload, while
@@ -1292,7 +1295,7 @@ useful signal for currently-compatible versions of those libraries.
   view every algorithm collects items through, flattening `display: contents`
   subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's
-  concrete Parley `TextMeasurer::compute_layout` path; arbitrary host
+  concrete `TextBlock::probe`/`commit` paragraph path; arbitrary host
   measurers are not supported. **Flexbox, Grid, Relative, and Linear
   implemented** —
   the shared root/leaf/cache/positioned/rounding machinery, CSS Flexbox Level

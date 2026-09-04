@@ -52,10 +52,6 @@ name = "containment"
 harness = false
 
 [[bench]]
-name = "text"
-harness = false
-
-[[bench]]
 name = "text_block"
 harness = false
 

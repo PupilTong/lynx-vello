@@ -900,8 +900,6 @@ impl TextBlock {
             .map_or(&self.natural, |part| &part.layout)
     }
 
-    /// Paint identity of one parley `style_index` from [`Self::display`].
-    #[must_use]
     /// How many parley style indices this block's display layout has.
     ///
     /// The range [`Self::source_of`] is defined over, so a painter can build
@@ -916,6 +914,8 @@ impl TextBlock {
             .len()
     }
 
+    /// Paint identity of one parley `style_index` from [`Self::display`].
+    #[must_use]
     pub fn source_of(&self, style_index: u16) -> SourceItem {
         let result = self.expect_result();
         let sources = result

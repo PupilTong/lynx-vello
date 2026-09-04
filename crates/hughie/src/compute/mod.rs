@@ -9,7 +9,6 @@ mod util;
 
 pub use flexbox::compute_flexbox_layout;
 pub use grid::compute_grid_layout;
-pub(crate) use leaf::compute_leaf_layout_with_measurement;
 #[cfg(feature = "layout-test-utils")]
 #[doc(hidden)]
 pub use leaf::compute_leaf_layout_with_measurement_for_testing;

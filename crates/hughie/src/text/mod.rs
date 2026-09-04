@@ -1,13 +1,8 @@
-//! Parley text measurement core.
+//! Parley text layout: the Lynx text block and the context it shapes in.
 
 pub mod block;
-mod content;
 mod context;
 mod font;
-mod layout;
-mod measure;
 
 pub use context::TextContext;
 pub use font::FontBlob;
-pub use layout::{TextLayout, TextLayoutStore, TextMeasurement};
-pub use measure::TextMeasurer;

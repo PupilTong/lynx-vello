@@ -383,7 +383,6 @@ impl<T> Document<T> {
 mod tests {
     use std::mem::size_of;
 
-    use hughie::text::TextLayoutStore;
     use hughie::tree::{LayoutInput, LayoutOutput, LayoutSlot};
 
     use super::*;
@@ -395,20 +394,22 @@ mod tests {
         const PRE_SPLIT_NODE_SIZE: usize = 368;
         const PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE: usize = 456;
         const PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE: usize = 160;
+        // The paragraph is one `Option<Box<_>>` on the node's layout state, so
+        // the store's own size never entered this budget — only the pointer
+        // does. The retired measurement path's `TextLayoutStore` used to be
+        // measured here beside it, which said nothing the pointer did not.
         let current = (
             size_of::<crate::Node<()>>(),
             size_of::<LayoutSlot>(),
             size_of::<NodeLayoutState>(),
-            size_of::<TextLayoutStore>(),
         );
         eprintln!(
-            "current: node={} layout_slot={} node_layout_state={} text_store={}; \
+            "current: node={} layout_slot={} node_layout_state={}; \
              pre-static-split baseline: node={} atomic_layout_data={} \
              atomic_layout_results={}",
             current.0,
             current.1,
             current.2,
-            current.3,
             PRE_SPLIT_NODE_SIZE,
             PRE_SPLIT_ATOMIC_LAYOUT_DATA_SIZE,
             PRE_SPLIT_ATOMIC_LAYOUT_RESULTS_SIZE,
@@ -416,8 +417,8 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352, 8,),
-            "Node, LayoutSlot, NodeLayoutState, and TextLayoutStore sizes changed",
+            (if cfg!(debug_assertions) { 224 } else { 216 }, 336, 352),
+            "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }
 
