@@ -19,7 +19,6 @@ use core::ops::Range;
 
 use super::style::{RunStyle, VerticalAlign};
 use crate::geometry::Size;
-use crate::text::content::should_remove_segment_break;
 
 /// One flattened paragraph item, in source order.
 #[derive(Clone, Copy, Debug)]
@@ -502,6 +501,36 @@ impl Normalizer {
             },
         }
     }
+}
+
+/// The CSS segment-break transformation rules.
+///
+/// Lives here rather than on the measurement path because this is the
+/// paragraph implementation that survives; that path borrows it back.
+pub(in crate::text) fn should_remove_segment_break(previous: Option<char>, next: char) -> bool {
+    previous.is_some_and(|character| character == '\u{200B}')
+        || next == '\u{200B}'
+        || previous.is_some_and(|character| {
+            is_east_asian_without_word_separators(character)
+                && is_east_asian_without_word_separators(next)
+        })
+}
+
+pub(in crate::text) const fn is_east_asian_without_word_separators(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x2E80..=0x312F
+            | 0x3190..=0xA4CF
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE1F
+            | 0xFE30..=0xFE6F
+            | 0xFF01..=0xFF9F
+            | 0xFFE0..=0xFFE6
+            | 0x16FE0..=0x18D8F
+            | 0x1AFF0..=0x1B2FF
+            | 0x1F200..=0x1F2FF
+            | 0x20000..=0x323AF
+    )
 }
 
 #[cfg(test)]

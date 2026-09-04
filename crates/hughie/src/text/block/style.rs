@@ -15,18 +15,18 @@ use std::borrow::Cow;
 
 use parley::setting::Tag;
 use parley::{
-    Alignment, FontFeature, FontFeatures, FontStyle as ParleyFontStyle, FontVariation,
-    FontVariations, FontWeight as ParleyFontWeight, LineHeight as ParleyLineHeight,
-    OverflowWrap as ParleyOverflowWrap, TextStyle as ParleyTextStyle,
-    TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
+    Alignment, FontFamily as ParleyFontFamily, FontFamilyName as ParleyFontFamilyName, FontFeature,
+    FontFeatures, FontStyle as ParleyFontStyle, FontVariation, FontVariations,
+    FontWeight as ParleyFontWeight, GenericFamily as ParleyGenericFamily,
+    LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
+    TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
-use stylo::values::computed::font::GenericFontFamily;
+use stylo::values::computed::font::{GenericFontFamily, SingleFontFamily};
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight,
 };
 
 use crate::style::TextBrush;
-use crate::text::measure::translate_font_family_list;
 
 /// Container-level parameters of one Lynx text block.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -269,6 +269,50 @@ pub(in crate::text::block) fn parley_style<'style>(
             TextWrap::NoWrap => ParleyTextWrapMode::NoWrap,
         },
         ..ParleyTextStyle::default()
+    }
+}
+
+/// Translates a stylo family list into parley's.
+///
+/// Lives with the block rather than with the measurement path because the
+/// block is the paragraph implementation that survives; the measurement path
+/// borrows it back until it goes.
+pub(in crate::text) fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
+    let families = &family.families.list;
+    if families.is_empty() {
+        return ParleyGenericFamily::SansSerif.into();
+    }
+    if families.len() == 1 {
+        return translate_font_family_name(&families[0]).into();
+    }
+    ParleyFontFamily::List(Cow::Owned(
+        families.iter().map(translate_font_family_name).collect(),
+    ))
+}
+
+pub(in crate::text) fn translate_font_family_name(
+    single: &SingleFontFamily,
+) -> ParleyFontFamilyName<'_> {
+    match single {
+        SingleFontFamily::FamilyName(name) => {
+            ParleyFontFamilyName::Named(Cow::Borrowed(name.name.as_ref()))
+        }
+        SingleFontFamily::Generic(generic) => {
+            ParleyFontFamilyName::Generic(translate_generic_family(*generic))
+        }
+    }
+}
+
+pub(in crate::text) const fn translate_generic_family(
+    value: GenericFontFamily,
+) -> ParleyGenericFamily {
+    match value {
+        GenericFontFamily::None | GenericFontFamily::SansSerif => ParleyGenericFamily::SansSerif,
+        GenericFontFamily::Serif => ParleyGenericFamily::Serif,
+        GenericFontFamily::Monospace => ParleyGenericFamily::Monospace,
+        GenericFontFamily::Cursive => ParleyGenericFamily::Cursive,
+        GenericFontFamily::Fantasy => ParleyGenericFamily::Fantasy,
+        GenericFontFamily::SystemUi => ParleyGenericFamily::SystemUi,
     }
 }
 

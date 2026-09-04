@@ -449,6 +449,10 @@ impl<T> Document<T> {
             self.note_emptiness_change(element);
             self.mark_ancestors_dirty_descendants(element);
         }
+        // The one mutation that really does change what was shaped. It used to
+        // ride on `invalidate_layout` dropping the artifact implicitly; that
+        // is now box-caches only, so the re-shape is asked for explicitly.
+        self.invalidate_text_artifact(id);
         self.invalidate_layout(id);
     }
 

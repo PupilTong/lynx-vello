@@ -490,9 +490,14 @@ impl DocumentLayoutState {
         }
     }
 
-    /// Drops both a node's cached box measurements and its shaped text.
-    pub(crate) fn clear_layout_cache(&mut self, slot: NodeId) {
-        self.clear_box_cache(slot);
+    /// Drops a node's shaped text, keeping its box measurements.
+    ///
+    /// Separate from [`Self::clear_box_cache`] because the two answer
+    /// different questions: a box cache dies when any geometry around a node
+    /// moves, a shaped paragraph only when the text or the style it was
+    /// shaped from changes. Re-shaping is the expensive half, so the eviction
+    /// that costs it is never implied by the one that does not.
+    pub(crate) fn clear_text_artifact(&mut self, slot: NodeId) {
         if let Some(artifacts) = self
             .nodes
             .get_mut(slot.arena_key())
@@ -500,6 +505,12 @@ impl DocumentLayoutState {
         {
             artifacts.invalidate();
         }
+    }
+
+    /// Drops both a node's cached box measurements and its shaped text.
+    pub(crate) fn clear_layout_cache(&mut self, slot: NodeId) {
+        self.clear_box_cache(slot);
+        self.clear_text_artifact(slot);
     }
 }
 

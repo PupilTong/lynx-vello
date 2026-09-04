@@ -763,3 +763,48 @@ fn asset_basenames(directory: &Path, extension: &str) -> BTreeSet<String> {
     }
     result
 }
+
+/// The `text-block` class really reaches the fixtures.
+///
+/// The goldens above pass byte-identically because `DisplayMode::Text` still
+/// dispatches to flexbox — not because the class is inert. If the harness ever
+/// stopped applying it, every text case would keep passing here and then break
+/// the moment text layout actually moves onto `-lynx-text`. This is the test
+/// that tells those two states apart.
+#[test]
+fn the_text_block_class_gives_a_fixture_the_lynx_text_display() {
+    use dom::stylo::values::computed::Display;
+
+    let case = generated::CASES
+        .iter()
+        .find(|case| case.name == "text-metrics-000")
+        .expect("the atlas carries the text-metrics probes");
+    assert!(
+        case.fragment.contains(r#"class="text-block""#),
+        "a text fixture must carry the marker the harness keys on"
+    );
+
+    let mut doc = html::parse(case.fragment, 128.0, 128.0);
+    doc.dom.layout();
+
+    let root = doc.dom.document_element().id();
+    let inner = doc
+        .dom
+        .get(root)
+        .expect("the staged root")
+        .first_child()
+        .map(dom::Node::id)
+        .expect("the staged root wraps the text box");
+    let display = doc
+        .dom
+        .get(inner)
+        .expect("live")
+        .computed_style()
+        .expect("flushed")
+        .clone_display();
+    assert_eq!(
+        display,
+        Display::LynxText,
+        "the harness sheet must beat the fixture's own inline `display:flex`"
+    );
+}
