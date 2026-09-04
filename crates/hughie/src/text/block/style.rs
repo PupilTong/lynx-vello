@@ -40,7 +40,6 @@ pub struct BlockStyle {
     /// `pre*` values); newline preservation is per-run for raw-text.
     pub text_wrap: TextWrap,
     pub word_break: WordBreak,
-    pub text_indent: TextIndent,
     pub overflow: TextOverflow,
     /// The `text-maxline` attribute. Lynx stores `optional<int>` and treats
     /// non-positive values as absent, which `NonZeroU32` makes unrepresentable.
@@ -131,6 +130,13 @@ pub enum WordBreak {
     KeepAll,
 }
 
+/// The `text-indent` value, as a caller resolves it.
+///
+/// Deliberately not a [`BlockStyle`] field: a percentage resolves against the
+/// definite inline size, which is the caller's to know, while the block only
+/// ever sees a break width — resolving against *that* would make the indent
+/// depend on the constraint it helps decide. The resolved px goes into
+/// [`BlockConstraint`](super::BlockConstraint).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextIndent {
     Px(f32),
@@ -286,7 +292,6 @@ mod tests {
         assert_eq!(style.direction, Direction::Ltr);
         assert_eq!(style.text_wrap, TextWrap::Wrap);
         assert_eq!(style.word_break, WordBreak::Normal);
-        assert_eq!(style.text_indent, TextIndent::Px(0.0));
         assert_eq!(style.overflow, TextOverflow::Clip);
         assert_eq!(style.max_lines, None);
         assert_eq!(style.max_chars, None);

@@ -28,8 +28,8 @@ use core::num::NonZeroU32;
 use divan::counter::ItemsCount;
 use hughie::geometry::Size;
 use hughie::text::block::{
-    BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextAlign, TextBlock, TextOverflow,
-    TextRunItem, VerticalAlign, WordBreak,
+    BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextAlign, TextBlock,
+    TextOverflow, TextRunItem, VerticalAlign, WordBreak,
 };
 use hughie::text::{FontBlob, TextContext};
 use stylo::values::computed::font::{
@@ -538,7 +538,7 @@ impl Batch {
         let mut last = Size::new(0.0, 0.0);
         for case in &self.cases {
             let mut block = case.build(&mut self.context);
-            block.layout(&mut self.context, Some(width));
+            block.commit(&mut self.context, BlockConstraint::new(Some(width), 0.0));
             last = divan::black_box(block.size());
             self.blocks.push(block);
         }
@@ -548,7 +548,7 @@ impl Batch {
     fn layout_all(&mut self, width: f32) -> Size<f32> {
         let mut last = Size::new(0.0, 0.0);
         for block in &mut self.blocks {
-            block.layout(&mut self.context, Some(width));
+            block.commit(&mut self.context, BlockConstraint::new(Some(width), 0.0));
             last = divan::black_box(block.size());
         }
         last
@@ -558,7 +558,7 @@ impl Batch {
         let mut last = Size::new(0.0, 0.0);
         for block in &mut self.blocks {
             block.set_box_size(0, size, None);
-            block.layout(&mut self.context, Some(width));
+            block.commit(&mut self.context, BlockConstraint::new(Some(width), 0.0));
             last = divan::black_box(block.size());
         }
         last
@@ -753,7 +753,7 @@ fn cold_thousand_style_runs(bencher: divan::Bencher<'_, '_>) {
                     })
                     .collect();
                 let mut block = TextBlock::new(context, BlockStyle::default(), &items, None);
-                block.layout(context, Some(300.0));
+                block.commit(context, BlockConstraint::new(Some(300.0), 0.0));
                 divan::black_box(block.size());
             }
         });
@@ -815,7 +815,7 @@ fn cold_word_break_matrix(bencher: divan::Bencher<'_, '_>) {
             for row in &batch.cases {
                 for case in row {
                     let mut block = case.build(&mut batch.context);
-                    block.layout(&mut batch.context, Some(100.0));
+                    block.commit(&mut batch.context, BlockConstraint::new(Some(100.0), 0.0));
                     divan::black_box(block.size());
                 }
             }
