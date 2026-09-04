@@ -25,10 +25,10 @@
 //! - **Rebuild** — changed text or styles mean a new [`TextBlock`]; there is no in-place path,
 //!   matching parley's own mutability contract.
 
-mod content;
+pub(in crate::text) mod content;
 mod position;
 mod shape;
-mod style;
+pub(in crate::text) mod style;
 mod truncate;
 
 use core::fmt;

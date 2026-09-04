@@ -887,6 +887,18 @@ impl<T> Document<T> {
     /// question: it survives every change the element made to its own
     /// geometry, and dies only when `shaping_changed` says Parley would shape
     /// the paragraph differently.
+    /// Drops the shaped text a node retains, keeping its box measurements.
+    ///
+    /// The explicit half of what `invalidate_layout` used to imply. Reshaping
+    /// is the expensive part of a text pass, so it is asked for by the
+    /// mutations that actually change what was shaped, never by geometry
+    /// moving around a node.
+    pub(crate) fn invalidate_text_artifact(&mut self, id: NodeId) {
+        if let Some(slot) = self.tree.slot(id) {
+            self.layout.clear_text_artifact(slot);
+        }
+    }
+
     pub(crate) fn invalidate_text_children(&mut self, element: NodeId, shaping_changed: bool) {
         let Some(node) = self.tree.get(element) else {
             return;

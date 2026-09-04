@@ -5,18 +5,17 @@ use std::borrow::Cow;
 
 use parley::setting::Tag;
 use parley::{
-    Alignment, CHROMIUM_LINE_BREAK_OVERRIDE, FontFamily as ParleyFontFamily,
-    FontFamilyName as ParleyFontFamilyName, FontFeature, FontFeatures,
+    Alignment, CHROMIUM_LINE_BREAK_OVERRIDE, FontFeature, FontFeatures,
     FontStyle as ParleyFontStyle, FontVariation, FontVariations, FontWeight as ParleyFontWeight,
-    GenericFamily as ParleyGenericFamily, LineHeight as ParleyLineHeight,
-    OverflowWrap as ParleyOverflowWrap, TextStyle as ParleyTextStyle,
-    TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
+    LineHeight as ParleyLineHeight, OverflowWrap as ParleyOverflowWrap,
+    TextStyle as ParleyTextStyle, TextWrapMode as ParleyTextWrapMode, WordBreak as ParleyWordBreak,
 };
 use stylo::Zero;
 use stylo::computed_values::{direction, text_wrap_mode};
-use stylo::values::computed::font::{FontFamily, GenericFontFamily, SingleFontFamily};
+use stylo::values::computed::font::{FontFamily, SingleFontFamily};
 use stylo::values::computed::{FontStyle, Length, LineHeight, TextAlign, WordBreak};
 
+use super::block::style::translate_font_family_list;
 use super::content::normalize_runs;
 use super::layout::BreakConstraint;
 #[cfg(debug_assertions)]
@@ -388,49 +387,16 @@ fn translate_run_style<'family>(
     }
 }
 
-/// Shared with `crate::text::block` so the two paragraph paths cannot drift on
-/// family translation.
-pub(super) fn translate_font_family_list(family: &FontFamily) -> ParleyFontFamily<'_> {
-    let families = &family.families.list;
-    if families.is_empty() {
-        return ParleyGenericFamily::SansSerif.into();
-    }
-    if families.len() == 1 {
-        return translate_font_family_name(&families[0]).into();
-    }
-    ParleyFontFamily::List(Cow::Owned(
-        families.iter().map(translate_font_family_name).collect(),
-    ))
-}
-
-fn translate_font_family_name(single: &SingleFontFamily) -> ParleyFontFamilyName<'_> {
-    match single {
-        SingleFontFamily::FamilyName(name) => {
-            ParleyFontFamilyName::Named(Cow::Borrowed(name.name.as_ref()))
-        }
-        SingleFontFamily::Generic(generic) => {
-            ParleyFontFamilyName::Generic(translate_generic_family(*generic))
-        }
-    }
-}
-
-const fn translate_generic_family(value: GenericFontFamily) -> ParleyGenericFamily {
-    match value {
-        GenericFontFamily::None | GenericFontFamily::SansSerif => ParleyGenericFamily::SansSerif,
-        GenericFontFamily::Serif => ParleyGenericFamily::Serif,
-        GenericFontFamily::Monospace => ParleyGenericFamily::Monospace,
-        GenericFontFamily::Cursive => ParleyGenericFamily::Cursive,
-        GenericFontFamily::Fantasy => ParleyGenericFamily::Fantasy,
-        GenericFontFamily::SystemUi => ParleyGenericFamily::SystemUi,
-    }
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use parley::{
+        FontFamily as ParleyFontFamily, FontFamilyName as ParleyFontFamilyName,
+        GenericFamily as ParleyGenericFamily,
+    };
     use stylo::Atom;
     use stylo::values::computed::font::{
-        FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax,
+        FamilyName, FontFamily, FontFamilyList, FontFamilyNameSyntax, GenericFontFamily,
     };
     use stylo::values::computed::{
         Display, FontFeatureSettings, FontVariationSettings, FontWeight, LetterSpacing,
@@ -443,6 +409,7 @@ mod tests {
     use crate::geometry::Size;
     use crate::style::CoreStyle;
     use crate::text::FontBlob;
+    use crate::text::block::style::translate_generic_family;
     use crate::tree::RequestedAxis;
 
     const AHEM: &[u8] = include_bytes!("../../tests/fixtures/Ahem.ttf");

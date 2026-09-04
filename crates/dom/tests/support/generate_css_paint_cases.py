@@ -94,7 +94,19 @@ def stage(content: str, extra: str = "") -> str:
 
 
 def box(style: str, content: str = "") -> str:
-    return f'<div style="display:flex;{style}">{content}</div>'
+    # An element that directly holds text wears `class="text-block"`, which the
+    # Rust harness turns into `display: -lynx-text` through a user-agent rule.
+    # Only a `-lynx-text` box lays text out in this engine, and these fixtures
+    # have no UA sheet of their own.
+    #
+    # The class stays inert in a browser on purpose: the reference capture sees
+    # an unknown class and an unchanged `display`, so the fragment remains a
+    # valid Chromium probe. Writing `display:-lynx-text` into the fragment
+    # instead would not — Chromium drops it as invalid and falls back to
+    # `display: inline`, which is a different box and a different golden.
+    holds_text = bool(content.strip()) and "<" not in content
+    marker = ' class="text-block"' if holds_text else ""
+    return f'<div style="display:flex;{style}"{marker}>{content}</div>'
 
 
 def named(category: str, ordinal: int) -> str:

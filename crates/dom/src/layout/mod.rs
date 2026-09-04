@@ -235,6 +235,18 @@ impl<T> Document<T> {
         )
     }
 
+    /// Drops the cached box measurements of `id` and of every ancestor whose
+    /// geometry could move because of it.
+    ///
+    /// **Box caches only.** A shaped paragraph is not geometry: it dies when
+    /// the text or the style it was shaped from changes, which is a different
+    /// question and has its own entry points
+    /// ([`Document::invalidate_text_children`] and
+    /// [`TreeArenas::clear_text_artifact`]). Clearing it here would be free
+    /// today — a text node is a leaf, and no element holds an artifact — but
+    /// it stops being free the moment a paragraph is owned by the element
+    /// that establishes it: every descendant mutation and every ancestor this
+    /// walk touches would re-shape a paragraph whose text never changed.
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
         let (pending, reached_root) = {
             let (tree, state, _) = self.layout_parts();
@@ -242,7 +254,7 @@ impl<T> Document<T> {
                 .slot(id)
                 .expect("stale NodeId passed to Document::invalidate_layout");
             let start = tree.at(slot);
-            state.clear_layout_cache(slot);
+            state.clear_box_cache(slot);
 
             let mut pending = None;
             let mut reached_root = true;
@@ -287,7 +299,7 @@ impl<T> Document<T> {
                 } else {
                     None
                 };
-                state.clear_layout_cache(node_slot);
+                state.clear_box_cache(node_slot);
                 if let Some(entry) = scheduled {
                     pending = Some(entry);
                     reached_root = false;
