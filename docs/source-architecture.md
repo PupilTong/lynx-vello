@@ -107,8 +107,15 @@ cargo run -p bobcat-source \
 - Native Lepus value nesting remains bounded at 128; counted allocations are
   checked against bytes remaining. Legacy Lepus and real QuickJS bytecode are
   explicit errors; only the exact known inert external-root stubs are allowed.
-- Web StyleInfo retains its 1 MiB section cap, sized validation stack, and
-  64-level returned-rule cap. XML retains its UTF-8-boundary and borrowing
+- Web StyleInfo validation and decoding run on the calling thread on every
+  platform. The 1 MiB section cap bounds the archive copy;
+  `ArchiveValidator::with_max_depth` bounds recursive byte checking to 72
+  subtree levels before deserialization. The returned tree still has a
+  64-level rule cap (the extra subtree allowance covers containers and leaf
+  data). No decoder thread or unsafe archive access is used. Tests cover a
+  populated boundary tree and an 8000-level archive on a 256 KiB caller,
+  plus the same real fixtures on native and Wasm.
+  XML retains its UTF-8-boundary and borrowing
   invariants, tested with 20,000 deterministic mutations.
 
 Unsupported native CSS encodings remain errors rather than partially converted

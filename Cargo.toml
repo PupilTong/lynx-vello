@@ -66,6 +66,7 @@ libloading = "0.8"
 rayon = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3.76"
 web-time = "1.1.0"
 # wasm_thread 0.3.3 forwards Worker-originated spawns to its parent through a
 # private control message. Bobcat's explicit OffscreenCanvas embedder Worker
