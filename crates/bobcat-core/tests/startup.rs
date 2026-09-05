@@ -227,6 +227,48 @@ impl ResourceFetcher for PendingFetcher {
     }
 }
 
+/// How long a startup test may run before it is treated as hung.
+///
+/// A hang detector, **not** a performance assertion. It exists so a genuine
+/// deadlock fails with a message instead of blocking the suite until the CI
+/// job's own timeout, and nothing about it should discriminate a fast machine
+/// from a slow one.
+///
+/// The number is chosen against measurement rather than taste. Reaching the
+/// first fetch means building an offscreen GPU target and starting
+/// `bobcat-main`: ~5.4s warm on an M-series laptop, ~14.4s cold, and longer
+/// again when the whole workspace suite is competing for the machine. The
+/// budget these tests used to carry was 10s, which sits *between* the warm and
+/// cold figures — so it failed on a cold cache or a busy machine and passed
+/// otherwise, which is the definition of a flaky test rather than a slow one.
+/// Eight times the observed cold path leaves no plausible load that crosses
+/// it while still failing a real deadlock in under two minutes.
+const HANG_BUDGET: Duration = Duration::from_mins(2);
+
+/// Fails `future` with a clear message if it has not finished within
+/// [`HANG_BUDGET`].
+///
+/// Every wall-clock deadline in this file lives here, once, around a whole
+/// test. Per-step deadlines are the thing to avoid: they turn "this step was
+/// slower than I guessed" into a failure, and there is no step here whose
+/// duration is a property worth asserting.
+///
+/// What it can and cannot see is worth stating, because it is what makes this
+/// safe. `timeout` polls the inner future before it consults the clock, so
+/// time spent inside one *synchronously blocking* poll — building the
+/// offscreen GPU target, which is most of a startup test's wall clock — is
+/// invisible to it and cannot expire it. An async stall is not: a future
+/// parked on a signal that never arrives yields, the runtime reaches the
+/// timer, and this fires. That asymmetry is the whole point. It detects the
+/// deadlock it is for and structurally cannot fail a machine that was only
+/// slow. Verified by shrinking the budget to 1ms: the tests still passed,
+/// and only an added async stall tripped it.
+async fn hang_budget<F: Future<Output = ()>>(future: F) {
+    tokio::time::timeout(HANG_BUDGET, future)
+        .await
+        .expect("startup hung: no progress within the hang budget");
+}
+
 #[derive(Debug)]
 struct DropObservedRequester;
 
@@ -236,6 +278,13 @@ impl EventRequester for DropObservedRequester {
 
 #[tokio::test]
 async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
+    hang_budget(async {
+        cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body().await;
+    })
+    .await;
+}
+
+async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body() {
     let (started_sender, started) = tokio::sync::oneshot::channel();
     let (dropped_sender, dropped) = flume::unbounded();
     let fetcher = Rc::new(PendingFetcher {
@@ -256,10 +305,15 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
         ViewSources::new("main.js"),
     ));
 
+    // No deadline on the ordering itself. Either construction completes while a
+    // fetch is pending — the bug this names — or the fetch is polled and the
+    // signal arrives; both are decided by what the code does, not by how fast
+    // the machine did it. A genuine hang is caught by `HANG_BUDGET` around the
+    // whole test, where a wall-clock number is honest, rather than here, where
+    // it would also fail a machine that was merely slow.
     tokio::select! {
         result = &mut construction => panic!("pending resource unexpectedly completed: {result:?}"),
         signal = started => signal.expect("the resource future is polled"),
-        () = tokio::time::sleep(Duration::from_secs(10)) => panic!("resource startup timed out"),
     }
     drop(construction);
 
@@ -268,7 +322,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
     // that owns the fetcher.
     assert_eq!(
         dropped
-            .recv_timeout(Duration::from_secs(10))
+            .recv()
             .expect("cancellation drops the resource future"),
         thread_tag()
     );
@@ -316,7 +370,7 @@ async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host()
         },
     );
 
-    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+    let outcome = tokio::time::timeout(HANG_BUDGET, async {
         // Pinning the construction lets the fetch actually start before the
         // assertion, so the test exercises the interleaving it is named for
         // rather than passing because nothing had begun.
