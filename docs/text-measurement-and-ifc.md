@@ -1,11 +1,37 @@
 # Text measurement, and the inline formatting context ahead of it
 
-Two halves. The first records what the measurement path does now and why —
-the retained-layout contract `crates/hughie/src/text/` implements and the
-eviction contract `crates/dom` drives it with. The second is a design
-argument for the inline formatting context that has to sit on top of it, and
-the decisions that argument leaves open. **The IFC is not implemented**; §5–§8
-exist to be decided on, not to describe shipped behaviour.
+> **Status (2026-09-04): the IFC described here is implemented, and the
+> measurement path described in §1–§4 has been deleted.**
+>
+> A Lynx text block is now one flattened paragraph owned by the element that
+> establishes it (`display: -lynx-text`), laid out by
+> `crates/hughie/src/text/block/` and driven by `crates/dom/src/layout/text_block.rs`.
+> Text nodes generate no boxes; sibling runs share a line; a glyph run paints
+> in its own element's style.
+>
+> This document is kept for the *reasoning*, which the code cannot carry:
+> §1–§4 record the retained-layout and eviction contracts the new path
+> inherited (the three-constraint memo, the probe/commit split, the two-level
+> eviction, and the shrink-to-fit defect it reproduces deliberately), and
+> §5–§8 are the design argument the implementation followed, including which
+> of its open decisions were taken and why. Read §1–§4 as *why the new path is
+> shaped this way*, not as a description of live code — `TextMeasurer`,
+> `TextLayout` and `TextLayoutStore` no longer exist.
+>
+> Of the decisions in §8: **D1** was taken as (b) — `TextBrush` stays `()` and
+> the painter keys a host table on parley's own style index, reached through a
+> glyph. **D2** resolves the index to the originating element's `NodeId`,
+> read through `Document::paint_style` at paint time, so every repaint-only
+> property stays out of the artifact. **D3** was taken staged, though not in
+> the order proposed: the ownership move and multi-run admission landed
+> together, because the UA sheet makes `inline-text` a text block and so the
+> first paragraph the engine lays out is already multi-run. **D5**'s truncation
+> and **D7**'s shrink-to-fit defect are unchanged and still open.
+
+Two halves. The first records what the measurement path did and why —
+the retained-layout contract `crates/hughie/src/text/` implemented and the
+eviction contract `crates/dom` drove it with. The second is the design
+argument for the inline formatting context that now sits on top of it.
 
 Companion documents: `docs/layout-architecture.md` (the box-layout engine this
 hangs off), `docs/tracking/css-text.md` (per-property Lynx conformance),

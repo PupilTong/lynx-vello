@@ -166,12 +166,6 @@ impl<'doc> RunPaints<'doc> {
     fn block_style_run(&self) -> &RunPaint<'doc> {
         &self.fallback
     }
-
-    /// The style the block itself carries — what a whole-paragraph decision
-    /// (the gradient tile, the ink extent) is made from.
-    pub(crate) fn block_style(&self) -> &'doc ComputedValues {
-        self.fallback.style
-    }
 }
 
 pub(crate) fn paint(
