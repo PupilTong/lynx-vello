@@ -310,7 +310,8 @@ Synchronous GPU readback remains absent because browser WebGPU map completion
 is Promise-driven; native capture blocks on device polling. Browser capture
 requires a separate asynchronous facade API.
 
-Source mapping and registration now live in `bobcat-source` with only its
-`runtime` feature enabled. Binary decoders are absent from the browser graph.
+Source mapping and registration live in the complete `bobcat-source` crate,
+including its XML, web and native binary parsers, with no Cargo feature flags.
+The `loadLynxXml` API continues to accept XML responses only.
 The one-shot response adapter preserves final-URL fragments and reports
 background presence without registering its body. Host PageConfig stays authoritative.

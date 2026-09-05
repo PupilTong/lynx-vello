@@ -27,9 +27,10 @@ curl --request POST http://127.0.0.1:8080/screenshot \
 ```
 
 `url` accepts `file://`, `http://`, and `https://`. The current source loader
-supports the web-target binary format and the existing raw Lynx XML source
-envelope. Native `.lynx.bundle` bytecode is a different format and returns an
-explicit `422` error; native-template support is deferred.
+supports web bundles, raw Lynx XML and source-based native `.lynx.bundle`
+inputs through the complete shared source crate. Binary page inputs require
+a `root` module. Real QuickJS/Lepus bytecode remains unsupported and returns
+an explicit `422` error.
 
 The request shape accepts UI Judge's camelCase fields and snake_case aliases.
 Scoring-only fields are ignored. Non-empty `initialData`, `globalProps`, and
