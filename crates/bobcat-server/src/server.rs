@@ -215,8 +215,8 @@ impl From<CaptureFailure> for ApiError {
     }
 }
 
-impl From<crate::jpeg::JpegError> for ApiError {
-    fn from(error: crate::jpeg::JpegError) -> Self {
+impl From<crate::bmp::BmpError> for ApiError {
+    fn from(error: crate::bmp::BmpError) -> Self {
         Self::internal(error.to_string())
     }
 }
@@ -341,10 +341,10 @@ async fn screenshot(
 ) -> Result<Response, ApiError> {
     let request = request.into_capture_request()?;
     let screenshot = state.headless.capture(request).await??;
-    let jpeg = tokio::task::spawn_blocking(move || crate::jpeg::encode(&screenshot))
+    let bmp = tokio::task::spawn_blocking(move || crate::bmp::encode(&screenshot))
         .await
-        .map_err(|error| ApiError::internal(format!("JPEG worker failed: {error}")))??;
-    Ok(([(CONTENT_TYPE, "image/jpeg")], jpeg).into_response())
+        .map_err(|error| ApiError::internal(format!("BMP worker failed: {error}")))??;
+    Ok(([(CONTENT_TYPE, "image/bmp")], bmp).into_response())
 }
 
 async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screenshot_returns_raw_jpeg() {
+    async fn screenshot_returns_raw_bmp() {
         let frame = Screenshot {
             size: FrameSize {
                 width: 8,
@@ -526,7 +526,7 @@ mod tests {
             },
             pixels: [20, 40, 60, 255].repeat(64),
         };
-        let jpeg = crate::jpeg::encode(&frame).expect("encode expected JPEG");
+        let bmp = crate::bmp::encode(&frame).expect("encode expected BMP");
         let headless = scripted_executor(frame);
         let response = router(Arc::clone(&headless))
             .oneshot(
@@ -547,11 +547,11 @@ mod tests {
             .expect("route screenshot response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CONTENT_TYPE], "image/jpeg");
-        let body = to_bytes(response.into_body(), jpeg.len() + 1)
+        assert_eq!(response.headers()[CONTENT_TYPE], "image/bmp");
+        let body = to_bytes(response.into_body(), bmp.len() + 1)
             .await
             .expect("read response");
-        assert_eq!(body.as_ref(), jpeg);
+        assert_eq!(body.as_ref(), bmp);
         headless.shutdown().expect("stop worker");
     }
 

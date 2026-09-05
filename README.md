@@ -9,7 +9,7 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining resource/script/view protocols with the QuickJS-backed preloaded ESM graph and main-thread host callbacks. It does not expose a renderer façade or re-export DOM/GPU internals. |
 | [`crates/bobcat-resources`](crates/bobcat-resources) | Cross-platform reference `ResourceFetcher`: registered and transported bytes, preprocessing, tiered caches, platform image decoding, and per-view image reports remain owned by each embedder's painter thread. |
 | [`crates/bobcat-cli`](crates/bobcat-cli) | The independent `bobcat` product: loads local `file:///` web bundles or Lynx XML source cards through `bobcat-source`, privately composes the runtime with a macOS window or paced headless GPU target, and exposes debugger-style frame/screenshot commands. |
-| [`crates/bobcat-server`](crates/bobcat-server) | HTTP screenshot embedder compatible with UI Judge's `/health` and `/screenshot` request surface. A bounded queue feeds one owner thread that creates offscreen Bobcat views and returns fixed-size, white-backed JPEG captures. |
+| [`crates/bobcat-server`](crates/bobcat-server) | HTTP screenshot embedder compatible with UI Judge's `/health` and `/screenshot` request surface. A bounded queue feeds one owner thread that creates offscreen Bobcat views and returns fixed-size, white-backed BMP captures. |
 | [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas`; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The URL facade loads JavaScript, CSS, or a complete Lynx XML source card while the UI remains a JavaScript-only asynchronous host boundary. |
 | [`crates/bobcat-source`](crates/bobcat-source) | Unified Lynx XML, web-bundle and source-based native external-bundle parsing; shared source registration for embedders. [Architecture and API](docs/source-architecture.md). |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
@@ -85,7 +85,7 @@ offscreen embedder:
 ```sh
 LYNX_USE_PORT=8080 cargo run -p bobcat-server
 curl --fail-with-body \
-  --output screenshot.jpg \
+  --output screenshot.bmp \
   --header 'content-type: application/json' \
   --data '{"url":"file:///absolute/path/to/card.web.bundle","task":"capture"}' \
   http://127.0.0.1:8080/screenshot
@@ -93,7 +93,7 @@ curl --fail-with-body \
 
 `GET /health` returns readiness JSON. `POST /screenshot` accepts `file://`,
 `http://`, and `https://` web bundles or raw Lynx XML and returns a raw
-800×600, DPR-1 JPEG (quality 90) after compositing alpha over white. Non-empty
+800×600, DPR-1 BMP after compositing alpha over white. Non-empty
 `globalProps`, `initialData`, or interaction `steps` are rejected explicitly
 because the current core exposes no faithful injection or automation seam.
 Native `.lynx.bundle` bytes are recognized and return `422`; native-template

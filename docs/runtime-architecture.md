@@ -76,7 +76,7 @@ QuickJS preloaded ESM graph
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source (runtime/XML only) + wasm-bindgen + wasm_thread
-bobcat-server ──▶ axum + reqwest + image/jpeg
+bobcat-server ──▶ axum + reqwest + image/bmp
 ```
 
 ## Animation timeline
@@ -172,7 +172,7 @@ work, settles the page, captures tightly packed RGBA8, and destroys the view.
 The group owns the Lynx main thread, QuickJS runtime, and Stylo pool, all
 released with that job's view; no runtime is shared across capture jobs and
 the server adds no separate rendering owner. The HTTP side then encodes the frame
-as a quality-90 JPEG on Tokio's blocking pool after compositing over white, so
+as an uncompressed BMP on Tokio's blocking pool after compositing over white, so
 CPU encoding neither retains the view nor occupies the GPU lane. A worker
 panic makes health fail and initiates server shutdown; queue saturation fails
 admission rather than creating unbounded GPU work. This is a trusted-page

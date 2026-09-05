@@ -7,8 +7,8 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod bmp;
 mod capture;
-mod jpeg;
 mod server;
 
 pub use server::{ServerError, serve};
