@@ -656,7 +656,7 @@ useful signal for currently-compatible versions of those libraries.
   only where ImageIO exists; the Linux decoder and libcurl transport are
   tested for real against the system libraries, and the browser path is
   linted for wasm32 and exercised only in a browser.
-- `crates/bobcat-cli` — the independent native `bobcat` product over
+- `crates/bobcat` (`cli` feature) — the native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
   `bobcat-core`, `bobcat-resources`, and `bobcat-source`.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
@@ -715,7 +715,8 @@ useful signal for currently-compatible versions of those libraries.
   linear display, visible overflow, and selector support. A present background
   section is retained under `/app-service.js` and warned about, but not
   executed until Bobcat has a background-thread realm.
-- `crates/bobcat-server` — a native HTTP screenshot **embedder**, not runtime
+- `crates/bobcat` (`server` feature) — the `bobcat-server` HTTP screenshot
+  **embedder** in the same crate, not runtime
   infrastructure inside `bobcat-core`. It follows UI Judge's public capture
   surface: `GET /health`, and `POST /screenshot` with required `url` and
   `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +

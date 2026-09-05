@@ -638,7 +638,7 @@ mod tests {
         executor.shutdown().expect("stop capture owner thread");
 
         let screenshot = result.expect("decode, boot, and render the web bundle");
-        let bmp = crate::bmp::encode(&screenshot).expect("encode captured BMP");
+        let bmp = crate::server::bmp::encode(&screenshot).expect("encode captured BMP");
         assert_eq!(&bmp[..2], b"BM");
         let image = image::load_from_memory(&bmp)
             .expect("decode captured BMP")

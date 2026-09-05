@@ -40,6 +40,11 @@ jobs:
       - name: Complete source API
         run: cargo test --locked -p bobcat-source
 
+      - name: Independent native embedder features
+        run: |
+          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
+
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
         # `cargo codspeed build` can measure a library production never ships.
@@ -121,7 +126,7 @@ jobs:
         # tokio's `rt-multi-thread`, which refuses to compile for wasm32, and
         # feature unification would drag it into any build that includes dev
         # targets. The packages are named rather than `--workspace` because
-        # bobcat-cli is a native binary that does not target wasm32 at all.
+        # bobcat is a native embedder crate that does not target wasm32.
         run: >-
           cargo clippy --target wasm32-unknown-unknown --lib
           -p bobcat-wasm
@@ -203,9 +208,14 @@ jobs:
         run: >-
           cargo clippy
           -p bobcat-source
-          -p bobcat-cli
-          -p bobcat-server
+          -p bobcat
           --all-targets --no-deps -- -D warnings
+
+      - name: Independent embedder features
+        run: |
+          cargo clippy --locked -p bobcat --no-default-features --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
 
   element-papi:
     name: Element PAPI runtime tests (Ubuntu)

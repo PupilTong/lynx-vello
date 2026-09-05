@@ -10,7 +10,7 @@ use bobcat_resources::{DiskCacheConfig, Resources, ResourcesConfig};
 use bobcat_source::PageSource;
 use url::Url;
 
-use crate::CliError;
+use crate::cli::CliError;
 
 /// The disk tier the runner keeps under the user's cache directory.
 const DISK_CACHE_BUDGET: u64 = 256 * 1024 * 1024;
