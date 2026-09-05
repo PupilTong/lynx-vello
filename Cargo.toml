@@ -14,6 +14,7 @@ rust-version = "1.95"
 bobcat-core = { path = "crates/bobcat-core" }
 bobcat-resources = { path = "crates/bobcat-resources" }
 lynx-template-decoder = { path = "crates/lynx-template-decoder" }
+lynx-template-converter = { path = "crates/lynx-template-converter" }
 lynx-xml = { path = "crates/lynx-xml" }
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }

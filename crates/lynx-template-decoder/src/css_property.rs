@@ -27,6 +27,17 @@ macro_rules! css_properties {
 
         /// CSS property names indexed by [`CssPropertyId`].
         pub const STYLE_PROPERTY_MAP: &[&str] = &[$($css,)*];
+
+        impl CssPropertyId {
+            /// Converts a wire/property-table discriminant to its enum value.
+            #[must_use]
+            pub fn from_u32(id: u32) -> Option<Self> {
+                match id {
+                    $($id => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+        }
     };
 }
 
@@ -266,6 +277,32 @@ pub struct CssProperty {
 }
 
 impl CssProperty {
+    /// Builds a property reference from its canonical or custom name.
+    #[must_use]
+    pub fn from_name(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let id = STYLE_PROPERTY_MAP
+            .iter()
+            .position(|candidate| *candidate == name.as_str())
+            .and_then(|index| u32::try_from(index).ok())
+            .and_then(CssPropertyId::from_u32)
+            .unwrap_or(CssPropertyId::Unknown);
+        Self {
+            unknown_name: (id == CssPropertyId::Unknown).then_some(name),
+            id,
+        }
+    }
+
+    /// Builds an interned property reference from its numeric wire id.
+    #[must_use]
+    pub fn from_u32(id: u32) -> Option<Self> {
+        CssPropertyId::from_u32(id).map(|id| Self {
+            id,
+            unknown_name: None,
+        })
+    }
+
+    /// The property name as written in the source CSS.
     #[must_use]
     pub fn name(&self) -> &str {
         if self.id == CssPropertyId::Unknown {
