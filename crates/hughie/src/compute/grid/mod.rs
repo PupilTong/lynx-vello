@@ -527,9 +527,11 @@ fn layout_in_flow_items<T>(
     inner_size: Size<f32>,
     content_origin: Point<f32>,
     outer_size: Size<f32>,
+    // The goal the container hands its items: a measurement passes through;
+    // a commit carries the independence the container can vouch for, which
+    // each item narrows per axis.
     goal: LayoutGoal,
     rtl: bool,
-    container_independent: Option<Size<bool>>,
 ) -> (Size<f32>, Point<Option<f32>>)
 where
     T: LayoutTree,
@@ -633,40 +635,43 @@ where
             },
         );
         let parent_size = Size::new(Some(area_size.width), Some(area_size.height));
-        let mut input = match goal {
-            LayoutGoal::Commit => LayoutInput::commit(known, parent_size, available),
-            LayoutGoal::Measure(requested) => {
-                LayoutInput::measure(known, parent_size, available, requested)
+        let item_goal = match goal {
+            LayoutGoal::Measure(_) => goal,
+            LayoutGoal::Commit {
+                content_independent: container,
+            } => {
+                // The item's grid area is what its percentages resolve against
+                // and what a stretch fills, so independence chains off the
+                // area rather than the container's own box. A fixed-function
+                // track cannot move at all; an intrinsic or flexible one moves
+                // only with the contributions it collects, which this item's
+                // content cannot touch as long as its own contributions are
+                // content-free.
+                let fixed_area = Size::new(
+                    container.width && span_is_fixed(columns, item.area.column),
+                    container.height && span_is_fixed(rows, item.area.row),
+                );
+                let style = tree.style(item.key.node);
+                let (values_stable, edges_stable) =
+                    item_value_stability(&style, item.aspect_ratio, fixed_area);
+                let axis_independent = |axis: Axis| {
+                    let area_stable = axis.size(fixed_area)
+                        || (axis.size(container) && contribution_is_content_free(item, axis));
+                    edges_stable
+                        && axis.size(values_stable)
+                        && !axis_has_intrinsic_style(item, axis)
+                        && area_stable
+                        && axis.size(known).is_some()
+                };
+                LayoutGoal::Commit {
+                    content_independent: Size::new(
+                        axis_independent(Axis::Horizontal),
+                        axis_independent(Axis::Vertical),
+                    ),
+                }
             }
         };
-        if let Some(container) = container_independent {
-            // The item's grid area is what its percentages resolve against and
-            // what a stretch fills, so independence chains off the area rather
-            // than the container's own box. A fixed-function track cannot move
-            // at all; an intrinsic or flexible one moves only with the
-            // contributions it collects, which this item's content cannot
-            // touch as long as its own contributions are content-free.
-            let fixed_area = Size::new(
-                container.width && span_is_fixed(columns, item.area.column),
-                container.height && span_is_fixed(rows, item.area.row),
-            );
-            let style = tree.style(item.key.node);
-            let (values_stable, edges_stable) =
-                item_value_stability(&style, item.aspect_ratio, fixed_area);
-            let axis_independent = |axis: Axis| {
-                let area_stable = axis.size(fixed_area)
-                    || (axis.size(container) && contribution_is_content_free(item, axis));
-                edges_stable
-                    && axis.size(values_stable)
-                    && !axis_has_intrinsic_style(item, axis)
-                    && area_stable
-                    && axis.size(known).is_some()
-            };
-            input.content_independent = Size::new(
-                axis_independent(Axis::Horizontal),
-                axis_independent(Axis::Vertical),
-            );
-        }
+        let input = LayoutInput::new(item_goal, known, parent_size, available);
         let output = tree.compute_layout(state, item.key.node, input);
 
         let mut margin = item.margin;
@@ -743,7 +748,7 @@ where
                 layout.content_size,
                 item.overflow,
             );
-            if goal == LayoutGoal::Commit {
+            if goal.commits() {
                 tree.set_unrounded_layout(state, item.key.node, layout);
             }
             continue;
@@ -844,7 +849,7 @@ where
             item.layout.content_size,
             item.overflow,
         );
-        if goal == LayoutGoal::Commit {
+        if goal.commits() {
             tree.set_unrounded_layout(state, item.node, item.layout);
         }
     }
@@ -1210,7 +1215,7 @@ where
     let (explicit_columns, explicit_rows) =
         expand_explicit_tracks(&style, repeat_max_basis, repeat_min_basis, repeat_count_gap);
 
-    let commits_layout = input.goal == LayoutGoal::Commit;
+    let commits_layout = input.goal.commits();
     let children = tree.flattened_children(node);
     let mut in_flow = Vec::with_capacity(children.capacity_hint());
     let mut absolute = commits_layout.then(Vec::new);
@@ -1372,9 +1377,13 @@ where
         final_inner,
         content_origin,
         outer_size,
-        input.goal,
+        container_content_independence(input, style_definite).map_or(
+            input.goal,
+            |content_independent| LayoutGoal::Commit {
+                content_independent,
+            },
+        ),
         rtl,
-        commits_layout.then(|| container_content_independence(input, style_definite)),
     );
     if commits_layout {
         for (document_index, child) in hidden.expect("commit keeps hidden grid items") {

@@ -652,7 +652,10 @@ fn leaf_measure_goal_preserves_the_single_axis_fast_path() {
     );
     assert_eq!(tree.leaf_measure_calls.get(), 1);
 
-    let _ = tree.compute_layout(leaf, LayoutInput::commit(known, parent, available));
+    let _ = tree.compute_layout(
+        leaf,
+        LayoutInput::commit(known, parent, available, Size::new(false, false)),
+    );
     assert_eq!(tree.leaf_measure_calls.get(), 2);
 }
 
@@ -1044,7 +1047,12 @@ fn absolute_children_use_order_zero_for_paint_order() {
 fn natural_sized_leaf_has_no_content_baseline() {
     let style = fixed_leaf_style(100.0, 20.0);
     let output = compute_leaf_layout(
-        LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
+        LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        ),
         &style,
         NaturalSize::from_size(Size::new(100.0, 20.0)),
     );
@@ -1068,6 +1076,7 @@ fn leaf_max_width_constrains_measurement_and_preserves_overflow_extent() {
                 AvailableSpace::Definite(500.0),
                 AvailableSpace::Definite(500.0),
             ),
+            Size::new(false, false),
         ),
         &style,
         NaturalSize::from_size(Size::new(200.0, 30.0)),
@@ -1221,7 +1230,12 @@ fn container_preferred_axes_clamp_with_minimum_precedence_and_content_mode_ignor
     );
     assert_size(inherent.size, Size::new(400.0, 120.0));
 
-    let mut content_input = LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT);
+    let mut content_input = LayoutInput::commit(
+        Size::NONE,
+        Size::NONE,
+        Size::MAX_CONTENT,
+        Size::new(false, false),
+    );
     content_input.sizing_mode = SizingMode::IgnoreSizeStyles;
     let content = tree.compute_layout(root, content_input);
     assert_size(content.size, Size::ZERO);

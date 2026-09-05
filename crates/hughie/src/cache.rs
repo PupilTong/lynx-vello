@@ -27,42 +27,50 @@ const MEASURE_CACHE_LIMIT: usize = 32;
 /// containers actually probe many constraint shapes.
 const MEASURE_CACHE_INLINE: usize = 2;
 
-const KNOWN_WIDTH_PRESENT: u16 = 1 << 0;
-const KNOWN_HEIGHT_PRESENT: u16 = 1 << 1;
-const PARENT_WIDTH_PRESENT: u16 = 1 << 2;
-const PARENT_HEIGHT_PRESENT: u16 = 1 << 3;
-const OPTIONAL_SIZE_PRESENCE: u16 =
+const KNOWN_WIDTH_PRESENT: u32 = 1 << 0;
+const KNOWN_HEIGHT_PRESENT: u32 = 1 << 1;
+const PARENT_WIDTH_PRESENT: u32 = 1 << 2;
+const PARENT_HEIGHT_PRESENT: u32 = 1 << 3;
+const OPTIONAL_SIZE_PRESENCE: u32 =
     KNOWN_WIDTH_PRESENT | KNOWN_HEIGHT_PRESENT | PARENT_WIDTH_PRESENT | PARENT_HEIGHT_PRESENT;
 const AVAILABLE_WIDTH_SHIFT: u32 = 4;
 const AVAILABLE_HEIGHT_SHIFT: u32 = 6;
-const AVAILABLE_TAG_MASK: u16 = 0b11;
-const AVAILABLE_DEFINITE: u16 = 0;
-const AVAILABLE_MIN_CONTENT: u16 = 1;
-const AVAILABLE_MAX_CONTENT: u16 = 2;
+const AVAILABLE_TAG_MASK: u32 = 0b11;
+const AVAILABLE_DEFINITE: u32 = 0;
+const AVAILABLE_MIN_CONTENT: u32 = 1;
+const AVAILABLE_MAX_CONTENT: u32 = 2;
 const GOAL_SHIFT: u32 = 8;
-const GOAL_MASK: u16 = 0b11;
-const GOAL_COMMIT: u16 = 0;
-const GOAL_HORIZONTAL: u16 = 1;
-const GOAL_VERTICAL: u16 = 2;
-const GOAL_BOTH: u16 = 3;
-const IGNORE_SIZE_STYLES: u16 = 1 << 10;
-const DEFINITE_WIDTH: u16 = 1 << 11;
-const DEFINITE_HEIGHT: u16 = 1 << 12;
-const EXACT_INPUT_FLAGS: u16 =
+const GOAL_MASK: u32 = 0b11;
+const GOAL_COMMIT: u32 = 0;
+const GOAL_HORIZONTAL: u32 = 1;
+const GOAL_VERTICAL: u32 = 2;
+const GOAL_BOTH: u32 = 3;
+const IGNORE_SIZE_STYLES: u32 = 1 << 10;
+const DEFINITE_WIDTH: u32 = 1 << 11;
+const DEFINITE_HEIGHT: u32 = 1 << 12;
+const EXACT_INPUT_FLAGS: u32 =
     OPTIONAL_SIZE_PRESENCE | IGNORE_SIZE_STYLES | DEFINITE_WIDTH | DEFINITE_HEIGHT;
-const BASELINE_X_PRESENT: u16 = 1 << 13;
-const BASELINE_Y_PRESENT: u16 = 1 << 14;
-const BASELINE_PRESENCE: u16 = BASELINE_X_PRESENT | BASELINE_Y_PRESENT;
-const INPUT_FLAGS: u16 = EXACT_INPUT_FLAGS
+const BASELINE_X_PRESENT: u32 = 1 << 13;
+const BASELINE_Y_PRESENT: u32 = 1 << 14;
+const BASELINE_PRESENCE: u32 = BASELINE_X_PRESENT | BASELINE_Y_PRESENT;
+/// The independence a `LayoutGoal::Commit` carries, per axis. Like the
+/// baseline-presence bits these ride in `flags` but stay out of `INPUT_FLAGS`
+/// and `EXACT_INPUT_FLAGS`: independence never changes computed geometry, so
+/// two commits that differ only in it answer each other from the cache.
+const INDEPENDENT_WIDTH: u32 = 1 << 15;
+const INDEPENDENT_HEIGHT: u32 = 1 << 16;
+const INPUT_FLAGS: u32 = EXACT_INPUT_FLAGS
     | (AVAILABLE_TAG_MASK << AVAILABLE_WIDTH_SHIFT)
     | (AVAILABLE_TAG_MASK << AVAILABLE_HEIGHT_SHIFT)
     | (GOAL_MASK << GOAL_SHIFT);
 
-/// A lossless compact representation of [`LayoutInput`].
+/// A lossless compact representation of [`LayoutInput`]. Every field round
+/// trips, including the `LayoutGoal::Commit` independence payload, which rides
+/// in `flags` outside the key bits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PackedLayoutInput {
     values: [f32; 6],
-    flags: u16,
+    flags: u32,
 }
 
 impl PackedLayoutInput {
@@ -107,12 +115,23 @@ impl PackedLayoutInput {
             AVAILABLE_HEIGHT_SHIFT,
         );
 
-        flags |= match input.goal {
-            LayoutGoal::Commit => GOAL_COMMIT,
+        let goal_tag = match input.goal {
+            LayoutGoal::Commit {
+                content_independent,
+            } => {
+                if content_independent.width {
+                    flags |= INDEPENDENT_WIDTH;
+                }
+                if content_independent.height {
+                    flags |= INDEPENDENT_HEIGHT;
+                }
+                GOAL_COMMIT
+            }
             LayoutGoal::Measure(RequestedAxis::Horizontal) => GOAL_HORIZONTAL,
             LayoutGoal::Measure(RequestedAxis::Vertical) => GOAL_VERTICAL,
             LayoutGoal::Measure(RequestedAxis::Both) => GOAL_BOTH,
-        } << GOAL_SHIFT;
+        };
+        flags |= goal_tag << GOAL_SHIFT;
         if input.sizing_mode == SizingMode::IgnoreSizeStyles {
             flags |= IGNORE_SIZE_STYLES;
         }
@@ -130,7 +149,12 @@ impl PackedLayoutInput {
     fn unpack(self) -> LayoutInput {
         LayoutInput {
             goal: match (self.flags >> GOAL_SHIFT) & GOAL_MASK {
-                GOAL_COMMIT => LayoutGoal::Commit,
+                GOAL_COMMIT => LayoutGoal::Commit {
+                    content_independent: Size::new(
+                        self.flags & INDEPENDENT_WIDTH != 0,
+                        self.flags & INDEPENDENT_HEIGHT != 0,
+                    ),
+                },
                 GOAL_HORIZONTAL => LayoutGoal::Measure(RequestedAxis::Horizontal),
                 GOAL_VERTICAL => LayoutGoal::Measure(RequestedAxis::Vertical),
                 GOAL_BOTH => LayoutGoal::Measure(RequestedAxis::Both),
@@ -157,7 +181,6 @@ impl PackedLayoutInput {
                 unpack_available_space(self.values[4], self.flags, AVAILABLE_WIDTH_SHIFT),
                 unpack_available_space(self.values[5], self.flags, AVAILABLE_HEIGHT_SHIFT),
             ),
-            content_independent: Size::new(false, false),
         }
     }
 
@@ -180,7 +203,7 @@ impl PackedLayoutInput {
 }
 
 #[inline]
-fn pack_option(value: Option<f32>, target: &mut f32, flags: &mut u16, present: u16) {
+fn pack_option(value: Option<f32>, target: &mut f32, flags: &mut u32, present: u32) {
     if let Some(value) = value {
         *target = value;
         *flags |= present;
@@ -188,12 +211,12 @@ fn pack_option(value: Option<f32>, target: &mut f32, flags: &mut u16, present: u
 }
 
 #[inline]
-fn unpack_option(value: f32, flags: u16, present: u16) -> Option<f32> {
+fn unpack_option(value: f32, flags: u32, present: u32) -> Option<f32> {
     (flags & present != 0).then_some(value)
 }
 
 #[inline]
-fn pack_available_space(value: AvailableSpace, target: &mut f32, flags: &mut u16, shift: u32) {
+fn pack_available_space(value: AvailableSpace, target: &mut f32, flags: &mut u32, shift: u32) {
     let tag = match value {
         AvailableSpace::Definite(value) => {
             *target = value;
@@ -206,7 +229,7 @@ fn pack_available_space(value: AvailableSpace, target: &mut f32, flags: &mut u16
 }
 
 #[inline]
-fn unpack_available_space(value: f32, flags: u16, shift: u32) -> AvailableSpace {
+fn unpack_available_space(value: f32, flags: u32, shift: u32) -> AvailableSpace {
     match (flags >> shift) & AVAILABLE_TAG_MASK {
         AVAILABLE_DEFINITE => AvailableSpace::Definite(value),
         AVAILABLE_MIN_CONTENT => AvailableSpace::MinContent,
@@ -237,7 +260,7 @@ impl PackedLayoutOutput {
     }
 
     #[inline]
-    fn unpack(self, input_flags: u16) -> LayoutOutput {
+    fn unpack(self, input_flags: u32) -> LayoutOutput {
         LayoutOutput {
             size: Size::new(self.values[0], self.values[1]),
             content_size: Size::new(self.values[2], self.values[3]),
@@ -271,7 +294,8 @@ impl MeasurementSlot {
     }
 }
 
-/// A bounded per-node layout cache with eight inline measurement slots.
+/// A bounded per-node layout cache holding two measurements inline and
+/// spilling to the heap up to a ceiling of 32.
 #[derive(Debug, PartialEq, Default)]
 pub struct Cache {
     committed: Option<MeasurementSlot>,
@@ -292,9 +316,7 @@ impl Cache {
         self.committed.is_none() && self.measurements.is_empty()
     }
 
-    /// The committed input, minus the fields the packed key does not cover:
-    /// `content_independent` reads back as `false` on both axes, and the
-    /// owning [`crate::tree::LayoutSlot`] re-attaches what it stored.
+    /// The complete committed input, independence payload included.
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
         self.committed.map(|slot| slot.input.unpack())
@@ -315,7 +337,7 @@ impl Cache {
             return Some(slot.unpack_output());
         }
 
-        if input.goal == LayoutGoal::Commit {
+        if input.goal.commits() {
             return None;
         }
 
@@ -328,7 +350,7 @@ impl Cache {
     pub fn store(&mut self, input: LayoutInput, output: LayoutOutput) {
         let slot = MeasurementSlot::new(input, output);
         match input.goal {
-            LayoutGoal::Commit => self.committed = Some(slot),
+            LayoutGoal::Commit { .. } => self.committed = Some(slot),
             LayoutGoal::Measure(_) => {
                 // Retiring a live same-shape measurement while the cache still
                 // has room costs a whole subtree recomputation the next time
@@ -419,7 +441,7 @@ fn packed_available_space_matches(
     available_index: usize,
     tag_shift: u32,
     known_index: usize,
-    known_present: u16,
+    known_present: u32,
 ) -> bool {
     let stored_tag = (stored.flags >> tag_shift) & AVAILABLE_TAG_MASK;
     let requested_tag = (requested.flags >> tag_shift) & AVAILABLE_TAG_MASK;
@@ -462,7 +484,10 @@ fn available_space_matches(
 #[inline]
 fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
     let goal_matches = match (stored.goal, requested.goal) {
-        (LayoutGoal::Commit, LayoutGoal::Commit | LayoutGoal::Measure(RequestedAxis::Both)) => true,
+        (
+            LayoutGoal::Commit { .. },
+            LayoutGoal::Commit { .. } | LayoutGoal::Measure(RequestedAxis::Both),
+        ) => true,
         (LayoutGoal::Measure(stored), LayoutGoal::Measure(requested)) => stored == requested,
         _ => false,
     };
@@ -488,13 +513,13 @@ fn inputs_match(stored: LayoutInput, requested: LayoutInput) -> bool {
 
 fn packed_axis_constraint_shape(
     input: PackedLayoutInput,
-    known_present: u16,
+    known_present: u32,
     available_shift: u32,
 ) -> usize {
     if input.flags & known_present != 0 {
         3
     } else {
-        usize::from((input.flags >> available_shift) & AVAILABLE_TAG_MASK)
+        ((input.flags >> available_shift) & AVAILABLE_TAG_MASK) as usize
     }
 }
 
@@ -562,6 +587,12 @@ mod tests {
         }
     }
 
+    const fn commit_goal(width: bool, height: bool) -> LayoutGoal {
+        LayoutGoal::Commit {
+            content_independent: Size::new(width, height),
+        }
+    }
+
     fn assert_input_bits_eq(left: LayoutInput, right: LayoutInput) {
         assert_eq!(left.goal, right.goal);
         assert_eq!(left.sizing_mode, right.sizing_mode);
@@ -603,7 +634,10 @@ mod tests {
     #[test]
     fn packed_inputs_exhaustively_round_trip_all_tags_and_presence_bits() {
         let goals = [
-            LayoutGoal::Commit,
+            commit_goal(false, false),
+            commit_goal(true, false),
+            commit_goal(false, true),
+            commit_goal(true, true),
             LayoutGoal::Measure(RequestedAxis::Horizontal),
             LayoutGoal::Measure(RequestedAxis::Vertical),
             LayoutGoal::Measure(RequestedAxis::Both),
@@ -641,7 +675,6 @@ mod tests {
                                     ),
                                     parent_size: Size::new(option(2), option(3)),
                                     available_space: Size::new(available_width, available_height),
-                                    content_independent: Size::new(false, false),
                                 };
                                 assert_input_bits_eq(input, PackedLayoutInput::new(input).unpack());
                             }
@@ -671,7 +704,10 @@ mod tests {
     #[test]
     fn packed_matcher_matches_the_layout_input_oracle_across_hot_key_states() {
         let goals = [
-            LayoutGoal::Commit,
+            commit_goal(false, false),
+            commit_goal(true, false),
+            commit_goal(false, true),
+            commit_goal(true, true),
             LayoutGoal::Measure(RequestedAxis::Horizontal),
             LayoutGoal::Measure(RequestedAxis::Vertical),
             LayoutGoal::Measure(RequestedAxis::Both),
@@ -712,7 +748,6 @@ mod tests {
                                                         stored_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
-                                                    content_independent: Size::new(false, false),
                                                 };
                                                 let requested = LayoutInput {
                                                     goal: requested_goal,
@@ -730,7 +765,6 @@ mod tests {
                                                         requested_available,
                                                         AvailableSpace::MaxContent,
                                                     ),
-                                                    content_independent: Size::new(false, false),
                                                 };
                                                 assert_packed_match_agrees_with_oracle(
                                                     stored, requested,
@@ -813,6 +847,7 @@ mod tests {
                 AvailableSpace::Definite(80.0),
                 AvailableSpace::Definite(40.0),
             ),
+            Size::new(true, false),
         );
         let stored = LayoutOutput::new(Size::new(80.0, 40.0), Size::new(90.0, 45.0))
             .with_first_baselines(Point::new(None, Some(14.0)));
@@ -827,6 +862,14 @@ mod tests {
         let mut measure_width = measure_both;
         measure_width.goal = LayoutGoal::Measure(RequestedAxis::Horizontal);
         assert_eq!(cache.get(measure_width), None);
+
+        // Independence is outside the key: a commit request that claims
+        // something else still answers from the stored entry, and the stored
+        // entry keeps its own payload.
+        let mut other_independence = input;
+        other_independence.goal = commit_goal(false, true);
+        assert_eq!(cache.get(other_independence), Some(stored));
+        assert_eq!(cache.committed_input(), Some(input));
 
         cache.clear();
         assert!(cache.is_empty());
@@ -893,7 +936,7 @@ mod tests {
         let mut requested = stored;
         assert!(inputs_match(stored, requested));
 
-        requested.goal = LayoutGoal::Commit;
+        requested.goal = commit_goal(false, false);
         assert!(!inputs_match(stored, requested));
         requested = stored;
         requested.sizing_mode = SizingMode::IgnoreSizeStyles;

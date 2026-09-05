@@ -26,8 +26,7 @@ use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
 use crate::style::{Contain, CoreStyle, LinearStyle};
 use crate::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
-    SizingMode,
+    AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
 
 fn linear_axes(
@@ -1195,12 +1194,12 @@ where
             target_size.map(Some),
             parent_size,
             target_size.map(AvailableSpace::Definite),
+            item.content_independent,
         );
         input.sizing_mode = SizingMode::IgnoreSizeStyles;
         input.definite_dimensions = axes
             .main
             .pack(item.main_size_is_definite, item.cross_size_is_definite);
-        input.content_independent = item.content_independent;
         let output = tree.compute_layout(state, item.key.node, input);
         item.baseline = output.first_baselines.y;
 
@@ -1342,7 +1341,7 @@ where
     let axes = linear_axes(style.linear_direction(), style.direction());
     let align_items = style.align_items();
     let main_gravity = computed_main_gravity(style.justify_content(), axes);
-    let commits_layout = input.goal == LayoutGoal::Commit;
+    let commits_layout = input.goal.commits();
     let weight_sum = style.linear_weight_sum().0;
     debug_assert!(
         weight_sum.is_finite() && weight_sum >= 0.0,
@@ -1365,8 +1364,7 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let container_independent =
-        commits_layout.then(|| container_content_independence(input, style_definite));
+    let container_independent = container_content_independence(input, style_definite);
     mirror_ratio_definiteness(&mut outer_definite, container_aspect_ratio);
     if input.sizing_mode != SizingMode::IgnoreSizeStyles {
         let before_ratio = outer_size;

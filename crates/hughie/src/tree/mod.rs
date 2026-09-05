@@ -51,11 +51,6 @@ impl SlotMarks {
 #[derive(Debug, Default)]
 pub struct LayoutSlot {
     cache: Cache,
-    /// The committed input's `content_independent` flags. They live here
-    /// rather than in the cache because the packed cache key covers only the
-    /// fields that decide geometry, and because this is where the host reads
-    /// them.
-    committed_independent_axes: Size<bool>,
     marks: SlotMarks,
     pub static_position: Point<f32>,
     pub unrounded: Layout,
@@ -69,15 +64,11 @@ impl LayoutSlot {
     }
 
     pub fn store_cached_layout(&mut self, input: LayoutInput, output: LayoutOutput) {
-        if input.goal == LayoutGoal::Commit {
-            self.committed_independent_axes = input.content_independent;
-        }
         self.cache.store(input, output);
     }
 
     pub fn clear_layout_cache(&mut self) {
         self.cache.clear();
-        self.committed_independent_axes = Size::new(false, false);
         // The node will be laid out again by whoever cleared this, and a node
         // its parent lays out out-of-flow — an escaping absolute box, whose
         // box the rounding tail itself writes — is reached by no other mark.
@@ -150,12 +141,11 @@ impl LayoutSlot {
         }
     }
 
+    /// The complete input the last commit ran under, independence payload
+    /// included: the packed committed entry carries it beside the key bits.
     #[must_use]
     pub fn committed_input(&self) -> Option<LayoutInput> {
-        self.cache.committed_input().map(|mut input| {
-            input.content_independent = self.committed_independent_axes;
-            input
-        })
+        self.cache.committed_input()
     }
 
     /// Returns the committed input/output pair when the committing parent
@@ -163,10 +153,11 @@ impl LayoutSlot {
     /// host to relayout this subtree in place under the stored input.
     #[must_use]
     pub fn committed_independent(&self) -> Option<(LayoutInput, LayoutOutput)> {
-        if !(self.committed_independent_axes.width && self.committed_independent_axes.height) {
+        let input = self.committed_input()?;
+        if input.goal.independence() != Some(Size::new(true, true)) {
             return None;
         }
-        self.committed_input().zip(self.cache.committed_output())
+        self.cache.committed_output().map(|output| (input, output))
     }
 
     #[must_use]
@@ -309,6 +300,7 @@ mod tests {
             Size::new(Some(40.0), Some(20.0)),
             Size::NONE,
             Size::MAX_CONTENT,
+            Size::new(false, false),
         );
         let output = LayoutOutput::new(Size::new(40.0, 20.0), Size::new(50.0, 30.0));
 
@@ -320,16 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn the_committed_independence_flags_ride_beside_the_packed_key() {
+    fn the_packed_committed_slot_carries_the_independence_payload() {
         let mut slot = LayoutSlot::default();
-        let mut input = LayoutInput::commit(
-            Size::new(Some(40.0), Some(20.0)),
-            Size::NONE,
-            Size::MAX_CONTENT,
-        );
+        let known = Size::new(Some(40.0), Some(20.0));
+        let mut input =
+            LayoutInput::commit(known, Size::NONE, Size::MAX_CONTENT, Size::new(true, false));
         let output = LayoutOutput::new(Size::new(40.0, 20.0), Size::new(50.0, 30.0));
 
-        input.content_independent = Size::new(true, false);
         slot.store_cached_layout(input, output);
         assert_eq!(slot.committed_input(), Some(input));
         assert_eq!(
@@ -338,9 +327,23 @@ mod tests {
             "one independent axis is not a license: the other one still moves",
         );
 
-        input.content_independent = Size::new(true, true);
+        input = LayoutInput::commit(known, Size::NONE, Size::MAX_CONTENT, Size::new(false, true));
+        slot.store_cached_layout(input, output);
+        assert_eq!(slot.committed_input(), Some(input));
+        assert_eq!(slot.committed_independent(), None);
+
+        input = LayoutInput::commit(known, Size::NONE, Size::MAX_CONTENT, Size::new(true, true));
         slot.store_cached_layout(input, output);
         assert_eq!(slot.committed_independent(), Some((input, output)));
+
+        let measured =
+            LayoutInput::measure(known, Size::NONE, Size::MAX_CONTENT, RequestedAxis::Both);
+        slot.store_cached_layout(measured, output);
+        assert_eq!(
+            slot.committed_independent(),
+            Some((input, output)),
+            "a measurement neither commits nor disturbs the committed payload",
+        );
 
         slot.clear_layout_cache();
         assert_eq!(slot.committed_input(), None);

@@ -1360,14 +1360,16 @@ useful signal for currently-compatible versions of those libraries.
   `compute_skipped_contents_layout`, and the `invalidate` module
   (`is_relayout_boundary`, `invalidate_for_relayout`) — the
   containment-bounded, damage-driven cache-invalidation host workflow
-  (single-axis / container queries out of scope). `LayoutInput` additionally
+  (single-axis / container queries out of scope). `LayoutGoal::Commit`
   carries per-axis `content_independent` flags — input *stability* under
-  subtree content change, proven by the committing algorithm (flexbox sets
-  them; the root input is viewport-stable by construction; other algorithms
-  conservatively leave them false) and stored beside the committed cache
-  entry, so a host can relayout a subtree in place under its stored input
-  and verify by output comparison. The per-node measurement cache keeps its
-  eight-slot budget but inlines only two slots, spilling to the heap for the
+  subtree content change, proven by the committing algorithm (flexbox, grid,
+  linear, relative and the absolute pass all set them; the root input is
+  viewport-stable by construction; a measurement carries no such claim, which
+  is why only a commit has the field). They ride inside the committed cache
+  entry, outside its key, so `LayoutSlot::committed_input` hands a host the
+  complete input it can relayout a subtree in place under, and verify by
+  output comparison. The per-node measurement cache has a 32-entry ceiling
+  but inlines only two slots, spilling to the heap for the
   nodes whose containers probe many constraint shapes. Read
   `docs/layout-architecture.md` before touching it. It must not depend on
   other workspace crates or own host tree/style storage, DOM/runtime types,

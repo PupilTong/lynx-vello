@@ -168,7 +168,8 @@ no engine object, so unused entry points never monomorphize into the host.
 Implemented machinery: `compute_root_layout`, `compute_leaf_layout`
 (closed `NaturalSize` replaced-content path), explicit hidden-subtree cleanup via
 `hide_subtree`, `compute_cached_layout`
-(keyed on the **complete `LayoutInput`** — see the caching section),
+(keyed on every **`LayoutInput` field that decides geometry** — see the
+caching section),
 `compute_absolute_layout` (the positioned pass for out-of-flow nodes whose
 containing block is not their formatting parent), and
 `round_layout(tree, state, root, scale)` (device-pixel snapping), plus
@@ -268,7 +269,13 @@ an item's used geometry while §9.8 still classifies that size as indefinite
 for percentages in descendants; Grid has the same distinction. A geometric
 `Some(size)` therefore cannot double as a definiteness flag.
 `LayoutGoal::Measure(RequestedAxis)` makes measurement and its requested axes
-one value; `LayoutGoal::Commit` requests durable child geometry.
+one value; `LayoutGoal::Commit { content_independent }` requests durable child
+geometry and carries the committing parent's per-axis claim that this input
+cannot move when only the node's subtree content changes. That claim is the
+one genuinely mode-specific parameter, so it lives on the goal that has a
+meaning for it: a measurement licenses no in-place relayout and therefore has
+no such field. It never affects computed geometry and is outside the cache
+key.
 Hidden-subtree cleanup is deliberately outside this sizing API.
 `LayoutInput`/`LayoutOutput`/`Layout` are
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
@@ -685,8 +692,10 @@ style ⇒ identical outer size,
 so only the interior re-arranges and the parent-owned frame stays valid
 (`compute_root_layout` remains the entry for the true tree root). This only
 ever `clear_layout_cache`s;
-it never reads or weakens cache keys (the key stays the complete
-`LayoutInput`). The style-damage → host-action translation table (REPAINT /
+it never reads or weakens cache keys (the key stays every `LayoutInput` field
+that decides geometry; the `Commit` goal's `content_independent` payload rides
+in the committed entry beside that key, never in it). The style-damage →
+host-action translation table (REPAINT /
 stacking / overflow-only → no cache work; RELAYOUT → invalidate + re-run;
 reconstruct/`display`/structural mutation → same but start from the mutated
 node's parent) is rustdoc'd on `invalidate` (`crate::invalidate`); it names the
@@ -703,7 +712,9 @@ the painting — layout's job is to never be the frame's bottleneck.
   (`children`, style accessors, `compute_layout`) are all
   monomorphized; hosts should `#[inline]` their impls of the first two.
 - **Cheap transient boundary; explicit durable records.** Geometry,
-  `LayoutInput`, and `LayoutOutput` are small `Copy` structs (`#[repr(C)]`),
+  `LayoutInput`, and `LayoutOutput` are small `Copy` structs (the `geometry`
+  types are additionally `#[repr(C)]`; `LayoutInput` and `LayoutOutput` are
+  not),
   passed by value; `Layout` is a larger non-`Copy`, non-`Clone` record moved
   into host storage and read by reference, so a whole-layout clone is not
   available. Values use `f32` throughout (GPU/SIMD native, halves
@@ -759,19 +770,22 @@ the painting — layout's job is to never be the frame's bottleneck.
   uncached,
   nested containers go super-linear (the classic exponential blowup). The
   protocol bakes the fix in: `compute_cached_layout` around every
-  generated-box dispatch, per-node slots (`cache::Cache`, embeddable, with
-  all `MEASURE_CACHE_SLOTS = 8` bounded measurement slots inline and therefore
-  allocation-free, plus one layout slot). Shape-aware replacement is
+  generated-box dispatch, per-node slots (`cache::Cache`, embeddable, with two
+  measurement slots inline, spilling to the heap up to
+  `MEASURE_CACHE_LIMIT = 32`, plus one layout slot). Shape-aware replacement is
   implemented; probe-trace validation and tuning remain L4 work. The key is
-  the **complete
-  `LayoutInput`** — `goal` distinguishes side-effect-free measurements
-  (including their requested axes) from geometry commits, `sizing_mode`
-  controls whether content-size probes ignore the node's own
-  size/min/max/aspect-ratio, `definite_dimensions` preserves percentage
+  **every `LayoutInput` field that decides geometry** — `goal` distinguishes
+  side-effect-free measurements (including their requested axes) from geometry
+  commits, `sizing_mode` controls whether content-size probes ignore the node's
+  own size/min/max/aspect-ratio, `definite_dimensions` preserves percentage
   definiteness independently from decided geometry, and `parent_size` is the
   percentage basis. All change results, so dropping any of them from the key
   would alias distinct layouts; matching may coalesce entries only under
-  provable equivalences (documented in the `cache` module).
+  provable equivalences (documented in the `cache` module). The `Commit` goal's
+  `content_independent` payload is the one field left out: it changes no
+  result, so it is packed into the committed entry outside the key bits — two
+  commits that differ only in it answer each other — and reads back whole
+  through `LayoutSlot::committed_input`.
 - **Incremental relayout is a host workflow the protocol supports, not a
   hidden engine mode.** On style/content/children change the host clears
   that node's cache and its ancestors' (dirty-path invalidation), then
