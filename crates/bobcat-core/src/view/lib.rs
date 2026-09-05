@@ -329,21 +329,20 @@ pub struct ViewSources {
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
     pub entry: String,
-    /// How large a style pool `bobcat-main` builds for this view's document,
-    /// itself included. Threads that will not start are a construction
-    /// failure, reported the same way a failed boot is.
+    /// How large a style pool `bobcat-main` builds for itself, itself
+    /// included, and shares with every document it carries. Threads that will
+    /// not start are a construction failure, reported the same way a failed
+    /// boot is.
     pub style_threads: StyleThreads,
 }
 
-/// The document half of [`ViewSources`]: what crosses to `bobcat-main`.
+/// The document half of [`ViewSources`]: what crosses to `bobcat-main` for
+/// this view in particular, as opposed to the thread's own style pool, which
+/// every document on it shares.
 pub(crate) struct MainSources {
     pub(crate) config: PageConfig,
     pub(crate) fonts: Vec<FontBlob>,
     pub(crate) default_font_family: Option<String>,
-    /// A size, not a pool: `bobcat-main` builds it itself, because rayon
-    /// takes over the calling thread and `bobcat-main` is the member that
-    /// matters.
-    pub(crate) style_threads: StyleThreads,
 }
 
 impl ViewSources {
@@ -451,11 +450,11 @@ impl<F: ResourceFetcher> LynxView<F> {
         } = sources;
         let main = spawn_main_thread(
             viewport,
+            style_threads,
             MainSources {
                 config,
                 fonts,
                 default_font_family,
-                style_threads,
             },
             main_link,
         )?;

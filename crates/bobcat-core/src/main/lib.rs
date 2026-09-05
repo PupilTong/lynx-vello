@@ -17,6 +17,7 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
@@ -38,7 +39,7 @@ use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, MainSources,
-    StyleSheetSource, ToMain, ToPainter, Viewport, frame_slot,
+    StyleSheetSource, StyleThreads, ToMain, ToPainter, Viewport, frame_slot,
 };
 
 #[cfg(test)]
@@ -225,6 +226,7 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
 /// blocked on a `BeginFrame` is already waiting on.
 pub(crate) fn spawn_main_thread<R: EventRequester>(
     viewport: Viewport,
+    style_threads: StyleThreads,
     sources: MainSources,
     link: MainLink<R>,
 ) -> Result<MainThreadHome, EngineError> {
@@ -232,7 +234,7 @@ pub(crate) fn spawn_main_thread<R: EventRequester>(
     let main_control = Arc::clone(&control);
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
-        .spawn(move || run_main_thread(viewport, sources, link, &main_control))
+        .spawn(move || run_main_thread(viewport, style_threads, sources, link, &main_control))
         .map_err(|error| EngineError::Thread {
             name: "script",
             message: error.to_string(),
@@ -349,23 +351,17 @@ impl<R: EventRequester> Booting<R> {
     fn new(
         viewport: Viewport,
         sources: MainSources,
+        style_pool: Option<&Rc<StylePool>>,
         notify: ToPainterSender<R>,
     ) -> Result<Self, LynxViewError> {
         let MainSources {
             config,
             fonts,
             default_font_family,
-            style_threads,
         } = sources;
-        // First, and on this thread, because it must be: rayon takes the
-        // calling thread over as index zero, so the pool can only be built by
-        // the thread that will flush. A view whose threads cannot start is a
-        // view that never existed, and starting them here overlaps the fetches
-        // the painter already has in flight.
-        let style_pool = build_style_pool(style_threads.resolve())?;
         let mut document = new_document(viewport, config);
         if let Some(pool) = style_pool {
-            document.set_style_pool(pool);
+            document.set_style_pool(Rc::clone(pool));
         }
         for font in fonts {
             document.register_fonts(font);
@@ -437,6 +433,7 @@ impl<R: EventRequester> Booting<R> {
 
 fn run_main_thread<R: EventRequester>(
     viewport: Viewport,
+    style_threads: StyleThreads,
     sources: MainSources,
     link: MainLink<R>,
     control: &StartupControl,
@@ -469,7 +466,22 @@ fn run_main_thread<R: EventRequester>(
             }
         };
 
-    let slot = match Booting::new(viewport, sources, notify.clone()) {
+    // The pool is the thread's for a harder reason than the runtime is:
+    // rayon takes this thread over as index zero and never gives it back, so
+    // a second pool built here would be refused outright. Every document this
+    // thread carries therefore shares this one — which they may, being unable
+    // to traverse at once on the single thread that drives them both. Built
+    // before the first source arrives, so starting the workers overlaps the
+    // fetches the painter already has in flight.
+    let style_pool = match build_style_pool(style_threads.resolve()) {
+        Ok(pool) => pool.map(Rc::new),
+        Err(error) => {
+            notify.send(ToPainter::Started(Err(error.into())));
+            return;
+        }
+    };
+
+    let slot = match Booting::new(viewport, sources, style_pool.as_ref(), notify.clone()) {
         Ok(booting) => ViewSlot::Booting(Box::new(booting)),
         Err(error) => {
             notify.send(ToPainter::Started(Err(error)));

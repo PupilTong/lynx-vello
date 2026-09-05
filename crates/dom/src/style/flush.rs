@@ -153,10 +153,10 @@ impl<T: Sync> Document<T> {
             let should_traverse = token.should_traverse();
             if should_traverse {
                 let _thread_state = LayoutThreadStateGuard::enter();
-                // This document's own workers, or none — in which case the
+                // This thread's workers, or none — in which case the
                 // traversal runs here, on the thread that flushes. Nothing
-                // reaches for a shared pool, so nothing has to be serialized
-                // against another document's flush.
+                // reaches for a process-wide pool, so nothing has to be
+                // serialized against a document on another thread.
                 let pool = self.style_pool().map(StylePool::rayon);
                 Node::id(driver::traverse_dom(&traversal, token, pool))
             } else {
