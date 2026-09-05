@@ -461,6 +461,7 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
             Size::new(Some(25.0), Some(10.0)),
             Size::NONE,
             Size::MAX_CONTENT,
+            Size::new(false, false),
         ),
     );
     assert_eq!(output.size, Size::new(25.0, 10.0));
@@ -476,7 +477,12 @@ fn grid_track_view_remains_live_across_recursive_session_layout() {
 fn leaf_dispatch_round_trips_layout_io() {
     let (tree, mut state, root) = leaf_tree();
     let child = tree.children(tree.node(root)).next().unwrap();
-    let input = LayoutInput::commit(Size::new(Some(40.0), None), Size::NONE, Size::MAX_CONTENT);
+    let input = LayoutInput::commit(
+        Size::new(Some(40.0), None),
+        Size::NONE,
+        Size::MAX_CONTENT,
+        Size::new(false, false),
+    );
     let output = LayoutTree::compute_layout(&tree, &mut state, child, input);
     assert_eq!(output.size, Size::new(40.0, 0.0));
 
@@ -614,6 +620,7 @@ fn compute_leaf_layout_uses_internal_natural_size() {
             AvailableSpace::Definite(100.0),
             AvailableSpace::Definite(100.0),
         ),
+        Size::new(false, false),
     );
     let output = compute_leaf_layout(
         input,
@@ -640,6 +647,7 @@ fn calc_padding_resolves_through_stylo_style_values() {
             AvailableSpace::Definite(200.0),
             AvailableSpace::Definite(100.0),
         ),
+        Size::new(false, false),
     );
     let output = compute_leaf_layout(
         input,
@@ -967,7 +975,12 @@ fn stretched_boundary_tree() -> (MockTree, MockState, usize, usize, usize) {
     tree.compute_layout(
         &mut state,
         parent,
-        LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
+        LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        ),
     );
     (tree, state, parent, boundary, interior)
 }
@@ -1060,6 +1073,7 @@ fn skipped_contents_dispatch_sizes_from_intrinsic_and_hides_descendants() {
                 AvailableSpace::Definite(200.0),
                 AvailableSpace::Definite(200.0),
             ),
+            Size::new(false, false),
         ),
     );
 

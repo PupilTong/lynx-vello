@@ -930,7 +930,9 @@ fn determine_hypothetical_cross_sizes<T>(
     wrap: flex_wrap::T,
     container_inner_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
-    container_independent: Size<bool>,
+    // `Some` only on a commit-goal pass, whose in-flow commit is the sole
+    // consumer of the per-item flags this writes.
+    container_independent: Option<Size<bool>>,
 ) where
     T: LayoutTree,
 {
@@ -987,16 +989,18 @@ fn determine_hypothetical_cross_sizes<T>(
                 && !cross_has_intrinsic_style
                 && let Some(cross) = resolved_cross
             {
-                let imposed = item.edges_stable
-                    && if axes.cross.size(item.preferred_size).is_some() {
-                        axes.cross.size(item.preferred_definite) && item.cross_values_stable
-                    } else {
-                        // `stretched_cross`: the single line spans the
-                        // container's cross size, imposed only when that size
-                        // is itself content-independent.
-                        axes.cross.size(container_independent)
-                    };
-                axes.cross.set_size(&mut item.content_independent, imposed);
+                if let Some(container_independent) = container_independent {
+                    let imposed = item.edges_stable
+                        && if axes.cross.size(item.preferred_size).is_some() {
+                            axes.cross.size(item.preferred_definite) && item.cross_values_stable
+                        } else {
+                            // `stretched_cross`: the single line spans the
+                            // container's cross size, imposed only when that
+                            // size is itself content-independent.
+                            axes.cross.size(container_independent)
+                        };
+                    axes.cross.set_size(&mut item.content_independent, imposed);
+                }
                 item.hypothetical_cross = cross;
                 item.target_cross = cross;
                 item.measured_baselines = Point::NONE;
@@ -1009,13 +1013,15 @@ fn determine_hypothetical_cross_sizes<T>(
             // value and echoes it back. Anything else is content, and a
             // stretch target is restored later, once the line's cross size is
             // known.
-            let cross_from_style = !cross_has_intrinsic_style
-                && axes.cross.size(item.preferred_size).is_some()
-                && axes.cross.size(item.preferred_definite)
-                && item.cross_values_stable
-                && item.edges_stable;
-            axes.cross
-                .set_size(&mut item.content_independent, cross_from_style);
+            if container_independent.is_some() {
+                let cross_from_style = !cross_has_intrinsic_style
+                    && axes.cross.size(item.preferred_size).is_some()
+                    && axes.cross.size(item.preferred_definite)
+                    && item.cross_values_stable
+                    && item.edges_stable;
+                axes.cross
+                    .set_size(&mut item.content_independent, cross_from_style);
+            }
 
             let mut known = Size::NONE;
             axes.main.set_size(&mut known, Some(item.target_main));
@@ -1147,7 +1153,9 @@ fn determine_used_cross_sizes<N>(
     items: &mut [FlexItem<N>],
     lines: &[FlexLine],
     axes: Axes,
-    line_cross_imposed: bool,
+    // `Some` only on a commit-goal pass; the bool is whether the line's cross
+    // size is itself content-independent.
+    line_cross_imposed: Option<bool>,
 ) {
     for line in lines {
         for item in &mut items[line.start..line.end] {
@@ -1158,10 +1166,12 @@ fn determine_used_cross_sizes<N>(
                 && !item.margin_auto.flow_start(axes.cross, axes.cross_reverse)
                 && !item.margin_auto.flow_end(axes.cross, axes.cross_reverse);
             item.target_cross = if should_stretch {
-                let imposed = line_cross_imposed
-                    && item.edges_stable
-                    && !axis_has_intrinsic_style(item, axes.cross);
-                axes.cross.set_size(&mut item.content_independent, imposed);
+                if let Some(line_cross_imposed) = line_cross_imposed {
+                    let imposed = line_cross_imposed
+                        && item.edges_stable
+                        && !axis_has_intrinsic_style(item, axes.cross);
+                    axes.cross.set_size(&mut item.content_independent, imposed);
+                }
                 clamp_axis(
                     line.cross_size - axes.cross.sum(item.margin),
                     axes.cross.size(item.min_size),
@@ -1423,11 +1433,11 @@ where
                 target_size.map(Some),
                 parent_size,
                 target_size.map(AvailableSpace::Definite),
+                item.content_independent,
             );
             axes.main
                 .set_size(&mut input.definite_dimensions, item.main_size_is_definite);
             input.sizing_mode = SizingMode::IgnoreSizeStyles;
-            input.content_independent = item.content_independent;
             let output = tree.compute_layout(state, item.key.node, input);
 
             let offset = if item.position == PositionProperty::Relative {
@@ -1622,7 +1632,7 @@ fn collect_flex_items<T>(
 where
     T: LayoutTree,
 {
-    let commits_layout = goal == LayoutGoal::Commit;
+    let commits_layout = goal.commits();
     let children = tree.flattened_children(node);
     let mut generated = Vec::with_capacity(children.capacity_hint());
     let mut absolute_items = SmallVec::new();
@@ -1744,7 +1754,7 @@ where
             .flatten(),
         !main_percentage_basis_was_indefinite,
         axes.main.size(outer_size).is_none() && size_containment.is_none(),
-        (input.goal == LayoutGoal::Commit).then_some(container_independent),
+        container_independent,
     );
 
     let main_gap = axes.main.size(gap);
@@ -1859,7 +1869,7 @@ where
             },
             !main_percentage_basis_was_indefinite,
             false,
-            (input.goal == LayoutGoal::Commit).then_some(container_independent),
+            container_independent,
         );
         lines = collect_flex_lines(
             &items,
@@ -1895,7 +1905,8 @@ where
         &mut items,
         &lines,
         axes,
-        flex_wrap == flex_wrap::T::Nowrap && axes.cross.size(container_independent),
+        container_independent
+            .map(|independent| flex_wrap == flex_wrap::T::Nowrap && axes.cross.size(independent)),
     );
     distribute_main_axis(
         &mut items,
@@ -2190,7 +2201,7 @@ mod tests {
                 AvailableSpace::Definite(100.0),
                 AvailableSpace::Definite(cross),
             ),
-            Size::new(false, false),
+            Some(Size::new(false, false)),
         );
     }
 
@@ -2233,7 +2244,7 @@ mod tests {
             (1, 1)
         );
 
-        let committed = collect_flex_items(&tree, TestRef(0), LayoutGoal::Commit);
+        let committed = collect_flex_items(&tree, TestRef(0), LayoutGoal::default());
         assert!(
             committed
                 .generated
@@ -2437,7 +2448,7 @@ mod tests {
         );
         assert_eq!(items[0].measured_baselines.y, Some(5.0));
         calculate_line_cross_sizes(&items, &mut lines, axes, flex_wrap::T::Nowrap, Some(40.0));
-        determine_used_cross_sizes(&mut items, &lines, axes, true);
+        determine_used_cross_sizes(&mut items, &lines, axes, Some(true));
         assert_eq!(
             items.each_ref().map(|item| item.target_cross),
             [40.0, 30.0, 40.0]

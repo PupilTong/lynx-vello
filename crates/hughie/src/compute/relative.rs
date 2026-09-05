@@ -796,7 +796,6 @@ where
         RequestedAxis::Both,
     );
     input.definite_dimensions = constraint_definite;
-    input.sizing_mode = SizingMode::ApplySizeStyles;
     input
 }
 
@@ -1261,10 +1260,14 @@ where
     let mut scrollable_size = container_size;
 
     for item in items {
-        let mut input = LayoutInput::commit(item.output.size.map(Some), parent_size, available);
+        let mut input = LayoutInput::commit(
+            item.output.size.map(Some),
+            parent_size,
+            available,
+            item.content_independent,
+        );
         input.definite_dimensions = item.size_is_definite;
         input.sizing_mode = SizingMode::IgnoreSizeStyles;
-        input.content_independent = item.content_independent;
         let output = tree.compute_layout(state, item.key.node, input);
         item.output = output;
 
@@ -1370,8 +1373,7 @@ where
         input.definite_dimensions.width || style_definite.width,
         input.definite_dimensions.height || style_definite.height,
     );
-    let container_independent = (input.goal == LayoutGoal::Commit)
-        .then(|| container_content_independence(input, style_definite));
+    let container_independent = container_content_independence(input, style_definite);
 
     if matches!(input.goal, LayoutGoal::Measure(_))
         && (size_containment.is_some()
@@ -1418,7 +1420,7 @@ where
     );
     let edge_inline_basis = available_content.width.definite_value();
 
-    let commits_layout = input.goal == LayoutGoal::Commit;
+    let commits_layout = input.goal.commits();
     let children = tree.flattened_children(node);
     let mut generated = Vec::with_capacity(children.capacity_hint());
     let mut absolute_items = Vec::new();
@@ -1716,7 +1718,7 @@ mod tests {
                 LayoutGoal::Measure(_) => self
                     .child_measure_calls
                     .set(self.child_measure_calls.get() + 1),
-                LayoutGoal::Commit => {
+                LayoutGoal::Commit { .. } => {
                     self.child_commit_calls
                         .set(self.child_commit_calls.get() + 1);
                     self.committed_artifact.set(true);
@@ -1806,6 +1808,7 @@ mod tests {
                     AvailableSpace::Definite(100.0),
                     AvailableSpace::Definite(50.0),
                 ),
+                Size::new(false, false),
             ),
         );
         assert_eq!(committed.size, Size::new(100.0, 50.0));

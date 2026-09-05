@@ -159,7 +159,12 @@ fn placement(start: GridLine, end: GridLine) -> Line<GridLine> {
 fn intrinsic_layout(tree: &TestTree, root: TestId) -> LayoutOutput {
     tree.compute_layout(
         root,
-        LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT),
+        LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        ),
     )
 }
 
@@ -1321,7 +1326,12 @@ fn intrinsic_probe_count_stays_linear_in_item_count() {
 fn min_content_layout(tree: &TestTree, root: TestId) -> LayoutOutput {
     tree.compute_layout(
         root,
-        LayoutInput::commit(Size::NONE, Size::NONE, Size::MIN_CONTENT),
+        LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MIN_CONTENT,
+            Size::new(false, false),
+        ),
     )
 }
 
@@ -1778,6 +1788,7 @@ fn cross_axis_rerun_uses_effective_content_alignment_gaps() {
             Size::new(None, Some(100.0)),
             Size::new(None, Some(100.0)),
             Size::new(AvailableSpace::MaxContent, AvailableSpace::Definite(100.0)),
+            Size::new(false, false),
         ),
     );
 
@@ -2428,6 +2439,7 @@ fn container_intrinsic_keyword_widths_override_available_space() {
                     AvailableSpace::Definite(200.0),
                     AvailableSpace::Definite(50.0),
                 ),
+                Size::new(false, false),
             ),
         );
         output.size.width
@@ -2451,6 +2463,7 @@ fn container_intrinsic_keyword_widths_override_available_space() {
                     AvailableSpace::Definite(200.0),
                     AvailableSpace::Definite(200.0),
                 ),
+                Size::new(false, false),
             ),
         );
         output.size.height

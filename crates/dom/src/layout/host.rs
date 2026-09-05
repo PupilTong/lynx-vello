@@ -19,9 +19,7 @@ use hughie::compute::{
 use hughie::geometry::{Point, Size};
 use hughie::invalidate::is_relayout_boundary;
 use hughie::style::{CoreStyle, PositionProperty};
-use hughie::tree::{
-    AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree,
-};
+use hughie::tree::{AvailableSpace, Layout, LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 use rustc_hash::FxHashSet;
 
 use super::style::{
@@ -130,7 +128,7 @@ impl<T> LayoutTree for TreeArenas<T> {
                         #[cfg(not(feature = "layout-test-utils"))]
                         compute_leaf_layout(input, &view, node_ref.natural_size())
                     };
-                    if input.goal == LayoutGoal::Commit {
+                    if input.goal.commits() {
                         for grandchild in tree.children(node) {
                             hide_subtree(tree, state, grandchild);
                         }

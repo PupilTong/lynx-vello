@@ -18,11 +18,49 @@ pub enum RequestedAxis {
     Both,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayoutGoal {
     Measure(RequestedAxis),
-    #[default]
-    Commit,
+    /// Durable child geometry. `content_independent`, per axis: the committing
+    /// parent proved this input's `known_dimensions`, `parent_size` and
+    /// `available_space` cannot change when only the node's own subtree
+    /// content changes. Distinct from [`LayoutInput::definite_dimensions`]
+    /// (CSS definiteness): a post-flexing size is definite even when it was
+    /// measured from the very content whose change is in question. It never
+    /// affects computed geometry and is outside the cache key; it is what
+    /// licenses a host to relayout the node in place under its committed
+    /// input. A measurement carries no such license, so only a commit has the
+    /// field.
+    Commit {
+        content_independent: Size<bool>,
+    },
+}
+
+impl Default for LayoutGoal {
+    fn default() -> Self {
+        Self::Commit {
+            content_independent: Size::new(false, false),
+        }
+    }
+}
+
+impl LayoutGoal {
+    /// Whether this goal asks for durable child geometry.
+    #[must_use]
+    pub const fn commits(self) -> bool {
+        matches!(self, Self::Commit { .. })
+    }
+
+    /// The independence a commit carries; a measurement carries none.
+    #[must_use]
+    pub const fn independence(self) -> Option<Size<bool>> {
+        match self {
+            Self::Commit {
+                content_independent,
+            } => Some(content_independent),
+            Self::Measure(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -90,34 +128,43 @@ pub struct LayoutInput {
     pub definite_dimensions: Size<bool>,
     pub parent_size: Size<Option<f32>>,
     pub available_space: Size<AvailableSpace>,
-    /// Per axis: this input's `known_dimensions`, `parent_size`, and
-    /// `available_space` cannot change when only the node's own subtree
-    /// content changes. Distinct from [`Self::definite_dimensions`], which is
-    /// CSS definiteness — a post-flexing size is *definite* even when it was
-    /// measured from the very content whose change is in question. Producers
-    /// that cannot prove stability leave it `false`; it never affects the
-    /// computed geometry, only whether a host may relayout the node in place
-    /// under a cached copy of this input.
-    pub content_independent: Size<bool>,
 }
 
 impl LayoutInput {
+    #[inline]
+    #[must_use]
+    pub fn new(
+        goal: LayoutGoal,
+        known_dimensions: Size<Option<f32>>,
+        parent_size: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+    ) -> Self {
+        Self {
+            goal,
+            sizing_mode: SizingMode::ApplySizeStyles,
+            known_dimensions,
+            definite_dimensions: known_dimensions.map(|value| value.is_some()),
+            parent_size,
+            available_space,
+        }
+    }
+
     #[inline]
     #[must_use]
     pub fn commit(
         known_dimensions: Size<Option<f32>>,
         parent_size: Size<Option<f32>>,
         available_space: Size<AvailableSpace>,
+        content_independent: Size<bool>,
     ) -> Self {
-        Self {
-            goal: LayoutGoal::Commit,
-            sizing_mode: SizingMode::ApplySizeStyles,
+        Self::new(
+            LayoutGoal::Commit {
+                content_independent,
+            },
             known_dimensions,
-            definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
-            content_independent: Size::new(false, false),
-        }
+        )
     }
 
     #[inline]
@@ -128,15 +175,12 @@ impl LayoutInput {
         available_space: Size<AvailableSpace>,
         requested_axis: RequestedAxis,
     ) -> Self {
-        Self {
-            goal: LayoutGoal::Measure(requested_axis),
-            sizing_mode: SizingMode::ApplySizeStyles,
+        Self::new(
+            LayoutGoal::Measure(requested_axis),
             known_dimensions,
-            definite_dimensions: known_dimensions.map(|value| value.is_some()),
             parent_size,
             available_space,
-            content_independent: Size::new(false, false),
-        }
+        )
     }
 }
 
@@ -228,13 +272,28 @@ mod tests {
         let parent = Size::new(Some(200.0), Some(150.0));
         let available = Size::new(AvailableSpace::Definite(100.0), AvailableSpace::MaxContent);
 
-        let commit = LayoutInput::commit(known, parent, available);
-        assert_eq!(commit.goal, LayoutGoal::Commit);
+        let independent = Size::new(true, false);
+        let commit = LayoutInput::commit(known, parent, available, independent);
+        assert_eq!(
+            commit.goal,
+            LayoutGoal::Commit {
+                content_independent: independent
+            }
+        );
+        assert!(commit.goal.commits());
+        assert_eq!(commit.goal.independence(), Some(independent));
         assert_eq!(commit.sizing_mode, SizingMode::ApplySizeStyles);
         assert_eq!(commit.known_dimensions, known);
 
         let measure = LayoutInput::measure(known, parent, available, RequestedAxis::Horizontal);
         assert_eq!(measure.goal, LayoutGoal::Measure(RequestedAxis::Horizontal));
+        assert!(!measure.goal.commits());
+        assert_eq!(measure.goal.independence(), None);
+        assert_eq!(LayoutGoal::default(), LayoutInput::default().goal);
+        assert_eq!(
+            LayoutGoal::default().independence(),
+            Some(Size::new(false, false))
+        );
 
         let baselines = Point::new(None, Some(14.0));
         let output = LayoutOutput::new(Size::new(100.0, 20.0), Size::new(120.0, 30.0))
