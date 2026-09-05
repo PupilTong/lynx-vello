@@ -720,8 +720,8 @@ useful signal for currently-compatible versions of those libraries.
   infrastructure inside `bobcat-core`. It follows UI Judge's public capture
   surface: `GET /health`, and `POST /screenshot` with required `url` and
   `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +
-  64 KiB body bound, and raw `image/jpeg` success output. Captures use a fixed
-  800×600 physical viewport at DPR 1 and JPEG quality 90, source-over
+  64 KiB body bound, and raw `image/bmp` success output. Captures use a fixed
+  800×600 physical viewport at DPR 1 and uncompressed BMP output, source-over
   composited onto white before encoding. Scoring-only fields are accepted and
   ignored; non-empty `globalProps`, `initialData`, and interaction `steps` are
   rejected with 422 instead of pretending the current opaque core has data
@@ -733,7 +733,7 @@ useful signal for currently-compatible versions of those libraries.
   ticks, settles, and returns its RGBA capture. The Lynx main thread it spawns
   is the view's only other runtime thread; the server adds no separate
   rendering owner.
-  JPEG encoding then runs on Tokio's blocking pool after the view is gone, so
+  BMP encoding then runs on Tokio's blocking pool after the view is gone, so
   it cannot retain the view or hold the GPU lane. Queue saturation and an
   unavailable worker are 503, input/render failures are 422, and encoding
   failures are 500. A worker panic makes `/health` unavailable and initiates
@@ -749,7 +749,7 @@ useful signal for currently-compatible versions of those libraries.
   `timeoutMs` cannot preempt synchronous QuickJS execution, a blocking GPU
   driver call on the capture/embedder thread, or synchronous view teardown
   while it joins the Lynx main thread. It must not move source fetching, HTTP
-  policy, JPEG encoding, queueing, or server lifecycle into `bobcat-core`.
+  policy, BMP encoding, queueing, or server lifecycle into `bobcat-core`.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
