@@ -34,7 +34,7 @@ use super::util::{
 use super::{compute_absolute_layout, hide_subtree};
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle, Display, Overflow};
+use crate::style::{Contain, CoreStyle, Display, GridStyle, Overflow};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
@@ -88,14 +88,14 @@ impl<N> PendingLayoutItem<N> for PendingItem<N> {
     }
 }
 
-fn classify_item<T>(
-    node: T::NodeId,
-    style: &T::Style<'_>,
+fn classify_item<N, S>(
+    node: N,
+    style: &S,
     display: Display,
     document_index: usize,
-) -> Option<PendingItem<T::NodeId>>
+) -> Option<PendingItem<N>>
 where
-    T: LayoutTree,
+    S: GridStyle,
 {
     if display.is_none() {
         return None;
@@ -124,20 +124,19 @@ where
     })
 }
 
-fn resolve_grid_item<T>(
-    tree: &T,
-    key: ItemKey<T::NodeId>,
+fn resolve_grid_item<N, S>(
+    style: &S,
+    key: ItemKey<N>,
     area: GridArea,
     percentage_basis: Size<Option<f32>>,
     defaults: ItemDefaults,
-) -> GridItem<T::NodeId>
+) -> GridItem<N>
 where
-    T: LayoutTree,
+    S: GridStyle,
 {
-    let style = tree.style(key.node);
     let raw_size = style.size();
     let raw_min_size = style.min_size();
-    let geometry = resolve_item_geometry(&style, percentage_basis);
+    let geometry = resolve_item_geometry(style, percentage_basis);
     let behaves_auto_or_depends = |value: &StyleSize| match value {
         StyleSize::Auto
         | StyleSize::FitContent
@@ -193,17 +192,15 @@ where
     }
 }
 
-fn expand_explicit_tracks<T>(
-    tree: &T,
-    node: T::NodeId,
+fn expand_explicit_tracks<S>(
+    style: &S,
     repeat_max_basis: Size<Option<f32>>,
     repeat_min_basis: Size<Option<f32>>,
     gap: Size<f32>,
 ) -> (ExpandedTemplate, ExpandedTemplate)
 where
-    T: LayoutTree,
+    S: GridStyle,
 {
-    let style = tree.style(node);
     let columns = expand_template(
         style.grid_template_columns(),
         repeat_max_basis.width,
@@ -1008,8 +1005,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn layout_absolute_items<T>(
-    tree: &T,
+fn layout_absolute_items<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     items: &[PendingItem<T::NodeId>],
     columns: &TrackSet,
@@ -1024,7 +1021,8 @@ fn layout_absolute_items<T>(
     defaults: ItemDefaults,
 ) -> Size<f32>
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: GridStyle,
 {
     let mut content_size = outer_size;
     let padding_box_origin = Point::new(border.left, border.top);
@@ -1045,8 +1043,8 @@ where
             (inset_auto.left && inset_auto.right) || (inset_auto.top && inset_auto.bottom);
         let content_static_offset = if needs_static_measurement {
             let item = resolve_grid_item(
-                tree,
-                pending.key(),
+                &tree.style(key.node),
+                key,
                 GridArea::default(),
                 Size::new(Some(inner_size.width), Some(inner_size.height)),
                 defaults,
@@ -1112,14 +1110,15 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_grid_layout<T>(
-    tree: &T,
+pub fn compute_grid_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
 ) -> LayoutOutput
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: GridStyle,
 {
     let style = tree.style(node);
     let size_containment = size_containment(&style);
@@ -1208,13 +1207,8 @@ where
         repeat_max_basis.height.or(repeat_min_basis.height),
     );
     let repeat_count_gap = resolve_gap(gap_value, repeat_count_basis);
-    let (explicit_columns, explicit_rows) = expand_explicit_tracks(
-        tree,
-        node,
-        repeat_max_basis,
-        repeat_min_basis,
-        repeat_count_gap,
-    );
+    let (explicit_columns, explicit_rows) =
+        expand_explicit_tracks(&style, repeat_max_basis, repeat_min_basis, repeat_count_gap);
 
     let commits_layout = input.goal == LayoutGoal::Commit;
     let children = tree.flattened_children(node);
@@ -1222,7 +1216,7 @@ where
     let mut absolute = commits_layout.then(Vec::new);
     let mut hidden = commits_layout.then(Vec::new);
     for (document_index, (child, style, display)) in children.enumerate() {
-        let Some(child_style) = classify_item::<T>(child, &style, display, document_index) else {
+        let Some(child_style) = classify_item(child, &style, display, document_index) else {
             if let Some(hidden) = &mut hidden {
                 hidden.push((document_index, child));
             }
@@ -1297,7 +1291,10 @@ where
     let mut items = in_flow
         .into_iter()
         .zip(placement.areas)
-        .map(|(item, area)| resolve_grid_item(tree, item.key(), area, Size::NONE, item_defaults))
+        .map(|(item, area)| {
+            let key = item.key();
+            resolve_grid_item(&tree.style(key.node), key, area, Size::NONE, item_defaults)
+        })
         .collect::<Vec<_>>();
 
     let mut columns = TrackSet::default();

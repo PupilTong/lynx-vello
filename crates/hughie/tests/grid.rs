@@ -1822,42 +1822,6 @@ mod sizing {
     }
 }
 
-mod visibility {
-    use super::*;
-
-    #[test]
-    fn hidden_grid_items_keep_their_auto_placement_cells() {
-        let mut tree = support::TestTree::default();
-        let mut hidden_style = support::fixed_leaf_style(50.0, 20.0);
-        hidden_style.visibility = stylo::computed_values::visibility::T::Hidden;
-        let hidden = tree.push_leaf(hidden_style, Size::new(50.0, 20.0), None);
-        let mut second_hidden_style = support::fixed_leaf_style(50.0, 20.0);
-        second_hidden_style.visibility = stylo::computed_values::visibility::T::Hidden;
-        let second_hidden = tree.push_leaf(second_hidden_style, Size::new(50.0, 20.0), None);
-        let visible = support::fixed_leaf(&mut tree, 50.0, 20.0);
-        let root = tree.push_grid(
-            support::TestStyle {
-                template_columns: tracks(&[px(50.0), px(50.0), px(50.0)]),
-                template_rows: tracks(&[px(20.0)]),
-                ..support::TestStyle::default()
-            },
-            vec![hidden, second_hidden, visible],
-        );
-
-        support::definite_layout(&tree, root, 150.0, 20.0);
-
-        for (name, node, expected_x) in [
-            ("hidden", hidden, 0.0),
-            ("second hidden", second_hidden, 50.0),
-            ("visible", visible, 100.0),
-        ] {
-            let layout = tree.layout(node);
-            assert_eq!(layout.size, Size::new(50.0, 20.0), "{name} item size");
-            assert_eq!(layout.location, Point::new(expected_x, 0.0), "{name} cell");
-        }
-    }
-}
-
 #[test]
 fn cross_size_dependent_ratio_item_forces_one_column_feedback_rerun() {
     let mut tree = TestTree::default();

@@ -1661,7 +1661,7 @@ mod tests {
     use super::*;
     use crate::compute::grid::placement::{GridArea, TrackSpan};
     use crate::geometry::{Point, Size};
-    use crate::style::CoreStyle;
+    use crate::style::{CoreStyle, GridStyle};
     use crate::tree::{LayoutInput, LayoutOutput, LayoutSlot, LayoutTree};
 
     fn lp_px(value: f32) -> LengthPercentage {
@@ -1705,7 +1705,9 @@ mod tests {
         fn max_size(&self) -> Size<&StyleMaxSize> {
             self.max_size.as_ref()
         }
+    }
 
+    impl GridStyle for TestStyle {
         fn grid_template_rows(&self) -> &GridTemplateComponent {
             &self.template
         }
@@ -1768,10 +1770,6 @@ mod tests {
 
         fn children(&self, _node: Self::NodeId) -> Self::ChildIter<'_> {
             core::iter::empty()
-        }
-
-        fn child_count(&self, _node: Self::NodeId) -> usize {
-            0
         }
 
         fn style(&self, node: Self::NodeId) -> Self::Style<'_> {

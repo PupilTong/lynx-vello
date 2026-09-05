@@ -14,7 +14,7 @@ use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
-    relative_layout_once, visibility,
+    relative_layout_once,
 };
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
@@ -375,7 +375,6 @@ pub(super) enum TestDisplay {
 #[derive(Debug, Clone)]
 pub(super) struct TestStyle {
     pub(super) display: Display,
-    pub(super) visibility: visibility::T,
     pub(super) position: PositionProperty,
     pub(super) inset: Edges<Inset>,
     pub(super) size: Size<StyleSize>,
@@ -426,7 +425,6 @@ impl Default for TestStyle {
     fn default() -> Self {
         Self {
             display: Display::Flex,
-            visibility: visibility::T::Visible,
             position: PositionProperty::Relative,
             inset: Edges::uniform(inset_auto()),
             size: Size::new(size_auto(), size_auto()),
@@ -478,10 +476,6 @@ impl Default for TestStyle {
 impl CoreStyle for TestStyle {
     fn display(&self) -> Display {
         self.display
-    }
-
-    fn visibility(&self) -> visibility::T {
-        self.visibility
     }
 
     fn position(&self) -> PositionProperty {
@@ -548,24 +542,12 @@ impl CoreStyle for TestStyle {
         self.skips_contents
     }
 
-    fn linear_direction(&self) -> linear_direction::T {
-        self.linear_direction
-    }
-
-    fn linear_weight_sum(&self) -> NonNegativeNumber {
-        self.linear_weight_sum
-    }
-
     fn justify_content(&self) -> ContentDistribution {
         self.justify_content
     }
 
     fn align_items(&self) -> ItemPlacement {
         self.align_items
-    }
-
-    fn linear_weight(&self) -> NonNegativeNumber {
-        self.linear_weight
     }
 
     fn align_self(&self) -> SelfAlignment {
@@ -576,20 +558,22 @@ impl CoreStyle for TestStyle {
         self.order
     }
 
-    fn flex_direction(&self) -> flex_direction::T {
-        self.flex_direction
-    }
-
-    fn flex_wrap(&self) -> flex_wrap::T {
-        self.flex_wrap
-    }
-
     fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         self.gap.as_ref()
     }
 
     fn align_content(&self) -> ContentDistribution {
         self.align_content
+    }
+}
+
+impl FlexboxStyle for TestStyle {
+    fn flex_direction(&self) -> flex_direction::T {
+        self.flex_direction
+    }
+
+    fn flex_wrap(&self) -> flex_wrap::T {
+        self.flex_wrap
     }
 
     fn flex_basis(&self) -> &FlexBasis {
@@ -603,7 +587,9 @@ impl CoreStyle for TestStyle {
     fn flex_shrink(&self) -> NonNegativeNumber {
         self.flex_shrink
     }
+}
 
+impl GridStyle for TestStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         &self.template_rows
     }
@@ -647,7 +633,23 @@ impl CoreStyle for TestStyle {
     fn justify_self(&self) -> SelfAlignment {
         self.justify_self
     }
+}
 
+impl LinearStyle for TestStyle {
+    fn linear_direction(&self) -> linear_direction::T {
+        self.linear_direction
+    }
+
+    fn linear_weight_sum(&self) -> NonNegativeNumber {
+        self.linear_weight_sum
+    }
+
+    fn linear_weight(&self) -> NonNegativeNumber {
+        self.linear_weight
+    }
+}
+
+impl RelativeStyle for TestStyle {
     fn relative_layout_once(&self) -> relative_layout_once::T {
         self.relative_layout_once
     }
@@ -1096,10 +1098,6 @@ impl LayoutTree for TestTree {
         TestChildren {
             ids: self.nodes[node.index].children.iter(),
         }
-    }
-
-    fn child_count(&self, node: TestRef) -> usize {
-        self.nodes[node.index].children.len()
     }
 
     fn style(&self, node: TestRef) -> &TestStyle {

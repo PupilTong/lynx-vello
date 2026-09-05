@@ -1,6 +1,6 @@
 //! Text measurement style protocol.
 
-use stylo::computed_values::{text_wrap_mode, white_space_collapse};
+use stylo::computed_values::text_wrap_mode;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, LetterSpacing,
@@ -16,8 +16,6 @@ style_protocol! {
                 style.inherited_values().get_inherited_text().clone_text_align(),
             text_wrap_mode -> text_wrap_mode::T =
                 style.inherited_values().get_inherited_text().clone_text_wrap_mode(),
-            white_space_collapse -> white_space_collapse::T =
-                style.inherited_values().get_inherited_text().clone_white_space_collapse(),
             word_break -> WordBreak =
                 style.inherited_values().get_inherited_text().clone_word_break(),
             text_indent -> TextIndent =
@@ -36,9 +34,6 @@ style_protocol! {
                     || initial_values().get_font().clone_font_family(),
                     |values| values.get_font().clone_font_family(),
                 ),
-            font_family_ref -> Option<&FontFamily> = style
-                .computed_text_values()
-                .map(|values| &values.get_font().font_family),
             font_size -> f32 = style.computed_text_values().map_or(16.0, |values| {
                 values.get_font().clone_font_size().computed_size().px()
             }),
@@ -121,10 +116,6 @@ mod tests {
 
         assert_eq!(style.text_align(), TextAlign::Start);
         assert_eq!(style.text_wrap_mode(), text_wrap_mode::T::Wrap);
-        assert_eq!(
-            style.white_space_collapse(),
-            white_space_collapse::T::Collapse
-        );
         assert_eq!(style.word_break(), WordBreak::Normal);
         assert!(style.text_indent().length.is_zero());
         assert_eq!(style.font_size(), 16.0);
@@ -150,16 +141,11 @@ mod tests {
             TextRunStyle::font_family(&view).families.list.first(),
             Some(SingleFontFamily::Generic(GenericFontFamily::SansSerif))
         ));
-        assert!(TextRunStyle::font_family_ref(&view).is_none());
         assert_eq!(
             TextContainerStyle::text_wrap_mode(&view),
             text_wrap_mode::T::Wrap
         );
         assert_eq!(TextContainerStyle::text_align(&view), TextAlign::Start);
-        assert_eq!(
-            TextContainerStyle::white_space_collapse(&view),
-            white_space_collapse::T::Collapse
-        );
         assert_eq!(TextContainerStyle::word_break(&view), WordBreak::Normal);
         assert!(TextContainerStyle::text_indent(&view).length.is_zero());
         assert_eq!(TextRunStyle::font_weight(&view), FontWeight::NORMAL);

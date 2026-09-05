@@ -4,8 +4,8 @@
 
 use hughie::style::containment::effective_containment;
 use hughie::style::{
-    Contain, ContentVisibility, CoreStyle, Display, PositionProperty, TextContainerStyle,
-    TextRunStyle,
+    Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridStyle, LinearStyle,
+    PositionProperty, RelativeStyle, TextContainerStyle, TextRunStyle,
 };
 use stylo::properties::ComputedValues;
 use stylo::values::computed::motion::OffsetPath;
@@ -198,6 +198,16 @@ impl<T> CoreStyle for StyleView<'_, T> {
         resolve_position(self.node, self.values())
     }
 }
+
+// Every algorithm accessor answers from `computed_values()`, which this view
+// already overrides, so the four algorithm protocols need no bodies here.
+impl<T> FlexboxStyle for StyleView<'_, T> {}
+
+impl<T> GridStyle for StyleView<'_, T> {}
+
+impl<T> LinearStyle for StyleView<'_, T> {}
+
+impl<T> RelativeStyle for StyleView<'_, T> {}
 
 /// Whether a restyle changed anything Parley *shapes* from, and therefore
 /// whether a descendant text node's retained layout has to be thrown away

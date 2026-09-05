@@ -24,7 +24,7 @@ use super::util::{
 use super::{compute_absolute_layout_with_static_position, measure_absolute_layout};
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle};
+use crate::style::{Contain, CoreStyle, LinearStyle};
 use crate::tree::{
     AvailableSpace, Layout, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis,
     SizingMode,
@@ -301,7 +301,7 @@ fn initial_item_flags(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_item<N>(
-    style: impl CoreStyle,
+    style: impl LinearStyle,
     key: OrderedItem<N>,
     flags: LinearItemFlags,
     percentage_basis: Size<Option<f32>>,
@@ -1326,14 +1326,15 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_linear_layout<T>(
-    tree: &T,
+pub fn compute_linear_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
 ) -> LayoutOutput
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: LinearStyle,
 {
     let style = tree.style(node);
     let size_containment = size_containment(&style);

@@ -16,7 +16,7 @@ use hughie::invalidate::{invalidate_for_relayout, is_relayout_boundary};
 use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::Zero;
-use stylo::computed_values::{relative_center, relative_layout_once, visibility};
+use stylo::computed_values::{relative_center, relative_layout_once};
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
 use stylo::values::computed::{
     Contain, ContainIntrinsicSize, Display, GridLine, GridTemplateComponent, ImplicitGridTracks,
@@ -160,11 +160,17 @@ impl CoreStyle for MockStyle {
     fn skips_contents(&self) -> bool {
         self.skips_contents
     }
+}
 
+impl RelativeStyle for MockStyle {}
+
+impl FlexboxStyle for MockStyle {
     fn flex_grow(&self) -> NonNegativeNumber {
         self.flex_grow
     }
+}
 
+impl GridStyle for MockStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         const NONE: &GridTemplateComponent = &GridTemplateComponent::None;
         NONE
@@ -360,7 +366,6 @@ fn leaf_tree() -> (MockTree, MockState, usize) {
 fn traversal_over_host_storage() {
     let (tree, _state, root) = leaf_tree();
     let root_handle = tree.node(root);
-    assert_eq!(tree.child_count(root_handle), 2);
     assert_eq!(tree.children(root_handle).count(), 2);
     let ids: Vec<usize> = tree
         .children(root_handle)
@@ -374,7 +379,6 @@ fn style_views_serve_initial_defaults() {
     let style = MockStyle::default();
     let view: <MockTree as LayoutTree>::Style<'_> = &style;
     assert_eq!(view.position(), PositionProperty::Static);
-    assert_eq!(view.visibility(), visibility::T::Visible);
     assert!(matches!(view.size().width, StyleSize::Auto));
     assert_eq!(view.order(), 0);
     assert_eq!(view.relative_layout_once(), relative_layout_once::T::True);
@@ -744,13 +748,6 @@ fn embeddable_cache_round_trips_a_complete_key() {
     assert_eq!(cache.get(same_geometry_but_indefinite), None);
 }
 
-#[test]
-fn default_child_count_counts_the_children_iterator() {
-    let (tree, _state, root) = leaf_tree();
-    assert_eq!(tree.child_count(tree.node(root)), 2);
-    assert_eq!(tree.child_count(tree.node(tree.nodes[root].children[0])), 0);
-}
-
 fn contents_style() -> MockStyle {
     MockStyle {
         display: MockDisplay::Contents,
@@ -803,7 +800,7 @@ fn flattened_children_splices_display_contents_subtrees_in_source_order() {
         .map(|child| child.index)
         .collect();
     assert_eq!(source, vec![first, wrapper, last]);
-    assert_eq!(tree.child_count(tree.node(root)), 3);
+    assert_eq!(tree.children(tree.node(root)).count(), 3);
 }
 
 #[test]

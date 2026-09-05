@@ -135,14 +135,27 @@ the independent state:
 | --- | --- | --- |
 | `LayoutTree` | associated `NodeId`, mutable `State`, borrowed `Style<'tree>`, and `ChildIter<'tree>`; topology/style reads — `children` (source children) and the provided `flattened_children` (the same children with `display: contents` subtrees spliced in place, each paired with the style the walk read; `size_hint` promises nothing, `capacity_hint` sizes buffers); **`compute_layout(&self, &mut State, NodeId, input)`** as the host display/algorithm dispatch point; immutable/mutable access to each state-owned `LayoutSlot`; required cache clearing | everything |
 | `LayoutSlot` | one node's measurement cache, committed input, static position, unrounded layout, and rounded layout | shared cache/position/rounding machinery and host queries |
-| `CoreStyle` | one `computed_values()` source plus defaulted box, Flex, Grid, Relative, and Linear accessors; sequence and geometry values remain borrowed | all box algorithms |
-| `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley text block |
+| `CoreStyle` | one `computed_values()` source plus the defaulted box model (`size`/`min_size`/`max_size`/`aspect_ratio`/`margin`/`padding`/`border`/`box_sizing`/`inset`/`overflow`), `display`, `position`, `direction`, the containment triple, `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
+| `FlexboxStyle: CoreStyle` | `flex_direction`, `flex_wrap`, `flex_basis`, `flex_grow`, `flex_shrink` | demanded by `compute_flexbox_layout` |
+| `GridStyle: CoreStyle` | `grid_template_rows`/`_columns`, `grid_auto_rows`/`_columns`, `grid_auto_flow`, `justify_items`, `grid_row_start`/`_end`, `grid_column_start`/`_end`, `justify_self` | demanded by `compute_grid_layout` |
+| `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight` | demanded by `compute_linear_layout` |
+| `RelativeStyle: CoreStyle` | `relative_layout_once`, `relative_id`, `relative_align`, `relative_adjacent`, `relative_center` | demanded by `compute_relative_layout` |
+| `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, and indent values | the Parley text block |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley text block |
 
-One `Style: CoreStyle` associated type serves every box algorithm. A
+One `Style: CoreStyle` associated type still serves every box algorithm; the
+four algorithm traits are demanded at the entry point that reads them, not by
+the GAT bound. The split constrains *reach*, not *values*: every accessor has a
+default, so a host that writes `impl GridStyle for MyStyle {}` with no bodies
+still answers every grid accessor with its initial value — what the split stops
+is an algorithm naming another algorithm's inputs, not a host from answering
+them. The alignment accessors stay on the core because it spans two or three
+algorithms each (`gap` and `align_content` are Flex and Grid; `align_items`,
+`justify_content` and `align_self` add Linear) and `order` is read by all four
+for paint order, so partitioning them would duplicate rather than divide. A
 Stylo-backed host supplies its post-flush `ComputedValues` through
 `computed_values()` and overrides only genuinely host-dependent lowering
-(currently `position()` in `dom`); `CoreStyle`'s defaults lend all other
+(currently `position()` in `dom`); the defaults lend all other
 box/Flex/Grid/Relative/Linear fields directly from that source. Cascade-less
 hosts can instead override individual accessors. Everything the engine reads
 through `LayoutTree` is immutable for the flush; everything it writes goes
@@ -165,17 +178,79 @@ length, edge, box-sizing, aspect-ratio, clamp, and relative-offset machinery.
 Their public entry points use the same fixed shape:
 
 ```rust
-pub fn compute_flexbox_layout<T: LayoutTree>(
-    tree: &T,
+pub fn compute_flexbox_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
-) -> LayoutOutput;
+) -> LayoutOutput
+where
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: FlexboxStyle;
 
-// Grid, Relative, and Linear use the same four-argument shape.
+// Grid, Relative, and Linear use the same four-argument shape, each naming
+// its own algorithm trait (`GridStyle`, `RelativeStyle`, `LinearStyle`).
 ```
 
 All four signatures are public; hosts select them in their display dispatch.
+The tree lifetime is named rather than quantified because every
+higher-ranked spelling — `for<'a> T::Style<'a>: FlexboxStyle` on the
+function, on a supertrait's `where` clause, or on a blanket subtrait impl —
+fails at a host that itself carries a lifetime, with `error[E0521]: borrowed
+data escapes outside of function` (the note reads "due to a current
+limitation of the type system, this implies a `'static` lifetime"). Both
+kinds of host in this repo are of that shape: `impl<'t> LayoutTree for
+TestHost<'t>` in `compute/grid/sizing.rs` and `impl<T> LayoutTree for
+TreeArenas<T>` in `dom`. Naming one `'tree` — the lifetime the caller's
+`&'tree T` already has — discharges the bound at the concrete host instead.
+
+The cost of the named lifetime is that any generic layer between a host and
+an entry point must name it too. There is one shape it forecloses: a
+hughie-internal function generic over `T` that reaches an algorithm entry
+point through `compute_cached_layout`'s `FnOnce(&T, ..)` closure. The
+closure's `&T` is higher-ranked, so satisfying the bound there would need the
+HRTB that does not compile (E0521 again). Nothing does this today — the host
+writes the dispatch closure and the host is concrete — and if something ever
+needs to, the escape hatch is a closure signature of
+`FnOnce(&mut T::State, T::NodeId, LayoutInput)` that captures the tree instead
+of taking it, which erases the higher-ranked lifetime.
+
+Which accessor each algorithm reads, and from where:
+
+| accessor | trait | read by |
+| --- | --- | --- |
+| `flex_direction`, `flex_wrap` | `FlexboxStyle` | `compute_flexbox_layout` |
+| `flex_basis` | `FlexboxStyle` | `determine_flex_base_sizes` |
+| `flex_grow`, `flex_shrink` | `FlexboxStyle` | flexbox `resolve_item` |
+| `grid_template_rows`, `grid_template_columns` | `GridStyle` | `expand_explicit_tracks` |
+| `grid_auto_rows`, `grid_auto_columns`, `grid_auto_flow`, `justify_items` | `GridStyle` | `compute_grid_layout` |
+| `grid_row_start`, `grid_row_end`, `grid_column_start`, `grid_column_end` | `GridStyle` | grid `classify_item` |
+| `justify_self` | `GridStyle` | `resolve_grid_item` |
+| `linear_direction`, `linear_weight_sum` | `LinearStyle` | `compute_linear_layout` |
+| `linear_weight` | `LinearStyle` | linear `resolve_item` |
+| `relative_layout_once` | `RelativeStyle` | `compute_relative_layout` |
+| `relative_id` | `RelativeStyle` | `IdLookup::new` |
+| `relative_align`, `relative_adjacent`, `relative_center` | `RelativeStyle` | relative `resolve_item` |
+
+Helpers that read one of these off a single style take that style generically
+instead of the tree: grid's `classify_item` is
+`fn classify_item<N, S: GridStyle>(node: N, style: &S, ..)`, with no tree
+parameter and no lifetime, and the per-item resolvers have the same shape —
+flexbox `resolve_item`, grid `resolve_grid_item`, linear `resolve_item`,
+relative `resolve_item`. Grid's `expand_explicit_tracks` takes its style
+generically too and is the one container-level helper that does: it reads the
+container's own template once per layout, not a style per item. Six helpers
+still thread `'tree` and repeat the bound, each because it reads a style per
+node rather than once: `determine_flex_base_sizes` and
+`perform_absolute_children` in flexbox and `layout_absolute_items` in grid
+measure or lay out children through the tree; `IdLookup::new` reads
+`relative_id` for every item; `refresh_item_bases` re-resolves one item style
+per pass; `two_pass_layout` recurses. The shared spine —
+`compute_root_layout`, `compute_cached_layout`, `compute_absolute_layout*`,
+`compute_skipped_contents_layout`, `hide_subtree`, `round_layout*`,
+`invalidate`, the leaf, the text block and `util::resolve_container_box` /
+`resolve_item_geometry*` — reads only core accessors and gained neither a
+lifetime nor a bound.
 
 Layout's transient call boundary uses two small `Copy` PODs: `LayoutInput`
 (layout goal, sizing mode, known dimensions, whether those dimensions
@@ -198,6 +273,40 @@ Hidden-subtree cleanup is deliberately outside this sizing API.
 `LayoutInput`/`LayoutOutput`/`Layout` are
 `#[non_exhaustive]` so the protocol can grow additively (block-layout margin
 collapsing is the known future widener).
+
+**`LayoutInput` stays one type, and the tree stays one trait.** The style
+surface splits per algorithm and the wire struct does not, for a structural
+reason rather than a matter of taste: a style belongs to one node whose own
+`display` picks the algorithm, so which trait applies is decidable where the
+style is read; an input is written by the *parent* and read by the *child*,
+and the parent learns the child's algorithm only inside `compute_layout`. A
+per-algorithm input struct would therefore have to be erased back to a common
+core on the callee's first line, and the cache still needs one key type per
+slot. Nothing the struct carries is algorithm-exclusive to begin with:
+`resolve_container_box` reads `sizing_mode`, `parent_size`, `known_dimensions`
+and `available_space` on every container path, and `goal` and
+`definite_dimensions` are read by the cache and by every algorithm. Anything
+only one goal can use rides on that goal's variant instead — `Measure` carries
+the requested axes, read by the leaf and by the cache key — and those variant
+payloads are the mechanism to reach for if an algorithm-exclusive input ever
+appears. taffy is the counterexample in reverse: its single merged
+`LayoutInput` carries `vertical_margins_are_collapsible`, which only its block
+algorithm reads and which flexbox and grid pass as a constant at ten call
+sites.
+
+The tree trait likewise stays whole. taffy splits `LayoutTree` into
+per-algorithm container traits for two reasons that do not apply here — cargo
+features that compile one algorithm out, and hanging a grid track iterator off
+a GAT (hughie borrows stylo's `GridTemplateComponent` directly). Splitting it
+would also strand `FlattenedChildren`, whose item type has three consumers
+outside layout that discard the style entirely (`dom/src/layout/host.rs` twice
+and `dom/src/visual/build.rs`). Only the production host (dom's `TreeArenas`)
+and the shared test host (`tests/support`'s `TestTree`) dispatch every
+algorithm, both from one `compute_layout`; every other impl reaches one
+algorithm or none. A per-algorithm container trait would therefore replace
+each impl with one impl per algorithm that host reaches, and that cost buys
+the partial host — one that implements some algorithms and not others — which
+nothing here is.
 
 **Recursion round-trips through the host.** An algorithm reads topology and
 styles through `&tree`, then calls
@@ -301,8 +410,9 @@ refcount. Per-field reference wrappers are lendable from any host storage (a
 `ComputedValues` host keeps the four margin edges as separate fields); a host
 that synthesizes style values per call must materialize them in per-node
 storage once per style change and lend from there. A source-backed
-`TextRunStyle` similarly lends its computed font family through
-`font_family_ref`; owned accessors remain available to hand-built run styles.
+`TextRunStyle` lends its whole `ComputedValues` through
+`computed_text_values()`, and the owned `font_family()` default reads the
+family from it; hand-built run styles override the owned accessors directly.
 Defaulted trait methods return the **fork's initial values**:
 the CSS initial value except where Lynx documents otherwise
 (`relative-layout-once: true` — the Lynx computed default *is* the fork
@@ -936,15 +1046,15 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   invalidation. `tests/grid.rs` covers numeric placement, sparse/dense and
   row/column auto-flow, implicit/automatic tracks, intrinsic spanning
   contributions, fixed/intrinsic/`fr`/fit-content/minmax tracks, spans,
-  alignment, RTL, baselines, measurement, nested layout, visibility, and
+  alignment, RTL, baselines, measurement, nested layout, and
   absolute/hoisted behavior.
   Private unit tests pin placement bit ranges, clamping, repeat expansion, and
   track cycling. `tests/relative.rs` covers every physical reference family,
   duplicate/reserved ids, both solver modes, cycles, intrinsic and percentage
   sizing, parent min/max feedback, selective wrap-width remeasurement,
-  measurement, visibility, nested layout, and absolute/hoisted behavior.
-  `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order
-  and visibility, intrinsic/minmax sizing, measurement, baselines, auto
+  measurement, nested layout, and absolute/hoisted behavior.
+  `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order,
+  intrinsic/minmax sizing, measurement, baselines, auto
   margins, absolute/hoisted behavior, and Flex/Grid composition.
   CI enforces at least 95% line coverage for `hughie`
   production source while excluding test and benchmark source from the

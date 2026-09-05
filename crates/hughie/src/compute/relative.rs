@@ -14,7 +14,7 @@ use super::util::{
 };
 use crate::geometry::{Edges, Line, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT};
+use crate::style::{CoreStyle, RELATIVE_REFERENCE_NONE, RELATIVE_REFERENCE_PARENT, RelativeStyle};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
@@ -158,25 +158,24 @@ impl<N> RelativeItem<N> {
     }
 }
 
-fn resolve_item<T>(
-    tree: &T,
-    key: ItemKey<T::NodeId>,
+fn resolve_item<N, S>(
+    style: &S,
+    key: ItemKey<N>,
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
     container_independent: Option<Size<bool>>,
-) -> RelativeItem<T::NodeId>
+) -> RelativeItem<N>
 where
-    T: LayoutTree,
+    S: RelativeStyle,
 {
-    let style = tree.style(key.node);
     let geometry =
-        resolve_item_geometry_with_bases(&style, size_percentage_basis, edge_inline_basis);
+        resolve_item_geometry_with_bases(style, size_percentage_basis, edge_inline_basis);
     // Computed on commit passes only: a measurement pass commits nothing and
     // would pay for an answer nobody reads.
     let (values_stable, edges_stable) = container_independent
         .map_or((Size::new(false, false), false), |container| {
-            item_value_stability(&style, geometry.aspect_ratio, container)
+            item_value_stability(style, geometry.aspect_ratio, container)
         });
     RelativeItem {
         geometry,
@@ -211,9 +210,10 @@ struct IdLookup {
 }
 
 impl IdLookup {
-    fn new<T>(tree: &T, items: &[OrderedItem<T::NodeId>]) -> Self
+    fn new<'tree, T>(tree: &'tree T, items: &[OrderedItem<T::NodeId>]) -> Self
     where
-        T: LayoutTree,
+        T: LayoutTree + 'tree,
+        T::Style<'tree>: RelativeStyle,
     {
         let mut entries = Vec::new();
         for (index, item) in items.iter().enumerate() {
@@ -1063,19 +1063,20 @@ where
     bounds
 }
 
-fn refresh_item_bases<T>(
-    tree: &T,
+fn refresh_item_bases<'tree, T>(
+    tree: &'tree T,
     items: &mut [RelativeItem<T::NodeId>],
     size_percentage_basis: Size<Option<f32>>,
     edge_inline_basis: Option<f32>,
     lookup: &IdLookup,
     container_independent: Option<Size<bool>>,
 ) where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: RelativeStyle,
 {
     for item in items {
         let mut refreshed = resolve_item(
-            tree,
+            &tree.style(item.key.node),
             item.key,
             size_percentage_basis,
             edge_inline_basis,
@@ -1118,8 +1119,8 @@ fn final_outer_axis(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn two_pass_layout<T>(
-    tree: &T,
+fn two_pass_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     items: &mut [RelativeItem<T::NodeId>],
     horizontal_order: &[usize],
@@ -1136,7 +1137,8 @@ fn two_pass_layout<T>(
     container_independent: Option<Size<bool>>,
 ) -> Size<f32>
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: RelativeStyle,
 {
     measure_all(
         tree,
@@ -1342,14 +1344,15 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_relative_layout<T>(
-    tree: &T,
+pub fn compute_relative_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
 ) -> LayoutOutput
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: RelativeStyle,
 {
     let style = tree.style(node);
     let size_containment = size_containment(&style);
@@ -1458,9 +1461,10 @@ where
     let mut items = generated
         .into_iter()
         .map(|item| {
+            let key = item.key();
             resolve_item(
-                tree,
-                item.key(),
+                &tree.style(key.node),
+                key,
                 initial_parent_size,
                 edge_inline_basis,
                 &lookup,
@@ -1630,6 +1634,8 @@ mod tests {
             self.contain_intrinsic_size.height.clone()
         }
     }
+
+    impl RelativeStyle for TestStyle {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestKind {

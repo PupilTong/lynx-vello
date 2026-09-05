@@ -1,4 +1,6 @@
-//! The unified computed-style protocol: how every layout algorithm reads style.
+//! The computed-style protocol: how every layout algorithm reads style. The
+//! box-model core lives here, the per-algorithm surfaces in `algorithms`, and
+//! the text surfaces in `text`.
 
 use std::sync::LazyLock;
 
@@ -38,13 +40,15 @@ macro_rules! style_protocol {
     };
 }
 
+pub mod algorithms;
 pub mod containment;
 pub mod text;
 
+pub use algorithms::{FlexboxStyle, GridStyle, LinearStyle, RelativeStyle};
 use containment::effective_containment;
 pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
-    relative_layout_once, text_wrap_mode, visibility, white_space_collapse,
+    relative_layout_once, text_wrap_mode, visibility,
 };
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
@@ -71,7 +75,10 @@ pub(in crate::style) fn initial_values() -> &'static ComputedValues {
 }
 
 #[inline]
-fn lower_relative_logical(physical: RelativeReference, logical: RelativeReference) -> i32 {
+pub(in crate::style) fn lower_relative_logical(
+    physical: RelativeReference,
+    logical: RelativeReference,
+) -> i32 {
     if physical == RELATIVE_REFERENCE_NONE {
         logical
     } else {
@@ -86,7 +93,6 @@ style_protocol! {
             inherited_values -> &ComputedValues = style.computed_values(),
 
             display -> Display = style.computed_values().clone_display(),
-            visibility -> visibility::T = style.computed_values().clone_visibility(),
             position -> PositionProperty = style.computed_values().clone_position(),
             inset -> Edges<&Inset> = {
                 let position = style.computed_values().get_position();
@@ -168,9 +174,6 @@ style_protocol! {
                 style.computed_values().clone_content_visibility() == ContentVisibility::Hidden
                     && !style.display().is_contents(),
 
-            flex_direction -> flex_direction::T =
-                style.computed_values().clone_flex_direction(),
-            flex_wrap -> flex_wrap::T = style.computed_values().clone_flex_wrap(),
             gap -> Size<&NonNegativeLengthPercentageOrNormal> = {
                 let position = style.computed_values().get_position();
                 Size::new(&position.column_gap, &position.row_gap)
@@ -181,99 +184,9 @@ style_protocol! {
                 style.computed_values().get_position().align_items,
             justify_content -> ContentDistribution =
                 style.computed_values().get_position().justify_content,
-
-            flex_basis -> &FlexBasis = &style.computed_values().get_position().flex_basis,
-            flex_grow -> NonNegativeNumber =
-                style.computed_values().get_position().flex_grow,
-            flex_shrink -> NonNegativeNumber =
-                style.computed_values().get_position().flex_shrink,
             align_self -> SelfAlignment =
                 style.computed_values().get_position().align_self,
             order -> i32 = style.computed_values().get_position().order,
-
-            grid_template_rows -> &GridTemplateComponent =
-                &style.computed_values().get_position().grid_template_rows,
-            grid_template_columns -> &GridTemplateComponent =
-                &style.computed_values().get_position().grid_template_columns,
-            grid_auto_rows -> &ImplicitGridTracks =
-                &style.computed_values().get_position().grid_auto_rows,
-            grid_auto_columns -> &ImplicitGridTracks =
-                &style.computed_values().get_position().grid_auto_columns,
-            grid_auto_flow -> GridAutoFlow =
-                style.computed_values().get_position().grid_auto_flow,
-            justify_items -> JustifyItems =
-                style.computed_values().get_position().justify_items,
-            grid_row_start -> &GridLine =
-                &style.computed_values().get_position().grid_row_start,
-            grid_row_end -> &GridLine =
-                &style.computed_values().get_position().grid_row_end,
-            grid_column_start -> &GridLine =
-                &style.computed_values().get_position().grid_column_start,
-            grid_column_end -> &GridLine =
-                &style.computed_values().get_position().grid_column_end,
-            justify_self -> SelfAlignment =
-                style.computed_values().get_position().justify_self,
-
-            linear_direction -> linear_direction::T =
-                style.computed_values().clone_linear_direction(),
-            linear_weight_sum -> NonNegativeNumber =
-                style.computed_values().clone_linear_weight_sum(),
-            linear_weight -> NonNegativeNumber =
-                style.computed_values().clone_linear_weight(),
-
-            relative_layout_once -> relative_layout_once::T =
-                style.computed_values().clone_relative_layout_once(),
-            relative_id -> RelativeReference =
-                style.computed_values().clone_relative_id(),
-            relative_align -> Edges<RelativeAlign> = {
-                let values = style.computed_values();
-                let (inline_start, inline_end) = (
-                    values.clone_relative_align_inline_start(),
-                    values.clone_relative_align_inline_end(),
-                );
-                let (logical_left, logical_right) =
-                    if values.clone_direction() == direction::T::Ltr {
-                        (inline_start, inline_end)
-                    } else {
-                        (inline_end, inline_start)
-                    };
-                Edges {
-                    left: lower_relative_logical(
-                        values.clone_relative_align_left(),
-                        logical_left,
-                    ),
-                    right: lower_relative_logical(
-                        values.clone_relative_align_right(),
-                        logical_right,
-                    ),
-                    top: values.clone_relative_align_top(),
-                    bottom: values.clone_relative_align_bottom(),
-                }
-            },
-            relative_adjacent -> Edges<RelativeReference> = {
-                let values = style.computed_values();
-                let (inline_start, inline_end) = (
-                    values.clone_relative_inline_start_of(),
-                    values.clone_relative_inline_end_of(),
-                );
-                let (logical_left, logical_right) =
-                    if values.clone_direction() == direction::T::Ltr {
-                        (inline_start, inline_end)
-                    } else {
-                        (inline_end, inline_start)
-                    };
-                Edges {
-                    left: lower_relative_logical(values.clone_relative_left_of(), logical_left),
-                    right: lower_relative_logical(
-                        values.clone_relative_right_of(),
-                        logical_right,
-                    ),
-                    top: values.clone_relative_top_of(),
-                    bottom: values.clone_relative_bottom_of(),
-                }
-            },
-            relative_center -> relative_center::T =
-                style.computed_values().clone_relative_center(),
         }
     }
 }
@@ -284,7 +197,6 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use stylo::Zero;
-    use stylo::values::specified::align::AlignFlags;
 
     use super::*;
 
@@ -311,7 +223,6 @@ mod tests {
         let style = Defaults;
 
         assert!(!style.display().is_none());
-        assert_eq!(style.visibility(), visibility::T::Visible);
         assert_eq!(style.position(), PositionProperty::Static);
         assert_eq!(style.inset(), Edges::uniform(&Inset::auto()));
         assert_eq!(
@@ -344,8 +255,6 @@ mod tests {
         assert_eq!(style.contain_intrinsic_height(), ContainIntrinsicSize::None);
         assert!(!style.skips_contents());
 
-        assert_eq!(style.flex_direction(), flex_direction::T::Row);
-        assert_eq!(style.flex_wrap(), flex_wrap::T::Nowrap);
         assert!(matches!(
             style.gap().width,
             NonNegativeLengthPercentageOrNormal::Normal
@@ -353,39 +262,8 @@ mod tests {
         assert_eq!(style.align_content(), ContentDistribution::normal());
         assert_eq!(style.align_items(), ItemPlacement::normal());
         assert_eq!(style.justify_content(), ContentDistribution::normal());
-        assert_eq!(style.flex_basis(), &FlexBasis::auto());
-        assert_eq!(style.flex_grow().0, 0.0);
-        assert_eq!(style.flex_shrink().0, 1.0);
         assert_eq!(style.align_self(), SelfAlignment::auto());
         assert_eq!(style.order(), 0);
-
-        assert!(matches!(
-            style.grid_template_rows(),
-            GridTemplateComponent::None
-        ));
-        assert!(style.grid_auto_rows().0.is_empty());
-        assert_eq!(style.grid_auto_flow(), GridAutoFlow::ROW);
-        assert_eq!(
-            style.justify_items().computed.0.0.value(),
-            AlignFlags::NORMAL
-        );
-        assert!(style.grid_row_start().is_auto());
-        assert_eq!(style.justify_self(), SelfAlignment::auto());
-
-        assert_eq!(style.linear_direction(), linear_direction::T::Column);
-        assert_eq!(style.linear_weight_sum().0, 0.0);
-        assert_eq!(style.linear_weight().0, 0.0);
-        assert_eq!(style.relative_layout_once(), relative_layout_once::T::True);
-        assert_eq!(style.relative_id(), RELATIVE_REFERENCE_NONE);
-        assert_eq!(
-            style.relative_align(),
-            Edges::uniform(RELATIVE_REFERENCE_NONE)
-        );
-        assert_eq!(
-            style.relative_adjacent(),
-            Edges::uniform(RELATIVE_REFERENCE_NONE)
-        );
-        assert_eq!(style.relative_center(), relative_center::T::None);
     }
 
     #[test]
