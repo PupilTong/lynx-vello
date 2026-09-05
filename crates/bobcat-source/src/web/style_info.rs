@@ -5,10 +5,10 @@ use std::collections::HashMap;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
-pub use crate::css_property::{
+pub use super::css_property::{
     CssProperty, CssPropertyId, ParsedDeclaration, STYLE_PROPERTY_MAP, ValueToken, token_types,
 };
-use crate::error::DecodeError;
+use super::error::DecodeError;
 
 /// Root of the `StyleInfo` section. Mirrors web-core's `RawStyleInfo`.
 #[derive(Debug, Clone, Default, Archive, RkyvDeserialize, RkyvSerialize)]

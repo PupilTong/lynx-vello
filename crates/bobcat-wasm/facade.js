@@ -597,8 +597,8 @@ export class BobcatCanvas {
   /**
    * Fetch, parse, and show a single-file Lynx XML source envelope: the same
    * load as `load()`, with the envelope's sections as the sources. A
-   * background-thread section is reported by a console warning and neither
-   * retained nor executed. Page configuration remains the host's
+   * background-thread section is recognized and reported by a console warning,
+   * but neither retained nor executed. Page configuration remains the host's
    * `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's
    * raw-loader defaults.
    */

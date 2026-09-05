@@ -110,7 +110,8 @@ async function fetchSource(kind, url, limit) {
 
 // Fetch the complete source once, then use the platform default decoder:
 // UTF-8 with replacement for malformed byte sequences, matching web-core's
-// raw Lynx XML loader. Parsing and section extraction remain in Rust.
+// raw Lynx XML loader. Shared parsing and section mapping remain in Rust's
+// bobcat-source adapter.
 async function fetchLynxXml(url) {
   const requestedUrl = absoluteUrl(url)
   const response = await fetch(requestedUrl)
@@ -252,12 +253,14 @@ async function dispatchRequest(message) {
     }
     case 'loadLynxXml': {
       const { source, url } = await fetchLynxXml(message.url)
-      const [mainThreadScriptUrl, styleSheetUrl, backgroundThreadScriptUrl] =
-        renderer.registerLynxXml(url, source)
-      if (backgroundThreadScriptUrl !== null) {
-        console.warn(
-          `Bobcat preserved the Lynx XML background-thread script at ${backgroundThreadScriptUrl}, but background-thread execution is not implemented`,
-        )
+      const [
+        mainThreadScriptUrl,
+        styleSheetUrl,
+        _backgroundThreadScriptUrl,
+        compatibilityWarnings,
+      ] = renderer.registerLynxXml(url, source)
+      for (const warning of compatibilityWarnings) {
+        console.warn(`Bobcat source warning: ${warning}`)
       }
       await replaceNativeView(
         request,

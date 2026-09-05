@@ -1,8 +1,9 @@
+#![cfg(feature = "web-bundle")]
 //! Integration tests decoding real `.web.bundle` files produced by the
 //! lynx-stack build pipeline (see `fixtures/README.md`).
 
-use lynx_template_decoder::style_info::{RuleKind, Selector};
-use lynx_template_decoder::{DecodeError, decode};
+use bobcat_source::web::style_info::{RuleKind, Selector};
+use bobcat_source::web::{DecodeError, decode};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -114,8 +115,8 @@ fn rejects_bad_magic() {
 #[test]
 fn rejects_future_version() {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&lynx_template_decoder::MAGIC_0.to_le_bytes());
-    bytes.extend_from_slice(&lynx_template_decoder::MAGIC_1.to_le_bytes());
+    bytes.extend_from_slice(&bobcat_source::web::MAGIC_0.to_le_bytes());
+    bytes.extend_from_slice(&bobcat_source::web::MAGIC_1.to_le_bytes());
     bytes.extend_from_slice(&2u32.to_le_bytes());
     let err = decode(&bytes).unwrap_err();
     assert!(matches!(err, DecodeError::UnsupportedVersion(2)), "{err}");
@@ -131,8 +132,8 @@ fn rejects_truncated_section() {
 #[test]
 fn rejects_unknown_section_label() {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&lynx_template_decoder::MAGIC_0.to_le_bytes());
-    bytes.extend_from_slice(&lynx_template_decoder::MAGIC_1.to_le_bytes());
+    bytes.extend_from_slice(&bobcat_source::web::MAGIC_0.to_le_bytes());
+    bytes.extend_from_slice(&bobcat_source::web::MAGIC_1.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes());
     bytes.extend_from_slice(&99u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());

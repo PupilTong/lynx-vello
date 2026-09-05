@@ -7,7 +7,7 @@
 //! format's established envelope and extraction behavior while exercising its
 //! current `engine-version` and `thread` attribute spellings.
 
-use lynx_xml::{LynxXml, parse};
+use bobcat_source::xml::{LynxXml, parse};
 
 fn expect_success(source: &str) -> LynxXml<'_> {
     match parse(source) {

@@ -13,6 +13,7 @@ use bobcat_core::{
     ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
+use bobcat_source::register_lynx_xml_response;
 use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
@@ -304,13 +305,18 @@ impl BobcatRenderer {
         self.register(&url, bytes, "text/javascript")
     }
 
-    /// Parse one browser-decoded Lynx XML source envelope and register its
-    /// logical template sections as fixed fragments of the final response URL.
+    /// Map one browser-decoded Lynx XML source envelope through the shared
+    /// embedder source adapter and register its logical template sections as
+    /// fixed fragments of the final response URL.
     ///
-    /// The returned array is `[main, styleOrNull, backgroundOrNull]`. The
-    /// Render Worker hands `main` and a present style URL to [`Self::load`];
-    /// a background section is reported by URL only, and neither retained nor
-    /// executed until Bobcat implements the background-thread runtime.
+    /// The returned array is
+    /// `[main, styleOrNull, backgroundOrNull, compatibilityWarnings]`. Its
+    /// first three slots preserve the existing internal Worker ABI; the last
+    /// carries shared, sanitized warning text. A background section is named
+    /// but not copied into the registry because Bobcat has no background-thread
+    /// runtime. The source adapter returns no page configuration: this
+    /// renderer's host-selected [`PageConfig`] remains authoritative in
+    /// [`Self::load`].
     #[wasm_bindgen(js_name = registerLynxXml)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -318,40 +324,32 @@ impl BobcatRenderer {
     )]
     pub fn register_lynx_xml(&self, source_url: String, source: String) -> Result<Array, JsValue> {
         self.ensure_running()?;
-        let parsed = lynx_xml::parse(&source).map_err(js_error)?;
-
-        let section_url = |fragment: &str| {
-            let mut url = Url::parse(&source_url).map_err(|error| {
-                js_error(format!(
-                    "the Lynx XML response URL `{source_url}` is invalid: {error}"
-                ))
-            })?;
-            url.set_fragment(Some(fragment));
-            Ok::<_, JsValue>(url.to_string())
-        };
-        let main_section_url = section_url("main-thread")?;
-        let style_section_url = section_url("style")?;
-        let background_section_url = section_url("background-thread")?;
-
-        let main_url = self.register(
-            &main_section_url,
-            parsed.main_thread_script.as_bytes().to_vec(),
-            "text/javascript",
-        )?;
-        let style_url = parsed
-            .style
-            .map(|style| self.register(&style_section_url, style.as_bytes().to_vec(), "text/css"))
-            .transpose()?;
-        // The background body is named, not retained: nothing executes it, and
-        // a view's construction copies only what it loads.
-        let background_url = parsed
-            .background_thread_script
-            .map(|_| background_section_url);
+        let input_url = Url::parse(&source_url)
+            .map_err(|error| js_error(format!("the Lynx XML response URL is invalid: {error}")))?;
+        // JavaScript has already applied the browser's replacement-mode UTF-8
+        // decoder. The one-shot adapter parses, maps and registers directly
+        // from this string, so it neither clones the whole envelope nor keeps
+        // an unsupported background body alive.
+        let registered =
+            register_lynx_xml_response(&input_url, &source, &self.resources).map_err(js_error)?;
+        let compatibility_warnings = Array::new();
+        for warning in registered.compatibility_warnings() {
+            compatibility_warnings.push(&JsValue::from(warning.as_str()));
+        }
 
         let registration = Array::new();
-        registration.push(&JsValue::from(main_url));
-        registration.push(&style_url.map_or(JsValue::NULL, JsValue::from));
-        registration.push(&background_url.map_or(JsValue::NULL, JsValue::from));
+        registration.push(&JsValue::from(registered.entry_url().to_string()));
+        registration.push(
+            &registered
+                .style_sheet_url()
+                .map_or(JsValue::NULL, |url| JsValue::from(url.to_string())),
+        );
+        registration.push(
+            &registered
+                .background_thread_url()
+                .map_or(JsValue::NULL, |url| JsValue::from(url.to_string())),
+        );
+        registration.push(&compatibility_warnings);
         Ok(registration)
     }
 

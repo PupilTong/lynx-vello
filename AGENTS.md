@@ -52,9 +52,9 @@ Parley path. See
 and behave the same as they do under `web-core` today. "Behave the same" means
 matching rendering output and user-interaction behavior — **not** pixel-perfect
 fidelity, and **not** reimplementing Android/iOS native platform code paths.
-This project does not touch the native `.lynx.bundle` format or platform
-bridges (`docs/lynx-binary-template.md` is kept for reference only, not a
-target).
+Source-based native external `.lynx.bundle` parsing and conversion are
+supported by `bobcat-source`; native bytecode execution and platform bridges
+remain outside the runtime target.
 
 ## Standards policy
 
@@ -135,26 +135,26 @@ useful signal for currently-compatible versions of those libraries.
 
 ## Crates
 
-- `crates/lynx-template-decoder` — decodes `.web.bundle` (magic `SDRA WROF`):
-  manifest, rkyv `StyleInfo`, Lepus/JS code, custom sections. Scope: binary
-  template parsing only, no JS runtime, no CSS engine (yet). The `StyleInfo`
-  section is capped at 1 MiB and 64 levels of rule nesting, and is validated on
-  a thread with a stack sized from its length — see "Input robustness at the
-  two external-byte boundaries" for what those bounds prevent.
-- `crates/lynx-xml` — zero-dependency, zero-copy parser for the restricted
-  single-file Lynx XML source envelope. The current breaking grammar uses
-  `<lynx engine-version="...">` plus `<script thread="main">` or
-  `<script thread="background">`; the former `version` / `main-thread` /
-  `background` spellings are
-  rejected. It extracts the borrowed engine version, optional style, required
-  main-thread script, and optional background-thread script, and reports the
-  reference web parser's UTF-16 error offset together with a Rust-native UTF-8
-  byte offset. Scope: source grammar and section extraction only — no input
-  sniffing, I/O, configuration mapping, CSS parsing, bundle encoding, engine
-  version negotiation, or runtime launch. It is a sibling of the binary
-  template decoder, never another format inside it. The CLI and browser
-  reference embedders own those omitted integration steps and consume this
-  crate directly.
+- `crates/bobcat-source` — the single owner of Lynx source parsing and
+  adaptation. `xml` is the zero-dependency, zero-copy restricted envelope parser
+  (`engine-version`, `thread="main"` / `thread="background"`); it retains UTF-16
+  and UTF-8 error offsets. `web` decodes `SDRA WROF` using the unchanged rkyv 0.7
+  wire model. `native` decodes source-based flexible external `.lynx.bundle`
+  files directly into that same model and can explicitly encode a web bundle.
+  It rejects real QuickJS/Lepus bytecode, rather than attempting execution or
+  decompilation. Named external modules are preserved; they do not acquire an
+  invented page root. `PageSource::from_native_bundle` requires an explicit
+  entry name, while `from_bytes` requires `root` for binary page inputs.
+  The `runtime` feature adds `PageSource` and browser response registration,
+  including shared StyleInfo lowering; IO and view construction stay with the
+  embedder. Default features enable runtime and both binary formats. With
+  default features disabled, `xml` has no dependencies; `web-bundle` and
+  `native-bundle` are independently usable without core/resources/GPU, while
+  Wasm enables only `runtime` for XML response registration. Native XML keeps
+  strict UTF-8 and private memory URLs; the browser retains replacement
+  decoding, final-response fragment URLs, host PageConfig, and registers no
+  unsupported background body. See `docs/source-architecture.md` for boundaries,
+  migration and parser resource bounds.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxView` facade plus the protocol-only, host-injected
   `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
@@ -623,8 +623,7 @@ useful signal for currently-compatible versions of those libraries.
   linted for wasm32 and exercised only in a browser.
 - `crates/bobcat-cli` — the independent native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
-  `bobcat-core`, `bobcat-resources`, the sibling `lynx-template-decoder`
-  utility, and the `lynx-xml` source parser.
+  `bobcat-core`, `bobcat-resources`, and `bobcat-source`.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
   raw Lynx XML source card; other URL schemes remain rejected at the boundary.
   The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
@@ -754,7 +753,7 @@ useful signal for currently-compatible versions of those libraries.
   over a `MessageChannel` whose Worker end the facade hands to
   `BobcatRenderer::create` at init.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
-  loader's replacement-mode UTF-8 behavior, parses it with `lynx-xml`, and hands any
+  loader's replacement-mode UTF-8 behavior, parses it with `bobcat-source::xml`, and hands any
   raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
   exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
   a host may still deliberately override them.
@@ -1408,16 +1407,16 @@ this section is the only place the absolute paths are spelled out.
   format: exact restricted grammar, section extraction, errors and offsets,
   fixed template mapping, and the intentional CSS difference between the
   merged XML-to-`.web.bundle` encoder and the still-proposed raw web loader.
-  `crates/lynx-xml` implements its source parsing boundary. XML is a source
+  `bobcat-source::xml` implements its source parsing boundary. XML is a source
   front end, not a third bundle encoding.
 - `docs/web-binary-template.md` — **read this before touching
-  `crates/lynx-template-decoder` or any StyleInfo/wire-format code.** The
+  `crates/bobcat-source/src/web` or any StyleInfo/wire-format code.** The
   web-target bundle format this repo decodes today: container layout,
   section encodings, and the rkyv 0.7 `RawStyleInfo` CSS data model (mirrored
   1:1 in the decoder crate — field/variant order there is wire format, do not
   reorder).
 - `docs/lynx-binary-template.md` — the *native* `.lynx.bundle` format ("lynx"
-  target), reference only, not implemented here.
+  target), implemented for source-based external bundles by `bobcat-source::native`.
 - `docs/tracking/` — the behavior/feature inventory (CSS properties, layout
   algorithms, DOM/event model, JS runtime APIs, `web-core` runtime
   architecture, built-in components, ReactLynx surface) that future
@@ -1446,24 +1445,27 @@ this section is the only place the absolute paths are spelled out.
   `./.github/scripts/fmt-check.sh` instead — it is what CI runs, it names the
   members from `cargo metadata` rather than from a list someone has to
   remember to extend. The hand-written list it replaced had been missing
-  `lynx-xml` since that crate was added.
+  `bobcat-source::xml` since that crate was added.
 
 ## Testing
 
 Integration tests decode real fixtures vendored from lynx-stack under
-`crates/lynx-template-decoder/tests/fixtures/` (Apache-2.0 build artifacts).
+`crates/bobcat-source/tests/fixtures/` (Apache-2.0 build artifacts).
 `cargo test` must pass on the pinned nightly toolchain.
 
-### Input robustness at the two external-byte boundaries
+### Input robustness at the external-byte boundaries
 
-`lynx-template-decoder` and `lynx-xml` are the crates fed bytes the engine did
+`bobcat-source::web` and `bobcat-source::xml` are the parsers fed bytes the engine did
 not produce — a downloaded `.web.bundle` and an authored `.lynx.xml`. Both are
 written in the `Result` style and both have grammar tests, but every input in
 those tests is one a *correct* encoder produced, which cannot establish the
 property that matters at a trust boundary: that no input takes the process
-down. The two crates answer that differently, because their exposure differs.
+down. The XML and web modules answer that differently, because their exposure differs.
+Native external parsing additionally bounds Lepus/CSS recursion, rejects overlapping
+section payloads, and caps CSS fallback expansion work; see
+`docs/source-architecture.md` and `crates/bobcat-source/tests/conversion.rs`.
 
-**`lynx-xml`** carries `tests/robustness.rs`: a fixed-seed character-level
+**`bobcat-source::xml`** carries `tests/robustness.rs`: a fixed-seed character-level
 mutator over seed documents, plus named degenerate cases for every construct
 with a terminator, asserting panic-freedom and two invariants a partial-index
 bug would break silently — the returned sections borrow from the source, and a
@@ -1478,7 +1480,7 @@ This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
 there are no length fields, and nothing allocates on a source-controlled count
 — and it is not worth a separate package and a scheduled job.
 
-**`lynx-template-decoder`'s `StyleInfo` section carries two hard bounds**, and
+**`bobcat-source::web`'s `StyleInfo` section carries two hard bounds**, and
 they are load-bearing rather than defensive. `Rule` holds `children: Vec<Rule>`
 with no depth bound and rkyv 0.7's derived `CheckBytes` recurses once per
 level, so a *well-formed* section — nothing for validation to reject — drives
@@ -1508,15 +1510,15 @@ rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say th
 result "may be vulnerable to memory overlap and recursion" — and the 0.7 pin is
 a wire-format constraint. The alternative, a hand-written iterative
 `CheckBytes` for `ArchivedRule`, would need `unsafe` and cost the crate its
-`forbid(unsafe_code)`. `crates/lynx-template-decoder/src/style_info.rs` holds
+`forbid(unsafe_code)`. `crates/bobcat-source/src/web/style_info.rs` holds
 the constants and the regression test.
 
 ### The unsafe floor
 
-`hughie`, `flashbulb`, `lynx-template-decoder` and `lynx-xml` carry
+`hughie`, `flashbulb`, and `bobcat-source` carry
 `#![forbid(unsafe_code)]`. The workspace-wide `unsafe_code = "warn"` is a lint
 any module can silence locally; `forbid` cannot be overridden from inside the
-crate, so `unsafe` appearing in one of these four has to be a deliberate edit
+crate, so `unsafe` appearing in one of these three has to be a deliberate edit
 to that line.
 
 Where `unsafe` is unavoidable, the bar is a `SAFETY` comment per block,
@@ -1602,7 +1604,7 @@ default explanation for a failure:
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
     -p bobcat-wasm -p bobcat-core -p dom -p hughie \
-    -p lynx-xml -p lynx-template-decoder -p quickjs-rust-bridge -- -D warnings
+    -p bobcat-source --no-default-features --features bobcat-source/runtime -p quickjs-rust-bridge -- -D warnings
   ```
 
   `--lib`, not `--all-targets`: `bobcat-core` dev-depends on tokio's

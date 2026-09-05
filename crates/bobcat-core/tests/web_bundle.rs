@@ -10,17 +10,15 @@ use support::{FetcherDouble, wait_for_script};
 const FIXTURES: &[(&str, &[u8])] = &[
     (
         "basic-bindtap",
-        include_bytes!("../../lynx-template-decoder/tests/fixtures/basic-bindtap.web.bundle"),
+        include_bytes!("../../bobcat-source/tests/fixtures/basic-bindtap.web.bundle"),
     ),
     (
         "basic-class-selector",
-        include_bytes!(
-            "../../lynx-template-decoder/tests/fixtures/basic-class-selector.web.bundle"
-        ),
+        include_bytes!("../../bobcat-source/tests/fixtures/basic-class-selector.web.bundle"),
     ),
 ];
 
-fn page_config(template: &lynx_template_decoder::WebTemplate) -> PageConfig {
+fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
     PageConfig {
         default_display_linear: template.config_flag("defaultDisplayLinear"),
         default_overflow_visible: template.config_flag("defaultOverflowVisible"),
@@ -52,7 +50,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
 #[test]
 fn decoded_bundle_page_config_is_supplied_at_view_construction() {
     for (name, bytes) in FIXTURES {
-        let template = lynx_template_decoder::decode(bytes).expect("decode");
+        let template = bobcat_source::web::decode(bytes).expect("decode");
         let config = page_config(&template);
         assert!(config.default_display_linear, "{name}");
         assert!(config.default_overflow_visible, "{name}");
@@ -74,7 +72,7 @@ fn with_fatal_reporter(root: &str) -> String {
 #[tokio::test]
 async fn decoded_scripts_boot_through_the_element_papi_alone() {
     for (name, bytes) in FIXTURES {
-        let template = lynx_template_decoder::decode(bytes).expect("decode");
+        let template = bobcat_source::web::decode(bytes).expect("decode");
         let root = template
             .lepus_code
             .get("root")
@@ -91,7 +89,7 @@ async fn decoded_scripts_boot_through_the_element_papi_alone() {
 
 #[tokio::test]
 async fn bundle_shaped_boot_sequence_runs_through_the_public_facade() {
-    let template = lynx_template_decoder::decode(FIXTURES[0].1).expect("decode");
+    let template = bobcat_source::web::decode(FIXTURES[0].1).expect("decode");
     run(
         page_config(&template),
         r"

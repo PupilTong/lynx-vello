@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::DecodeError;
-use crate::reader::Reader;
+use super::DecodeError;
+use super::reader::Reader;
 
 pub(crate) fn decode_string_map(
     bytes: &[u8],

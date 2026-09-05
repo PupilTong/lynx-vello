@@ -318,3 +318,33 @@ test('a load releases active pointers before replacing the native view', async (
 
   await view.dispose()
 })
+
+test('a Lynx XML load preserves the host-selected page configuration', async () => {
+  FakeWorker.instances.length = 0
+  const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
+  const hostConfig = {
+    defaultDisplayLinear: true,
+    defaultOverflowVisible: true,
+    enableCSSSelector: false,
+  }
+  const view = await BobcatCanvas.create(canvas, 80, 60, 1, hostConfig)
+  const worker = FakeWorker.instances[0]
+
+  await view.loadLynxXml('../card.lynx.xml')
+
+  const init = worker.messages.find(({ type }) => type === 'bobcat-init')
+  const load = worker.messages.find(
+    ({ operation }) => operation === 'loadLynxXml',
+  )
+  assert.deepEqual(init.config, hostConfig)
+  assert.deepEqual(
+    { operation: load.operation, url: load.url },
+    {
+      operation: 'loadLynxXml',
+      url: 'https://example.test/card.lynx.xml',
+    },
+  )
+  assert.equal(Object.hasOwn(load, 'config'), false)
+
+  await view.dispose()
+})

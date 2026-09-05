@@ -1,6 +1,6 @@
 //! Little-endian byte cursor over the bundle.
 
-use crate::DecodeError;
+use super::DecodeError;
 
 pub(crate) struct Reader<'a> {
     bytes: &'a [u8],

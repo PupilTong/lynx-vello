@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const packageDirectory = fileURLToPath(new URL('..', import.meta.url))
 const gluePath = path.join(packageDirectory, 'pkg/bobcat_wasm.js')
+const wasmDeclarationsPath = path.join(packageDirectory, 'pkg/bobcat_wasm.d.ts')
 const wasmPath = path.join(packageDirectory, 'pkg/bobcat_wasm_bg.wasm')
 
 for (const script of [
@@ -19,6 +20,7 @@ for (const script of [
 }
 
 const glue = await readFile(gluePath, 'utf8')
+const wasmDeclarations = await readFile(wasmDeclarationsPath, 'utf8')
 if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
   throw new Error('generated glue does not construct shared WebAssembly memory')
 }
@@ -44,6 +46,13 @@ for (const requiredMethod of [
   if (!glue.includes(requiredMethod)) {
     throw new Error(`generated renderer is missing ${requiredMethod}`)
   }
+}
+if (
+  !wasmDeclarations.includes(
+    'registerLynxXml(source_url: string, source: string): Array<any>;',
+  )
+) {
+  throw new Error('generated renderer changed the registerLynxXml Worker ABI')
 }
 if (!glue.includes('passArray8ToWasm0(bytes')) {
   throw new Error('generated script registry must accept raw Uint8Array bytes')
@@ -228,6 +237,8 @@ for (const requiredLynxXmlLoaderStep of [
 }
 for (const requiredLynxXmlDispatchStep of [
   'renderer.registerLynxXml(url, source)',
+  '_backgroundThreadScriptUrl',
+  'for (const warning of compatibilityWarnings)',
   'console.warn(',
   'await replaceNativeView(',
   'styleSheetUrl === null ? [] : [styleSheetUrl]',
