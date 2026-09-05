@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use rkyv::validation::check_archived_root_with_context;
+use rkyv::validation::validators::ArchiveValidator;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 pub use super::css_property::{
@@ -158,55 +160,17 @@ pub struct DeclarationBlock {
     pub declarations: Vec<ParsedDeclaration>,
 }
 
-/// Ceiling on the `StyleInfo` section, and how much validation stack a byte of
-/// it may claim.
-///
-/// `Rule` holds `children: Vec<Rule>` with no depth bound, and rkyv 0.7's
-/// derived `CheckBytes` recurses once per level. A section that is *well
-/// formed* — not malformed, so no validation error can reject it — therefore
-/// drives that recursion as deep as its bytes allow. Measured on aarch64: one
-/// level costs 28 archive bytes and roughly 410 bytes of stack in release,
-/// 3.5 KiB in debug. A 168 KB section overflows the 2 MiB stack Rust gives a
-/// spawned thread, and it does so *inside* `check_archived_root` — reported as
-/// `fatal runtime error: stack overflow`, which is `SIGABRT`. Not a panic:
-/// `catch_unwind` cannot contain it and the whole process dies.
-///
-/// A length cap alone cannot fix this, because the safe length depends on the
-/// caller's stack and a library does not know it. So validation runs on a
-/// thread whose stack this crate chooses, sized from the section length; the
-/// cap exists only to bound that request. The largest `StyleInfo` section in
-/// the vendored fixtures is 24 KB, so 1 MiB is about 40x headroom, and a
-/// section beyond it is refused as a `DecodeError` rather than risking the
-/// process.
-///
-/// rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say
-/// the result "may be vulnerable to memory overlap and recursion" — and the
-/// 0.7 pin is a wire-format constraint, so the bound has to be built here. The
-/// alternative, a hand-written iterative `CheckBytes` for `ArchivedRule`, would
-/// require `unsafe` and cost this crate its `forbid(unsafe_code)`.
+/// Bounds allocation for the copied archive and validation work.
 const MAX_SECTION_LEN: usize = 1 << 20;
 
-/// Stack per section byte, with margin over the measurements above (14.7
-/// release, 125 debug).
-const STACK_PER_SECTION_BYTE: usize = if cfg!(debug_assertions) { 256 } else { 64 };
-
-/// Enough for a shallow section's ordinary frames before any nesting.
-const STACK_FLOOR: usize = 1 << 20;
-
-/// The deepest `Rule` nesting a section may declare.
-///
-/// The format nests one level in practice — a `Keyframes` rule carries its
-/// keyframe rules as `children` — and `bobcat-cli`'s converter reads exactly
-/// that one level. The limit sits well above that so a future grammar has room.
-///
-/// It is a second bound rather than a nicety: the validation thread above keeps
-/// *decoding* off the caller's stack, but the decoded value crosses back, and
-/// `Rule`'s drop glue recurses once per level. A deep tree handed to a
-/// small-stack caller would overflow on the way out, after decoding had already
-/// succeeded. Refusing it here means the deep value is also dropped on the
-/// sized thread, and nothing past this function ever sees a tree it cannot
-/// afford to walk or free.
+/// The deepest rule tree a caller may receive, walk, or drop.
 const MAX_RULE_DEPTH: usize = 64;
+
+/// Bound recursive byte validation *before* constructing an owned rule tree.
+/// Each children vector consumes a subtree level. The remaining allowance
+/// covers the root, map entries, rules vector and leaf vectors/strings; it
+/// does not grow with input size. Tests exercise populated rules at the limit.
+const MAX_VALIDATION_DEPTH: usize = MAX_RULE_DEPTH + 8;
 
 pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
     if bytes.len() > MAX_SECTION_LEN {
@@ -216,27 +180,13 @@ pub(crate) fn decode_style_info(bytes: &[u8]) -> Result<StyleInfo, DecodeError> 
         )));
     }
 
-    let stack = STACK_FLOOR + bytes.len() * STACK_PER_SECTION_BYTE;
-    std::thread::scope(|scope| {
-        let validator = std::thread::Builder::new()
-            .name("style-info-validate".to_owned())
-            .stack_size(stack)
-            .spawn_scoped(scope, || decode_checked(bytes))
-            .map_err(|e| {
-                DecodeError::StyleInfo(format!("could not start the validation thread: {e}"))
-            })?;
-        // A panic in there is a decoder bug, not a bad-input signal, so it is
-        // re-raised on this thread rather than folded into `DecodeError`.
-        validator
-            .join()
-            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
-    })
-}
-
-fn decode_checked(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
     let mut aligned = rkyv::AlignedVec::with_capacity(bytes.len());
     aligned.extend_from_slice(bytes);
-    let archived = rkyv::check_archived_root::<StyleInfo>(&aligned)
+    // This model contains no shared pointers, so ArchiveValidator supplies
+    // every check it needs. No platform-specific threads or unsafe access:
+    // excessive nesting fails during validation on the calling thread.
+    let mut validator = ArchiveValidator::with_max_depth(&aligned, MAX_VALIDATION_DEPTH);
+    let archived = check_archived_root_with_context::<StyleInfo, _>(&aligned, &mut validator)
         .map_err(|e| DecodeError::StyleInfo(e.to_string()))?;
     let style_info: StyleInfo = archived
         .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
@@ -244,7 +194,8 @@ fn decode_checked(bytes: &[u8]) -> Result<StyleInfo, DecodeError> {
 
     let depth = nesting_depth(&style_info);
     if depth > MAX_RULE_DEPTH {
-        // Dropping `style_info` here, on the sized stack, is deliberate.
+        // Validation already bounded this tree; rejecting and dropping it
+        // here cannot recurse to an input-controlled depth.
         return Err(DecodeError::StyleInfo(format!(
             "rule nesting is {depth} levels deep, over the {MAX_RULE_DEPTH}-level limit"
         )));
@@ -326,10 +277,9 @@ mod tests {
     /// is `SIGABRT`, not a panic, so this test could not have caught it with
     /// `should_panic`: the whole test binary died.
     ///
-    /// Decoding runs on a 256 KiB caller so the assertion is specifically that
-    /// the decoder supplies its own stack rather than borrowing whatever the
-    /// caller happens to have. 8000 levels is 224 KB of archive, and used to
-    /// abort a 2 MiB thread.
+    /// Decode directly on a 256 KiB caller. The decoder must reject the input
+    /// before following its 8000 levels (224 KB of archive), without spawning
+    /// a helper thread or requiring a stack sized from the input length.
     #[test]
     fn deep_nesting_is_refused_instead_of_aborting() {
         let bytes = deep_section(8000);
@@ -349,7 +299,7 @@ mod tests {
             .expect_err("8000 levels is over the limit")
             .to_string();
         assert!(
-            message.contains("levels deep"),
+            message.contains("maximum subtree depth"),
             "expected the depth limit to reject this, got: {message}"
         );
     }
@@ -357,9 +307,72 @@ mod tests {
     /// The limit has to leave the shape the format actually uses alone.
     #[test]
     fn nesting_within_the_limit_still_decodes() {
-        let bytes = deep_section(MAX_RULE_DEPTH - 2);
-        let decoded = decode_style_info(&bytes).expect("within the limit");
-        assert_eq!(nesting_depth(&decoded), MAX_RULE_DEPTH - 1);
+        let bytes = deep_section(MAX_RULE_DEPTH - 1);
+        let decoded = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || decode_style_info(&bytes).expect("within the limit"))
+            .expect("spawn small-stack caller")
+            .join()
+            .expect("valid input decodes on the caller's stack");
+        assert_eq!(nesting_depth(&decoded), MAX_RULE_DEPTH);
+    }
+
+    #[test]
+    fn a_rule_tree_one_level_over_the_limit_is_rejected() {
+        let bytes = deep_section(MAX_RULE_DEPTH);
+        let error = decode_style_info(&bytes).expect_err("65 rule levels");
+        assert!(error.to_string().contains("levels deep"), "{error}");
+    }
+
+    #[test]
+    fn a_populated_leaf_at_the_rule_limit_still_decodes() {
+        let mut rule = empty_rule();
+        rule.prelude.selectors = vec![Selector {
+            components: vec![SimpleSelector {
+                kind: SimpleSelectorKind::Class,
+                value: "a-selector-long-enough-to-be-out-of-line".to_owned(),
+            }],
+        }];
+        rule.declaration_block.declarations = vec![ParsedDeclaration {
+            property: CssProperty::from_name("--a-long-custom-property-name"),
+            value_tokens: vec![ValueToken {
+                token_type: token_types::IDENT_TOKEN,
+                value: "a-value-long-enough-to-be-out-of-line".to_owned(),
+            }],
+            is_important: true,
+        }];
+        for _ in 1..MAX_RULE_DEPTH {
+            let mut parent = empty_rule();
+            parent.children.push(rule);
+            rule = parent;
+        }
+        let info = StyleInfo {
+            css_id_to_style_sheet: HashMap::from([(
+                0,
+                StyleSheet {
+                    imports: vec![1, 2],
+                    rules: vec![rule],
+                },
+            )]),
+            style_text_size_hint: 0,
+        };
+        let bytes = rkyv::to_bytes::<_, 4096>(&info).expect("encode populated leaf");
+        let decoded = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || decode_style_info(&bytes).expect("decode populated leaf"))
+            .expect("spawn small-stack caller")
+            .join()
+            .expect("populated input decodes on the caller's stack");
+        assert_eq!(nesting_depth(&decoded), MAX_RULE_DEPTH);
+        let mut leaf = &decoded.css_id_to_style_sheet[&0].rules[0];
+        while let Some(child) = leaf.children.first() {
+            leaf = child;
+        }
+        assert_eq!(
+            leaf.prelude.selectors[0].components[0].value,
+            "a-selector-long-enough-to-be-out-of-line"
+        );
+        assert!(leaf.declaration_block.declarations[0].is_important);
     }
 
     #[test]

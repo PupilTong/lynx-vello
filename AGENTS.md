@@ -1517,38 +1517,35 @@ This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
 there are no length fields, and nothing allocates on a source-controlled count
 — and it is not worth a separate package and a scheduled job.
 
-**`bobcat-source::web`'s `StyleInfo` section carries two hard bounds**, and
-they are load-bearing rather than defensive. `Rule` holds `children: Vec<Rule>`
-with no depth bound and rkyv 0.7's derived `CheckBytes` recurses once per
-level, so a *well-formed* section — nothing for validation to reject — drives
-that recursion as deep as its bytes allow. Measured on aarch64: a level costs
-28 archive bytes and about 410 bytes of stack in release, 3.5 KiB in debug, so
-a **168 KB** section overflowed the 2 MiB stack Rust gives a spawned thread. It
-did so *inside* `check_archived_root`, reported as `fatal runtime error: stack
-overflow` — `SIGABRT`, not a panic, uncatchable, process gone. The largest
-`StyleInfo` section in the vendored fixtures is 24 KB.
+**`bobcat-source::web`'s `StyleInfo` validation stays on the calling
+thread on every platform**, including Wasm. It never starts a decoder worker
+or requests a stack sized from the input. The rkyv 0.7 field and enum layouts
+remain unchanged, and the crate still forbids unsafe code.
 
-Validation therefore runs on a thread whose stack the crate sizes from the
-section length, under two caps:
+Three bounds apply before a caller receives an owned tree:
 
-- **Length**, 1 MiB — about 40x the largest real section. It exists only to bound how much stack
-  that thread may be asked for. A length cap on its own cannot fix the overflow, because the safe
-  length depends on the caller's stack and a library does not know it.
-- **Nesting**, 64 levels. The format nests one level in practice (a `Keyframes` rule holds its
-  keyframe rules) and `bobcat-cli`'s converter reads exactly that one.
+- **Section length**, 1 MiB, bounds the copied archive and validation work.
+- **Validation subtree depth**, 72, is enforced during byte validation using
+  rkyv 0.7's `ArchiveValidator::with_max_depth` and the safe
+  `check_archived_root_with_context` API. This model has no shared pointers,
+  so the validator supplies all required checks. Each recursive rule's
+  children vector consumes a subtree level; the allowance above 64 accounts
+  for the root, map and leaf vectors/strings. Excessive nesting is rejected
+  before deserialization can construct an unbounded owned tree.
+- **Rule depth**, 64, remains the limit on the returned tree. The iterative
+  depth check rejects deeper rules after bounded validation/deserialization;
+  even that failure's drop is bounded by the validation limit.
 
-The depth cap is the half that is easy to miss: `Rule`'s drop glue also
-recurses per level, so a deep tree returned to a small-stack caller would
-overflow on the way *out*, after decoding had already succeeded. Refusing it
-keeps the deep value on the sized thread, and nothing downstream ever sees a
-tree it cannot afford to walk or free.
-
-rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say the
-result "may be vulnerable to memory overlap and recursion" — and the 0.7 pin is
-a wire-format constraint. The alternative, a hand-written iterative
-`CheckBytes` for `ArchivedRule`, would need `unsafe` and cost the crate its
-`forbid(unsafe_code)`. `crates/bobcat-source/src/web/style_info.rs` holds
-the constants and the regression test.
+The previous implementation incorrectly treated rkyv 0.7 as having no depth
+control and moved validation onto a large-stack thread. Its default validator
+has no configured limit, but `ArchiveValidator::with_max_depth` does. The
+thread workaround is gone. Regression tests exercise an 8000-level archive
+and a populated 64-level tree on a 256 KiB caller stack, the 65-level rejection,
+and real web-bundle fixtures on native and Wasm. Test-only threads establish
+the small caller stack or generate the deep fixture; decoding itself is
+synchronous and thread-free. See
+`crates/bobcat-source/src/web/style_info.rs` and
+`crates/bobcat-source/tests/decode_web_bundle.rs`.
 
 ### The unsafe floor
 
