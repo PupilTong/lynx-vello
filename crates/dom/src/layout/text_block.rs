@@ -227,8 +227,14 @@ fn as_items(collected: &[Collected]) -> Vec<InlineItem<'_>> {
 
 /// The paragraph style, from the establishing element's inherited values.
 fn block_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> BlockStyle {
-    let view = TextContainerView::of_establishing_element(tree.at(element));
-    BlockStyle::from_container_style(&view)
+    let node = tree.at(element);
+    let view = TextContainerView::of_establishing_element(node);
+    let limits = node.text_constraints();
+    BlockStyle {
+        max_lines: limits.max_lines,
+        max_chars: limits.max_chars,
+        ..BlockStyle::from_container_style(&view)
+    }
 }
 
 /// Rebuilds `element`'s paragraph when its content or style moved, and reports

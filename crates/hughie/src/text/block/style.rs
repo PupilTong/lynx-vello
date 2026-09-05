@@ -286,6 +286,7 @@ impl BlockStyle {
         use stylo::computed_values::direction;
         use stylo::computed_values::text_wrap_mode::T as WrapMode;
         use stylo::values::computed::TextAlign as StyloAlign;
+        use stylo::values::specified::text::TextOverflowSide;
 
         Self {
             text_align: match style.text_align() {
@@ -308,7 +309,10 @@ impl BlockStyle {
                 stylo::values::computed::WordBreak::KeepAll => WordBreak::KeepAll,
                 stylo::values::computed::WordBreak::Normal => WordBreak::Normal,
             },
-            overflow: TextOverflow::Clip,
+            overflow: match style.text_overflow().second {
+                TextOverflowSide::Clip => TextOverflow::Clip,
+                TextOverflowSide::Ellipsis => TextOverflow::Ellipsis,
+            },
             max_lines: None,
             max_chars: None,
         }

@@ -276,6 +276,66 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
     screenshots().assert_matches(&["raw-text-runs"], &image);
 }
 
+/// Both layout and glyph painting must lose the second line. At DPR 2 the
+/// same 21px line height makes the two boxes 84 and 42 device pixels tall.
+#[tokio::test]
+async fn text_maxline_halves_the_rendered_box_at_device_pixel_ratio_two() {
+    const AHEM: &[u8] = include_bytes!("../../hughie/tests/fixtures/Ahem.ttf");
+    const SOURCE: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'display:flex;flex-direction:row;align-items:flex-start;gap:10px;background-color:white');
+  for (const limited of [false, true]) {
+    const text = __CreateText(0);
+    __SetInlineStyles(text, 'width:100px;flex-shrink:0;font-family:Ahem;font-size:20px;line-height:21px;background-color:#0080ff');
+    __AppendElement(text, __CreateRawText('abc\ndef'));
+    if (limited) __SetAttribute(text, 'text-maxline', 1);
+    __AppendElement(page, text);
+  }
+};
+";
+    let mut view = LynxView::new(
+        Arc::new(NoWakeup),
+        220.0,
+        60.0,
+        2.0,
+        DrawTarget::Offscreen,
+        fetcher(SOURCE.as_bytes()),
+        ViewSources {
+            fonts: vec![FontBlob::from_static(AHEM)],
+            default_font_family: Some("Ahem".to_owned()),
+            ..ViewSources::new(SCRIPT_URL)
+        },
+    )
+    .await
+    .expect("view");
+    wait_for_script(&mut view).expect("script execution");
+    let shot = view.capture().expect("capture both text boxes");
+    assert_eq!((shot.size.width, shot.size.height), (440, 120));
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * shot.size.width as usize + x) * 4;
+        &shot.pixels[offset..offset + 4]
+    };
+    for (x, height) in [(180, 84), (400, 42)] {
+        let blue_rows = (0..shot.size.height as usize)
+            .filter(|&y| pixel(x, y) == [0, 128, 255, 255])
+            .count();
+        assert_eq!(blue_rows, height, "box height in device pixels at x={x}");
+    }
+    assert_eq!(pixel(20, 20), [0, 0, 0, 255], "unrestricted first line");
+    assert_eq!(pixel(240, 20), [0, 0, 0, 255], "restricted first line");
+    assert_eq!(pixel(20, 62), [0, 0, 0, 255], "unrestricted second line");
+    assert_eq!(
+        pixel(240, 62),
+        [255, 255, 255, 255],
+        "restricted second line is gone"
+    );
+
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["text-maxline"], &image);
+}
+
 /// Requirement: a class change made by script must restyle against author
 /// rules that were never parsed from text. The script paints itself red, then
 /// swaps the class and flushes again; only the second commit is captured.

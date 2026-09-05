@@ -339,6 +339,28 @@ fn maxlength_cuts_without_backing_off_and_keeps_three_dots() {
 }
 
 #[test]
+fn maxlength_clip_at_a_line_boundary_does_not_retain_an_empty_line() {
+    let style = ahem_style();
+    let mut context = text_context();
+    for text in ["aaaa", "aa aa"] {
+        let block = laid_out(
+            &mut context,
+            BlockStyle {
+                max_chars: Some(2),
+                ..BlockStyle::default()
+            },
+            &[run(&style, text)],
+            None,
+            Some(20.0),
+        );
+        assert!(block.truncated());
+        assert_eq!(block.lines().len(), 1);
+        assert_close(block.size().height, 10.0);
+        assert_close(block.size().width, 20.0);
+    }
+}
+
+#[test]
 fn the_earlier_of_maxlength_and_maxline_wins() {
     let style = ahem_style();
     let items = [run(&style, "aaaa aaaa aaaa")];

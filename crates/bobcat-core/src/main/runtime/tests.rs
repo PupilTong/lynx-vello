@@ -1238,6 +1238,55 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "explicit line heights have exact pixel metrics"
+)]
+fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
+    let (mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  for (const limited of [false, true]) {
+                    const text = __CreateText(0);
+                    __SetID(text, limited ? 'limited' : 'unlimited');
+                    __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px');
+                    __AppendElement(text, __CreateRawText('ab\ncd'));
+                    if (limited) __SetAttribute(text, 'text-maxline', '1');
+                    __AppendElement(page, text);
+                  }
+                };
+                ",
+            "app:///text-maxline.js",
+        )
+        .expect("main-thread script");
+
+    let tree = elements.tree();
+    for (name, height) in [("unlimited", 42.0), ("limited", 21.0)] {
+        let id = tree
+            .document_element()
+            .children()
+            .find(|node| node.attribute("id") == Some(name))
+            .expect("the text element")
+            .id();
+        assert_eq!(
+            tree.text_block_size(id)
+                .expect("committed paragraph")
+                .height,
+            height,
+            "{name}: the paragraph must measure only visible lines"
+        );
+        assert_eq!(
+            tree.rounded_layout(id).expect("committed box").size.height,
+            height,
+            "{name}: the box must use the truncated paragraph's height"
+        );
+    }
+}
+
+#[test]
 fn rewriting_the_text_attribute_relays_out_the_same_run() {
     let (mut runtime, elements) = text_runtime();
     runtime

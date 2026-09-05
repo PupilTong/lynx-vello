@@ -523,17 +523,21 @@ useful signal for currently-compatible versions of those libraries.
   `RawTextAttributes` does, updating that node in place rather than replacing
   it (a run keeps its retained Parley layout under its own id), and carrying
   no node at all for an empty value. The UA sheet carries the other half,
-  again from `web-elements`: `text` is a flex container whatever
+  again from `web-elements`: `text` establishes one flattened paragraph whatever
   `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
   `raw-text` dissolves into the `text` it is written inside
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
-  newline. **Not implemented**: an inline formatting context, so sibling runs
-  in one `text` are separate flex items rather than one wrapped paragraph, a
-  nested `text` is a flex item rather than an inline box, and `text-maxline`
-  truncation is still absent — `docs/text-measurement-and-ifc.md` records the
-  retained-layout and eviction contracts those would build on, and the open
-  design decisions (brush, artifact ownership, truncation ordering).
+  newline. Sibling runs and nested text share the establishing element's
+  paragraph. `tree::text` observes `text-maxline` and `text-maxlength`, parses
+  the web attribute numbers, and supplies typed `dom::layout::TextConstraints`.
+  DOM stores them in the node's optional content allocation and forwards them
+  to `hughie::text::block::BlockStyle`; an update or removal invalidates box
+  measurement and re-breaks the retained glyphs. Computed `text-overflow`
+  selects clip or the existing literal-dots ellipsis. Custom inline-truncation
+  content, `tail-color-convert`, and the text layout event remain unwired.
+  `docs/text-measurement-and-ifc.md` records the earlier design investigation;
+  current integration status lives in `docs/tracking/css-text.md`.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -1380,8 +1384,9 @@ useful signal for currently-compatible versions of those libraries.
   surface, `rpx`-aware view/device policy, per-component css-id scoping,
   sticky lowering,
   component-specific staggered layout, and the rest of the Lynx text policy —
-  `text-maxline`/`text-maxlength` truncation, `tail-color-convert`, and the
-  inline formatting context sibling runs in one `text` would need. The
+  custom inline-truncation content, `tail-color-convert`, and text layout events.
+  The flattened paragraph and `text-maxline`/`text-maxlength` attribute wiring
+  are implemented (see `tree::text` above). The
   `raw-text` attribute-to-text-node reflection and its UA display/newline
   policy have landed in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C
   text style, document context, and artifact storage already live in `dom`.

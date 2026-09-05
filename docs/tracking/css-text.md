@@ -188,10 +188,18 @@ in the paragraph protocol: direction is resolved at style time into a physical
 
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
 
-Implementation note (2026-09-02): the structural model above — flattening,
-atomic inline boxes with vertical alignment, `text-maxline`/`text-maxlength`/
-`text-overflow` truncation with inline-truncation content, and the layout
-event's line data — is implemented standalone in `hughie::text::block`
-(`crates/hughie/src/text/block/`), deliberately unwired from the box-protocol
-measurement path. Its recorded deviations live in
+Implementation note (2026-09-05): `display: -lynx-text` flattens its subtree
+through `dom` into `hughie::text::block`, including atomic inline boxes.
+`bobcat-core::main::tree::text` observes `text-maxline` / `text-maxlength` and
+passes typed `dom::layout::TextConstraints` into the establishing element's
+paragraph. Setting, changing, or removing a limit invalidates box measurement
+while retaining shaped glyphs; both probes and commits use the same limits.
+The attributes are paragraph-wide, not per nested run. Non-positive line
+counts mean unlimited, while a zero character count cuts all content. The
+web's numeric-prefix parsing is retained; fractional line counts are invalid
+for its CSS clamp, and fractional character offsets truncate as DOM Range does.
+Computed `text-overflow` selects clip or the existing literal-dots algorithm.
+Custom inline-truncation content, `tail-color-convert`, and delivery of the
+layout event remain unwired; the standalone block already supports custom
+tails and exposes line data. Its recorded deviations live in
 [deviations.md](deviations.md) under "Text layout".

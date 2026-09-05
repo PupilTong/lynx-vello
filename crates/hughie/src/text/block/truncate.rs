@@ -120,10 +120,6 @@ pub(in crate::text::block) fn plan(
         (None, None) => return None,
     };
 
-    let cut_line = natural_lines
-        .iter()
-        .position(|line| line.consumed_end > cut_unit)
-        .unwrap_or(natural_lines.len() - 1);
     let cut_byte = map
         .unit_to_byte(text, cut_unit)
         .unwrap_or_else(|| u32::try_from(text.len()).expect("text fits u32"));
@@ -148,6 +144,21 @@ pub(in crate::text::block) fn plan(
     } else {
         Tail::None
     };
+
+    let cut_line = natural_lines
+        .iter()
+        .position(|line| {
+            // A markerless maxlength cut at a line boundary ends the
+            // preceding line, without reserving an empty next line. Keep the
+            // maxline branch's line when it hides an oversized custom tail;
+            // that branch deliberately retains the cut line's geometry.
+            if tail == Tail::None && maxchars_cut == Some(cut_unit) {
+                line.consumed_end >= cut_unit
+            } else {
+                line.consumed_end > cut_unit
+            }
+        })
+        .unwrap_or(natural_lines.len() - 1);
 
     Some(CutPlan {
         cut_byte,

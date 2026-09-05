@@ -4,6 +4,7 @@ mod host;
 mod style;
 pub(crate) mod text_block;
 
+use std::num::NonZeroU32;
 use std::sync::LazyLock;
 
 #[cfg(feature = "layout-test-utils")]
@@ -32,6 +33,18 @@ pub(crate) static ANONYMOUS_STYLE: LazyLock<Arc<ComputedValues>> = LazyLock::new
     use stylo::properties::style_structs::Font;
     ComputedValues::initial_values_with_font_override(Font::initial_values())
 });
+
+/// Non-CSS limits on the paragraph an element establishes.
+///
+/// The embedder owns attribute names and parsing. These limits apply to the
+/// whole paragraph, including nested runs, and are not inherited by them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextConstraints {
+    pub max_lines: Option<NonZeroU32>,
+    /// UTF-16 source units, with each atomic inline box counting as one.
+    /// Zero cuts all content; `None` leaves the character count unlimited.
+    pub max_chars: Option<u32>,
+}
 
 impl<T: Sync> Document<T> {
     pub fn layout(&mut self) {
@@ -71,6 +84,24 @@ pub(crate) fn natural_size(width: u32, height: u32) -> NaturalSize {
 }
 
 impl<T> Document<T> {
+    /// Updates paragraph limits and invalidates measurement and box layout.
+    ///
+    /// Shaped glyphs survive: the paragraph applies limits when breaking
+    /// lines, and its style update clears the cached measurements.
+    pub fn set_text_constraints(&mut self, id: crate::NodeId, constraints: TextConstraints) {
+        let node = self
+            .arenas_mut()
+            .get_mut(id)
+            .expect("stale NodeId passed to Document::set_text_constraints");
+        assert!(
+            node.is_element(),
+            "non-element NodeId passed to Document::set_text_constraints"
+        );
+        if node.set_text_constraints(constraints) {
+            self.invalidate_layout(id);
+        }
+    }
+
     /// Updates intrinsic dimensions and invalidates affected layout.
     pub fn set_natural_size(&mut self, id: crate::NodeId, natural_size: NaturalSize) {
         let changed = {
@@ -530,9 +561,55 @@ mod tests {
         assert_eq!(restored.lines().len(), lines);
     }
 
-    /// The two-level eviction, from the outside: a relayout-damaged element
-    /// keeps its text children's shaped glyphs unless the restyle moved
-    /// something Parley shapes from.
+    /// Paragraph limits evict box and break measurements, preserving the
+    /// natural shaped layout even across intrinsic-width probes.
+    #[test]
+    fn changing_paragraph_limits_rebreaks_without_reshaping() {
+        let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+        document.layout();
+        let before = document
+            .text_block_rebuilds(label)
+            .expect("shaped paragraph");
+        assert_eq!(
+            document.text_block(label).expect("paragraph").lines().len(),
+            2
+        );
+
+        for (constraints, lines) in [
+            (
+                TextConstraints {
+                    max_lines: NonZeroU32::new(1),
+                    max_chars: None,
+                },
+                1,
+            ),
+            (
+                TextConstraints {
+                    max_lines: None,
+                    max_chars: Some(2),
+                },
+                1,
+            ),
+            (TextConstraints::default(), 2),
+        ] {
+            document.set_text_constraints(label, constraints);
+            document.layout();
+            let block = document.text_block(label).expect("committed paragraph");
+            assert_eq!(block.lines().len(), lines, "{constraints:?}");
+            assert_eq!(document.text_block_rebuilds(label), Some(before));
+            assert!(!document.text_block_is_probe_dirty(label));
+
+            document.set_text_constraints(label, constraints);
+            assert_eq!(
+                document.layout_cache_is_empty(label),
+                Some(false),
+                "no-op update"
+            );
+        }
+    }
+
+    /// A relayout-damaged element keeps its shaped glyphs unless the restyle
+    /// moved something Parley shapes from.
     #[test]
     fn a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved() {
         for (case, declaration, survives) in [

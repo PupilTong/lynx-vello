@@ -20,6 +20,7 @@ use stylo::stylesheets::UrlExtraData;
 use stylo_atoms::Atom;
 use stylo_dom::ElementState;
 
+use crate::layout::TextConstraints;
 use crate::tree::custom::{CustomElementState, DefinitionId};
 use crate::tree::document::{DOCUMENT_NODE_ID, NodeId, NodeSlot, PayloadSlot, TreeArenas};
 use crate::tree::shadow::{ShadowLinks, ShadowRootData, ShadowRootMode};
@@ -72,6 +73,7 @@ impl Default for StylingData {
 
 enum NodeContent {
     Text(String),
+    Paragraph(TextConstraints),
     Replaced {
         natural_size: NaturalSize,
         /// The image source the paint walk resolves against the document's
@@ -636,6 +638,34 @@ impl<T> Node<T> {
 
     pub(crate) fn is_replaced(&self) -> bool {
         matches!(self.content.as_deref(), Some(NodeContent::Replaced { .. }))
+    }
+
+    pub(crate) fn text_constraints(&self) -> TextConstraints {
+        match self.content.as_deref() {
+            Some(NodeContent::Paragraph(constraints)) => *constraints,
+            _ => TextConstraints::default(),
+        }
+    }
+
+    pub(crate) fn set_text_constraints(&mut self, constraints: TextConstraints) -> bool {
+        assert!(
+            self.content.is_none()
+                || matches!(self.content.as_deref(), Some(NodeContent::Paragraph(_))),
+            "paragraph constraints cannot replace another kind of content"
+        );
+        if self.text_constraints() == constraints {
+            return false;
+        }
+        // Use the existing optional content allocation: ordinary elements
+        // and unrestricted paragraphs pay no additional per-node storage.
+        if constraints == TextConstraints::default() {
+            self.content = None;
+        } else if let Some(NodeContent::Paragraph(current)) = self.content.as_deref_mut() {
+            *current = constraints;
+        } else {
+            self.content = Some(Box::new(NodeContent::Paragraph(constraints)));
+        }
+        true
     }
 
     pub(crate) fn set_natural_size(&mut self, natural_size: NaturalSize) -> bool {
