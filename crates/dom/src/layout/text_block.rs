@@ -32,9 +32,7 @@ use hughie::text::block::{
     VerticalAlign,
 };
 
-use crate::layout::style::{
-    DisplayMode, StyleView, TextContainerView, TextRunView, display_mode, inline_style_of,
-};
+use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode, inline_style_of};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
 
@@ -225,10 +223,9 @@ fn as_items(collected: &[Collected]) -> Vec<InlineItem<'_>> {
         .collect()
 }
 
-/// The paragraph style, from the establishing element's inherited values.
+/// The paragraph style, from the establishing element's CSS and attributes.
 fn block_style<T>(tree: &TreeArenas<T>, element: NodeSlot) -> BlockStyle {
-    let view = TextContainerView::of_establishing_element(tree.at(element));
-    BlockStyle::from_container_style(&view)
+    BlockStyle::from_container_style(&StyleView::of(tree.at(element)))
 }
 
 /// Rebuilds `element`'s paragraph when its content or style moved, and reports
@@ -304,7 +301,7 @@ pub(crate) fn constraint_for<T>(
     use hughie::style::TextContainerStyle;
     use stylo::values::generics::text::GenericTextIndent;
 
-    let view = TextContainerView::of_establishing_element(tree.at(element));
+    let view = StyleView::of(tree.at(element));
     let indent: GenericTextIndent<_> = view.text_indent();
     let resolved = indent
         .length

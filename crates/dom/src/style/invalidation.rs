@@ -341,12 +341,17 @@ impl<T> Document<T> {
             _ => {}
         }
         let slot_assignment = is_slot_assignment_attribute(name);
+        let layout_changed =
+            crate::layout::text_limit_changed(self.live_element(id), name, Some(value));
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, Some(value));
         self.note_attribute_change(id, &name);
         self.live_node_mut(id)
             .set_attr_local_name(name, value.to_owned());
+        if layout_changed {
+            self.invalidate_layout(id);
+        }
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }
@@ -379,11 +384,15 @@ impl<T> Document<T> {
             _ => {}
         }
         let slot_assignment = is_slot_assignment_attribute(name);
+        let layout_changed = crate::layout::text_limit_changed(self.live_element(id), name, None);
         let name = LocalName::from(name);
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &name, None);
         self.note_attribute_change(id, &name);
         self.live_node_mut(id).remove_attr_local_name(&name);
+        if layout_changed {
+            self.invalidate_layout(id);
+        }
         if slot_assignment {
             self.note_slot_assignment_attribute(id);
         }

@@ -4,7 +4,7 @@ use stylo::computed_values::text_wrap_mode;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, LetterSpacing,
-    LineHeight, TextAlign, TextIndent, WordBreak,
+    LineHeight, TextAlign, TextIndent, TextOverflow, WordBreak,
 };
 
 use crate::style::{CoreStyle, initial_values};
@@ -20,6 +20,8 @@ style_protocol! {
                 style.inherited_values().get_inherited_text().clone_word_break(),
             text_indent -> TextIndent =
                 style.inherited_values().get_inherited_text().clone_text_indent(),
+            text_overflow -> TextOverflow =
+                style.inherited_values().get_text().clone_text_overflow(),
         }
     }
 }

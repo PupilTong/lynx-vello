@@ -24,7 +24,7 @@ use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, shaping_inputs_changed, skips_contents,
+    establishes_fixed_containing_block, shaping_inputs_changed, skips_contents, text_limit_changed,
 };
 use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
@@ -530,9 +530,94 @@ mod tests {
         assert_eq!(restored.lines().len(), lines);
     }
 
-    /// The two-level eviction, from the outside: a relayout-damaged element
-    /// keeps its text children's shaped glyphs unless the restyle moved
-    /// something Parley shapes from.
+    /// Paragraph limits evict box and break measurements, preserving the
+    /// natural shaped layout even across intrinsic-width probes.
+    #[test]
+    fn changing_paragraph_limits_rebreaks_without_reshaping() {
+        let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+        document.layout();
+        let before = document
+            .text_block_rebuilds(label)
+            .expect("shaped paragraph");
+        assert_eq!(
+            document.text_block(label).expect("paragraph").lines().len(),
+            2
+        );
+
+        for (max_lines, max_chars, lines) in
+            [(Some("1"), None, 1), (None, Some("2"), 1), (None, None, 2)]
+        {
+            for (name, value) in [("text-maxline", max_lines), ("text-maxlength", max_chars)] {
+                if let Some(value) = value {
+                    document.set_attribute(label, name, value);
+                } else {
+                    document.remove_attribute(label, name);
+                }
+            }
+            document.layout();
+            let block = document.text_block(label).expect("committed paragraph");
+            assert_eq!(block.lines().len(), lines, "{max_lines:?}, {max_chars:?}");
+            assert_eq!(document.text_block_rebuilds(label), Some(before));
+            assert!(!document.text_block_is_probe_dirty(label));
+
+            for (name, value) in [("text-maxline", max_lines), ("text-maxlength", max_chars)] {
+                if let Some(value) = value {
+                    document.set_attribute(label, name, value);
+                } else {
+                    document.remove_attribute(label, name);
+                }
+            }
+            assert_eq!(
+                document.layout_cache_is_empty(label),
+                Some(false),
+                "no-op update"
+            );
+        }
+    }
+
+    /// Equivalent numeric limits keep measurements, while selectors still
+    /// distinguish the original strings and can change the box's geometry.
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "DPR 1 box dimensions are rounded to whole pixels"
+    )]
+    fn text_limit_values_keep_css_attribute_invalidation() {
+        for (attribute, first, equivalent) in
+            [("text-maxline", "1", "1.0"), ("text-maxlength", "2", "2.9")]
+        {
+            let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+            document.add_stylesheet(
+                &format!("[{attribute}=\"{equivalent}\"] {{ padding-top: 7px; }}"),
+                StylesheetOrigin::Author,
+            );
+            document.set_attribute(label, attribute, first);
+            document.layout();
+            let before = document.rounded_layout(label).unwrap().size.height;
+            let rebuilds = document.text_block_rebuilds(label);
+
+            document.set_attribute(label, attribute, equivalent);
+            assert_eq!(
+                document.layout_cache_is_empty(label),
+                Some(false),
+                "the effective limit is unchanged before style damage is harvested",
+            );
+            document.layout();
+            assert_eq!(
+                document.rounded_layout(label).unwrap().size.height,
+                before + 7.0
+            );
+            assert_eq!(document.text_block_rebuilds(label), rebuilds);
+
+            document.remove_attribute(label, attribute);
+            document.layout();
+            assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
+            assert_eq!(document.text_block_rebuilds(label), rebuilds);
+        }
+    }
+
+    /// A relayout-damaged element keeps its shaped glyphs unless the restyle
+    /// moved something Parley shapes from.
     #[test]
     fn a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved() {
         for (case, declaration, survives) in [

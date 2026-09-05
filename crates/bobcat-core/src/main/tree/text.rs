@@ -1,5 +1,5 @@
-//! The `text` tag's defaults: what color a run wears, and what may
-//! generate a box inside one.
+//! The `text` tag's defaults: what color a run wears,
+//! and what may generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
 //! lays out — is [`super::raw_text`], which owns the `raw-text` component and
@@ -19,9 +19,8 @@
 ///
 /// A `text` renders text: anything else written directly inside one generates
 /// no box, and the tags that are content opt back in. `wrapper` dissolves,
-/// `view` and `image` stay boxes — flex ones, not the `inline-flex` and
-/// `contents` web-elements can hand a real inline formatting context, which
-/// this engine does not have. `raw-text` opts back in from
+/// `view` and `image` stay atomic boxes in the flattened paragraph.
+/// `raw-text` opts back in from
 /// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
 /// lives.
 pub(super) const UA_RULES: &str = "\
@@ -36,10 +35,150 @@ text > text, text > wrapper > text { color: inherit; }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::float_cmp)] // Ahem and explicit line heights have exact metrics.
+
     use dom::stylo::color::AbsoluteColor;
     use dom::stylo::values::computed::{ColorPropertyValue, Display};
 
+    use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, style_of};
+
+    const MAX_LINES: &str = "text-maxline";
+    const MAX_CHARS: &str = "text-maxlength";
+
+    fn append_run(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
+        let raw = element_under(document, parent, "raw-text", "");
+        document.set_attribute(raw, "text", content);
+    }
+
+    fn paragraph(content: &str) -> (LynxDocument, dom::NodeId) {
+        const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+        let mut document = document();
+        assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+        let text = child(
+            &mut document,
+            "text",
+            "width:100px;font-family:Ahem;font-size:20px;line-height:21px",
+        );
+        append_run(&mut document, text, content);
+        (document, text)
+    }
+
+    fn assert_height(document: &mut LynxDocument, text: dom::NodeId, height: f32) {
+        document.layout();
+        assert_eq!(
+            document.text_block_size(text).expect("paragraph").height,
+            height
+        );
+        assert_eq!(
+            document.rounded_layout(text).expect("text box").size.height,
+            height
+        );
+    }
+
+    #[test]
+    fn text_maxline_updates_and_removal_resize_text_and_following_content() {
+        for content in ["abc def", "abc\ndef"] {
+            let (mut document, text) = paragraph(content);
+            let sibling = child(&mut document, "view", "width:10px;height:10px");
+            assert_height(&mut document, text, 42.0);
+
+            for (value, height) in [
+                (Some("1"), 21.0),
+                (Some("2"), 42.0),
+                (Some("1"), 21.0),
+                (None, 42.0),
+            ] {
+                if let Some(value) = value {
+                    document.set_attribute(text, MAX_LINES, value);
+                } else {
+                    document.remove_attribute(text, MAX_LINES);
+                }
+                assert_height(&mut document, text, height);
+                assert_eq!(
+                    document
+                        .rounded_layout(sibling)
+                        .expect("following box")
+                        .location
+                        .y,
+                    height,
+                    "content after the paragraph follows its new height"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_limits_use_web_attribute_numbers_and_reset_invalid_values() {
+        let (mut document, text) = paragraph("abc def");
+        for (value, height) in [
+            ("1", 21.0),
+            ("0", 42.0),
+            ("1.0", 21.0),
+            ("-1", 42.0),
+            ("1e0", 21.0),
+            ("", 42.0),
+            ("  +1px", 21.0),
+            ("garbage", 42.0),
+            ("1e+", 21.0),
+            ("1.5", 42.0),
+            ("\u{feff}1", 21.0),
+            ("Infinity", 42.0),
+            ("1", 21.0),
+            ("4294967296", 42.0),
+        ] {
+            document.set_attribute(text, MAX_LINES, value);
+            assert_height(&mut document, text, height);
+        }
+        // Both attributes use the same numeric reader, but maxlength permits
+        // zero and truncates fractional character offsets like DOM Range.
+        for (value, width) in [("1.9", 20.0), ("0", 0.0), ("-1", 60.0)] {
+            document.set_attribute(text, MAX_CHARS, value);
+            document.layout();
+            assert_eq!(
+                document.text_block_size(text).expect("paragraph").width,
+                width
+            );
+        }
+    }
+
+    #[test]
+    fn text_limits_belong_to_the_whole_paragraph_across_nested_runs() {
+        let (mut document, text) = paragraph("abc ");
+        let nested = element_under(&mut document, text, "text", "");
+        append_run(&mut document, nested, "def");
+        document.set_attribute(nested, MAX_CHARS, "0");
+        document.set_attribute(nested, MAX_LINES, "1");
+        assert_height(&mut document, text, 42.0);
+
+        document.set_attribute(text, MAX_LINES, "1");
+        assert_height(&mut document, text, 21.0);
+        document.set_attribute(text, MAX_CHARS, "2");
+        document.layout();
+        assert_eq!(
+            document.text_block_size(text).expect("paragraph").width,
+            40.0
+        );
+
+        document.remove_attribute(text, MAX_LINES);
+        assert_height(&mut document, text, 21.0);
+        document.remove_attribute(text, MAX_CHARS);
+        assert_height(&mut document, text, 42.0);
+    }
+
+    #[test]
+    fn text_overflow_selects_the_existing_ellipsis_path() {
+        let (mut document, text) = paragraph("abc def");
+        document.set_attribute(text, MAX_CHARS, "1");
+        for (overflow, width) in [("clip", 20.0), ("ellipsis", 80.0), ("clip", 20.0)] {
+            document.set_inline_style_property(text, "text-overflow", overflow);
+            document.layout();
+            assert_eq!(
+                document.text_block_size(text).expect("paragraph").width,
+                width
+            );
+        }
+    }
 
     #[test]
     fn a_text_does_not_wear_an_ancestor_s_color() {
