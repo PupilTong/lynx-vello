@@ -18,7 +18,7 @@ use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, main_link};
+use crate::view::{NoWakeup, detached_link};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -44,7 +44,7 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (painter, main) = main_link(Arc::new(NoWakeup));
+        let (painter, main) = detached_link(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
         let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)

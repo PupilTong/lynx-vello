@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, StyleThreads};
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -187,8 +187,17 @@ impl MacApplication {
             let requester = Arc::clone(&self.event_requester);
             move || requester.request_event()
         });
-        let view = pollster::block_on(LynxView::new(
+        // One window, so one group: its Lynx main thread and its Stylo workers
+        // exist for this view alone, and the view is what keeps them alive.
+        let group = pollster::block_on(LynxGroup::new(
             Arc::clone(&self.event_requester),
+            StyleThreads::Auto,
+        ))
+        .map_err(|source| CliError::StartView {
+            input: program.input.clone(),
+            source,
+        })?;
+        let view = pollster::block_on(group.create_lynx_view(
             css_width,
             css_height,
             scale_factor,

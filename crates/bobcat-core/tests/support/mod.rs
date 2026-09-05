@@ -14,11 +14,51 @@ use bobcat_core::resource::{
     StyleSheetPayload, StyleSheetResponse,
 };
 use bobcat_core::script::ScriptError;
-use bobcat_core::{EngineEvent, LynxView, PreparsedStyleSheet};
+use bobcat_core::{
+    DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
+    PreparsedStyleSheet, StyleThreads, ViewSources,
+};
 use bytes::Bytes;
 use url::Url;
 
-/// Drains the terminal boot event preserved after construction. `LynxView::new`
+/// One view in a group of its own, at Stylo's own thread count.
+///
+/// Almost every test here is about a page rather than about sharing, so it
+/// wants exactly one view and never names the group again. The handle is
+/// dropped as this returns: the view holds the group's thread alive by
+/// itself, and dropping the view is what ends it.
+///
+/// # Errors
+///
+/// Whatever building the group or the view failed with.
+pub async fn solo_view<R, F, B>(
+    event_requester: Arc<R>,
+    width: f32,
+    height: f32,
+    device_pixel_ratio: f32,
+    target: DrawTarget,
+    resources: B,
+    sources: ViewSources,
+) -> Result<LynxView<F>, LynxViewError>
+where
+    R: EventRequester,
+    F: ResourceFetcher,
+    B: FnOnce(ImageReports) -> F,
+{
+    LynxGroup::new(event_requester, StyleThreads::Auto)
+        .await?
+        .create_lynx_view(
+            width,
+            height,
+            device_pixel_ratio,
+            target,
+            resources,
+            sources,
+        )
+        .await
+}
+
+/// Drains the terminal boot event preserved after construction. Construction
 /// has already awaited the same outcome before it returns, and every `pump`
 /// here runs the view's own turn on this thread.
 pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {

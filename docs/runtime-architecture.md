@@ -12,10 +12,11 @@ capabilities and OS facts:
   pixel the view ever loads (`crates/bobcat-resources` is the reference
   implementation both shipped embedders use);
 - an `EventRequester`, the one wakeup the engine has for the embedder's
-  thread. It is a platform type, not a trait object — `LynxView::new` is
+  thread. It is a platform type, not a trait object — `LynxGroup::new` is
   generic over it and the Lynx main thread holds it, so the wake is a direct
-  call; `NoWakeup` is the implementation for a host with no event loop to
-  wake;
+  call. One serves a whole group: its views paint on the thread that created
+  it, and so wake one event loop. `NoWakeup` is the implementation for a host
+  with no event loop to wake;
 - a `DrawTarget`, at construction: `DrawTarget::window(...)` over anything
   convertible into a `WindowTarget` — a `'static` surface target, so a shared
   window handle rather than a borrow — or `DrawTarget::Offscreen` for a
@@ -139,9 +140,10 @@ For the native product, `bobcat-cli`:
 3. retains `lepusCode.root` or the XML main-thread body as an entry MTS module
    in its own `ResourceFetcher` under a URL, alongside bundle `StyleInfo` on
    the pre-parsed stylesheet arm or an XML `<style>` body on the CSS-text arm;
-4. names both URLs in a `ViewSources` and awaits one `LynxView::new` with the
-   `PageConfig` and the remaining injected capabilities, where any failure is
-   one `CliError::StartView`.
+4. names both URLs in a `ViewSources`, starts a `LynxGroup` for the one page
+   it renders, and awaits one `create_lynx_view` with the `PageConfig` and the
+   remaining injected capabilities, where any failure is one
+   `CliError::StartView`.
 
 The browser reference embedder uses the shared `register_lynx_xml_response`
 adapter inside its Render Worker after fetching one XML URL. See
@@ -149,9 +151,11 @@ adapter inside its Render Worker after fetching one XML URL. See
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 
-`LynxView::new` validates the viewport, creates the one link, starts
-`bobcat-main`, builds the painter and the `DrawTarget` it was given on the
-calling thread, and asynchronously awaits one startup result.
+`LynxGroup::new` starts `bobcat-main` and awaits the script runtime and style
+pool it will share. `create_lynx_view` then validates the viewport, creates
+that view's link, sends the group's thread an attachment to build the document
+from, builds the painter and the `DrawTarget` it was given on the calling
+thread, and asynchronously awaits one startup result.
 `bobcat-main` creates the fresh document itself, registers fonts, receives
 each author stylesheet — fetched by the painter through the view's
 `ResourceFetcher` — and mounts those sheets in cascade order, fetches the UTF-8 entry
@@ -341,14 +345,38 @@ thread, which creates the document itself from the view's `PageConfig` and
 device metrics. That thread is the only committer.
 
 A view spans two threads and one link. The embedder's own thread — whichever
-one constructed the view — owns the window, captures input, creates the
-surface (the one call macOS allows nowhere else), and owns everything that
+one created the view's `LynxGroup` — owns the window, captures input, creates
+the surface (the one call macOS allows nowhere else), and owns everything that
 draws. The Lynx main thread owns the document and the realm. The link is an
 ordered FIFO per direction plus a one-slot mailbox for the frames themselves,
 and one typed wakeup back to the embedder.
 
+That main thread belongs to the `LynxGroup`, not to any one view. A group owns
+it along with the one QuickJS runtime every view's realm is opened on and the
+one Stylo pool every view's document restyles with; `create_lynx_view` is the
+only way to build a view, because naming the group is the only way to say
+which thread it runs on. One group per thread and one thread per group: the
+handle is `!Send` and `!Sync`, so the thread that creates a group is the
+thread every view in it paints on.
+
+Views in a group take turns rather than run at once — the thread serves one
+command round for one view at a time — so a second view costs no second heap,
+no second module graph and no second set of Stylo workers, at the price of
+the two never restyling in parallel. The assumption that buys is that a
+person drives one view at a time. A host that needs two pages genuinely
+parallel gives them a group each, on a thread each. The pool in particular
+*must* be the group's rather than any view's: rayon takes the calling thread
+over as index zero of the first pool built on it and refuses a second one
+there forever, so one thread can only ever build one pool.
+
+Dropping a view sends its goodbye and returns; the group's thread releases
+that view's document and realm and goes on serving its siblings. The thread
+is joined when the group handle and the last view built from it are both
+gone — a view holds its group alive, so the embedder may drop them in either
+order.
+
 ```text
-the thread that called LynxView::new (AppKit main, or a Render Worker)
+the thread that created the LynxGroup (AppKit main, or a Render Worker)
   window lifecycle, input capture, surface creation
   LynxView, owning the Painter — everything below runs inside the
   embedder's own calls:
@@ -359,7 +387,8 @@ the thread that called LynxView::new (AppKit main, or a Render Worker)
   ── ToMain FIFO ──▶                       ◀── ToPainter FIFO ──
                                            ◀── Arc<CommittedFrame> mailbox ──
                                            ◀── EventRequester wakeup ──
-                    Lynx main thread (owns document + realm)
+      Lynx main thread — the group's, shared by every view in it
+                    (owns each document + realm; one runtime, one style pool)
                     PAPI mutations: plain &mut
                     __FlushElementTree: commit
                       style → layout → build → encode
@@ -483,8 +512,9 @@ lands on at the same instant — handoffs are seamless in both directions.
 
 ## Native and Wasm spawning
 
-`LynxView::new` always delegates VM creation and module boot to an
-engine-owned task. The core selects the thread builder at compile time:
+`LynxGroup::new` always delegates VM creation to an engine-owned task, and
+`create_lynx_view` delegates each view's realm and module boot to the same
+one. The core selects the thread builder at compile time:
 
 ```text
 not wasm32  -> std::thread::Builder
@@ -493,27 +523,34 @@ wasm32      -> wasm_thread::Builder
 
 On Wasm, `configure_wasm_workers(worker_script_url)` is the OS bootstrap
 seam. It configures the default `wasm_thread` worker script and nothing else;
-the core then uses that same target-specific spawn path for the Lynx main
-Worker and for each view's Stylo Rayon Workers. Stylo pool creation belongs
-to the core, not the browser facade — the facade only says how many workers a
-view should get, through `ViewSources::style_threads`.
+the core then uses that same target-specific spawn path for each group's Lynx
+main Worker and for that group's Stylo Rayon Workers. Stylo pool creation
+belongs to the core, not the browser facade — the facade only says how many
+workers a group should get, as the `StyleThreads` argument to
+`LynxGroup::new`.
 
-Wasm and native follow the same ownership model: every `LynxView` spawns and
-owns one Lynx-main Worker — the Render Worker is the thread that constructed
-the view, so it is where the painting happens — and dropping that view
-explicitly shuts down and joins the Worker after it drops its document and
-QuickJS realm. Independent
-views are not a process-global singleton. The npm facade keeps at most one
-live view per `BobcatRenderer`: `create` builds none, and each `load` replaces
-the view before it, retaining the Render Worker, transferred canvas, Wasm
-instance, and wrapper state. Replacement construction therefore cannot
-overlap the old view's teardown.
+Wasm and native follow the same ownership model: every `LynxGroup` spawns and
+owns one Lynx-main Worker — the Render Worker is the thread that created the
+group, so it is where the painting happens — and dropping a view shuts it down
+after that Worker has released its document and realm, while dropping the last
+of the group's handles is what joins the Worker itself. Independent groups are
+not a process-global singleton. The npm facade keeps at most one live view,
+in one group, per `BobcatRenderer`: `create` builds neither, and each `load`
+replaces both the view and its group, retaining the Render Worker, transferred
+canvas, Wasm instance, and wrapper state. A page gets a group of its own
+because the script runtime is the group's, so a page loaded twice would
+otherwise register its entry module a second time under a name the previous
+load already took. Replacement construction therefore cannot overlap the old
+view's teardown.
 
-Nothing about Stylo is process-wide any more. Each view's Lynx-main Worker
-builds its own Rayon style pool as its first act of startup, and the pool
-retires with the view. That Worker is index zero of the pool it builds, taken
-over in place by rayon's `use_current_thread` — which is why the pool can only
-be built there, and why the configured count includes it. Stylo's global pool
+Nothing about Stylo is process-wide any more. Each group's Lynx-main Worker
+builds one Rayon style pool as its first act of startup, before any view
+attaches, and the pool retires with the group. That Worker is index zero of
+the pool it builds, taken over in place by rayon's `use_current_thread` —
+which is why the pool can only be built there, why the configured count
+includes it, and why the pool has to be the group's: a second one on the same
+thread is refused outright, so every view the thread carries shares that one
+or has none. Stylo's global pool
 was built the same way and Gecko relies on it, so a lone view restyles on the
 same threads and with the same parallelism it did before these pools became
 per-view: the root closure runs inline on the script owner, and the managed
@@ -535,15 +572,18 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `LynxView::new` validates the metrics, creates the link, starts
-   `bobcat-main`, and builds the painter — including the `DrawTarget` the
-   embedder named, whose GPU objects come up while the main thread is already
-   fetching — on the calling thread, then awaits a startup oneshot.
+1. `LynxGroup::new` starts `bobcat-main` and waits for its runtime and pool.
+   `create_lynx_view` validates the metrics, creates the view's link, attaches
+   the view to that thread, and builds the painter — including the
+   `DrawTarget` the embedder named, whose GPU objects come up while the main
+   thread is already fetching — on the calling thread, then awaits a startup
+   message.
 2. `bobcat-main` creates the private document from `PageConfig` and the device
-   metrics, registers fonts and the image store, and awaits the `ViewSources`'
-   stylesheets and entry MTS source through its owned `ResourceFetcher`.
-3. Still on `bobcat-main`, it mounts the sheets, creates the QuickJS realm,
-   installs Bobcat callbacks, preloads
+   metrics, gives it a handle on the group's style pool, registers fonts, and
+   awaits the `ViewSources`' stylesheets and entry MTS source, which the
+   painter pushes to it.
+3. Still on `bobcat-main`, it mounts the sheets, opens the view's QuickJS realm
+   on the group's runtime, installs Bobcat callbacks, preloads
    `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
    TLA-based `bobcat:boot` module. Only complete success answers the startup
    oneshot; closing it drops pending resource work, releases the painter, and

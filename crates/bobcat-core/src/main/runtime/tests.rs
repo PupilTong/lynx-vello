@@ -1,7 +1,7 @@
 use super::*;
 use crate::main::tree::{PageConfig, Viewport, new_document};
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, main_link};
+use crate::view::{NoWakeup, detached_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -78,7 +78,7 @@ fn runtime_over_watching_names(
     DocumentProbe,
     PublishedNames,
 ) {
-    let (painter, main) = main_link(Arc::new(NoWakeup));
+    let (painter, main) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
@@ -734,7 +734,7 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut painter, main) = main_link(Arc::new(NoWakeup));
+    let (mut painter, main) = detached_link(Arc::new(NoWakeup));
     let state = EventState::new(main.notify);
     let (a, b) = (node_id(3), node_id(4));
     // The edges as a sequence, so both what crossed and what did not are

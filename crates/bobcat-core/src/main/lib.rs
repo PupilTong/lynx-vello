@@ -1,9 +1,10 @@
 //! Lynx main-thread ownership, startup, and command rounds.
 //!
-//! The embedder's own thread starts this owner from `LynxView::new` and keeps
-//! the painter itself. This thread creates the document, awaits and applies
-//! every startup resource, boots the realm, and then owns both document and
-//! realm until shutdown.
+//! The embedder's own thread starts this owner from `LynxGroup::new` and keeps
+//! every painter itself. This thread builds the script runtime and the style
+//! pool the group shares, then adopts one view at a time: it creates each
+//! document, applies every startup source pushed to it, boots each realm, and
+//! owns document and realm until that view is released or the group is.
 
 pub(crate) mod quickjs;
 #[path = "runtime/lib.rs"]
@@ -38,9 +39,12 @@ use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError, MainSources,
-    StyleSheetSource, StyleThreads, ToMain, ToPainter, Viewport, frame_slot,
+    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand, LoadedSource,
+    LynxViewError, MainSources, StyleSheetSource, StyleThreads, ToMain, ToPainter, ViewId,
+    Viewport, frame_slot,
 };
+#[cfg(test)]
+use crate::view::{DETACHED_VIEW, DetachedLink};
 
 #[cfg(test)]
 pub(crate) struct EntryModule {
@@ -48,12 +52,12 @@ pub(crate) struct EntryModule {
     pub(crate) url: String,
 }
 
-/// The construction guard's cancellation flag.
+/// One view's construction cancellation flag.
 ///
 /// It only prevents work that has not entered synchronous JavaScript yet.
-/// Once `QuickJS` is executing, teardown waits for that call and joins the
-/// owner thread without trying to interrupt it — on the targets that join
-/// at all; see [`MainThreadHome::shutdown`].
+/// Once `QuickJS` is executing, cancellation takes effect when that call
+/// returns; nothing interrupts a realm mid-call, and the group's other views
+/// are untouched either way.
 #[derive(Default)]
 pub(crate) struct StartupControl {
     cancelled: AtomicBool,
@@ -74,31 +78,33 @@ type MainJoinHandle = std::thread::JoinHandle<()>;
 #[cfg(target_arch = "wasm32")]
 type MainJoinHandle = wasm_thread::JoinHandle<()>;
 
-/// The view-owned right to join `bobcat-main`.
-pub(crate) struct MainThreadHome {
+/// The group-owned right to join `bobcat-main`.
+///
+/// One per group rather than one per view: the thread outlives any single
+/// view on it, and the join is the last thing that happens once the group and
+/// the last view built from it are both gone.
+pub(crate) struct GroupHome {
     thread: Option<MainJoinHandle>,
-    control: Arc<StartupControl>,
 }
 
-impl MainThreadHome {
-    pub(crate) fn cancel(&self) {
-        self.control.cancel();
-    }
-
-    pub(crate) fn shutdown(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            // Under `panic = "abort"` a trapped `bobcat-main` runs no
-            // destructors and never signals its join handle, and no check
-            // can outrun a trap that lands between the check and the wait —
-            // so wasm teardown never joins. The goodbye is already sent: a
-            // healthy main thread exits on its own, and a trapped one is
-            // already gone.
-            #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-            drop(thread);
-            #[cfg(not(all(target_arch = "wasm32", panic = "abort")))]
-            {
-                let _ = thread.join();
-            }
+impl GroupHome {
+    /// Waits for `bobcat-main` to return, once the goodbye that ends it has
+    /// already been sent.
+    pub(crate) fn join(&mut self) {
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Under `panic = "abort"` a trapped `bobcat-main` runs no
+        // destructors and never signals its join handle, and no check
+        // can outrun a trap that lands between the check and the wait —
+        // so wasm teardown never joins. The goodbye is already sent: a
+        // healthy main thread exits on its own, and a trapped one is
+        // already gone.
+        #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+        drop(thread);
+        #[cfg(not(all(target_arch = "wasm32", panic = "abort")))]
+        {
+            let _ = thread.join();
         }
     }
 }
@@ -157,20 +163,23 @@ impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn request_images(&self, sources: Vec<Arc<str>>) {
         self.send(ToPainter::RequestImages(sources));
     }
-}
 
-/// The main thread's receiving end of its link to the painter.
-pub(crate) struct MainLink<R: EventRequester> {
-    /// Commands from the painter, in the order it sent them.
-    pub(crate) commands: flume::Receiver<ToMain>,
-    /// Everything this thread has to say back.
-    pub(crate) notify: ToPainterSender<R>,
-}
-
-impl<R: EventRequester> MainLink<R> {
-    pub(crate) fn new(commands: flume::Receiver<ToMain>, notify: ToPainterSender<R>) -> Self {
-        Self { commands, notify }
+    /// The event loop this view wakes, which in a group is every view's.
+    #[cfg(test)]
+    pub(crate) fn requester(&self) -> &Arc<R> {
+        &self.requester
     }
+}
+
+/// The main thread's end of its group's link.
+pub(crate) struct GroupLink<R: EventRequester> {
+    /// Every view's commands, and every attachment, in the order they were
+    /// sent.
+    pub(crate) commands: flume::Receiver<GroupCommand>,
+    /// The one event loop every view in this group wakes.
+    pub(crate) requester: Arc<R>,
+    /// How this thread's own startup went, answered exactly once.
+    pub(crate) ready: flume::Sender<Result<(), LynxViewError>>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -186,8 +195,12 @@ type ScriptPanicReporter = Box<dyn Fn(ScriptError)>;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 thread_local! {
-    static WASM_SCRIPT_PANIC_REPORTER: RefCell<Option<ScriptPanicReporter>> = const {
-        RefCell::new(None)
+    /// One reporter per view this thread has ever carried. Append-only: a
+    /// view that is gone has a closed FIFO, and sending onto one is already a
+    /// no-op, so nothing has to be pruned on a path that only runs as the
+    /// Worker traps.
+    static WASM_SCRIPT_PANIC_REPORTERS: RefCell<Vec<ScriptPanicReporter>> = const {
+        RefCell::new(Vec::new())
     };
 }
 
@@ -218,30 +231,25 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
     Ok(())
 }
 
-/// Starts the Lynx main thread, which creates and initializes its own document
-/// before holding the main end of the view's link for the rest of its life.
+/// Starts one group's Lynx main thread, which builds the script runtime and
+/// style pool its views share before adopting the first of them.
 ///
-/// Nothing announces its exit: dropping the last `ToPainterSender` closes
-/// the notification FIFO, which is the same fact — and the one a painter
-/// blocked on a `BeginFrame` is already waiting on.
-pub(crate) fn spawn_main_thread<R: EventRequester>(
-    viewport: Viewport,
+/// Nothing announces its exit: dropping every `ToPainterSender` closes the
+/// notification FIFOs, which is the same fact — and the one a painter blocked
+/// on a `BeginFrame` is already waiting on.
+pub(crate) fn spawn_group<R: EventRequester>(
     style_threads: StyleThreads,
-    sources: MainSources,
-    link: MainLink<R>,
-) -> Result<MainThreadHome, EngineError> {
-    let control = Arc::new(StartupControl::default());
-    let main_control = Arc::clone(&control);
+    link: GroupLink<R>,
+) -> Result<GroupHome, EngineError> {
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
-        .spawn(move || run_main_thread(viewport, style_threads, sources, link, &main_control))
+        .spawn(move || run_group(style_threads, link))
         .map_err(|error| EngineError::Thread {
             name: "script",
             message: error.to_string(),
         })?;
-    Ok(MainThreadHome {
+    Ok(GroupHome {
         thread: Some(thread),
-        control,
     })
 }
 
@@ -254,17 +262,20 @@ pub(crate) fn spawn_main_thread<R: EventRequester>(
 /// so a document cannot cross a thread boundary. The builder runs on
 /// `bobcat-main`, which is the thread that owns the document for the rest of
 /// its life.
+///
+/// The thread it starts is a group of exactly one view, with no style pool:
+/// these tests are about the link and the painter, not about traversal.
 #[cfg(test)]
 pub(crate) fn spawn_test_main_thread<R: EventRequester>(
     build_document: impl FnOnce() -> LynxDocument + Send + 'static,
     entry: EntryModule,
-    link: MainLink<R>,
-) -> Result<MainThreadHome, EngineError> {
-    let control = Arc::new(StartupControl::default());
+    link: DetachedLink<R>,
+) -> Result<GroupHome, EngineError> {
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
         .spawn(move || {
-            let MainLink { commands, notify } = link;
+            let DetachedLink { commands, notify } = link;
+            let requester = Arc::clone(notify.requester());
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
@@ -287,13 +298,13 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                 Ok((mut js_runtime, runtime)) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
                     notify.send(ToPainter::FrameChanged);
-                    serve_view(
-                        &mut js_runtime,
+                    let mut views = vec![CarriedView::new(
+                        DETACHED_VIEW,
                         ViewSlot::Running(runtime),
-                        &commands,
-                        &notify,
-                        &StartupControl::default(),
-                    );
+                        notify,
+                        Arc::new(StartupControl::default()),
+                    )];
+                    serve_group(&mut js_runtime, None, &requester, &commands, &mut views);
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -305,9 +316,8 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
             name: "script",
             message: error.to_string(),
         })?;
-    Ok(MainThreadHome {
+    Ok(GroupHome {
         thread: Some(thread),
-        control,
     })
 }
 
@@ -431,170 +441,283 @@ impl<R: EventRequester> Booting<R> {
     }
 }
 
-fn run_main_thread<R: EventRequester>(
-    viewport: Viewport,
-    style_threads: StyleThreads,
-    sources: MainSources,
-    link: MainLink<R>,
-    control: &StartupControl,
-) {
-    let MainLink { commands, notify } = link;
+fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>) {
+    let GroupLink {
+        commands,
+        requester,
+        ready,
+    } = link;
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
     install_script_panic_hook();
+
+    // Both the runtime and the pool are the group's, not any view's. A group
+    // opens one realm per view on that runtime, which is why the modules its
+    // views share are registered here, once.
+    //
+    // The pool is the group's for a harder reason than the runtime is: rayon
+    // takes this thread over as index zero and never gives it back, so a
+    // second pool built here would be refused outright. Views may share the
+    // one pool because they cannot traverse at once — the single thread that
+    // drives them both is already inside whichever traversal is running.
+    //
+    // Both are built before the first view attaches, so starting the workers
+    // overlaps the fetches that view's painter already has in flight.
+    let started = ScriptRuntime::new()
+        .map_err(LynxViewError::from)
+        .and_then(|mut runtime| {
+            install_shared_modules(&mut runtime)
+                .map_err(|error| error.into_script_error().into())
+                .map(|()| runtime)
+        })
+        .and_then(|runtime| {
+            build_style_pool(style_threads.resolve())
+                .map_err(LynxViewError::from)
+                .map(|pool| (runtime, pool.map(Rc::new)))
+        });
+    let (mut js_runtime, style_pool) = match started {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+
+    // The table lives outside the guard so a panic here can still be reported
+    // to every view it ends — which is all of them, this thread being what
+    // they share.
+    let mut views = Vec::new();
+    let served = catch_unwind(AssertUnwindSafe(|| {
+        serve_group(
+            &mut js_runtime,
+            style_pool.as_ref(),
+            &requester,
+            &commands,
+            &mut views,
+        );
+    }));
+    if let Err(payload) = served {
+        let error = platform_script_error(format!(
+            "the Lynx main thread panicked: {}",
+            panic_payload(payload.as_ref())
+        ));
+        for view in &views {
+            view.notify
+                .send(ToPainter::Engine(EngineEvent::ScriptRunError(
+                    error.clone(),
+                )));
+        }
+    }
+}
+
+/// One view a group's thread carries: its slot, the link it reports through,
+/// and the flag its embedder can still cancel its construction with.
+struct CarriedView<R: EventRequester> {
+    id: ViewId,
+    /// `None` only while a source is being mounted: mounting one consumes the
+    /// booting document and hands back whatever it became. A view that
+    /// panicked mid-mount is left this way, still in the table, so the report
+    /// its group makes on the way out still reaches its painter.
+    slot: Option<ViewSlot<R>>,
+    notify: ToPainterSender<R>,
+    control: Arc<StartupControl>,
+    /// The newest `BeginFrame` this round has serviced, acknowledged in the
+    /// round's tail.
+    serviced_begin_frame: Option<u64>,
+}
+
+impl<R: EventRequester> CarriedView<R> {
+    fn new(
+        id: ViewId,
+        slot: ViewSlot<R>,
+        notify: ToPainterSender<R>,
+        control: Arc<StartupControl>,
+    ) -> Self {
+        Self {
+            id,
+            slot: Some(slot),
+            notify,
+            control,
+            serviced_begin_frame: None,
+        }
+    }
+
+    /// A booting view has no realm, so nothing can have armed a timer on it;
+    /// only a running one can shorten its group's wait.
+    fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
+        match self.slot.as_mut()? {
+            ViewSlot::Booting(_) => None,
+            ViewSlot::Running(runtime) => runtime.next_timer_deadline(),
+        }
+    }
+
+    /// Applies one command. `false` ends the view: it was released, its boot
+    /// failed, or its construction was cancelled and nobody is listening for
+    /// an outcome.
+    fn apply(&mut self, js_runtime: &mut ScriptRuntime, command: ToMain) -> bool {
+        if matches!(command, ToMain::Shutdown) {
+            return false;
+        }
+        // A running view is served in place: everything after boot is the
+        // common case, and nothing about it needs the slot by value.
+        if let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() {
+            apply_main_command(
+                js_runtime,
+                runtime,
+                command,
+                &self.notify,
+                &mut self.serviced_begin_frame,
+            );
+            return true;
+        }
+        let Some(ViewSlot::Booting(booting)) = self.slot.take() else {
+            unreachable!("a carried view holds its slot between commands")
+        };
+        let ToMain::SourceLoaded { source } = command else {
+            unreachable!("a view that has not booted has nothing else to apply")
+        };
+        match booting.apply(js_runtime, source, &self.control) {
+            Booted::Waiting(booting) => self.slot = Some(ViewSlot::Booting(booting)),
+            Booted::Running(runtime) => {
+                // Boot's outcome and boot's pixels ride one FIFO, in this
+                // order: whatever the entry committed reaches the target on
+                // the turn that reports the ending, with nobody left to ask
+                // for another.
+                self.notify
+                    .send(ToPainter::Engine(EngineEvent::ScriptFinished));
+                self.notify.send(ToPainter::FrameChanged);
+                self.notify.send(ToPainter::Started(Ok(())));
+                self.slot = Some(ViewSlot::Running(runtime));
+            }
+            Booted::Failed(error) => {
+                self.notify.send(ToPainter::Started(Err(error)));
+                return false;
+            }
+            Booted::Gone => return false,
+        }
+        true
+    }
+
+    /// The tail of one round. Only a running view has one: a booting view has
+    /// published nothing and armed nothing.
+    fn finish_round(&mut self, js_runtime: &mut ScriptRuntime) {
+        let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() else {
+            return;
+        };
+        // After this round's commands, because a listener one of them
+        // delivered may have cleared a timer that is already due, and on
+        // every round rather than only the ones a deadline woke, because a
+        // command can arrive while a deadline is already behind us.
+        for failure in runtime.run_due_timers(js_runtime) {
+            self.notify
+                .send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
+        }
+        runtime.commit_if_dirty();
+        if let Some(seq) = self.serviced_begin_frame.take() {
+            self.notify.send(ToPainter::BeginFrameServiced(seq));
+        }
+    }
+}
+
+/// Adopts one view, on the runtime and pool this thread already holds.
+fn attach<R: EventRequester>(
+    views: &mut Vec<CarriedView<R>>,
+    style_pool: Option<&Rc<StylePool>>,
+    requester: &Arc<R>,
+    attachment: Attachment,
+) {
+    let Attachment {
+        view,
+        viewport,
+        sources,
+        notifications,
+        frames,
+        control,
+    } = attachment;
+    let notify = ToPainterSender::new(notifications, frames, Arc::clone(requester));
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-    set_script_panic_reporter(Some({
+    add_script_panic_reporter({
         let notify = notify.clone();
         Box::new(move |error| {
             notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
-    }));
-
-    // The runtime is the thread's, not the view's: a group opens one realm on
-    // it per view, which is why the modules they share are registered here.
-    let mut js_runtime =
-        match ScriptRuntime::new()
-            .map_err(LynxViewError::from)
-            .and_then(|mut runtime| {
-                install_shared_modules(&mut runtime)
-                    .map_err(|error| error.into_script_error().into())
-                    .map(|()| runtime)
-            }) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                notify.send(ToPainter::Started(Err(error)));
-                return;
-            }
-        };
-
-    // The pool is the thread's for a harder reason than the runtime is:
-    // rayon takes this thread over as index zero and never gives it back, so
-    // a second pool built here would be refused outright. Every document this
-    // thread carries therefore shares this one — which they may, being unable
-    // to traverse at once on the single thread that drives them both. Built
-    // before the first source arrives, so starting the workers overlaps the
-    // fetches the painter already has in flight.
-    let style_pool = match build_style_pool(style_threads.resolve()) {
-        Ok(pool) => pool.map(Rc::new),
-        Err(error) => {
-            notify.send(ToPainter::Started(Err(error.into())));
-            return;
-        }
-    };
-
-    let slot = match Booting::new(viewport, sources, style_pool.as_ref(), notify.clone()) {
-        Ok(booting) => ViewSlot::Booting(Box::new(booting)),
-        Err(error) => {
-            notify.send(ToPainter::Started(Err(error)));
-            return;
-        }
-    };
-    let served = catch_unwind(AssertUnwindSafe(|| {
-        serve_view(&mut js_runtime, slot, &commands, &notify, control);
-    }));
-    if let Err(payload) = served {
-        notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(
-            platform_script_error(format!(
-                "the Lynx main thread panicked: {}",
-                panic_payload(payload.as_ref())
-            )),
-        )));
+    });
+    match Booting::new(viewport, sources, style_pool, notify.clone()) {
+        Ok(booting) => views.push(CarriedView::new(
+            view,
+            ViewSlot::Booting(Box::new(booting)),
+            notify,
+            control,
+        )),
+        Err(error) => notify.send(ToPainter::Started(Err(error))),
     }
 }
 
-/// Drives one view from its first source to the end of its life.
+/// Drives every view on one group's thread, from its first source to the end
+/// of its life.
 ///
-/// One park, `commands.recv()`, whether the view is still mounting sources or
-/// already serving — which is what lets a thread carrying several views wait
-/// once for all of them instead of once per view.
-fn serve_view<R: EventRequester>(
+/// One park, `commands.recv()`, for the whole group rather than one per view:
+/// every view's commands arrive on one FIFO, each naming the view it is for.
+/// That is also what boot being a state machine buys — a view still waiting
+/// for its entry would otherwise park on a channel its siblings' commands are
+/// already queued on.
+fn serve_group<R: EventRequester>(
     js_runtime: &mut ScriptRuntime,
-    slot: ViewSlot<R>,
-    commands: &flume::Receiver<ToMain>,
-    notify: &ToPainterSender<R>,
-    control: &StartupControl,
+    style_pool: Option<&Rc<StylePool>>,
+    requester: &Arc<R>,
+    commands: &flume::Receiver<GroupCommand>,
+    views: &mut Vec<CarriedView<R>>,
 ) {
-    let mut slot = slot;
     loop {
-        let mut serviced_begin_frame = None;
-        // A booting view has no realm, so nothing can have armed a timer on
-        // it; only a running one can shorten this wait.
-        let deadline = match &mut slot {
-            ViewSlot::Booting(_) => None,
-            ViewSlot::Running(runtime) => runtime.next_timer_deadline(),
-        };
+        // The earliest deadline any view armed: the thread wakes for whichever
+        // realm needs it first, and the round's tail runs every view's timers.
+        let deadline = views
+            .iter_mut()
+            .filter_map(CarriedView::next_timer_deadline)
+            .min();
         match wait_for_command(commands, deadline) {
             Woken::Command(first) => {
-                for command in std::iter::once(first).chain(commands.drain()) {
-                    if matches!(command, ToMain::Shutdown) {
-                        return;
-                    }
-                    slot = match slot {
-                        ViewSlot::Booting(booting) => {
-                            let ToMain::SourceLoaded { source } = command else {
-                                unreachable!("a view that has not booted has nothing else to apply")
+                for message in std::iter::once(first).chain(commands.drain()) {
+                    match message {
+                        GroupCommand::Close => return,
+                        GroupCommand::Attach(attachment) => {
+                            attach(views, style_pool, requester, *attachment);
+                        }
+                        GroupCommand::View { view, command } => {
+                            let Some(index) = views.iter().position(|carried| carried.id == view)
+                            else {
+                                // A command for a view already released: its
+                                // goodbye won the race with whatever its
+                                // painter sent last.
+                                continue;
                             };
-                            match booting.apply(js_runtime, source, control) {
-                                Booted::Waiting(booting) => ViewSlot::Booting(booting),
-                                Booted::Running(runtime) => {
-                                    // Boot's outcome and boot's pixels ride one
-                                    // FIFO, in this order: whatever the entry
-                                    // committed reaches the target on the turn
-                                    // that reports the ending, with nobody left
-                                    // to ask for another.
-                                    notify.send(ToPainter::Engine(EngineEvent::ScriptFinished));
-                                    notify.send(ToPainter::FrameChanged);
-                                    notify.send(ToPainter::Started(Ok(())));
-                                    ViewSlot::Running(runtime)
-                                }
-                                Booted::Failed(error) => {
-                                    notify.send(ToPainter::Started(Err(error)));
-                                    return;
-                                }
-                                Booted::Gone => return,
+                            if !views[index].apply(js_runtime, command) {
+                                views.swap_remove(index);
                             }
                         }
-                        ViewSlot::Running(mut runtime) => {
-                            apply_main_command(
-                                js_runtime,
-                                &mut runtime,
-                                command,
-                                notify,
-                                &mut serviced_begin_frame,
-                            );
-                            ViewSlot::Running(runtime)
-                        }
-                    };
+                    }
                 }
             }
-            // A deadline the realm asked for, and nothing else to serve.
+            // A deadline a realm asked for, and nothing else to serve.
             Woken::Deadline => {}
             Woken::Disconnected => return,
         }
-        // Only a running view has a round tail: a booting one has published
-        // nothing and armed nothing.
-        if let ViewSlot::Running(runtime) = &mut slot {
-            // After this round's commands, because a listener one of them
-            // delivered may have cleared a timer that is already due, and on
-            // every round rather than only the ones a deadline woke, because a
-            // command can arrive while a deadline is already behind us.
-            for failure in runtime.run_due_timers(js_runtime) {
-                notify.send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
-            }
-            runtime.commit_if_dirty();
-            if let Some(seq) = serviced_begin_frame {
-                notify.send(ToPainter::BeginFrameServiced(seq));
-            }
+        for view in &mut *views {
+            view.finish_round(js_runtime);
         }
     }
 }
 
 /// What ended one round's wait.
 enum Woken {
-    /// A command arrived; more may be queued behind it.
-    Command(ToMain),
+    /// A message arrived; more may be queued behind it.
+    Command(GroupCommand),
     /// The earliest armed timer came due with no command to serve.
     Deadline,
-    /// The painter is gone, and nothing more will be asked of this thread.
+    /// Every painter and the group handle are gone, and nothing more will be
+    /// asked of this thread.
     Disconnected,
 }
 
@@ -606,7 +729,10 @@ enum Woken {
 /// which is exactly what `flume` blocks on itself. Nothing drives the future
 /// but this loop, and the waker only unparks this thread, so this is a
 /// blocking wait spelled with a future rather than an executor.
-fn wait_for_command(commands: &flume::Receiver<ToMain>, deadline: Option<ClockInstant>) -> Woken {
+fn wait_for_command(
+    commands: &flume::Receiver<GroupCommand>,
+    deadline: Option<ClockInstant>,
+) -> Woken {
     let Some(deadline) = deadline else {
         return commands.recv().map_or(Woken::Disconnected, Woken::Command);
     };
@@ -689,15 +815,16 @@ fn install_script_panic_hook() {
     WASM_SCRIPT_PANIC_HOOK.get_or_init(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            WASM_SCRIPT_PANIC_REPORTER.with(|reporter| {
-                if let Some(reporter) = reporter.borrow().as_ref() {
-                    let location = info
-                        .location()
-                        .map_or_else(String::new, |location| format!(" at {location}"));
-                    reporter(platform_script_error(format!(
-                        "the script Worker aborted after a panic{location}: {}",
-                        panic_payload(info.payload())
-                    )));
+            WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| {
+                let location = info
+                    .location()
+                    .map_or_else(String::new, |location| format!(" at {location}"));
+                let error = platform_script_error(format!(
+                    "the script Worker aborted after a panic{location}: {}",
+                    panic_payload(info.payload())
+                ));
+                for reporter in reporters.borrow().iter() {
+                    reporter(error.clone());
                 }
             });
             previous(info);
@@ -706,8 +833,8 @@ fn install_script_panic_hook() {
 }
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
-fn set_script_panic_reporter(reporter: Option<ScriptPanicReporter>) {
-    WASM_SCRIPT_PANIC_REPORTER.with(|slot| *slot.borrow_mut() = reporter);
+fn add_script_panic_reporter(reporter: ScriptPanicReporter) {
+    WASM_SCRIPT_PANIC_REPORTERS.with(|reporters| reporters.borrow_mut().push(reporter));
 }
 
 fn platform_script_error(message: String) -> ScriptError {
@@ -729,9 +856,9 @@ pub(super) fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-/// Builds one document's style pool, on `bobcat-main` — the thread that owns
-/// that document, is the only one that will ever flush it, and is index zero
-/// of the pool this returns.
+/// Builds one group's style pool, on `bobcat-main` — the thread that owns
+/// every document in that group, is the only one that will ever flush them,
+/// and is index zero of the pool this returns.
 ///
 /// Call it nowhere else. Rayon takes the calling thread over in place, which
 /// is what makes a lone view restyle on exactly the threads and with exactly
@@ -740,11 +867,12 @@ pub(super) fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
 /// only where a level is wider than the traversal's work unit.
 ///
 /// The takeover is permanent — rayon leaks about 25 KB per pool and refuses a
-/// second one on the same thread forever — which is affordable only because
-/// `bobcat-main` is created for one view and dies with it.
+/// second one on the same thread forever — which is the reason the pool is the
+/// group's rather than any view's: one thread can only ever build one, so
+/// every view on it shares that one or has none.
 ///
-/// `None` asks for no pool at all, and answers `None`: that document traverses
-/// on `bobcat-main` with no pool, which is what a machine gets when the pool
+/// `None` asks for no pool at all, and answers `None`: those documents
+/// traverse on `bobcat-main` alone, which is what a machine gets when the pool
 /// would have held `bobcat-main` and nothing else.
 fn build_style_pool(threads: Option<NonZeroUsize>) -> Result<Option<StylePool>, EngineError> {
     let Some(threads) = threads else {

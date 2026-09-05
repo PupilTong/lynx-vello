@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 /// The one way to build a view: hand it its sources and it comes back with
 /// its Lynx main thread already running the entry module.
@@ -13,7 +13,7 @@ async fn view(
     resolved_url: &str,
 ) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     let fetcher = Rc::new(FetcherDouble::new(source.to_vec()).resolving_to(resolved_url));
-    LynxView::new(
+    solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,
