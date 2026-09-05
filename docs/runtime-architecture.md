@@ -75,7 +75,7 @@ QuickJS preloaded ESM graph
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source (runtime/XML only) + wasm-bindgen + wasm_thread
-bobcat-server ──▶ axum + reqwest + image/jpeg
+bobcat-server ──▶ axum + reqwest + image/bmp
 ```
 
 ## Animation timeline
@@ -168,7 +168,7 @@ thread is the embedder owner: it constructs the non-`Send` `LynxView` with an
 work, settles the page, captures tightly packed RGBA8, and destroys the view.
 The Lynx main thread it spawns is the view's only other runtime thread; the
 server adds no separate rendering owner. The HTTP side then encodes the frame
-as a quality-90 JPEG on Tokio's blocking pool after compositing over white, so
+as a uncompressed BMP on Tokio's blocking pool after compositing over white, so
 CPU encoding neither retains the view nor occupies the GPU lane. A worker
 panic makes health fail and initiates server shutdown; queue saturation fails
 admission rather than creating unbounded GPU work. This is a trusted-page

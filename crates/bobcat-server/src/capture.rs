@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_real_web_bundle_renders_to_the_fixed_jpeg_contract() {
+    async fn a_real_web_bundle_renders_to_the_fixed_bmp_contract() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../bobcat-source/tests/fixtures/basic-class-selector.web.bundle");
         let url = Url::from_file_path(&path).expect("absolute fixture URL");
@@ -638,17 +638,17 @@ mod tests {
         executor.shutdown().expect("stop capture owner thread");
 
         let screenshot = result.expect("decode, boot, and render the web bundle");
-        let jpeg = crate::jpeg::encode(&screenshot).expect("encode captured JPEG");
-        assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
-        let image = image::load_from_memory(&jpeg)
-            .expect("decode captured JPEG")
+        let bmp = crate::bmp::encode(&screenshot).expect("encode captured BMP");
+        assert_eq!(&bmp[..2], b"BM");
+        let image = image::load_from_memory(&bmp)
+            .expect("decode captured BMP")
             .to_rgb8();
         assert_eq!(image.dimensions(), (800, 600));
         assert!(
             image
                 .pixels()
                 .any(|pixel| pixel.0.iter().any(|channel| *channel < 245)),
-            "the bundle's pink element must survive rendering and JPEG encoding"
+            "the bundle's pink element must survive rendering and BMP encoding"
         );
     }
 }

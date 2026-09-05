@@ -1,8 +1,9 @@
 # bobcat-server
 
 `bobcat-server` is a native HTTP embedder for `bobcat-core`. It follows UI
-Judge's screenshot wire contract: `GET /health` reports readiness and
-`POST /screenshot` returns a raw 800×600, DPR-1 JPEG (quality 90) after
+Judge's screenshot request surface: `GET /health` reports readiness and
+`POST /screenshot` returns an uncompressed 24-bit 800×600, DPR-1 BMP with
+`Content-Type: image/bmp` after
 compositing Bobcat's RGBA readback over white.
 
 Start it with:
@@ -22,7 +23,7 @@ curl --request POST http://127.0.0.1:8080/screenshot \
     "screenshotSettleMs": 16,
     "timeoutMs": 60000
   }' \
-  --output screenshot.jpg
+  --output screenshot.bmp
 ```
 
 `url` accepts `file://`, `http://`, and `https://`. The current source loader
@@ -40,9 +41,9 @@ The HTTP runtime accepts requests concurrently. Rendering is admitted through
 an eight-item bounded queue and performed sequentially on one dedicated owner
 thread, where the non-`Send` `LynxView` is created with an offscreen GPU target,
 ticked through the requested settle period, captured, and destroyed.
-The resulting RGBA frame is JPEG-encoded on Tokio's blocking pool, allowing the
+The resulting RGBA frame is BMP-encoded on Tokio's blocking pool, allowing the
 owner thread to begin the next GPU job. A full or unavailable queue returns
-`503`; page/input/render failures return `422`; JPEG encoding failures return
+`503`; page/input/render failures return `422`; BMP encoding failures return
 `500`.
 
 The service mirrors UI Judge by listening on all IPv4 and IPv6 interfaces and
