@@ -145,12 +145,11 @@ useful signal for currently-compatible versions of those libraries.
   decompilation. Named external modules are preserved; they do not acquire an
   invented page root. `PageSource::from_native_bundle` requires an explicit
   entry name, while `from_bytes` requires `root` for binary page inputs.
-  The `runtime` feature adds `PageSource` and browser response registration,
-  including shared StyleInfo lowering; IO and view construction stay with the
-  embedder. Default features enable runtime and both binary formats. With
-  default features disabled, `xml` has no dependencies; `web-bundle` and
-  `native-bundle` are independently usable without core/resources/GPU, while
-  Wasm enables only `runtime` for XML response registration. Native XML keeps
+  `PageSource`, browser response registration, shared StyleInfo lowering and
+  all three parsers are always available: the crate has no Cargo feature flags.
+  All embedders, including Wasm, depend on the complete crate and its
+  core/resources dependencies. IO and view construction stay with the embedder;
+  the browser's `loadLynxXml` API still accepts only XML responses. Native XML keeps
   strict UTF-8 and private memory URLs; the browser retains replacement
   decoding, final-response fragment URLs, host PageConfig, and registers no
   unsupported background body. See `docs/source-architecture.md` for boundaries,
@@ -705,8 +704,9 @@ useful signal for currently-compatible versions of those libraries.
   The server loads the top-level `file://`, `http://`, or `https://` input,
   delegates container mapping to `bobcat-source`, registers its extracted
   scripts and stylesheet with a per-job `bobcat-resources` system, and lets
-  that system resolve, fetch, cache, and decode page subresources. Native
-  `.lynx.bundle` therefore fails explicitly until its separate support lands.
+  that system resolve, fetch, cache, and decode page subresources.
+  Source-based native bundles are accepted when they contain a `root` module;
+  real QuickJS/Lepus bytecode remains an explicit error.
   It listens on all IPv4 and IPv6 interfaces like UI Judge and has no auth,
   TLS, CORS, or URL sandbox, so its arbitrary file/network reads are suitable
   only for a trusted environment, including only trusted page JavaScript:
@@ -1640,7 +1640,7 @@ default explanation for a failure:
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
     -p bobcat-wasm -p bobcat-core -p dom -p hughie \
-    -p bobcat-source --no-default-features --features bobcat-source/runtime -p quickjs-rust-bridge -- -D warnings
+    -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
   `--lib`, not `--all-targets`: `bobcat-core` dev-depends on tokio's

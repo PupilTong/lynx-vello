@@ -30,7 +30,7 @@ web-time = { workspace = true }
 [dev-dependencies]
 divan = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
-bobcat-source = { workspace = true, features = ["web-bundle"] }
+bobcat-source = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [[bench]]

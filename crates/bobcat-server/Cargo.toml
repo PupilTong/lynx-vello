@@ -16,7 +16,7 @@ path = "src/main.rs"
 axum = { workspace = true }
 bobcat-core = { workspace = true }
 bobcat-resources = { workspace = true }
-bobcat-source = { workspace = true, features = ["runtime", "web-bundle"] }
+bobcat-source = { workspace = true }
 image = { workspace = true, features = ["bmp"] }
 reqwest = { workspace = true, features = ["rustls"] }
 serde = { workspace = true }

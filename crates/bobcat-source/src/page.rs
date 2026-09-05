@@ -10,9 +10,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-#[cfg(feature = "web-bundle")]
-use bobcat_core::PreparsedStyleSheet;
-use bobcat_core::{PageConfig, ViewSources};
+use bobcat_core::{PageConfig, PreparsedStyleSheet, ViewSources};
 use bobcat_resources::Resources;
 use thiserror::Error;
 use url::Url;
@@ -113,7 +111,6 @@ impl fmt::Display for CompatibilityWarning {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SourceError {
-    #[cfg(feature = "web-bundle")]
     #[error("could not decode web bundle `{input}`: {source}")]
     DecodeWebBundle {
         input: String,
@@ -133,26 +130,17 @@ pub enum SourceError {
         source: crate::xml::ParseError,
     },
     #[error("web bundle `{0}` has no `lepusCode.root` entry")]
-    #[cfg(feature = "web-bundle")]
     MissingRoot(String),
-    #[cfg(not(feature = "web-bundle"))]
-    #[error("web bundle support is disabled for `{0}`")]
-    WebBundleSupportDisabled(String),
-    #[cfg(feature = "native-bundle")]
     #[error("could not decode native bundle `{input}`: {source}")]
     DecodeNativeBundle {
         input: String,
         #[source]
         source: crate::native::ConvertError,
     },
-    #[cfg(feature = "native-bundle")]
     #[error(
         "native bundle `{input}` has no main-thread module `{entry}`; select an external module explicitly"
     )]
     MissingNativeEntry { input: String, entry: String },
-    #[cfg(not(feature = "native-bundle"))]
-    #[error("native Lynx bundle support is disabled for `{0}`")]
-    UnsupportedNativeBundle(String),
 }
 
 /// Explicit name for [`SourceError`] at APIs that carry several error types.
@@ -164,7 +152,6 @@ enum PageStyleSheet {
     /// Verbatim UTF-8 CSS from a raw Lynx XML `<style>` section.
     Text(Arc<str>),
     /// A web bundle's rkyv `StyleInfo`, lowered without reserializing it.
-    #[cfg(feature = "web-bundle")]
     Preparsed(PreparsedStyleSheet),
 }
 
@@ -223,14 +210,7 @@ impl PageSource {
     /// Decodes a page container that the caller has already loaded.
     pub fn from_bytes(input: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
         if looks_like_native_bundle(bytes) {
-            #[cfg(feature = "native-bundle")]
-            {
-                Self::from_native_bundle(input, bytes, "root")
-            }
-            #[cfg(not(feature = "native-bundle"))]
-            {
-                Err(SourceError::UnsupportedNativeBundle(diagnostic_url(input)))
-            }
+            Self::from_native_bundle(input, bytes, "root")
         } else if looks_like_lynx_xml(bytes) {
             let source = std::str::from_utf8(bytes).map_err(|source| {
                 SourceError::InvalidLynxXmlEncoding {
@@ -240,18 +220,10 @@ impl PageSource {
             })?;
             Self::from_lynx_xml(input, source)
         } else {
-            #[cfg(feature = "web-bundle")]
-            {
-                Self::from_web_bundle(input, bytes)
-            }
-            #[cfg(not(feature = "web-bundle"))]
-            {
-                Err(SourceError::WebBundleSupportDisabled(diagnostic_url(input)))
-            }
+            Self::from_web_bundle(input, bytes)
         }
     }
 
-    #[cfg(feature = "web-bundle")]
     fn from_web_bundle(input: &Url, bytes: &[u8]) -> Result<Self, SourceError> {
         let template =
             crate::web::decode(bytes).map_err(|source| SourceError::DecodeWebBundle {
@@ -264,7 +236,6 @@ impl PageSource {
     /// Decode a source-based native external bundle and select its named main module.
     /// The ordinary byte-sniffing path requires `root`; external libraries normally
     /// need an explicit name such as `library__main-thread` instead.
-    #[cfg(feature = "native-bundle")]
     pub fn from_native_bundle(input: &Url, bytes: &[u8], entry: &str) -> Result<Self, SourceError> {
         let mut template =
             crate::native::decode(bytes).map_err(|source| SourceError::DecodeNativeBundle {
@@ -283,7 +254,6 @@ impl PageSource {
         Self::from_template(input, template)
     }
 
-    #[cfg(feature = "web-bundle")]
     fn from_template(
         input: &Url,
         mut template: crate::web::WebTemplate,
@@ -392,7 +362,6 @@ impl PageSource {
             Some((url, PageStyleSheet::Text(source))) => {
                 register_text(resources, url, source, "text/css; charset=utf-8");
             }
-            #[cfg(feature = "web-bundle")]
             Some((url, PageStyleSheet::Preparsed(sheet))) => {
                 resources
                     .register_style_sheet(url.as_str(), sheet.clone())
@@ -615,12 +584,10 @@ mod tests {
         )
     }
 
-    #[cfg(feature = "web-bundle")]
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
 
-    #[cfg(feature = "web-bundle")]
     fn push_section(bytes: &mut Vec<u8>, label: u32, content: &[u8]) {
         push_u32(bytes, label);
         push_u32(
@@ -630,13 +597,11 @@ mod tests {
         bytes.extend_from_slice(content);
     }
 
-    #[cfg(feature = "web-bundle")]
     fn push_string(bytes: &mut Vec<u8>, value: &str) {
         push_u32(bytes, u32::try_from(value.len()).expect("tiny test string"));
         bytes.extend_from_slice(value.as_bytes());
     }
 
-    #[cfg(feature = "web-bundle")]
     fn web_bundle(root: Option<&str>) -> Vec<u8> {
         let mut bytes = Vec::new();
         push_u32(&mut bytes, crate::web::MAGIC_0);
@@ -678,7 +643,6 @@ mod tests {
         assert!(!looks_like_lynx_xml(b"  {\"json\":true}"));
     }
 
-    #[cfg(feature = "web-bundle")]
     #[test]
     fn web_bundle_exposes_config_entry_and_input_url() {
         let input = Url::parse("https://example.test/card.web.bundle").expect("test URL");
@@ -705,7 +669,6 @@ mod tests {
         assert!(resources.unregister(&sources.entry));
     }
 
-    #[cfg(feature = "web-bundle")]
     #[test]
     fn web_bundle_requires_a_root_script() {
         let error = PageSource::from_bytes(&input_url(), &web_bundle(None))
@@ -901,27 +864,15 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "web-bundle"))]
     #[test]
-    fn a_binary_web_bundle_requires_the_web_bundle_feature() {
-        let error = PageSource::from_bytes(&input_url(), b"SDRA WROF")
-            .expect_err("web-bundle support is disabled");
-
-        assert!(matches!(error, SourceError::WebBundleSupportDisabled(_)));
-    }
-
-    #[test]
-    fn native_bundle_magics_are_rejected_explicitly() {
+    fn truncated_native_bundles_report_native_decode_errors() {
         for magic in [0x0024_1922_u32, 0xdd73_7199] {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&8_u32.to_le_bytes());
             bytes.extend_from_slice(&magic.to_le_bytes());
 
             let error = PageSource::from_bytes(&input_url(), &bytes)
-                .expect_err("native templates are a separate unsupported format");
-            #[cfg(not(feature = "native-bundle"))]
-            assert!(matches!(error, SourceError::UnsupportedNativeBundle(_)));
-            #[cfg(feature = "native-bundle")]
+                .expect_err("native header without sections is truncated");
             assert!(matches!(error, SourceError::DecodeNativeBundle { .. }));
         }
     }
@@ -934,9 +885,6 @@ mod tests {
 
         let error = PageSource::from_bytes(&input_url(), &bytes)
             .expect_err("native decoding is a separate implementation");
-        #[cfg(not(feature = "native-bundle"))]
-        assert!(matches!(error, SourceError::UnsupportedNativeBundle(_)));
-        #[cfg(feature = "native-bundle")]
         assert!(matches!(
             error,
             SourceError::DecodeNativeBundle {

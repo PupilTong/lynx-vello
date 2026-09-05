@@ -7,21 +7,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[features]
-default = ["runtime", "native-bundle"]
-web-bundle = ["dep:bytecheck", "dep:rkyv", "dep:serde_json", "dep:thiserror"]
-native-bundle = ["web-bundle", "dep:cssparser"]
-runtime = ["dep:bobcat-core", "dep:bobcat-resources", "dep:thiserror", "dep:url"]
-
 [dependencies]
-bobcat-core = { workspace = true, optional = true }
-bobcat-resources = { workspace = true, optional = true }
-bytecheck = { workspace = true, optional = true }
-rkyv = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-cssparser = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
-url = { workspace = true, optional = true }
+bobcat-core = { workspace = true }
+bobcat-resources = { workspace = true }
+bytecheck = { workspace = true }
+rkyv = { workspace = true }
+serde_json = { workspace = true }
+cssparser = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
@@ -32,12 +26,9 @@ workspace = true
 [[bench]]
 name = "decode"
 harness = false
-required-features = ["web-bundle"]
 
 [[example]]
 name = "dump"
-required-features = ["web-bundle"]
 
 [[example]]
 name = "convert"
-required-features = ["native-bundle"]

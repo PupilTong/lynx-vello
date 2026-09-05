@@ -96,8 +96,8 @@ curl --fail-with-body \
 800×600, DPR-1 BMP after compositing alpha over white. Non-empty
 `globalProps`, `initialData`, or interaction `steps` are rejected explicitly
 because the current core exposes no faithful injection or automation seam.
-Native `.lynx.bundle` bytes are recognized and return `422`; native-template
-support belongs to its separate change.
+Source-based native `.lynx.bundle` inputs are also supported when they contain
+a `root` module; real QuickJS/Lepus bytecode still returns `422`.
 
 Like UI Judge, the server listens on all IPv4 and IPv6 interfaces and permits
 arbitrary file and HTTP(S) input URLs. It has no authentication or TLS, so run

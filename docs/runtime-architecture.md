@@ -53,12 +53,12 @@ and decoded images never do.
 The dependency graph is:
 
 ```text
-bobcat-cli    ─┬──▶ bobcat-source (runtime + native-bundle)
+bobcat-cli    ─┬──▶ bobcat-source
                └──▶ bobcat-resources ─┐
 bobcat-server ─┬──▶ bobcat-source     ├──▶ bobcat-core ──▶ dom ─┬─▶ hughie
                └──▶ bobcat-resources ─┤          │              ├─▶ vendor/stylo
 bobcat-wasm ──┬───▶ bobcat-resources ─┘          │              └─▶ vello/wgpu
-              └───▶ bobcat-source (runtime/XML only)
+              └───▶ bobcat-source
 bobcat-source ────────────────────────────────────┘
                                                   └──▶ quickjs-rust-bridge
 
@@ -74,7 +74,7 @@ QuickJS preloaded ESM graph
                       └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ bobcat-source + winit
-bobcat-wasm ──▶ bobcat-source (runtime/XML only) + wasm-bindgen + wasm_thread
+bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
 bobcat-server ──▶ axum + reqwest + image/bmp
 ```
 
@@ -146,8 +146,8 @@ and execution:
 
 1. `bobcat-cli` reads one local input, while `bobcat-server` reads one
    `file://`, `http://`, or `https://` input for each accepted capture job;
-2. `bobcat-source::PageSource` content-sniffs Lynx XML versus a web bundle,
-   uses the shared `web` and `xml` parsers, lowers bundle
+2. `bobcat-source::PageSource` content-sniffs Lynx XML, web bundles and
+   source-based native bundles, uses the shared parsers, lowers bundle
    `StyleInfo` directly to a `PreparsedStyleSheet`, and produces the
    corresponding `PageConfig`, source URLs, and payloads;
 3. the embedder registers `lepusCode.root` or the XML main-thread body as the
@@ -158,8 +158,8 @@ and execution:
 4. the embedder awaits one `LynxView::new`, passing `DrawTarget`, the
    `bobcat-resources` per-view builder, and the resulting `ViewSources`.
 
-The server enables `runtime` and `web-bundle` on the existing source crate.
-Native-bundle decoding remains disabled for this screenshot product.
+All embedders use the complete source crate without feature flags. Binary
+page inputs require a `root` module; native bytecode remains unsupported.
 
 `bobcat-server` keeps HTTP handling concurrent but sends accepted captures
 through a bounded FIFO to one dedicated capture thread. For each job that
