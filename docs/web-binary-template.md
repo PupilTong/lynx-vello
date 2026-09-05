@@ -9,7 +9,7 @@ This is the **"web" target** template format. It is *not* the native
 the web platform never ships Lepus/QuickJS bytecode; its main-thread code is
 plain JavaScript, and its CSS is pre-parsed into rkyv-serialized Rust structs.
 
-`crates/lynx-template-decoder` in this repo implements a native Rust decoder
+`crates/bobcat-source/src/web` in this repo implements a native Rust decoder
 for exactly this format.
 
 Hand-written [Lynx XML markup templates](lynx-xml-template.md) are a **source

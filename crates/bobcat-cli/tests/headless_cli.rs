@@ -229,7 +229,7 @@ fn styled_lynx_xml() -> String {
 
 /// A bundle whose `.styled` class comes only from its `StyleInfo` section.
 fn styled_bundle() -> Vec<u8> {
-    use lynx_template_decoder::style_info::{
+    use bobcat_source::web::style_info::{
         CssProperty, CssPropertyId, DeclarationBlock, ParsedDeclaration, Rule, RuleKind,
         RulePrelude, Selector, SimpleSelector, SimpleSelectorKind, StyleInfo, StyleSheet,
         ValueToken, token_types,
@@ -296,7 +296,7 @@ fn styled_bundle() -> Vec<u8> {
     push_lepus_section(&mut bytes, script);
     push_section(
         &mut bytes,
-        lynx_template_decoder::SectionLabel::StyleInfo as u32,
+        bobcat_source::web::SectionLabel::StyleInfo as u32,
         &style_info,
     );
     bytes
@@ -309,13 +309,13 @@ fn bundle_header() -> Vec<u8> {
         "enableCSSSelector": "true"
     }"#;
     let mut bytes = Vec::new();
-    push_u32(&mut bytes, lynx_template_decoder::MAGIC_0);
-    push_u32(&mut bytes, lynx_template_decoder::MAGIC_1);
+    push_u32(&mut bytes, bobcat_source::web::MAGIC_0);
+    push_u32(&mut bytes, bobcat_source::web::MAGIC_1);
     push_u32(&mut bytes, 1);
     let config: Vec<u8> = config.encode_utf16().flat_map(u16::to_le_bytes).collect();
     push_section(
         &mut bytes,
-        lynx_template_decoder::SectionLabel::Configurations as u32,
+        bobcat_source::web::SectionLabel::Configurations as u32,
         &config,
     );
     bytes
@@ -328,7 +328,7 @@ fn push_lepus_section(bytes: &mut Vec<u8>, script: &str) {
     push_string(&mut lepus, script);
     push_section(
         bytes,
-        lynx_template_decoder::SectionLabel::LepusCode as u32,
+        bobcat_source::web::SectionLabel::LepusCode as u32,
         &lepus,
     );
 }
@@ -354,14 +354,14 @@ fn minimal_bundle() -> Vec<u8> {
     ";
 
     let mut bytes = Vec::new();
-    push_u32(&mut bytes, lynx_template_decoder::MAGIC_0);
-    push_u32(&mut bytes, lynx_template_decoder::MAGIC_1);
+    push_u32(&mut bytes, bobcat_source::web::MAGIC_0);
+    push_u32(&mut bytes, bobcat_source::web::MAGIC_1);
     push_u32(&mut bytes, 1);
 
     let config: Vec<u8> = config.encode_utf16().flat_map(u16::to_le_bytes).collect();
     push_section(
         &mut bytes,
-        lynx_template_decoder::SectionLabel::Configurations as u32,
+        bobcat_source::web::SectionLabel::Configurations as u32,
         &config,
     );
 
@@ -371,7 +371,7 @@ fn minimal_bundle() -> Vec<u8> {
     push_string(&mut lepus, script);
     push_section(
         &mut bytes,
-        lynx_template_decoder::SectionLabel::LepusCode as u32,
+        bobcat_source::web::SectionLabel::LepusCode as u32,
         &lepus,
     );
     bytes

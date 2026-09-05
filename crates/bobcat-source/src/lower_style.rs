@@ -29,7 +29,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bobcat_core::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-use lynx_template_decoder::style_info::{
+
+use crate::web::style_info::{
     DeclarationBlock, Rule, RuleKind, RulePrelude, StyleInfo, StyleSheet,
 };
 
@@ -174,12 +175,11 @@ fn descriptor_text(block: &DeclarationBlock) -> String {
 
 #[cfg(test)]
 mod tests {
-    use lynx_template_decoder::style_info::{
+    use super::*;
+    use crate::web::style_info::{
         CssProperty, CssPropertyId, ParsedDeclaration, Selector, SimpleSelector,
         SimpleSelectorKind, ValueToken, token_types,
     };
-
-    use super::*;
 
     fn preparsed(property: &str, value: &str) -> PreparsedDeclaration {
         PreparsedDeclaration {

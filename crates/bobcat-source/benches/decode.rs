@@ -20,7 +20,7 @@ fn bench_decode(bencher: divan::Bencher<'_, '_>, bytes: &'static [u8]) {
         .with_inputs(|| Vec::with_capacity(BATCH_SIZE))
         .bench_local_values(|mut templates| {
             for _ in 0..BATCH_SIZE {
-                templates.push(lynx_template_decoder::decode(black_box(bytes)).unwrap());
+                templates.push(bobcat_source::web::decode(black_box(bytes)).unwrap());
             }
             templates
         });
@@ -43,7 +43,7 @@ fn decode_large_style_info(bencher: divan::Bencher<'_, '_>) {
 
 #[divan::bench]
 fn selectors_to_css(bencher: divan::Bencher<'_, '_>) {
-    let template = lynx_template_decoder::decode(LARGE_CSS).unwrap();
+    let template = bobcat_source::web::decode(LARGE_CSS).unwrap();
     let style_info = template.style_info.unwrap();
     bencher.counter(ItemsCount::new(BATCH_SIZE)).bench(|| {
         let mut total = 0usize;

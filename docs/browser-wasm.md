@@ -88,7 +88,7 @@ decoder — reach `console.warn`.
 
 `loadLynxXml(url)` similarly fetches the source envelope once and decodes it
 with the browser's replacement-mode UTF-8 `TextDecoder`, matching web-core's
-raw XML loader. Rust's `lynx-xml` parser validates and extracts the sections in
+raw XML loader. Rust's `bobcat-source::xml` parser validates and extracts the sections in
 the Render Worker. The source uses `<lynx engine-version="...">` and
 `<script thread="main">` / `<script thread="background">`; legacy
 attribute spellings are rejected. A present stylesheet is registered as CSS
@@ -307,3 +307,8 @@ revoked only after `loadLynxXml` settles.
 Synchronous GPU readback remains absent because browser WebGPU map completion
 is Promise-driven; native capture blocks on device polling. Browser capture
 requires a separate asynchronous facade API.
+
+Source mapping and registration now live in `bobcat-source` with only its
+`runtime` feature enabled. Binary decoders are absent from the browser graph.
+The one-shot response adapter preserves final-URL fragments and reports
+background presence without registering its body. Host PageConfig stays authoritative.

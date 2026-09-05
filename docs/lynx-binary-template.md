@@ -158,3 +158,13 @@ rspeedy build (rsbuild/webpack)
 The encoder input is JSON (sourceContent/css/customSections/lepusCode/manifest…),
 assembled by `LynxTemplatePlugin`; the C++ side parses CSS + TTML, compiles Lepus
 to QuickJS bytecode, and serializes all sections.
+
+## Bobcat implementation
+
+`bobcat-source::native::decode` handles source-based flexible external bundles
+(target SDK 2.8+ with serialized selectors and source CSS values), returning
+the shared web-compatible template model directly. `native::convert` explicitly
+serializes that result as a web bundle for tooling. Real bytecode, legacy
+Lepus, card-style top-level CSS, and irreversible parsed CSS encodings return
+errors. The exact two known inert external-root stubs are accepted only in
+the external layout. See [source architecture](source-architecture.md).

@@ -25,7 +25,7 @@
 //! and a scheduled job, so the same search runs here, bounded and
 //! deterministic, in the suite everyone already runs.
 
-use lynx_xml::parse;
+use bobcat_source::xml::parse;
 
 /// Whether `part` points into `whole`.
 ///

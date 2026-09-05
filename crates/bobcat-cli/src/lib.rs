@@ -7,10 +7,9 @@
 //! paint, frame scheduling, the script and render threads — is the engine's;
 //! every CLI event handler is a relay into it.
 //!
-//! Its resource system serves the decoded input's own bytes and nothing
-//! else — `FrameImages::read` always answers `None` — so a page's images
-//! paint as nothing: fetching and decoding them is embedder work this runner
-//! does not do.
+//! It uses `bobcat-resources` for the decoded input and everything that input
+//! names — files beside it, data URLs, HTTP resources, and images — including
+//! the embedder-owned caches and image decoding that feed painter turns.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // The workspace-wide `unsafe_code = "warn"` says a block may exist; this says
@@ -28,7 +27,6 @@ mod headless;
 mod macos;
 mod page;
 mod screenshot;
-mod style_info;
 #[cfg(target_os = "macos")]
 mod vsync;
 
@@ -64,26 +62,8 @@ pub enum CliError {
         #[source]
         source: std::io::Error,
     },
-    #[error("could not decode web bundle `{input}`: {source}")]
-    Decode {
-        input: String,
-        #[source]
-        source: lynx_template_decoder::DecodeError,
-    },
-    #[error("Lynx XML `{input}` is not valid UTF-8: {source}")]
-    InvalidLynxXmlEncoding {
-        input: String,
-        #[source]
-        source: std::str::Utf8Error,
-    },
-    #[error("could not parse Lynx XML `{input}`: {source}")]
-    ParseLynxXml {
-        input: String,
-        #[source]
-        source: lynx_xml::ParseError,
-    },
-    #[error("web bundle `{0}` has no `lepusCode.root` entry")]
-    MissingRoot(String),
+    #[error(transparent)]
+    PageSource(#[from] bobcat_source::SourceError),
     #[error("could not run input `{input}`: {source}")]
     Script {
         input: String,

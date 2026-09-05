@@ -13,8 +13,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 bobcat-core = { path = "crates/bobcat-core" }
 bobcat-resources = { path = "crates/bobcat-resources" }
-lynx-template-decoder = { path = "crates/lynx-template-decoder" }
-lynx-xml = { path = "crates/lynx-xml" }
+bobcat-source = { path = "crates/bobcat-source", default-features = false }
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }

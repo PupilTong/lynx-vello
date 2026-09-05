@@ -65,8 +65,8 @@ QuickJS preloaded ESM graph
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
 
-bobcat-cli ──▶ lynx-template-decoder + winit
-bobcat-wasm ──▶ wasm-bindgen + wasm_thread + embedded QuickJS
+bobcat-cli ──▶ bobcat-source + winit
+bobcat-wasm ──▶ bobcat-source (runtime/XML only) + wasm-bindgen + wasm_thread
 ```
 
 ## Animation timeline
@@ -133,9 +133,9 @@ decoder/parser types for either format.
 
 For the native product, `bobcat-cli`:
 
-1. reads the local input and content-sniffs Lynx XML versus a web bundle;
-2. decodes a bundle with `lynx-template-decoder`, or parses XML with
-   `lynx-xml`, then produces the corresponding `PageConfig`;
+1. reads the local input;
+2. asks `bobcat-source::PageSource` to classify and decode it and produce the
+   corresponding `PageConfig`;
 3. retains `lepusCode.root` or the XML main-thread body as an entry MTS module
    in its own `ResourceFetcher` under a URL, alongside bundle `StyleInfo` on
    the pre-parsed stylesheet arm or an XML `<style>` body on the CSS-text arm;
@@ -143,8 +143,9 @@ For the native product, `bobcat-cli`:
    `PageConfig` and the remaining injected capabilities, where any failure is
    one `CliError::StartView`.
 
-The browser reference embedder performs the same XML section mapping inside
-its Render Worker after fetching one XML URL. Neither embedder executes the
+The browser reference embedder uses the shared `register_lynx_xml_response`
+adapter inside its Render Worker after fetching one XML URL. See
+[source architecture](source-architecture.md) for the feature and format boundaries. Neither embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; both report that limitation explicitly.
 

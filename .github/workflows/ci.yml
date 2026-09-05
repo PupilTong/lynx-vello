@@ -37,6 +37,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Source feature boundaries
+        run: |
+          cargo test --locked -p bobcat-source --no-default-features
+          cargo test --locked -p bobcat-source --no-default-features --features web-bundle
+          cargo test --locked -p bobcat-source --no-default-features --features native-bundle
+          cargo test --locked -p bobcat-source --no-default-features --features runtime
+
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
         # `cargo codspeed build` can measure a library production never ships.
@@ -126,8 +133,7 @@ jobs:
           -p bobcat-core
           -p dom
           -p hughie
-          -p lynx-xml
-          -p lynx-template-decoder
+          -p bobcat-source --no-default-features --features bobcat-source/runtime
           -p quickjs-rust-bridge
           -- -D warnings
 

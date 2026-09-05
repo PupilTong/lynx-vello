@@ -6,7 +6,7 @@ use serde_json::json;
 fn main() {
     let path = std::env::args().nth(1).expect("usage: dump <bundle>");
     let bytes = std::fs::read(&path).expect("read bundle");
-    let template = lynx_template_decoder::decode(&bytes).expect("decode bundle");
+    let template = bobcat_source::web::decode(&bytes).expect("decode bundle");
 
     let lepus: serde_json::Map<String, serde_json::Value> = template
         .lepus_code
@@ -37,7 +37,7 @@ fn main() {
                             .prelude
                             .selectors
                             .iter()
-                            .map(lynx_template_decoder::style_info::Selector::to_css_string)
+                            .map(bobcat_source::web::style_info::Selector::to_css_string)
                             .collect::<Vec<_>>(),
                         "declarations": rule
                             .declaration_block

@@ -195,11 +195,9 @@ version = "0.1.0"
 dependencies = [
  "bobcat-core",
  "bobcat-resources",
+ "bobcat-source",
  "flashbulb",
  "flume",
- "http",
- "lynx-template-decoder",
- "lynx-xml",
  "png",
  "pollster",
  "rkyv",
@@ -212,13 +210,13 @@ dependencies = [
 name = "bobcat-core"
 version = "0.1.0"
 dependencies = [
+ "bobcat-source",
  "bytes",
  "codspeed-divan-compat",
  "dom",
  "flashbulb",
  "flume",
  "http",
- "lynx-template-decoder",
  "quickjs-rust-bridge",
  "rayon",
  "rustc-hash 2.1.3",
@@ -255,13 +253,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobcat-source"
+version = "0.1.0"
+dependencies = [
+ "bobcat-core",
+ "bobcat-resources",
+ "bytecheck",
+ "codspeed-divan-compat",
+ "cssparser",
+ "rkyv",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "bobcat-wasm"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
  "bobcat-resources",
+ "bobcat-source",
  "js-sys",
- "lynx-xml",
  "parking_lot_core",
  "url",
  "wasm-bindgen",
@@ -1696,21 +1709,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "lynx-template-decoder"
-version = "0.1.0"
-dependencies = [
- "bytecheck",
- "codspeed-divan-compat",
- "rkyv",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "lynx-xml"
-version = "0.1.0"
 
 [[package]]
 name = "malloc_size_of_derive"

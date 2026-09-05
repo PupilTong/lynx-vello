@@ -1,13 +1,6 @@
 // Copyright 2026 The Lynx Authors. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// The workspace sets `unsafe_code = "warn"`, which any module can silence with a
-// local `allow`. This crate holds no `unsafe` at all, and that is a property
-// worth a machine check rather than a convention: `forbid` cannot be overridden
-// from inside the crate, so introducing `unsafe` here has to be a deliberate
-// edit to this line.
-#![forbid(unsafe_code)]
-
 //! Parser for the restricted single-file Lynx XML markup source format.
 //!
 //! Lynx XML is a source envelope carrying an engine-version requirement, one
@@ -17,7 +10,7 @@
 //! creates that tree through the Lynx Element PAPI.
 //!
 //! This source format is not an encoding of either Lynx binary template
-//! container. The crate neither decodes nor produces `.web.bundle` or
+//! container. This module neither decodes nor produces `.web.bundle` or
 //! `.lynx.bundle` files.
 
 use std::fmt;
@@ -117,11 +110,11 @@ impl std::error::Error for ParseError {}
 ///   <style>.title { color: red; }</style>
 ///   <script thread="main"><![CDATA[globalThis.renderPage = () => {};]]></script>
 /// </lynx>"#;
-/// let parsed = lynx_xml::parse(source)?;
+/// let parsed = bobcat_source::xml::parse(source)?;
 /// assert_eq!(parsed.engine_version, "4.2");
 /// assert_eq!(parsed.style, Some(".title { color: red; }"));
 /// assert!(parsed.main_thread_script.contains("renderPage"));
-/// # Ok::<(), lynx_xml::ParseError>(())
+/// # Ok::<(), bobcat_source::xml::ParseError>(())
 /// ```
 pub fn parse(source: &str) -> Result<LynxXml<'_>, ParseError> {
     Parser::new(source).parse()
