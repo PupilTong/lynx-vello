@@ -60,19 +60,20 @@ not copy or register its unused body. Browser PageConfig remains host-owned.
 
 ## API and dependencies
 
-| Features (disable defaults to select) | API | Dependencies |
+| Module / adapter (always available) | API | Dependencies |
 | --- | --- | --- |
-| none | `xml::parse` | None |
-| `web-bundle` | `web::decode`, wire types | rkyv 0.7, bytecheck, JSON and errors |
-| `native-bundle` | `native::decode`, `native::convert` | Web model plus cssparser |
-| `runtime` | `PageSource`, `register_lynx_xml_response` | Core, resources and URLs; binary formats optional |
-| defaults | All of the above | Native embedder configuration |
+| XML | `xml::parse` | Parser itself uses only std |
+| Web | `web::decode`, wire types | rkyv 0.7, bytecheck, JSON and errors |
+| Native | `native::decode`, `native::convert` | Web model plus cssparser |
+| Runtime adaptation | `PageSource`, `register_lynx_xml_response` | Core, resources and URLs |
 
-A tooling consumer can parse either binary without depending on Bobcat's GPU
-or runtime. Wasm enables only `runtime`; neither binary parser nor rkyv enters
-its normal dependency graph. Core only dev-depends on the web parser for its
-bundle fixtures. Transport, text decoding policy, font/image resources and
-view construction remain outside the format parsers.
+`bobcat-source` has no Cargo feature flags. CLI, server, Wasm and tooling all
+depend on the complete crate, including both binary parsers, rkyv, core and
+resources. Core's source dependency remains dev-only for bundle fixtures.
+The browser's `loadLynxXml` API still accepts XML; availability of the full
+source API does not change that endpoint's input contract. Transport, text
+decoding policy, font/image resources and view construction remain outside
+the format parsers.
 
 Migration:
 
@@ -88,7 +89,7 @@ Migration:
   background realm. The low-level decoder retains all named modules.
 
 ```sh
-cargo run -p bobcat-source --no-default-features --features native-bundle \
+cargo run -p bobcat-source \
   --example convert -- input.lynx.bundle output.web.bundle
 ```
 
@@ -115,16 +116,18 @@ stylesheets. The native external decoder does not promise full native-card or
 bytecode compatibility. Native conversion still exports the established web
 wire format, including named external modules rather than inventing a root.
 
-## Validation
+## Original consolidation validation
+
+These results describe the original consolidation before removal of source
+feature flags. Current CI tests the complete source API on native and compiles
+that same API for Wasm; there is no longer a feature-subset matrix.
 
 - Default source suite: 121 tests and 2 doctests passed, including native
   conversion, malformed input, selector escaping, keyframes and font faces.
-- XML-only, web-only, native-without-runtime and XML/runtime suites passed.
 - CLI unit suite: 17 passed. CLI headless rendering and core bundle boot:
   3 tests each passed after granting GPU access outside the sandbox.
-- Native source/CLI Clippy and browser-target XML/runtime Clippy passed.
-- Worker/config JavaScript tests: 7 passed. Normal Wasm dependencies contain
-  `bobcat-source` without rkyv or bytecheck; XML-only has no normal dependencies.
+- Native source/CLI Clippy and browser-target Clippy passed.
+- Worker/config JavaScript tests: 7 passed.
 - Workspace all-target check, formatting, diff whitespace and benchmark-feature
   parity checks passed. The entire unrelated workspace test suite was not run.
 - The local production `react-externals/dist/comp-lib.lynx.bundle` was rejected

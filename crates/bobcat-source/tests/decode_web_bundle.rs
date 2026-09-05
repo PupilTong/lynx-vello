@@ -1,4 +1,3 @@
-#![cfg(feature = "web-bundle")]
 //! Integration tests decoding real `.web.bundle` files produced by the
 //! lynx-stack build pipeline (see `fixtures/README.md`).
 

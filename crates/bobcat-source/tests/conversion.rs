@@ -1,4 +1,3 @@
-#![cfg(feature = "native-bundle")]
 use bobcat_source::native::{ConvertError, convert};
 use bobcat_source::web::css_property::{CssPropertyId, token_types};
 
@@ -358,7 +357,6 @@ fn direct_native_decode_preserves_named_modules_without_inventing_a_root() {
     );
 }
 
-#[cfg(feature = "runtime")]
 #[test]
 fn external_page_entry_must_be_selected_explicitly() {
     let bytes = native_bundle(vec![custom_section(vec![CustomSection::source(
