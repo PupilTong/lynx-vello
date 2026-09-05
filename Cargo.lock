@@ -271,18 +271,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "bobcat-cli"
+name = "bobcat"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bobcat-core",
  "bobcat-resources",
  "bobcat-source",
  "flashbulb",
  "flume",
+ "image",
  "png",
  "pollster",
+ "reqwest",
  "rkyv",
+ "serde",
+ "serde_json",
+ "socket2",
  "thiserror 2.0.18",
+ "tokio",
+ "tower",
  "url",
  "winit",
 ]
@@ -331,25 +339,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
-]
-
-[[package]]
-name = "bobcat-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bobcat-core",
- "bobcat-resources",
- "bobcat-source",
- "image",
- "reqwest",
- "serde",
- "serde_json",
- "socket2",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "url",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-# bobcat-cli
+# bobcat: CLI feature
 
-`bobcat-cli` builds the `bobcat` executable. It accepts either a local Lynx
+The `bobcat` crate with feature `cli` builds the `bobcat` executable. It accepts either a local Lynx
 `.web.bundle` or a raw Lynx XML source document as a `file:///` URL and
 privately composes `bobcat-core/quickjs` →
 `dom`/`hughie`. The CLI is an independent product;

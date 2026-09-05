@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use url::Url;
 
-use crate::capture::{
+use crate::server::capture::{
     CaptureExecutor, CaptureFailure, CaptureQueueError, CaptureRequest, WorkerPanicked,
 };
 
@@ -215,8 +215,8 @@ impl From<CaptureFailure> for ApiError {
     }
 }
 
-impl From<crate::bmp::BmpError> for ApiError {
-    fn from(error: crate::bmp::BmpError) -> Self {
+impl From<crate::server::bmp::BmpError> for ApiError {
+    fn from(error: crate::server::bmp::BmpError) -> Self {
         Self::internal(error.to_string())
     }
 }
@@ -341,7 +341,7 @@ async fn screenshot(
 ) -> Result<Response, ApiError> {
     let request = request.into_capture_request()?;
     let screenshot = state.headless.capture(request).await??;
-    let bmp = tokio::task::spawn_blocking(move || crate::bmp::encode(&screenshot))
+    let bmp = tokio::task::spawn_blocking(move || crate::server::bmp::encode(&screenshot))
         .await
         .map_err(|error| ApiError::internal(format!("BMP worker failed: {error}")))??;
     Ok(([(CONTENT_TYPE, "image/bmp")], bmp).into_response())
@@ -389,7 +389,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::capture::CaptureJob;
+    use crate::server::capture::CaptureJob;
 
     fn http_request(url: &str) -> HttpScreenshotRequest {
         HttpScreenshotRequest {
@@ -526,7 +526,7 @@ mod tests {
             },
             pixels: [20, 40, 60, 255].repeat(64),
         };
-        let bmp = crate::bmp::encode(&frame).expect("encode expected BMP");
+        let bmp = crate::server::bmp::encode(&frame).expect("encode expected BMP");
         let headless = scripted_executor(frame);
         let response = router(Arc::clone(&headless))
             .oneshot(

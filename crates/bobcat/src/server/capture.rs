@@ -331,24 +331,21 @@ async fn capture_page(
     let sources = page.view_sources();
     drop(page);
 
-    let mut view = tokio::time::timeout(
-        request.timeout,
-        async {
-            // Preserve per-capture runtime isolation: the view keeps this
-            // job's group alive until capture finishes and the view drops.
-            let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto).await?;
-            group
-                .create_lynx_view(
-                    VIEWPORT_WIDTH,
-                    VIEWPORT_HEIGHT,
-                    DEVICE_PIXEL_RATIO,
-                    DrawTarget::Offscreen,
-                    resources.builder(),
-                    sources,
-                )
-                .await
-        },
-    )
+    let mut view = tokio::time::timeout(request.timeout, async {
+        // Preserve per-capture runtime isolation: the view keeps this
+        // job's group alive until capture finishes and the view drops.
+        let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto).await?;
+        group
+            .create_lynx_view(
+                VIEWPORT_WIDTH,
+                VIEWPORT_HEIGHT,
+                DEVICE_PIXEL_RATIO,
+                DrawTarget::Offscreen,
+                resources.builder(),
+                sources,
+            )
+            .await
+    })
     .await
     .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))?
     .map_err(|source| CaptureFailure::StartView {
@@ -646,7 +643,7 @@ mod tests {
         executor.shutdown().expect("stop capture owner thread");
 
         let screenshot = result.expect("decode, boot, and render the web bundle");
-        let bmp = crate::bmp::encode(&screenshot).expect("encode captured BMP");
+        let bmp = crate::server::bmp::encode(&screenshot).expect("encode captured BMP");
         assert_eq!(&bmp[..2], b"BM");
         let image = image::load_from_memory(&bmp)
             .expect("decode captured BMP")

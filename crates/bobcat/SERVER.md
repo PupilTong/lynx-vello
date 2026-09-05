@@ -1,6 +1,7 @@
 # bobcat-server
 
-`bobcat-server` is a native HTTP embedder for `bobcat-core`. It follows UI
+`bobcat-server` is the `bobcat` crate's `server`-gated HTTP embedder for
+`bobcat-core`. It follows UI
 Judge's screenshot request surface: `GET /health` reports readiness and
 `POST /screenshot` returns an uncompressed 24-bit 800×600, DPR-1 BMP with
 `Content-Type: image/bmp` after
@@ -9,7 +10,7 @@ compositing Bobcat's RGBA readback over white.
 Start it with:
 
 ```sh
-LYNX_USE_PORT=8080 cargo run -p bobcat-server --bin bobcat-server
+LYNX_USE_PORT=8080 cargo run -p bobcat --no-default-features --features server --bin bobcat-server
 ```
 
 Capture a web bundle:

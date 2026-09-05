@@ -11,7 +11,6 @@
 //! names — files beside it, data URLs, HTTP resources, and images — including
 //! the embedder-owned caches and image decoding that feed painter turns.
 
-#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 // The workspace-wide `unsafe_code = "warn"` says a block may exist; this says
 // it must explain itself. Crate-local rather than workspace-wide because `dom`
 // and `quickjs-rust-bridge` are not at this bar yet.

@@ -53,6 +53,12 @@ and decoded images never do.
 
 The dependency graph is:
 
+`bobcat` is one native embedder crate. Its independent `cli` and `server`
+features gate the two modules and their optional dependencies; both are enabled
+by default. The `bobcat` and `bobcat-server` binaries require `cli` and `server`
+respectively. The product labels below name those two features of the same
+crate, not separate crates. Both use the complete source/resource APIs.
+
 ```text
 bobcat-cli    ─┬──▶ bobcat-source
                └──▶ bobcat-resources ─┐
@@ -166,15 +172,15 @@ page inputs require a `root` module; native bytecode remains unsupported.
 `bobcat-server` keeps HTTP handling concurrent but sends accepted captures
 through a bounded FIFO to one dedicated capture thread. For each job that
 thread is the embedder owner: it creates a fresh `LynxGroup` for that job and
-constructs its non-`Send` `LynxView` with an
-800×600 DPR-1 `DrawTarget::Offscreen`, owns the view's `Painter` and all GPU
+constructs its non-`Send` `LynxView` with an 800×600 DPR-1
+`DrawTarget::Offscreen`, owns the view's `Painter` and all GPU
 work, settles the page, captures tightly packed RGBA8, and destroys the view.
 The group owns the Lynx main thread, QuickJS runtime, and Stylo pool, all
 released with that job's view; no runtime is shared across capture jobs and
-the server adds no separate rendering owner. The HTTP side then encodes the frame
-as an uncompressed BMP on Tokio's blocking pool after compositing over white, so
-CPU encoding neither retains the view nor occupies the GPU lane. A worker
-panic makes health fail and initiates server shutdown; queue saturation fails
+the server adds no separate rendering owner. The HTTP side then encodes the
+frame as an uncompressed BMP on Tokio's blocking pool after compositing over
+white, so CPU encoding neither retains the view nor occupies the GPU lane.
+A worker panic makes health fail and initiates server shutdown; queue saturation fails
 admission rather than creating unbounded GPU work. This is a trusted-page
 embedder: the public core deliberately exposes no QuickJS interrupt, and
 `timeoutMs` cannot preempt synchronous script execution, a blocking GPU call
@@ -622,9 +628,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    stylesheet and then the entry MTS source, sending only loaded sources
    across the link in that order.
 3. `bobcat-main` mounts each received sheet, opens the view's QuickJS realm on
-   the group's runtime on entry arrival, installs Bobcat callbacks, preloads `bobcat:runtime`,
-   `bobcat:element`, `bobcat:timers`, and the resolved entry URL, then runs the
-   TLA-based `bobcat:boot` module. Only complete success sends `Started` back
+   the group's runtime on entry arrival, installs Bobcat callbacks, preloads
+   `bobcat:runtime`, `bobcat:element`, `bobcat:timers`, and the resolved entry
+   URL, then runs the TLA-based `bobcat:boot` module. Only complete success sends `Started` back
    through the same painter inbox. Cancelling construction drops pending
    resource futures on the calling thread, releases the painter, and takes
    that view off the group's thread; other views in the group keep running.
@@ -654,8 +660,8 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 cargo check -p bobcat-core
 cargo check -p bobcat-core --target wasm32-unknown-unknown
 cargo check -p bobcat-source
-cargo check -p bobcat-cli
-cargo check -p bobcat-server
+cargo check -p bobcat --no-default-features --features cli
+cargo check -p bobcat --no-default-features --features server
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets
 ```

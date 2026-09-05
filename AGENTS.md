@@ -176,9 +176,10 @@ useful signal for currently-compatible versions of those libraries.
   The calling thread drives stylesheet and entry fetches and
   sends only loaded sources across the link. `bobcat-main` creates the
   document itself, registers its fonts, mounts each received stylesheet,
-  opens a realm on the group's QuickJS runtime when the entry arrives, and boots it before returning
-  success. A resource, font, realm, or boot failure yields `LynxViewError` and
-  no view, and nothing later mounts a stylesheet or starts a second entry.
+  opens a realm on the group's QuickJS runtime when the entry arrives, and
+  boots it before returning success. A resource, font, realm, or boot failure
+  yields `LynxViewError` and no view, and nothing later mounts a stylesheet or
+  starts a second entry.
   Cancelling the unresolved `create_lynx_view` future drops pending resource
   work on the calling thread or stops that view's startup before QuickJS
   begins, then releases the painter it built and takes the half-built view
@@ -685,7 +686,7 @@ useful signal for currently-compatible versions of those libraries.
   only where ImageIO exists; the Linux decoder and libcurl transport are
   tested for real against the system libraries, and the browser path is
   linted for wasm32 and exercised only in a browser.
-- `crates/bobcat-cli` — the independent native `bobcat` product over
+- `crates/bobcat` (`cli` feature) — the native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
   `bobcat-core`, `bobcat-resources`, and `bobcat-source`.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
@@ -746,7 +747,8 @@ useful signal for currently-compatible versions of those libraries.
   linear display, visible overflow, and selector support. A present background
   section is retained under `/app-service.js` and warned about, but not
   executed until Bobcat has a background-thread realm.
-- `crates/bobcat-server` — a native HTTP screenshot **embedder**, not runtime
+- `crates/bobcat` (`server` feature) — the `bobcat-server` HTTP screenshot
+  **embedder** in the same crate, not runtime
   infrastructure inside `bobcat-core`. It follows UI Judge's public capture
   surface: `GET /health`, and `POST /screenshot` with required `url` and
   `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +
@@ -758,10 +760,11 @@ useful signal for currently-compatible versions of those libraries.
   injection or DOM automation seams.
   Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
   jobs feeds one dedicated capture thread. That is the embedder thread for
-  each job: it constructs and destroys the non-`Send` `LynxView` with
-  `DrawTarget::Offscreen`, owns the view's `Painter` and every GPU operation,
-  ticks, settles, and returns its RGBA capture. The Lynx main thread it spawns
-  is the view's only other runtime thread; the server adds no separate
+  each job: it starts a fresh `LynxGroup` and constructs its non-`Send`
+  `LynxView` with `DrawTarget::Offscreen`, owns the view's `Painter` and every GPU operation,
+  ticks, settles, and returns its RGBA capture. Dropping that view releases
+  its group, including the Lynx main thread, QuickJS runtime, and Stylo pool;
+  no runtime is shared across capture jobs. The server adds no separate
   rendering owner.
   BMP encoding then runs on Tokio's blocking pool after the view is gone, so
   it cannot retain the view or hold the GPU lane. Queue saturation and an

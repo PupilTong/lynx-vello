@@ -16,7 +16,7 @@
 //!
 //! The loop always waits. What wakes it for a *frame* is this window's own
 //! display: while [`bobcat_core::LynxView::owes_frame`] holds, a
-//! [`crate::vsync::DisplayLink`] on the monitor the window is on posts one
+//! [`crate::cli::vsync::DisplayLink`] on the monitor the window is on posts one
 //! wakeup per refresh, and stops the moment nothing is owed. The engine names
 //! no interval and this file owns no timer — an animation runs at the rate
 //! the display actually scans out, and a swap chain that had no image to give
@@ -35,12 +35,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::window::{Window, WindowId};
 
-use crate::CliError;
-use crate::args::Options;
-use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::Program;
-use crate::screenshot::save_screenshot;
-use crate::vsync::DisplayLink;
+use crate::cli::CliError;
+use crate::cli::args::Options;
+use crate::cli::command::{COMMAND_HELP, Command, Console};
+use crate::cli::page::Program;
+use crate::cli::screenshot::save_screenshot;
+use crate::cli::vsync::DisplayLink;
 
 #[derive(Debug)]
 enum UserEvent {

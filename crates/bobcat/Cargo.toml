@@ -1,0 +1,56 @@
+[package]
+name = "bobcat"
+description = "Native Bobcat CLI and HTTP screenshot embedders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = ["cli", "server"]
+cli = ["dep:flume", "dep:png", "dep:pollster", "dep:winit"]
+server = ["dep:axum", "dep:image", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:socket2", "dep:tokio"]
+
+[[bin]]
+name = "bobcat"
+path = "src/bin/bobcat.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "bobcat-server"
+path = "src/bin/bobcat-server.rs"
+required-features = ["server"]
+
+[[test]]
+name = "headless_cli"
+required-features = ["cli"]
+
+[dependencies]
+bobcat-core = { workspace = true }
+bobcat-resources = { workspace = true }
+bobcat-source = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+flume = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+image = { workspace = true, features = ["bmp"], optional = true }
+reqwest = { workspace = true, features = ["rustls"], optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+socket2 = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "time"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = { workspace = true, optional = true }
+
+[dev-dependencies]
+flashbulb = { workspace = true, features = ["render"] }
+rkyv = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
