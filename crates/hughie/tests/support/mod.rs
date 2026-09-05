@@ -542,24 +542,12 @@ impl CoreStyle for TestStyle {
         self.skips_contents
     }
 
-    fn linear_direction(&self) -> linear_direction::T {
-        self.linear_direction
-    }
-
-    fn linear_weight_sum(&self) -> NonNegativeNumber {
-        self.linear_weight_sum
-    }
-
     fn justify_content(&self) -> ContentDistribution {
         self.justify_content
     }
 
     fn align_items(&self) -> ItemPlacement {
         self.align_items
-    }
-
-    fn linear_weight(&self) -> NonNegativeNumber {
-        self.linear_weight
     }
 
     fn align_self(&self) -> SelfAlignment {
@@ -570,20 +558,22 @@ impl CoreStyle for TestStyle {
         self.order
     }
 
-    fn flex_direction(&self) -> flex_direction::T {
-        self.flex_direction
-    }
-
-    fn flex_wrap(&self) -> flex_wrap::T {
-        self.flex_wrap
-    }
-
     fn gap(&self) -> Size<&NonNegativeLengthPercentageOrNormal> {
         self.gap.as_ref()
     }
 
     fn align_content(&self) -> ContentDistribution {
         self.align_content
+    }
+}
+
+impl FlexboxStyle for TestStyle {
+    fn flex_direction(&self) -> flex_direction::T {
+        self.flex_direction
+    }
+
+    fn flex_wrap(&self) -> flex_wrap::T {
+        self.flex_wrap
     }
 
     fn flex_basis(&self) -> &FlexBasis {
@@ -597,7 +587,9 @@ impl CoreStyle for TestStyle {
     fn flex_shrink(&self) -> NonNegativeNumber {
         self.flex_shrink
     }
+}
 
+impl GridStyle for TestStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         &self.template_rows
     }
@@ -641,7 +633,23 @@ impl CoreStyle for TestStyle {
     fn justify_self(&self) -> SelfAlignment {
         self.justify_self
     }
+}
 
+impl LinearStyle for TestStyle {
+    fn linear_direction(&self) -> linear_direction::T {
+        self.linear_direction
+    }
+
+    fn linear_weight_sum(&self) -> NonNegativeNumber {
+        self.linear_weight_sum
+    }
+
+    fn linear_weight(&self) -> NonNegativeNumber {
+        self.linear_weight
+    }
+}
+
+impl RelativeStyle for TestStyle {
     fn relative_layout_once(&self) -> relative_layout_once::T {
         self.relative_layout_once
     }

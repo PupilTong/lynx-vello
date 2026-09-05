@@ -160,11 +160,17 @@ impl CoreStyle for MockStyle {
     fn skips_contents(&self) -> bool {
         self.skips_contents
     }
+}
 
+impl RelativeStyle for MockStyle {}
+
+impl FlexboxStyle for MockStyle {
     fn flex_grow(&self) -> NonNegativeNumber {
         self.flex_grow
     }
+}
 
+impl GridStyle for MockStyle {
     fn grid_template_rows(&self) -> &GridTemplateComponent {
         const NONE: &GridTemplateComponent = &GridTemplateComponent::None;
         NONE

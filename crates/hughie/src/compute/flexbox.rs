@@ -25,7 +25,7 @@ use super::util::{
 };
 use crate::geometry::{Edges, Point, Size};
 use crate::style::containment::size_containment;
-use crate::style::{Contain, CoreStyle};
+use crate::style::{Contain, CoreStyle, FlexboxStyle};
 use crate::tree::{
     AvailableSpace, LayoutGoal, LayoutInput, LayoutOutput, LayoutTree, RequestedAxis, SizingMode,
 };
@@ -227,18 +227,17 @@ fn resolve_flex_basis(value: &FlexBasis, basis: Option<f32>) -> Option<f32> {
     }
 }
 
-fn resolve_item<T>(
-    tree: &T,
-    key: ItemKey<T::NodeId>,
+fn resolve_item<N, S>(
+    style: &S,
+    key: ItemKey<N>,
     container_inner_size: Size<Option<f32>>,
     axes: Axes,
     rtl: bool,
     default_alignment: AlignFlags,
-) -> FlexItem<T::NodeId>
+) -> FlexItem<N>
 where
-    T: LayoutTree,
+    S: FlexboxStyle,
 {
-    let style = tree.style(key.node);
     let flex_grow = style.flex_grow().0;
     let flex_shrink = style.flex_shrink().0;
     debug_assert!(
@@ -249,7 +248,7 @@ where
         flex_shrink.is_finite() && flex_shrink >= 0.0,
         "flex-shrink must be finite and non-negative"
     );
-    let geometry = resolve_item_geometry(&style, container_inner_size);
+    let geometry = resolve_item_geometry(style, container_inner_size);
     FlexItem {
         geometry,
         key,
@@ -403,8 +402,8 @@ where
     clippy::too_many_lines,
     reason = "the flex-basis resolution steps read as one sequence"
 )]
-fn determine_flex_base_sizes<T>(
-    tree: &T,
+fn determine_flex_base_sizes<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     items: &mut [FlexItem<T::NodeId>],
     axes: Axes,
@@ -418,7 +417,8 @@ fn determine_flex_base_sizes<T>(
     // inspection entirely.
     container_independent: Option<Size<bool>>,
 ) where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: FlexboxStyle,
 {
     let container_main = axes.main.size(container_inner_size);
     let available_main = axes.main.size(available_space);
@@ -1515,8 +1515,8 @@ fn static_position_for_absolute<N>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_absolute_children<T>(
-    tree: &T,
+fn perform_absolute_children<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     absolute_items: &[OrderedItem<T::NodeId>],
     axes: Axes,
@@ -1529,7 +1529,8 @@ fn perform_absolute_children<T>(
     default_alignment: AlignFlags,
 ) -> Size<f32>
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: FlexboxStyle,
 {
     let content_origin = Point::new(border.left + padding.left, border.top + padding.top);
     let parent_size = inner_size.map(Some);
@@ -1542,7 +1543,7 @@ where
     for pending in absolute_items {
         let key = pending.key();
         let style = tree.style(key.node);
-        let mut item = resolve_item(tree, key, parent_size, axes, rtl, default_alignment);
+        let mut item = resolve_item(&style, key, parent_size, axes, rtl, default_alignment);
         let mut known = item.preferred_size;
         let available = inner_size.map(AvailableSpace::Definite);
         let output = measure_child(
@@ -1671,14 +1672,15 @@ where
 }
 
 #[allow(clippy::too_many_lines)]
-pub fn compute_flexbox_layout<T>(
-    tree: &T,
+pub fn compute_flexbox_layout<'tree, T>(
+    tree: &'tree T,
     state: &mut T::State,
     node: T::NodeId,
     input: LayoutInput,
 ) -> LayoutOutput
 where
-    T: LayoutTree,
+    T: LayoutTree + 'tree,
+    T::Style<'tree>: FlexboxStyle,
 {
     let style = tree.style(node);
     let size_containment = size_containment(&style);
@@ -1730,7 +1732,17 @@ where
     );
     let mut items = generated
         .into_iter()
-        .map(|item| resolve_item(tree, item.key(), percentage_basis, axes, rtl, align_items))
+        .map(|item| {
+            let key = item.key();
+            resolve_item(
+                &tree.style(key.node),
+                key,
+                percentage_basis,
+                axes,
+                rtl,
+                align_items,
+            )
+        })
         .collect::<Vec<_>>();
     determine_flex_base_sizes(
         tree,
@@ -1839,7 +1851,14 @@ where
         main_gap = axes.main.size(gap);
         for item in &mut items {
             let key = item.key;
-            *item = resolve_item(tree, key, inner_size, axes, rtl, align_items);
+            *item = resolve_item(
+                &tree.style(key.node),
+                key,
+                inner_size,
+                axes,
+                rtl,
+                align_items,
+            );
         }
         let final_available_space = Size::new(
             AvailableSpace::Definite(inner_size.width.unwrap_or(0.0)),
@@ -2003,6 +2022,8 @@ mod tests {
             self.2
         }
     }
+
+    impl FlexboxStyle for TestStyle {}
 
     std::thread_local! {
         static TEST_MEASURE_CALLS: Cell<usize> = const { Cell::new(0) };

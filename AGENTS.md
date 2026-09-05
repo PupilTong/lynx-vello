@@ -1290,9 +1290,13 @@ useful signal for currently-compatible versions of those libraries.
   and without `RefCell`/`AtomicRefCell` checks. Style traits speak the stylo fork's computed-value
   vocabulary directly (requires the `stylo` workspace dep + python3 for its
   build script; the old zero-dependency/standalone pillar is retired), and
-  host-side display dispatch; `LayoutTree::flattened_children` is the box-tree
-  view every algorithm collects items through, flattening `display: contents`
-  subtrees. Leaf content is deliberately closed: replaced
+  host-side display dispatch. The style traits are split by algorithm:
+  `CoreStyle` carries the box model, containment, the alignment accessors and
+  `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and
+  `RelativeStyle` each carry the properties only their own algorithm reads and
+  are demanded at that algorithm's entry point. `LayoutTree::flattened_children`
+  is the box-tree view every algorithm collects items through, flattening
+  `display: contents` subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's
   concrete `TextBlock::probe`/`commit` paragraph path; arbitrary host
   measurers are not supported. **Flexbox, Grid, Relative, and Linear
