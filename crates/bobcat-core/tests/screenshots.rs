@@ -14,7 +14,7 @@ use bobcat_core::{
     PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main.js";
 const MAIN_THREAD_SCRIPT: &str = r"
@@ -104,7 +104,7 @@ async fn booted(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> LynxView<Rc<FetcherDouble>> {
-    let mut view = LynxView::new(
+    let mut view = solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,
@@ -133,7 +133,7 @@ async fn booted_with_sheet_at(
     width: f32,
     height: f32,
 ) -> LynxView<Rc<FetcherDouble>> {
-    let mut view = LynxView::new(
+    let mut view = solo_view(
         Arc::new(NoWakeup),
         width,
         height,

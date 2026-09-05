@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
-use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, StyleThreads};
 use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
 
@@ -45,12 +45,20 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         let requester = std::sync::Arc::clone(&event_requester);
         move || requester.request_event()
     });
+    // One page, so one group: its Lynx main thread and its Stylo workers exist
+    // for this view alone. The handle is dropped as this scope ends — the view
+    // holds the group's thread alive by itself.
+    let group = pollster::block_on(LynxGroup::new(event_requester, StyleThreads::Auto)).map_err(
+        |source| CliError::StartView {
+            input: program.input.clone(),
+            source,
+        },
+    )?;
     // One construction: the windowless GPU target this view renders into,
     // the input's author CSS, and its entry MTS module are all arguments, so
     // what comes back is a view whose first commit is already styled and
     // whose target already exists.
-    let mut view = pollster::block_on(LynxView::new(
-        event_requester,
+    let mut view = pollster::block_on(group.create_lynx_view(
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,

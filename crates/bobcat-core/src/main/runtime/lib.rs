@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 pub(crate) use self::timers::ClockInstant;
 use self::timers::TimerSchedule;
 use super::ToPainterSender;
-use super::quickjs::ScriptEngine;
+use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::main::tree::LynxDocument;
 use crate::script::ScriptError;
 use crate::view::{EventRequester, ToPainter};
@@ -378,14 +378,16 @@ impl<R: EventRequester> fmt::Debug for MainThreadRuntime<R> {
 
 impl<R: EventRequester> MainThreadRuntime<R> {
     pub(crate) fn new(
+        js_runtime: &mut ScriptRuntime,
         document: LynxDocument,
         notify: ToPainterSender<R>,
     ) -> Result<Self, MainThreadError> {
-        let mut engine = ScriptEngine::new()
+        let mut engine = js_runtime
+            .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(notify.clone()));
         let timers = Rc::new(TimerState::new());
-        let tree = install_bobcat(&mut engine, document, notify, &events, &timers)?;
+        let tree = install_bobcat(&mut engine, js_runtime, document, notify, &events, &timers)?;
         Ok(Self {
             engine,
             tree,
@@ -463,6 +465,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
     /// Returns whether anything was delivered.
     pub(crate) fn dispatch_event(
         &mut self,
+        js_runtime: &mut ScriptRuntime,
         target: dom::NodeId,
         name: &str,
         detail_json: &str,
@@ -519,6 +522,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
                 HostArgument::Boolean(index == last),
             ];
             let called = self.engine.call_module_export(
+                js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
                 &arguments,
@@ -533,7 +537,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         }
         // Listeners remove elements too; the count they ran up is settled
         // here, at the end of the walk, rather than per node.
-        self.finish_batch(true)?;
+        self.finish_batch(js_runtime, true)?;
         Ok(delivered)
     }
 
@@ -552,7 +556,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
     /// Returns whatever their callbacks threw. A timer is its own task, so
     /// one that throws neither stops the ones behind it nor ends the realm —
     /// the same standing an event listener that throws already has.
-    pub(crate) fn run_due_timers(&mut self) -> Vec<ScriptError> {
+    pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
         let due = self
             .timers
             .schedule
@@ -568,6 +572,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
             // batch is not nested inside this one.
             self.timers.nesting.set(timer.nesting);
             let ran = self.engine.call_module_export(
+                js_runtime,
                 TIMER_MODULE_SPECIFIER,
                 TIMER_RUN_EXPORT,
                 &[HostArgument::Number(f64::from(timer.id))],
@@ -582,7 +587,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         }
         // Callbacks remove elements like any other realm entry point; the
         // count they ran up is settled here, at the end of the batch.
-        if let Err(error) = self.finish_batch(true) {
+        if let Err(error) = self.finish_batch(js_runtime, true) {
             failures.push(error.into_script_error());
         }
         failures
@@ -590,11 +595,12 @@ impl<R: EventRequester> MainThreadRuntime<R> {
 
     pub(crate) fn run_main_thread_script(
         &mut self,
+        js_runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
-        self.engine
+        js_runtime
             .register_module_source(source_name, &entry_source)
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
@@ -622,12 +628,17 @@ if (typeof globalThis.renderPage === "function") {{
 __FlushElementTree();
 "#
         );
-        self.evaluate_module(&boot, BOOT_MODULE_SPECIFIER, "booting the MTS entry")
+        self.evaluate_module(
+            js_runtime,
+            &boot,
+            BOOT_MODULE_SPECIFIER,
+            "booting the MTS entry",
+        )
     }
 
-    fn collect_garbage(&mut self) -> Result<(), MainThreadError> {
+    fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         self.tree.borrow_mut().removals = 0;
-        self.engine
+        js_runtime
             .collect_garbage()
             .map_err(|error| MainThreadError::from_engine("collecting garbage", error))
     }
@@ -635,28 +646,61 @@ __FlushElementTree();
     /// Collects if enough held subtrees were removed since the last
     /// collection. Runs after every evaluation that succeeded; a failed one
     /// keeps its count for the next.
-    fn finish_batch(&mut self, succeeded: bool) -> Result<(), MainThreadError> {
+    fn finish_batch(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        succeeded: bool,
+    ) -> Result<(), MainThreadError> {
         let due = succeeded && self.tree.borrow_mut().take_collection_due();
-        if due { self.collect_garbage() } else { Ok(()) }
+        if due {
+            self.collect_garbage(js_runtime)
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn evaluate_module(
         &mut self,
+        js_runtime: &mut ScriptRuntime,
         source: &str,
         name: &str,
         phase: &'static str,
     ) -> Result<(), MainThreadError> {
         let result = self
             .engine
-            .execute_module(source, name)
+            .execute_module(js_runtime, source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));
-        let finished = self.finish_batch(result.is_ok());
+        let finished = self.finish_batch(js_runtime, result.is_ok());
         result.and(finished)
     }
 }
 
+/// Registers the source modules every realm on one runtime shares.
+///
+/// Their specifiers are fixed, so registering them per realm would refuse the
+/// second realm on a runtime — a runtime holds one source per name and
+/// compiles it into a module per realm, which is exactly what views share.
+pub(crate) fn install_shared_modules(
+    js_runtime: &mut ScriptRuntime,
+) -> Result<(), MainThreadError> {
+    js_runtime
+        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
+        .map_err(|error| {
+            MainThreadError::from_engine("registering the Bobcat runtime module", error)
+        })?;
+    js_runtime
+        .register_module_source(ELEMENT_MODULE_SPECIFIER, ELEMENT_PAPI_SOURCE)
+        .map_err(|error| {
+            MainThreadError::from_engine("registering the Element PAPI module", error)
+        })?;
+    js_runtime
+        .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))
+}
+
 fn install_bobcat<R: EventRequester>(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     document: LynxDocument,
     notify: ToPainterSender<R>,
     events: &Rc<EventState<R>>,
@@ -668,34 +712,28 @@ fn install_bobcat<R: EventRequester>(
         notify,
     }));
 
-    install_host_module(engine, &handle, events)?;
-    install_event_members(engine, events)?;
-    install_timer_members(engine, timers)?;
-    engine
-        .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Bobcat runtime module", error)
-        })?;
-    engine
-        .register_module_source(ELEMENT_MODULE_SPECIFIER, ELEMENT_PAPI_SOURCE)
-        .map_err(|error| {
-            MainThreadError::from_engine("registering the Element PAPI module", error)
-        })?;
-    engine
-        .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
-        .map_err(|error| MainThreadError::from_engine("registering the timer module", error))?;
+    install_host_module(engine, js_runtime, &handle, events)?;
+    install_event_members(engine, js_runtime, events)?;
+    install_timer_members(engine, js_runtime, timers)?;
 
     Ok(handle)
 }
 
 fn install(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     name: &str,
     arity: u8,
     callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
 ) -> Result<(), MainThreadError> {
     engine
-        .register_host_module_function(HOST_MODULE_SPECIFIER, name, arity, Box::new(callback))
+        .register_host_module_function(
+            js_runtime,
+            HOST_MODULE_SPECIFIER,
+            name,
+            arity,
+            Box::new(callback),
+        )
         .map_err(|error| MainThreadError::from_engine("installing the host module", error))
 }
 
@@ -704,13 +742,13 @@ fn install(
 /// argument helpers below, applied at the argument's position; `NAME` is the
 /// diagnostic prefix every helper and validator stitches into its error.
 macro_rules! tree_members {
-    ($engine:ident, $handle:ident; $(
+    ($engine:ident, $js_runtime:ident, $handle:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
     )*) => {$({
         const NAME: &str = concat!("bobcat-internal:host.", stringify!($name));
         let tree = Rc::clone($handle);
         let arity = 0u8 $(+ { let _ = stringify!($arg); 1u8 })*;
-        install($engine, stringify!($name), arity, move |arguments| {
+        install($engine, $js_runtime, stringify!($name), arity, move |arguments| {
             #[allow(unused_mut, reason = "zero-argument members never advance it")]
             let mut index = 0usize;
             $(
@@ -727,10 +765,11 @@ macro_rules! tree_members {
 
 fn install_host_module<R: EventRequester>(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<TreeHandle<R>>>,
     events: &Rc<EventState<R>>,
 ) -> Result<(), MainThreadError> {
-    tree_members! { engine, handle;
+    tree_members! { engine, js_runtime, handle;
         fn createPage() |document| {
             Ok(node_id_value(document.document_element().id()))
         }
@@ -761,7 +800,7 @@ fn install_host_module<R: EventRequester>(
     // also counts toward the next collection: a detached subtree is freed
     // only once the handles naming it are finalized.
     let tree = Rc::clone(handle);
-    install(engine, "removeElement", 1, move |arguments| {
+    install(engine, js_runtime, "removeElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.removeElement";
         let child = node_id_argument(NAME, arguments, 0)?;
         let mut handle = borrow_tree(NAME, &tree)?;
@@ -773,7 +812,7 @@ fn install_host_module<R: EventRequester>(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, "replaceElement", 2, move |arguments| {
+    install(engine, js_runtime, "replaceElement", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.replaceElement";
         let new_element = node_id_argument(NAME, arguments, 0)?;
         let old_element = node_id_argument(NAME, arguments, 1)?;
@@ -790,7 +829,7 @@ fn install_host_module<R: EventRequester>(
         Ok(HostValue::Undefined)
     })?;
 
-    install_attribute_members(engine, handle)?;
+    install_attribute_members(engine, js_runtime, handle)?;
 
     let tree = Rc::clone(handle);
     let state = Rc::clone(events);
@@ -801,7 +840,7 @@ fn install_host_module<R: EventRequester>(
     // reflects goes with it because no handle could ever name one. Every
     // listener the realm had on it is gone too, since those lived on the
     // handle, so the index stops naming the node.
-    install(engine, "dropElement", 1, move |arguments| {
+    install(engine, js_runtime, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
         let node = node_id_argument(NAME, arguments, 0)?;
         let mut tree = borrow_tree(NAME, &tree)?;
@@ -825,10 +864,16 @@ fn install_host_module<R: EventRequester>(
     })?;
 
     let tree = Rc::clone(handle);
-    install(engine, "flushElementTree", 0, move |_arguments| {
-        borrow_tree("bobcat-internal:host.flushElementTree", &tree)?.flush();
-        Ok(HostValue::Undefined)
-    })?;
+    install(
+        engine,
+        js_runtime,
+        "flushElementTree",
+        0,
+        move |_arguments| {
+            borrow_tree("bobcat-internal:host.flushElementTree", &tree)?.flush();
+            Ok(HostValue::Undefined)
+        },
+    )?;
 
     Ok(())
 }
@@ -840,31 +885,52 @@ fn install_host_module<R: EventRequester>(
 /// [`EventState::stopped`].
 fn install_event_members<R: EventRequester>(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     events: &Rc<EventState<R>>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
-    install(engine, "enableEventListener", 3, move |arguments| {
-        let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
-        let capture = capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
-        let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
-        state.enable(node, name, capture);
-        Ok(HostValue::Undefined)
-    })?;
+    install(
+        engine,
+        js_runtime,
+        "enableEventListener",
+        3,
+        move |arguments| {
+            let node = node_id_argument("bobcat-internal:host.enableEventListener", arguments, 0)?;
+            let capture =
+                capture_argument("bobcat-internal:host.enableEventListener", arguments, 1)?;
+            let name = string_argument("bobcat-internal:host.enableEventListener", arguments, 2)?;
+            state.enable(node, name, capture);
+            Ok(HostValue::Undefined)
+        },
+    )?;
 
     let state = Rc::clone(events);
-    install(engine, "disableEventListener", 3, move |arguments| {
-        let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
-        let capture = capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
-        let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
-        state.disable(node, name, capture);
-        Ok(HostValue::Undefined)
-    })?;
+    install(
+        engine,
+        js_runtime,
+        "disableEventListener",
+        3,
+        move |arguments| {
+            let node = node_id_argument("bobcat-internal:host.disableEventListener", arguments, 0)?;
+            let capture =
+                capture_argument("bobcat-internal:host.disableEventListener", arguments, 1)?;
+            let name = string_argument("bobcat-internal:host.disableEventListener", arguments, 2)?;
+            state.disable(node, name, capture);
+            Ok(HostValue::Undefined)
+        },
+    )?;
 
     let state = Rc::clone(events);
-    install(engine, "stopPropagation", 0, move |_arguments| {
-        state.stopped.set(true);
-        Ok(HostValue::Undefined)
-    })?;
+    install(
+        engine,
+        js_runtime,
+        "stopPropagation",
+        0,
+        move |_arguments| {
+            state.stopped.set(true);
+            Ok(HostValue::Undefined)
+        },
+    )?;
 
     Ok(())
 }
@@ -876,10 +942,11 @@ fn install_event_members<R: EventRequester>(
 /// loop's, because the deadline it waits on is the schedule these maintain.
 fn install_timer_members(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     timers: &Rc<TimerState>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(timers);
-    install(engine, "setTimer", 2, move |arguments| {
+    install(engine, js_runtime, "setTimer", 2, move |arguments| {
         const NAME: &str = "bobcat-internal:host.setTimer";
         let delay = number_argument(NAME, arguments, 0)?;
         let repeats = boolean_argument(NAME, arguments, 1)?;
@@ -893,7 +960,7 @@ fn install_timer_members(
     })?;
 
     let state = Rc::clone(timers);
-    install(engine, "clearTimer", 1, move |arguments| {
+    install(engine, js_runtime, "clearTimer", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.clearTimer";
         let id = timer_id_argument(NAME, arguments, 0)?;
         state.schedule.borrow_mut().clear(id);
@@ -914,9 +981,10 @@ fn install_timer_members(
 /// document handle.
 fn install_attribute_members<R: EventRequester>(
     engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
     handle: &Rc<RefCell<TreeHandle<R>>>,
 ) -> Result<(), MainThreadError> {
-    tree_members! { engine, handle;
+    tree_members! { engine, js_runtime, handle;
         fn setAttribute(
             node: node_id_argument,
             name: string_argument,

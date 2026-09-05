@@ -153,10 +153,10 @@ CSS supplied as text.
 Private `bobcat_core::tree` composes the native operations over
 `Document<()>`, and the embedded `packages/bobcat-element` runtime exposes
 the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
-`LynxView::new` transfers its owned `ViewSources` to `bobcat-main` and awaits
-startup. That thread creates the document, fetches and mounts the stylesheets,
-fetches the entry module through the injected resource contract, and only then
-creates QuickJS. The boot module awaits that resolved entry URL before calling
+`LynxGroup::create_lynx_view` transfers that view's `ViewSources` to the
+group's `bobcat-main` and awaits startup. That thread creates the document on
+the group's style pool, mounts the stylesheets its painter pushes, and only
+then opens the view's realm on the group's QuickJS runtime. The boot module awaits that resolved entry URL before calling
 a present `globalThis.renderPage` or the
 `__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:

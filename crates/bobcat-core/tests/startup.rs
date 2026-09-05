@@ -15,8 +15,8 @@ use bobcat_core::resource::{
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
     ResourceRequest, ResourceResponse,
 };
-use bobcat_core::{DrawTarget, EventRequester, LynxView, NoWakeup, ViewSources};
-use support::{FetcherDouble, wait_for_script};
+use bobcat_core::{DrawTarget, EventRequester, NoWakeup, ViewSources};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 /// Which thread ran something, by identity rather than by name.
 ///
@@ -128,7 +128,7 @@ async fn resource_continuations_stay_on_the_painter() {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         records: Arc::clone(&records),
     });
-    let mut view = LynxView::new(
+    let mut view = solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,
@@ -150,7 +150,7 @@ async fn resource_continuations_stay_on_the_painter() {
         "the resource future yielded and resumed"
     );
     // The inversion this change is for: the fetcher belongs to the painter,
-    // which is the thread that called `LynxView::new`. `bobcat-main` owns no
+    // which is the thread that created the group. `bobcat-main` owns no
     // fetcher and awaits nothing — it asks for a source by message and is
     // answered by one.
     let painter = thread_tag();
@@ -295,7 +295,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body
     let fetcher_weak = Rc::downgrade(&fetcher);
     let requester = Arc::new(DropObservedRequester);
     let requester_weak = Arc::downgrade(&requester);
-    let mut construction = Box::pin(LynxView::new(
+    let mut construction = Box::pin(solo_view(
         requester,
         393.0,
         727.0,
@@ -354,7 +354,7 @@ async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host()
         dropped: Mutex::new(Some(dropped_sender)),
     });
 
-    let construction = LynxView::new(
+    let construction = solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,

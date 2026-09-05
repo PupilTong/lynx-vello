@@ -1,7 +1,7 @@
 use super::*;
 use crate::main::tree::{PageConfig, Viewport, new_document};
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, main_link};
+use crate::view::{NoWakeup, detached_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -21,7 +21,7 @@ fn no_detail() -> Arc<str> {
     Arc::from("")
 }
 
-fn runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
+fn runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
     runtime_over(new_document(
         Viewport::new(393.0, 727.0),
         PageConfig::default(),
@@ -30,7 +30,7 @@ fn runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
 
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
-fn text_runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
+fn text_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
     let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
@@ -38,9 +38,11 @@ fn text_runtime() -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
     runtime_over(document)
 }
 
-fn runtime_over(document: LynxDocument) -> (MainThreadRuntime<NoWakeup>, DocumentProbe) {
-    let (runtime, elements, _) = runtime_over_watching_names(document);
-    (runtime, elements)
+fn runtime_over(
+    document: LynxDocument,
+) -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
+    let (js_runtime, runtime, elements, _) = runtime_over_watching_names(document);
+    (js_runtime, runtime, elements)
 }
 
 /// A same-thread window onto the runtime-owned document, so a test can
@@ -70,18 +72,27 @@ impl PublishedNames {
 /// ask what the realm published.
 fn runtime_over_watching_names(
     document: LynxDocument,
-) -> (MainThreadRuntime<NoWakeup>, DocumentProbe, PublishedNames) {
-    let (painter, main) = main_link(Arc::new(NoWakeup));
-    let runtime = MainThreadRuntime::new(document, main.notify).expect("main-thread runtime");
+) -> (
+    ScriptRuntime,
+    MainThreadRuntime<NoWakeup>,
+    DocumentProbe,
+    PublishedNames,
+) {
+    let (painter, main) = detached_link(Arc::new(NoWakeup));
+    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
+    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
+        .expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
-    (runtime, probe, PublishedNames(painter))
+    (js_runtime, runtime, probe, PublishedNames(painter))
 }
 
 #[test]
 fn element_papi_boot_builds_the_private_tree() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -97,9 +108,10 @@ fn element_papi_boot_builds_the_private_tree() {
 
 #[test]
 fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 const engine = lynx.getEngine();
                 const page = __CreatePage('card', 0);
@@ -122,9 +134,10 @@ fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
 
 #[test]
 fn boot_allows_an_entry_with_neither_render_path() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             "if ('renderPage' in globalThis) throw new Error('unexpected global');",
             "app:///no-render.js",
         )
@@ -138,9 +151,10 @@ fn boot_allows_an_entry_with_neither_render_path() {
 
 #[test]
 fn boot_awaits_the_esm_entry_before_rendering_once() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 import { __CreateView as createView } from 'bobcat:element';
                 await Promise.resolve();
@@ -169,9 +183,10 @@ fn boot_awaits_the_esm_entry_before_rendering_once() {
 
 #[test]
 fn imported_runtime_bindings_supply_bridges_without_globals() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 if (lynx.SystemInfo !== SystemInfo || !Object.isFrozen(SystemInfo)) {
                   throw new Error('SystemInfo must be one frozen shared snapshot');
@@ -260,9 +275,10 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
 
 #[test]
 fn get_engine_returns_one_event_target_with_standard_listener_identity() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 const engine = lynx.getEngine();
                 if (engine !== lynx.getEngine() ||
@@ -312,9 +328,9 @@ fn get_engine_returns_one_event_target_with_standard_listener_identity() {
 
 #[test]
 fn bundle_url_reaches_script_error_location() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     let error = runtime
-        .run_main_thread_script("const = 1", "app:///broken.js")
+        .run_main_thread_script(&mut js_runtime, "const = 1", "app:///broken.js")
         .expect_err("syntax error");
 
     assert!(
@@ -329,9 +345,10 @@ fn bundle_url_reaches_script_error_location() {
 
 #[test]
 fn stale_element_ids_become_script_errors_without_losing_the_tree() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     let error = runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 import { removeElement } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
@@ -356,9 +373,10 @@ fn stale_element_ids_become_script_errors_without_losing_the_tree() {
 /// outlived its element can only ever name nothing.
 #[test]
 fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -381,7 +399,9 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
         "the detached element is still allocated while script could reach it"
     );
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     assert!(
         elements.tree().get(node_id(3)).is_none(),
         "a swept handle drops its element through the finalization registry"
@@ -389,6 +409,7 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
 
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -410,9 +431,10 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
 
 #[test]
 fn classes_attributes_and_identity_queries_reach_the_private_document() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -446,9 +468,10 @@ fn classes_attributes_and_identity_queries_reach_the_private_document() {
 
 #[test]
 fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -478,9 +501,10 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
 
 #[test]
 fn inline_styles_reach_computed_style_and_layout() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -511,9 +535,10 @@ fn inline_styles_reach_computed_style_and_layout() {
 
 #[test]
 fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -552,9 +577,10 @@ fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
 
 #[test]
 fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -587,9 +613,10 @@ fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
 /// a `;` start a second declaration instead.
 #[test]
 fn a_style_record_value_cannot_inject_a_second_declaration() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -641,9 +668,10 @@ fn a_style_record_splits_on_lengths_rather_than_delimiters() {
 
 #[test]
 fn a_later_inline_style_record_replaces_the_complete_declaration_block() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -671,9 +699,10 @@ fn a_later_inline_style_record_replaces_the_complete_declaration_block() {
 
 #[test]
 fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -705,7 +734,7 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut painter, main) = main_link(Arc::new(NoWakeup));
+    let (mut painter, main) = detached_link(Arc::new(NoWakeup));
     let state = EventState::new(main.notify);
     let (a, b) = (node_id(3), node_id(4));
     // The edges as a sequence, so both what crossed and what did not are
@@ -772,12 +801,12 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
 /// registration has to reach it as the realm makes it.
 #[test]
 fn registering_a_listener_publishes_its_name_to_the_painting_side() {
-    let (mut runtime, _elements, mut names) = runtime_over_watching_names(new_document(
-        Viewport::new(393.0, 727.0),
-        PageConfig::default(),
-    ));
+    let (mut js_runtime, mut runtime, _elements, mut names) = runtime_over_watching_names(
+        new_document(Viewport::new(393.0, 727.0), PageConfig::default()),
+    );
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -797,6 +826,7 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     // unregistration, not a second boot.
     runtime
         .evaluate_module(
+            &mut js_runtime,
             r"
                 import { __GetElementUniqueID } from 'bobcat:element';
                 import { disableEventListener } from 'bobcat-internal:host';
@@ -814,9 +844,10 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
 
 #[test]
 fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 globalThis.renderPage = function () {
@@ -842,12 +873,18 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
 
     let target = 4;
     let delivered = runtime
-        .dispatch_event(node_id(target), &tap(), &Arc::from("{\"x\":1}"))
+        .dispatch_event(
+            &mut js_runtime,
+            node_id(target),
+            &tap(),
+            &Arc::from("{\"x\":1}"),
+        )
         .expect("dispatch");
     assert!(delivered);
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             r"
                 if (seen.join('|') !== 'page-capture:2:1|inner:4:2') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
@@ -861,9 +898,10 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
 
 #[test]
 fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 // A card's own worklet runtime installs this; `__AddEvent`
@@ -900,12 +938,13 @@ fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
 
     assert!(
         runtime
-            .dispatch_event(node_id(4), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
             .expect("dispatch")
     );
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             r"
                 if (seen.join('|') !== 'page-capture:2|inner-catch:4') {
                   throw new Error('unexpected deliveries: ' + seen.join('|'));
@@ -919,9 +958,10 @@ fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
 
 #[test]
 fn a_replaced_add_event_handler_moves_its_node_between_passes() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 globalThis.runWorklet = (value, params) => value.body(params[0]);
@@ -947,12 +987,13 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 
     assert!(
         runtime
-            .dispatch_event(node_id(3), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
             .expect("dispatch")
     );
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             r"
                 import { __AddEvent, __GetEvent } from 'bobcat:element';
                 if (seen.join('|') !== 'capture') {
@@ -972,7 +1013,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 
     assert!(
         !runtime
-            .dispatch_event(node_id(3), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
             .expect("dispatch")
     );
 }
@@ -984,9 +1025,10 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 /// `eventPhase` and `currentTarget` on an event a listener kept.
 #[test]
 fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 globalThis.renderPage = function () {
@@ -1010,13 +1052,14 @@ fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
     for _ in 0..2 {
         assert!(
             runtime
-                .dispatch_event(node_id(4), &tap(), &no_detail())
+                .dispatch_event(&mut js_runtime, node_id(4), &tap(), &no_detail())
                 .expect("dispatch")
         );
     }
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             r"
                 // Two deliveries per walk: `outer` registered nothing, so it
                 // is on the path but never reached.
@@ -1055,9 +1098,10 @@ fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
 
 #[test]
 fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1076,7 +1120,7 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
         .expect("dispatch");
 
     assert_eq!(
@@ -1091,9 +1135,10 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
 
 #[test]
 fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 globalThis.renderPage = function () {
@@ -1119,16 +1164,17 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
     // the walk. The real finalizer performs the one `dropElement` call;
     // invoking it manually here would leave that finalizer armed and make
     // its later cleanup a duplicate stale-id call.
-    runtime.collect_garbage().expect("sweep");
+    runtime.collect_garbage(&mut js_runtime).expect("sweep");
 
     runtime
-        .dispatch_event(node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
         .expect("dispatch");
 
     // A collected handle is routine — a ReactLynx re-render drops them
     // constantly — so it must not silently cost the rest of the walk.
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (seen.join('|') !== 'page|view') throw new Error('truncated: ' + seen.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -1138,9 +1184,10 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
 
 #[test]
 fn stopping_propagation_ends_the_walk() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.seen = [];
                 globalThis.renderPage = function () {
@@ -1160,11 +1207,12 @@ fn stopping_propagation_ends_the_walk() {
         .expect("main-thread script");
 
     runtime
-        .dispatch_event(node_id(3), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
         .expect("dispatch");
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (seen.join('|') !== 'page') throw new Error('got ' + seen.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -1174,9 +1222,10 @@ fn stopping_propagation_ends_the_walk() {
 
 #[test]
 fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1189,7 +1238,7 @@ fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
 
     assert!(
         !runtime
-            .dispatch_event(node_id(3), &tap(), &no_detail())
+            .dispatch_event(&mut js_runtime, node_id(3), &tap(), &no_detail())
             .expect("dispatch"),
         "with an empty listener index the walk crosses the boundary zero times"
     );
@@ -1197,9 +1246,10 @@ fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
 
 #[test]
 fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
-    let (mut runtime, elements) = text_runtime();
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1239,9 +1289,10 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
 
 #[test]
 fn rewriting_the_text_attribute_relays_out_the_same_run() {
-    let (mut runtime, elements) = text_runtime();
+    let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1278,9 +1329,10 @@ fn rewriting_the_text_attribute_relays_out_the_same_run() {
 
 #[test]
 fn a_collected_raw_text_takes_its_run_with_it() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1304,7 +1356,9 @@ fn a_collected_raw_text_takes_its_run_with_it() {
         "the detached carrier still holds its run"
     );
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
 
     let tree = elements.tree();
     assert!(tree.get(node_id(4)).is_none(), "the carrier is freed");
@@ -1323,9 +1377,10 @@ fn a_collected_raw_text_takes_its_run_with_it() {
 /// letting go.
 #[test]
 fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1343,7 +1398,9 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
         )
         .expect("main-thread script");
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     assert_eq!(
         elements
             .tree()
@@ -1355,6 +1412,7 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "import { __CreatePage, __RemoveElement } from 'bobcat:element';
                  __RemoveElement(__CreatePage('card', 0), globalThis.wrapper);",
             "app:///detach.js",
@@ -1370,12 +1428,15 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "globalThis.wrapper = undefined;",
             "app:///let-go.js",
             "letting go",
         )
         .expect("let go");
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     let tree = elements.tree();
     assert!(
         tree.get(node_id(3)).is_none(),
@@ -1395,9 +1456,10 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
 /// the connected elements, and nothing more.
 #[test]
 fn every_connected_element_survives_a_collection_script_holds_nothing_through() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1426,7 +1488,9 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
         )
         .expect("main-thread script");
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     let tree = elements.tree();
     // page 2, a 3, b 4, c 5, d 6, e 7, f 8, g 9.
     for (id, parent) in [(3, 2), (6, 2), (7, 3), (8, 3)] {
@@ -1450,9 +1514,10 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
 /// element must not quietly disappear from the screen.
 #[test]
 fn dropping_a_connected_element_is_refused() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     let error = runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 import { dropElement } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
@@ -1481,9 +1546,10 @@ fn dropping_a_connected_element_is_refused() {
 /// element it was swapped with.
 #[test]
 fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1525,9 +1591,10 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
 /// somewhere else — the ancestor's handle dying does not take it.
 #[test]
 fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1544,7 +1611,9 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
         )
         .expect("main-thread script");
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     let tree = elements.tree();
     assert!(
         tree.get(node_id(3)).is_none(),
@@ -1558,6 +1627,7 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "import { __AppendElement, __CreatePage } from 'bobcat:element';
                  __AppendElement(__CreatePage('card', 0), globalThis.inner);",
             "app:///reattach.js",
@@ -1579,9 +1649,10 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
 /// collection and the ids are retired.
 #[test]
 fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1607,7 +1678,9 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
         "before collection the detached subtree is intact"
     );
 
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     let tree = elements.tree();
     for id in 3..=6 {
         assert!(
@@ -1623,9 +1696,10 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
 /// script lets go.
 #[test]
 fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1640,11 +1714,14 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
             "app:///removal.js",
         )
         .expect("main-thread script");
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     assert!(elements.tree().get(node_id(4)).is_some());
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "import { __CreateView, __ReplaceElement } from 'bobcat:element';
                  __ReplaceElement(__CreateView(0), globalThis.holder);",
             "app:///replace.js",
@@ -1665,6 +1742,7 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "import { __RemoveElement } from 'bobcat:element';
                  __RemoveElement(null, globalThis.holder);",
             "app:///noop.js",
@@ -1673,12 +1751,15 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
         .expect("removing a detached element is a no-op");
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "globalThis.holder = undefined;",
             "app:///let-go.js",
             "letting go",
         )
         .expect("let go");
-    runtime.collect_garbage().expect("collection");
+    runtime
+        .collect_garbage(&mut js_runtime)
+        .expect("collection");
     let tree = elements.tree();
     assert!(tree.get(node_id(3)).is_none() && tree.get(node_id(4)).is_none());
 }
@@ -1687,9 +1768,10 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
 /// finalizer's call lands, and the id it used names nothing afterwards.
 #[test]
 fn a_drop_frees_the_element_at_once_and_retires_its_id() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 import { dropElement, tagName } from 'bobcat-internal:host';
                 globalThis.renderPage = function () {
@@ -1711,6 +1793,7 @@ fn a_drop_frees_the_element_at_once_and_retires_its_id() {
     assert!(elements.tree().get(node_id(3)).is_none());
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "import { tagName } from 'bobcat-internal:host';
                  tagName(globalThis.goneId);",
             "app:///after.js",
@@ -1740,9 +1823,10 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
             "{ const self = view; __UpdateListCallbacks(view, () => self, () => self, () => self); }",
         ),
     ] {
-        let (mut runtime, elements) = runtime();
+        let (mut js_runtime, mut runtime, elements) = runtime();
         runtime
             .run_main_thread_script(
+                &mut js_runtime,
                 &format!(
                     r"
                     globalThis.renderPage = function () {{
@@ -1758,8 +1842,12 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
                 "app:///self-capture.js",
             )
             .expect("main-thread script");
-        runtime.collect_garbage().expect("collection");
-        runtime.collect_garbage().expect("collection");
+        runtime
+            .collect_garbage(&mut js_runtime)
+            .expect("collection");
+        runtime
+            .collect_garbage(&mut js_runtime)
+            .expect("collection");
         let tree = elements.tree();
         assert!(
             tree.get(node_id(3)).is_none(),
@@ -1774,9 +1862,10 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
 /// without any allocation pressure or explicit collection.
 #[test]
 fn enough_removals_end_a_batch_with_a_collection() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1797,6 +1886,7 @@ fn enough_removals_end_a_batch_with_a_collection() {
     let below = REMOVALS_PER_COLLECTION - 1;
     runtime
         .evaluate_module(
+            &mut js_runtime,
             &format!("globalThis.churn({below});"),
             "app:///below.js",
             "churning",
@@ -1812,7 +1902,12 @@ fn enough_removals_end_a_batch_with_a_collection() {
     );
 
     runtime
-        .evaluate_module("globalThis.churn(1);", "app:///cross.js", "churning")
+        .evaluate_module(
+            &mut js_runtime,
+            "globalThis.churn(1);",
+            "app:///cross.js",
+            "churning",
+        )
         .expect("churn");
     assert_eq!(
         runtime.tree.borrow().removals,
@@ -1845,9 +1940,10 @@ fn enough_removals_end_a_batch_with_a_collection() {
 /// tree. `raw-text`, the only component today, has no shadow root.
 #[test]
 fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1870,16 +1966,17 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     );
 
     let error = runtime
-        .dispatch_event(node_id(5), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, node_id(5), &tap(), &no_detail())
         .expect_err("a target no handle names cannot be delivered");
     assert!(error.to_string().contains("ownership graph"), "{error}");
 }
 
 #[test]
 fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     let error = runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -1901,9 +1998,10 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
 /// exactly what the loop does when its wait ends.
 #[test]
 fn a_timeout_runs_once_with_the_arguments_it_was_given() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.fired = [];
                 globalThis.renderPage = function () {
@@ -1916,13 +2014,17 @@ fn a_timeout_runs_once_with_the_arguments_it_was_given() {
         )
         .expect("main-thread script");
 
-    assert!(runtime.run_due_timers().is_empty(), "the callback returned");
+    assert!(
+        runtime.run_due_timers(&mut js_runtime).is_empty(),
+        "the callback returned"
+    );
     // Nothing is armed any more, so a second round finds nothing to run.
-    assert!(runtime.run_due_timers().is_empty());
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     assert_eq!(runtime.next_timer_deadline(), None);
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (fired.join('|') !== 'xy') throw new Error(fired.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -1932,9 +2034,10 @@ fn a_timeout_runs_once_with_the_arguments_it_was_given() {
 
 #[test]
 fn a_cleared_timeout_never_runs() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.fired = [];
                 globalThis.renderPage = function () {
@@ -1947,10 +2050,11 @@ fn a_cleared_timeout_never_runs() {
         .expect("main-thread script");
 
     assert_eq!(runtime.next_timer_deadline(), None, "nothing stays armed");
-    assert!(runtime.run_due_timers().is_empty());
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (fired.length !== 0) throw new Error(fired.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -1960,9 +2064,10 @@ fn a_cleared_timeout_never_runs() {
 
 #[test]
 fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.ticks = 0;
                 globalThis.renderPage = function () {
@@ -1980,7 +2085,7 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
         .expect("main-thread script");
 
     for _ in 0..6 {
-        assert!(runtime.run_due_timers().is_empty());
+        assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     }
 
     // Three rounds ran it and the third disarmed it, so the last three found
@@ -1988,6 +2093,7 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
     // own `clearInterval`.
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (ticks !== 3) throw new Error(String(ticks));",
             "app:///verify.js",
             "verifying",
@@ -1998,9 +2104,10 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
 
 #[test]
 fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.fired = [];
                 globalThis.victim = 0;
@@ -2016,10 +2123,11 @@ fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
         )
         .expect("main-thread script");
 
-    assert!(runtime.run_due_timers().is_empty());
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (fired.length !== 0) throw new Error(fired.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -2029,9 +2137,10 @@ fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
 
 #[test]
 fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.fired = [];
                 globalThis.renderPage = function () {
@@ -2044,12 +2153,13 @@ fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
         )
         .expect("main-thread script");
 
-    let failures = runtime.run_due_timers();
+    let failures = runtime.run_due_timers(&mut js_runtime);
     assert_eq!(failures.len(), 1, "one callback threw");
     assert!(failures[0].to_string().contains("boom"), "{}", failures[0]);
 
     runtime
         .evaluate_module(
+            &mut js_runtime,
             "if (fired.join('|') !== 'after') throw new Error(fired.join('|'));",
             "app:///verify.js",
             "verifying",
@@ -2059,9 +2169,10 @@ fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
 
 #[test]
 fn a_timer_callback_mutates_the_document_the_realm_shares() {
-    let (mut runtime, elements) = runtime();
+    let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
                   const page = __CreatePage('card', 0);
@@ -2075,7 +2186,7 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
         )
         .expect("main-thread script");
 
-    assert!(runtime.run_due_timers().is_empty());
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
 
     assert_eq!(
         elements
@@ -2092,9 +2203,10 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
 /// which is what keeps such a chain from spinning `bobcat-main`.
 #[test]
 fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
-    let (mut runtime, _elements) = runtime();
+    let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
         .run_main_thread_script(
+            &mut js_runtime,
             r"
                 globalThis.depth = 0;
                 globalThis.renderPage = function () {
@@ -2111,14 +2223,14 @@ fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
         .expect("main-thread script");
 
     for level in 1..=5 {
-        assert!(runtime.run_due_timers().is_empty());
+        assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
         let armed = ClockInstant::now();
         let deadline = runtime.next_timer_deadline().expect("the chain goes on");
         assert!(deadline <= armed, "level {level} still asks for no delay");
     }
 
     let before = ClockInstant::now();
-    assert!(runtime.run_due_timers().is_empty());
+    assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     let deadline = runtime.next_timer_deadline().expect("the chain goes on");
     assert!(deadline > before, "the sixth link waits");
 }

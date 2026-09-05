@@ -59,9 +59,10 @@ pub(crate) struct PendingRelayout {
 pub struct Document<T> {
     style_engine: StyleEngine,
     /// The worker threads this document's style traversals run on. `None`
-    /// traverses on the thread that flushes; a pool is never shared with
-    /// another document, which is what lets two of them restyle at once.
-    style_pool: Option<crate::style::pool::StylePool>,
+    /// traverses on the thread that flushes; a pool is shared only with the
+    /// documents that flush on this same thread, which is what lets two
+    /// documents on two threads restyle at once.
+    style_pool: Option<std::rc::Rc<crate::style::pool::StylePool>>,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::Painter>,
@@ -154,19 +155,26 @@ impl<T> Document<T> {
         &self.style_engine
     }
 
-    /// Gives this document its own style worker threads, returning whatever
-    /// pool it had before.
+    /// Gives this document the style worker threads of the thread it flushes
+    /// on, returning whatever pool it had before.
     ///
-    /// One pool belongs to one document. Handing the same threads to a
-    /// second document that flushes concurrently is the aliasing hazard
-    /// [`crate::StylePool`] describes, which is why a pool is moved here
-    /// rather than shared — an owner cannot hand it on and keep it.
-    pub fn set_style_pool(&mut self, pool: crate::StylePool) -> Option<crate::StylePool> {
+    /// One pool belongs to one thread — rayon takes the thread that builds it
+    /// over as index zero, permanently — so the documents that share a pool
+    /// are exactly the documents that flush on that thread. `Rc` is what says
+    /// so: a pool cannot reach a second thread, and two documents on one
+    /// thread cannot traverse at once, because the thread driving one
+    /// traversal is inside it. The aliasing hazard [`crate::StylePool`]
+    /// describes needs two concurrent traversals over one worker, and this
+    /// leaves nowhere for the second to come from.
+    pub fn set_style_pool(
+        &mut self,
+        pool: std::rc::Rc<crate::StylePool>,
+    ) -> Option<std::rc::Rc<crate::StylePool>> {
         self.style_pool.replace(pool)
     }
 
-    pub(crate) const fn style_pool(&self) -> Option<&crate::style::pool::StylePool> {
-        self.style_pool.as_ref()
+    pub(crate) fn style_pool(&self) -> Option<&crate::style::pool::StylePool> {
+        self.style_pool.as_deref()
     }
 
     pub(crate) const fn animations(&self) -> &crate::style::animation::AnimationDriver {
