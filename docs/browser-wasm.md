@@ -22,7 +22,8 @@ Render Worker
   └── core wasm_thread spawn -> Lynx main/VM Worker
                                ├── owner-thread-bound QuickJS realm
                                ├── Element PAPI + private document batches
-                               └── core wasm_thread spawn -> Stylo workers
+                               └── index 0 of its own Stylo pool, whose other
+                                   members it wasm_thread-spawns
 ```
 
 The UI thread never instantiates Wasm and never owns an engine, document,
@@ -301,7 +302,8 @@ submits edits through a same-origin Blob URL. It creates and transfers the DOM
 canvas only for the first render, registering its font container and default
 family once. Every submit is one `loadLynxXml` on that warm canvas, rebuilding
 only the native `LynxView`; the Render Worker, OffscreenCanvas, Wasm instance,
-Stylo pool, and retained font bytes stay. The Blob URL is
+Stylo worker count, and retained font bytes stay — the Stylo workers
+themselves belong to the view and are rebuilt with it. The Blob URL is
 revoked only after `loadLynxXml` settles.
 
 Synchronous GPU readback remains absent because browser WebGPU map completion

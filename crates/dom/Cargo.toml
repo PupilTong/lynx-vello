@@ -16,6 +16,7 @@ rustc-hash = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 pollster = { workspace = true }
+rayon = { workspace = true }
 vello = { workspace = true, features = ["wgpu", "wgpu_default"] }
 
 hughie = { workspace = true }
@@ -32,7 +33,6 @@ url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 parley = { workspace = true }
-rayon = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 parley = { workspace = true, features = ["complex-scripts"] }

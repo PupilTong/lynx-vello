@@ -491,11 +491,12 @@ not wasm32  -> std::thread::Builder
 wasm32      -> wasm_thread::Builder
 ```
 
-On Wasm, `configure_wasm_workers(worker_script_url, style_thread_count)` is
-the OS bootstrap seam. It configures the default `wasm_thread` worker script;
+On Wasm, `configure_wasm_workers(worker_script_url)` is the OS bootstrap
+seam. It configures the default `wasm_thread` worker script and nothing else;
 the core then uses that same target-specific spawn path for the Lynx main
-Worker and for Stylo's Rayon Workers. Stylo pool creation belongs to the core,
-not the browser facade.
+Worker and for each view's Stylo Rayon Workers. Stylo pool creation belongs
+to the core, not the browser facade — the facade only says how many workers a
+view should get, through `ViewSources::style_threads`.
 
 Wasm and native follow the same ownership model: every `LynxView` spawns and
 owns one Lynx-main Worker — the Render Worker is the thread that constructed
@@ -508,12 +509,23 @@ the view before it, retaining the Render Worker, transferred canvas, Wasm
 instance, and wrapper state. Replacement construction therefore cannot
 overlap the old view's teardown.
 
-Only the Stylo Rayon pool is process-wide. It adopts the persistent Render
-Worker as index zero rather than a view's transient Lynx-main Worker, and adds
-at least one managed style Worker. A traversal entered from a script owner is
-therefore transferred onto a managed pool worker, while painting enters
-from its long-lived index-zero owner. The configured count describes that
-style pool; each live view's Lynx-main Worker is separate.
+Nothing about Stylo is process-wide any more. Each view's Lynx-main Worker
+builds its own Rayon style pool as its first act of startup, and the pool
+retires with the view. That Worker is index zero of the pool it builds, taken
+over in place by rayon's `use_current_thread` — which is why the pool can only
+be built there, and why the configured count includes it. Stylo's global pool
+was built the same way and Gecko relies on it, so a lone view restyles on the
+same threads and with the same parallelism it did before these pools became
+per-view: the root closure runs inline on the script owner, and the managed
+members take over only where a level is wider than the traversal's work unit.
+The takeover is permanent — rayon leaks about 25 KB per pool and refuses a
+second pool on the same thread forever — which is affordable only because the
+Lynx-main Worker is created for one view and dies with it. Disjoint pools are
+what let two views on two threads restyle at once; the process-wide traversal
+mutex that serialized them is gone. `dom::MAX_STYLE_THREADS` (six) is a hard
+ceiling, not a preference: Stylo indexes its per-traversal thread-local
+storage by Rayon thread index into an array that long, and counts its own six
+the same way.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns

@@ -108,7 +108,13 @@ for (const requiredDeclaration of [
   }
 }
 const lynxXmlConfigStart = facade.indexOf('export const LYNX_XML_PAGE_CONFIG')
-const lynxXmlConfigEnd = facade.indexOf('function preferredThreadCount')
+// Bounded by the declaration's own terminator, not by whatever happens to be
+// declared next: a slice that ends at an unrelated neighbour reports this
+// config as missing whenever that neighbour is renamed.
+const lynxXmlConfigEnd =
+  lynxXmlConfigStart === -1
+    ? -1
+    : facade.indexOf('})', lynxXmlConfigStart)
 if (lynxXmlConfigStart === -1 || lynxXmlConfigEnd === -1) {
   throw new Error('browser facade is missing LYNX_XML_PAGE_CONFIG')
 }
@@ -171,8 +177,13 @@ const domWorker = await readFile(
   'utf8',
 )
 const engineConstruction = renderWorker.indexOf('await BobcatRenderer.create(')
-if (engineConstruction === -1 || !renderWorker.includes('message.threadCount')) {
-  throw new Error('Render Worker must pass the style thread count to view construction')
+if (
+  engineConstruction === -1 ||
+  !renderWorker.includes('message.hardwareConcurrency')
+) {
+  throw new Error(
+    "Render Worker must pass the machine's parallelism to view construction",
+  )
 }
 if (!renderWorker.includes('message.imagePort')) {
   throw new Error('Render Worker must pass the image decode port to view construction')

@@ -14,6 +14,7 @@ pub(crate) mod tree;
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::thread::Builder as ThreadBuilder;
 use std::{str, thread};
 
-use dom::CommittedFrame;
+use dom::{CommittedFrame, StylePool};
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -172,7 +173,7 @@ impl<R: EventRequester> MainLink<R> {
 }
 
 #[cfg(target_arch = "wasm32")]
-static WASM_STYLE_POOL: OnceLock<Result<(), String>> = OnceLock::new();
+static WASM_WORKER_BOOTSTRAP: OnceLock<()> = OnceLock::new();
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 static WASM_SCRIPT_PANIC_HOOK: OnceLock<()> = OnceLock::new();
 
@@ -189,40 +190,31 @@ thread_local! {
     };
 }
 
+/// Tells `wasm_thread` which script boots a Worker, which is what every
+/// thread a view spawns — `bobcat-main` and each of its style workers — is
+/// made of.
+///
+/// Process-wide because the bootstrap is: one module, one script URL. The
+/// thread *counts* are not, and belong to each view's
+/// [`ViewSources::style_threads`](crate::ViewSources::style_threads).
 #[cfg(target_arch = "wasm32")]
-pub fn configure_wasm_workers(
-    worker_script_url: String,
-    style_thread_count: usize,
-) -> Result<(), EngineError> {
+pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineError> {
     if worker_script_url.is_empty() {
         return Err(EngineError::Thread {
             name: "wasm worker configuration",
             message: "the worker script URL must not be empty".to_owned(),
         });
     }
-    if style_thread_count < 2 {
+    if WASM_WORKER_BOOTSTRAP.set(()).is_err() {
         return Err(EngineError::Thread {
             name: "wasm worker configuration",
-            message: "the style thread count must be at least two so one managed worker remains after the entry task"
-                .to_owned(),
-        });
-    }
-    if WASM_STYLE_POOL.get().is_some() {
-        return Err(EngineError::Thread {
-            name: "wasm worker configuration",
-            message: "the style thread pool was already initialized".to_owned(),
+            message: "the Worker bootstrap was already configured".to_owned(),
         });
     }
     wasm_thread::Builder::empty()
         .worker_script_url(worker_script_url)
         .set_default();
-    WASM_STYLE_POOL
-        .get_or_init(|| create_wasm_style_pool(style_thread_count))
-        .clone()
-        .map_err(|message| EngineError::Thread {
-            name: "wasm style pool",
-            message,
-        })
+    Ok(())
 }
 
 /// Starts the Lynx main thread, which creates and initializes its own document
@@ -330,9 +322,22 @@ fn boot<R: EventRequester>(
         config,
         fonts,
         default_font_family,
+        style_threads,
     } = sources;
 
+    // First, and on this thread, because it must be: rayon takes the calling
+    // thread over as index zero, so the pool can only be built by the thread
+    // that will flush. A view whose threads cannot start is a view that never
+    // existed, and starting them here overlaps the fetches the painter
+    // already has in flight.
+    let style_pool = match build_style_pool(style_threads.resolve()) {
+        Ok(pool) => pool,
+        Err(error) => return Some(Err(error.into())),
+    };
     let mut document = new_document(viewport, config);
+    if let Some(pool) = style_pool {
+        document.set_style_pool(pool);
+    }
     for font in fonts {
         document.register_fonts(font);
     }
@@ -629,28 +634,45 @@ pub(super) fn panic_payload(payload: &(dyn std::any::Any + Send)) -> &str {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn create_wasm_style_pool(thread_count: usize) -> Result<(), String> {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(thread_count)
-        .use_current_thread()
-        .thread_name(|index| format!("StyleThread#{index}"))
-        .start_handler(|_| {
-            dom::stylo::thread_state::initialize_layout_worker_thread();
-        })
-        .stack_size(dom::stylo::parallel::STYLE_THREAD_STACK_SIZE_KB * 1024)
-        .spawn_handler(|thread| {
-            let mut builder = wasm_thread::Builder::new();
-            if let Some(name) = thread.name() {
-                builder = builder.name(name.to_owned());
-            }
-            if let Some(stack_size) = thread.stack_size() {
-                builder = builder.stack_size(stack_size);
-            }
-            builder.spawn(move || thread.run()).map(|_| ())
-        })
-        .build()
-        .map_err(|error| error.to_string())?;
-    dom::install_style_thread_pool(pool)
-        .map_err(|_| "Stylo's embedder thread pool was installed twice".to_owned())
+/// Builds one document's style pool, on `bobcat-main` — the thread that owns
+/// that document, is the only one that will ever flush it, and is index zero
+/// of the pool this returns.
+///
+/// Call it nowhere else. Rayon takes the calling thread over in place, which
+/// is what makes a lone view restyle on exactly the threads and with exactly
+/// the parallelism it did when every document shared Stylo's global pool: the
+/// root closure runs inline on `bobcat-main` and the managed members take over
+/// only where a level is wider than the traversal's work unit.
+///
+/// The takeover is permanent — rayon leaks about 25 KB per pool and refuses a
+/// second one on the same thread forever — which is affordable only because
+/// `bobcat-main` is created for one view and dies with it.
+///
+/// `None` asks for no pool at all, and answers `None`: that document traverses
+/// on `bobcat-main` with no pool, which is what a machine gets when the pool
+/// would have held `bobcat-main` and nothing else.
+fn build_style_pool(threads: Option<NonZeroUsize>) -> Result<Option<StylePool>, EngineError> {
+    let Some(threads) = threads else {
+        return Ok(None);
+    };
+    // A managed style thread is a Worker here, which rayon cannot start
+    // itself — and this Worker spawns them, being itself one the Render
+    // Worker spawned, and being index zero of the pool it is spawning for.
+    #[cfg(target_arch = "wasm32")]
+    let pool = StylePool::with_spawn_handler(threads, |worker| {
+        let mut builder = wasm_thread::Builder::new();
+        if let Some(name) = worker.name() {
+            builder = builder.name(name.to_owned());
+        }
+        if let Some(stack_size) = worker.stack_size() {
+            builder = builder.stack_size(stack_size);
+        }
+        builder.spawn(move || worker.run()).map(|_| ())
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    let pool = StylePool::with_threads(threads);
+    pool.map(Some).map_err(|error| EngineError::Thread {
+        name: "style pool",
+        message: error.to_string(),
+    })
 }

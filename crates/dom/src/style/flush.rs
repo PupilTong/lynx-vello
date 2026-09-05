@@ -6,7 +6,6 @@ use stylo::context::{
 };
 use stylo::dom::{TElement, TNode};
 use stylo::driver;
-use stylo::global_style_data::STYLE_THREAD_POOL;
 use stylo::shared_lock::StylesheetGuards;
 use stylo::thread_state::{self, ThreadState};
 use stylo::traversal::{DomTraversal, PerLevelTraversalData, recalc_style_at};
@@ -14,23 +13,9 @@ use stylo::traversal_flags::TraversalFlags;
 use stylo_atoms::Atom;
 
 use crate::style::damage::StyleDamage;
+use crate::style::pool::StylePool;
 use crate::tree::document::{Document, NodeId};
 use crate::tree::node::Node;
-
-#[cfg(target_arch = "wasm32")]
-static EMBEDDER_STYLE_THREAD_POOL: std::sync::OnceLock<rayon::ThreadPool> =
-    std::sync::OnceLock::new();
-
-/// Installs the process-wide style traversal pool supplied by a Wasm embedder.
-///
-/// The persistent presenting owner occupies index zero. Script owners enter
-/// traversal from outside the pool, and Stylo moves their root closures onto a
-/// managed worker. It must be installed before the first style flush.
-/// Subsequent calls return the supplied pool unchanged.
-#[cfg(target_arch = "wasm32")]
-pub fn install_style_thread_pool(pool: rayon::ThreadPool) -> Result<(), rayon::ThreadPool> {
-    EMBEDDER_STYLE_THREAD_POOL.set(pool)
-}
 
 /// The CSS Paint API is unsupported: no speculative painters are registered.
 #[derive(Debug)]
@@ -43,34 +28,6 @@ impl RegisteredSpeculativePainters for NoPainters {
 }
 
 pub(super) static NO_PAINTERS: NoPainters = NoPainters;
-
-/// Serializes style traversals across every document in the process.
-///
-/// Stylo's bloom filter and style-sharing cache do not own their buffers: each
-/// takes an `AtomicRefMut` on a leaked, per-OS-thread `AtomicRefCell`
-/// (`StyleBloom::new` borrows `BLOOM_KEY`, `StyleSharingCache` borrows
-/// `SHARING_CACHE_KEY`), so a second live instance on one thread panics on the
-/// borrow. Both sit in a `ThreadLocalStyleContext`, and those contexts live in
-/// the `ScopedTLS` that [`driver::traverse_dom`] owns for the whole call — so
-/// every pool worker a traversal touched keeps its two buffers borrowed until
-/// that traversal returns, not until it finishes a chunk. A rayon worker
-/// waiting on its own scope runs any job it can find, including a chunk
-/// belonging to a different traversal; that chunk builds a second
-/// `ThreadLocalStyleContext` on a thread that already holds the borrows.
-///
-/// The mutex is process-wide because the pool is: [`STYLE_THREAD_POOL`] is a
-/// global, and a Wasm embedder installs one pool for the module. Per-document
-/// would protect nothing — `flush_styles_with_damage_sink` takes `&mut self`,
-/// so one document already cannot traverse twice at once, and the collision is
-/// between separate documents whose traversals share worker threads. Narrowing
-/// it means guaranteeing no OS thread serves two traversals, which takes one
-/// pool per concurrently flushing document; until something supplies those
-/// thread sets, the pool's granularity is the guard's.
-///
-/// Taken only after `pre_traverse` reports work, so a flush with nothing to
-/// restyle never touches it. The animation-only traversal passes no pool and
-/// runs inline on the caller's thread, which is why it is not guarded.
-static STYLE_POOL_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Balances [`thread_state::enter`] on unwind, so a panicking traversal does
 /// not leave the embedder's thread permanently flagged `LAYOUT`.
@@ -196,22 +153,12 @@ impl<T: Sync> Document<T> {
             let should_traverse = token.should_traverse();
             if should_traverse {
                 let _thread_state = LayoutThreadStateGuard::enter();
-                let _pool_guard = STYLE_POOL_GUARD
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                #[cfg(target_arch = "wasm32")]
-                if let Some(pool) = EMBEDDER_STYLE_THREAD_POOL.get() {
-                    Node::id(driver::traverse_dom(&traversal, token, Some(pool)))
-                } else {
-                    let pool = STYLE_THREAD_POOL.pool();
-                    Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let pool = STYLE_THREAD_POOL.pool();
-                    Node::id(driver::traverse_dom(&traversal, token, pool.as_ref()))
-                }
+                // This document's own workers, or none — in which case the
+                // traversal runs here, on the thread that flushes. Nothing
+                // reaches for a shared pool, so nothing has to be serialized
+                // against another document's flush.
+                let pool = self.style_pool().map(StylePool::rayon);
+                Node::id(driver::traverse_dom(&traversal, token, pool))
             } else {
                 root
             }

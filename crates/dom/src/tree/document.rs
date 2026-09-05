@@ -58,6 +58,10 @@ pub(crate) struct PendingRelayout {
 /// thread rather than handing one over — which is what `bobcat-main` does.
 pub struct Document<T> {
     style_engine: StyleEngine,
+    /// The worker threads this document's style traversals run on. `None`
+    /// traverses on the thread that flushes; a pool is never shared with
+    /// another document, which is what lets two of them restyle at once.
+    style_pool: Option<crate::style::pool::StylePool>,
     tree: Box<TreeArenas<T>>,
     layout: DocumentLayoutState,
     pub(crate) painter: RefCell<crate::paint::painter::Painter>,
@@ -112,6 +116,7 @@ impl<T> Document<T> {
         let layout = DocumentLayoutState::new();
         let mut document = Self {
             style_engine,
+            style_pool: None,
             tree,
             layout,
             painter: RefCell::new(crate::paint::painter::Painter::default()),
@@ -147,6 +152,21 @@ impl<T> Document<T> {
 
     pub(crate) const fn style_engine(&self) -> &StyleEngine {
         &self.style_engine
+    }
+
+    /// Gives this document its own style worker threads, returning whatever
+    /// pool it had before.
+    ///
+    /// One pool belongs to one document. Handing the same threads to a
+    /// second document that flushes concurrently is the aliasing hazard
+    /// [`crate::StylePool`] describes, which is why a pool is moved here
+    /// rather than shared — an owner cannot hand it on and keep it.
+    pub fn set_style_pool(&mut self, pool: crate::StylePool) -> Option<crate::StylePool> {
+        self.style_pool.replace(pool)
+    }
+
+    pub(crate) const fn style_pool(&self) -> Option<&crate::style::pool::StylePool> {
+        self.style_pool.as_ref()
     }
 
     pub(crate) const fn animations(&self) -> &crate::style::animation::AnimationDriver {

@@ -43,7 +43,7 @@ pub mod input {
 
 pub use dom::{
     FontBlob, FrameImages, ImageEvent, ImageInbox, ImageReports, ImageSizeHint,
-    MAX_RENDERABLE_DIMENSION, NoImages, is_renderable, vello,
+    MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
 };
 pub use main::tree::PageConfig;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
@@ -51,5 +51,5 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 pub use view::configure_wasm_workers;
 pub use view::{
     DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError,
-    NoWakeup, Screenshot, ViewSources, WindowTarget,
+    NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
 };

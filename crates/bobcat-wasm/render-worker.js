@@ -77,7 +77,7 @@ async function initialize(message) {
     message.devicePixelRatio,
     message.workerUrl,
     message.imagePort,
-    message.threadCount,
+    message.hardwareConcurrency,
     message.config.defaultDisplayLinear,
     message.config.defaultOverflowVisible,
     message.config.enableCSSSelector,
