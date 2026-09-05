@@ -3,7 +3,7 @@ mod support;
 
 use hughie::compute::{LeafMeasureInput, LeafMetrics};
 use hughie::prelude::*;
-use stylo::computed_values::{box_sizing, direction, linear_direction, visibility};
+use stylo::computed_values::{box_sizing, direction, linear_direction};
 use stylo::values::computed::{
     Contain, ContentDistribution, Display, MaxSize, PositionProperty, Size as StyleSize,
 };
@@ -172,7 +172,7 @@ fn absolute_and_in_flow_children_share_merged_layout_order() {
 }
 
 #[test]
-fn display_none_is_zeroed_while_hidden_stays_in_flow() {
+fn display_none_is_zeroed_while_siblings_stay_in_flow() {
     let mut tree = TestTree::default();
     let first = fixed_leaf(&mut tree, 10.0, 10.0);
     let hidden_descendant = fixed_leaf(&mut tree, 8.0, 8.0);
@@ -183,13 +183,11 @@ fn display_none_is_zeroed_while_hidden_stays_in_flow() {
         },
         vec![hidden_descendant],
     );
-    let visibility_hidden = fixed_leaf_with(&mut tree, 10.0, 10.0, |style| {
-        style.visibility = visibility::T::Hidden;
-    });
+    let after_none = fixed_leaf(&mut tree, 10.0, 10.0);
     let last = fixed_leaf(&mut tree, 10.0, 10.0);
     let root = tree.push_linear(
         TestStyle::default(),
-        vec![first, display_none, visibility_hidden, last],
+        vec![first, display_none, after_none, last],
     );
 
     definite_layout(&tree, root, 50.0, 50.0);
@@ -197,7 +195,7 @@ fn display_none_is_zeroed_while_hidden_stays_in_flow() {
     assert_eq!(tree.layout(display_none), Layout::with_order(1));
     assert_eq!(tree.layout(hidden_descendant), Layout::default());
     assert_close(tree.layout(first).location.y, 0.0);
-    assert_close(tree.layout(visibility_hidden).location.y, 10.0);
+    assert_close(tree.layout(after_none).location.y, 10.0);
     assert_close(tree.layout(last).location.y, 20.0);
 }
 

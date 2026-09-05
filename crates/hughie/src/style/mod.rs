@@ -44,7 +44,7 @@ pub mod text;
 use containment::effective_containment;
 pub use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
-    relative_layout_once, text_wrap_mode, visibility, white_space_collapse,
+    relative_layout_once, text_wrap_mode, visibility,
 };
 pub use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 pub use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
@@ -86,7 +86,6 @@ style_protocol! {
             inherited_values -> &ComputedValues = style.computed_values(),
 
             display -> Display = style.computed_values().clone_display(),
-            visibility -> visibility::T = style.computed_values().clone_visibility(),
             position -> PositionProperty = style.computed_values().clone_position(),
             inset -> Edges<&Inset> = {
                 let position = style.computed_values().get_position();
@@ -311,7 +310,6 @@ mod tests {
         let style = Defaults;
 
         assert!(!style.display().is_none());
-        assert_eq!(style.visibility(), visibility::T::Visible);
         assert_eq!(style.position(), PositionProperty::Static);
         assert_eq!(style.inset(), Edges::uniform(&Inset::auto()));
         assert_eq!(

@@ -50,10 +50,6 @@ impl<T> LayoutTree for TreeArenas<T> {
         self.at(node).flat_children().iter().copied()
     }
 
-    fn child_count(&self, node: NodeSlot) -> usize {
-        self.at(node).flat_children().len()
-    }
-
     fn style(&self, node: NodeSlot) -> Self::Style<'_> {
         StyleView::of(self.at(node))
     }

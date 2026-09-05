@@ -14,7 +14,7 @@ use hughie::prelude::*;
 use style_traits::values::specified::AllowedNumericType;
 use stylo::computed_values::{
     box_sizing, direction, flex_direction, flex_wrap, linear_direction, relative_center,
-    relative_layout_once, visibility,
+    relative_layout_once,
 };
 use stylo::values::computed::length::NonNegativeLengthPercentageOrNormal;
 use stylo::values::computed::length_percentage::{CalcNode, ComputedLeaf};
@@ -375,7 +375,6 @@ pub(super) enum TestDisplay {
 #[derive(Debug, Clone)]
 pub(super) struct TestStyle {
     pub(super) display: Display,
-    pub(super) visibility: visibility::T,
     pub(super) position: PositionProperty,
     pub(super) inset: Edges<Inset>,
     pub(super) size: Size<StyleSize>,
@@ -426,7 +425,6 @@ impl Default for TestStyle {
     fn default() -> Self {
         Self {
             display: Display::Flex,
-            visibility: visibility::T::Visible,
             position: PositionProperty::Relative,
             inset: Edges::uniform(inset_auto()),
             size: Size::new(size_auto(), size_auto()),
@@ -478,10 +476,6 @@ impl Default for TestStyle {
 impl CoreStyle for TestStyle {
     fn display(&self) -> Display {
         self.display
-    }
-
-    fn visibility(&self) -> visibility::T {
-        self.visibility
     }
 
     fn position(&self) -> PositionProperty {
@@ -1096,10 +1090,6 @@ impl LayoutTree for TestTree {
         TestChildren {
             ids: self.nodes[node.index].children.iter(),
         }
-    }
-
-    fn child_count(&self, node: TestRef) -> usize {
-        self.nodes[node.index].children.len()
     }
 
     fn style(&self, node: TestRef) -> &TestStyle {

@@ -1770,10 +1770,6 @@ mod tests {
             core::iter::empty()
         }
 
-        fn child_count(&self, _node: Self::NodeId) -> usize {
-            0
-        }
-
         fn style(&self, node: Self::NodeId) -> Self::Style<'_> {
             &node.tree.style
         }

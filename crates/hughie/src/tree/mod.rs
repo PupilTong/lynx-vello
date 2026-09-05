@@ -191,10 +191,6 @@ pub trait LayoutTree {
     /// Returns all source children, including nodes that generate no box.
     fn children(&self, node: Self::NodeId) -> Self::ChildIter<'_>;
 
-    fn child_count(&self, node: Self::NodeId) -> usize {
-        self.children(node).count()
-    }
-
     /// Flattens `display: contents` subtrees while preserving source order.
     /// Each item includes the style and display value already read by the walk.
     fn flattened_children(&self, node: Self::NodeId) -> FlattenedChildren<'_, Self>

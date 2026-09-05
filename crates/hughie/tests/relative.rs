@@ -3,9 +3,7 @@
 mod support;
 
 use hughie::prelude::*;
-use stylo::computed_values::{
-    box_sizing, direction, relative_center, relative_layout_once, visibility,
-};
+use stylo::computed_values::{box_sizing, direction, relative_center, relative_layout_once};
 use stylo::values::computed::lynx_layout::RelativeReference;
 use stylo::values::computed::{Display, MaxSize, PositionProperty, Size as StyleSize};
 use support::*;
@@ -574,25 +572,6 @@ fn relative_position_insets_are_visual_only_for_sibling_dependencies() {
 
     assert_close(tree.layout(anchor).location.x, 20.0);
     assert_close(tree.layout(follower).location.x, 10.0);
-}
-
-#[test]
-fn hidden_visibility_items_remain_in_the_constraint_graph() {
-    let mut tree = TestTree::default();
-    let hidden = relative_leaf_with(&mut tree, 10.0, 10.0, 1, |s| {
-        s.visibility = visibility::T::Hidden;
-    });
-    let follower = relative_leaf_with(&mut tree, 10.0, 10.0, 2, |s| {
-        s.visibility = visibility::T::Hidden;
-        s.relative_adjacent.right = id(1);
-    });
-    let root = relative_container(&mut tree, TestStyle::default(), &[follower, hidden]);
-
-    definite_layout(&tree, root, 100.0, 20.0);
-
-    assert_close(tree.layout(hidden).location.x, 0.0);
-    assert_close(tree.layout(follower).location.x, 10.0);
-    assert_size(tree.layout(follower).size, Size::new(10.0, 10.0));
 }
 
 #[test]

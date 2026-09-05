@@ -136,7 +136,7 @@ the independent state:
 | `LayoutTree` | associated `NodeId`, mutable `State`, borrowed `Style<'tree>`, and `ChildIter<'tree>`; topology/style reads — `children` (source children) and the provided `flattened_children` (the same children with `display: contents` subtrees spliced in place, each paired with the style the walk read; `size_hint` promises nothing, `capacity_hint` sizes buffers); **`compute_layout(&self, &mut State, NodeId, input)`** as the host display/algorithm dispatch point; immutable/mutable access to each state-owned `LayoutSlot`; required cache clearing | everything |
 | `LayoutSlot` | one node's measurement cache, committed input, static position, unrounded layout, and rounded layout | shared cache/position/rounding machinery and host queries |
 | `CoreStyle` | one `computed_values()` source plus defaulted box, Flex, Grid, Relative, and Linear accessors; sequence and geometry values remain borrowed | all box algorithms |
-| `TextContainerStyle: CoreStyle` | paragraph-level alignment, whitespace, word-break, and indent values | the Parley text block |
+| `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, and indent values | the Parley text block |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley text block |
 
 One `Style: CoreStyle` associated type serves every box algorithm. A
@@ -301,8 +301,9 @@ refcount. Per-field reference wrappers are lendable from any host storage (a
 `ComputedValues` host keeps the four margin edges as separate fields); a host
 that synthesizes style values per call must materialize them in per-node
 storage once per style change and lend from there. A source-backed
-`TextRunStyle` similarly lends its computed font family through
-`font_family_ref`; owned accessors remain available to hand-built run styles.
+`TextRunStyle` lends its whole `ComputedValues` through
+`computed_text_values()`, and the owned `font_family()` default reads the
+family from it; hand-built run styles override the owned accessors directly.
 Defaulted trait methods return the **fork's initial values**:
 the CSS initial value except where Lynx documents otherwise
 (`relative-layout-once: true` — the Lynx computed default *is* the fork
@@ -936,15 +937,15 @@ masonry/`staggered-grid` stay out of scope. The last is a Lynx
   invalidation. `tests/grid.rs` covers numeric placement, sparse/dense and
   row/column auto-flow, implicit/automatic tracks, intrinsic spanning
   contributions, fixed/intrinsic/`fr`/fit-content/minmax tracks, spans,
-  alignment, RTL, baselines, measurement, nested layout, visibility, and
+  alignment, RTL, baselines, measurement, nested layout, and
   absolute/hoisted behavior.
   Private unit tests pin placement bit ranges, clamping, repeat expansion, and
   track cycling. `tests/relative.rs` covers every physical reference family,
   duplicate/reserved ids, both solver modes, cycles, intrinsic and percentage
   sizing, parent min/max feedback, selective wrap-width remeasurement,
-  measurement, visibility, nested layout, and absolute/hoisted behavior.
-  `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order
-  and visibility, intrinsic/minmax sizing, measurement, baselines, auto
+  measurement, nested layout, and absolute/hoisted behavior.
+  `tests/linear.rs` covers orientation and gravity, weight/sum/freeze, order,
+  intrinsic/minmax sizing, measurement, baselines, auto
   margins, absolute/hoisted behavior, and Flex/Grid composition.
   CI enforces at least 95% line coverage for `hughie`
   production source while excluding test and benchmark source from the
