@@ -158,6 +158,11 @@ jobs:
       - name: Build threaded wasm-bindgen bindings
         run: pnpm --filter bobcat-wasm build
 
+      - name: Decode real bundles in Wasm without decoder threads
+        run: >-
+          wasm-pack test --node crates/bobcat-source
+          --test decode_web_bundle --locked -Z build-std=std,panic_abort
+
       - name: Verify shared-memory and npm artifacts
         run: pnpm --filter bobcat-wasm verify
 
