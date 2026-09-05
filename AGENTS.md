@@ -529,11 +529,13 @@ useful signal for currently-compatible versions of those libraries.
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
   newline. Sibling runs and nested text share the establishing element's
-  paragraph. `tree::text` observes `text-maxline` and `text-maxlength`, parses
-  the web attribute numbers, and supplies typed `dom::layout::TextConstraints`.
-  DOM stores them in the node's optional content allocation and forwards them
-  to `hughie::text::block::BlockStyle`; an update or removal invalidates box
-  measurement and re-breaks the retained glyphs. Computed `text-overflow`
+  paragraph. DOM's borrowed `StyleView` reads `text-maxline` and
+  `text-maxlength` from the establishing element's existing attributes through
+  `LinearStyle`, and `BlockStyle::from_container_style` consumes those inputs.
+  Attribute updates and removals invalidate box measurement when the parsed
+  limit changes and re-break the retained glyphs; CSS selector invalidation
+  still runs independently. No text custom element, separate paragraph-limit
+  storage, or public limit setter participates. Computed `text-overflow`
   selects clip or the existing literal-dots ellipsis. Custom inline-truncation
   content, `tail-color-convert`, and the text layout event remain unwired.
   `docs/text-measurement-and-ifc.md` records the earlier design investigation;
@@ -1345,7 +1347,9 @@ useful signal for currently-compatible versions of those libraries.
   `CoreStyle` carries the box model, containment, the alignment accessors and
   `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and
   `RelativeStyle` each carry the properties only their own algorithm reads and
-  are demanded at that algorithm's entry point. `LayoutTree::flattened_children`
+  are demanded at that algorithm's entry point. `LinearStyle` additionally
+  supplies paragraph-wide `text_maxline` and `text_maxlength` inputs from the
+  host's attribute view, defaulting to unlimited. `LayoutTree::flattened_children`
   is the box-tree view every algorithm collects items through, flattening
   `display: contents` subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's

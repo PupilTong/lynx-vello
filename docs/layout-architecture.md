@@ -48,22 +48,26 @@ subtrees), device-pixel rounding, and automatic
 style-damage→`invalidate_layout` consumption with in-place boundary re-layout
 that refreshes the boundary's scrollable `content_size`, with
 replaced leaves reading their node-owned `NaturalSize`, plus W3C text nodes
-using a dedicated text-only inherited-style view, a lazily-created
+using a dedicated run-style view, a lazily-created
 boxed `TextContext` in `DocumentLayoutState`, and per-node lazily boxed
 retained artifacts in that same state. Keeping
-the text-only view separate leaves the box-algorithm style view at two words.
+the run view separate leaves the box-algorithm style view at two words. The
+paragraph reads its establishing element through that same `StyleView`,
+including the attribute-backed `LinearStyle` truncation inputs.
 Literal text and natural-size metadata reuse the node's existing nullable
 content pointer, while retained Parley artifacts stay phase-local in layout
 state. Updating replaced metadata automatically invalidates the affected cache
 path. It is public on `Document` (`set_natural_size`/`natural_size`) because
 the decoder that produces it is a separate crate, but it is not exposed
 through any Element PAPI.
-Text truncation, inline boxes, and the Lynx text attribute policy now have a
-standalone implementation in `hughie::text::block` (flattened Lynx paragraph,
-atomic inline boxes, `text-maxline`/`text-maxlength`/`text-overflow` with
-inline-truncation content, layout-event line data), deliberately unwired from
-the measurement path above; element-backed raw text and the dom-side wiring
-are not implemented yet.
+`display: -lynx-text` flattens its subtree into `hughie::text::block`, with
+atomic inline boxes and element-backed raw text. `LinearStyle::text_maxline`
+and `text_maxlength` carry the establishing element's attribute values into
+`BlockStyle`; computed `text-overflow` selects clip or ellipsis. Layout reads
+limits from existing DOM attributes, and ordinary attribute mutation invalidates
+box measurements when a parsed limit changes while preserving natural
+shaping. Custom inline-truncation content and layout-event delivery remain
+unwired; the standalone block already supports both custom tails and line data.
 [`docs/text-measurement-and-ifc.md`](text-measurement-and-ifc.md) carries the
 retained-layout and eviction contracts the wired path builds on, and the open
 design decisions ahead of an inline formatting context. Crate

@@ -2,6 +2,8 @@
 //! to hughie without cloning its `Arc` or re-entering Stylo's runtime
 //! borrow checker.
 
+use core::num::NonZeroU32;
+
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridStyle, LinearStyle,
@@ -199,13 +201,87 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 }
 
-// Every algorithm accessor answers from `computed_values()`, which this view
-// already overrides, so the four algorithm protocols need no bodies here.
+// CSS accessors answer from the borrowed computed values. Paragraph limits
+// are the attribute-backed inputs to LinearStyle.
 impl<T> FlexboxStyle for StyleView<'_, T> {}
 
 impl<T> GridStyle for StyleView<'_, T> {}
 
-impl<T> LinearStyle for StyleView<'_, T> {}
+impl<T> LinearStyle for StyleView<'_, T> {
+    fn text_maxline(&self) -> Option<NonZeroU32> {
+        text_maxline(self.node.attribute("text-maxline"))
+    }
+
+    fn text_maxlength(&self) -> Option<u32> {
+        text_maxlength(self.node.attribute("text-maxlength"))
+    }
+}
+
+impl<T> TextContainerStyle for StyleView<'_, T> {}
+
+/// Attribute writes invalidate layout only when the value read through
+/// `LinearStyle` changes. CSS selector invalidation still runs independently.
+pub(crate) fn text_limit_changed<T>(node: &Node<T>, name: &str, value: Option<&str>) -> bool {
+    match name {
+        "text-maxline" => text_maxline(node.attribute(name)) != text_maxline(value),
+        "text-maxlength" => text_maxlength(node.attribute(name)) != text_maxlength(value),
+        _ => false,
+    }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "parse_count bounds values to u32; line-clamp accepts positive integers only"
+)]
+fn text_maxline(value: Option<&str>) -> Option<NonZeroU32> {
+    parse_count(value)
+        .filter(|count| count.fract() == 0.0)
+        .and_then(|count| NonZeroU32::new(count as u32))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
+)]
+fn text_maxlength(value: Option<&str>) -> Option<u32> {
+    parse_count(value).map(|count| count as u32)
+}
+
+/// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
+/// decimal prefixes and exponents work, empty/negative values do not. Counts
+/// beyond the paragraph's u32 source space are effectively unlimited.
+fn parse_count(value: Option<&str>) -> Option<f64> {
+    let value = value?
+        .trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
+    let bytes = value.as_bytes();
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let mut exponent = end + 1;
+        exponent += usize::from(matches!(bytes.get(exponent), Some(b'+' | b'-')));
+        let digits = exponent;
+        while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+            exponent += 1;
+        }
+        if exponent > digits {
+            end = exponent;
+        }
+    }
+    value[..end]
+        .parse::<f64>()
+        .ok()
+        .filter(|count| (0.0..=f64::from(u32::MAX)).contains(count))
+}
 
 impl<T> RelativeStyle for StyleView<'_, T> {}
 
@@ -250,67 +326,12 @@ pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues)
                 || old_text.white_space_collapse != new_text.white_space_collapse))
 }
 
-/// The style of the box that establishes a text node's formatting context.
-///
-/// Paragraph-level: the anonymous box contributes no geometry of its own, so
-/// [`CoreStyle`] answers from the initial values, and everything Parley reads
-/// per *paragraph* — `white-space`, `word-break`, `text-wrap`, `text-align`,
-/// `text-indent` — comes from the inherited values of the establishing
-/// element.
-///
-/// This is deliberately a different view from [`TextRunView`] even though both
-/// resolve to the same element today. A text node is a single anonymous run
-/// inside its parent, so the two roles coincide; in an inline formatting
-/// context they do not — one paragraph spans many runs, and each run carries
-/// the style of the innermost inline box its characters sit in. Keeping the
-/// roles apart here is what lets the run side gain its own style source
-/// without disturbing the paragraph side.
-pub(crate) struct TextContainerView<'dom> {
-    paragraph: &'dom ComputedValues,
-}
-
-impl std::fmt::Debug for TextContainerView<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TextContainerView")
-    }
-}
-
-impl<'dom> TextContainerView<'dom> {
-    /// The paragraph style for `node`'s anonymous box — the style of the
-    /// element that establishes its formatting context, which for a lone text
-    /// child is its flat parent.
-    /// The paragraph style of an element that *establishes* a text block.
-    ///
-    /// Its own computed style, not its parent's: a `display: -lynx-text`
-    /// element is the formatting context, where a text node merely sits in
-    /// one.
-    pub(crate) fn of_establishing_element<T>(node: &'dom Node<T>) -> Self {
-        Self {
-            paragraph: node
-                .layout_computed_style()
-                .unwrap_or(&super::ANONYMOUS_STYLE),
-        }
-    }
-}
-
-impl CoreStyle for TextContainerView<'_> {
-    fn computed_values(&self) -> &ComputedValues {
-        &super::ANONYMOUS_STYLE
-    }
-
-    fn inherited_values(&self) -> &ComputedValues {
-        self.paragraph
-    }
-}
-
-impl TextContainerStyle for TextContainerView<'_> {}
-
 /// The style one shaped run carries: everything Parley resolves per *run* —
 /// the font family, size, weight, style, variations, features, `line-height`
 /// and `letter-spacing`.
 ///
-/// Today a text node is one run and its style is its parent's; see
-/// [`TextContainerView`] for why the two views exist separately anyway.
+/// The paragraph's `StyleView` reads its establishing element; each run reads
+/// its own innermost element so nested text keeps its font and line height.
 pub(crate) struct TextRunView<'dom> {
     run: &'dom ComputedValues,
 }
@@ -353,7 +374,7 @@ mod tests {
     use hughie::style::Display;
     use stylo::values::specified::box_::DisplayInside;
 
-    use super::{DisplayMode, StyleView, TextContainerView, TextRunView, display_mode};
+    use super::{DisplayMode, StyleView, TextRunView, display_mode};
 
     #[test]
     fn supported_lynx_displays_map_to_layout_modes() {
@@ -381,7 +402,6 @@ mod tests {
     fn post_flush_style_views_stay_within_their_expected_footprint() {
         let word = size_of::<usize>();
         assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
-        assert_eq!(size_of::<TextContainerView<'static>>(), word);
         assert_eq!(size_of::<TextRunView<'static>>(), word);
     }
 }

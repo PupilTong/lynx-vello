@@ -3,8 +3,12 @@
 //! Each container algorithm reads a set of properties no other algorithm
 //! reads. Keeping those sets on their own traits lets an entry point demand
 //! exactly what it consumes, so `compute_linear_layout` cannot name a grid
-//! property. The accessors a second algorithm shares — the box model, the
+//! property. `LinearStyle` also supplies the paragraph's attribute-backed
+//! line and UTF-16 character limits; hosts default both to unlimited.
+//! The accessors a second algorithm shares — the box model, the
 //! containment triple, the alignment accessors and `order` — stay on `CoreStyle`.
+
+use core::num::NonZeroU32;
 
 use stylo::computed_values::{
     direction, flex_direction, flex_wrap, linear_direction, relative_center, relative_layout_once,
@@ -71,6 +75,8 @@ style_protocol! {
                 style.computed_values().clone_linear_weight_sum(),
             linear_weight -> NonNegativeNumber =
                 style.computed_values().clone_linear_weight(),
+            text_maxline -> Option<NonZeroU32> = None,
+            text_maxlength -> Option<u32> = None,
         }
     }
 }
@@ -180,6 +186,8 @@ mod tests {
         assert_eq!(style.linear_direction(), linear_direction::T::Column);
         assert_eq!(style.linear_weight_sum().0, 0.0);
         assert_eq!(style.linear_weight().0, 0.0);
+        assert_eq!(style.text_maxline(), None);
+        assert_eq!(style.text_maxlength(), None);
 
         assert_eq!(style.relative_layout_once(), relative_layout_once::T::True);
         assert_eq!(style.relative_id(), RELATIVE_REFERENCE_NONE);

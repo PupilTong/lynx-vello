@@ -188,12 +188,15 @@ in the paragraph protocol: direction is resolved at style time into a physical
 
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
 
-Implementation note (2026-09-05): `display: -lynx-text` flattens its subtree
+Implementation note (2026-09-06): `display: -lynx-text` flattens its subtree
 through `dom` into `hughie::text::block`, including atomic inline boxes.
-`bobcat-core::main::tree::text` observes `text-maxline` / `text-maxlength` and
-passes typed `dom::layout::TextConstraints` into the establishing element's
-paragraph. Setting, changing, or removing a limit invalidates box measurement
-while retaining shaped glyphs; both probes and commits use the same limits.
+`dom::layout::StyleView` reads `text-maxline` / `text-maxlength` through
+`LinearStyle`, and `BlockStyle::from_container_style` consumes those inputs
+for the establishing element's paragraph. Attribute mutation invalidates box
+measurement when the parsed limit changes, while CSS selector invalidation
+remains independent. Limits use the existing attribute storage, with no
+custom element or public paragraph-limit setter. Shaped glyphs survive these
+updates; both probes and commits use the same limits.
 The attributes are paragraph-wide, not per nested run. Non-positive line
 counts mean unlimited, while a zero character count cuts all content. The
 web's numeric-prefix parsing is retained; fractional line counts are invalid

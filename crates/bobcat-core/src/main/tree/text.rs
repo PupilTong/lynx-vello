@@ -1,93 +1,9 @@
-//! The `text` tag's paragraph limits and defaults: what color a run wears,
+//! The `text` tag's defaults: what color a run wears,
 //! and what may generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
 //! lays out — is [`super::raw_text`], which owns the `raw-text` component and
 //! the rules that dissolve a carrier into the `text` it is written inside.
-
-use std::num::NonZeroU32;
-
-use dom::layout::TextConstraints;
-use dom::{CustomElement, NodeId};
-
-use super::LynxDocument;
-
-const MAX_LINES: &str = "text-maxline";
-const MAX_CHARS: &str = "text-maxlength";
-
-pub(super) fn define(document: &mut LynxDocument) {
-    document.define("text", Box::new(Text));
-}
-
-struct Text;
-
-impl CustomElement<()> for Text {
-    fn observed_attributes(&self) -> Vec<String> {
-        vec![MAX_LINES.to_owned(), MAX_CHARS.to_owned()]
-    }
-
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
-    )]
-    fn attribute_changed_callback(
-        &self,
-        document: &mut LynxDocument,
-        element: NodeId,
-        _name: &str,
-        old: Option<&str>,
-        new: Option<&str>,
-    ) {
-        if old == new {
-            return;
-        }
-        let node = document.get(element).expect("the reacting text element");
-        let constraints = TextConstraints {
-            max_lines: parse_count(node.attribute(MAX_LINES))
-                // web-elements passes this number to CSS line-clamp, which
-                // accepts positive integers only.
-                .filter(|count| count.fract() == 0.0)
-                .and_then(|count| NonZeroU32::new(count as u32)),
-            max_chars: parse_count(node.attribute(MAX_CHARS)).map(|count| count as u32),
-        };
-        document.set_text_constraints(element, constraints);
-    }
-}
-
-/// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
-/// decimal prefixes and exponents work, empty/negative values do not. Counts
-/// beyond the paragraph's u32 source space are effectively unlimited.
-fn parse_count(value: Option<&str>) -> Option<f64> {
-    let value = value?
-        .trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
-    let bytes = value.as_bytes();
-    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    if bytes.get(end) == Some(&b'.') {
-        end += 1;
-        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-            end += 1;
-        }
-    }
-    if matches!(bytes.get(end), Some(b'e' | b'E')) {
-        let mut exponent = end + 1;
-        exponent += usize::from(matches!(bytes.get(exponent), Some(b'+' | b'-')));
-        let digits = exponent;
-        while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
-            exponent += 1;
-        }
-        if exponent > digits {
-            end = exponent;
-        }
-    }
-    value[..end]
-        .parse::<f64>()
-        .ok()
-        .filter(|count| (0.0..=f64::from(u32::MAX)).contains(count))
-}
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
 ///
@@ -124,8 +40,11 @@ mod tests {
     use dom::stylo::color::AbsoluteColor;
     use dom::stylo::values::computed::{ColorPropertyValue, Display};
 
+    use super::super::LynxDocument;
     use super::super::test_support::{child, display, document, element_under, style_of};
-    use super::{LynxDocument, MAX_CHARS, MAX_LINES};
+
+    const MAX_LINES: &str = "text-maxline";
+    const MAX_CHARS: &str = "text-maxlength";
 
     fn append_run(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
         let raw = element_under(document, parent, "raw-text", "");

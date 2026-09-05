@@ -37,6 +37,9 @@ The style side is split by algorithm: `CoreStyle` holds what every algorithm
 reads, and `FlexboxStyle`/`GridStyle`/`LinearStyle`/`RelativeStyle` hold the
 properties exactly one algorithm reads, demanded by that algorithm's entry
 point (`T::Style<'tree>: GridStyle`) rather than by the `Style` GAT bound.
+`LinearStyle` also supplies the paragraph's `text_maxline` and
+`text_maxlength` inputs, defaulting to unlimited. The DOM style view reads
+these from the establishing element's attributes when building `BlockStyle`.
 `calc()` needs no protocol plumbing: stylo's `LengthPercentage` carries and
 resolves it itself. There are deliberately no `LayoutTreeView`,
 `LayoutSession`, or `LayoutStore` layers.
