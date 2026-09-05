@@ -6,7 +6,7 @@ use std::path::Path;
 
 use bobcat_core::FrameSize;
 
-use crate::CliError;
+use crate::cli::CliError;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

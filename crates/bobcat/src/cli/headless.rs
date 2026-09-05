@@ -16,11 +16,11 @@ use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxView};
 use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
 
-use crate::CliError;
-use crate::args::Options;
-use crate::command::{COMMAND_HELP, Command, Console};
-use crate::page::Program;
-use crate::screenshot::save_screenshot;
+use crate::cli::CliError;
+use crate::cli::args::Options;
+use crate::cli::command::{COMMAND_HELP, Command, Console};
+use crate::cli::page::Program;
+use crate::cli::screenshot::save_screenshot;
 
 /// This embedder's wakeup: a `Pump` on the same channel the console and the
 /// synthetic clock feed, so a wakeup from the Lynx main thread is one more
@@ -301,7 +301,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{FrameClock, ScriptGate};
-    use crate::command::Command;
+    use crate::cli::command::Command;
 
     #[test]
     fn changing_vsync_restarts_the_deadline() {

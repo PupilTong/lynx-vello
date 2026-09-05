@@ -145,41 +145,40 @@ useful signal for currently-compatible versions of those libraries.
   decompilation. Named external modules are preserved; they do not acquire an
   invented page root. `PageSource::from_native_bundle` requires an explicit
   entry name, while `from_bytes` requires `root` for binary page inputs.
-  The `runtime` feature adds `PageSource` and browser response registration,
-  including shared StyleInfo lowering; IO and view construction stay with the
-  embedder. Default features enable runtime and both binary formats. With
-  default features disabled, `xml` has no dependencies; `web-bundle` and
-  `native-bundle` are independently usable without core/resources/GPU, while
-  Wasm enables only `runtime` for XML response registration. Native XML keeps
+  `PageSource`, browser response registration, shared StyleInfo lowering and
+  all three parsers are always available: the crate has no Cargo feature flags.
+  All embedders, including Wasm, depend on the complete crate and its
+  core/resources dependencies. IO and view construction stay with the embedder;
+  the browser's `loadLynxXml` API still accepts only XML responses. Native XML keeps
   strict UTF-8 and private memory URLs; the browser retains replacement
   decoding, final-response fragment URLs, host PageConfig, and registers no
   unsupported background body. See `docs/source-architecture.md` for boundaries,
   migration and parser resource bounds.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
-  opaque `LynxView` facade plus the protocol-only, host-injected
-  `ResourceFetcher`, `ImageStore`, draw-target, OS-input, and
+  opaque `LynxView<F>` facade plus the protocol-only, host-injected
+  `ResourceFetcher`, draw-target, OS-input, and
   lifecycle-wakeup capabilities. The script engine is deliberately *not* one of
   them: core owns its `QuickJS` realm outright, and the only script surface an
   embedder sees is the sanitized `script::ScriptError` a failure is reported
-  with. A view is built from one `ViewSources` — an owned
-  `Arc<dyn ResourceFetcher>`, owned font containers, an optional default font
-  family, an optional `ImageStore`, author stylesheet URLs in cascade order,
-  and the one entry MTS module URL — passed to the async `LynxView::new` with
-  `PageConfig`, the device metrics, and the lifecycle wakeup. `new` validates
-  the viewport, creates the one link, builds the painter in place on the
-  calling thread, starts `bobcat-main`, and awaits one startup result. The
-  wakeup is the only thing `new` is generic over, and `bobcat-main` is what
-  holds it; the view itself names no type parameter. `bobcat-main` creates the document itself, registers its fonts and
-  image store, awaits and mounts every stylesheet, awaits the entry module,
-  creates QuickJS, and boots it before returning success; the fetcher decides
-  where actual network or file IO runs, but every future continuation and
-  document mutation remains on `bobcat-main`. A resource, font, realm, or boot
-  failure yields `LynxViewError` and no view, and nothing later mounts a
-  stylesheet or starts a second entry. Cancelling the unresolved `new` future
-  drops pending resource work or stops startup before `QuickJS` begins, then
-  releases the painter it built and directly joins `bobcat-main`; synchronous
-  startup JavaScript is allowed to finish rather than being externally
-  interrupted.
+  with. A view is built from one `ViewSources` — `PageConfig`, owned font
+  containers, an optional default font family, author stylesheet URLs in
+  cascade order, and the one entry MTS module URL — plus a builder that turns
+  the view's `ImageReports` into its concrete `ResourceFetcher`. Both are
+  passed to the async `LynxView::new` with device metrics, `DrawTarget`, and
+  the lifecycle wakeup. `new` validates the viewport, creates the one link,
+  starts `bobcat-main`, and builds the painter, draw target, and fetcher in
+  place on the calling thread. The view's `F` parameter is that painter-owned
+  fetcher; the wakeup is a separate constructor generic held by
+  `bobcat-main`. The calling thread drives stylesheet and entry fetches and
+  sends only loaded sources across the link. `bobcat-main` creates the
+  document itself, registers its fonts, mounts each received stylesheet,
+  creates QuickJS when the entry arrives, and boots it before returning
+  success. A resource, font, realm, or boot failure yields `LynxViewError` and
+  no view, and nothing later mounts a stylesheet or starts a second entry.
+  Cancelling the unresolved `new` future drops pending resource work on the
+  calling thread or stops startup before `QuickJS` begins, then releases the
+  painter it built and directly joins `bobcat-main`; synchronous startup
+  JavaScript is allowed to finish rather than being externally interrupted.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
@@ -337,7 +336,7 @@ useful signal for currently-compatible versions of those libraries.
   transform and unioned per source — so a host decodes to the draw rather
   than to the file. No container sniffing, no codec contract, no cache
   policy and no byte budget lives in `bobcat-core` or `dom`; the reference
-  implementation of all of that is `crates/bobcat-resources`, which both
+  implementation of all of that is `crates/bobcat-resources`, which all
   shipped embedders use. `LynxView::prefetch_images` warms sources ahead of
   the walk that would discover them. Automatic loading for the Lynx
   `<image>` element remains unwired, as does its element surface (`mode`,
@@ -604,7 +603,7 @@ useful signal for currently-compatible versions of those libraries.
   The crate must remain independent of Bobcat, the DOM, resources, and runtime
   policy — it knows nothing about Lynx.
 - `crates/bobcat-resources` — the cross-platform reference resource system:
-  one `ResourceFetcher` for macOS, Linux and the browser, which both shipped
+  one `ResourceFetcher` for macOS, Linux and the browser, which all shipped
   embedders use instead of the in-memory fetchers they used to carry. It is
   the worked example of what the protocol expects, not part of the
   protocol, and core stays exactly as free of resources as before. Four
@@ -657,15 +656,15 @@ useful signal for currently-compatible versions of those libraries.
   only where ImageIO exists; the Linux decoder and libcurl transport are
   tested for real against the system libraries, and the browser path is
   linted for wasm32 and exercised only in a browser.
-- `crates/bobcat-cli` — the independent native `bobcat` product over
+- `crates/bobcat` (`cli` feature) — the native `bobcat` product over
   `bobcat-core`. Its workspace dependencies are
   `bobcat-core`, `bobcat-resources`, and `bobcat-source`.
   `bobcat -i file:///…` content-sniffs and boots either one web bundle or one
   raw Lynx XML source card; other URL schemes remain rejected at the boundary.
   The CLI is an **embedder** of the opaque `bobcat_core::LynxView`: it owns
-  argument parsing, input bytes, bundle decoding or XML parsing, `PageConfig`
-  mapping, the reference resource system with the extracted scripts/styles
-  registered, the winit window and event loop, device metrics, input
+  argument parsing, local input IO, the `PageSource` instance, the reference
+  resource system with the extracted scripts/styles registered, the winit
+  window and event loop, device metrics, input
   translation, the stdin prompt, and PNG writing — and nothing of the
   pipeline. Every event handler is a relay into the view
   (`dispatch_input`, `resize`, `pump`, clock ticks in
@@ -702,18 +701,56 @@ useful signal for currently-compatible versions of those libraries.
   `set/show vsync`). Screenshots are captured only through that live prompt;
   there is no one-shot startup flag. PNG readback happens only on a screenshot.
   It must not
-  duplicate runtime, DOM, layout, or painting policy: missing MTS/PAPI support
-  remains a precise `bobcat-core` QuickJS error. Its `style_info` module lowers
-  a decoded `StyleInfo` into `bobcat_core::PreparsedStyleSheet` — flattening
-  every `css_id` fragment in reverse-topological order, imported before
-  importing — and registers it in the fetcher under the URL both runners name in
-  `ViewSources::style_sheets`. A bundle carrying non-zero fragment ids warns that
-  per-component scoping is not implemented rather than claiming compatibility.
+  duplicate runtime, DOM, layout, painting, or source-lowering policy: missing
+  MTS/PAPI support remains a precise `bobcat-core` QuickJS error.
+  `bobcat-source` lowers a decoded `StyleInfo` into
+  `bobcat_core::PreparsedStyleSheet`, flattening every `css_id` fragment in
+  reverse-topological order so imported fragments precede their importers.
+  Each native embedder registers that sheet in `bobcat-resources` under the
+  URL it names in `ViewSources::style_sheets`. A bundle carrying non-zero
+  fragment ids warns that per-component scoping is not implemented rather
+  than claiming compatibility.
   For XML, a present `<style>` body instead uses the fetcher's raw CSS-text arm
   and the fixed page configuration is `false`/`false`/`true` for default
   linear display, visible overflow, and selector support. A present background
   section is retained under `/app-service.js` and warned about, but not
   executed until Bobcat has a background-thread realm.
+- `crates/bobcat` (`server` feature) — the `bobcat-server` HTTP screenshot
+  **embedder** in the same crate, not runtime
+  infrastructure inside `bobcat-core`. It follows UI Judge's public capture
+  surface: `GET /health`, and `POST /screenshot` with required `url` and
+  `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +
+  64 KiB body bound, and raw `image/bmp` success output. Captures use a fixed
+  800×600 physical viewport at DPR 1 and uncompressed BMP output, source-over
+  composited onto white before encoding. Scoring-only fields are accepted and
+  ignored; non-empty `globalProps`, `initialData`, and interaction `steps` are
+  rejected with 422 instead of pretending the current opaque core has data
+  injection or DOM automation seams.
+  Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
+  jobs feeds one dedicated capture thread. That is the embedder thread for
+  each job: it constructs and destroys the non-`Send` `LynxView` with
+  `DrawTarget::Offscreen`, owns the view's `Painter` and every GPU operation,
+  ticks, settles, and returns its RGBA capture. The Lynx main thread it spawns
+  is the view's only other runtime thread; the server adds no separate
+  rendering owner.
+  BMP encoding then runs on Tokio's blocking pool after the view is gone, so
+  it cannot retain the view or hold the GPU lane. Queue saturation and an
+  unavailable worker are 503, input/render failures are 422, and encoding
+  failures are 500. A worker panic makes `/health` unavailable and initiates
+  graceful server shutdown.
+  The server loads the top-level `file://`, `http://`, or `https://` input,
+  delegates container mapping to `bobcat-source`, registers its extracted
+  scripts and stylesheet with a per-job `bobcat-resources` system, and lets
+  that system resolve, fetch, cache, and decode page subresources.
+  Source-based native bundles are accepted when they contain a `root` module;
+  real QuickJS/Lepus bytecode remains an explicit error.
+  It listens on all IPv4 and IPv6 interfaces like UI Judge and has no auth,
+  TLS, CORS, or URL sandbox, so its arbitrary file/network reads are suitable
+  only for a trusted environment, including only trusted page JavaScript:
+  `timeoutMs` cannot preempt synchronous QuickJS execution, a blocking GPU
+  driver call on the capture/embedder thread, or synchronous view teardown
+  while it joins the Lynx main thread. It must not move source fetching, HTTP
+  policy, BMP encoding, queueing, or server lifecycle into `bobcat-core`.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
   thread is a JavaScript-only host coordinator: it creates one explicit
@@ -1531,38 +1568,35 @@ This is deliberately not a fuzzer. Coverage-guided mutation buys little on a
 there are no length fields, and nothing allocates on a source-controlled count
 — and it is not worth a separate package and a scheduled job.
 
-**`bobcat-source::web`'s `StyleInfo` section carries two hard bounds**, and
-they are load-bearing rather than defensive. `Rule` holds `children: Vec<Rule>`
-with no depth bound and rkyv 0.7's derived `CheckBytes` recurses once per
-level, so a *well-formed* section — nothing for validation to reject — drives
-that recursion as deep as its bytes allow. Measured on aarch64: a level costs
-28 archive bytes and about 410 bytes of stack in release, 3.5 KiB in debug, so
-a **168 KB** section overflowed the 2 MiB stack Rust gives a spawned thread. It
-did so *inside* `check_archived_root`, reported as `fatal runtime error: stack
-overflow` — `SIGABRT`, not a panic, uncatchable, process gone. The largest
-`StyleInfo` section in the vendored fixtures is 24 KB.
+**`bobcat-source::web`'s `StyleInfo` validation stays on the calling
+thread on every platform**, including Wasm. It never starts a decoder worker
+or requests a stack sized from the input. The rkyv 0.7 field and enum layouts
+remain unchanged, and the crate still forbids unsafe code.
 
-Validation therefore runs on a thread whose stack the crate sizes from the
-section length, under two caps:
+Three bounds apply before a caller receives an owned tree:
 
-- **Length**, 1 MiB — about 40x the largest real section. It exists only to bound how much stack
-  that thread may be asked for. A length cap on its own cannot fix the overflow, because the safe
-  length depends on the caller's stack and a library does not know it.
-- **Nesting**, 64 levels. The format nests one level in practice (a `Keyframes` rule holds its
-  keyframe rules) and `bobcat-cli`'s converter reads exactly that one.
+- **Section length**, 1 MiB, bounds the copied archive and validation work.
+- **Validation subtree depth**, 72, is enforced during byte validation using
+  rkyv 0.7's `ArchiveValidator::with_max_depth` and the safe
+  `check_archived_root_with_context` API. This model has no shared pointers,
+  so the validator supplies all required checks. Each recursive rule's
+  children vector consumes a subtree level; the allowance above 64 accounts
+  for the root, map and leaf vectors/strings. Excessive nesting is rejected
+  before deserialization can construct an unbounded owned tree.
+- **Rule depth**, 64, remains the limit on the returned tree. The iterative
+  depth check rejects deeper rules after bounded validation/deserialization;
+  even that failure's drop is bounded by the validation limit.
 
-The depth cap is the half that is easy to miss: `Rule`'s drop glue also
-recurses per level, so a deep tree returned to a small-stack caller would
-overflow on the way *out*, after decoding had already succeeded. Refusing it
-keeps the deep value on the sized thread, and nothing downstream ever sees a
-tree it cannot afford to walk or free.
-
-rkyv 0.7 offers no depth limit of its own — its `check_archived_*` docs say the
-result "may be vulnerable to memory overlap and recursion" — and the 0.7 pin is
-a wire-format constraint. The alternative, a hand-written iterative
-`CheckBytes` for `ArchivedRule`, would need `unsafe` and cost the crate its
-`forbid(unsafe_code)`. `crates/bobcat-source/src/web/style_info.rs` holds
-the constants and the regression test.
+The previous implementation incorrectly treated rkyv 0.7 as having no depth
+control and moved validation onto a large-stack thread. Its default validator
+has no configured limit, but `ArchiveValidator::with_max_depth` does. The
+thread workaround is gone. Regression tests exercise an 8000-level archive
+and a populated 64-level tree on a 256 KiB caller stack, the 65-level rejection,
+and real web-bundle fixtures on native and Wasm. Test-only threads establish
+the small caller stack or generate the deep fixture; decoding itself is
+synchronous and thread-free. See
+`crates/bobcat-source/src/web/style_info.rs` and
+`crates/bobcat-source/tests/decode_web_bundle.rs`.
 
 ### The unsafe floor
 
@@ -1655,7 +1689,7 @@ default explanation for a failure:
   ```sh
   cargo clippy --target wasm32-unknown-unknown --lib \
     -p bobcat-wasm -p bobcat-core -p dom -p hughie \
-    -p bobcat-source --no-default-features --features bobcat-source/runtime -p quickjs-rust-bridge -- -D warnings
+    -p bobcat-source -p quickjs-rust-bridge -- -D warnings
   ```
 
   `--lib`, not `--all-targets`: `bobcat-core` dev-depends on tokio's

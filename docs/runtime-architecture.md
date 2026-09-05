@@ -10,7 +10,7 @@ capabilities and OS facts:
   module URL — and, as a separate argument, the builder of the view's
   `ResourceFetcher`, which is also its `FrameImages` and owns every byte and
   pixel the view ever loads (`crates/bobcat-resources` is the reference
-  implementation both shipped embedders use);
+  implementation all shipped embedders use);
 - an `EventRequester`, the one wakeup the engine has for the embedder's
   thread. It is a platform type, not a trait object — `LynxView::new` is
   generic over it and the Lynx main thread holds it, so the wake is a direct
@@ -32,9 +32,11 @@ crates/bobcat-core/src/
   view/lib.rs          LynxView, ViewSources, the startup guard, and the
                        shared values, messages, and link construction
   paint/lib.rs         Painter, frame clock, and painter-owned link replicas
+  paint/sources.rs     painter-owned startup resource loading
   paint/gesture.rs     input arbitration
   paint/graphics.rs    window GPU state
-  main/lib.rs          document creation, source loading, startup, and inbox
+  main/lib.rs          document creation, loaded-source mounting, startup,
+                       and inbox
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration
   main/tree/lib.rs     Lynx document and UA component policy
@@ -42,22 +44,34 @@ crates/bobcat-core/src/
 
 Shared command, event, viewport, and link vocabulary stays in `view` beside
 the public handle that owns one end of it; a stateful type whose owner is
-fixed lives under `paint` or `main`. `ViewSources` moves once from `view`
-into the main-owned startup request, and the fetched entry module never
-leaves `main`.
+fixed lives under `paint` or `main`. Construction splits `ViewSources` once:
+document inputs move into the main-owned startup request, while entry and
+stylesheet specifiers stay with the embedder-owned painter and its
+`ResourceFetcher`. Fetched source bytes cross to `main`; the fetcher, caches,
+and decoded images never do.
 
 The dependency graph is:
 
+`bobcat` is one native embedder crate. Its independent `cli` and `server`
+features gate the two modules and their optional dependencies; both are enabled
+by default. The `bobcat` and `bobcat-server` binaries require `cli` and `server`
+respectively. The product labels below name those two features of the same
+crate, not separate crates. Both use the complete source/resource APIs.
+
 ```text
-bobcat-cli  ─┐
-             ├──▶ bobcat-resources ──▶ bobcat-core ──▶ dom ─┬─▶ hughie
-bobcat-wasm ─┘                              │              ├─▶ vendor/stylo
-                                            │              └─▶ vello/wgpu
-                                            └──▶ quickjs-rust-bridge
+bobcat-cli    ─┬──▶ bobcat-source
+               └──▶ bobcat-resources ─┐
+bobcat-server ─┬──▶ bobcat-source     ├──▶ bobcat-core ──▶ dom ─┬─▶ hughie
+               └──▶ bobcat-resources ─┤          │              ├─▶ vendor/stylo
+bobcat-wasm ──┬───▶ bobcat-resources ─┘          │              └─▶ vello/wgpu
+              └───▶ bobcat-source
+bobcat-source ────────────────────────────────────┘
+                                                  └──▶ quickjs-rust-bridge
 
 QuickJS preloaded ESM graph
   bobcat:boot
     ├──▶ bobcat:element (flush binding)
+    ├──▶ bobcat:timers (timer-global installation)
     └──▶ await import(resolved entry MTS URL)
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
           │     └── named compatibility exports + engine EventTarget
@@ -66,7 +80,8 @@ QuickJS preloaded ESM graph
                       └──▶ private dom::Document<()> tree
 
 bobcat-cli ──▶ bobcat-source + winit
-bobcat-wasm ──▶ bobcat-source (runtime/XML only) + wasm-bindgen + wasm_thread
+bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
+bobcat-server ──▶ axum + reqwest + image/bmp
 ```
 
 ## Animation timeline
@@ -131,34 +146,60 @@ Source/container IO is embedder work. `bobcat-core` does not fetch, decode, or
 interpret `.web.bundle` containers or Lynx XML envelopes and has no public
 decoder/parser types for either format.
 
-For the native product, `bobcat-cli`:
+For the native file and HTTP products, `bobcat-source` owns the shared
+container-to-runtime mapping while each embedder owns resources, transport,
+and execution:
 
-1. reads the local input;
-2. asks `bobcat-source::PageSource` to classify and decode it and produce the
-   corresponding `PageConfig`;
-3. retains `lepusCode.root` or the XML main-thread body as an entry MTS module
-   in its own `ResourceFetcher` under a URL, alongside bundle `StyleInfo` on
-   the pre-parsed stylesheet arm or an XML `<style>` body on the CSS-text arm;
-4. names both URLs in a `ViewSources` and awaits one `LynxView::new` with the
-   `PageConfig` and the remaining injected capabilities, where any failure is
-   one `CliError::StartView`.
+1. `bobcat-cli` reads one local input, while `bobcat-server` reads one
+   `file://`, `http://`, or `https://` input for each accepted capture job;
+2. `bobcat-source::PageSource` content-sniffs Lynx XML, web bundles and
+   source-based native bundles, uses the shared parsers, lowers bundle
+   `StyleInfo` directly to a `PreparsedStyleSheet`, and produces the
+   corresponding `PageConfig`, source URLs, and payloads;
+3. the embedder registers `lepusCode.root` or the XML main-thread body as the
+   entry MTS module in its `bobcat-resources` instance, alongside the bundle
+   stylesheet on the pre-parsed arm or an XML `<style>` body on the CSS-text
+   arm; that resource system also owns every later file/network fetch, cache,
+   and image decode;
+4. the embedder awaits one `LynxView::new`, passing `DrawTarget`, the
+   `bobcat-resources` per-view builder, and the resulting `ViewSources`.
 
-The browser reference embedder uses the shared `register_lynx_xml_response`
-adapter inside its Render Worker after fetching one XML URL. See
-[source architecture](source-architecture.md) for the feature and format boundaries. Neither embedder executes the
+All embedders use the complete source crate without feature flags. Binary
+page inputs require a `root` module; native bytecode remains unsupported.
+
+`bobcat-server` keeps HTTP handling concurrent but sends accepted captures
+through a bounded FIFO to one dedicated capture thread. For each job that
+thread is the embedder owner: it constructs the non-`Send` `LynxView` with an
+800×600 DPR-1 `DrawTarget::Offscreen`, owns the view's `Painter` and all GPU
+work, settles the page, captures tightly packed RGBA8, and destroys the view.
+The Lynx main thread it spawns is the view's only other runtime thread; the
+server adds no separate rendering owner. The HTTP side then encodes the frame
+as a uncompressed BMP on Tokio's blocking pool after compositing over white, so
+CPU encoding neither retains the view nor occupies the GPU lane. A worker
+panic makes health fail and initiates server shutdown; queue saturation fails
+admission rather than creating unbounded GPU work. This is a trusted-page
+embedder: the public core deliberately exposes no QuickJS interrupt, and
+`timeoutMs` cannot preempt synchronous script execution, a blocking GPU call
+on the capture/embedder thread, or synchronous view teardown while it joins
+the Lynx main thread.
+
+The browser reference embedder uses the shared `register_lynx_xml_response` adapter inside
+its Render Worker after fetching one XML URL. No shipped embedder executes the
 optional background section yet because `bobcat-core` does not yet provide a
-background-thread realm; both report that limitation explicitly.
+background-thread realm; each source-facing embedder reports that limitation
+explicitly.
 
 `LynxView::new` validates the viewport, creates the one link, starts
 `bobcat-main`, builds the painter and the `DrawTarget` it was given on the
 calling thread, and asynchronously awaits one startup result.
 `bobcat-main` creates the fresh document itself, registers fonts, receives
 each author stylesheet — fetched by the painter through the view's
-`ResourceFetcher` — and mounts those sheets in cascade order, fetches the UTF-8 entry
-MTS module, creates QuickJS, and completes boot before answering. The actual
-network or file IO may run wherever the fetcher chooses; every fetch call,
-future continuation, document mutation, and post-fetch action runs on
-`bobcat-main`.
+`ResourceFetcher` — and mounts those sheets in cascade order, receives the
+UTF-8 entry MTS module, creates QuickJS, and completes boot before answering.
+The actual network or file IO may run wherever the fetcher chooses; fetch
+futures are driven by the embedder-owned painter during construction, then
+only the loaded source crosses the link. Every document mutation and
+post-fetch runtime action remains on `bobcat-main`.
 
 The resolved entry URL becomes its exact module specifier. A resource,
 encoding, font, realm, script-boot, or thread failure yields `LynxViewError`
@@ -186,9 +227,10 @@ offscreen ticks, capture and image loads, and its `pump` is the
 view's turn: it draws the frame the view owes and drains the lifecycle events
 that turn produced. It exposes no tree getter, document getter, renderer
 getter, script-realm handle, decomposition method, or way to mount a
-stylesheet or start a second entry module. It names no type parameter — the
-embedder's event-loop wakeup is chosen at compile time as an argument to
-`new`, and `bobcat-main` is what holds it.
+stylesheet or start a second entry module. `LynxView<F>` carries only the
+painter-owned `ResourceFetcher` type. The embedder's event-loop wakeup is a
+separate constructor generic held by `bobcat-main`, not another owner or
+thread represented in the view type.
 
 The following types are private to `bobcat-core`:
 
@@ -277,9 +319,10 @@ and tests.
 
 ## Document and rendering ownership
 
-`dom::Document<T>` privately owns its style/layout state, retained painter and
-Vello scene, and holds the embedder's image store behind an `Arc`. In Bobcat
-the payload is `()` and the core adds
+`dom::Document<T>` privately owns its style/layout state, retained commit
+builder and Vello scene; that DOM-side painter is distinct from the
+embedder-thread `bobcat_core::paint::Painter` that composes a published frame.
+In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
 It also defines the one component the engine owns, `raw-text`, in its own
@@ -299,7 +342,7 @@ private Document<()>
   ├── DOM + Stylo arenas
   ├── layout/text state
   ├── ImageRegistry          (source names and load states; no pixels)
-  └── private Painter
+  └── private dom paint::Painter (main-thread commit builder)
         ├── retained Arc<CommittedFrame>   (paint tables + scroll-slot table +
         │                                   the split scene: per-chain fragments
         │                                   and the compose program over them;
@@ -537,17 +580,18 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 
 1. `LynxView::new` validates the metrics, creates the link, starts
    `bobcat-main`, and builds the painter — including the `DrawTarget` the
-   embedder named, whose GPU objects come up while the main thread is already
-   fetching — on the calling thread, then awaits a startup oneshot.
+   embedder named and the per-view `ResourceFetcher` — on the calling thread.
 2. `bobcat-main` creates the private document from `PageConfig` and the device
-   metrics, registers fonts and the image store, and awaits the `ViewSources`'
-   stylesheets and entry MTS source through its owned `ResourceFetcher`.
-3. Still on `bobcat-main`, it mounts the sheets, creates the QuickJS realm,
-   installs Bobcat callbacks, preloads
-   `bobcat:runtime`, `bobcat:element`, and the resolved entry URL, then runs the
-   TLA-based `bobcat:boot` module. Only complete success answers the startup
-   oneshot; closing it drops pending resource work, releases the painter, and
-   directly joins `bobcat-main`.
+   metrics and registers fonts. In parallel, the calling thread drives the
+   painter-owned fetcher for each stylesheet and then the entry MTS source,
+   sending only loaded sources across the link in that order.
+3. `bobcat-main` mounts each received sheet, creates the QuickJS realm on entry
+   arrival, installs Bobcat callbacks, preloads `bobcat:runtime`,
+   `bobcat:element`, `bobcat:timers`, and the resolved entry URL, then runs the
+   TLA-based `bobcat:boot` module. Only complete success sends `Started` back
+   through the same painter inbox. Cancelling construction drops pending
+   resource futures on the calling thread, releases the painter, tells
+   `bobcat-main` to stop, and joins it.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
    scene encode — writes the `Arc<CommittedFrame>` into the mailbox, announces
    it on the `ToPainter` FIFO, and wakes the embedder through its
@@ -573,7 +617,9 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 ```sh
 cargo check -p bobcat-core
 cargo check -p bobcat-core --target wasm32-unknown-unknown
-cargo check -p bobcat-cli
+cargo check -p bobcat-source
+cargo check -p bobcat --no-default-features --features cli
+cargo check -p bobcat --no-default-features --features server
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets
 ```

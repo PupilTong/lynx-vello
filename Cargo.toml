@@ -13,7 +13,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 bobcat-core = { path = "crates/bobcat-core" }
 bobcat-resources = { path = "crates/bobcat-resources" }
-bobcat-source = { path = "crates/bobcat-source", default-features = false }
+bobcat-source = { path = "crates/bobcat-source" }
 hughie = { path = "crates/hughie" }
 flashbulb = { path = "crates/flashbulb" }
 quickjs-rust-bridge = { path = "crates/quickjs-rust-bridge" }
@@ -28,6 +28,7 @@ selectors = { path = "vendor/stylo/selectors" }
 servo_arc = { path = "vendor/stylo/servo_arc" }
 
 app_units = "0.7"
+axum = "0.8.9"
 bytecheck = "0.6"
 bytes = "1"
 cc = "1"
@@ -38,6 +39,7 @@ euclid = "0.22"
 flume = { version = "0.12", default-features = false, features = ["async"] }
 html5ever = "0.39"
 http = "1"
+image = { version = "0.25.10", default-features = false }
 getrandom = "0.4.3"
 markup5ever_rcdom = "0.39"
 parley = { version = "0.11", default-features = false, features = [
@@ -47,20 +49,24 @@ parley = { version = "0.11", default-features = false, features = [
 parking_lot_core = { version = "0.9", features = ["nightly"] }
 pollster = "1"
 png = "0.18"
+reqwest = { version = "0.13.4", default-features = false }
 rkyv = { version = "0.7", features = ["validation"] }
 rustc-hash = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 slab = "0.4"
 smallvec = { version = "1", features = ["const_new", "union"] }
+socket2 = "0.6.5"
 thiserror = "2"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "sync"] }
+tower = "0.5.3"
 url = "2"
 js-sys = "0.3"
 libloading = "0.8"
 rayon = "1"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "0.3.76"
 web-time = "1.1.0"
 # wasm_thread 0.3.3 forwards Worker-originated spawns to its parent through a
 # private control message. Bobcat's explicit OffscreenCanvas embedder Worker

@@ -37,12 +37,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Source feature boundaries
+      - name: Complete source API
+        run: cargo test --locked -p bobcat-source
+
+      - name: Independent native embedder features
         run: |
-          cargo test --locked -p bobcat-source --no-default-features
-          cargo test --locked -p bobcat-source --no-default-features --features web-bundle
-          cargo test --locked -p bobcat-source --no-default-features --features native-bundle
-          cargo test --locked -p bobcat-source --no-default-features --features runtime
+          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
 
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
@@ -125,7 +126,7 @@ jobs:
         # tokio's `rt-multi-thread`, which refuses to compile for wasm32, and
         # feature unification would drag it into any build that includes dev
         # targets. The packages are named rather than `--workspace` because
-        # bobcat-cli is a native binary that does not target wasm32 at all.
+        # bobcat is a native embedder crate that does not target wasm32.
         run: >-
           cargo clippy --target wasm32-unknown-unknown --lib
           -p bobcat-wasm
@@ -133,7 +134,7 @@ jobs:
           -p bobcat-core
           -p dom
           -p hughie
-          -p bobcat-source --no-default-features --features bobcat-source/runtime
+          -p bobcat-source
           -p quickjs-rust-bridge
           -- -D warnings
 
@@ -157,6 +158,11 @@ jobs:
       - name: Build threaded wasm-bindgen bindings
         run: pnpm --filter bobcat-wasm build
 
+      - name: Decode real bundles in Wasm without decoder threads
+        run: >-
+          wasm-pack test --node crates/bobcat-source
+          --test decode_web_bundle --locked -Z build-std=std,panic_abort
+
       - name: Verify shared-memory and npm artifacts
         run: pnpm --filter bobcat-wasm verify
 
@@ -168,21 +174,22 @@ jobs:
         env:
           PAGES_BASE_PATH: /ci-preview
 
-  linux-cli:
-    name: bobcat-cli type-check + clippy (Ubuntu)
+  linux-embedders:
+    name: native Bobcat embedders type-check + clippy (Ubuntu)
     runs-on: ubuntu-26.04
     env:
       CC: clang-22
       CXX: clang++-22
     steps:
-      # bobcat-cli is the one workspace member no job compiles on Linux. The
-      # macOS job builds it there; the Ubuntu benchmark job builds
+      # The CLI, HTTP server, and their source adapter are the native workspace
+      # products no other job compiles on Linux. The macOS job builds them
+      # there; the Ubuntu benchmark job builds
       # dom/hughie/quickjs-rust-bridge through their bench targets but never
-      # reaches the CLI, which nothing depends on. Without this job the
-      # headless runner — the mode Linux hosts actually run — has no gate
-      # compiling it at all.
+      # reaches these embedders, which nothing depends on. Without this job the
+      # headless runners — the modes Linux hosts actually run — have no gate
+      # compiling them at all.
       #
-      # No tests: the CLI's dev-dependencies pull in flashbulb's GPU capture,
+      # No tests: both native runners have end-to-end GPU screenshot cases,
       # and a hosted runner has no adapter.
       - uses: actions/checkout@v4
         with:
@@ -200,10 +207,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-cli
+          shared-key: linux-embedders
 
       - name: Clippy
-        run: cargo clippy -p bobcat-cli --all-targets --no-deps -- -D warnings
+        run: >-
+          cargo clippy
+          -p bobcat-source
+          -p bobcat
+          --all-targets --no-deps -- -D warnings
+
+      - name: Independent embedder features
+        run: |
+          cargo clippy --locked -p bobcat --no-default-features --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
 
   element-papi:
     name: Element PAPI runtime tests (Ubuntu)
