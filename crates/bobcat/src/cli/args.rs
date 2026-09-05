@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 
 use url::Url;
 
-use crate::CliError;
+use crate::cli::CliError;
 
 pub(crate) const DEFAULT_VIEWPORT_WIDTH: f32 = 393.0;
 pub(crate) const DEFAULT_VIEWPORT_HEIGHT: f32 = 727.0;
