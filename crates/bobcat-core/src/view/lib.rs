@@ -807,7 +807,7 @@ impl<F> Drop for ViewStartup<F> {
 /// Every view in a group sends on one FIFO, so every command names its view;
 /// a group hands the ids out and never reuses one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ViewId(pub(crate) u64);
+pub(crate) struct ViewId(u64);
 
 /// A view for a group's thread to adopt, and everything that view needs
 /// which is not already the group's.

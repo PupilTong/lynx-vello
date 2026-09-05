@@ -222,7 +222,7 @@ impl PainterLink {
     /// link, so the painter is what plays the group handle. An embedder's
     /// group sends this from its own `Drop`, once every view is gone.
     #[cfg(test)]
-    pub(crate) fn close_group(&self) {
+    fn close_group(&self) {
         let _ = self.commands.send(GroupCommand::Close);
     }
 

@@ -166,7 +166,7 @@ impl<R: EventRequester> ToPainterSender<R> {
 
     /// The event loop this view wakes, which in a group is every view's.
     #[cfg(test)]
-    pub(crate) fn requester(&self) -> &Arc<R> {
+    fn requester(&self) -> &Arc<R> {
         &self.requester
     }
 }
