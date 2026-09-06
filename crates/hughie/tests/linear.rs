@@ -675,11 +675,11 @@ fn fully_known_commit_elides_the_probe_but_still_commits_the_child() {
     definite_layout(&tree, root, 100.0, 40.0);
 
     assert_eq!(tree.child_layout_calls.get(), 2);
-    assert_eq!(
+    assert!(
         tree.committed_input(child)
             .expect("the final child Commit must remain")
-            .goal,
-        LayoutGoal::Commit
+            .goal
+            .commits()
     );
     assert_size(tree.layout(child).size, Size::new(20.0, 10.0));
 }
@@ -1420,7 +1420,7 @@ fn real_cache_does_not_let_linear_measurement_satisfy_commit() {
     assert!(
         tree.measure_inputs(measured)[before_commit..]
             .iter()
-            .any(|input| input.goal == LayoutGoal::Commit)
+            .any(|input| input.goal.commits())
     );
 }
 

@@ -5,12 +5,13 @@
 //! process-wide mutex, because they shared Stylo's one global thread pool and
 //! a worker waiting on its own scope will run another traversal's chunk on a
 //! thread whose bloom filter and style-sharing cache are already borrowed.
-//! Per-document pools make the thread sets disjoint instead, and these tests
+//! Per-thread pools make the thread sets disjoint instead, and these tests
 //! are the claim that follows from that: concurrent flushes overlap, and
 //! neither one's workers ever appear in the other's.
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::ThreadId;
@@ -174,7 +175,7 @@ fn two_documents_restyle_at_the_same_time() {
                     met: AtomicBool::new(false),
                 });
                 let mut document = Document::new(device, "page", ());
-                document.set_style_pool(pool(2));
+                document.set_style_pool(Rc::new(pool(2)));
                 let children = wide_page(&mut document, 64);
                 document.layout();
                 let sizes: Vec<f32> = children
@@ -233,6 +234,81 @@ fn two_documents_restyle_at_the_same_time() {
     assert!(
         !first.contains(second_flusher) && !second.contains(first_flusher),
         "membership does not cross: neither flusher serves the other's document"
+    );
+}
+
+/// Two documents, one thread, one pool.
+///
+/// Rayon's takeover is permanent — the test below pins that — so the thread
+/// that built a pool can never build a second. A pool therefore belongs to its
+/// thread rather than to any one document on it, and a thread carrying two
+/// documents shares one between them.
+///
+/// That is safe for the reason the neighbouring test's `is_disjoint` does not
+/// have to cover: the thread driving one traversal is inside it, so the second
+/// cannot start until the first returns, and no worker is ever asked to hold
+/// two `ThreadLocalStyleContext`s at once.
+#[test]
+fn two_documents_on_one_thread_share_one_pool() {
+    let (sizes, witnesses, workers, flusher) = std::thread::spawn(|| {
+        let shared = Rc::new(pool(2));
+        let workers = shared.thread_count();
+        let mut sizes = Vec::new();
+        let mut witnesses = Vec::new();
+        for _ in 0..2 {
+            let threads: Arc<Mutex<HashSet<ThreadId>>> = Arc::default();
+            let device = witness_device(WitnessProvider {
+                threads: Arc::clone(&threads),
+                rendezvous: Arc::new(Rendezvous::default()),
+                // Pre-armed: these two flush in turn, so neither may wait for
+                // the other to arrive.
+                met: AtomicBool::new(true),
+            });
+            let mut document = Document::new(device, "page", ());
+            document.set_style_pool(Rc::clone(&shared));
+            let children = wide_page(&mut document, 64);
+            document.layout();
+            sizes.push(
+                children
+                    .iter()
+                    .map(|id| {
+                        document
+                            .get(*id)
+                            .expect("the child is live")
+                            .computed_style()
+                            .expect("the child is styled")
+                            .clone_font_size()
+                            .computed_size()
+                            .px()
+                    })
+                    .collect::<Vec<f32>>(),
+            );
+            witnesses.push(threads.lock().expect("witnessed threads").clone());
+        }
+        (sizes, witnesses, workers, std::thread::current().id())
+    })
+    .join()
+    .expect("the flushing thread finished");
+
+    for document in &sizes {
+        assert_eq!(document.len(), 64);
+        assert!(
+            document
+                .iter()
+                .all(|size| (size - WITNESS_BASE_FONT_SIZE_PX).abs() < f32::EPSILON),
+            "every element restyled: {document:?}"
+        );
+    }
+    let [first, second] = witnesses.as_slice() else {
+        unreachable!("two documents were flushed")
+    };
+    assert!(
+        first.contains(&flusher) && second.contains(&flusher),
+        "one flushing thread is index zero for both: {first:?}, {second:?}"
+    );
+    assert!(
+        first.union(second).count() <= workers,
+        "both documents drew from the one {workers}-thread pool: {first:?} and {second:?}"
     );
 }
 

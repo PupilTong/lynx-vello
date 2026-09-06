@@ -770,18 +770,20 @@ pub(super) fn axis_has_intrinsic_style(geometry: &ItemGeometry, axis: Axis) -> b
 /// when only its subtree content changes — its input is stable there, and
 /// either the parent imposed the size or the container's style resolves one
 /// against that stable input. This is what every percentage its children
-/// resolve, and every stretch target it imposes, chains off.
+/// resolve, and every stretch target it imposes, chains off. A measurement
+/// carries no independence and licenses none, so it answers `None`.
 #[inline]
 pub(super) fn container_content_independence(
     input: LayoutInput,
     style_definite: Size<bool>,
-) -> Size<bool> {
-    Size::new(
-        input.content_independent.width
+) -> Option<Size<bool>> {
+    let content_independent = input.goal.independence()?;
+    Some(Size::new(
+        content_independent.width
             && (input.known_dimensions.width.is_some() || style_definite.width),
-        input.content_independent.height
+        content_independent.height
             && (input.known_dimensions.height.is_some() || style_definite.height),
-    )
+    ))
 }
 
 /// The per-item facts a container needs before it can call any part of an

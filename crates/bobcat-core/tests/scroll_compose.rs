@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, NoWakeup, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main.js";
 
@@ -48,7 +48,7 @@ globalThis.renderPage = function renderPage() {
 async fn booted() -> LynxView<Rc<FetcherDouble>> {
     let fetcher =
         Rc::new(FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL));
-    let mut view = LynxView::new(
+    let mut view = solo_view(
         Arc::new(NoWakeup),
         100.0,
         100.0,

@@ -343,7 +343,7 @@ pub(crate) fn compute_text_block_layout<T>(
     input: hughie::tree::LayoutInput,
 ) -> hughie::tree::LayoutOutput {
     use hughie::compute::{LeafMetrics, compute_text_block_layout as compute_block_box};
-    use hughie::tree::{LayoutGoal, LayoutTree};
+    use hughie::tree::LayoutTree;
 
     let atoms = refresh(tree, state, element);
 
@@ -388,7 +388,7 @@ pub(crate) fn compute_text_block_layout<T>(
         let Some((context, store)) = context_and_block(state, element) else {
             return LeafMetrics::new(Size::ZERO);
         };
-        let metrics = if measure_input.goal == LayoutGoal::Commit {
+        let metrics = if measure_input.goal.commits() {
             store.block.commit(context, constraint)
         } else {
             store.block.probe(context, constraint)
@@ -397,7 +397,7 @@ pub(crate) fn compute_text_block_layout<T>(
             .with_first_baselines(hughie::geometry::Point::new(None, metrics.first_baseline))
     });
 
-    if input.goal == LayoutGoal::Commit {
+    if input.goal.commits() {
         place_and_hide(tree, state, element, &atoms);
     } else {
         state.note_probed_text(element);

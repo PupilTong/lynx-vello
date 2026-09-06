@@ -48,15 +48,15 @@ use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::main::tree::LynxDocument;
 use crate::main::tree::Viewport;
 #[cfg(test)]
-use crate::main::{EntryModule, MainLink, MainThreadHome, spawn_test_main_thread};
+use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, LoadedSource,
-    LynxViewError, ToMain, ToPainter, frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, GroupCommand,
+    LoadedSource, LynxViewError, ToMain, ToPainter, ViewId, frame_slot,
 };
 #[cfg(test)]
-use crate::view::{NoWakeup, main_link};
+use crate::view::{DetachedLink, NoWakeup, detached_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -156,7 +156,10 @@ mod clock_tests {
 /// including the replicas it uses while routing and drawing without touching
 /// that thread.
 pub(crate) struct PainterLink {
-    commands: flume::Sender<ToMain>,
+    /// Which view on the group's thread these commands are for. Every view in
+    /// a group sends on one FIFO, so each command carries its own name.
+    view: ViewId,
+    commands: flume::Sender<GroupCommand>,
     notifications: flume::Receiver<ToPainter>,
     frames: Arc<FrameHub>,
     frame: Option<Arc<CommittedFrame>>,
@@ -176,11 +179,13 @@ pub(crate) struct PainterLink {
 
 impl PainterLink {
     pub(crate) fn new(
-        commands: flume::Sender<ToMain>,
+        view: ViewId,
+        commands: flume::Sender<GroupCommand>,
         notifications: flume::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
     ) -> Self {
         Self {
+            view,
             commands,
             notifications,
             frames,
@@ -201,10 +206,24 @@ impl PainterLink {
         self.adopt_frame(announced);
     }
 
-    /// Sends one command. A closed channel is a main thread that has exited;
-    /// the painter goes on showing what it last published.
+    /// Sends one command, naming the view it is for. A closed channel is a
+    /// main thread that has exited; the painter goes on showing what it last
+    /// published.
     pub(crate) fn send(&self, command: ToMain) {
-        let _ = self.commands.send(command);
+        let _ = self.commands.send(GroupCommand::View {
+            view: self.view,
+            command,
+        });
+    }
+
+    /// Ends the whole group's thread, not just this view.
+    ///
+    /// Only the crate's own tests reach this: they own both ends of their
+    /// link, so the painter is what plays the group handle. An embedder's
+    /// group sends this from its own `Drop`, once every view is gone.
+    #[cfg(test)]
+    fn close_group(&self) {
+        let _ = self.commands.send(GroupCommand::Close);
     }
 
     /// Applies everything that has arrived. However many frames were
@@ -278,7 +297,10 @@ impl PainterLink {
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
         self.commands
-            .send(ToMain::BeginFrame { now, seq })
+            .send(GroupCommand::View {
+                view: self.view,
+                command: ToMain::BeginFrame { now, seq },
+            })
             .ok()
             .map(|()| seq)
     }
@@ -482,7 +504,7 @@ pub(crate) struct Painter<F> {
     // released.
     pub(super) link: PainterLink,
     #[cfg(test)]
-    main: Option<MainThreadHome>,
+    main: Option<GroupHome>,
     #[cfg(test)]
     pub(super) detached: bool,
     viewport: Viewport,
@@ -518,8 +540,12 @@ impl<F> std::fmt::Debug for Painter<F> {
 impl<F> Drop for Painter<F> {
     fn drop(&mut self) {
         if let Some(main) = self.main.as_mut() {
+            // The view first and the group second, in the order an embedder
+            // releases them: `bobcat-main` drops this view's document, then
+            // returns from the round that closed the group.
             self.link.send(ToMain::Shutdown);
-            main.shutdown();
+            self.link.close_group();
+            main.join();
         }
     }
 }
@@ -840,8 +866,8 @@ impl TestPainter {
         frame_size: FrameSize,
         event_requester: Arc<R>,
         output: Output,
-    ) -> (Self, MainLink<R>) {
-        let (link, main) = main_link(event_requester);
+    ) -> (Self, DetachedLink<R>) {
+        let (link, main) = detached_link(event_requester);
         let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
             crate::resource::NeverAnswers
         });

@@ -31,7 +31,7 @@
 //!
 //! [`Resources`] is the shared system: registry, caches, worker pool,
 //! decoder. An embedder builds one, registers what it already holds, and
-//! hands [`Resources::builder`] to [`bobcat_core::LynxView::new`], which
+//! hands [`Resources::builder`] to [`bobcat_core::LynxGroup::create_lynx_view`], which
 //! turns it into the per-view [`ViewResources`] that implements the
 //! protocol and carries that view's [`ImageReports`]. Loads complete on
 //! worker threads (or as browser tasks) and are delivered through the
@@ -450,7 +450,7 @@ impl Resources {
         }
     }
 
-    /// The builder [`bobcat_core::LynxView::new`] takes.
+    /// The builder [`bobcat_core::LynxGroup::create_lynx_view`] takes.
     pub fn builder(&self) -> impl FnOnce(ImageReports) -> ViewResources + 'static {
         let resources = self.clone();
         move |reports| resources.for_view(reports)

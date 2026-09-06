@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bobcat_core::{
     DrawTarget, EngineError, FontBlob, LynxView, LynxViewError, NoWakeup, ViewSources,
 };
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 const ENTRY: &str = "main.js";
 
@@ -16,7 +16,7 @@ async fn view(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
-    LynxView::new(
+    solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,

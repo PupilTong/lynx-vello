@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{Output, TestPainter};
-use crate::main::MainLink;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter};
+use crate::view::{
+    DetachedLink, EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter,
+};
 
 /// A phone-shaped document, ready for a main thread to be started over it.
 fn document() -> LynxDocument {
@@ -38,7 +39,7 @@ fn view_over<R: EventRequester>(
 /// link is handed back so a test can play the main thread's whole side of
 /// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
 /// ever service them.
-fn detached() -> (TestPainter, MainLink<NoWakeup>) {
+fn detached() -> (TestPainter, DetachedLink<NoWakeup>) {
     TestPainter::with_link(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
@@ -142,7 +143,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     };
 
     let publish = |notification| main.notify.send(notification);
-    let commands = &main.commands;
+    let commands = &main;
 
     emit(&mut view);
     assert!(
@@ -253,7 +254,7 @@ fn a_scroll_decision_sends_no_command() {
     });
     view.execute_decisions(&mut decisions, None);
     assert!(
-        main.commands.try_recv().is_err(),
+        main.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"
     );
     assert!(view.scroll_intents.offsets.is_empty());

@@ -2,16 +2,18 @@
 //!
 //! Hosts inject resources, normalized OS input, and draw-target capabilities
 //! into an opaque [`LynxView`]. The script engine is not one of them: the core
-//! owns its `QuickJS` realm, its preloaded ESM graph, and its main-thread
-//! runtime outright, and the engine, document, and Element-PAPI tree hand-off
-//! remain private runtime implementation.
+//! owns the `QuickJS` runtime, the realms opened on it, the preloaded ESM
+//! graph and the main-thread runtime outright, and the engine, document, and Element-PAPI tree
+//! hand-off remain private runtime implementation.
 //!
-//! A view is two threads: the embedder's own — whichever one called
-//! [`LynxView::new`], which is where every draw happens — and the Lynx main
-//! thread the core owns.
+//! A view is two threads: the embedder's own — whichever one created the
+//! [`LynxGroup`] it belongs to, which is where every draw happens — and the
+//! Lynx main thread that group owns. Views in one group share that thread,
+//! and with it one `QuickJS` runtime and one Stylo pool; views in different
+//! groups share nothing.
 //!
 //! A view boots once, at construction: [`ViewSources`] carries everything it
-//! runs on and [`LynxView::new`] does the rest. Decoded images are one of
+//! runs on and [`LynxGroup::create_lynx_view`] does the rest. Decoded images are one of
 //! those sources — the core neither fetches, decodes, caches nor retains a
 //! single pixel. It asks the embedder's [`ResourceFetcher`](resource::ResourceFetcher),
 //! which is the one resource system a view has, for them by source string:
@@ -50,6 +52,6 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
-    DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxView, LynxViewError,
-    NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
+    DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
+    LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
 };

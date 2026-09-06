@@ -17,7 +17,7 @@ use bobcat_core::{
     DrawTarget, LynxView, NoWakeup, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main.js";
 const STYLE_URL: &str = "app:///author.css";
@@ -81,7 +81,7 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 /// module are its construction inputs.
 async fn booted() -> LynxView<Rc<FetcherDouble>> {
     let fetcher = Rc::new(resources(slider_sheet()));
-    let mut view = LynxView::new(
+    let mut view = solo_view(
         Arc::new(NoWakeup),
         32.0,
         24.0,

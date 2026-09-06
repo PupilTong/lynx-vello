@@ -132,9 +132,9 @@ the `bobcat:boot` module uses top-level await to import the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
 element tree. QuickJS drains its owned pending-job queue until that
-module-evaluation promise settles. `LynxView::new` resolves only after that
-boot succeeds and rejects on any resource, font, realm, or boot failure, so a
-failed startup never exposes a half-initialized view. `ScriptFinished` remains
+module-evaluation promise settles. `LynxGroup::create_lynx_view` resolves only
+after that boot succeeds and rejects on any resource, font, realm, or boot
+failure, so a failed startup never exposes a half-initialized view. `ScriptFinished` remains
 queued as the successful lifecycle edge consumed by the browser loop. No
 browser microtask checkpoint or timer interception participates in completion;
 the fallback listener is retained inside the preloaded runtime ESM rather than
@@ -301,9 +301,10 @@ The Pages shell exposes its Canvas and Lynx XML workspace views through the
 submits edits through a same-origin Blob URL. It creates and transfers the DOM
 canvas only for the first render, registering its font container and default
 family once. Every submit is one `loadLynxXml` on that warm canvas, rebuilding
-only the native `LynxView`; the Render Worker, OffscreenCanvas, Wasm instance,
-Stylo worker count, and retained font bytes stay — the Stylo workers
-themselves belong to the view and are rebuilt with it. The Blob URL is
+only the native `LynxGroup` and its one `LynxView`; the Render Worker,
+OffscreenCanvas, Wasm instance, Stylo worker count, and retained font bytes
+stay — the Stylo workers themselves belong to the group and are rebuilt with
+it. The Blob URL is
 revoked only after `loadLynxXml` settles.
 
 Synchronous GPU readback remains absent because browser WebGPU map completion

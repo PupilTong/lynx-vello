@@ -41,7 +41,7 @@ where
 {
     let measurement_axis = match input.goal {
         LayoutGoal::Measure(axis) => Some(axis),
-        LayoutGoal::Commit => None,
+        LayoutGoal::Commit { .. } => None,
     };
 
     let LeafSizing {
@@ -186,6 +186,9 @@ where
 pub struct LeafMeasureInput {
     pub known_dimensions: Size<Option<f32>>,
     pub available_space: Size<AvailableSpace>,
+    /// The goal of the pass that reached this leaf. A `Commit` payload is the
+    /// committing parent's claim about that pass's input, not a leaf-level
+    /// flag; leaf closures only ask [`LayoutGoal::commits`].
     pub goal: LayoutGoal,
 }
 
@@ -641,7 +644,7 @@ mod tests {
         fn measure(&mut self, input: LeafMeasureInput) -> LeafMetrics {
             self.artifacts.shape_calls += 1;
             let (slot, paint_tag) = match input.goal {
-                LayoutGoal::Commit => (&mut self.artifacts.committed, b'C'),
+                LayoutGoal::Commit { .. } => (&mut self.artifacts.committed, b'C'),
                 LayoutGoal::Measure(_) => (&mut self.artifacts.probe, b'P'),
             };
             *slot = Some(RetainedArtifact {
@@ -713,7 +716,12 @@ mod tests {
     fn committed_artifact_survives_probes_and_box_cache_hits() {
         let tree = LeafTree;
         let mut state = LeafHostState::default();
-        let commit_input = LayoutInput::commit(Size::NONE, Size::NONE, Size::MAX_CONTENT);
+        let commit_input = LayoutInput::commit(
+            Size::NONE,
+            Size::NONE,
+            Size::MAX_CONTENT,
+            Size::new(false, false),
+        );
 
         let committed = compute_cached_layout(
             &tree,
@@ -817,7 +825,7 @@ mod tests {
                 .measure(LeafMeasureInput::new(
                     Size::new(Some(22.0), None),
                     Size::MAX_CONTENT,
-                    LayoutGoal::Commit,
+                    LayoutGoal::default(),
                 ))
                 .size,
             Size::new(22.0, 11.0)
@@ -951,6 +959,7 @@ mod tests {
             Size::new(Some(4.0), Some(4.0)),
             Size::NONE,
             Size::MAX_CONTENT,
+            Size::new(false, false),
         );
 
         let output = compute_leaf_layout_with_measurement(input, &style, None, false, |_input| {

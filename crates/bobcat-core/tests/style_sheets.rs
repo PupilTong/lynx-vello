@@ -15,7 +15,7 @@ use bobcat_core::{
     DrawTarget, LynxView, LynxViewError, NoWakeup, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
-use support::{FetcherDouble, wait_for_script};
+use support::{FetcherDouble, solo_view, wait_for_script};
 
 const SCRIPT_URL: &str = "app:///main-thread.js";
 const SHEET_URL: &str = "app:///author.css";
@@ -72,7 +72,7 @@ async fn view_with(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
-    LynxView::new(
+    solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,

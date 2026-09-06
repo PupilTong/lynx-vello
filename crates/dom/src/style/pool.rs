@@ -1,6 +1,6 @@
-//! The worker threads one document's style traversals run on.
+//! The worker threads one thread's style traversals run on.
 //!
-//! A pool belongs to exactly one document, and that is the whole point of it.
+//! A pool belongs to exactly one thread, and that is the whole point of it.
 //! Stylo's bloom filter and style-sharing cache do not own their buffers: each
 //! takes an `AtomicRefMut` on a leaked, per-OS-thread `AtomicRefCell`
 //! (`StyleBloom::new` borrows `BLOOM_KEY`, `StyleSharingCache` borrows
@@ -14,10 +14,12 @@
 //! `ThreadLocalStyleContext` on a thread that already holds the borrows.
 //!
 //! Disjoint thread sets are what make that unrepresentable rather than
-//! guarded: one document cannot traverse twice at once — `flush_styles` takes
-//! `&mut self` — and no two documents share a worker, so nothing serializes
-//! documents against each other and two views on two threads restyle at the
-//! same time.
+//! guarded. A pool never leaves the thread that built it — a document holds it
+//! behind an `Rc`, and rayon's takeover below pins it there anyway — so the
+//! documents sharing a pool are exactly the documents flushing on one thread,
+//! and that thread cannot drive two traversals at once: it is inside the first
+//! one. No two threads share a worker, which is what lets two views restyle at
+//! the same time.
 //!
 //! The thread that flushes *is* a member, and index zero of its own pool.
 //! [`StylePool::with_spawn_handler`] therefore has to be called on that
@@ -26,16 +28,17 @@
 //! the workers spill out of it only when a level is wider than the traversal's
 //! work unit. That is what Stylo's own global pool did, and what Gecko relies
 //! on, so a lone document restyles on exactly the threads and with exactly the
-//! parallelism it did before these pools became per-document.
+//! parallelism it did before these pools became per-thread.
 //!
 //! It is not free. Rayon leaks the `WorkerThread` it hands the calling thread
 //! and the `Registry` behind it — measured at about 25 KB for a six-thread
 //! pool, once per pool ever built, with the managed workers still exiting
 //! normally on drop — and a thread that has taken over one pool can never take
 //! over another, for the whole of its life. Both are affordable only because a
-//! pool is built once on a `bobcat-main` that is created fresh for its view and
-//! dies with it. A pool built twice on one thread is a bug this cannot express:
-//! rayon refuses it, and [`StylePoolError::ThreadAlreadyPooled`] says so.
+//! pool is built once on a `bobcat-main` that is created fresh and dies with
+//! the views it carries. A pool built twice on one thread is a bug this cannot
+//! express: rayon refuses it, and [`StylePoolError::ThreadAlreadyPooled`] says
+//! so — which is why the pool is the thread's rather than any one document's.
 
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,7 +131,7 @@ impl StyleWorker {
     }
 }
 
-/// One document's style threads, one of which is the thread that flushes it.
+/// One thread's style threads, one of which is that thread itself.
 ///
 /// Dropping it retires the managed members; they exit once the work they hold
 /// finishes, and nothing waits for them. What rayon leaked to take over the

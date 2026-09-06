@@ -9,7 +9,7 @@ use std::{fmt, mem};
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxView, PageConfig,
+    DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, PageConfig,
     StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
@@ -136,10 +136,13 @@ pub struct BobcatRenderer {
     /// The selected embedder default is stable wrapper state too; every view
     /// this renderer builds gets the same generic-family map.
     default_font_family: Option<String>,
-    /// The Stylo worker count each view this renderer builds gets. The
-    /// workers themselves are the view's and retire with it; only the size
+    /// The Stylo worker count each group this renderer builds gets. The
+    /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
     style_threads: StyleThreads,
+    /// The group the current view belongs to, and the one thing that joins
+    /// its Lynx-main Worker. One page, one group: see [`Self::load`].
+    group: Option<LynxGroup>,
     script_finished: bool,
     disposed: bool,
 }
@@ -213,6 +216,7 @@ impl BobcatRenderer {
 
             Ok(Self {
                 view: None,
+                group: None,
                 resources,
                 canvas,
                 events,
@@ -251,9 +255,16 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Dropping the previous view explicitly stops and joins its Lynx-main
-        // Worker before construction of the independent replacement begins.
+        // Dropping the previous view stops it, and dropping the group it
+        // belonged to is what joins that Lynx-main Worker — both before
+        // construction of the independent replacement begins.
+        //
+        // A page gets a group of its own rather than reusing this renderer's:
+        // the script runtime is the group's, and a page loaded twice would
+        // otherwise register its entry module a second time under a name the
+        // previous load already took.
         drop(self.view.take());
+        drop(self.group.take());
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -267,7 +278,6 @@ impl BobcatRenderer {
             fonts: self.fonts.clone(),
             default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
-            style_threads: self.style_threads,
             ..ViewSources::new(entry_url)
         };
         // A canvas owns its own resolution — configuring a context does not
@@ -277,16 +287,19 @@ impl BobcatRenderer {
         let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
             .map_err(js_error)?;
         set_canvas_size(&self.canvas, frame_size);
-        let built = LynxView::new(
-            self.events.clone(),
-            self.width,
-            self.height,
-            self.device_pixel_ratio,
-            DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
-            self.resources.builder(),
-            sources,
-        )
-        .await;
+        let group = LynxGroup::new(self.events.clone(), self.style_threads)
+            .await
+            .map_err(js_error)?;
+        let built = group
+            .create_lynx_view(
+                self.width,
+                self.height,
+                self.device_pixel_ratio,
+                DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
+                self.resources.builder(),
+                sources,
+            )
+            .await;
         // Construction has finished every source load, so this page's
         // registered bytes are dead either way. Clearing here keeps a Render
         // Worker that loads page after page from growing a registry of them;
@@ -294,6 +307,7 @@ impl BobcatRenderer {
         self.resources.clear_registered();
         warn_notes(&self.resources);
         self.view = Some(built.map_err(js_error)?);
+        self.group = Some(group);
         // Boot published its frame before this Worker took a turn, and a
         // frame from below wakes through the same signal — but the wakeup it
         // sent was consumed by the loop that was waiting on the *previous*
@@ -555,13 +569,14 @@ impl BobcatRenderer {
     }
 
     /// Release the current native view before the outer facade terminates its
-    /// Render Worker and the Wasm session with it. Dropping the view stops and
-    /// joins its Lynx-main Worker.
+    /// Render Worker and the Wasm session with it. Dropping the view stops it,
+    /// and dropping its group joins that Lynx-main Worker.
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;
         self.events.request_event();
         drop(self.view.take());
+        drop(self.group.take());
     }
 }
 

@@ -57,10 +57,14 @@ pub fn compute_root_layout<T: LayoutTree>(
     available_space: Size<AvailableSpace>,
 ) {
     let parent_size = available_space.definite_values();
-    let mut root_input = LayoutInput::commit(Size::NONE, parent_size, available_space);
     // The viewport imposes the root's constraints; no document content can
     // move them, which is what lets style-imposed sizing chain down from here.
-    root_input.content_independent = Size::new(true, true);
+    let root_input = LayoutInput::commit(
+        Size::NONE,
+        parent_size,
+        available_space,
+        Size::new(true, true),
+    );
     let output = tree.compute_layout(state, root, root_input);
 
     let style = tree.style(root);
@@ -135,8 +139,6 @@ pub fn compute_boundary_relayout<T: LayoutTree>(
         "compute_boundary_relayout requires a relayout boundary \
          (contain: strict, or a skipped content-visibility box)"
     );
-    let mut input = input;
-    input.goal = LayoutGoal::Commit;
     tree.compute_layout(state, node, input)
 }
 
@@ -158,7 +160,7 @@ where
     let output = compute_uncached(tree, state, node, input);
     let slot = tree.layout_mut(state, node);
     slot.store_cached_layout(input, output);
-    if input.goal == LayoutGoal::Commit {
+    if input.goal.commits() {
         // A commit that ran is the one thing that rewrites descendant boxes;
         // a measurement pass reads them and writes none. Marking here is what
         // gives the rounding tail its spine: a commit only reaches a node
@@ -234,7 +236,7 @@ pub fn compute_skipped_contents_layout<T: LayoutTree>(
         }),
     );
 
-    if input.goal == LayoutGoal::Commit {
+    if input.goal.commits() {
         for child in tree.children(node) {
             hide_subtree(tree, state, child);
         }
@@ -277,7 +279,15 @@ where
         node,
         containing_block,
         static_position,
-        LayoutGoal::Commit,
+        // Every field of the input `absolute_layout` builds for this box is a
+        // function of the containing block and the box's own style — an
+        // out-of-flow box is never measured to build its own input. And its
+        // content cannot move the containing block back: it contributes to no
+        // ancestor's used size, only to their scrollable overflow, which is an
+        // output the in-place path compares before it trusts anything.
+        LayoutGoal::Commit {
+            content_independent: Size::new(true, true),
+        },
     )
 }
 
@@ -348,21 +358,7 @@ where
             .height
             .unwrap_or(AvailableSpace::Definite(inset_modified_size.height)),
     );
-    let mut child_input = match goal {
-        LayoutGoal::Commit => LayoutInput::commit(known_dimensions, parent_size, available_space),
-        LayoutGoal::Measure(requested_axis) => LayoutInput::measure(
-            known_dimensions,
-            parent_size,
-            available_space,
-            requested_axis,
-        ),
-    };
-    // Every field above is a function of the containing block and the box's
-    // own style — an out-of-flow box is never measured to build its own input.
-    // And its content cannot move the containing block back: it contributes to
-    // no ancestor's used size, only to their scrollable overflow, which is an
-    // output the in-place path compares before it trusts anything.
-    child_input.content_independent = Size::new(true, true);
+    let child_input = LayoutInput::new(goal, known_dimensions, parent_size, available_space);
     let output = tree.compute_layout(state, node, child_input);
 
     let margin = resolve_absolute_margins(
@@ -918,6 +914,7 @@ mod tests {
                     AvailableSpace::Definite(50.0),
                     AvailableSpace::Definite(20.0),
                 ),
+                Size::new(false, false),
             )
         }
     }

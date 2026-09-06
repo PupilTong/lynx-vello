@@ -113,7 +113,7 @@ pub trait ResourceFetcher: dom::FrameImages {
 /// the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
 /// belongs to one view, and a handle shared across views has nowhere to put
 /// more than one. A host that loads images asynchronously returns a per-view
-/// value from the builder [`LynxView::new`](crate::LynxView::new) takes,
+/// value from the builder [`create_lynx_view`](crate::LynxGroup::create_lynx_view) takes,
 /// holding this handle plus that view's reports.
 impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
