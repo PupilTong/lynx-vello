@@ -188,10 +188,30 @@ in the paragraph protocol: direction is resolved at style time into a physical
 
 Scope note: this is the spec for the `parley` integration — see `.claude/agents/lynx-text-engine.md`.
 
-Implementation note (2026-09-02): the structural model above — flattening,
-atomic inline boxes with vertical alignment, `text-maxline`/`text-maxlength`/
-`text-overflow` truncation with inline-truncation content, and the layout
-event's line data — is implemented standalone in `hughie::text::block`
-(`crates/hughie/src/text/block/`), deliberately unwired from the box-protocol
-measurement path. Its recorded deviations live in
+Implementation note (2026-09-06): `display: -lynx-text` flattens its subtree
+through `dom` into `hughie::text::block`, including atomic inline boxes.
+Core reflects `text-maxline` / `text-maxlength` into the inline custom properties
+`--lynx-text-maxline` / `--lynx-text-maxlength`. Its UA stylesheet registers both
+with `<integer>` syntax and `inherits: false`; the initial values (`0` and `-1`)
+mean unlimited. `dom::layout::StyleView` reads their computed values through
+`TextContainerStyle`, and `BlockStyle::from_container_style` consumes those inputs
+for the establishing element's paragraph. Normal restyles and animation ticks
+compare the effective limits when refreshing the layout style snapshot and
+merge changes into layout damage, clearing box measurements through the existing
+invalidation path. Attribute writes require no special invalidation logic, and
+the original strings remain available to attribute selectors. Later inline
+style replacement or overriding CSS can replace the reflected limits; they are
+ordinary cascade inputs. No custom element or public paragraph-limit setter is
+added. Shaped glyphs survive limit changes; both probes and commits use the same
+limits. CSS values receive integer validation, computation, and animation
+interpolation in Stylo; the attribute parser still normalizes Lynx's numeric
+prefixes before writing CSS.
+The attributes are paragraph-wide, not per nested run. Non-positive line
+counts mean unlimited, while a zero character count cuts all content. The
+web's numeric-prefix parsing is retained; fractional line counts are invalid
+for its CSS clamp, and fractional character offsets truncate as DOM Range does.
+Computed `text-overflow` selects clip or the existing literal-dots algorithm.
+Custom inline-truncation content, `tail-color-convert`, and delivery of the
+layout event remain unwired; the standalone block already supports custom
+tails and exposes line data. Its recorded deviations live in
 [deviations.md](deviations.md) under "Text layout".

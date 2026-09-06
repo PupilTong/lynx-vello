@@ -526,16 +526,20 @@ impl<T: Sync> Document<T> {
                     let Some(node) = self.arenas_mut().get_mut(current) else {
                         continue;
                     };
-                    let harvested = node.stylo_data_mut().and_then(|wrapper| {
+                    let damage = node.stylo_data_mut().map(|wrapper| {
                         let mut data = wrapper.borrow_mut();
                         let damage = data.damage;
                         data.clear_restyle_flags_and_damage();
-                        (!damage.is_empty()).then(|| StyleDamage::from(damage))
+                        damage
                     });
                     // Reads the primary style after the clear above, which is
                     // sound only because clearing restyle state touches the
                     // hint, the damage, and the flags — never `styles`.
                     let refresh = node.refresh_layout_style();
+                    let harvested = StyleDamage::from_style_change(
+                        damage.unwrap_or_default(),
+                        refresh.paragraph_limits_changed,
+                    );
                     (
                         harvested.map(|damage| (damage, refresh)),
                         node.has_animation_dirty_descendants() || refresh.changed,

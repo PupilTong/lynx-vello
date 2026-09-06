@@ -24,7 +24,8 @@ use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, shaping_inputs_changed, skips_contents,
+    establishes_fixed_containing_block, paragraph_limits_changed, shaping_inputs_changed,
+    skips_contents,
 };
 use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
@@ -530,9 +531,205 @@ mod tests {
         assert_eq!(restored.lines().len(), lines);
     }
 
-    /// The two-level eviction, from the outside: a relayout-damaged element
-    /// keeps its text children's shaped glyphs unless the restyle moved
-    /// something Parley shapes from.
+    /// Paragraph limits evict box and break measurements, preserving the
+    /// natural shaped layout even across intrinsic-width probes.
+    #[test]
+    fn changing_paragraph_limits_rebreaks_without_reshaping() {
+        let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+        document.add_stylesheet(
+            r#"@property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
+               @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }"#,
+            StylesheetOrigin::UserAgent,
+        );
+        document.layout();
+        let before = document
+            .text_block_rebuilds(label)
+            .expect("shaped paragraph");
+        assert_eq!(
+            document.text_block(label).expect("paragraph").lines().len(),
+            2
+        );
+
+        for (max_lines, max_chars, lines) in
+            [(Some("1"), None, 1), (None, Some("2"), 1), (None, None, 2)]
+        {
+            for (name, value) in [
+                ("--lynx-text-maxline", max_lines),
+                ("--lynx-text-maxlength", max_chars),
+            ] {
+                document.set_inline_style_property(label, name, value.unwrap_or(""));
+            }
+            document.layout();
+            let block = document.text_block(label).expect("committed paragraph");
+            assert_eq!(block.lines().len(), lines, "{max_lines:?}, {max_chars:?}");
+            assert_eq!(document.text_block_rebuilds(label), Some(before));
+            assert!(!document.text_block_is_probe_dirty(label));
+
+            for (name, value) in [
+                ("--lynx-text-maxline", max_lines),
+                ("--lynx-text-maxlength", max_chars),
+            ] {
+                document.set_inline_style_property(label, name, value.unwrap_or(""));
+            }
+            assert_eq!(
+                document.layout_cache_is_empty(label),
+                Some(false),
+                "no-op update"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn cascaded_paragraph_limits_update_ancestor_and_following_sibling_geometry() {
+        for (property, initial, limit) in [
+            ("--lynx-text-maxline", "0", "1"),
+            ("--lynx-text-maxlength", "-1", "2"),
+        ] {
+            let (mut document, label, _) = label_document_parts("hello world", 100.0);
+            document.add_stylesheet(
+                &format!(
+                    "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}"
+                ),
+                StylesheetOrigin::UserAgent,
+            );
+            document.add_stylesheet(
+                &format!(
+                    "page {{ flex-direction: column; line-height: 20px; }}
+                     .label {{ width: 100px; }}
+                     .expanded {{ {property}: initial !important; }}"
+                ),
+                StylesheetOrigin::Author,
+            );
+            let root = document.document_element().id();
+            let wrapper = document.create_element("view", ());
+            document.set_inline_style(
+                wrapper,
+                "display: flex; flex-direction: column; width: 100px; flex-shrink: 0",
+            );
+            document.append_child(root, wrapper);
+            document.append_child(wrapper, label);
+            let following = document.create_element("view", ());
+            document.set_inline_style(following, "display: flex; width: 1px; height: 7px");
+            document.append_child(root, following);
+            document.layout();
+            let rebuilds = document.text_block_rebuilds(label);
+
+            for (stage, height) in [(0, 20.0), (1, 40.0), (2, 20.0), (3, 40.0)] {
+                match stage {
+                    0 => document.set_inline_style_property(label, property, limit),
+                    1 => document.add_class(label, "expanded"),
+                    2 => document.remove_class(label, "expanded"),
+                    _ => document.set_inline_style_property(label, property, ""),
+                }
+                document.layout();
+                assert_eq!(
+                    document.rounded_layout(label).unwrap().size.height,
+                    height,
+                    "{property}, stage {stage}: paragraph height"
+                );
+                assert_eq!(
+                    document.rounded_layout(wrapper).unwrap().size.height,
+                    height,
+                    "{property}, stage {stage}: auto-sized ancestor"
+                );
+                assert_eq!(
+                    document.rounded_layout(following).unwrap().location.y,
+                    height,
+                    "{property}, stage {stage}: following sibling position"
+                );
+                assert_eq!(document.text_block_rebuilds(label), rebuilds);
+            }
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "explicit line heights have exact pixel metrics"
+    )]
+    fn interpolated_integer_paragraph_limits_relayout_without_reshaping() {
+        use hughie::style::TextContainerStyle;
+
+        for (property, initial, limit, samples) in [
+            (
+                "--lynx-text-maxline",
+                "0",
+                "4",
+                [(2.5, 1, 1, 20.0), (5.0, 2, 2, 40.0), (7.5, 3, 2, 40.0)],
+            ),
+            (
+                "--lynx-text-maxlength",
+                "-1",
+                "7",
+                [(2.5, 1, 1, 20.0), (5.0, 3, 1, 20.0), (7.5, 5, 1, 20.0)],
+            ),
+        ] {
+            let (mut document, label, _) = label_document_parts("hello world", 100.0);
+            document.add_stylesheet(
+                &format!(
+                    "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}"
+                ),
+                StylesheetOrigin::UserAgent,
+            );
+            document.add_stylesheet(
+                &format!(
+                    "@keyframes limit {{ from {{ {property}: {initial}; }} to {{ {property}: {limit}; }} }}
+                     .label {{ line-height: 20px; animation: limit 10s linear; }}"
+                ),
+                StylesheetOrigin::Author,
+            );
+            document.advance_animations(0.0);
+            document.layout();
+            let rebuilds = document.text_block_rebuilds(label);
+            assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
+
+            for (index, (time, count, lines, height)) in samples.into_iter().enumerate() {
+                let tick = document.advance_animations(time);
+                assert!(tick.relayout, "{property}: limit changed at t={time}");
+                document.layout();
+                let style = StyleView::of(document.get(label).unwrap());
+                let effective = if property == "--lynx-text-maxline" {
+                    style.text_maxline().map(core::num::NonZeroU32::get)
+                } else {
+                    style.text_maxlength()
+                };
+                assert_eq!(
+                    effective,
+                    Some(count),
+                    "{property}: integer sample at t={time}"
+                );
+                assert_eq!(document.text_block(label).unwrap().lines().len(), lines);
+                assert_eq!(document.rounded_layout(label).unwrap().size.height, height);
+                assert_eq!(document.text_block_rebuilds(label), rebuilds);
+                assert!(!document.text_block_is_probe_dirty(label));
+
+                if index == 0 {
+                    let same_integer = document.advance_animations(3.0);
+                    assert!(
+                        !same_integer.relayout,
+                        "{property}: a later sample rounding to the same integer keeps its layout"
+                    );
+                }
+            }
+
+            let ended = document.advance_animations(10.5);
+            assert!(
+                ended.relayout,
+                "{property}: finishing restores the initial limit"
+            );
+            document.layout();
+            let style = StyleView::of(document.get(label).unwrap());
+            assert_eq!(style.text_maxline(), None);
+            assert_eq!(style.text_maxlength(), None);
+            assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
+            assert_eq!(document.rounded_layout(label).unwrap().size.height, 40.0);
+            assert_eq!(document.text_block_rebuilds(label), rebuilds);
+        }
+    }
+
+    /// A relayout-damaged element keeps its shaped glyphs unless the restyle
+    /// moved something Parley shapes from.
     #[test]
     fn a_relayout_keeps_shaped_text_unless_the_shaping_inputs_moved() {
         for (case, declaration, survives) in [

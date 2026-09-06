@@ -1,9 +1,8 @@
 //! Parameter vocabulary of one Lynx text block.
 //!
 //! Plain resolved-value structs instead of the box-protocol wire format or a
-//! trait over `ComputedValues`: the block's defining capabilities
-//! (`text-maxline`, `text-maxlength`, inline-truncation content) are element
-//! attributes with no home in a computed-style hook, and the Lynx grammar is
+//! trait over `ComputedValues`: paragraph limits arrive through `TextContainerStyle`,
+//! custom inline-truncation is content, and the Lynx grammar is
 //! narrower than stylo's — `white-space` is only `normal | nowrap`, there is
 //! no `word-spacing`, no `pre*` — so two-value enums make the unsupported
 //! states unrepresentable instead of mapped and ignored. Font values stay
@@ -274,8 +273,8 @@ pub(in crate::text::block) fn parley_style<'style>(
 
 /// Builds the paragraph parameters from a container's computed style.
 ///
-/// `max_lines` / `max_chars` stay `None`: they are element attributes with no
-/// computed-style home, so a host that has them supplies them itself.
+/// Paragraph limits come from `TextContainerStyle`, whose host view reads the
+/// establishing element's computed custom properties alongside paragraph CSS.
 /// `text_indent` is absent by design — it is a [`BlockConstraint`] input,
 /// because a percentage resolves against the definite inline size.
 ///
@@ -286,6 +285,7 @@ impl BlockStyle {
         use stylo::computed_values::direction;
         use stylo::computed_values::text_wrap_mode::T as WrapMode;
         use stylo::values::computed::TextAlign as StyloAlign;
+        use stylo::values::specified::text::TextOverflowSide;
 
         Self {
             text_align: match style.text_align() {
@@ -308,9 +308,12 @@ impl BlockStyle {
                 stylo::values::computed::WordBreak::KeepAll => WordBreak::KeepAll,
                 stylo::values::computed::WordBreak::Normal => WordBreak::Normal,
             },
-            overflow: TextOverflow::Clip,
-            max_lines: None,
-            max_chars: None,
+            overflow: match style.text_overflow().second {
+                TextOverflowSide::Clip => TextOverflow::Clip,
+                TextOverflowSide::Ellipsis => TextOverflow::Ellipsis,
+            },
+            max_lines: style.text_maxline(),
+            max_chars: style.text_maxlength(),
         }
     }
 }

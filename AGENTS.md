@@ -542,17 +542,25 @@ useful signal for currently-compatible versions of those libraries.
   `RawTextAttributes` does, updating that node in place rather than replacing
   it (a run keeps its retained Parley layout under its own id), and carrying
   no node at all for an empty value. The UA sheet carries the other half,
-  again from `web-elements`: `text` is a flex container whatever
+  again from `web-elements`: `text` establishes one flattened paragraph whatever
   `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
   `raw-text` dissolves into the `text` it is written inside
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
-  newline. **Not implemented**: an inline formatting context, so sibling runs
-  in one `text` are separate flex items rather than one wrapped paragraph, a
-  nested `text` is a flex item rather than an inline box, and `text-maxline`
-  truncation is still absent — `docs/text-measurement-and-ifc.md` records the
-  retained-layout and eviction contracts those would build on, and the open
-  design decisions (brush, artifact ownership, truncation ordering).
+  newline. Sibling runs and nested text share the establishing element's
+  paragraph. Core reflects `text-maxline` and `text-maxlength` into inline
+  `--lynx-text-maxline` / `--lynx-text-maxlength`; the UA registers both with
+  `<integer>` syntax and `inherits: false`. DOM's borrowed `StyleView` reads
+  their computed values through `TextContainerStyle`, and
+  `BlockStyle::from_container_style` consumes those inputs. Normal and animated
+  style refreshes merge effective limit changes into layout damage to re-break
+  the retained glyphs through existing box invalidation. Original attribute
+  strings remain available to selectors. No text custom element, separate paragraph-limit
+  storage, or public limit setter participates. Computed `text-overflow`
+  selects clip or the existing literal-dots ellipsis. Custom inline-truncation
+  content, `tail-color-convert`, and the text layout event remain unwired.
+  `docs/text-measurement-and-ifc.md` records the earlier design investigation;
+  current integration status lives in `docs/tracking/css-text.md`.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
@@ -1368,7 +1376,9 @@ useful signal for currently-compatible versions of those libraries.
   `CoreStyle` carries the box model, containment, the alignment accessors and
   `order`, while `FlexboxStyle`, `GridStyle`, `LinearStyle` and
   `RelativeStyle` each carry the properties only their own algorithm reads and
-  are demanded at that algorithm's entry point. `LayoutTree::flattened_children`
+  are demanded at that algorithm's entry point. `TextContainerStyle` supplies
+  paragraph-wide `text_maxline` and `text_maxlength` inputs from non-inherited
+  integer custom properties, defaulting to unlimited. `LayoutTree::flattened_children`
   is the box-tree view every algorithm collects items through, flattening
   `display: contents` subtrees. Leaf content is deliberately closed: replaced
   content uses the `NaturalSize` value path, while text uses the crate's
@@ -1409,8 +1419,9 @@ useful signal for currently-compatible versions of those libraries.
   surface, `rpx`-aware view/device policy, per-component css-id scoping,
   sticky lowering,
   component-specific staggered layout, and the rest of the Lynx text policy —
-  `text-maxline`/`text-maxlength` truncation, `tail-color-convert`, and the
-  inline formatting context sibling runs in one `text` would need. The
+  custom inline-truncation content, `tail-color-convert`, and text layout events.
+  The flattened paragraph and `text-maxline`/`text-maxlength` attribute wiring
+  are implemented (see `tree::text` above). The
   `raw-text` attribute-to-text-node reflection and its UA display/newline
   policy have landed in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C
   text style, document context, and artifact storage already live in `dom`.

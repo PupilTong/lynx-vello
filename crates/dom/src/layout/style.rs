@@ -199,13 +199,15 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 }
 
-// Every algorithm accessor answers from `computed_values()`, which this view
-// already overrides, so the four algorithm protocols need no bodies here.
+// Every algorithm accessor reads computed values, including registered
+// paragraph-limit custom properties, through the style protocol defaults.
 impl<T> FlexboxStyle for StyleView<'_, T> {}
 
 impl<T> GridStyle for StyleView<'_, T> {}
 
 impl<T> LinearStyle for StyleView<'_, T> {}
+
+impl<T> TextContainerStyle for StyleView<'_, T> {}
 
 impl<T> RelativeStyle for StyleView<'_, T> {}
 
@@ -250,67 +252,32 @@ pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues)
                 || old_text.white_space_collapse != new_text.white_space_collapse))
 }
 
-/// The style of the box that establishes a text node's formatting context.
-///
-/// Paragraph-level: the anonymous box contributes no geometry of its own, so
-/// [`CoreStyle`] answers from the initial values, and everything Parley reads
-/// per *paragraph* — `white-space`, `word-break`, `text-wrap`, `text-align`,
-/// `text-indent` — comes from the inherited values of the establishing
-/// element.
-///
-/// This is deliberately a different view from [`TextRunView`] even though both
-/// resolve to the same element today. A text node is a single anonymous run
-/// inside its parent, so the two roles coincide; in an inline formatting
-/// context they do not — one paragraph spans many runs, and each run carries
-/// the style of the innermost inline box its characters sit in. Keeping the
-/// roles apart here is what lets the run side gain its own style source
-/// without disturbing the paragraph side.
-pub(crate) struct TextContainerView<'dom> {
-    paragraph: &'dom ComputedValues,
-}
+/// Stylo gives custom-property changes repaint damage. Compare the effective
+/// values the paragraph actually consumes to account for their layout dependency.
+pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
+    struct ParagraphStyle<'a>(&'a ComputedValues);
 
-impl std::fmt::Debug for TextContainerView<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("TextContainerView")
-    }
-}
-
-impl<'dom> TextContainerView<'dom> {
-    /// The paragraph style for `node`'s anonymous box — the style of the
-    /// element that establishes its formatting context, which for a lone text
-    /// child is its flat parent.
-    /// The paragraph style of an element that *establishes* a text block.
-    ///
-    /// Its own computed style, not its parent's: a `display: -lynx-text`
-    /// element is the formatting context, where a text node merely sits in
-    /// one.
-    pub(crate) fn of_establishing_element<T>(node: &'dom Node<T>) -> Self {
-        Self {
-            paragraph: node
-                .layout_computed_style()
-                .unwrap_or(&super::ANONYMOUS_STYLE),
+    impl CoreStyle for ParagraphStyle<'_> {
+        fn computed_values(&self) -> &ComputedValues {
+            self.0
         }
     }
-}
+    impl TextContainerStyle for ParagraphStyle<'_> {}
 
-impl CoreStyle for TextContainerView<'_> {
-    fn computed_values(&self) -> &ComputedValues {
-        &super::ANONYMOUS_STYLE
+    if old.custom_properties().non_inherited == new.custom_properties().non_inherited {
+        return false;
     }
 
-    fn inherited_values(&self) -> &ComputedValues {
-        self.paragraph
-    }
+    let (old, new) = (ParagraphStyle(old), ParagraphStyle(new));
+    old.text_maxline() != new.text_maxline() || old.text_maxlength() != new.text_maxlength()
 }
-
-impl TextContainerStyle for TextContainerView<'_> {}
 
 /// The style one shaped run carries: everything Parley resolves per *run* —
 /// the font family, size, weight, style, variations, features, `line-height`
 /// and `letter-spacing`.
 ///
-/// Today a text node is one run and its style is its parent's; see
-/// [`TextContainerView`] for why the two views exist separately anyway.
+/// The paragraph's `StyleView` reads its establishing element; each run reads
+/// its own innermost element so nested text keeps its font and line height.
 pub(crate) struct TextRunView<'dom> {
     run: &'dom ComputedValues,
 }
@@ -353,7 +320,7 @@ mod tests {
     use hughie::style::Display;
     use stylo::values::specified::box_::DisplayInside;
 
-    use super::{DisplayMode, StyleView, TextContainerView, TextRunView, display_mode};
+    use super::{DisplayMode, StyleView, TextRunView, display_mode};
 
     #[test]
     fn supported_lynx_displays_map_to_layout_modes() {
@@ -381,7 +348,6 @@ mod tests {
     fn post_flush_style_views_stay_within_their_expected_footprint() {
         let word = size_of::<usize>();
         assert_eq!(size_of::<StyleView<'static, ()>>(), 2 * word);
-        assert_eq!(size_of::<TextContainerView<'static>>(), word);
         assert_eq!(size_of::<TextRunView<'static>>(), word);
     }
 }

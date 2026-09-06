@@ -26,6 +26,7 @@ mod ua_sheet;
 
 use dom::{Document, StylesheetOrigin};
 
+pub(crate) use self::text::apply_attribute_style;
 pub use self::ua_sheet::PageConfig;
 pub(crate) use crate::view::Viewport;
 

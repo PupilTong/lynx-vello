@@ -1,13 +1,35 @@
 //! Text measurement style protocol.
 
+use core::num::NonZeroU32;
+use std::sync::LazyLock;
+
+use style_traits::ToCss;
 use stylo::computed_values::text_wrap_mode;
+use stylo::custom_properties::Name;
 use stylo::properties::ComputedValues;
 use stylo::values::computed::{
     FontFamily, FontFeatureSettings, FontStyle, FontVariationSettings, FontWeight, LetterSpacing,
-    LineHeight, TextAlign, TextIndent, WordBreak,
+    LineHeight, TextAlign, TextIndent, TextOverflow, WordBreak,
 };
 
 use crate::style::{CoreStyle, initial_values};
+
+static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxline"));
+static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
+
+/// Read the UA-registered, non-inherited integer after CSS computation.
+/// Stylo has no public scalar accessor for registered values. `ToCss` exposes
+/// the computed integer after resolving `calc()` and animations.
+fn paragraph_limit(style: &ComputedValues, name: &Name) -> Option<u32> {
+    let value = style
+        .custom_properties()
+        .non_inherited
+        .get(name)?
+        .to_css_string()
+        .parse::<i32>()
+        .ok()?;
+    u32::try_from(value).ok()
+}
 
 style_protocol! {
     pub trait TextContainerStyle: CoreStyle {
@@ -20,6 +42,12 @@ style_protocol! {
                 style.inherited_values().get_inherited_text().clone_word_break(),
             text_indent -> TextIndent =
                 style.inherited_values().get_inherited_text().clone_text_indent(),
+            text_overflow -> TextOverflow =
+                style.inherited_values().get_text().clone_text_overflow(),
+            text_maxline -> Option<NonZeroU32> =
+                paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
+            text_maxlength -> Option<u32> =
+                paragraph_limit(style.computed_values(), &TEXT_MAXLENGTH),
         }
     }
 }
@@ -118,6 +146,12 @@ mod tests {
         assert_eq!(style.text_wrap_mode(), text_wrap_mode::T::Wrap);
         assert_eq!(style.word_break(), WordBreak::Normal);
         assert!(style.text_indent().length.is_zero());
+        assert_eq!(style.text_maxline(), None);
+        assert_eq!(style.text_maxlength(), None);
+        // A paragraph needs no LinearStyle implementation.
+        let block = crate::text::block::BlockStyle::from_container_style(&style);
+        assert_eq!(block.max_lines, None);
+        assert_eq!(block.max_chars, None);
         assert_eq!(style.font_size(), 16.0);
         assert_eq!(style.font_weight(), FontWeight::NORMAL);
         assert_eq!(style.font_style(), FontStyle::NORMAL);
