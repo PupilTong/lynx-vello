@@ -385,6 +385,11 @@ impl MacApplication {
                 EngineEvent::TimerFailed(error) => {
                     eprintln!("timer callback failed: {error}");
                 }
+                // A background script, on another runtime entirely: the
+                // document never saw it and the window is unaffected.
+                EngineEvent::WorkerFailed(error) => {
+                    eprintln!("worker failed: {error}");
+                }
                 _ => {}
             }
         }

@@ -213,6 +213,11 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
             EngineEvent::TimerFailed(error) => {
                 eprintln!("timer callback failed: {error}");
             }
+            // A background script, on another runtime entirely: the document
+            // never saw it and the run goes on.
+            EngineEvent::WorkerFailed(error) => {
+                eprintln!("worker failed: {error}");
+            }
             EngineEvent::RenderFailed(error) => return Err(CliError::Engine(error)),
             _ => {}
         }

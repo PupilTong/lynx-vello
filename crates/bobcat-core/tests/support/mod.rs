@@ -42,7 +42,7 @@ pub async fn solo_view<R, F, B>(
 ) -> Result<LynxView<F>, LynxViewError>
 where
     R: EventRequester,
-    F: ResourceFetcher,
+    F: ResourceFetcher + 'static,
     B: FnOnce(ImageReports) -> F,
 {
     LynxGroup::new(event_requester, StyleThreads::Auto)
@@ -61,7 +61,9 @@ where
 /// Drains the terminal boot event preserved after construction. Construction
 /// has already awaited the same outcome before it returns, and every `pump`
 /// here runs the view's own turn on this thread.
-pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {
+pub fn wait_for_script<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.

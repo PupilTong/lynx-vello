@@ -10,6 +10,7 @@
 //! not a re-export of the runtime. It is `#[doc(hidden)]` and carries no
 //! stability promise.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::event::EventSteps;
@@ -17,8 +18,9 @@ use dom::event::EventSteps;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::workers::WorkerHub;
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, detached_link};
+use crate::view::{DETACHED_VIEW, NoWakeup, detached_link};
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -47,8 +49,14 @@ impl ScriptHarness {
         let (painter, main) = detached_link(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-            .expect("the benchmark realm boots");
+        let runtime = MainThreadRuntime::new(
+            &mut js_runtime,
+            document,
+            main.notify,
+            DETACHED_VIEW,
+            Rc::new(WorkerHub::new()),
+        )
+        .expect("the benchmark realm boots");
         Self {
             js_runtime,
             runtime,

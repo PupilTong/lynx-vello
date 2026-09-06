@@ -1,7 +1,8 @@
 use super::*;
 use crate::main::tree::{PageConfig, Viewport, new_document};
+use crate::main::workers::WorkerEvent;
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, detached_link};
+use crate::view::{DETACHED_VIEW, NoWakeup, WorkerScript, detached_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -81,8 +82,14 @@ fn runtime_over_watching_names(
     let (painter, main) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-        .expect("main-thread runtime");
+    let runtime = MainThreadRuntime::new(
+        &mut js_runtime,
+        document,
+        main.notify,
+        DETACHED_VIEW,
+        Rc::new(WorkerHub::new()),
+    )
+    .expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
     (js_runtime, runtime, probe, PublishedNames(painter))
 }
@@ -2358,4 +2365,399 @@ fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
     assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     let deadline = runtime.next_timer_deadline().expect("the chain goes on");
     assert!(deadline > before, "the sixth link waits");
+}
+
+// # Workers
+//
+// Every test here plays the two halves the engine's own threads play: the
+// painter, which answers a script request with bytes, and the group's command
+// loop, which routes what the worker thread says back into the realm. What is
+// real is everything between — the second `QuickJS` runtime, the worker
+// thread, the realm on it, and both directions of the boundary.
+
+/// The painter and the group loop, by hand.
+struct WorkerHarness {
+    link: PainterLink,
+    hub: Rc<WorkerHub>,
+    events: Option<flume::Receiver<WorkerEvent>>,
+}
+
+impl WorkerHarness {
+    /// Every script the realm has asked for since the last call.
+    fn requests(&mut self) -> Vec<(WorkerKey, String)> {
+        self.link.sync();
+        self.link.take_worker_requests()
+    }
+
+    /// Answers the one outstanding request with `source`, as a fetch would.
+    fn answer(
+        &mut self,
+        runtime: &mut MainThreadRuntime<NoWakeup>,
+        js_runtime: &mut ScriptRuntime,
+        source: &str,
+    ) {
+        let mut requests = self.requests();
+        assert_eq!(requests.len(), 1, "exactly one worker was constructed");
+        let (key, url) = requests.remove(0);
+        runtime
+            .worker_script_loaded(
+                js_runtime,
+                key,
+                Ok(WorkerScript {
+                    source: source.to_owned(),
+                    url,
+                }),
+            )
+            .expect("answering the script request");
+    }
+
+    /// The next thing a worker realm said, delivered into the view's realm
+    /// the way the group's command loop delivers it.
+    fn deliver_next(
+        &mut self,
+        runtime: &mut MainThreadRuntime<NoWakeup>,
+        js_runtime: &mut ScriptRuntime,
+    ) -> Result<(), MainThreadError> {
+        let event = self.next_event();
+        runtime.deliver_worker_event(js_runtime, event.key, event.payload)
+    }
+
+    fn next_event(&mut self) -> WorkerEvent {
+        let events = self
+            .events
+            .get_or_insert_with(|| self.hub.take_fresh_receiver().expect("a worker started"));
+        events
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker thread answered")
+    }
+}
+
+impl Drop for WorkerHarness {
+    fn drop(&mut self) {
+        self.hub.shutdown();
+    }
+}
+
+fn worker_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, WorkerHarness) {
+    let (link, main) = detached_link(Arc::new(NoWakeup));
+    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
+    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let hub = Rc::new(WorkerHub::new());
+    let runtime = MainThreadRuntime::new(
+        &mut js_runtime,
+        new_document(Viewport::new(393.0, 727.0), PageConfig::default()),
+        main.notify,
+        DETACHED_VIEW,
+        Rc::clone(&hub),
+    )
+    .expect("main-thread runtime");
+    (
+        js_runtime,
+        runtime,
+        WorkerHarness {
+            link,
+            hub,
+            events: None,
+        },
+    )
+}
+
+/// Asserts inside the realm: a module that throws is a failed test.
+fn verify(runtime: &mut MainThreadRuntime<NoWakeup>, js_runtime: &mut ScriptRuntime, source: &str) {
+    runtime
+        .evaluate_module(js_runtime, source, "app:///verify.js", "verifying")
+        .expect("verification");
+}
+
+#[test]
+fn a_worker_receives_what_the_realm_posts_and_answers_it() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                const worker = new Worker("app:///echo.js");
+                worker.onmessage = (event) => seen.push(event.data.pong);
+                worker.postMessage({ ping: 7 });
+                "#,
+            "app:///worker-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "onmessage = (event) => postMessage({ pong: event.data.ping + 1 });",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        "if (seen.join('|') !== '8') throw new Error(seen.join('|'));",
+    );
+}
+
+#[test]
+fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                const worker = new Worker("app:///order.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.postMessage("a");
+                worker.postMessage("b");
+                "#,
+            "app:///order-entry.js",
+        )
+        .expect("main-thread script");
+
+    // Both were posted before the worker had a realm to receive them, so both
+    // waited on this side and cross the moment it does.
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "onmessage = (event) => postMessage(event.data.toUpperCase());",
+    );
+    for _ in 0..2 {
+        workers
+            .deliver_next(&mut runtime, &mut js_runtime)
+            .expect("delivering the worker's message");
+    }
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        "if (seen.join('|') !== 'A|B') throw new Error(seen.join('|'));",
+    );
+}
+
+#[test]
+fn a_worker_realm_shares_no_global_with_the_main_thread() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.mainOnly = "main";
+                globalThis.seen = [];
+                const worker = new Worker("app:///isolated.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.postMessage(null);
+                "#,
+            "app:///isolated-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        globalThis.mainOnly = "worker";
+        onmessage = () => postMessage(typeof globalThis.__CreateView);
+        "#,
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        // The worker assigned its own `mainOnly`, on its own global, on its
+        // own runtime: nothing about it can be seen from here.
+        if (globalThis.mainOnly !== "main") throw new Error(globalThis.mainOnly);
+        // And the Element PAPI is not installed on a global anywhere, least
+        // of all a worker's.
+        if (seen.join("|") !== "undefined") throw new Error(seen.join("|"));
+        "#,
+    );
+}
+
+#[test]
+fn a_worker_cannot_import_the_element_papi() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.failures = [];
+                const worker = new Worker("app:///reaching.js");
+                worker.onerror = (event) => failures.push(event.message);
+                "#,
+            "app:///reaching-entry.js",
+        )
+        .expect("main-thread script");
+
+    // `bobcat:element` is registered on `bobcat-main`'s runtime and on no
+    // other, so a worker asking for the document cannot even resolve it.
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "import { __CreateView } from 'bobcat:element';\n__CreateView(0);",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's failure");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        "if (failures.length !== 1) throw new Error(String(failures.length));",
+    );
+}
+
+#[test]
+fn a_worker_that_closes_itself_reports_and_stops() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                globalThis.errors = 0;
+                globalThis.worker = new Worker("app:///closing.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.onerror = () => { errors += 1; };
+                // Two, so the second is queued behind the `close()` the
+                // first causes and must be discarded rather than delivered.
+                worker.postMessage("go");
+                worker.postMessage("after");
+                "#,
+            "app:///closing-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+        onmessage = (event) => {
+          postMessage(event.data);
+          close();
+        };
+        ",
+    );
+    // The message it sent before closing, then the close itself. If the
+    // second message had been delivered there would be a third.
+    for _ in 0..2 {
+        workers
+            .deliver_next(&mut runtime, &mut js_runtime)
+            .expect("delivering the worker's news");
+    }
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (seen.join("|") !== "go") throw new Error(seen.join("|"));
+        // A close is not a failure, so it fires nothing.
+        if (errors !== 0) throw new Error(String(errors));
+        // And posting to a worker that ended is a no-op rather than a throw.
+        worker.postMessage("again");
+        "#,
+    );
+}
+
+#[test]
+fn a_worker_script_that_will_not_load_fires_one_error() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.failures = [];
+                const worker = new Worker("app:///missing.js");
+                worker.addEventListener("error", (event) => failures.push(event.message));
+                "#,
+            "app:///missing-entry.js",
+        )
+        .expect("main-thread script");
+
+    let mut requests = workers.requests();
+    assert_eq!(requests.len(), 1);
+    let (key, _) = requests.remove(0);
+    runtime
+        .worker_script_loaded(&mut js_runtime, key, Err("404 Not Found".to_owned()))
+        .expect("reporting the failed fetch");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (failures.length !== 1) throw new Error(String(failures.length));
+        if (!failures[0].includes("404 Not Found")) throw new Error(failures[0]);
+        "#,
+    );
+}
+
+#[test]
+fn a_terminated_worker_is_no_longer_a_worker_this_realm_may_name() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.worker = new Worker("app:///terminated.js");
+                "#,
+            "app:///terminated-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(&mut runtime, &mut js_runtime, "postMessage('hello');");
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        worker.terminate();
+        // Idempotent, and everything after it is a no-op rather than a throw.
+        worker.terminate();
+        worker.postMessage("ignored");
+        "#,
+    );
+
+    // Whatever the worker managed to say before it was terminated is
+    // delivered to a `Worker` that has forgotten it, and reaches nothing.
+    let event = workers.next_event();
+    runtime
+        .deliver_worker_event(&mut js_runtime, event.key, event.payload)
+        .expect("delivering to a terminated worker");
+}
+
+#[test]
+fn a_worker_keeps_its_own_timers() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                const worker = new Worker("app:///timers.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                "#,
+            "app:///timers-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "setTimeout(() => postMessage('late'), 1);",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        "if (seen.join('|') !== 'late') throw new Error(seen.join('|'));",
+    );
 }

@@ -12,6 +12,7 @@ mod gesture;
 mod graphics;
 pub(crate) mod images;
 mod sources;
+mod workers;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -26,7 +27,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Poll, Wake, Waker};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -47,6 +48,7 @@ use self::graphics::{FrameAcquisition, WindowGraphics};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::Viewport;
+use crate::main::workers::WorkerKey;
 #[cfg(test)]
 use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
 #[cfg(not(target_arch = "wasm32"))]
@@ -172,6 +174,8 @@ pub(crate) struct PainterLink {
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
+    /// Worker scripts the realm asked for, buffered for the same reason.
+    worker_requests: Vec<(WorkerKey, String)>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// A field rather than a local because a startup drain runs in pieces.
     pending_announce: bool,
@@ -196,6 +200,7 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
+            worker_requests: Vec::new(),
             pending_announce: false,
         }
     }
@@ -249,6 +254,12 @@ impl PainterLink {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
+            ToPainter::RequestWorkerScript { key, url } => {
+                self.worker_requests.push((key, url));
+            }
+            // The turn this asked for is the turn applying it, so arriving is
+            // the whole of the message.
+            ToPainter::WakeTurn => {}
             ToPainter::Started(_) => {
                 unreachable!("startup messages are served before the view exists")
             }
@@ -257,6 +268,23 @@ impl PainterLink {
 
     fn take_image_requests(&mut self) -> Vec<Arc<str>> {
         std::mem::take(&mut self.image_requests)
+    }
+
+    pub(crate) fn take_worker_requests(&mut self) -> Vec<(WorkerKey, String)> {
+        std::mem::take(&mut self.worker_requests)
+    }
+
+    /// The waker a fetch off the frame path is polled with.
+    ///
+    /// It wakes nothing here. The painter has no event loop of its own to
+    /// wake — the host owns that — so the waker asks `bobcat-main` for a
+    /// turn, and the answer travels back over the wakeup every other engine
+    /// fact does.
+    fn turn_waker(&self) -> Waker {
+        Waker::from(Arc::new(TurnWaker {
+            view: self.view,
+            commands: self.commands.clone(),
+        }))
     }
 
     fn adopt_frame(&mut self, announced: bool) {
@@ -423,6 +451,31 @@ impl PainterLink {
     }
 }
 
+/// The waker every off-turn fetch on the painter is polled with.
+///
+/// Waking means asking the group's thread for a turn: the painter cannot ask
+/// its own host for one, because the host's event loop is woken by the
+/// engine's single [`EventRequester`](crate::EventRequester), which lives on
+/// `bobcat-main`. `Send + Sync` because a host's resource system finishes its
+/// work wherever it likes and wakes from there.
+struct TurnWaker {
+    view: ViewId,
+    commands: flume::Sender<GroupCommand>,
+}
+
+impl Wake for TurnWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        let _ = self.commands.send(GroupCommand::View {
+            view: self.view,
+            command: ToMain::RequestTurn,
+        });
+    }
+}
+
 impl fmt::Debug for PainterLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -523,6 +576,8 @@ pub(crate) struct Painter<F> {
     refill_requested_for: Option<u64>,
     /// The whole image resource system. Owned here and nowhere else.
     images: images::PainterImages<F>,
+    /// Worker scripts this view's realm asked for and has not been given.
+    workers: workers::WorkerScripts,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -875,7 +930,7 @@ impl TestPainter {
     }
 }
 
-impl<F: crate::resource::ResourceFetcher> Painter<F> {
+impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
     pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
@@ -904,6 +959,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             composed_scene: Scene::new(),
             refill_requested_for: None,
             images: images::PainterImages::new(resources),
+            workers: workers::WorkerScripts::default(),
             thread_bound: PhantomData,
         }
     }
@@ -963,14 +1019,30 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
     }
 
     /// One painter turn's intake: everything the document said, then the
-    /// image work that came with it.
+    /// resource work that came with it.
     ///
-    /// The two are one call because they are one fact. A turn that drained
-    /// the link without servicing its image requests would leave the store
+    /// They are one call because they are one fact. A turn that drained the
+    /// link without servicing its image requests would leave the store
     /// unasked, and the frame that needed those images would never arrive.
     fn sync(&mut self) {
         self.link.sync();
         self.service_images();
+        self.service_workers();
+    }
+
+    /// Services the worker protocol: starts the fetch for every script the
+    /// realm asked for, then hands back whichever have finished.
+    ///
+    /// Polled here rather than on a thread of its own because this is where
+    /// the host's resource system may be touched at all, and because the
+    /// waker a fetch wakes with asks for exactly this turn.
+    fn service_workers(&mut self) {
+        for (key, url) in self.link.take_worker_requests() {
+            self.workers.request(self.images.handle(), key, url);
+        }
+        for (key, script) in self.workers.poll(&self.link.turn_waker()) {
+            self.link.send(ToMain::WorkerScriptLoaded { key, script });
+        }
     }
 
     /// Services the image protocol: gives the host its moment in the turn,

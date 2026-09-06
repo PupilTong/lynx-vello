@@ -38,6 +38,9 @@ rstest.mockRequire("bobcat-internal:host", () => {
     stopPropagation: native.stopPropagation,
     setTimer: native.setTimer,
     clearTimer: native.clearTimer,
+    createWorker: native.createWorker,
+    postWorkerMessage: native.postWorkerMessage,
+    terminateWorker: native.terminateWorker,
   };
 });
 
@@ -357,7 +360,7 @@ function createMockBobcat(issuedIds) {
     stopPropagation: () => {
       calls.push(["stopPropagation"]);
     },
-    // The Element PAPI reaches neither of these; they are here because the
+    // The Element PAPI reaches none of what follows; it is here because the
     // mock stands in for the whole native module, not part of it.
     /**
      * @param {number} delayMilliseconds
@@ -370,6 +373,25 @@ function createMockBobcat(issuedIds) {
     /** @param {number} id */
     clearTimer: (id) => {
       calls.push(["clearTimer", id]);
+    },
+    /**
+     * @param {string} url
+     * @param {string} name
+     */
+    createWorker: (url, name) => {
+      calls.push(["createWorker", url, name]);
+      return 1;
+    },
+    /**
+     * @param {number} key
+     * @param {string} data
+     */
+    postWorkerMessage: (key, data) => {
+      calls.push(["postWorkerMessage", key, data]);
+    },
+    /** @param {number} key */
+    terminateWorker: (key) => {
+      calls.push(["terminateWorker", key]);
     },
   };
   return host;

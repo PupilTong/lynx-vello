@@ -76,6 +76,35 @@ interface BobcatNative {
   setTimer(delayMilliseconds: number, repeats: boolean): number;
   /** Disarms a timer, whether or not one is armed under that id. */
   clearTimer(id: number): void;
+  /**
+   * Names one worker and starts fetching its script, returning the key every
+   * later call and every delivery back names it by. The load is asynchronous:
+   * a script that cannot be fetched, decoded or evaluated arrives as an
+   * `error` delivery rather than as a throw here.
+   */
+  createWorker(url: string, name: string): number;
+  /** Hands one JSON-encoded message to a worker; a dead key is a no-op. */
+  postWorkerMessage(key: number, data: string): void;
+  /**
+   * Ends a worker between its tasks and drops its realm. Nothing interrupts
+   * one mid-call.
+   */
+  terminateWorker(key: number): void;
+}
+
+/**
+ * The native functions a worker realm gets instead of the document. Its
+ * `bobcat-internal:host` carries the timer pair and nothing else, because a
+ * worker has no tree to mutate.
+ */
+interface BobcatWorkerNative {
+  /** Hands one JSON-encoded message back to the realm that created us. */
+  postWorkerMessage(data: string): void;
+  /**
+   * Ends this worker once the running task returns. Queued messages and armed
+   * timers go with it.
+   */
+  closeWorker(): void;
 }
 
 declare module "bobcat-internal:host" {
@@ -100,6 +129,32 @@ declare module "bobcat-internal:host" {
   export const stopPropagation: BobcatNative["stopPropagation"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
+  export const createWorker: BobcatNative["createWorker"];
+  export const postWorkerMessage: BobcatNative["postWorkerMessage"];
+  export const terminateWorker: BobcatNative["terminateWorker"];
+}
+
+declare module "bobcat-internal:worker" {
+  export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
+  export const closeWorker: BobcatWorkerNative["closeWorker"];
+}
+
+declare module "bobcat:event-target" {
+  export class EventTarget {
+    addEventListener(
+      eventName: unknown,
+      callback: unknown,
+      options?: unknown,
+    ): undefined;
+    removeEventListener(
+      eventName: unknown,
+      callback: unknown,
+      options?: unknown,
+    ): undefined;
+    dispatchEvent(event: unknown): boolean;
+  }
+  export function installEventTarget(target: object): undefined;
+  export function installEventHandler(target: object, name: string): undefined;
 }
 
 /**

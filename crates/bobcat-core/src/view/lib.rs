@@ -24,6 +24,7 @@ pub use crate::main::configure_wasm_workers;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
+use crate::main::workers::WorkerKey;
 use crate::main::{GroupHome, GroupLink, StartupControl, ToPainterSender, spawn_group};
 pub use crate::paint::WindowTarget;
 use crate::paint::{Output, Painter, PainterLink};
@@ -222,6 +223,13 @@ pub enum EngineEvent {
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
+    /// A `Worker` failed: its script could not be loaded, it threw on load,
+    /// or something in it threw while it ran. Not fatal to the view — the
+    /// document is on another runtime entirely — and reported here because a
+    /// card that registered no `onerror` would otherwise lose a background
+    /// script in silence. The realm hears about it as an `error` event on the
+    /// `Worker` itself.
+    WorkerFailed(ScriptError),
     /// The painter could not produce a frame. Fatal for the draw target:
     /// nothing further will reach the screen, so an embedder reports it and
     /// takes the window down.
@@ -513,7 +521,7 @@ impl LynxGroup {
         sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
-        F: ResourceFetcher,
+        F: ResourceFetcher + 'static,
         B: FnOnce(dom::ImageReports) -> F,
     {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
@@ -633,7 +641,7 @@ impl<F> Drop for LynxView<F> {
     }
 }
 
-impl<F: ResourceFetcher> LynxView<F> {
+impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// Routes one normalized OS input event against the frame the painter
     /// last read.
     pub fn dispatch_input(&mut self, event: InputEvent) {
@@ -758,7 +766,7 @@ struct ViewStartup<F> {
     control: Arc<StartupControl>,
 }
 
-impl<F: ResourceFetcher> ViewStartup<F> {
+impl<F: ResourceFetcher + 'static> ViewStartup<F> {
     async fn serve(
         &mut self,
         style_sheets: Vec<String>,
@@ -837,6 +845,16 @@ pub(crate) enum GroupCommand {
     Close,
 }
 
+/// One worker script, resolved, fetched and decoded by the thread that owns
+/// the fetcher.
+#[derive(Debug)]
+pub(crate) struct WorkerScript {
+    pub(crate) source: String,
+    /// The resolved URL, which is what the worker runtime registers the
+    /// module under and what every error against it names.
+    pub(crate) url: String,
+}
+
 /// Painter → Lynx main: every fact the document must see.
 pub(crate) enum ToMain {
     DispatchEvent {
@@ -872,6 +890,23 @@ pub(crate) enum ToMain {
     SourceLoaded {
         source: LoadedSource,
     },
+    /// The answer to one [`ToPainter::RequestWorkerScript`], success or the
+    /// reason there is none. Unlike a startup source, a failure does cross:
+    /// nobody is waiting on it, and the realm that constructed the `Worker`
+    /// is the only thing that can report it.
+    WorkerScriptLoaded {
+        key: WorkerKey,
+        script: Result<WorkerScript, String>,
+    },
+    /// The painter has off-turn work that became ready and needs a turn to
+    /// apply it — today, a worker script whose fetch woke.
+    ///
+    /// It is a round trip because the engine has exactly one wakeup and it
+    /// lives on this thread: the painter cannot ask its own event loop for a
+    /// turn, so it asks the thread that can. Answering it is
+    /// [`ToPainter::WakeTurn`], and the answer's only content is that it
+    /// arrived.
+    RequestTurn,
     Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
@@ -899,6 +934,15 @@ pub(crate) enum LoadedSource {
 pub(crate) enum ToPainter {
     /// The frame mailbox holds something the painter has not read.
     FrameChanged,
+    /// A turn the painter asked for with [`ToMain::RequestTurn`]. Carries
+    /// nothing: the wakeup that brought it is the whole message.
+    WakeTurn,
+    /// A `Worker` the realm constructed needs its script fetched. The painter
+    /// answers with [`ToMain::WorkerScriptLoaded`], whatever the outcome.
+    RequestWorkerScript {
+        key: WorkerKey,
+        url: String,
+    },
     Engine(EngineEvent),
     ListenerAvailable(Arc<str>),
     ListenerUnavailable(Arc<str>),

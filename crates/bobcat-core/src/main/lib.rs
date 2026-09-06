@@ -11,6 +11,7 @@ pub(crate) mod quickjs;
 pub(crate) mod runtime;
 #[path = "tree/lib.rs"]
 pub(crate) mod tree;
+pub(crate) mod workers;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
@@ -37,6 +38,7 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use self::workers::{WorkerEvent, WorkerHub};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand, LoadedSource,
@@ -276,13 +278,19 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let DetachedLink { commands, notify } = link;
             let requester = Arc::clone(notify.requester());
+            let workers = Rc::new(WorkerHub::new());
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
                     .map_err(MainThreadError::into_script_error)?;
-                let mut runtime =
-                    MainThreadRuntime::new(&mut js_runtime, build_document(), notify.clone())
-                        .map_err(MainThreadError::into_script_error)?;
+                let mut runtime = MainThreadRuntime::new(
+                    &mut js_runtime,
+                    build_document(),
+                    notify.clone(),
+                    DETACHED_VIEW,
+                    Rc::clone(&workers),
+                )
+                .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&mut js_runtime, &entry.source, &entry.url)
                     .map_err(MainThreadError::into_script_error)?;
@@ -304,7 +312,15 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         notify,
                         Arc::new(StartupControl::default()),
                     )];
-                    serve_group(&mut js_runtime, None, &requester, &commands, &mut views);
+                    serve_group(
+                        &mut js_runtime,
+                        None,
+                        &requester,
+                        &commands,
+                        &mut views,
+                        &workers,
+                    );
+                    workers.shutdown();
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -339,6 +355,10 @@ enum ViewSlot<R: EventRequester> {
 struct Booting<R: EventRequester> {
     document: LynxDocument,
     notify: ToPainterSender<R>,
+    /// This view's name, and the group's worker thread — both of which the
+    /// realm's `Worker` members need the moment the entry runs.
+    view: ViewId,
+    workers: Rc<WorkerHub>,
 }
 
 /// What applying one source did to a booting view.
@@ -363,6 +383,8 @@ impl<R: EventRequester> Booting<R> {
         sources: MainSources,
         style_pool: Option<&Rc<StylePool>>,
         notify: ToPainterSender<R>,
+        view: ViewId,
+        workers: Rc<WorkerHub>,
     ) -> Result<Self, LynxViewError> {
         let MainSources {
             config,
@@ -381,7 +403,12 @@ impl<R: EventRequester> Booting<R> {
         {
             return Err(EngineError::UnknownFontFamily(family).into());
         }
-        Ok(Self { document, notify })
+        Ok(Self {
+            document,
+            notify,
+            view,
+            workers,
+        })
     }
 
     /// Applies one pushed source. The entry's arrival is what ends the wait:
@@ -420,8 +447,14 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
-        let Self { document, notify } = *self;
-        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
+        let Self {
+            document,
+            notify,
+            view,
+            workers,
+        } = *self;
+        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify, view, workers)
+        {
             Ok(runtime) => runtime,
             Err(error) => return Booted::Failed(error.into_script_error().into()),
         };
@@ -489,6 +522,10 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
     // to every view it ends — which is all of them, this thread being what
     // they share.
     let mut views = Vec::new();
+    // Empty, and free, until a card in this group constructs its first
+    // `Worker`: the thread and the second `QuickJS` runtime behind it are
+    // started by that construction, not by this one.
+    let workers = Rc::new(WorkerHub::new());
     let served = catch_unwind(AssertUnwindSafe(|| {
         serve_group(
             &mut js_runtime,
@@ -496,8 +533,13 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
             &requester,
             &commands,
             &mut views,
+            &workers,
         );
     }));
+    // After the loop and outside the guard: a panicking group still ends its
+    // workers, and the thread they run on is joined here whether or not it
+    // was ever started.
+    workers.shutdown();
     if let Err(payload) = served {
         let error = platform_script_error(format!(
             "the Lynx main thread panicked: {}",
@@ -600,6 +642,14 @@ impl<R: EventRequester> CarriedView<R> {
         true
     }
 
+    /// This view is over: end every worker it started, so nothing it built
+    /// outlives the realm that could hear from it.
+    fn release(mut self) {
+        if let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() {
+            runtime.release_workers();
+        }
+    }
+
     /// The tail of one round. Only a running view has one: a booting view has
     /// published nothing and armed nothing.
     fn finish_round(&mut self, js_runtime: &mut ScriptRuntime) {
@@ -626,6 +676,7 @@ fn attach<R: EventRequester>(
     views: &mut Vec<CarriedView<R>>,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
+    workers: &Rc<WorkerHub>,
     attachment: Attachment,
 ) {
     let Attachment {
@@ -644,7 +695,14 @@ fn attach<R: EventRequester>(
             notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
     });
-    match Booting::new(viewport, sources, style_pool, notify.clone()) {
+    match Booting::new(
+        viewport,
+        sources,
+        style_pool,
+        notify.clone(),
+        view,
+        Rc::clone(workers),
+    ) {
         Ok(booting) => views.push(CarriedView::new(
             view,
             ViewSlot::Booting(Box::new(booting)),
@@ -669,21 +727,26 @@ fn serve_group<R: EventRequester>(
     requester: &Arc<R>,
     commands: &flume::Receiver<GroupCommand>,
     views: &mut Vec<CarriedView<R>>,
+    workers: &Rc<WorkerHub>,
 ) {
+    // `None` until the group's first worker starts, and the same receiver
+    // from then on: one thread serves every worker of every view here.
+    let mut worker_events = None;
     loop {
+        worker_events = worker_events.or_else(|| workers.take_fresh_receiver());
         // The earliest deadline any view armed: the thread wakes for whichever
         // realm needs it first, and the round's tail runs every view's timers.
         let deadline = views
             .iter_mut()
             .filter_map(CarriedView::next_timer_deadline)
             .min();
-        match wait_for_command(commands, deadline) {
-            Woken::Command(first) => {
+        match wait_for_command(commands, &mut worker_events, deadline) {
+            Woken::Command(GroupWake::Command(first)) => {
                 for message in std::iter::once(first).chain(commands.drain()) {
                     match message {
                         GroupCommand::Close => return,
                         GroupCommand::Attach(attachment) => {
-                            attach(views, style_pool, requester, *attachment);
+                            attach(views, style_pool, requester, workers, *attachment);
                         }
                         GroupCommand::View { view, command } => {
                             let Some(index) = views.iter().position(|carried| carried.id == view)
@@ -694,15 +757,28 @@ fn serve_group<R: EventRequester>(
                                 continue;
                             };
                             if !views[index].apply(js_runtime, command) {
-                                views.swap_remove(index);
+                                views.swap_remove(index).release();
                             }
                         }
                     }
                 }
             }
+            Woken::Command(GroupWake::Worker(first)) => {
+                let drained = worker_events
+                    .as_ref()
+                    .map(flume::Receiver::drain)
+                    .into_iter()
+                    .flatten();
+                for event in std::iter::once(first).chain(drained) {
+                    deliver_worker_event(js_runtime, views, event);
+                }
+            }
             // A deadline a realm asked for, and nothing else to serve.
             Woken::Deadline => {}
             Woken::Disconnected => return,
+        }
+        for event in workers.take_stillborn() {
+            deliver_worker_event(js_runtime, views, event);
         }
         for view in &mut *views {
             view.finish_round(js_runtime);
@@ -710,29 +786,119 @@ fn serve_group<R: EventRequester>(
     }
 }
 
+/// Routes one thing a worker realm said to the view whose realm created it.
+///
+/// A view that has since been released is not an error: its workers were
+/// ended with it, and this event was already in flight.
+fn deliver_worker_event<R: EventRequester>(
+    js_runtime: &mut ScriptRuntime,
+    views: &mut [CarriedView<R>],
+    event: WorkerEvent,
+) {
+    let Some(carried) = views.iter_mut().find(|carried| carried.id == event.view) else {
+        return;
+    };
+    let Some(ViewSlot::Running(runtime)) = carried.slot.as_mut() else {
+        unreachable!("only a booted realm can have constructed a worker")
+    };
+    let delivered = catch_unwind(AssertUnwindSafe(|| {
+        runtime.deliver_worker_event(js_runtime, event.key, event.payload)
+    }));
+    if let Ok(Err(error)) = delivered {
+        // A handler that threw, which is a listener failing like any other.
+        carried
+            .notify
+            .send(ToPainter::Engine(EngineEvent::ListenerFailed(
+                error.into_script_error(),
+            )));
+    }
+}
+
 /// What ended one round's wait.
-enum Woken {
+pub(crate) enum Woken<T> {
     /// A message arrived; more may be queued behind it.
-    Command(GroupCommand),
-    /// The earliest armed timer came due with no command to serve.
+    Command(T),
+    /// The earliest armed timer came due with no message to serve.
     Deadline,
-    /// Every painter and the group handle are gone, and nothing more will be
-    /// asked of this thread.
+    /// Every sender is gone, and nothing more will be asked of this thread.
     Disconnected,
+}
+
+/// The two things that wake a group's thread with work on them.
+enum GroupWake {
+    Command(GroupCommand),
+    Worker(WorkerEvent),
 }
 
 /// Waits for the next command, or until `deadline` when a timer names one.
 ///
+/// One park for the whole group, however many things it is waiting on: the
+/// views' commands, the worker thread's news once there is one, and the
+/// earliest deadline any realm armed.
+///
 /// `flume`'s own timed receive reads the standard library's clock, which
-/// wasm32 does not implement, so the wait is assembled here out of the two
-/// pieces both targets do have: the receiver's future, and `park_timeout` —
-/// which is exactly what `flume` blocks on itself. Nothing drives the future
-/// but this loop, and the waker only unparks this thread, so this is a
-/// blocking wait spelled with a future rather than an executor.
+/// wasm32 does not implement, so the wait is assembled here out of the pieces
+/// both targets do have: the receivers' futures, and `park_timeout` — which is
+/// exactly what `flume` blocks on itself. Nothing drives those futures but
+/// this loop, and the waker only unparks this thread, so this is a blocking
+/// wait spelled with futures rather than an executor.
 fn wait_for_command(
     commands: &flume::Receiver<GroupCommand>,
+    worker_events: &mut Option<flume::Receiver<WorkerEvent>>,
     deadline: Option<ClockInstant>,
-) -> Woken {
+) -> Woken<GroupWake> {
+    // The common case, and the cheapest: no worker has ever started and no
+    // realm has armed a timer, so there is exactly one thing to wait on.
+    if worker_events.is_none() && deadline.is_none() {
+        return commands.recv().map_or(Woken::Disconnected, |command| {
+            Woken::Command(GroupWake::Command(command))
+        });
+    }
+    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut receiving = commands.recv_async();
+    let mut worker_receiving = worker_events.as_ref().map(flume::Receiver::recv_async);
+    loop {
+        match Pin::new(&mut receiving).poll(&mut context) {
+            Poll::Ready(Ok(command)) => return Woken::Command(GroupWake::Command(command)),
+            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
+            Poll::Pending => {}
+        }
+        let mut worker_gone = false;
+        if let Some(receiving) = worker_receiving.as_mut() {
+            match Pin::new(receiving).poll(&mut context) {
+                Poll::Ready(Ok(event)) => return Woken::Command(GroupWake::Worker(event)),
+                // The worker thread is gone — trapped, since nothing else
+                // drops its sender while this thread runs. That is not this
+                // thread's end: the views it served go on without it, so the
+                // channel is forgotten rather than waited on again.
+                Poll::Ready(Err(flume::RecvError::Disconnected)) => worker_gone = true,
+                Poll::Pending => {}
+            }
+        }
+        if worker_gone {
+            worker_receiving = None;
+            *worker_events = None;
+        }
+        let Some(deadline) = deadline else {
+            // A spurious wake just polls again; a real one has already queued
+            // whatever the poll will find.
+            thread::park();
+            continue;
+        };
+        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
+            return Woken::Deadline;
+        };
+        thread::park_timeout(remaining);
+    }
+}
+
+/// The same wait, for a thread with exactly one receiver and a deadline: the
+/// worker thread, which has no second channel and no group to serve.
+pub(crate) fn wait_on<T>(
+    commands: &flume::Receiver<T>,
+    deadline: Option<ClockInstant>,
+) -> Woken<T> {
     let Some(deadline) = deadline else {
         return commands.recv().map_or(Woken::Disconnected, Woken::Command);
     };
@@ -748,14 +914,12 @@ fn wait_for_command(
         let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
             return Woken::Deadline;
         };
-        // A spurious wake just polls again; a real one has already queued the
-        // command the poll will find.
         thread::park_timeout(remaining);
     }
 }
 
-/// The waker [`wait_for_command`] hands the receiver: the only thing a send
-/// has to do is end this thread's park.
+/// The waker every wait above hands its receivers: the only thing a send has
+/// to do is end this thread's park.
 struct UnparkWaker(thread::Thread);
 
 impl Wake for UnparkWaker {
@@ -803,6 +967,15 @@ fn apply_main_command<R: EventRequester>(
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
+        ToMain::WorkerScriptLoaded { key, script } => {
+            if let Err(error) = runtime.worker_script_loaded(js_runtime, key, script) {
+                notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(
+                    error.into_script_error(),
+                )));
+            }
+        }
+        // The painter asked for a turn; answering is the whole of it.
+        ToMain::RequestTurn => notify.send(ToPainter::WakeTurn),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
         ToMain::Shutdown => unreachable!("shutdown ends the command loop before dispatch"),
         #[cfg(test)]

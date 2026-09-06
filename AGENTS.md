@@ -255,10 +255,14 @@ useful signal for currently-compatible versions of those libraries.
   `ScriptFinished` preserves the successful entry-module boot edge after
   `new` has awaited it, `ScriptRunError` reports a fatal script-runtime failure
   during later owner-thread work, `ListenerFailed` reports a listener that
-  threw during event delivery, and `TimerFailed` reports a `setTimeout` or
-  `setInterval` callback that threw when it came due — the last two separate
-  because neither is fatal: the walk continues, a repeating timer stays armed,
-  the realm stays usable, and later events and timers are delivered as normal;
+  threw during event delivery, `TimerFailed` reports a `setTimeout` or
+  `setInterval` callback that threw when it came due, and `WorkerFailed`
+  reports a `Worker` whose script could not be loaded or whose realm threw —
+  the last three separate because none is fatal: the walk continues, a
+  repeating timer stays armed, the document never saw the worker at all, the
+  realm stays usable, and later events and timers are delivered as normal
+  (`WorkerFailed` is also the only way an embedder hears about a background
+  script that died, since a card with no `onerror` swallows the event);
   a frame the engine wants drawn rides the same wakeup, and the `pump` that
   answers it is the turn that draws it — so no OS frame callback and no vsync
   round trip stands between a commit and its pixels. Pacing is the
@@ -294,6 +298,19 @@ useful signal for currently-compatible versions of those libraries.
   the two never restyling in parallel; the assumption that buys is that a
   person drives one view at a time. A host that needs two pages genuinely
   parallel gives them a group each, on a thread each.
+  **A group's `Worker`s share a second thread and a second `QuickJS`
+  runtime**, `bobcat-workers`, started by the first `new Worker(...)` any view
+  in the group makes and joined when the group's thread ends — a group whose
+  cards never construct one never pays for it. Separate from `bobcat-main`'s
+  runtime because that is what a worker is for: script that must not stop the
+  thread that owns the document. Since `QuickJS` binds a runtime to one
+  thread, putting the workers' runtime on a thread of its own is also what
+  makes "a worker cannot touch the document" a fact about the program rather
+  than a rule someone has to keep — there is no path from a worker realm to a
+  `LynxDocument`, and no value of either runtime can be named by the other.
+  One realm per live `Worker`, on that one runtime, so a second worker costs a
+  global object and a module graph rather than a heap, at the price of the
+  group's workers taking turns.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -373,17 +390,23 @@ useful signal for currently-compatible versions of those libraries.
   `tagName`, `attributeNames`, `childElementIds`, `parentNode`,
   `insertBefore`, `removeElement`, `replaceElement`,
   `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
-  `disableEventListener`, `stopPropagation`, `setTimer`, and `clearTimer` —
-  all but the last two speaking DOM vocabulary
+  `disableEventListener`, `stopPropagation`, `setTimer`, `clearTimer`,
+  `createWorker`, `postWorkerMessage`, and `terminateWorker` —
+  all but the last five speaking DOM vocabulary
   over numeric `NodeId`s; the two that answer with a list encode it in the
   return string, since the boundary's value type carries no array —
   `attributeNames` as the same length-prefixed record `setInlineStyles`
   accepts, and `childElementIds` as comma-joined ids, which need no length
   prefix because a decimal id cannot contain the separator), then registers the
   core-owned compatibility shell as `bobcat:runtime`, the Element PAPI
-  runtime as `bobcat:element`, and the timer runtime as `bobcat:timers` in
-  QuickJS's synchronous preloaded ESM loader.
-  All three JavaScript sources live together in `packages/bobcat-element/src`
+  runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
+  shared `EventTarget` both realms build on as `bobcat:event-target`, in
+  QuickJS's synchronous preloaded ESM loader. The group's worker runtime gets
+  a deliberately shorter list — `bobcat:event-target`, the worker global scope
+  as `bobcat:worker`, and `bobcat:timers` — because a worker has no document
+  to reach and no page to be the main thread of, so an import of
+  `bobcat:element` fails to resolve rather than failing late.
+  All five JavaScript sources live together in `packages/bobcat-element/src`
   and are embedded by core with `include_str!`. The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
@@ -401,14 +424,50 @@ useful signal for currently-compatible versions of those libraries.
   requirement. The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, init/global props, context sinks, the native-module
   sentinel and empty JS event module,
-  performance/error hooks, and
-  `__OnLifecycleEvent`; transformed entries receive every binding through the
+  performance/error hooks,
+  `__OnLifecycleEvent`, and `Worker`; transformed entries receive every
+  binding through the
   prepended import, and the module installs none of them on `globalThis`.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
   listeners never cross the host boundary and its only engine-driven delivery
   today is the boot fallback's `__RenderPage` event, whose `data` is the
   `processData` result. The other context sinks retain and deliver nothing,
   and the module does not invent the background-only `lynxCoreInject` realm.
+  **`Worker` is the one export here that is not a sink or a Lynx binding.**
+  Lynx has no `Worker` on either target — the native engine registers no such
+  global and `web-core` only uses the browser's own for its internal
+  dual-thread plumbing — so under the standards policy this is a new bucket-1
+  capability and the real W3C interface is what is implemented, not a Lynx
+  quirk that does not exist. `new Worker(scriptURL, { name })` returns
+  immediately and the script load is asynchronous, exactly as HTML says: the
+  realm holds the `Worker` objects and their listeners, the host holds the
+  realm the script runs in, and what crosses between them is a numeric key
+  and one JSON string per message. `postMessage`, `terminate`, `onmessage`,
+  `onerror` and the `EventTarget` surface are there; the worker's own global
+  scope (`bobcat:worker`) gives it `self`, `postMessage`, `close`, `name`,
+  `onmessage`, `addEventListener`, and the timers, and nothing else — no
+  `importScripts` (a worker script is an ESM and uses `import`), no
+  `location`, `navigator`, `fetch`, `MessagePort` or DOM.
+  **Deviations from HTML, all forced by the boundary**: messages are
+  serialized with JSON rather than structured-cloned, because the two sides
+  are separate heaps with a primitives-only boundary between them and there
+  is no object graph to clone — so a cycle throws a plain `TypeError` where
+  the standard throws `DataCloneError`, `undefined` arrives as `null`, and
+  `Map`/`Set`/`ArrayBuffer`/functions do not survive; there is no transfer
+  list, so a second `postMessage` argument is rejected rather than ignored;
+  and `terminate()` is cooperative, taking effect between the worker's tasks,
+  because nothing interrupts a realm mid-call.
+  **The script is the painter's fetch**, not `bobcat-main`'s: the realm asks
+  through `createWorker`, `bobcat-main` forwards one `RequestWorkerScript` to
+  the painter, and the painter — the only thread that owns a
+  `ResourceFetcher` — resolves, fetches and decodes it across its own turns,
+  answering with `WorkerScriptLoaded`. A fetch that becomes ready between
+  turns has to reach a turn somehow and the painter has no event loop of its
+  own to wake, so its waker asks `bobcat-main` for one (`RequestTurn`) and
+  the answer (`WakeTurn`) rides the group's single `EventRequester` like
+  every other engine fact. What a card posts before the script arrives is
+  queued on `bobcat-main` and flushed the moment the realm exists, as HTML
+  requires.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries
   receive them through the prepended import:

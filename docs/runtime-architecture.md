@@ -41,6 +41,8 @@ crates/bobcat-core/src/
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration
   main/tree/lib.rs     Lynx document and UA component policy
+  main/workers.rs      the group's worker thread and its second QuickJS runtime
+  paint/workers.rs     fetching worker scripts off the frame path
 ```
 
 Shared command, event, viewport, and link vocabulary stays in `view` beside
@@ -69,16 +71,28 @@ bobcat-wasm ──┬───▶ bobcat-resources ─┘          │          
 bobcat-source ────────────────────────────────────┘
                                                   └──▶ quickjs-rust-bridge
 
-QuickJS preloaded ESM graph
+QuickJS preloaded ESM graph — bobcat-main's runtime
   bobcat:boot
     ├──▶ bobcat:element (flush binding)
     ├──▶ bobcat:timers (timer-global installation)
     └──▶ await import(resolved entry MTS URL)
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
-          │     └── named compatibility exports + engine EventTarget
+          │     ├── named compatibility exports + engine EventTarget + Worker
+          │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.mjs)
           └──▶ bobcat:element (packages/bobcat-element/src/element-papi.mjs)
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
+
+QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
+  bobcat:worker-boot (one per live Worker, evaluated, never registered)
+    ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.mjs)
+    │     ├── the global scope: self, postMessage, close, name, onmessage
+    │     ├──▶ bobcat:event-target
+    │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
+    ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
+    └──▶ await import(the worker's own script URL)
+  No bobcat:element and no bobcat:runtime here: a worker has no document to
+  reach, so reaching for one fails to resolve rather than failing late.
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
@@ -254,14 +268,22 @@ realm.
 
 ## The core-owned JavaScript engine
 
-The script engine is not an injected capability. `bobcat-core` owns one
-`QuickJS` runtime and the single realm on it outright, behind the
-crate-private `main::quickjs::ScriptEngine`, which is created on the engine-owned
-Lynx main thread and never leaves it — it is deliberately not `Send`, and
-nothing outside the crate can name it. The bridge would carry more realms on
-that one runtime, which is the shape a background-thread realm would take:
-its own global object and native modules, sharing the runtime's heap, job
-queue, and execution limits, with no value crossing between the two.
+The script engine is not an injected capability. `bobcat-core` owns its
+`QuickJS` runtimes and every realm on them outright, behind the crate-private
+`main::quickjs::ScriptRuntime`/`ScriptEngine`, which are created on the thread
+that owns them and never leave it — deliberately not `Send`, and unnameable
+outside the crate.
+
+A group has two runtimes, on two threads. `bobcat-main` carries one realm per
+view: same heap, same atom table, same job queue, no value crossing between
+them, and each with its own global object and native modules.
+`bobcat-workers` — started lazily by the group's first `new Worker(...)` and
+joined when `bobcat-main` ends — carries the other, with one realm per live
+`Worker`. Separating them is the whole point of a worker: script that must
+not stop the thread that owns the document. Because `QuickJS` binds a runtime
+to one thread, that separation is also what makes "a worker cannot touch the
+document" structural — there is no path from a worker realm to a
+`LynxDocument`, and no value of either runtime can be named by the other.
 
 Its whole surface is five operations:
 

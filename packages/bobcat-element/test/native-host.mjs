@@ -26,3 +26,6 @@ export const disableEventListener = native.disableEventListener;
 export const stopPropagation = native.stopPropagation;
 export const setTimer = native.setTimer;
 export const clearTimer = native.clearTimer;
+export const createWorker = native.createWorker;
+export const postWorkerMessage = native.postWorkerMessage;
+export const terminateWorker = native.terminateWorker;
