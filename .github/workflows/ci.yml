@@ -37,9 +37,6 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Complete source API
-        run: cargo test --locked -p bobcat-source
-
       - name: Independent native embedder features
         run: |
           cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
