@@ -3,19 +3,12 @@
 //! Each container algorithm reads a set of properties no other algorithm
 //! reads. Keeping those sets on their own traits lets an entry point demand
 //! exactly what it consumes, so `compute_linear_layout` cannot name a grid
-//! property. `LinearStyle` also reads the paragraph's non-inherited custom
-//! properties for line and UTF-16 character limits, defaulting to unlimited.
-//! The accessors a second algorithm shares — the box model, the
+//! property. The accessors a second algorithm shares — the box model, the
 //! containment triple, the alignment accessors and `order` — stay on `CoreStyle`.
-
-use core::num::NonZeroU32;
-use std::sync::LazyLock;
 
 use stylo::computed_values::{
     direction, flex_direction, flex_wrap, linear_direction, relative_center, relative_layout_once,
 };
-use stylo::custom_properties::Name;
-use stylo::properties::ComputedValues;
 use stylo::values::computed::lynx_layout::{RelativeAlign, RelativeReference};
 use stylo::values::computed::{
     FlexBasis, GridAutoFlow, GridLine, GridTemplateComponent, ImplicitGridTracks, JustifyItems,
@@ -69,24 +62,6 @@ style_protocol! {
     }
 }
 
-static TEXT_MAXLINE: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxline"));
-static TEXT_MAXLENGTH: LazyLock<Name> = LazyLock::new(|| Name::from("lynx-text-maxlength"));
-
-/// The UA registers these properties with universal syntax and no inheritance.
-/// The runtime writes canonical unsigned counts; a negative initial value or
-/// any other CSS token sequence leaves the paragraph unlimited.
-fn paragraph_limit(style: &ComputedValues, name: &Name) -> Option<u32> {
-    style
-        .custom_properties()
-        .non_inherited
-        .get(name)?
-        .as_universal()?
-        .css
-        .trim()
-        .parse()
-        .ok()
-}
-
 style_protocol! {
     pub trait LinearStyle: CoreStyle {
         defaults(style) {
@@ -96,10 +71,6 @@ style_protocol! {
                 style.computed_values().clone_linear_weight_sum(),
             linear_weight -> NonNegativeNumber =
                 style.computed_values().clone_linear_weight(),
-            text_maxline -> Option<NonZeroU32> =
-                paragraph_limit(style.computed_values(), &TEXT_MAXLINE).and_then(NonZeroU32::new),
-            text_maxlength -> Option<u32> =
-                paragraph_limit(style.computed_values(), &TEXT_MAXLENGTH),
         }
     }
 }
@@ -209,8 +180,6 @@ mod tests {
         assert_eq!(style.linear_direction(), linear_direction::T::Column);
         assert_eq!(style.linear_weight_sum().0, 0.0);
         assert_eq!(style.linear_weight().0, 0.0);
-        assert_eq!(style.text_maxline(), None);
-        assert_eq!(style.text_maxlength(), None);
 
         assert_eq!(style.relative_layout_once(), relative_layout_once::T::True);
         assert_eq!(style.relative_id(), RELATIVE_REFERENCE_NONE);

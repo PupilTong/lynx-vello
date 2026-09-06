@@ -14,6 +14,7 @@ layout-test-utils = []
 
 [dependencies]
 smallvec = { workspace = true }
+style_traits = { workspace = true }
 stylo = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -25,7 +26,6 @@ parley = { workspace = true, features = ["complex-scripts"] }
 [dev-dependencies]
 divan = { workspace = true }
 euclid = { workspace = true }
-style_traits = { workspace = true }
 dom = { workspace = true, features = ["layout-test-utils"] }
 
 [[bench]]

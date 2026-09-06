@@ -86,11 +86,11 @@ fn parse_count(value: Option<&str>) -> Option<f64> {
 /// `raw-text` opts back in from
 /// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
 /// lives.
-/// Universal syntax preserves the full u32 source-count range. Attribute
-/// parsing supplies canonical counts; each paragraph receives its own limits.
+/// Attribute parsing supplies canonical counts; the registered integer syntax
+/// validates CSS overrides, and each paragraph receives its own limits.
 pub(super) const UA_RULES: &str = r#"
-@property --lynx-text-maxline { syntax: "*"; inherits: false; initial-value: 0; }
-@property --lynx-text-maxlength { syntax: "*"; inherits: false; initial-value: -1; }
+@property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
+@property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
 inline-text { display: -lynx-text !important; }
 inline-image, inline-truncation { display: none; }
@@ -257,7 +257,19 @@ mod tests {
     fn inline_css_can_override_a_reflected_text_limit() {
         for (attribute, property, value, width, height) in [
             (MAX_LINES, "--lynx-text-maxline", "2", 60.0, 42.0),
+            (MAX_LINES, "--lynx-text-maxline", "calc(2 - 1)", 60.0, 21.0),
+            (MAX_LINES, "--lynx-text-maxline", "1.5", 60.0, 42.0),
+            (MAX_LINES, "--lynx-text-maxline", "1px", 60.0, 42.0),
             (MAX_CHARS, "--lynx-text-maxlength", "2", 40.0, 21.0),
+            (
+                MAX_CHARS,
+                "--lynx-text-maxlength",
+                "calc(1 + 1)",
+                40.0,
+                21.0,
+            ),
+            (MAX_CHARS, "--lynx-text-maxlength", "1.5", 60.0, 42.0),
+            (MAX_CHARS, "--lynx-text-maxlength", "1px", 60.0, 42.0),
         ] {
             let (mut document, text) = paragraph("abc def");
             set_limit(&mut document, text, attribute, Some("1"));

@@ -262,7 +262,11 @@ pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValue
             self.0
         }
     }
-    impl LinearStyle for ParagraphStyle<'_> {}
+    impl TextContainerStyle for ParagraphStyle<'_> {}
+
+    if old.custom_properties().non_inherited == new.custom_properties().non_inherited {
+        return false;
+    }
 
     let (old, new) = (ParagraphStyle(old), ParagraphStyle(new));
     old.text_maxline() != new.text_maxline() || old.text_maxlength() != new.text_maxlength()

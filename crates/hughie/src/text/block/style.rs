@@ -1,7 +1,7 @@
 //! Parameter vocabulary of one Lynx text block.
 //!
 //! Plain resolved-value structs instead of the box-protocol wire format or a
-//! trait over `ComputedValues`: paragraph limits arrive through `LinearStyle`,
+//! trait over `ComputedValues`: paragraph limits arrive through `TextContainerStyle`,
 //! custom inline-truncation is content, and the Lynx grammar is
 //! narrower than stylo's — `white-space` is only `normal | nowrap`, there is
 //! no `word-spacing`, no `pre*` — so two-value enums make the unsupported
@@ -273,17 +273,15 @@ pub(in crate::text::block) fn parley_style<'style>(
 
 /// Builds the paragraph parameters from a container's computed style.
 ///
-/// Paragraph limits come from `LinearStyle`, whose host view reads the
-/// establishing element's attributes alongside its computed CSS values.
+/// Paragraph limits come from `TextContainerStyle`, whose host view reads the
+/// establishing element's computed custom properties alongside paragraph CSS.
 /// `text_indent` is absent by design — it is a [`BlockConstraint`] input,
 /// because a percentage resolves against the definite inline size.
 ///
 /// [`BlockConstraint`]: super::BlockConstraint
 impl BlockStyle {
     #[must_use]
-    pub fn from_container_style<S: crate::style::TextContainerStyle + crate::style::LinearStyle>(
-        style: &S,
-    ) -> Self {
+    pub fn from_container_style<S: crate::style::TextContainerStyle>(style: &S) -> Self {
         use stylo::computed_values::direction;
         use stylo::computed_values::text_wrap_mode::T as WrapMode;
         use stylo::values::computed::TextAlign as StyloAlign;

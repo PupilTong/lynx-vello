@@ -53,7 +53,7 @@ boxed `TextContext` in `DocumentLayoutState`, and per-node lazily boxed
 retained artifacts in that same state. Keeping
 the run view separate leaves the box-algorithm style view at two words. The
 paragraph reads its establishing element through that same `StyleView`,
-including the attribute-backed `LinearStyle` truncation inputs.
+including the registered integer custom properties read by `TextContainerStyle`.
 Literal text and natural-size metadata reuse the node's existing nullable
 content pointer, while retained Parley artifacts stay phase-local in layout
 state. Updating replaced metadata automatically invalidates the affected cache
@@ -61,12 +61,13 @@ path. It is public on `Document` (`set_natural_size`/`natural_size`) because
 the decoder that produces it is a separate crate, but it is not exposed
 through any Element PAPI.
 `display: -lynx-text` flattens its subtree into `hughie::text::block`, with
-atomic inline boxes and element-backed raw text. `LinearStyle::text_maxline`
-and `text_maxlength` carry the establishing element's attribute values into
-`BlockStyle`; computed `text-overflow` selects clip or ellipsis. Layout reads
-limits from existing DOM attributes, and ordinary attribute mutation invalidates
-box measurements when a parsed limit changes while preserving natural
-shaping. Custom inline-truncation content and layout-event delivery remain
+atomic inline boxes and element-backed raw text. `TextContainerStyle::text_maxline`
+and `text_maxlength` carry the establishing element's computed custom properties
+into `BlockStyle`; computed `text-overflow` selects clip or ellipsis. Core reflects
+attributes into inline CSS, registered by the UA with `<integer>` syntax and
+`inherits: false`. Normal and animated style refreshes compare effective limits
+and merge their layout damage into existing box invalidation while preserving
+natural shaping. Custom inline-truncation content and layout-event delivery remain
 unwired; the standalone block already supports both custom tails and line data.
 [`docs/text-measurement-and-ifc.md`](text-measurement-and-ifc.md) carries the
 retained-layout and eviction contracts the wired path builds on, and the open
@@ -142,9 +143,9 @@ the independent state:
 | `CoreStyle` | one `computed_values()` source plus the defaulted box model (`size`/`min_size`/`max_size`/`aspect_ratio`/`margin`/`padding`/`border`/`box_sizing`/`inset`/`overflow`), `display`, `position`, `direction`, the containment triple, `skips_contents`, the alignment accessors (`gap`, `align_content`, `align_items`, `justify_content`, `align_self`) and `order`; sequence and geometry values remain borrowed | every algorithm, the leaf, the absolute pass, the root, rounding and invalidation |
 | `FlexboxStyle: CoreStyle` | `flex_direction`, `flex_wrap`, `flex_basis`, `flex_grow`, `flex_shrink` | demanded by `compute_flexbox_layout` |
 | `GridStyle: CoreStyle` | `grid_template_rows`/`_columns`, `grid_auto_rows`/`_columns`, `grid_auto_flow`, `justify_items`, `grid_row_start`/`_end`, `grid_column_start`/`_end`, `justify_self` | demanded by `compute_grid_layout` |
-| `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight`; `text_maxline` / `text_maxlength` read the non-inherited paragraph custom properties | demanded by `compute_linear_layout` and the paragraph's `BlockStyle` builder |
+| `LinearStyle: CoreStyle` | `linear_direction`, `linear_weight_sum`, `linear_weight` | demanded by `compute_linear_layout` |
 | `RelativeStyle: CoreStyle` | `relative_layout_once`, `relative_id`, `relative_align`, `relative_adjacent`, `relative_center` | demanded by `compute_relative_layout` |
-| `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, and indent values | the Parley text block |
+| `TextContainerStyle: CoreStyle` | paragraph-level alignment, wrap-mode, word-break, indent, overflow, and `text_maxline` / `text_maxlength` from non-inherited integer custom properties | the Parley text block |
 | `TextRunStyle` | run-level font, spacing, line-height, family, feature, and variation views; a Stylo host can expose one borrowed `computed_text_values()` source | the Parley text block |
 
 One `Style: CoreStyle` associated type still serves every box algorithm; the
@@ -232,7 +233,7 @@ Which accessor each algorithm reads, and from where:
 | `justify_self` | `GridStyle` | `resolve_grid_item` |
 | `linear_direction`, `linear_weight_sum` | `LinearStyle` | `compute_linear_layout` |
 | `linear_weight` | `LinearStyle` | linear `resolve_item` |
-| `text_maxline`, `text_maxlength` | `LinearStyle` | paragraph `BlockStyle::from_container_style`; layout style refresh compares their effective values to supplement Stylo damage for these custom properties |
+| `text_maxline`, `text_maxlength` | `TextContainerStyle` | paragraph `BlockStyle::from_container_style`; layout style refresh compares their effective values to supplement Stylo damage for these custom properties |
 | `relative_layout_once` | `RelativeStyle` | `compute_relative_layout` |
 | `relative_id` | `RelativeStyle` | `IdLookup::new` |
 | `relative_align`, `relative_adjacent`, `relative_center` | `RelativeStyle` | relative `resolve_item` |

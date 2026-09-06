@@ -144,25 +144,32 @@ mod tests {
             ("--lynx-text-maxlength", "-1"),
         ] {
             let mut doc = Doc::with_css(&format!(
-                "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}
+                "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}
                  .label {{ display: -lynx-text; }}"
             ));
             let label = doc.el(doc.root, "text.label");
             flush(&mut doc);
 
-            for (value, relayout) in [
-                ("1", true),
-                ("01", false),
-                ("2", true),
-                ("invalid", true),
-                ("-1", false),
+            for (value, computed, relayout) in [
+                ("1", "1", true),
+                ("01", "1", false),
+                ("2", "2", true),
+                ("2px", initial, true),
+                ("invalid", initial, false),
+                ("calc(1 + 1)", "2", true),
+                ("calc(1.5)", "2", false),
+                ("1.5", initial, true),
+                ("-1", "-1", false),
             ] {
                 doc.dom.set_inline_style_property(label, property, value);
                 let summary = flush(&mut doc);
-                let damage = damage_of(&summary, label).expect("custom property changed");
-                assert!(damage.needs_repaint());
+                assert_eq!(doc.value(label, property), computed, "{property}: {value}");
+                let damage = damage_of(&summary, label);
+                if let Some(damage) = damage {
+                    assert!(damage.needs_repaint());
+                }
                 assert_eq!(
-                    damage.needs_relayout(),
+                    damage.is_some_and(StyleDamage::needs_relayout),
                     relayout,
                     "{property}: changing to {value}"
                 );

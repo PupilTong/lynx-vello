@@ -537,8 +537,8 @@ mod tests {
     fn changing_paragraph_limits_rebreaks_without_reshaping() {
         let (mut document, label, _run) = label_document_parts("hello world", 100.0);
         document.add_stylesheet(
-            r#"@property --lynx-text-maxline { syntax: "*"; inherits: false; initial-value: 0; }
-               @property --lynx-text-maxlength { syntax: "*"; inherits: false; initial-value: -1; }"#,
+            r#"@property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
+               @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }"#,
             StylesheetOrigin::UserAgent,
         );
         document.layout();
@@ -589,7 +589,7 @@ mod tests {
             let (mut document, label, _) = label_document_parts("hello world", 100.0);
             document.add_stylesheet(
                 &format!(
-                    "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}"
+                    "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}"
                 ),
                 StylesheetOrigin::UserAgent,
             );
@@ -648,15 +648,27 @@ mod tests {
         clippy::float_cmp,
         reason = "explicit line heights have exact pixel metrics"
     )]
-    fn animated_paragraph_limits_relayout_without_reshaping() {
-        for (property, initial, limit) in [
-            ("--lynx-text-maxline", "0", "1"),
-            ("--lynx-text-maxlength", "-1", "2"),
+    fn interpolated_integer_paragraph_limits_relayout_without_reshaping() {
+        use hughie::style::TextContainerStyle;
+
+        for (property, initial, limit, samples) in [
+            (
+                "--lynx-text-maxline",
+                "0",
+                "4",
+                [(2.5, 1, 1, 20.0), (5.0, 2, 2, 40.0), (7.5, 3, 2, 40.0)],
+            ),
+            (
+                "--lynx-text-maxlength",
+                "-1",
+                "7",
+                [(2.5, 1, 1, 20.0), (5.0, 3, 1, 20.0), (7.5, 5, 1, 20.0)],
+            ),
         ] {
             let (mut document, label, _) = label_document_parts("hello world", 100.0);
             document.add_stylesheet(
                 &format!(
-                    "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}"
+                    "@property {property} {{ syntax: '<integer>'; inherits: false; initial-value: {initial}; }}"
                 ),
                 StylesheetOrigin::UserAgent,
             );
@@ -672,21 +684,47 @@ mod tests {
             let rebuilds = document.text_block_rebuilds(label);
             assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
 
-            let before_switch = document.advance_animations(2.5);
-            assert!(
-                !before_switch.relayout,
-                "{property}: discrete value unchanged"
-            );
-
-            for (time, lines, height) in [(7.5, 1, 20.0), (10.5, 2, 40.0)] {
+            for (index, (time, count, lines, height)) in samples.into_iter().enumerate() {
                 let tick = document.advance_animations(time);
                 assert!(tick.relayout, "{property}: limit changed at t={time}");
                 document.layout();
+                let style = StyleView::of(document.get(label).unwrap());
+                let effective = if property == "--lynx-text-maxline" {
+                    style.text_maxline().map(core::num::NonZeroU32::get)
+                } else {
+                    style.text_maxlength()
+                };
+                assert_eq!(
+                    effective,
+                    Some(count),
+                    "{property}: integer sample at t={time}"
+                );
                 assert_eq!(document.text_block(label).unwrap().lines().len(), lines);
                 assert_eq!(document.rounded_layout(label).unwrap().size.height, height);
                 assert_eq!(document.text_block_rebuilds(label), rebuilds);
                 assert!(!document.text_block_is_probe_dirty(label));
+
+                if index == 0 {
+                    let same_integer = document.advance_animations(3.0);
+                    assert!(
+                        !same_integer.relayout,
+                        "{property}: a later sample rounding to the same integer keeps its layout"
+                    );
+                }
             }
+
+            let ended = document.advance_animations(10.5);
+            assert!(
+                ended.relayout,
+                "{property}: finishing restores the initial limit"
+            );
+            document.layout();
+            let style = StyleView::of(document.get(label).unwrap());
+            assert_eq!(style.text_maxline(), None);
+            assert_eq!(style.text_maxlength(), None);
+            assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
+            assert_eq!(document.rounded_layout(label).unwrap().size.height, 40.0);
+            assert_eq!(document.text_block_rebuilds(label), rebuilds);
         }
     }
 
