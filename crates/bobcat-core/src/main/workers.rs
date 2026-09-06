@@ -31,11 +31,13 @@ use rustc_hash::FxHashMap;
 use wasm_thread::Builder as ThreadBuilder;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-use super::runtime::{
-    TimerState, WORKER_BOOT_SPECIFIER, WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER,
-    install_worker_members, install_worker_modules, run_due_timers, worker_boot_source,
+use super::runtime::worker_scope::{
+    WORKER_BOOT_SPECIFIER, WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members,
+    install_worker_modules, worker_boot_source,
 };
-use super::{MainJoinHandle, Woken, panic_payload, platform_script_error, wait_on};
+use super::runtime::{TimerState, run_due_timers};
+use super::wait::{Woken, wait_on};
+use super::{MainJoinHandle, panic_payload, platform_script_error};
 use crate::script::ScriptError;
 use crate::view::ViewId;
 

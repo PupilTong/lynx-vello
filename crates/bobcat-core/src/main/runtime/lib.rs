@@ -1,6 +1,8 @@
 //! The Lynx main-thread runtime over its owned `QuickJS` realm.
 
 mod timers;
+mod worker_host;
+pub(crate) mod worker_scope;
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
@@ -13,12 +15,13 @@ use smallvec::SmallVec;
 
 pub(crate) use self::timers::ClockInstant;
 use self::timers::TimerSchedule;
+use self::worker_host::{WorkerState, install_worker_host_members};
 use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-use super::workers::{WorkerCommand, WorkerHub, WorkerKey, WorkerPayload, WorkerStart};
 use crate::main::tree::{LynxDocument, apply_attribute_style};
-use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
-use crate::view::{EngineEvent, EventRequester, ToPainter, ViewId, WorkerScript};
+use crate::main::workers::WorkerHub;
+use crate::script::ScriptError;
+use crate::view::{EventRequester, ToPainter, ViewId};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -26,20 +29,8 @@ const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 const HOST_MODULE_SPECIFIER: &str = "bobcat-internal:host";
 const RUNTIME_MODULE_SPECIFIER: &str = "bobcat:runtime";
 const TIMER_MODULE_SPECIFIER: &str = "bobcat:timers";
-/// The worker realm's global-scope module, on the *worker* runtime.
-pub(crate) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
-/// The module a worker realm's boot is evaluated as. It is never registered,
-/// only evaluated, so every realm may carry one under the same name.
-pub(crate) const WORKER_BOOT_SPECIFIER: &str = "bobcat:worker-boot";
-/// The worker realm's host module: what `bobcat-internal:host` is to
-/// `bobcat-main`, minus everything that would need a document.
-const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 const EVENT_DISPATCH_EXPORT: &str = "__BobcatDispatchEvent";
 const TIMER_RUN_EXPORT: &str = "__BobcatRunTimer";
-/// Called on `bobcat:worker`, in a worker realm, with one JSON message.
-pub(crate) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
-/// Called on `bobcat:runtime`, in a view's realm, with one worker's news.
-const WORKER_EVENT_EXPORT: &str = "__BobcatDeliverWorkerEvent";
 
 /// Declarations one `__SetInlineStyles` record carries without touching the
 /// heap. Compiled `ReactLynx` records are a handful of properties.
@@ -61,8 +52,6 @@ const TIMER_MODULE_SOURCE: &str =
     include_str!("../../../../../packages/bobcat-element/src/timers.mjs");
 const EVENT_TARGET_SOURCE: &str =
     include_str!("../../../../../packages/bobcat-element/src/event-target.mjs");
-const WORKER_MODULE_SOURCE: &str =
-    include_str!("../../../../../packages/bobcat-element/src/worker-runtime.mjs");
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
@@ -351,116 +340,6 @@ impl<R: EventRequester> EventState<R> {
     }
 }
 
-/// One view's workers: what its realm has created, and what each is still
-/// waiting for.
-///
-/// Shared with the host functions that maintain it, so it is `Rc` like
-/// [`EventState`]: the native `createWorker` export and the command loop that
-/// answers its fetch are different stack frames on the same thread.
-///
-/// The keys are also the boundary's whole validation: a realm may only name a
-/// worker its own view created and has not ended, so a number a card invented
-/// is a JavaScript exception rather than another view's worker.
-struct WorkerState<R: EventRequester> {
-    view: ViewId,
-    /// The group's worker thread and key sequence, shared with every other
-    /// view on it.
-    hub: Rc<WorkerHub>,
-    /// Where a script request leaves for the thread that owns the fetcher.
-    notify: ToPainterSender<R>,
-    live: RefCell<FxHashMap<WorkerKey, WorkerSlot>>,
-}
-
-/// Where one worker is between `new Worker(...)` and its realm.
-enum WorkerSlot {
-    /// Constructed; its script is still being fetched.
-    ///
-    /// HTML queues what is posted before a worker's global scope exists and
-    /// delivers it once the scope is up, which is what `queued` is: without
-    /// it the commonest shape there is — construct, then post — would lose
-    /// its first message.
-    Loading { name: String, queued: Vec<String> },
-    /// Its realm is up on the worker thread.
-    Running,
-}
-
-impl<R: EventRequester> WorkerState<R> {
-    fn new(view: ViewId, hub: Rc<WorkerHub>, notify: ToPainterSender<R>) -> Self {
-        Self {
-            view,
-            hub,
-            notify,
-            live: RefCell::default(),
-        }
-    }
-
-    /// Names one worker and asks the painter for its script. The fetch is the
-    /// painter's because the fetcher is: this thread never holds one.
-    fn create(&self, url: &str, name: &str) -> WorkerKey {
-        let key = self.hub.next_key();
-        self.live.borrow_mut().insert(
-            key,
-            WorkerSlot::Loading {
-                name: name.to_owned(),
-                queued: Vec::new(),
-            },
-        );
-        self.notify.send(ToPainter::RequestWorkerScript {
-            key,
-            url: url.to_owned(),
-        });
-        key
-    }
-
-    /// The script arrived. Starting the worker and flushing what was posted
-    /// while it loaded are one step, so nothing can arrive out of order.
-    fn started(&self, key: WorkerKey, script: WorkerScript) {
-        let mut live = self.live.borrow_mut();
-        // Terminated, or its view released, while the fetch was in flight.
-        let Some(slot) = live.get_mut(&key) else {
-            return;
-        };
-        let WorkerSlot::Loading { name, queued } = std::mem::replace(slot, WorkerSlot::Running)
-        else {
-            unreachable!("a script is answered once, for a worker that is still loading")
-        };
-        drop(live);
-        let WorkerScript { source, url } = script;
-        self.hub.start(Box::new(WorkerStart {
-            key,
-            view: self.view,
-            name,
-            url,
-            source,
-        }));
-        for data in queued {
-            self.hub.send(WorkerCommand::Message { key, data });
-        }
-    }
-
-    /// A worker the realm may still name, or the reason it may not.
-    fn validate(&self, function: &str, key: WorkerKey) -> Result<(), String> {
-        if self.live.borrow().contains_key(&key) {
-            Ok(())
-        } else {
-            Err(format!("{function} names no live worker of this view"))
-        }
-    }
-
-    /// Forgets one worker: it ended, however it ended.
-    fn forget(&self, key: WorkerKey) {
-        self.live.borrow_mut().remove(&key);
-    }
-
-    /// Ends every worker this view created, because the view is gone.
-    fn release(&self) {
-        let released = std::mem::take(&mut *self.live.borrow_mut());
-        if !released.is_empty() {
-            self.hub.send(WorkerCommand::ReleaseView(self.view));
-        }
-    }
-}
-
 /// The timer schedule, and the nesting level the next timer inherits.
 ///
 /// Shared with the host functions that maintain it, so it is `Rc` like
@@ -716,92 +595,6 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         failures
     }
 
-    /// The painter answered a `createWorker` request.
-    ///
-    /// A worker whose script could not be fetched or decoded is over before
-    /// it began, and hears about it exactly the way one whose script threw
-    /// does: an `error` event on the realm's `Worker`, and a
-    /// [`EngineEvent::WorkerFailed`] for the embedder.
-    pub(crate) fn worker_script_loaded(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        key: WorkerKey,
-        script: Result<WorkerScript, String>,
-    ) -> Result<(), MainThreadError> {
-        match script {
-            Ok(script) => {
-                self.workers.started(key, script);
-                Ok(())
-            }
-            Err(message) => self.deliver_worker_event(
-                js_runtime,
-                key,
-                WorkerPayload::Failed(ScriptError {
-                    kind: ScriptErrorKind::Other,
-                    phase: ScriptErrorPhase::Execute,
-                    message: Arc::from(format!("loading the worker's script: {message}")),
-                    location: None,
-                }),
-            ),
-        }
-    }
-
-    /// Hands the realm one thing a worker had to say.
-    ///
-    /// The failure paths report twice on purpose. The `error` event is the
-    /// standard's own path and the only one a card can act on; the engine
-    /// event is the only way an embedder learns a background script died,
-    /// which it otherwise could not, because a card that registered no
-    /// handler swallows the event entirely.
-    pub(crate) fn deliver_worker_event(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        key: WorkerKey,
-        payload: WorkerPayload,
-    ) -> Result<(), MainThreadError> {
-        let (kind, data) = match payload {
-            WorkerPayload::Message(data) => ("message", data),
-            WorkerPayload::Errored(error) => {
-                let message = error.message.to_string();
-                self.workers
-                    .notify
-                    .send(ToPainter::Engine(EngineEvent::WorkerFailed(error)));
-                ("error", message)
-            }
-            WorkerPayload::Failed(error) => {
-                let message = error.message.to_string();
-                self.workers.forget(key);
-                self.workers
-                    .notify
-                    .send(ToPainter::Engine(EngineEvent::WorkerFailed(error)));
-                ("failed", message)
-            }
-            WorkerPayload::Closed => {
-                self.workers.forget(key);
-                ("closed", String::new())
-            }
-        };
-        self.engine
-            .call_module_export(
-                js_runtime,
-                RUNTIME_MODULE_SPECIFIER,
-                WORKER_EVENT_EXPORT,
-                &[
-                    HostArgument::Number(key.as_number()),
-                    HostArgument::String(kind),
-                    HostArgument::String(&data),
-                ],
-            )
-            .map(|_| ())
-            .map_err(|error| MainThreadError::from_engine("delivering a worker event", error))
-    }
-
-    /// Ends every worker this view created. Called when the view is released:
-    /// the realm is about to go, and nothing it started should outlive it.
-    pub(crate) fn release_workers(&mut self) {
-        self.workers.release();
-    }
-
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
@@ -951,86 +744,6 @@ pub(crate) fn install_shared_modules(
     js_runtime
         .register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
         .map_err(|error| MainThreadError::from_engine("registering the timer module", error))
-}
-
-/// Registers the source modules every worker realm on the group's *worker*
-/// runtime shares.
-///
-/// Deliberately short: the worker runtime carries the `EventTarget` its global
-/// scope is built on, that global scope, and the timers — and nothing else.
-/// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
-/// document to reach and no page to be the main thread of, and registering
-/// them would make an import that must fail merely fail late.
-pub(crate) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
-    js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
-    js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
-    js_runtime.register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
-}
-
-/// The module one worker realm is booted with.
-///
-/// The two static imports run before anything in the body, which is what puts
-/// the global scope and the timer globals in place before the worker's own
-/// script is loaded — the same ordering `bobcat:boot` relies on for the MTS
-/// entry. `name` is written between them and the script for the same reason:
-/// `self.name` is readable from a worker's top level.
-pub(crate) fn worker_boot_source(name: &str, url: &str) -> String {
-    let name = serde_json::to_string(name)
-        .expect("serializing a Rust string as a JavaScript string cannot fail");
-    let url = serde_json::to_string(url)
-        .expect("serializing a Rust string as a JavaScript string cannot fail");
-    format!(
-        r#"import "{WORKER_MODULE_SPECIFIER}";
-import "{TIMER_MODULE_SPECIFIER}";
-
-globalThis.name = {name};
-await import({url});
-"#
-    )
-}
-
-/// Installs everything one worker realm reaches the host through: the timer
-/// pair under `bobcat-internal:host`, so `bobcat:timers` compiles unchanged,
-/// and the two members that are a worker's whole outward surface.
-///
-/// There is no document member here and no way to add one: this realm is on
-/// another runtime, on another thread, and the document is neither `Send` nor
-/// reachable from anything the closures below capture.
-pub(crate) fn install_worker_members(
-    engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
-    timers: &Rc<TimerState>,
-    closing: &Rc<Cell<bool>>,
-    mut post: impl FnMut(String) + 'static,
-) -> Result<(), ScriptError> {
-    install_timer_members(engine, js_runtime, timers)
-        .map_err(MainThreadError::into_script_error)?;
-
-    engine.register_host_module_function(
-        js_runtime,
-        WORKER_HOST_MODULE_SPECIFIER,
-        "postWorkerMessage",
-        1,
-        Box::new(move |arguments| {
-            const NAME: &str = "bobcat-internal:worker.postWorkerMessage";
-            post(string_argument(NAME, arguments, 0)?.to_owned());
-            Ok(HostValue::Undefined)
-        }),
-    )?;
-
-    let closing = Rc::clone(closing);
-    engine.register_host_module_function(
-        js_runtime,
-        WORKER_HOST_MODULE_SPECIFIER,
-        "closeWorker",
-        0,
-        Box::new(move |_arguments| {
-            // A flag, not a teardown: this runs inside the realm it would
-            // tear down, so the thread reads it once the task returns.
-            closing.set(true);
-            Ok(HostValue::Undefined)
-        }),
-    )
 }
 
 #[allow(
@@ -1217,70 +930,6 @@ fn install_host_module<R: EventRequester>(
     )?;
 
     Ok(())
-}
-
-/// Installs the three members the realm's `Worker` speaks to.
-///
-/// None of them touches the document, and none of them can: a worker's realm
-/// is on the group's other runtime, on the group's other thread, and what
-/// crosses to it is a key and a JSON string.
-fn install_worker_host_members<R: EventRequester>(
-    engine: &mut ScriptEngine,
-    js_runtime: &mut ScriptRuntime,
-    workers: &Rc<WorkerState<R>>,
-) -> Result<(), MainThreadError> {
-    let state = Rc::clone(workers);
-    install(engine, js_runtime, "createWorker", 2, move |arguments| {
-        const NAME: &str = "bobcat-internal:host.createWorker";
-        let url = string_argument(NAME, arguments, 0)?;
-        let name = string_argument(NAME, arguments, 1)?;
-        if url.is_empty() {
-            return Err(format!("{NAME} requires a script URL"));
-        }
-        Ok(HostValue::Number(state.create(url, name).as_number()))
-    })?;
-
-    let state = Rc::clone(workers);
-    install(
-        engine,
-        js_runtime,
-        "postWorkerMessage",
-        2,
-        move |arguments| {
-            const NAME: &str = "bobcat-internal:host.postWorkerMessage";
-            let key = worker_key_argument(NAME, arguments, 0)?;
-            let data = string_argument(NAME, arguments, 1)?;
-            state.validate(NAME, key)?;
-            let mut live = state.live.borrow_mut();
-            match live.get_mut(&key) {
-                // Still fetching: HTML queues what is posted before the
-                // worker's global scope exists.
-                Some(WorkerSlot::Loading { queued, .. }) => queued.push(data.to_owned()),
-                Some(WorkerSlot::Running) => {
-                    drop(live);
-                    state.hub.send(WorkerCommand::Message {
-                        key,
-                        data: data.to_owned(),
-                    });
-                }
-                None => unreachable!("the key was just validated as live"),
-            }
-            Ok(HostValue::Undefined)
-        },
-    )?;
-
-    let state = Rc::clone(workers);
-    install(engine, js_runtime, "terminateWorker", 1, move |arguments| {
-        const NAME: &str = "bobcat-internal:host.terminateWorker";
-        let key = worker_key_argument(NAME, arguments, 0)?;
-        state.validate(NAME, key)?;
-        state.forget(key);
-        // Cooperative: the worker thread drops the realm between tasks,
-        // because nothing interrupts one mid-call. A worker still fetching
-        // its script has no realm yet, and the answer finds no slot.
-        state.hub.send(WorkerCommand::Terminate { key });
-        Ok(HostValue::Undefined)
-    })
 }
 
 /// Installs the three members the realm's `EventTarget` speaks to.
@@ -1714,18 +1363,6 @@ fn timer_id_argument(function: &str, arguments: &[HostValue], index: usize) -> R
     Ok(value as u32)
 }
 
-/// A worker key, which the realm only ever passes back after the host handed
-/// it one.
-fn worker_key_argument(
-    function: &str,
-    arguments: &[HostValue],
-    index: usize,
-) -> Result<WorkerKey, String> {
-    let value = number_argument(function, arguments, index)?;
-    WorkerKey::from_number(value)
-        .ok_or_else(|| format!("{function} expects a worker key for argument {index}"))
-}
-
 fn string_argument<'a>(
     function: &str,
     arguments: &'a [HostValue],
@@ -1739,4 +1376,5 @@ fn string_argument<'a>(
 }
 
 #[cfg(test)]
+#[path = "tests/lib.rs"]
 mod tests;

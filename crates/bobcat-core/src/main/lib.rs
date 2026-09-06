@@ -11,6 +11,7 @@ pub(crate) mod quickjs;
 pub(crate) mod runtime;
 #[path = "tree/lib.rs"]
 pub(crate) mod tree;
+pub(crate) mod wait;
 pub(crate) mod workers;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
@@ -20,14 +21,14 @@ use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::str;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::Poll;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
-use std::{str, thread};
 
 use dom::{CommittedFrame, StylePool};
 #[cfg(target_arch = "wasm32")]
@@ -38,6 +39,7 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use self::wait::{Woken, park_until};
 use self::workers::{WorkerEvent, WorkerHub};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
@@ -814,34 +816,18 @@ fn deliver_worker_event<R: EventRequester>(
     }
 }
 
-/// What ended one round's wait.
-pub(crate) enum Woken<T> {
-    /// A message arrived; more may be queued behind it.
-    Command(T),
-    /// The earliest armed timer came due with no message to serve.
-    Deadline,
-    /// Every sender is gone, and nothing more will be asked of this thread.
-    Disconnected,
-}
-
 /// The two things that wake a group's thread with work on them.
 enum GroupWake {
     Command(GroupCommand),
     Worker(WorkerEvent),
 }
 
-/// Waits for the next command, or until `deadline` when a timer names one.
+/// Waits for the next thing this group has to serve, or until `deadline` when
+/// a timer names one.
 ///
 /// One park for the whole group, however many things it is waiting on: the
 /// views' commands, the worker thread's news once there is one, and the
 /// earliest deadline any realm armed.
-///
-/// `flume`'s own timed receive reads the standard library's clock, which
-/// wasm32 does not implement, so the wait is assembled here out of the pieces
-/// both targets do have: the receivers' futures, and `park_timeout` — which is
-/// exactly what `flume` blocks on itself. Nothing drives those futures but
-/// this loop, and the waker only unparks this thread, so this is a blocking
-/// wait spelled with futures rather than an executor.
 fn wait_for_command(
     commands: &flume::Receiver<GroupCommand>,
     worker_events: &mut Option<flume::Receiver<WorkerEvent>>,
@@ -854,20 +840,24 @@ fn wait_for_command(
             Woken::Command(GroupWake::Command(command))
         });
     }
-    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
     let mut receiving = commands.recv_async();
     let mut worker_receiving = worker_events.as_ref().map(flume::Receiver::recv_async);
-    loop {
-        match Pin::new(&mut receiving).poll(&mut context) {
-            Poll::Ready(Ok(command)) => return Woken::Command(GroupWake::Command(command)),
-            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
+    let mut worker_gone = false;
+    let woken = park_until(deadline, |context| {
+        match Pin::new(&mut receiving).poll(context) {
+            Poll::Ready(Ok(command)) => {
+                return Poll::Ready(Woken::Command(GroupWake::Command(command)));
+            }
+            Poll::Ready(Err(flume::RecvError::Disconnected)) => {
+                return Poll::Ready(Woken::Disconnected);
+            }
             Poll::Pending => {}
         }
-        let mut worker_gone = false;
         if let Some(receiving) = worker_receiving.as_mut() {
-            match Pin::new(receiving).poll(&mut context) {
-                Poll::Ready(Ok(event)) => return Woken::Command(GroupWake::Worker(event)),
+            match Pin::new(receiving).poll(context) {
+                Poll::Ready(Ok(event)) => {
+                    return Poll::Ready(Woken::Command(GroupWake::Worker(event)));
+                }
                 // The worker thread is gone — trapped, since nothing else
                 // drops its sender while this thread runs. That is not this
                 // thread's end: the views it served go on without it, so the
@@ -878,58 +868,14 @@ fn wait_for_command(
         }
         if worker_gone {
             worker_receiving = None;
-            *worker_events = None;
         }
-        let Some(deadline) = deadline else {
-            // A spurious wake just polls again; a real one has already queued
-            // whatever the poll will find.
-            thread::park();
-            continue;
-        };
-        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
-            return Woken::Deadline;
-        };
-        thread::park_timeout(remaining);
+        Poll::Pending
+    });
+    drop(worker_receiving);
+    if worker_gone {
+        *worker_events = None;
     }
-}
-
-/// The same wait, for a thread with exactly one receiver and a deadline: the
-/// worker thread, which has no second channel and no group to serve.
-pub(crate) fn wait_on<T>(
-    commands: &flume::Receiver<T>,
-    deadline: Option<ClockInstant>,
-) -> Woken<T> {
-    let Some(deadline) = deadline else {
-        return commands.recv().map_or(Woken::Disconnected, Woken::Command);
-    };
-    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut receiving = commands.recv_async();
-    loop {
-        match Pin::new(&mut receiving).poll(&mut context) {
-            Poll::Ready(Ok(command)) => return Woken::Command(command),
-            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
-            Poll::Pending => {}
-        }
-        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
-            return Woken::Deadline;
-        };
-        thread::park_timeout(remaining);
-    }
-}
-
-/// The waker every wait above hands its receivers: the only thing a send has
-/// to do is end this thread's park.
-struct UnparkWaker(thread::Thread);
-
-impl Wake for UnparkWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
+    woken.unwrap_or(Woken::Deadline)
 }
 
 fn apply_main_command<R: EventRequester>(

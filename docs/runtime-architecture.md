@@ -38,8 +38,12 @@ crates/bobcat-core/src/
   paint/graphics.rs    window GPU state
   main/lib.rs          document creation, loaded-source mounting, startup,
                        and inbox
+  main/wait.rs         how a thread of this engine parks: one park loop, both
+                       threads
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration
+  main/runtime/worker_host.rs   a view's realm reaching its workers
+  main/runtime/worker_scope.rs  what a worker realm is made of
   main/tree/lib.rs     Lynx document and UA component policy
   main/workers.rs      the group's worker thread and its second QuickJS runtime
   paint/workers.rs     fetching worker scripts off the frame path, polled with
