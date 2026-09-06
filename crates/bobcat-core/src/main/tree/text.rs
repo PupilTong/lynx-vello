@@ -1,9 +1,72 @@
-//! The `text` tag's defaults: what color a run wears,
+//! The `text` tag's attribute-to-CSS limits and defaults: what color a run wears,
 //! and what may generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
 //! lays out — is [`super::raw_text`], which owns the `raw-text` component and
 //! the rules that dissolve a carrier into the `text` it is written inside.
+
+use dom::NodeId;
+
+use super::LynxDocument;
+
+/// Reflects paragraph-limit attributes into ordinary inline CSS. A later
+/// style replacement or an author declaration can override these values.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
+)]
+pub(crate) fn apply_attribute_style(
+    document: &mut LynxDocument,
+    element: NodeId,
+    name: &str,
+    value: Option<&str>,
+) {
+    let (property, count) = match name {
+        "text-maxline" => (
+            "--lynx-text-maxline",
+            parse_count(value).filter(|count| *count > 0.0 && count.fract() == 0.0),
+        ),
+        "text-maxlength" => ("--lynx-text-maxlength", parse_count(value)),
+        _ => return,
+    };
+    let css = count.map_or_else(String::new, |count| (count as u32).to_string());
+    document.set_inline_style_property(element, property, &css);
+}
+
+/// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
+/// decimal prefixes and exponents work, empty/negative values do not. Counts
+/// beyond the paragraph's u32 source space are effectively unlimited.
+fn parse_count(value: Option<&str>) -> Option<f64> {
+    let value = value?
+        .trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
+    let bytes = value.as_bytes();
+    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let mut exponent = end + 1;
+        exponent += usize::from(matches!(bytes.get(exponent), Some(b'+' | b'-')));
+        let digits = exponent;
+        while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+            exponent += 1;
+        }
+        if exponent > digits {
+            end = exponent;
+        }
+    }
+    value[..end]
+        .parse::<f64>()
+        .ok()
+        .filter(|count| (0.0..=f64::from(u32::MAX)).contains(count))
+}
 
 /// `text`'s own defaults, from `web-elements`' `x-text.css`.
 ///
@@ -23,7 +86,11 @@
 /// `raw-text` opts back in from
 /// [`super::raw_text::UA_RULES`], where the rest of a carrier's policy already
 /// lives.
-pub(super) const UA_RULES: &str = "\
+/// Universal syntax preserves the full u32 source-count range. Attribute
+/// parsing supplies canonical counts; each paragraph receives its own limits.
+pub(super) const UA_RULES: &str = r#"
+@property --lynx-text-maxline { syntax: "*"; inherits: false; initial-value: 0; }
+@property --lynx-text-maxlength { syntax: "*"; inherits: false; initial-value: -1; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
 inline-text { display: -lynx-text !important; }
 inline-image, inline-truncation { display: none; }
@@ -31,7 +98,7 @@ text > * { display: none; }
 text > wrapper { display: contents; }
 text > view, text > image { display: flex; }
 text > text, text > wrapper > text { color: inherit; }
-";
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -45,6 +112,20 @@ mod tests {
 
     const MAX_LINES: &str = "text-maxline";
     const MAX_CHARS: &str = "text-maxlength";
+
+    fn set_limit(
+        document: &mut LynxDocument,
+        element: dom::NodeId,
+        name: &str,
+        value: Option<&str>,
+    ) {
+        if let Some(value) = value {
+            document.set_attribute(element, name, value);
+        } else {
+            document.remove_attribute(element, name);
+        }
+        super::apply_attribute_style(document, element, name, value);
+    }
 
     fn append_run(document: &mut LynxDocument, parent: dom::NodeId, content: &str) {
         let raw = element_under(document, parent, "raw-text", "");
@@ -89,11 +170,7 @@ mod tests {
                 (Some("1"), 21.0),
                 (None, 42.0),
             ] {
-                if let Some(value) = value {
-                    document.set_attribute(text, MAX_LINES, value);
-                } else {
-                    document.remove_attribute(text, MAX_LINES);
-                }
+                set_limit(&mut document, text, MAX_LINES, value);
                 assert_height(&mut document, text, height);
                 assert_eq!(
                     document
@@ -127,13 +204,13 @@ mod tests {
             ("1", 21.0),
             ("4294967296", 42.0),
         ] {
-            document.set_attribute(text, MAX_LINES, value);
+            set_limit(&mut document, text, MAX_LINES, Some(value));
             assert_height(&mut document, text, height);
         }
         // Both attributes use the same numeric reader, but maxlength permits
         // zero and truncates fractional character offsets like DOM Range.
         for (value, width) in [("1.9", 20.0), ("0", 0.0), ("-1", 60.0)] {
-            document.set_attribute(text, MAX_CHARS, value);
+            set_limit(&mut document, text, MAX_CHARS, Some(value));
             document.layout();
             assert_eq!(
                 document.text_block_size(text).expect("paragraph").width,
@@ -147,29 +224,78 @@ mod tests {
         let (mut document, text) = paragraph("abc ");
         let nested = element_under(&mut document, text, "text", "");
         append_run(&mut document, nested, "def");
-        document.set_attribute(nested, MAX_CHARS, "0");
-        document.set_attribute(nested, MAX_LINES, "1");
+        set_limit(&mut document, nested, MAX_CHARS, Some("0"));
+        set_limit(&mut document, nested, MAX_LINES, Some("1"));
         assert_height(&mut document, text, 42.0);
 
-        document.set_attribute(text, MAX_LINES, "1");
+        set_limit(&mut document, text, MAX_LINES, Some("1"));
         assert_height(&mut document, text, 21.0);
-        document.set_attribute(text, MAX_CHARS, "2");
+        set_limit(&mut document, text, MAX_CHARS, Some("2"));
         document.layout();
         assert_eq!(
             document.text_block_size(text).expect("paragraph").width,
             40.0
         );
 
-        document.remove_attribute(text, MAX_LINES);
+        set_limit(&mut document, text, MAX_LINES, None);
         assert_height(&mut document, text, 21.0);
-        document.remove_attribute(text, MAX_CHARS);
+        set_limit(&mut document, text, MAX_CHARS, None);
         assert_height(&mut document, text, 42.0);
+    }
+
+    #[test]
+    fn registered_text_limits_do_not_inherit_from_the_parent() {
+        let (mut document, text) = paragraph("abc def");
+        let page = document.document_element().id();
+        set_limit(&mut document, page, MAX_LINES, Some("1"));
+        set_limit(&mut document, page, MAX_CHARS, Some("0"));
+        assert_height(&mut document, text, 42.0);
+        assert_eq!(document.text_block_size(text).unwrap().width, 60.0);
+    }
+
+    #[test]
+    fn inline_css_can_override_a_reflected_text_limit() {
+        for (attribute, property, value, width, height) in [
+            (MAX_LINES, "--lynx-text-maxline", "2", 60.0, 42.0),
+            (MAX_CHARS, "--lynx-text-maxlength", "2", 40.0, 21.0),
+        ] {
+            let (mut document, text) = paragraph("abc def");
+            set_limit(&mut document, text, attribute, Some("1"));
+            document.set_inline_style_property(text, property, value);
+            assert_height(&mut document, text, height);
+            assert_eq!(document.text_block_size(text).unwrap().width, width);
+            assert_eq!(document.get(text).unwrap().attribute(attribute), Some("1"));
+        }
+    }
+
+    #[test]
+    fn reflected_limits_preserve_attribute_selector_values() {
+        for (attribute, first, equivalent) in [(MAX_LINES, "1", "1.0"), (MAX_CHARS, "2", "2.9")] {
+            let (mut document, text) = paragraph("abc def");
+            document.add_stylesheet(
+                &format!("[{attribute}=\"{equivalent}\"] {{ padding-top: 7px; }}"),
+                dom::StylesheetOrigin::Author,
+            );
+            set_limit(&mut document, text, attribute, Some(first));
+            document.layout();
+            let before = document.rounded_layout(text).unwrap().size.height;
+            set_limit(&mut document, text, attribute, Some(equivalent));
+            document.layout();
+            assert_eq!(
+                document.rounded_layout(text).unwrap().size.height,
+                before + 7.0
+            );
+            assert_eq!(
+                document.get(text).unwrap().attribute(attribute),
+                Some(equivalent)
+            );
+        }
     }
 
     #[test]
     fn text_overflow_selects_the_existing_ellipsis_path() {
         let (mut document, text) = paragraph("abc def");
-        document.set_attribute(text, MAX_CHARS, "1");
+        set_limit(&mut document, text, MAX_CHARS, Some("1"));
         for (overflow, width) in [("clip", 20.0), ("ellipsis", 80.0), ("clip", 20.0)] {
             document.set_inline_style_property(text, "text-overflow", overflow);
             document.layout();

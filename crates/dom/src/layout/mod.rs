@@ -24,7 +24,8 @@ use stylo::servo_arc::Arc;
 
 pub(crate) use self::style::{
     DisplayMode, StyleView, box_parent, display_mode, establishes_absolute_containing_block,
-    establishes_fixed_containing_block, shaping_inputs_changed, skips_contents, text_limit_changed,
+    establishes_fixed_containing_block, paragraph_limits_changed, shaping_inputs_changed,
+    skips_contents,
 };
 use crate::tree::document::{Document, NodeLayoutState, RelayoutKind};
 
@@ -535,6 +536,11 @@ mod tests {
     #[test]
     fn changing_paragraph_limits_rebreaks_without_reshaping() {
         let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+        document.add_stylesheet(
+            r#"@property --lynx-text-maxline { syntax: "*"; inherits: false; initial-value: 0; }
+               @property --lynx-text-maxlength { syntax: "*"; inherits: false; initial-value: -1; }"#,
+            StylesheetOrigin::UserAgent,
+        );
         document.layout();
         let before = document
             .text_block_rebuilds(label)
@@ -547,12 +553,11 @@ mod tests {
         for (max_lines, max_chars, lines) in
             [(Some("1"), None, 1), (None, Some("2"), 1), (None, None, 2)]
         {
-            for (name, value) in [("text-maxline", max_lines), ("text-maxlength", max_chars)] {
-                if let Some(value) = value {
-                    document.set_attribute(label, name, value);
-                } else {
-                    document.remove_attribute(label, name);
-                }
+            for (name, value) in [
+                ("--lynx-text-maxline", max_lines),
+                ("--lynx-text-maxlength", max_chars),
+            ] {
+                document.set_inline_style_property(label, name, value.unwrap_or(""));
             }
             document.layout();
             let block = document.text_block(label).expect("committed paragraph");
@@ -560,12 +565,11 @@ mod tests {
             assert_eq!(document.text_block_rebuilds(label), Some(before));
             assert!(!document.text_block_is_probe_dirty(label));
 
-            for (name, value) in [("text-maxline", max_lines), ("text-maxlength", max_chars)] {
-                if let Some(value) = value {
-                    document.set_attribute(label, name, value);
-                } else {
-                    document.remove_attribute(label, name);
-                }
+            for (name, value) in [
+                ("--lynx-text-maxline", max_lines),
+                ("--lynx-text-maxlength", max_chars),
+            ] {
+                document.set_inline_style_property(label, name, value.unwrap_or(""));
             }
             assert_eq!(
                 document.layout_cache_is_empty(label),
@@ -575,44 +579,114 @@ mod tests {
         }
     }
 
-    /// Equivalent numeric limits keep measurements, while selectors still
-    /// distinguish the original strings and can change the box's geometry.
+    #[test]
+    #[expect(clippy::float_cmp, reason = "rounded boxes have exact pixel geometry")]
+    fn cascaded_paragraph_limits_update_ancestor_and_following_sibling_geometry() {
+        for (property, initial, limit) in [
+            ("--lynx-text-maxline", "0", "1"),
+            ("--lynx-text-maxlength", "-1", "2"),
+        ] {
+            let (mut document, label, _) = label_document_parts("hello world", 100.0);
+            document.add_stylesheet(
+                &format!(
+                    "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}"
+                ),
+                StylesheetOrigin::UserAgent,
+            );
+            document.add_stylesheet(
+                &format!(
+                    "page {{ flex-direction: column; line-height: 20px; }}
+                     .label {{ width: 100px; }}
+                     .expanded {{ {property}: initial !important; }}"
+                ),
+                StylesheetOrigin::Author,
+            );
+            let root = document.document_element().id();
+            let wrapper = document.create_element("view", ());
+            document.set_inline_style(
+                wrapper,
+                "display: flex; flex-direction: column; width: 100px; flex-shrink: 0",
+            );
+            document.append_child(root, wrapper);
+            document.append_child(wrapper, label);
+            let following = document.create_element("view", ());
+            document.set_inline_style(following, "display: flex; width: 1px; height: 7px");
+            document.append_child(root, following);
+            document.layout();
+            let rebuilds = document.text_block_rebuilds(label);
+
+            for (stage, height) in [(0, 20.0), (1, 40.0), (2, 20.0), (3, 40.0)] {
+                match stage {
+                    0 => document.set_inline_style_property(label, property, limit),
+                    1 => document.add_class(label, "expanded"),
+                    2 => document.remove_class(label, "expanded"),
+                    _ => document.set_inline_style_property(label, property, ""),
+                }
+                document.layout();
+                assert_eq!(
+                    document.rounded_layout(label).unwrap().size.height,
+                    height,
+                    "{property}, stage {stage}: paragraph height"
+                );
+                assert_eq!(
+                    document.rounded_layout(wrapper).unwrap().size.height,
+                    height,
+                    "{property}, stage {stage}: auto-sized ancestor"
+                );
+                assert_eq!(
+                    document.rounded_layout(following).unwrap().location.y,
+                    height,
+                    "{property}, stage {stage}: following sibling position"
+                );
+                assert_eq!(document.text_block_rebuilds(label), rebuilds);
+            }
+        }
+    }
+
     #[test]
     #[expect(
         clippy::float_cmp,
-        reason = "DPR 1 box dimensions are rounded to whole pixels"
+        reason = "explicit line heights have exact pixel metrics"
     )]
-    fn text_limit_values_keep_css_attribute_invalidation() {
-        for (attribute, first, equivalent) in
-            [("text-maxline", "1", "1.0"), ("text-maxlength", "2", "2.9")]
-        {
-            let (mut document, label, _run) = label_document_parts("hello world", 100.0);
+    fn animated_paragraph_limits_relayout_without_reshaping() {
+        for (property, initial, limit) in [
+            ("--lynx-text-maxline", "0", "1"),
+            ("--lynx-text-maxlength", "-1", "2"),
+        ] {
+            let (mut document, label, _) = label_document_parts("hello world", 100.0);
             document.add_stylesheet(
-                &format!("[{attribute}=\"{equivalent}\"] {{ padding-top: 7px; }}"),
+                &format!(
+                    "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}"
+                ),
+                StylesheetOrigin::UserAgent,
+            );
+            document.add_stylesheet(
+                &format!(
+                    "@keyframes limit {{ from {{ {property}: {initial}; }} to {{ {property}: {limit}; }} }}
+                     .label {{ line-height: 20px; animation: limit 10s linear; }}"
+                ),
                 StylesheetOrigin::Author,
             );
-            document.set_attribute(label, attribute, first);
+            document.advance_animations(0.0);
             document.layout();
-            let before = document.rounded_layout(label).unwrap().size.height;
             let rebuilds = document.text_block_rebuilds(label);
-
-            document.set_attribute(label, attribute, equivalent);
-            assert_eq!(
-                document.layout_cache_is_empty(label),
-                Some(false),
-                "the effective limit is unchanged before style damage is harvested",
-            );
-            document.layout();
-            assert_eq!(
-                document.rounded_layout(label).unwrap().size.height,
-                before + 7.0
-            );
-            assert_eq!(document.text_block_rebuilds(label), rebuilds);
-
-            document.remove_attribute(label, attribute);
-            document.layout();
             assert_eq!(document.text_block(label).unwrap().lines().len(), 2);
-            assert_eq!(document.text_block_rebuilds(label), rebuilds);
+
+            let before_switch = document.advance_animations(2.5);
+            assert!(
+                !before_switch.relayout,
+                "{property}: discrete value unchanged"
+            );
+
+            for (time, lines, height) in [(7.5, 1, 20.0), (10.5, 2, 40.0)] {
+                let tick = document.advance_animations(time);
+                assert!(tick.relayout, "{property}: limit changed at t={time}");
+                document.layout();
+                assert_eq!(document.text_block(label).unwrap().lines().len(), lines);
+                assert_eq!(document.rounded_layout(label).unwrap().size.height, height);
+                assert_eq!(document.text_block_rebuilds(label), rebuilds);
+                assert!(!document.text_block_is_probe_dirty(label));
+            }
         }
     }
 

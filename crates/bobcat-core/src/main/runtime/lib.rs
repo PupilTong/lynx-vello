@@ -15,7 +15,7 @@ pub(crate) use self::timers::ClockInstant;
 use self::timers::TimerSchedule;
 use super::ToPainterSender;
 use super::quickjs::ScriptEngine;
-use crate::main::tree::LynxDocument;
+use crate::main::tree::{LynxDocument, apply_attribute_style};
 use crate::script::ScriptError;
 use crate::view::{EventRequester, ToPainter};
 
@@ -924,6 +924,7 @@ fn install_attribute_members<R: EventRequester>(
         ) |document| {
             validate_live_element(document, NAME, node)?;
             document.set_attribute(node, name, value);
+            apply_attribute_style(document, node, name, Some(value));
             Ok(HostValue::Undefined)
         }
         // Deliberately name-based: this PAPI receives record keys, custom
@@ -940,6 +941,7 @@ fn install_attribute_members<R: EventRequester>(
         fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
             validate_live_element(document, NAME, node)?;
             document.remove_attribute(node, name);
+            apply_attribute_style(document, node, name, None);
             Ok(HostValue::Undefined)
         }
         fn getAttribute(node: node_id_argument, name: string_argument) |document| {

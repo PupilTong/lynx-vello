@@ -130,12 +130,16 @@ pub(crate) struct StyleRefresh {
     /// Whether anything a descendant text node is *shaped* from moved with
     /// it. Only meaningful when `changed`.
     pub(crate) shaping_changed: bool,
+    /// Whether the paragraph's effective custom-property limits changed.
+    /// These layout inputs are outside Stylo's longhand damage comparison.
+    pub(crate) paragraph_limits_changed: bool,
 }
 
 impl StyleRefresh {
     pub(crate) const UNCHANGED: Self = Self {
         changed: false,
         shaping_changed: false,
+        paragraph_limits_changed: false,
     };
 }
 
@@ -582,12 +586,14 @@ impl<T> Node<T> {
                     StyleRefresh {
                         changed: true,
                         shaping_changed: crate::layout::shaping_inputs_changed(old, new),
+                        paragraph_limits_changed: crate::layout::paragraph_limits_changed(old, new),
                     }
                 }
             }
             _ => StyleRefresh {
                 changed: true,
                 shaping_changed: true,
+                paragraph_limits_changed: false,
             },
         };
         if refresh.changed {

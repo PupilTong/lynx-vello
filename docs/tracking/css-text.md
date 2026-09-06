@@ -190,13 +190,20 @@ Scope note: this is the spec for the `parley` integration — see `.claude/agent
 
 Implementation note (2026-09-06): `display: -lynx-text` flattens its subtree
 through `dom` into `hughie::text::block`, including atomic inline boxes.
-`dom::layout::StyleView` reads `text-maxline` / `text-maxlength` through
+Core reflects `text-maxline` / `text-maxlength` into the inline custom properties
+`--lynx-text-maxline` / `--lynx-text-maxlength`. Its UA stylesheet registers both
+with universal syntax and `inherits: false`; the initial values (`0` and `-1`)
+mean unlimited. `dom::layout::StyleView` reads their computed values through
 `LinearStyle`, and `BlockStyle::from_container_style` consumes those inputs
-for the establishing element's paragraph. Attribute mutation invalidates box
-measurement when the parsed limit changes, while CSS selector invalidation
-remains independent. Limits use the existing attribute storage, with no
-custom element or public paragraph-limit setter. Shaped glyphs survive these
-updates; both probes and commits use the same limits.
+for the establishing element's paragraph. Normal restyles and animation ticks
+compare the effective limits when refreshing the layout style snapshot and
+merge changes into layout damage, clearing box measurements through the existing
+invalidation path. Attribute writes require no special invalidation logic, and
+the original strings remain available to attribute selectors. Later inline
+style replacement or overriding CSS can replace the reflected limits; they are
+ordinary cascade inputs. No custom element or public paragraph-limit setter is
+added. Shaped glyphs survive limit changes; both probes and commits use the same
+limits.
 The attributes are paragraph-wide, not per nested run. Non-positive line
 counts mean unlimited, while a zero character count cuts all content. The
 web's numeric-prefix parsing is retained; fractional line counts are invalid

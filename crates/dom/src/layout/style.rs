@@ -2,8 +2,6 @@
 //! to hughie without cloning its `Arc` or re-entering Stylo's runtime
 //! borrow checker.
 
-use core::num::NonZeroU32;
-
 use hughie::style::containment::effective_containment;
 use hughie::style::{
     Contain, ContentVisibility, CoreStyle, Display, FlexboxStyle, GridStyle, LinearStyle,
@@ -201,87 +199,15 @@ impl<T> CoreStyle for StyleView<'_, T> {
     }
 }
 
-// CSS accessors answer from the borrowed computed values. Paragraph limits
-// are the attribute-backed inputs to LinearStyle.
+// Every algorithm accessor reads computed values, including registered
+// paragraph-limit custom properties, through the style protocol defaults.
 impl<T> FlexboxStyle for StyleView<'_, T> {}
 
 impl<T> GridStyle for StyleView<'_, T> {}
 
-impl<T> LinearStyle for StyleView<'_, T> {
-    fn text_maxline(&self) -> Option<NonZeroU32> {
-        text_maxline(self.node.attribute("text-maxline"))
-    }
-
-    fn text_maxlength(&self) -> Option<u32> {
-        text_maxlength(self.node.attribute("text-maxlength"))
-    }
-}
+impl<T> LinearStyle for StyleView<'_, T> {}
 
 impl<T> TextContainerStyle for StyleView<'_, T> {}
-
-/// Attribute writes invalidate layout only when the value read through
-/// `LinearStyle` changes. CSS selector invalidation still runs independently.
-pub(crate) fn text_limit_changed<T>(node: &Node<T>, name: &str, value: Option<&str>) -> bool {
-    match name {
-        "text-maxline" => text_maxline(node.attribute(name)) != text_maxline(value),
-        "text-maxlength" => text_maxlength(node.attribute(name)) != text_maxlength(value),
-        _ => false,
-    }
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "parse_count bounds values to u32; line-clamp accepts positive integers only"
-)]
-fn text_maxline(value: Option<&str>) -> Option<NonZeroU32> {
-    parse_count(value)
-        .filter(|count| count.fract() == 0.0)
-        .and_then(|count| NonZeroU32::new(count as u32))
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "parse_count bounds values to u32; character offsets truncate like DOM Range"
-)]
-fn text_maxlength(value: Option<&str>) -> Option<u32> {
-    parse_count(value).map(|count| count as u32)
-}
-
-/// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
-/// decimal prefixes and exponents work, empty/negative values do not. Counts
-/// beyond the paragraph's u32 source space are effectively unlimited.
-fn parse_count(value: Option<&str>) -> Option<f64> {
-    let value = value?
-        .trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
-    let bytes = value.as_bytes();
-    let mut end = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
-    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-        end += 1;
-    }
-    if bytes.get(end) == Some(&b'.') {
-        end += 1;
-        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
-            end += 1;
-        }
-    }
-    if matches!(bytes.get(end), Some(b'e' | b'E')) {
-        let mut exponent = end + 1;
-        exponent += usize::from(matches!(bytes.get(exponent), Some(b'+' | b'-')));
-        let digits = exponent;
-        while bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
-            exponent += 1;
-        }
-        if exponent > digits {
-            end = exponent;
-        }
-    }
-    value[..end]
-        .parse::<f64>()
-        .ok()
-        .filter(|count| (0.0..=f64::from(u32::MAX)).contains(count))
-}
 
 impl<T> RelativeStyle for StyleView<'_, T> {}
 
@@ -324,6 +250,22 @@ pub(crate) fn shaping_inputs_changed(old: &ComputedValues, new: &ComputedValues)
                 || old_text.word_break != new_text.word_break
                 || old_text.text_wrap_mode != new_text.text_wrap_mode
                 || old_text.white_space_collapse != new_text.white_space_collapse))
+}
+
+/// Stylo gives custom-property changes repaint damage. Compare the effective
+/// values the paragraph actually consumes to account for their layout dependency.
+pub(crate) fn paragraph_limits_changed(old: &ComputedValues, new: &ComputedValues) -> bool {
+    struct ParagraphStyle<'a>(&'a ComputedValues);
+
+    impl CoreStyle for ParagraphStyle<'_> {
+        fn computed_values(&self) -> &ComputedValues {
+            self.0
+        }
+    }
+    impl LinearStyle for ParagraphStyle<'_> {}
+
+    let (old, new) = (ParagraphStyle(old), ParagraphStyle(new));
+    old.text_maxline() != new.text_maxline() || old.text_maxlength() != new.text_maxlength()
 }
 
 /// The style one shaped run carries: everything Parley resolves per *run* —

@@ -7,6 +7,18 @@ use stylo::servo::restyle_damage::ServoRestyleDamage;
 pub(crate) struct StyleDamage(ServoRestyleDamage);
 
 impl StyleDamage {
+    /// Merge Stylo damage with the layout inputs read outside its longhands.
+    /// Both normal restyles and animation ticks use the same classification.
+    pub(crate) fn from_style_change(
+        mut damage: ServoRestyleDamage,
+        paragraph_limits_changed: bool,
+    ) -> Option<Self> {
+        if paragraph_limits_changed {
+            damage.insert(ServoRestyleDamage::RELAYOUT);
+        }
+        (!damage.is_empty()).then_some(Self(damage))
+    }
+
     #[must_use]
     pub(crate) fn needs_relayout(self) -> bool {
         self.0.contains(ServoRestyleDamage::RELAYOUT)
@@ -29,12 +41,6 @@ impl StyleDamage {
     #[cfg(test)]
     fn needs_repaint(self) -> bool {
         self.0.contains(ServoRestyleDamage::REPAINT)
-    }
-}
-
-impl From<ServoRestyleDamage> for StyleDamage {
-    fn from(damage: ServoRestyleDamage) -> Self {
-        Self(damage)
     }
 }
 
@@ -108,6 +114,60 @@ mod tests {
 
         let damage = damage_of(&summary, el).expect("the inline width change carries damage");
         assert!(damage.needs_relayout());
+    }
+
+    #[test]
+    fn registered_non_inherited_custom_property_change_reports_repaint_only() {
+        let mut doc = Doc::with_css(
+            "@property --limit { syntax: '<integer>'; inherits: false; initial-value: -1; }",
+        );
+        let el = doc.el(doc.root, "view");
+        let child = doc.el(el, "view");
+        doc.dom.set_inline_style_property(el, "--limit", "1");
+        flush(&mut doc);
+        assert_eq!(doc.value(el, "--limit"), "1");
+        assert_eq!(doc.value(child, "--limit"), "-1");
+
+        doc.dom.set_inline_style_property(el, "--limit", "2");
+        let summary = flush(&mut doc);
+        let damage = damage_of(&summary, el).expect("the registered property changed");
+        assert!(damage.needs_repaint());
+        assert!(!damage.needs_relayout());
+        assert_eq!(doc.value(el, "--limit"), "2");
+        assert_eq!(doc.value(child, "--limit"), "-1");
+    }
+
+    #[test]
+    fn paragraph_limit_damage_tracks_effective_values() {
+        for (property, initial) in [
+            ("--lynx-text-maxline", "0"),
+            ("--lynx-text-maxlength", "-1"),
+        ] {
+            let mut doc = Doc::with_css(&format!(
+                "@property {property} {{ syntax: '*'; inherits: false; initial-value: {initial}; }}
+                 .label {{ display: -lynx-text; }}"
+            ));
+            let label = doc.el(doc.root, "text.label");
+            flush(&mut doc);
+
+            for (value, relayout) in [
+                ("1", true),
+                ("01", false),
+                ("2", true),
+                ("invalid", true),
+                ("-1", false),
+            ] {
+                doc.dom.set_inline_style_property(label, property, value);
+                let summary = flush(&mut doc);
+                let damage = damage_of(&summary, label).expect("custom property changed");
+                assert!(damage.needs_repaint());
+                assert_eq!(
+                    damage.needs_relayout(),
+                    relayout,
+                    "{property}: changing to {value}"
+                );
+            }
+        }
     }
 
     #[test]

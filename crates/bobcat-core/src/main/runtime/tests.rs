@@ -1287,6 +1287,79 @@ fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
 }
 
 #[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "explicit line heights have exact pixel metrics"
+)]
+fn text_limits_from_papi_relayout_after_an_earlier_flush() {
+    for (attribute, width) in [("text-maxline", 40.0), ("text-maxlength", 20.0)] {
+        let (mut runtime, elements) = text_runtime();
+        runtime
+            .run_main_thread_script(
+                &format!(
+                    r"
+                    globalThis.renderPage = function () {{
+                      const page = __CreatePage('card', 0);
+                      const text = __CreateText(0);
+                      __SetInlineStyles(text, 'font-family:Ahem;font-size:20px;line-height:21px');
+                      __AppendElement(text, __CreateRawText('ab\ncd'));
+                      __AppendElement(page, text);
+                      __FlushElementTree();
+                      __SetAttribute(text, '{attribute}', '1');
+                    }};
+                    "
+                ),
+                "app:///text-limit-update.js",
+            )
+            .expect("main-thread script");
+        let tree = elements.tree();
+        let text = tree.document_element().first_child().unwrap().id();
+        let paragraph = tree.text_block_size(text).expect("paragraph");
+        assert_eq!(paragraph.height, 21.0, "{attribute}");
+        assert_eq!(paragraph.width, width, "{attribute}");
+        assert_eq!(tree.rounded_layout(text).unwrap().size.height, 21.0);
+    }
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "explicit line heights have exact pixel metrics"
+)]
+fn replacing_inline_styles_can_override_reflected_text_limits() {
+    let (mut runtime, elements) = text_runtime();
+    runtime
+        .run_main_thread_script(
+            r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              for (const style of [
+                'font-family:Ahem;font-size:20px;line-height:21px',
+                {fontFamily:'Ahem',fontSize:'20px',lineHeight:'21px'},
+              ]) {
+                const text = __CreateText(0);
+                __SetAttribute(text, 'text-maxline', '1');
+                __SetAttribute(text, 'text-maxlength', '1');
+                __SetInlineStyles(text, style);
+                __AppendElement(text, __CreateRawText('ab\ncd'));
+                __AppendElement(page, text);
+              }
+            };
+            ",
+            "app:///text-limit-style-replacement.js",
+        )
+        .expect("main-thread script");
+    let tree = elements.tree();
+    for text in tree.document_element().children() {
+        assert_eq!(text.attribute("text-maxline"), Some("1"));
+        assert_eq!(text.attribute("text-maxlength"), Some("1"));
+        let paragraph = tree.text_block_size(text.id()).expect("paragraph");
+        assert_eq!(paragraph.height, 42.0);
+        assert_eq!(paragraph.width, 40.0);
+    }
+}
+
+#[test]
 fn rewriting_the_text_attribute_relays_out_the_same_run() {
     let (mut runtime, elements) = text_runtime();
     runtime
