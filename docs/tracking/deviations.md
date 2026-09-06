@@ -417,6 +417,34 @@ consequential choice about whether to follow the spec or the quirk.
 
 ## Components (see [components.md](components.md))
 
+- **`<image>` is never sized by its bitmap**, unlike the `<img>` it resembles.
+  Native gives the tag no platform layout node unless it carries `auto-size`
+  (`LayoutContext::NoNeedPlatformLayoutNode`'s table is literally
+  `{"image": {"auto-size"}}`), which leaves starlight measuring it as a
+  childless leaf — `LayoutObject::UpdateMeasureWithLeafNode` writes the
+  constraint on a definite axis and **zero** on every other one — and no
+  intrinsic ratio softens that, since `SL_DEFAULT_ASPECT_RATIO` is `-1.0f`.
+  web-core reaches the identical result through the browser with
+  `contain: strict` on `x-image`. So an unsized `<image src>` renders as
+  nothing in *both* references, while this engine's replaced-content path
+  would size it from its pixels for free.
+  **Decision (user-confirmed, 2026-09-06): match Lynx** — the standards
+  policy's second bucket forbids "improving" a Lynx-only feature toward the
+  W3C feature it resembles, and both references agree. Landed as
+  `contain: size` in `bobcat_core`'s `tree::image` UA rules, with
+  `hughie::compute_leaf_layout` suppressing the natural aspect ratio under
+  size containment so a single authored axis cannot derive the other.
+  Two consequences worth knowing: `contain` is a property Lynx has no
+  equivalent of at all, so an author's `contain: none` can switch this off in
+  a way no Lynx target permits (accepted — it is also exactly how the deferred
+  `image[auto-size]` will be written, which is why the UA declaration is not
+  `!important`); and the same rule applies to an `<image>` written inside a
+  `<text>`, which follows native (an inline image is sized from its own style)
+  rather than web-core, which erases the host with `display: contents
+  !important` and promotes the shadow `<img>` in its place.
+  Deliberately **not** ported from `x-image.css`: `contain`'s
+  layout/paint/style bits, `flex-direction: row !important` and the alignment
+  triple (all scaffolding for a shadow `<img>` this engine does not have).
 - **Almost every built-in component exposes a bespoke imperative JS method
   surface** (`invoke()`-based RPC: `scrollTo`, `getScrollInfo`,
   `setInputFilter`, `startAnimate`, etc.) instead of standard DOM

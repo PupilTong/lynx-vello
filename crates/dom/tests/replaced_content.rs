@@ -191,3 +191,60 @@ fn a_read_carries_the_drawn_size_as_its_hint() {
         );
     }
 }
+
+/// Regression: a load completing after its element was freed must not panic.
+///
+/// The registry names replaced nodes so a completed load knows whose natural
+/// size to set, and `Document::set_natural_size` panics on a stale id rather
+/// than ignoring one. Freeing is the only place an id stops meaning anything,
+/// so the free is where the binding has to go — before this, an ordinary
+/// unmount during a load reached that panic, which is fatal on abort-only
+/// Wasm.
+#[test]
+fn freeing_a_node_mid_load_leaves_no_stale_binding() {
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let node = h.doc.el_tag(root, "img", "box");
+    h.doc.dom.set_image_source(node, Some("app:///pending.png"));
+    assert_eq!(
+        h.doc.dom.take_wanted_images(),
+        vec![std::sync::Arc::<str>::from("app:///pending.png")],
+        "the source was asked for, so a report for it is in flight"
+    );
+
+    h.doc.dom.drop_element(node);
+    h.doc.dom.apply_image_events(&[dom::ImageEvent::Loaded {
+        source: std::sync::Arc::from("app:///pending.png"),
+        width: 4,
+        height: 4,
+    }]);
+}
+
+/// And the unbind is per node, not per source: one element going away leaves
+/// the others presenting the same URL bound, so the load still sizes them.
+#[test]
+fn freeing_one_node_leaves_a_sibling_on_the_same_source_bound() {
+    const SHARED: &str = "app:///shared.png";
+
+    let mut h = Harness::new("");
+    let root = h.doc.root;
+    let leaving = h.doc.el_tag(root, "img", "");
+    let staying = h.doc.el_tag(root, "img", "");
+    h.doc.dom.set_image_source(leaving, Some(SHARED));
+    h.doc.dom.set_image_source(staying, Some(SHARED));
+
+    h.doc.dom.drop_element(leaving);
+    h.doc.dom.apply_image_events(&[dom::ImageEvent::Loaded {
+        source: std::sync::Arc::from(SHARED),
+        width: 40,
+        height: 20,
+    }]);
+    h.doc.dom.layout();
+
+    let layout = h.doc.dom.rounded_layout(staying).expect("laid out");
+    assert_eq!(
+        (layout.size.width, layout.size.height),
+        (40.0, 20.0),
+        "the surviving node still received the load's natural size"
+    );
+}

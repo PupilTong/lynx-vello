@@ -358,10 +358,10 @@ useful signal for currently-compatible versions of those libraries.
   policy and no byte budget lives in `bobcat-core` or `dom`; the reference
   implementation of all of that is `crates/bobcat-resources`, which both
   shipped embedders use. `LynxView::prefetch_images` warms sources ahead of
-  the walk that would discover them. Automatic loading for the Lynx
-  `<image>` element remains unwired, as does its element surface (`mode`,
-  `placeholder` racing, `cap-insets`, `blur-radius`, `load`/`error`
-  events).
+  the walk that would discover them. The Lynx `<image>` element loads through
+  that path from its `src` alone (`tree::image`); the rest of its element
+  surface remains unwired (`mode`, `auto-size`, `placeholder` racing,
+  `cap-insets`, `blur-radius`, `load`/`error` events).
   `Painter`, `LynxDocument`, `Viewport`, `new_document`, `MainThreadRuntime`,
   the startup owner/guard, and the concrete QuickJS adapter are all
   crate-private.
@@ -521,8 +521,8 @@ useful signal for currently-compatible versions of those libraries.
   the ownership graph and the tree disagreeing.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
   `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
-  the components the engine defines (`tree::raw_text`, one file per
-  component, each owning its own UA rules and tests);
+  the components the engine defines (`tree::raw_text` and `tree::image`, one
+  file per component, each owning its own UA rules and tests);
   the native host-module functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
   `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
@@ -678,9 +678,10 @@ useful signal for currently-compatible versions of those libraries.
   `LynxGroup::create_lynx_view` takes and that carries that view's
   `ImageReports`.
   Recorded limits: only an image's first frame is decoded (no animated
-  playback), no `region-to-decode`, no `blur-radius` post-processing, and no
-  `<image>` element surface — the pipeline serves whatever source string the
-  paint walk names, today `url(…)` layers and `Document::set_image_source`.
+  playback), no `region-to-decode`, no `blur-radius` post-processing, and none
+  of the `<image>` element surface past `src` — the pipeline serves whatever
+  source string the paint walk names, today `url(…)` layers and the source an
+  `<image>`'s `src` installs through `Document::set_image_source`.
   The macOS decoder is type-checked against the Apple target but exercised
   only where ImageIO exists; the Linux decoder and libcurl transport are
   tested for real against the system libraries, and the browser path is
@@ -1423,7 +1424,9 @@ useful signal for currently-compatible versions of those libraries.
   The flattened paragraph and `text-maxline`/`text-maxlength` attribute wiring
   are implemented (see `tree::text` above). The
   `raw-text` attribute-to-text-node reflection and its UA display/newline
-  policy have landed in `bobcat-core`'s `tree::raw_text` (see above). Generic W3C
+  policy have landed in `bobcat-core`'s `tree::raw_text` (see above), as has
+  the `<image>` tag's `src`-to-replaced-content reflection and its UA box in
+  `tree::image`. Generic W3C
   text style, document context, and artifact storage already live in `dom`.
 - `crates/flashbulb` — screenshot testing infrastructure, and the only crate
   here that exists for the test suite rather than the product (`publish =

@@ -59,14 +59,42 @@ has. Native's bitmap-size cache — a second mount of a known URL publishing its
 natural size in the commit that creates the node — is now the store's to
 provide, since only the store knows what it has already decoded.
 
-The Lynx `<image>` element surface — `mode`, `placeholder`, the src/placeholder
-race, `cap-insets`, `blur-radius`, the `load`/`error` events — remains above
-this layer and unimplemented, as does the loop that would set the two halves
-from an element's `src`; what exists today is the W3C `<img>` paint path:
-natural size into layout, `object-fit`/`object-position`/`image-rendering` at
-paint. The metadata must not be encoded as
-`contain-*`/`contain-intrinsic-size`, because natural replaced size is content
-data rather than CSS size containment.
+The Lynx `<image>` element surface — `mode`, `auto-size`, `placeholder`, the
+src/placeholder race, `cap-insets`, `blur-radius`, the `load`/`error` events —
+remains above this layer and unimplemented. What exists today is the `src` half
+(`bobcat_core`'s `tree::image`, landed 2026-09-06) over the W3C `<img>` paint
+path: natural size into layout,
+`object-fit`/`object-position`/`image-rendering` at paint. The natural size
+must not be encoded as `contain-intrinsic-size`, because natural replaced size
+is content data rather than CSS size containment — note that `tree::image`'s
+`contain: size` says the *inverse* and declares no `contain-intrinsic-size`:
+it is how Lynx's own rule that an `<image>` box is never bitmap-sized reaches
+a layout engine that would otherwise size a replaced leaf from its pixels.
+
+Implementation note (2026-09-06): `bobcat_core`'s `tree::image` defines the
+`image` tag as a `dom::CustomElement` observing `src` alone and reflecting it
+into `Document::set_image_source`, with an empty value and a removed attribute
+both meaning no source — web-core relays `newval || placeholder` to its inner
+`<img>`, which with no placeholder is the same case, and native refuses to
+build a request for an empty URL. Nothing is trimmed, resolved or validated:
+the registry keys on the raw string the page wrote, and resolving it against a
+base URL is the embedder's. The source binds on write, which is itself what
+asks the host for it, so an `<image>` needs no plumbing the `url(…)` layers
+did not already have. Its UA rules are `box-sizing: border-box` (the common
+block `web-elements` opens with, and native's own default), a `display: flex`
+that pins `web-elements`' exclusion of `x-image` from the
+`defaultDisplayLinear` toggle list, `contain: size`, and `image > * { display:
+none; }`. That last one merely *ties* on specificity with `view`'s,
+`wrapper`'s, `scroll-view`'s and `list`'s own `display` rules, so it wins by
+being assembled last in the sheet and `nothing_inside_an_image_generates_a_box`
+is the tripwire for that ordering. A `text`/`inline-text` child
+is the one exception the sheet cannot reach, because `display: -lynx-text` is
+UA-important; a `src` masks it, since `dom` hides every child of a replaced
+box. Two enabling changes landed with it: `hughie`'s `compute_leaf_layout`
+suppresses the natural aspect ratio under size containment (it otherwise fills
+a missing axis before containment is consulted), and `dom`'s `free_node`
+unbinds a freed node from the image registry — without which a load completing
+after its element was dropped reached `set_natural_size`'s stale-id panic.
 
 `mode` (object-fit) is a direct, already-standards-aligned mapping in all three implementations: Android `ScalingUtils.ScaleType` (`FIT_XY`/`FIT_CENTER`/`CENTER_CROP`/`CENTER`, `lynx/platform/android/.../image/ScalingUtils.java`), iOS `UIViewContentMode` (`ScaleToFill`/`ScaleAspectFit`/`ScaleAspectFill`/`Center`, `LynxConverter (UIViewContentMode)` in `lynx/platform/darwin/ios/lynx/ui/image/LynxUIImage.mm:2063-2081`), and web-platform literally emits CSS `object-fit: fill/contain/cover` plus a `position:absolute` no-scale rule for `center` (`lynx-stack/packages/web-platform/web-elements/src/elements/XImage/x-image.css:38-53`). There is no Lynx equivalent of CSS `object-fit: scale-down` or `none` (as distinct from `center`) in any of the three stacks — a small, low-risk feature gap, not a divergence.
 

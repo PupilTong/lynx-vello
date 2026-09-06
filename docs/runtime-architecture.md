@@ -286,9 +286,9 @@ Vello scene, and holds the embedder's image store behind an `Arc`. In Bobcat
 the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
-It also defines the one component the engine owns, `raw-text`, in its own
-module (`tree::raw_text`, which owns the component, its UA rules, and its
-tests together). Lynx writes a
+It also defines the two components the engine owns, `raw-text` and `image`,
+each in its own module (`tree::raw_text` and `tree::image`, which own the
+component, its UA rules, and its tests together). Lynx writes a
 text run as an attribute (`__CreateRawText(value)` sets `text` on a `raw-text`
 element) while everything downstream — Parley shaping, line breaking, the
 glyph painter — speaks the W3C text node, so the component observes `text` and
@@ -297,6 +297,18 @@ carrying none at all for an empty value. The UA sheet supplies the display
 policy the reflection needs: `text` is a flex container, `wrapper` is
 `display: contents`, and a `raw-text` dissolves into the `text` it is written
 inside and generates no box anywhere else.
+
+`image` is the same shape of join for pictures: Lynx names one as an attribute
+(`__CreateImage` then `src`), while everything downstream speaks replaced
+content, so the component reflects `src` into `Document::set_image_source` and
+an empty or removed value into no source at all. Its UA rules give the tag a
+border box, suppress every child, and — the one load-bearing declaration —
+`contain: size`, which is the CSS spelling of Lynx's rule that an `<image>`
+box is sized by its style and never by its bitmap. Native gives the tag no
+platform layout node unless it carries `auto-size`, leaving starlight to
+measure it as a childless leaf that is zero on every non-definite axis, and
+web-core buys the same from the browser with `contain: strict` on `x-image`;
+the replaced-content path would otherwise size it like an `<img>`.
 
 ```text
 private Document<()>
@@ -335,8 +347,9 @@ elsewhere. Composition then reads the frame's images once per commit through
 That read may block, because after a reported load it must not miss: a store
 that evicted a bitmap restores it inside the call. `crates/bobcat-resources`
 is the reference implementation of all of this, and `LynxView::prefetch_images`
-warms sources ahead of the walk that would discover them. The `<image>`
-element has not yet wired automatic loading.
+warms sources ahead of the walk that would discover them. A Lynx `<image>`
+rides the same rails: its `src` binds a source, which is what asks the host
+for it.
 
 ## Commit, publish, and visibility
 

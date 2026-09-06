@@ -18,10 +18,22 @@ pub fn compute_leaf_layout<Style: CoreStyle>(
     style: &Style,
     natural_size: NaturalSize,
 ) -> LayoutOutput {
+    // css-contain-2: a size-contained element is sized as if it had no
+    // contents, and a replaced element's natural ratio *is* contents — it is
+    // the bitmap speaking, not the box. The measurement below is already
+    // substituted by `contain-intrinsic-size`, but the ratio reaches sizing by
+    // a second road: `resolve_leaf_sizing` fills a missing axis from it before
+    // containment is ever consulted, so a contained image with one authored
+    // axis would still derive the other from its pixels.
+    let natural_aspect_ratio = if crate::style::containment::size_containment(style).is_some() {
+        None
+    } else {
+        natural_size.aspect_ratio()
+    };
     compute_leaf_layout_with_measurement(
         input,
         style,
-        natural_size.aspect_ratio(),
+        natural_aspect_ratio,
         false,
         |measure_input| natural_size.measure(measure_input),
     )
@@ -604,8 +616,8 @@ fn finalize_size(
 #[allow(clippy::float_cmp)]
 mod tests {
     use stylo::values::computed::{
-        AspectRatio, Display, Length, LengthPercentage, MaxSize, NonNegativeLengthPercentage,
-        Size as StyleSize,
+        AspectRatio, Contain, Display, Length, LengthPercentage, MaxSize,
+        NonNegativeLengthPercentage, Size as StyleSize,
     };
     use stylo::values::generics::NonNegative;
     use stylo::values::generics::position::PreferredRatio;
@@ -842,6 +854,7 @@ mod tests {
         padding: Edges<NonNegativeLengthPercentage>,
         box_sizing: box_sizing::T,
         aspect_ratio: AspectRatio,
+        containment: Contain,
     }
 
     impl BoxStyle {
@@ -853,6 +866,7 @@ mod tests {
                 )))),
                 box_sizing: box_sizing::T::ContentBox,
                 aspect_ratio: AspectRatio::auto(),
+                containment: Contain::empty(),
             }
         }
 
@@ -885,6 +899,10 @@ mod tests {
         fn aspect_ratio(&self) -> AspectRatio {
             self.aspect_ratio
         }
+
+        fn containment(&self) -> Contain {
+            self.containment
+        }
     }
 
     fn aspect_ratio(auto: bool, width: f32, height: f32) -> AspectRatio {
@@ -908,6 +926,68 @@ mod tests {
         let intrinsic = compute_leaf_layout(LayoutInput::default(), &automatic, natural);
         assert_eq!(intrinsic.size, Size::new(120.0, 70.0));
         assert_eq!(intrinsic.content_size, Size::new(120.0, 70.0));
+    }
+
+    /// css-contain-2: a size-contained box is sized as if it had no contents,
+    /// and a replaced element's natural ratio *is* contents.
+    ///
+    /// The ratio reaches sizing by a road the substituted measurement does not
+    /// cover — `resolve_leaf_sizing` fills a missing axis from it before
+    /// containment is consulted — so without the suppression a contained image
+    /// with one authored axis would still derive the other from its pixels.
+    /// This is the branch the Lynx `<image>` tag's `contain: size` depends on.
+    #[test]
+    fn size_containment_suppresses_the_natural_aspect_ratio() {
+        let natural = NaturalSize::from_size(Size::new(40.0, 20.0));
+        let width_only = BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()));
+
+        let uncontained = compute_leaf_layout(LayoutInput::default(), &width_only, natural);
+        assert_eq!(
+            uncontained.size,
+            Size::new(100.0, 50.0),
+            "without containment the missing axis comes from the 2:1 bitmap"
+        );
+
+        let contained = BoxStyle {
+            containment: Contain::SIZE,
+            ..width_only
+        };
+        assert_eq!(
+            compute_leaf_layout(LayoutInput::default(), &contained, natural).size,
+            Size::new(100.0, 0.0),
+            "a size-contained box has no contents to take a ratio from"
+        );
+
+        let unsized_contained = BoxStyle {
+            containment: Contain::SIZE,
+            ..BoxStyle::new(Size::new(StyleSize::auto(), StyleSize::auto()))
+        };
+        assert_eq!(
+            compute_leaf_layout(LayoutInput::default(), &unsized_contained, natural).size,
+            Size::ZERO,
+            "and neither axis is derived when neither is authored"
+        );
+    }
+
+    /// An author's own `aspect-ratio` is style, not contents, so containment
+    /// leaves it alone — only the natural ratio is suppressed.
+    #[test]
+    fn size_containment_leaves_an_authored_aspect_ratio_alone() {
+        let style = BoxStyle {
+            aspect_ratio: aspect_ratio(false, 2.0, 1.0),
+            containment: Contain::SIZE,
+            ..BoxStyle::new(Size::new(size_px(100.0), StyleSize::auto()))
+        };
+
+        assert_eq!(
+            compute_leaf_layout(
+                LayoutInput::default(),
+                &style,
+                NaturalSize::from_size(Size::new(40.0, 40.0))
+            )
+            .size,
+            Size::new(100.0, 50.0),
+        );
     }
 
     #[test]
