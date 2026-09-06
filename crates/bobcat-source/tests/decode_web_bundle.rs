@@ -1,18 +1,26 @@
-#![cfg(feature = "web-bundle")]
 //! Integration tests decoding real `.web.bundle` files produced by the
 //! lynx-stack build pipeline (see `fixtures/README.md`).
 
 use bobcat_source::web::style_info::{RuleKind, Selector};
 use bobcat_source::web::{DecodeError, decode};
 
-fn fixture(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"))
+fn fixture(name: &str) -> &'static [u8] {
+    match name {
+        "basic-class-selector.web.bundle" => {
+            include_bytes!("fixtures/basic-class-selector.web.bundle")
+        }
+        "basic-bindtap.web.bundle" => include_bytes!("fixtures/basic-bindtap.web.bundle"),
+        "basic-performance-large-css.web.bundle" => {
+            include_bytes!("fixtures/basic-performance-large-css.web.bundle")
+        }
+        _ => panic!("unknown fixture: {name}"),
+    }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_card_with_css() {
-    let template = decode(&fixture("basic-class-selector.web.bundle")).unwrap();
+    let template = decode(fixture("basic-class-selector.web.bundle")).unwrap();
 
     assert_eq!(template.version, 1);
     assert_eq!(template.config_str("cardType"), Some("react"));
@@ -69,9 +77,10 @@ fn decodes_card_with_css() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_card_with_empty_style_info() {
-    let template = decode(&fixture("basic-bindtap.web.bundle")).unwrap();
+    let template = decode(fixture("basic-bindtap.web.bundle")).unwrap();
 
     assert_eq!(template.config_str("cardType"), Some("react"));
     assert!(!template.config_flag("isLazy"));
@@ -81,9 +90,10 @@ fn decodes_card_with_empty_style_info() {
     assert!(style_info.css_id_to_style_sheet.is_empty());
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_large_style_info() {
-    let template = decode(&fixture("basic-performance-large-css.web.bundle")).unwrap();
+    let template = decode(fixture("basic-performance-large-css.web.bundle")).unwrap();
 
     let style_info = template.style_info.as_ref().unwrap();
     let rule_count: usize = style_info
@@ -106,13 +116,15 @@ fn decodes_large_style_info() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_bad_magic() {
     let err = decode(b"NOTABUNDLE__????").unwrap_err();
     assert!(matches!(err, DecodeError::BadMagic { .. }), "{err}");
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_future_version() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&bobcat_source::web::MAGIC_0.to_le_bytes());
@@ -122,14 +134,16 @@ fn rejects_future_version() {
     assert!(matches!(err, DecodeError::UnsupportedVersion(2)), "{err}");
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_truncated_section() {
     let bundle = fixture("basic-class-selector.web.bundle");
     let err = decode(&bundle[..bundle.len() - 100]).unwrap_err();
     assert!(matches!(err, DecodeError::UnexpectedEof { .. }), "{err}");
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_unknown_section_label() {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&bobcat_source::web::MAGIC_0.to_le_bytes());
