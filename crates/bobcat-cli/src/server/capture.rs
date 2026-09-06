@@ -466,6 +466,12 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<(), Cap
             EngineEvent::TimerFailed(error) => {
                 eprintln!("bobcat-server: timer callback failed: {error}");
             }
+            // A background script, on another runtime entirely: the document
+            // never saw it, so the capture this request asked for still
+            // stands.
+            EngineEvent::WorkerFailed(error) => {
+                eprintln!("bobcat-server: worker failed: {error}");
+            }
             EngineEvent::RenderFailed(source) => {
                 return Err(CaptureFailure::Render {
                     url: url.clone(),
