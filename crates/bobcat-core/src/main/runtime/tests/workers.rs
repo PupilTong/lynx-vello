@@ -255,7 +255,10 @@ fn a_worker_cannot_import_the_element_papi() {
         .expect("main-thread script");
 
     // `bobcat:element` is registered on `bobcat-main`'s runtime and on no
-    // other, so a worker asking for the document cannot even resolve it.
+    // other, so a worker asking for the document cannot even resolve it. The
+    // realm survives — see `a_worker_whose_script_throws_on_load_keeps_running`
+    // for why the engine cannot tell this apart from a script that ran and
+    // threw — but it has no handlers, so it answers nothing.
     workers.answer(
         &mut runtime,
         &mut js_runtime,
@@ -637,6 +640,70 @@ fn an_on_message_handler_and_an_identical_listener_are_two_registrations() {
         worker.onmessage = null;
         worker.dispatchEvent({ type: "message", data: "silenced" });
         if (seen.length !== 0) throw new Error(seen.join("|"));
+        "#,
+    );
+}
+
+#[test]
+fn a_worker_whose_script_throws_on_load_keeps_running() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                globalThis.errors = [];
+                globalThis.worker = new Worker("app:///half-broken.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.onerror = (event) => errors.push(event.message);
+                "#,
+            "app:///half-broken-entry.js",
+        )
+        .expect("main-thread script");
+
+    // The shape that matters: handlers registered, then some optional piece of
+    // start-up throws. HTML reports the exception and goes on to enable the
+    // port queue and run the event loop, so the worker is up and listening.
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+        onmessage = (event) => postMessage(event.data.toUpperCase());
+        throw new Error('optional init exploded');
+        ",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the load failure");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (errors.length !== 1) throw new Error(String(errors.length));
+        if (!errors[0].includes("optional init exploded")) throw new Error(errors[0]);
+        // Still a worker this realm may name, and still one that answers.
+        worker.postMessage("alive");
+        worker.postMessage("again");
+        "#,
+    );
+    for _ in 0..2 {
+        workers
+            .deliver_next(&mut runtime, &mut js_runtime)
+            .expect("delivering the worker's message");
+    }
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        // Two, because the throw arrived through the job queue and the
+        // checkpoint it stopped used to be finished by the next realm entry —
+        // which ate the first message whole.
+        if (seen.join("|") !== "ALIVE|AGAIN") {
+            throw new Error(`seen=[${seen.join("|")}] errors=[${errors.join("|")}]`);
+        }
+        if (errors.length !== 1) throw new Error(errors.join("|"));
         "#,
     );
 }

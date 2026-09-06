@@ -266,7 +266,8 @@ useful signal for currently-compatible versions of those libraries.
   swallows the event). Only a load failure ends the worker; something that
   threw once inside a running one — a listener, a timer callback — leaves it
   running and delivering, which is what HTML says an uncaught exception in a
-  worker does;
+  worker does — a script registers its handlers before whatever optional work
+  fails, so ending it there would throw away a worker that works;
   a frame the engine wants drawn rides the same wakeup, and the `pump` that
   answers it is the turn that draws it — so no OS frame callback and no vsync
   round trip stands between a commit and its pixels. Pacing is the

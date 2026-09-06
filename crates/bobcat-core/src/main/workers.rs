@@ -351,17 +351,15 @@ fn apply(
         WorkerCommand::Start(start) => {
             let key = start.key;
             let view = start.view;
-            match boot(runtime, events, registered, *start) {
-                Ok(realm) => {
-                    realms.insert(key, realm);
-                }
-                Err(error) => {
-                    let _ = events.send(WorkerEvent {
-                        view,
-                        key,
-                        payload: WorkerPayload::Failed(error),
-                    });
-                }
+            // Only a worker that could not be *built* fails: everything the
+            // script itself does, including throwing on load, is reported
+            // from inside as the realm's own work.
+            if let Err(error) = boot(runtime, events, realms, registered, *start) {
+                let _ = events.send(WorkerEvent {
+                    view,
+                    key,
+                    payload: WorkerPayload::Failed(error),
+                });
             }
         }
         WorkerCommand::Message { key, data } => {
@@ -382,19 +380,13 @@ fn apply(
                 &[HostArgument::String(&data)],
             );
             if let Err(error) = delivered {
-                // A listener that threw is not the end of the worker. HTML
-                // reports an uncaught exception at the worker and then at its
-                // parent and leaves both running, so the realm stays and the
-                // next message is delivered as normal — which is exactly what
-                // `Errored` means and `Failed` does not.
-                let _ = events.send(WorkerEvent {
-                    view: realm.view,
+                report(
+                    events,
+                    realm,
                     key,
-                    payload: WorkerPayload::Errored(context_of(
-                        "delivering a message to a worker",
-                        error,
-                    )),
-                });
+                    "delivering a message to a worker",
+                    error,
+                );
             }
         }
         WorkerCommand::Terminate { key } => {
@@ -404,13 +396,24 @@ fn apply(
     }
 }
 
-/// Builds one worker's realm and runs its script to completion.
+/// Builds one worker's realm, then runs its script in it.
+///
+/// `Err` is reserved for what leaves no worker at all — a runtime that never
+/// came up, a script that could not be registered, a realm that could not be
+/// created or furnished. The script's *own* outcome is not among them: by the
+/// time it runs, the realm is built and in the table, so a script that throws
+/// on load is reported exactly like a listener or a timer callback that
+/// throws later, and leaves a worker that is up and listening. That is what
+/// HTML's "run a worker" does — it reports the exception and goes on to enable
+/// the port queue and run the event loop — and it matters because a script
+/// registers its handlers before whatever optional work fails.
 fn boot(
     runtime: &mut Result<ScriptRuntime, ScriptError>,
     events: &flume::Sender<WorkerEvent>,
+    realms: &mut FxHashMap<WorkerKey, WorkerRealm>,
     registered: &mut FxHashMap<String, Vec<RegisteredScript>>,
     start: WorkerStart,
-) -> Result<WorkerRealm, ScriptError> {
+) -> Result<(), ScriptError> {
     let js_runtime = match runtime {
         Ok(runtime) => runtime,
         // The runtime failed once, for every worker that will ever be asked
@@ -440,16 +443,52 @@ fn boot(
             });
         }
     })?;
-    let boot = worker_boot_source(&name, &specifier);
-    engine
-        .execute_module(js_runtime, &boot, WORKER_BOOT_SPECIFIER)
-        .map_err(|error| context_of("running the worker's script", error))?;
-    Ok(WorkerRealm {
-        view,
-        engine,
-        timers,
-        closing,
-    })
+    let source = worker_boot_source(&name, &specifier);
+    // In the table before the script runs, which is the whole point.
+    realms.insert(
+        key,
+        WorkerRealm {
+            view,
+            engine,
+            timers,
+            closing,
+        },
+    );
+    let realm = realms
+        .get_mut(&key)
+        .expect("the realm was just put in the table");
+    if let Err(error) = realm
+        .engine
+        .execute_module(js_runtime, &source, WORKER_BOOT_SPECIFIER)
+    {
+        report(events, realm, key, "running the worker's script", error);
+        // The throw arrived through the job queue — the boot module awaits the
+        // script — so it also stopped that checkpoint mid-drain. Settle it
+        // here, now that it has been reported, or the next realm to enter this
+        // runtime pays for it with a task of its own.
+        js_runtime.settle_after_failure();
+    }
+    Ok(())
+}
+
+/// Reports what a worker's realm threw, without ending it.
+///
+/// The one error policy for everything a realm does — loading its script,
+/// taking a message, running a timer. HTML reports an uncaught exception at
+/// the worker and then at its parent and leaves both running, which is exactly
+/// what `Errored` means and `Failed` does not.
+fn report(
+    events: &flume::Sender<WorkerEvent>,
+    realm: &WorkerRealm,
+    key: WorkerKey,
+    context: &str,
+    error: ScriptError,
+) {
+    let _ = events.send(WorkerEvent {
+        view: realm.view,
+        key,
+        payload: WorkerPayload::Errored(context_of(context, error)),
+    });
 }
 
 /// One worker script already on this runtime.
@@ -520,14 +559,13 @@ fn fire_timers(
         for error in
             run_due_timers(&mut realm.engine, js_runtime, &realm.timers).unwrap_or_default()
         {
-            let _ = events.send(WorkerEvent {
-                view: realm.view,
-                key: *key,
-                payload: WorkerPayload::Errored(context_of(
-                    "running a worker's timer callback",
-                    error,
-                )),
-            });
+            report(
+                events,
+                realm,
+                *key,
+                "running a worker's timer callback",
+                error,
+            );
         }
     }
 }
