@@ -707,3 +707,90 @@ fn a_worker_whose_script_throws_on_load_keeps_running() {
         "#,
     );
 }
+
+#[test]
+fn worker_is_reached_only_through_the_import_never_through_a_global() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                // The entry has the prepended import, so the binding is in
+                // scope here — but it is a lexical binding and nothing more.
+                if (typeof Worker !== "function") throw new Error(typeof Worker);
+                if (typeof globalThis.Worker !== "undefined") {
+                    throw new Error("Worker leaked onto globalThis");
+                }
+                const worker = new Worker("app:///nested.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.postMessage(null);
+                "#,
+            "app:///reach-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "onmessage = () => postMessage(typeof globalThis.Worker);",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        // A worker realm has no `Worker` either, so nothing nests: this realm
+        // never registered `bobcat:runtime` on the worker runtime, and the
+        // engine installs no global anywhere.
+        if (seen.join("|") !== "undefined") throw new Error(seen.join("|"));
+        // And this module — an ordinary one, with no prepended import — sees
+        // no binding at all. `typeof` on an undeclared name is the safe probe;
+        // naming it outright is the ReferenceError below.
+        if (typeof Worker !== "undefined") throw new Error(typeof Worker);
+        let named = false;
+        try {
+            Worker;
+        } catch (error) {
+            named = error instanceof ReferenceError;
+        }
+        if (!named) throw new Error("a bare `Worker` should be a ReferenceError");
+        "#,
+    );
+}
+
+#[test]
+fn a_worker_cannot_import_the_runtime_that_would_let_it_nest() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.failures = [];
+                const worker = new Worker("app:///nesting.js");
+                worker.onerror = (event) => failures.push(event.message);
+                "#,
+            "app:///nesting-entry.js",
+        )
+        .expect("main-thread script");
+
+    // `bobcat:runtime` is registered on `bobcat-main`'s runtime and on no
+    // other, so the only route to `Worker` does not exist here.
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "import { Worker } from 'bobcat:runtime';\nnew Worker('app:///deeper.js');",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's failure");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        "if (failures.length !== 1) throw new Error(String(failures.length));",
+    );
+}
