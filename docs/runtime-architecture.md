@@ -42,7 +42,8 @@ crates/bobcat-core/src/
   main/runtime/lib.rs  realm/DOM integration
   main/tree/lib.rs     Lynx document and UA component policy
   main/workers.rs      the group's worker thread and its second QuickJS runtime
-  paint/workers.rs     fetching worker scripts off the frame path
+  paint/workers.rs     fetching worker scripts off the frame path, polled with
+                       the group's own host wakeup
 ```
 
 Shared command, event, viewport, and link vocabulary stays in `view` beside

@@ -6,14 +6,14 @@
 //! thread that does own one — the same split the view's startup sources use,
 //! moved off construction and onto the painter's turns.
 //!
-//! # Why a turn is asked for
+//! # Why these are polled with the host's own wakeup
 //!
-//! A fetch that becomes ready between turns has to reach a turn somehow, and
-//! the engine's only wakeup belongs to the group's thread. The waker handed
-//! to these futures therefore does not wake the painter: it sends
-//! [`ToMain::RequestTurn`], and the answer's arrival is what wakes the host's
-//! event loop, exactly as every other thing `bobcat-main` has to say does.
-//! One round trip per completed fetch, on a path that runs once per `Worker`.
+//! The painter has no thread and no event loop: the host's turns *are* its
+//! executor, and it runs only inside them. A fetch that becomes ready between
+//! turns therefore has no way to cause the next poll — so the waker handed to
+//! these futures is the group's `EventRequester` itself, which is what gives
+//! the host a turn. Nothing waits on it; it is what makes an answer nobody is
+//! waiting for observable at all.
 
 use std::future::Future;
 use std::pin::Pin;

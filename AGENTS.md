@@ -470,10 +470,20 @@ useful signal for currently-compatible versions of those libraries.
   the painter, and the painter — the only thread that owns a
   `ResourceFetcher` — resolves, fetches and decodes it across its own turns,
   answering with `WorkerScriptLoaded`. A fetch that becomes ready between
-  turns has to reach a turn somehow and the painter has no event loop of its
-  own to wake, so its waker asks `bobcat-main` for one (`RequestTurn`) and
-  the answer (`WakeTurn`) rides the group's single `EventRequester` like
-  every other engine fact. What a card posts before the script arrives is
+  turns has to reach a turn somehow, and the painter has no thread and no
+  event loop of its own — the host's turns *are* its executor, and it runs
+  only inside them. So the future is polled with the group's `EventRequester`
+  itself: its bounds are already `Wake`'s, `LynxGroup::new` is the last place
+  the requester's type is nameable, and the `Waker` std erases it into sits on
+  the group and is cloned into each painter. A completed fetch therefore rings
+  the host's loop in one hop, with `bobcat-main` out of the path — so it
+  neither queues behind a long synchronous JavaScript call nor goes missing
+  once its view has been released. Nothing *waits* on any of this: the
+  `Worker` constructor returns immediately, as HTML says, and the wakeup is
+  only what makes an answer nobody is waiting for observable at all — without
+  it a worker on an idle card never starts, in silence, because
+  `bobcat-resources` rings the embedder only on its image path and both
+  windowed embedders park. What a card posts before the script arrives is
   queued on `bobcat-main` and flushed the moment the realm exists, as HTML
   requires.
   The PAPI runtime exports

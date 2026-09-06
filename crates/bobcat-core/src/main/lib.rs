@@ -974,8 +974,6 @@ fn apply_main_command<R: EventRequester>(
                 )));
             }
         }
-        // The painter asked for a turn; answering is the whole of it.
-        ToMain::RequestTurn => notify.send(ToPainter::WakeTurn),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
         ToMain::Shutdown => unreachable!("shutdown ends the command loop before dispatch"),
         #[cfg(test)]

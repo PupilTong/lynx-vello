@@ -27,7 +27,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Poll, Wake, Waker};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -257,9 +257,6 @@ impl PainterLink {
             ToPainter::RequestWorkerScript { key, url } => {
                 self.worker_requests.push((key, url));
             }
-            // The turn this asked for is the turn applying it, so arriving is
-            // the whole of the message.
-            ToPainter::WakeTurn => {}
             ToPainter::Started(_) => {
                 unreachable!("startup messages are served before the view exists")
             }
@@ -272,19 +269,6 @@ impl PainterLink {
 
     pub(crate) fn take_worker_requests(&mut self) -> Vec<(WorkerKey, String)> {
         std::mem::take(&mut self.worker_requests)
-    }
-
-    /// The waker a fetch off the frame path is polled with.
-    ///
-    /// It wakes nothing here. The painter has no event loop of its own to
-    /// wake — the host owns that — so the waker asks `bobcat-main` for a
-    /// turn, and the answer travels back over the wakeup every other engine
-    /// fact does.
-    fn turn_waker(&self) -> Waker {
-        Waker::from(Arc::new(TurnWaker {
-            view: self.view,
-            commands: self.commands.clone(),
-        }))
     }
 
     fn adopt_frame(&mut self, announced: bool) {
@@ -451,31 +435,6 @@ impl PainterLink {
     }
 }
 
-/// The waker every off-turn fetch on the painter is polled with.
-///
-/// Waking means asking the group's thread for a turn: the painter cannot ask
-/// its own host for one, because the host's event loop is woken by the
-/// engine's single [`EventRequester`](crate::EventRequester), which lives on
-/// `bobcat-main`. `Send + Sync` because a host's resource system finishes its
-/// work wherever it likes and wakes from there.
-struct TurnWaker {
-    view: ViewId,
-    commands: flume::Sender<GroupCommand>,
-}
-
-impl Wake for TurnWaker {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        let _ = self.commands.send(GroupCommand::View {
-            view: self.view,
-            command: ToMain::RequestTurn,
-        });
-    }
-}
-
 impl fmt::Debug for PainterLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -578,6 +537,10 @@ pub(crate) struct Painter<F> {
     images: images::PainterImages<F>,
     /// Worker scripts this view's realm asked for and has not been given.
     workers: workers::WorkerScripts,
+    /// The host's own wakeup, as a waker. What the fetches above are polled
+    /// with: a completion between turns rings the host's event loop directly,
+    /// which is the only thing that can give this painter another turn.
+    host_wake: Waker,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -922,10 +885,16 @@ impl TestPainter {
         event_requester: Arc<R>,
         output: Output,
     ) -> (Self, DetachedLink<R>) {
+        let host_wake = crate::view::host_waker(&event_requester);
         let (link, main) = detached_link(event_requester);
-        let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
-            crate::resource::NeverAnswers
-        });
+        let painter = Self::with_output(
+            viewport,
+            frame_size,
+            link,
+            output,
+            |_reports| crate::resource::NeverAnswers,
+            host_wake,
+        );
         (painter, main)
     }
 }
@@ -937,6 +906,7 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
         link: PainterLink,
         output: Output,
         resources: B,
+        host_wake: Waker,
     ) -> Self
     where
         B: FnOnce(dom::ImageReports) -> F,
@@ -960,6 +930,7 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
             refill_requested_for: None,
             images: images::PainterImages::new(resources),
             workers: workers::WorkerScripts::default(),
+            host_wake,
             thread_bound: PhantomData,
         }
     }
@@ -1040,7 +1011,7 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
         for (key, url) in self.link.take_worker_requests() {
             self.workers.request(self.images.handle(), key, url);
         }
-        for (key, script) in self.workers.poll(&self.link.turn_waker()) {
+        for (key, script) in self.workers.poll(&self.host_wake) {
             self.link.send(ToMain::WorkerScriptLoaded { key, script });
         }
     }
