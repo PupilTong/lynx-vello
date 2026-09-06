@@ -86,9 +86,19 @@ rather than assumed:
   renderer functions contain none
   (`lynx/core/runtime/lepus/bindings/renderer_functions_def.h`); and the
   official ambient types declare none
-  (`lynx/js_libraries/types/types/common/global.d.ts:25-53`). PrimJS is built
-  without `quickjs-libc`, so QuickJS's own optional `Worker` is not compiled
-  in either. `MessageChannel`, `MessagePort` and a global `postMessage` are
+  (`lynx/js_libraries/types/types/common/global.d.ts:25-53`). QuickJS's own
+  optional `Worker` is not reachable either, though not for the reason one
+  might expect: `quickjs-libc` *is* compiled in
+  (`lynx/third_party/quickjs/BUILD.gn:162-166` defines the `quickjs_libc`
+  target and `:149-152` makes it an unconditional dep of `quickjs_source`),
+  but that class is installed only by `js_std_init_handlers`/
+  `js_init_module_os` under `USE_WORKER`, and nothing under `lynx/core/`
+  calls either — the only `quickjs-libc` entry point the engine uses is
+  `lepus_std_loop` from `core/runtime/js/jsi/quickjs/quickjs_helper.cc`. The
+  enumerated global install lists above are the primary evidence and stand on
+  their own; the PrimJS source submodule is not checked out in this reference
+  clone, so `quickjs-libc.cc` itself was not read.
+  `MessageChannel`, `MessagePort` and a global `postMessage` are
   likewise absent.
 - `web-core` uses the browser's `Worker` **internally** and never exposes it:
   a module worker for BTS (`lynx-stack/.../mainthread/Background.ts:52-64`,
@@ -104,7 +114,7 @@ rather than assumed:
 
 The nearest Lynx analogue is `ContextProxy` — fixed, named channels
 (`postMessage`/`dispatchEvent`/`addEventListener`/`removeEventListener` plus
-`onTriggerEvent`, `lynx/core/runtime/common/bindings/event/context_proxy_in_js.cc:26-44`)
+`onTriggerEvent`, `lynx/core/runtime/js/bindings/event/context_proxy_in_js.cc:26-44`)
 carrying a Lynx `MessageEvent` whose `origin` is a context *name*, not a URL.
 You cannot create one, and `web-core` does not even implement its
 `postMessage` (`lynx-stack/.../LynxCrossThreadContext.ts:45-47` just

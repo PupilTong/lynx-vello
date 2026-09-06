@@ -186,9 +186,16 @@ export function installEventTarget(target) {
  * Installs one `on<name>` accessor whose value participates in dispatch as a
  * plain listener, the way an HTML event handler IDL attribute does.
  *
- * The handler is kept in the accessor's own closure and (de)registered on
- * assignment, so `target.onmessage = f` and `addEventListener("message", f)`
- * deliver in the order they were set, and assigning `null` removes it.
+ * What is registered is an internal wrapper, never the assigned function
+ * itself. That is what keeps `target.onmessage = f` and
+ * `target.addEventListener("message", f)` two separate registrations: they
+ * share no identity, so neither dedups against the other and removing one
+ * leaves the other — which is what the DOM does, and what registering `f`
+ * directly would get wrong in both directions.
+ *
+ * The wrapper is registered once, on the first assignment, and stays. So the
+ * handler keeps its place in the listener order across reassignment, and
+ * assigning `null` silences it without moving it — again as the DOM does.
  *
  * @param {object} target
  * @param {string} name
@@ -197,6 +204,13 @@ export function installEventTarget(target) {
 export function installEventHandler(target, name) {
   /** @type {{ current: Function | null }} */
   const handler = { current: null };
+  /** @this {object} @param {unknown} event */
+  function invoke(event) {
+    if (typeof handler.current === "function") {
+      handler.current.call(this, event);
+    }
+  }
+  let registered = false;
   Object.defineProperty(target, `on${name}`, {
     configurable: true,
     enumerable: true,
@@ -205,13 +219,10 @@ export function installEventHandler(target, name) {
     },
     /** @param {unknown} value */
     set(value) {
-      if (handler.current !== null) {
-        this.removeEventListener(name, handler.current, false);
-        handler.current = null;
-      }
-      if (typeof value === "function") {
-        handler.current = /** @type {Function} */ (value);
-        this.addEventListener(name, handler.current, false);
+      handler.current = typeof value === "function" ? value : null;
+      if (!registered) {
+        this.addEventListener(name, invoke, false);
+        registered = true;
       }
     },
   });

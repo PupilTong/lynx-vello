@@ -2438,6 +2438,29 @@ impl Drop for WorkerHarness {
     }
 }
 
+/// Answers the next outstanding script request with `source`, as a fetch
+/// would. Requests are answered in the order they were made, which is the
+/// order the realm constructed its workers in.
+fn answer_next(
+    runtime: &mut MainThreadRuntime<NoWakeup>,
+    js_runtime: &mut ScriptRuntime,
+    pending: &mut Vec<(WorkerKey, String)>,
+    source: &str,
+) {
+    assert!(!pending.is_empty(), "a worker was constructed");
+    let (key, url) = pending.remove(0);
+    runtime
+        .worker_script_loaded(
+            js_runtime,
+            key,
+            Ok(WorkerScript {
+                source: source.to_owned(),
+                url,
+            }),
+        )
+        .expect("answering the script request");
+}
+
 fn worker_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, WorkerHarness) {
     let (link, main) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
@@ -2759,5 +2782,226 @@ fn a_worker_keeps_its_own_timers() {
         &mut runtime,
         &mut js_runtime,
         "if (seen.join('|') !== 'late') throw new Error(seen.join('|'));",
+    );
+}
+
+#[test]
+fn two_workers_over_one_url_with_different_bodies_each_run_their_own() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    // One URL, two workers. Every view has its own fetcher, so one URL does
+    // not name one body — and the group's worker runtime holds exactly one
+    // source per module name, which is the trap.
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                for (const worker of [
+                  new Worker("app:///same.js"),
+                  new Worker("app:///same.js"),
+                ]) {
+                  worker.onmessage = (event) => seen.push(event.data);
+                  worker.postMessage(null);
+                }
+                "#,
+            "app:///same-url-entry.js",
+        )
+        .expect("main-thread script");
+
+    let mut pending = workers.requests();
+    assert_eq!(pending.len(), 2, "each constructor asks for its own script");
+    answer_next(
+        &mut runtime,
+        &mut js_runtime,
+        &mut pending,
+        "onmessage = () => postMessage('first');",
+    );
+    answer_next(
+        &mut runtime,
+        &mut js_runtime,
+        &mut pending,
+        "onmessage = () => postMessage('second');",
+    );
+    for _ in 0..2 {
+        workers
+            .deliver_next(&mut runtime, &mut js_runtime)
+            .expect("delivering the worker's message");
+    }
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        seen.sort();
+        if (seen.join("|") !== "first|second") throw new Error(seen.join("|"));
+        "#,
+    );
+}
+
+#[test]
+fn a_worker_whose_listener_throws_keeps_running() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                globalThis.errors = [];
+                globalThis.worker = new Worker("app:///throwing.js");
+                worker.onmessage = (event) => seen.push(event.data);
+                worker.onerror = (event) => errors.push(event.message);
+                worker.postMessage("boom");
+                "#,
+            "app:///throwing-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        r"
+        onmessage = (event) => {
+          if (event.data === 'boom') throw new Error('handler exploded');
+          postMessage(event.data);
+        };
+        ",
+    );
+    // The throw, reported at the parent — and the worker is still there.
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's failure");
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (errors.length !== 1) throw new Error(String(errors.length));
+        if (!errors[0].includes("handler exploded")) throw new Error(errors[0]);
+        worker.postMessage("again");
+        "#,
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        // HTML reports an uncaught exception at the worker and then at its
+        // parent, and leaves both running.
+        if (seen.join("|") !== "again") throw new Error(seen.join("|"));
+        "#,
+    );
+}
+
+#[test]
+fn a_script_stays_registerable_after_a_registration_fails() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                globalThis.errors = [];
+                for (const url of ["app:///bomb.js", "app:///pool.js", "app:///pool.js"]) {
+                  const worker = new Worker(url);
+                  worker.onmessage = (event) => seen.push(event.data);
+                  worker.onerror = (event) => errors.push(event.message);
+                }
+                "#,
+            "app:///poison-entry.js",
+        )
+        .expect("main-thread script");
+
+    let mut pending = workers.requests();
+    assert_eq!(pending.len(), 3);
+    // Enough queued microtasks to outlast two whole job checkpoints, so the
+    // runtime is left mid-drain and the *next* worker's registration fails
+    // for a reason that has nothing to do with its own source.
+    answer_next(
+        &mut runtime,
+        &mut js_runtime,
+        &mut pending,
+        "for (let i = 0; i < 3000; i += 1) { Promise.resolve().then(() => {}); }",
+    );
+    answer_next(
+        &mut runtime,
+        &mut js_runtime,
+        &mut pending,
+        "postMessage('pooled');",
+    );
+    answer_next(
+        &mut runtime,
+        &mut js_runtime,
+        &mut pending,
+        "postMessage('pooled');",
+    );
+
+    // Whatever the first two did, the third worker over that URL must run:
+    // a registration that failed leaves nothing recorded, so the URL is not
+    // spent. Drain until the message arrives or the workers are all done.
+    for _ in 0..3 {
+        workers
+            .deliver_next(&mut runtime, &mut js_runtime)
+            .expect("delivering the worker's news");
+    }
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (!seen.includes("pooled")) {
+            throw new Error(`seen=${seen.join("|")} errors=${errors.join("|")}`);
+        }
+        "#,
+    );
+}
+
+#[test]
+fn an_on_message_handler_and_an_identical_listener_are_two_registrations() {
+    let (mut js_runtime, mut runtime, mut workers) = worker_runtime();
+    // The DOM keeps a handler attribute and an explicit listener apart even
+    // when they are the same function, because the attribute registers an
+    // internal callback rather than the author's own.
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r#"
+                globalThis.seen = [];
+                globalThis.worker = new Worker("app:///twice.js");
+                globalThis.handler = (event) => seen.push(event.data);
+                worker.onmessage = handler;
+                worker.addEventListener("message", handler);
+                worker.postMessage(null);
+                "#,
+            "app:///twice-entry.js",
+        )
+        .expect("main-thread script");
+
+    workers.answer(
+        &mut runtime,
+        &mut js_runtime,
+        "onmessage = () => postMessage('once');",
+    );
+    workers
+        .deliver_next(&mut runtime, &mut js_runtime)
+        .expect("delivering the worker's message");
+
+    verify(
+        &mut runtime,
+        &mut js_runtime,
+        r#"
+        if (seen.join("|") !== "once|once") throw new Error(seen.join("|"));
+        // Removing the explicit listener leaves the handler attribute, and
+        // clearing the attribute leaves nothing.
+        seen.length = 0;
+        worker.removeEventListener("message", handler);
+        worker.dispatchEvent({ type: "message", data: "after-remove" });
+        if (seen.join("|") !== "after-remove") throw new Error(seen.join("|"));
+        seen.length = 0;
+        worker.onmessage = null;
+        worker.dispatchEvent({ type: "message", data: "silenced" });
+        if (seen.length !== 0) throw new Error(seen.join("|"));
+        "#,
     );
 }

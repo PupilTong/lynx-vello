@@ -17,9 +17,11 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 // EventTarget surface under it. Not here: `importScripts` (this realm loads
 // ESM, so a worker script uses `import`), `location`, `navigator`, `fetch`,
 // `XMLHttpRequest`, `MessagePort`, `messageerror` (JSON cannot fail to
-// deserialize what JSON produced), and the DOM — a worker realm holds no
-// document and cannot reach one, which is the whole reason it is on another
-// runtime and another thread.
+// deserialize what JSON produced), `onerror` (an uncaught exception in here is
+// reported at the parent `Worker` and to the embedder, but this side has no
+// hook to intercept it first), and the DOM — a worker realm holds no document
+// and cannot reach one, which is the whole reason it is on another runtime and
+// another thread.
 
 /**
  * The global scope object. `self` and `globalThis` are the same object, as

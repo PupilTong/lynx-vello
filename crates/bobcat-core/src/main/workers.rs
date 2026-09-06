@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::thread::Builder as ThreadBuilder;
 
 use quickjs_rust_bridge::HostArgument;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -314,10 +314,11 @@ fn serve_workers(
     events: &flume::Sender<WorkerEvent>,
     realms: &mut FxHashMap<WorkerKey, WorkerRealm>,
 ) {
-    // Every worker URL already registered on this runtime. A source is
-    // runtime-wide and compiles per realm, so two workers over one script
-    // share the registration and each still gets its own module instance.
-    let mut registered = FxHashSet::default();
+    // Every worker script already registered on this runtime, by URL. A
+    // source is runtime-wide and compiles per realm, so two workers over one
+    // script share the registration and each still gets its own module
+    // instance.
+    let mut registered = FxHashMap::default();
     loop {
         let deadline = realms
             .values()
@@ -341,7 +342,7 @@ fn apply(
     runtime: &mut Result<ScriptRuntime, ScriptError>,
     events: &flume::Sender<WorkerEvent>,
     realms: &mut FxHashMap<WorkerKey, WorkerRealm>,
-    registered: &mut FxHashSet<String>,
+    registered: &mut FxHashMap<String, Vec<RegisteredScript>>,
     command: WorkerCommand,
 ) {
     match command {
@@ -379,13 +380,19 @@ fn apply(
                 &[HostArgument::String(&data)],
             );
             if let Err(error) = delivered {
-                fail(
-                    events,
-                    realms,
+                // A listener that threw is not the end of the worker. HTML
+                // reports an uncaught exception at the worker and then at its
+                // parent and leaves both running, so the realm stays and the
+                // next message is delivered as normal — which is exactly what
+                // `Errored` means and `Failed` does not.
+                let _ = events.send(WorkerEvent {
+                    view: realm.view,
                     key,
-                    "delivering a message to a worker",
-                    error,
-                );
+                    payload: WorkerPayload::Errored(context_of(
+                        "delivering a message to a worker",
+                        error,
+                    )),
+                });
             }
         }
         WorkerCommand::Terminate { key } => {
@@ -399,7 +406,7 @@ fn apply(
 fn boot(
     runtime: &mut Result<ScriptRuntime, ScriptError>,
     events: &flume::Sender<WorkerEvent>,
-    registered: &mut FxHashSet<String>,
+    registered: &mut FxHashMap<String, Vec<RegisteredScript>>,
     start: WorkerStart,
 ) -> Result<WorkerRealm, ScriptError> {
     let js_runtime = match runtime {
@@ -415,11 +422,7 @@ fn boot(
         url,
         source,
     } = start;
-    if registered.insert(url.clone()) {
-        js_runtime
-            .register_module_source(&url, &source)
-            .map_err(|error| context_of("registering the worker's script", error))?;
-    }
+    let specifier = register_script(js_runtime, registered, &url, source)?;
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
@@ -435,7 +438,7 @@ fn boot(
             });
         }
     })?;
-    let boot = worker_boot_source(&name, &url);
+    let boot = worker_boot_source(&name, &specifier);
     engine
         .execute_module(js_runtime, &boot, WORKER_BOOT_SPECIFIER)
         .map_err(|error| context_of("running the worker's script", error))?;
@@ -445,6 +448,56 @@ fn boot(
         timers,
         closing,
     })
+}
+
+/// One worker script already on this runtime.
+struct RegisteredScript {
+    /// The exact bytes registered under `specifier`.
+    ///
+    /// Kept, rather than trusting the URL alone, because a URL does not name
+    /// a body here: every view has its own `ResourceFetcher`, so two views in
+    /// one group can resolve one URL to different scripts, and a runtime
+    /// holds exactly one source per module name.
+    source: String,
+    specifier: String,
+}
+
+/// Registers one worker's script, or finds the registration it can share, and
+/// answers with the specifier its boot module should import.
+///
+/// Two things are load-bearing here. **The registration happens before it is
+/// recorded**, never the other way round: `register_module_source` fails for
+/// reasons that have nothing to do with this source — a checkpoint another
+/// worker left incomplete is enough — and recording first would leave the
+/// runtime believing in a module it does not have, so every later worker over
+/// that URL would fail at `await import` with a misleading reason, forever.
+/// **A second body under one URL gets a second name**, because sharing the
+/// first one would silently run one view's script in another view's worker.
+fn register_script(
+    js_runtime: &mut ScriptRuntime,
+    registered: &mut FxHashMap<String, Vec<RegisteredScript>>,
+    url: &str,
+    source: String,
+) -> Result<String, ScriptError> {
+    let bodies = registered.entry(url.to_owned()).or_default();
+    if let Some(shared) = bodies.iter().find(|script| script.source == source) {
+        return Ok(shared.specifier.clone());
+    }
+    // The first body keeps the URL, which is what a stack trace should say;
+    // only the unusual case pays for the disambiguation.
+    let specifier = if bodies.is_empty() {
+        url.to_owned()
+    } else {
+        format!("{url}#bobcat-worker-body-{}", bodies.len())
+    };
+    js_runtime
+        .register_module_source(&specifier, &source)
+        .map_err(|error| context_of("registering the worker's script", error))?;
+    bodies.push(RegisteredScript {
+        source,
+        specifier: specifier.clone(),
+    });
+    Ok(specifier)
 }
 
 /// Runs every timer that came due, in every realm that armed one.
@@ -475,25 +528,6 @@ fn fire_timers(
             });
         }
     }
-}
-
-/// Ends one worker with a reason, dropping its realm rather than leaving it
-/// to receive messages it can no longer answer.
-fn fail(
-    events: &flume::Sender<WorkerEvent>,
-    realms: &mut FxHashMap<WorkerKey, WorkerRealm>,
-    key: WorkerKey,
-    context: &str,
-    error: ScriptError,
-) {
-    let Some(realm) = realms.remove(&key) else {
-        return;
-    };
-    let _ = events.send(WorkerEvent {
-        view: realm.view,
-        key,
-        payload: WorkerPayload::Failed(context_of(context, error)),
-    });
 }
 
 /// Drops every realm whose script called `close()` during this round, and

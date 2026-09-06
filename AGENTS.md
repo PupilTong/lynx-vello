@@ -257,12 +257,16 @@ useful signal for currently-compatible versions of those libraries.
   during later owner-thread work, `ListenerFailed` reports a listener that
   threw during event delivery, `TimerFailed` reports a `setTimeout` or
   `setInterval` callback that threw when it came due, and `WorkerFailed`
-  reports a `Worker` whose script could not be loaded or whose realm threw —
-  the last three separate because none is fatal: the walk continues, a
-  repeating timer stays armed, the document never saw the worker at all, the
-  realm stays usable, and later events and timers are delivered as normal
-  (`WorkerFailed` is also the only way an embedder hears about a background
-  script that died, since a card with no `onerror` swallows the event);
+  reports a `Worker` whose script could not be loaded, whose script threw on
+  load, or that threw while running — the last three separate because none is
+  fatal: the walk continues, a repeating timer stays armed, the document never
+  saw the worker at all, the realm stays usable, and later events and timers
+  are delivered as normal (`WorkerFailed` is also the only way an embedder
+  hears about a background script in trouble, since a card with no `onerror`
+  swallows the event). Only a load failure ends the worker; something that
+  threw once inside a running one — a listener, a timer callback — leaves it
+  running and delivering, which is what HTML says an uncaught exception in a
+  worker does;
   a frame the engine wants drawn rides the same wakeup, and the `pump` that
   answers it is the turn that draws it — so no OS frame callback and no vsync
   round trip stands between a commit and its pixels. Pacing is the
@@ -457,6 +461,10 @@ useful signal for currently-compatible versions of those libraries.
   list, so a second `postMessage` argument is rejected rather than ignored;
   and `terminate()` is cooperative, taking effect between the worker's tasks,
   because nothing interrupts a realm mid-call.
+  A script is registered on the worker runtime under its resolved URL but
+  keyed by its *bytes*: every view has its own fetcher, so one URL does not
+  name one body, and a second body seen at one URL gets a module name of its
+  own rather than silently running the first.
   **The script is the painter's fetch**, not `bobcat-main`'s: the realm asks
   through `createWorker`, `bobcat-main` forwards one `RequestWorkerScript` to
   the painter, and the painter — the only thread that owns a
@@ -952,11 +960,15 @@ useful signal for currently-compatible versions of those libraries.
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the dependency-free JavaScript sources for the
-  three ESMs `bobcat-core` preloads into the QuickJS main-thread realm:
-  `src/main-thread-runtime.mjs` provides `bobcat:runtime`,
-  `src/element-papi.mjs` provides `bobcat:element`, and `src/timers.mjs`
-  provides `bobcat:timers`. Core embeds all three with
-  `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
+  five ESMs `bobcat-core` preloads into its QuickJS realms.
+  Four go on the main-thread runtime: `src/main-thread-runtime.mjs` provides
+  `bobcat:runtime`, `src/element-papi.mjs` provides `bobcat:element`,
+  `src/timers.mjs` provides `bobcat:timers`, and `src/event-target.mjs`
+  provides `bobcat:event-target`. The group's *worker* runtime gets
+  `src/worker-runtime.mjs` as `bobcat:worker`, plus `bobcat:event-target` and
+  `bobcat:timers` again — registered per runtime, because a source is
+  runtime-wide and no value crosses between two runtimes. Core embeds all five
+  with `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
   and verifies every named export. The package owns the
   supported `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
