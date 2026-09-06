@@ -817,6 +817,18 @@ impl<T> Document<T> {
             .is_some();
         self.animations.forget(&[id]);
         let (node, payload) = self.tree.remove_node(id);
+        // The image registry names replaced nodes so a completed load knows
+        // whose natural size to set, and this is the one place a name stops
+        // meaning anything: an id retired here is never reissued, so an entry
+        // that outlived its node could only ever hold a stale one — and
+        // `Document::set_natural_size` panics on a stale id rather than
+        // ignoring it. Unbinding here makes that unrepresentable instead of
+        // guarded, and it is also what keeps `Entry::nodes` from growing with
+        // element churn: a recycled list binding one URL across its cells
+        // scans that vector on every rebind.
+        if let Some(source) = node.image_source() {
+            self.images.unbind_node(source, id);
+        }
         let slot = id;
         debug_assert_eq!(
             removed_snapshot,

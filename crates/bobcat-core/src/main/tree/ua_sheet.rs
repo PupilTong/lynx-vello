@@ -2,10 +2,16 @@
 //! defaults every container tag shares, and the assembly of the one sheet.
 //!
 //! Each tag's own policy lives with that tag — [`super::scroll_container`],
-//! [`super::text`], [`super::raw_text`] — and this module only decides what
-//! they all agree on and what order they land in.
+//! [`super::text`], [`super::raw_text`], [`super::image`] — and this module
+//! only decides what they all agree on and what order they land in.
+//!
+//! Order is mostly documentation, with one exception that is mechanism:
+//! [`super::image`]'s child suppression ties on specificity with `view`'s,
+//! `scroll-view`'s, `list`'s and `wrapper`'s own `display` rules, so it wins
+//! only by being assembled last. That module's
+//! `nothing_inside_an_image_generates_a_box` is the tripwire for it.
 
-use super::{raw_text, scroll_container, text};
+use super::{image, raw_text, scroll_container, text};
 
 /// Page configuration that controls the Lynx UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,10 +78,12 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
          wrapper {{ display: contents; }}\n\
          {scrollers}\
          {text}\
-         {carriers}",
+         {carriers}\
+         {images}",
         scrollers = scroll_container::UA_RULES,
         text = text::UA_RULES,
         carriers = raw_text::UA_RULES,
+        images = image::UA_RULES,
     )
 }
 

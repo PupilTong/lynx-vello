@@ -85,6 +85,28 @@ globalThis.renderPage = function renderPage() {
 };
 "#;
 
+/// The Lynx `<image>` element written the only way script can write one:
+/// `__CreateImage` mints the tag, `__SetAttribute` names the source. The three
+/// boxes are the three sizing cases the tag has — an authored box, an image
+/// asked to fill a container's cross axis, and one with no definite axis at
+/// all, which Lynx renders as nothing.
+const IMAGE_ELEMENT_SCRIPT: &str = r"
+globalThis.renderPage = function renderPage() {
+  const page = __CreatePage('card', 0);
+  __SetInlineStyles(page, 'background-color:#e5e7eb;padding:16px');
+  function picture(styles) {
+    const image = __CreateImage(0);
+    __SetInlineStyles(image, styles);
+    __SetAttribute(image, 'src', 'https://example.test/retained-checker.png');
+    __AppendElement(page, image);
+    return image;
+  }
+  picture('width:128px;height:96px;image-rendering:pixelated');
+  picture('height:48px;margin-top:16px;image-rendering:pixelated');
+  picture('margin-top:16px;image-rendering:pixelated');
+};
+";
+
 fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
     PreparsedDeclaration {
         property: property.to_owned(),
@@ -250,6 +272,43 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["embedder-image-store"], &image);
+}
+
+/// Requirement: the Lynx `<image>` element loads and paints from its `src`
+/// alone, with the embedder asked for nothing.
+///
+/// The whole path is under test: `__SetAttribute` raises the tag's component,
+/// which makes the element replaced content and binds its source; the painter
+/// names that source against the store and reports the load back; the document
+/// records it and republishes; the next frame draws the bitmap.
+///
+/// The golden also pins the sizing rule the tag exists for. Lynx gives
+/// `<image>` no measurement of its own, so only a definite axis produces one:
+/// the first box is 128x96 because it says so, the second is 48 tall and
+/// stretches across the page's cross axis, and the third — which authors
+/// neither axis — is zero-height and draws nothing at all. An `<img>` would
+/// have sized all three from the 4x4 checker.
+#[tokio::test]
+async fn an_image_element_loads_and_paints_from_its_src() {
+    let images = checker_store();
+    let mut view = booted(
+        |sink| {
+            Rc::new(
+                FetcherDouble::new(IMAGE_ELEMENT_SCRIPT.as_bytes().to_vec())
+                    .resolving_to(SCRIPT_URL)
+                    .with_images(Rc::clone(&images))
+                    .serving(sink),
+            )
+        },
+        ViewSources::new(SCRIPT_URL),
+    )
+    .await;
+    settle_images(&mut view, &images);
+
+    let shot = view.capture().expect("capture the committed image element");
+    let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
+        .expect("captured RGBA image");
+    screenshots().assert_matches(&["image-element"], &image);
 }
 
 /// Requirement: text written the only way Lynx can write it — a `raw-text`
