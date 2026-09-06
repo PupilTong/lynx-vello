@@ -50,7 +50,8 @@ use std::time::Duration;
 use bobcat_core::resource::{
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
     ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
-    StyleSheetPayload, StyleSheetResponse, fetch_style_sheet_as_text,
+    ScriptReports, ScriptRequest, StyleSheetPayload, StyleSheetResponse, ViewReports,
+    fetch_style_sheet_as_text,
 };
 use bobcat_core::vello::peniko::ImageData;
 use bobcat_core::{FrameImages, ImageReports, ImageSizeHint, PreparsedStyleSheet};
@@ -67,6 +68,7 @@ mod images;
 pub mod mime;
 pub mod preprocess;
 mod registry;
+mod scripts;
 pub mod transport;
 
 pub use crate::executor::Wakeup;
@@ -171,9 +173,15 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
+    /// Rings the wakeup the embedder gave the view. A completion made between
+    /// turns needs a turn to be drained, and nothing else will ask for one.
+    pub(crate) fn wake(&self) {
+        (self.wakeup)();
+    }
+
     fn complete(&self, completion: Completion) {
         let _ = self.completions.send(completion);
-        (self.wakeup)();
+        self.wake();
     }
 
     /// Decodes `bytes`, which preprocessing found to be a `format` image
@@ -443,15 +451,17 @@ impl Resources {
     /// The per-view value for one [`bobcat_core::LynxView`], carrying its
     /// [`ImageReports`].
     #[must_use]
-    pub fn for_view(&self, reports: ImageReports) -> ViewResources {
+    pub fn for_view(&self, reports: ViewReports) -> ViewResources {
         ViewResources {
             resources: self.clone(),
-            reports,
+            reports: reports.images,
+            scripts: reports.scripts,
+            script_completions: flume::unbounded(),
         }
     }
 
     /// The builder [`bobcat_core::LynxGroup::create_lynx_view`] takes.
-    pub fn builder(&self) -> impl FnOnce(ImageReports) -> ViewResources + 'static {
+    pub fn builder(&self) -> impl FnOnce(ViewReports) -> ViewResources + 'static {
         let resources = self.clone();
         move |reports| resources.for_view(reports)
     }
@@ -506,7 +516,7 @@ impl Resources {
     }
 }
 
-fn preprocess_fetched(
+pub(crate) fn preprocess_fetched(
     fetched: Fetched,
     url: &Url,
 ) -> Result<(Fetched, preprocess::Preprocessed), error::Failure> {
@@ -536,6 +546,15 @@ fn parse_registration_url(url: &str) -> Result<Url, RegisterError> {
 pub struct ViewResources {
     resources: Resources,
     reports: ImageReports,
+    /// This view's script sink, and the channel its loads come back on. Per
+    /// view rather than shared, because a script request belongs to exactly
+    /// one `Worker` in exactly one view — unlike an image URL, which every
+    /// view that asked for it hears about.
+    scripts: ScriptReports,
+    script_completions: (
+        flume::Sender<scripts::Completion>,
+        flume::Receiver<scripts::Completion>,
+    ),
 }
 
 impl fmt::Debug for ViewResources {
@@ -675,8 +694,13 @@ impl ResourceFetcher for ViewResources {
         images::retain(&self.resources, frame);
     }
 
-    fn service_images(&self) {
+    fn request_script(&self, request: ScriptRequest) {
+        scripts::request(&self.resources, &self.script_completions.0, &request);
+    }
+
+    fn service_loads(&self) {
         images::service(&self.resources);
+        scripts::service(&self.script_completions.1, &self.scripts);
     }
 }
 

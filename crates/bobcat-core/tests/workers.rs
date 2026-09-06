@@ -11,18 +11,16 @@
 
 mod support;
 
-use std::future::Future;
-use std::pin::Pin;
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
     CacheStatus, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
-    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
+    ResourceFetcher, ResourceLocality, ResourceMetadata, ResourceRequest, ResourceResponse,
+    ResourceSource, ResourceTiming, ScriptReports, ScriptRequest, ScriptRequestId,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, ImageSizeHint, LynxView, ViewSources, vello,
@@ -81,66 +79,54 @@ impl EventRequester for PendingTurn {
     }
 }
 
-/// A fetch that is not ready the first time it is polled.
+/// A miniature of a real host: it serves the entry through the awaiting half
+/// of the protocol, which is what construction uses, and worker scripts
+/// through the pushing half, which is what everything after construction uses.
 ///
-/// It answers `Pending`, then completes on a thread of its own and wakes the
-/// waker it was given — which is exactly what a real host's transport does,
-/// and the only shape that exercises the painter's off-turn path.
-struct Later {
-    ready: Arc<AtomicBool>,
-    armed: bool,
-}
-
-impl Later {
-    fn new() -> Self {
-        Self {
-            ready: Arc::new(AtomicBool::new(false)),
-            armed: false,
-        }
-    }
-}
-
-impl Future for Later {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
-        if self.ready.load(Ordering::Acquire) {
-            return Poll::Ready(());
-        }
-        if !self.armed {
-            self.armed = true;
-            let ready = Arc::clone(&self.ready);
-            let waker = context.waker().clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(20));
-                ready.store(true, Ordering::Release);
-                waker.wake();
-            });
-        }
-        Poll::Pending
-    }
-}
-
-/// Serves a fixed set of URLs, and makes the worker's script arrive late.
-#[derive(Debug)]
+/// Deliberately faithful about the part that matters — the load finishes on a
+/// thread of its own, *between* the painter's turns, and this host rings the
+/// view's wakeup itself. Nothing in the engine polls it and nothing in the
+/// engine wakes for it.
 struct Routes {
     entry: Vec<u8>,
     worker: Option<Vec<u8>>,
-    /// Every URL `fetch_resource` was asked for, in order.
+    /// Every URL the host was asked to load, in order.
     fetched: Mutex<Vec<String>>,
+    /// Where finished script loads are handed to the engine, drained in the
+    /// host's own moment in a painter turn.
+    scripts: ScriptReports,
+    completions: (flume::Sender<ScriptDone>, flume::Receiver<ScriptDone>),
+    /// The same wakeup the view was built with. A host that reports between
+    /// turns and does not ring this has reported into a void.
+    wakeup: Arc<PendingTurn>,
+}
+
+struct ScriptDone {
+    id: ScriptRequestId,
+    result: Result<(String, Vec<u8>), String>,
 }
 
 impl Routes {
-    fn new(worker: Option<&str>) -> Self {
+    fn new(worker: Option<&str>, scripts: ScriptReports, wakeup: Arc<PendingTurn>) -> Self {
         Self {
             entry: ENTRY.as_bytes().to_vec(),
             worker: worker.map(|source| source.as_bytes().to_vec()),
             fetched: Mutex::new(Vec::new()),
+            scripts,
+            completions: flume::unbounded(),
+            wakeup,
         }
     }
 
     fn fetched(&self) -> Vec<String> {
         self.fetched.lock().expect("the fetch log").clone()
+    }
+
+    fn log(&self, url: &str) {
+        self.fetched
+            .lock()
+            .expect("the fetch log")
+            .push(url.to_owned());
     }
 }
 
@@ -163,30 +149,14 @@ impl ResourceFetcher for Routes {
         })
     }
 
+    /// The entry, during construction, driven by the embedder's own executor.
     async fn fetch_resource(
         &self,
         request: ResourceRequest,
     ) -> Result<ResourceResponse, ResourceError> {
         let url = request.resource.url.to_string();
-        self.fetched
-            .lock()
-            .expect("the fetch log")
-            .push(url.clone());
-        let bytes = if url == WORKER_URL {
-            // Not ready yet: the painter must come back for it.
-            Later::new().await;
-            self.worker.clone().ok_or_else(|| ResourceError {
-                request_id: Some(request.context.id),
-                kind: ResourceErrorKind::NotFound,
-                phase: ResourceErrorPhase::ReceiveHeaders,
-                locator: Some(request.resource.resource.specifier.clone()),
-                status: None,
-                message: "no such worker script".into(),
-                retry: RetryAdvice::Never,
-            })?
-        } else {
-            self.entry.clone()
-        };
+        self.log(&url);
+        let bytes = self.entry.clone();
         Ok(ResourceResponse {
             metadata: ResourceMetadata {
                 request_id: request.context.id,
@@ -201,6 +171,35 @@ impl ResourceFetcher for Routes {
             bytes: Bytes::from(bytes),
         })
     }
+
+    /// A worker script, at whatever moment its `Worker` was constructed.
+    fn request_script(&self, request: ScriptRequest) {
+        let url = request.specifier.to_string();
+        self.log(&url);
+        let id = request.id;
+        let body = self.worker.clone();
+        let completions = self.completions.0.clone();
+        let wakeup = Arc::clone(&self.wakeup);
+        std::thread::spawn(move || {
+            // Long enough that the turn which asked has certainly ended: the
+            // answer lands between turns, which is the case worth testing.
+            std::thread::sleep(Duration::from_millis(20));
+            let result = body
+                .map(|bytes| (url, bytes))
+                .ok_or_else(|| "no such worker script".to_owned());
+            let _ = completions.send(ScriptDone { id, result });
+            wakeup.request_event();
+        });
+    }
+
+    fn service_loads(&self) {
+        for done in self.completions.1.try_iter() {
+            match done.result {
+                Ok((url, bytes)) => self.scripts.loaded(done.id, &url, Bytes::from(bytes)),
+                Err(message) => self.scripts.failed(done.id, &message),
+            }
+        }
+    }
 }
 
 impl bobcat_core::FrameImages for Routes {
@@ -209,21 +208,33 @@ impl bobcat_core::FrameImages for Routes {
     }
 }
 
-async fn booted(wakeup: &Arc<PendingTurn>, routes: &Rc<Routes>) -> LynxView<Rc<Routes>> {
-    let routes = Rc::clone(routes);
+/// Builds the view, and hands back the host it was built with — which cannot
+/// exist before the view does, since it is built from the view's own sinks.
+async fn booted(
+    wakeup: &Arc<PendingTurn>,
+    worker: Option<&'static str>,
+) -> (LynxView<Rc<Routes>>, Rc<Routes>) {
+    let built: Rc<RefCell<Option<Rc<Routes>>>> = Rc::new(RefCell::new(None));
+    let out = Rc::clone(&built);
+    let wake = Arc::clone(wakeup);
     let mut view = solo_view(
         Arc::clone(wakeup),
         16.0,
         12.0,
         1.0,
         DrawTarget::Offscreen,
-        move |_sink| routes,
+        move |reports| {
+            let routes = Rc::new(Routes::new(worker, reports.scripts, wake));
+            *out.borrow_mut() = Some(Rc::clone(&routes));
+            routes
+        },
         ViewSources::new(ENTRY_URL),
     )
     .await
     .expect("view");
     wait_for_script(&mut view).expect("script execution");
-    view
+    let routes = built.borrow_mut().take().expect("the host was built");
+    (view, routes)
 }
 
 /// Runs the view the way a host does — a turn when the engine asks for one,
@@ -260,8 +271,7 @@ fn drive(
 #[tokio::test]
 async fn a_worker_script_is_fetched_by_the_painter_and_its_answer_reaches_the_document() {
     let wakeup = Arc::new(PendingTurn::default());
-    let routes = Rc::new(Routes::new(Some(WORKER)));
-    let mut view = booted(&wakeup, &routes).await;
+    let (mut view, routes) = booted(&wakeup, Some(WORKER)).await;
 
     // Red until the worker answers: the entry painted the page before it
     // constructed one, and the script had not even been fetched yet.
@@ -283,8 +293,7 @@ async fn a_worker_script_is_fetched_by_the_painter_and_its_answer_reaches_the_do
 #[tokio::test]
 async fn a_worker_script_that_cannot_be_fetched_is_reported_and_the_view_goes_on() {
     let wakeup = Arc::new(PendingTurn::default());
-    let routes = Rc::new(Routes::new(None));
-    let mut view = booted(&wakeup, &routes).await;
+    let (mut view, _routes) = booted(&wakeup, None).await;
 
     let mut failure = None;
     drive(&mut view, &wakeup, |_view, events| {

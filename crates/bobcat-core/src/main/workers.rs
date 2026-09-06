@@ -50,6 +50,20 @@ use crate::view::ViewId;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct WorkerKey(u64);
 
+/// A worker's key names its script load too: one worker asks for one script,
+/// so there is nothing a second identity would distinguish.
+impl From<WorkerKey> for crate::resource::ScriptRequestId {
+    fn from(key: WorkerKey) -> Self {
+        Self(key.0)
+    }
+}
+
+impl From<crate::resource::ScriptRequestId> for WorkerKey {
+    fn from(id: crate::resource::ScriptRequestId) -> Self {
+        Self(id.0)
+    }
+}
+
 /// The largest integer an `f64` represents exactly, and so the last key a
 /// realm could hold without rounding. A group would have to construct one
 /// worker per microsecond for nearly three centuries to reach it.

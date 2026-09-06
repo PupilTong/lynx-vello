@@ -12,7 +12,6 @@ mod gesture;
 mod graphics;
 pub(crate) mod images;
 mod sources;
-mod workers;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -22,15 +21,15 @@ mod event_loop_tests;
 mod tests;
 
 use std::cell::Cell;
-use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Poll, Waker};
+use std::task::Poll;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
+use std::{fmt, str};
 
 use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
@@ -51,11 +50,14 @@ use crate::main::tree::Viewport;
 use crate::main::workers::WorkerKey;
 #[cfg(test)]
 use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
+use crate::resource::{
+    ScriptEvent, ScriptInbox, ScriptRequest as ResourceScriptRequest, ViewReports,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
     ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, GroupCommand,
-    LoadedSource, LynxViewError, ToMain, ToPainter, ViewId, frame_slot,
+    LoadedSource, LynxViewError, ToMain, ToPainter, ViewId, WorkerScript, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DetachedLink, NoWakeup, detached_link};
@@ -535,12 +537,10 @@ pub(crate) struct Painter<F> {
     refill_requested_for: Option<u64>,
     /// The whole image resource system. Owned here and nowhere else.
     images: images::PainterImages<F>,
-    /// Worker scripts this view's realm asked for and has not been given.
-    workers: workers::WorkerScripts,
-    /// The host's own wakeup, as a waker. What the fetches above are polled
-    /// with: a completion between turns rings the host's event loop directly,
-    /// which is the only thing that can give this painter another turn.
-    host_wake: Waker,
+    /// Where the host reports the worker scripts it was asked for. The
+    /// painter holds no other worker state: which worker is waiting for what
+    /// is `bobcat-main`'s, and the loading itself is the host's.
+    scripts: ScriptInbox,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -885,32 +885,34 @@ impl TestPainter {
         event_requester: Arc<R>,
         output: Output,
     ) -> (Self, DetachedLink<R>) {
-        let host_wake = crate::view::host_waker(&event_requester);
         let (link, main) = detached_link(event_requester);
-        let painter = Self::with_output(
-            viewport,
-            frame_size,
-            link,
-            output,
-            |_reports| crate::resource::NeverAnswers,
-            host_wake,
-        );
+        let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
+            crate::resource::NeverAnswers
+        });
         (painter, main)
     }
 }
 
-impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
+impl<F: crate::resource::ResourceFetcher> Painter<F> {
     pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
         link: PainterLink,
         output: Output,
         resources: B,
-        host_wake: Waker,
     ) -> Self
     where
-        B: FnOnce(dom::ImageReports) -> F,
+        B: FnOnce(ViewReports) -> F,
     {
+        // The sinks come first and the store is built from them, so a store
+        // that exists without its report channels is unrepresentable.
+        let (scripts_sink, scripts) = ScriptInbox::new();
+        let images = images::PainterImages::new(|images| {
+            resources(ViewReports {
+                images,
+                scripts: scripts_sink,
+            })
+        });
         Self {
             link,
             #[cfg(test)]
@@ -928,9 +930,8 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
             composed: None,
             composed_scene: Scene::new(),
             refill_requested_for: None,
-            images: images::PainterImages::new(resources),
-            workers: workers::WorkerScripts::default(),
-            host_wake,
+            images,
+            scripts,
             thread_bound: PhantomData,
         }
     }
@@ -1001,17 +1002,33 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
         self.service_workers();
     }
 
-    /// Services the worker protocol: starts the fetch for every script the
-    /// realm asked for, then hands back whichever have finished.
+    /// Services the worker-script protocol: asks the host for every script
+    /// the realm named, then forwards whatever it has answered.
     ///
-    /// Polled here rather than on a thread of its own because this is where
-    /// the host's resource system may be touched at all, and because the
-    /// waker a fetch wakes with asks for exactly this turn.
+    /// The painter neither loads nor waits. Asking is non-blocking, the host
+    /// loads on its own concurrency, and the turn that drains its answers is
+    /// one the host asked for — the same arrangement images have had all
+    /// along, and the reason nothing here holds a future or a waker.
     fn service_workers(&mut self) {
         for (key, url) in self.link.take_worker_requests() {
-            self.workers.request(self.images.handle(), key, url);
+            self.images.store().request_script(ResourceScriptRequest {
+                id: key.into(),
+                specifier: Arc::from(url),
+            });
         }
-        for (key, script) in self.workers.poll(&self.host_wake) {
+        for event in self.scripts.drain() {
+            let (key, script) = match event {
+                ScriptEvent::Loaded { id, url, bytes } => (
+                    id.into(),
+                    str::from_utf8(&bytes)
+                        .map(|source| WorkerScript {
+                            source: source.to_owned(),
+                            url,
+                        })
+                        .map_err(|error| error.to_string()),
+                ),
+                ScriptEvent::Failed { id, message } => (id.into(), Err(message.to_string())),
+            };
             self.link.send(ToMain::WorkerScriptLoaded { key, script });
         }
     }

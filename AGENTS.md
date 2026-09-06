@@ -371,7 +371,7 @@ useful signal for currently-compatible versions of those libraries.
   image at a time by source string (the `url(…)` value CSS produced, or a
   replaced element's source): named through `request_image`, answered
   through `ImageReports` with the intrinsic size layout needs, given its
-  moment in every painter turn through `service_images` (where a host whose
+  moment in every painter turn through `service_loads` (where a host whose
   loads complete off-thread forwards them into the reports), and read back
   synchronously while the frame composes through `FrameImages::read`, which
   carries a `dom::ImageSizeHint` — the largest device-pixel extent the frame
@@ -466,27 +466,28 @@ useful signal for currently-compatible versions of those libraries.
   keyed by its *bytes*: every view has its own fetcher, so one URL does not
   name one body, and a second body seen at one URL gets a module name of its
   own rather than silently running the first.
-  **The script is the painter's fetch**, not `bobcat-main`'s: the realm asks
-  through `createWorker`, `bobcat-main` forwards one `RequestWorkerScript` to
-  the painter, and the painter — the only thread that owns a
-  `ResourceFetcher` — resolves, fetches and decodes it across its own turns,
-  answering with `WorkerScriptLoaded`. A fetch that becomes ready between
-  turns has to reach a turn somehow, and the painter has no thread and no
-  event loop of its own — the host's turns *are* its executor, and it runs
-  only inside them. So the future is polled with the group's `EventRequester`
-  itself: its bounds are already `Wake`'s, `LynxGroup::new` is the last place
-  the requester's type is nameable, and the `Waker` std erases it into sits on
-  the group and is cloned into each painter. A completed fetch therefore rings
-  the host's loop in one hop, with `bobcat-main` out of the path — so it
-  neither queues behind a long synchronous JavaScript call nor goes missing
-  once its view has been released. Nothing *waits* on any of this: the
-  `Worker` constructor returns immediately, as HTML says, and the wakeup is
-  only what makes an answer nobody is waiting for observable at all — without
-  it a worker on an idle card never starts, in silence, because
-  `bobcat-resources` rings the embedder only on its image path and both
-  windowed embedders park. What a card posts before the script arrives is
-  queued on `bobcat-main` and flushed the moment the realm exists, as HTML
-  requires.
+  **A worker script is loaded the way an image is, not the way the entry is.**
+  The protocol has two halves and the difference between them is *when*:
+  `resolve_locator`/`fetch_resource`/`fetch_style_sheet` are awaited, which
+  works only during `create_lynx_view`, where the embedder's own executor is
+  driving; `request_image`/`request_script` are named and answered later,
+  because the painter has no thread and no event loop of its own and cannot
+  await anything outside a host call. A `Worker`'s script is asked for at an
+  arbitrary moment, so it takes the second half. The realm asks through
+  `createWorker`, `bobcat-main` forwards one `RequestWorkerScript`, the
+  painter — the only thread that owns a `ResourceFetcher` — calls
+  `request_script` and returns, and the host loads on its own concurrency,
+  reports through `ScriptReports`, and **rings the view's wakeup**, exactly as
+  it already must for images. The painter holds no future, no waker and no
+  pending state: which `Worker` is waiting for what is `bobcat-main`'s, and
+  the loading is the host's. That wakeup is not a courtesy — the painter runs
+  only inside host calls, and both windowed embedders park (macOS on
+  `ControlFlow::Wait` with the display link armed only while a frame is owed,
+  the browser Render Worker on a Promise only `request_event` resolves), so a
+  report nobody wakes for is a worker that never starts. Nothing *waits* on
+  any of it: the `Worker` constructor returns immediately, as HTML says. What
+  a card posts before the script arrives is queued on `bobcat-main` and
+  flushed the moment the realm exists, as HTML requires.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries
   receive them through the prepended import:
@@ -742,7 +743,7 @@ useful signal for currently-compatible versions of those libraries.
   during decode. Loads complete on the crate's own
   worker threads (local tasks in the browser), are delivered through the
   wakeup the embedder supplies, and are applied in the painter's next turn
-  through the protocol's `service_images` hook. The frame reads each image
+  through the protocol's `service_loads` hook. The frame reads each image
   with the size it draws it at: a resident bitmap far larger than its draw
   is re-decoded at the drawn size in the background and replaced, one that
   was evicted is restored inside the read from the retained bytes or the

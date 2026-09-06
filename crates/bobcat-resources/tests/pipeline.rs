@@ -13,9 +13,17 @@ use std::time::{Duration, Instant};
 use bobcat_core::resource::{
     CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceCapability, ResourceDescriptor,
     ResourceDescriptor as Descriptor, ResourceErrorKind, ResourceFetcher, ResourcePriority,
-    ResourceRequest, ResourceSource, StyleSheetPayload,
+    ResourceRequest, ResourceSource, ScriptInbox, StyleSheetPayload, ViewReports,
 };
 use bobcat_core::{FrameImages, ImageEvent, ImageInbox, ImageSizeHint, PreparsedStyleSheet};
+
+/// The sinks a view reports through. These tests are about images, so the
+/// script half is minted and dropped.
+fn view_reports(images: bobcat_core::ImageReports) -> ViewReports {
+    let (scripts, _inbox) = ScriptInbox::new();
+    ViewReports { images, scripts }
+}
+
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use http::HeaderMap;
 
@@ -59,7 +67,7 @@ impl Harness {
             counter.fetch_add(1, Ordering::SeqCst);
         });
         let (reports, inbox) = ImageInbox::new();
-        let view = resources.for_view(reports);
+        let view = resources.for_view(view_reports(reports));
         Self {
             resources,
             view,
@@ -79,7 +87,7 @@ impl Harness {
     fn settle(&self, source: &str) -> ImageEvent {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            self.view.service_images();
+            self.view.service_loads();
             if let Some(event) = self.inbox.drain().into_iter().find(|event| match event {
                 ImageEvent::Loaded {
                     source: reported, ..
@@ -107,7 +115,7 @@ impl Harness {
     fn settle_resident(&self, source: &str, size: (u32, u32)) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            self.view.service_images();
+            self.view.service_loads();
             if self.resources.resident_size(source) == Some(size) {
                 return;
             }
@@ -182,7 +190,7 @@ fn a_registered_png_loads_reports_its_size_and_reads_back_at_the_drawn_size() {
 
     // Asking again answers from what is known, without a second load.
     let (reports, inbox) = ImageInbox::new();
-    let second = harness.resources.for_view(reports);
+    let second = harness.resources.for_view(view_reports(reports));
     second.request_image("app:///checker.png");
     assert!(matches!(
         inbox.drain().as_slice(),
@@ -399,11 +407,11 @@ fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
         .expect("register");
     let builder = harness.resources.builder();
     let (reports, inbox) = ImageInbox::new();
-    let other = builder(reports);
+    let other = builder(view_reports(reports));
     other.request_image("app:///shared.png");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        other.service_images();
+        other.service_loads();
         if !inbox.drain().is_empty() {
             break;
         }

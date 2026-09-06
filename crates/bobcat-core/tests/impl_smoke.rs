@@ -13,7 +13,7 @@ use support::{FetcherDouble, solo_view, wait_for_script};
 const ENTRY: &str = "main.js";
 
 async fn view(
-    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::resource::ViewReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     solo_view(
@@ -28,7 +28,7 @@ async fn view(
     .await
 }
 
-fn fetcher() -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
+fn fetcher() -> impl FnOnce(bobcat_core::resource::ViewReports) -> Rc<FetcherDouble> {
     |_sink| Rc::new(FetcherDouble::new(Vec::new()))
 }
 
@@ -38,11 +38,11 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     images.insert_rgba8("app:///pixel.png", 1, 1, vec![0, 0, 0, 255]);
 
     let mut view = view(
-        |sink| {
+        |reports| {
             Rc::new(
                 FetcherDouble::new(Vec::new())
                     .with_images(Rc::clone(&images))
-                    .serving(sink),
+                    .serving(reports.images),
             )
         },
         ViewSources::new(ENTRY),

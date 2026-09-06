@@ -19,7 +19,6 @@
 //! that will actually load images — does not use, since its decode callbacks
 //! land on the painter's own event loop.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::vello::peniko::ImageData;
@@ -41,11 +40,7 @@ use crate::resource::ResourceFetcher;
 /// frame that scrolls, and a slice index costs nothing where a URL hash would
 /// have cost a lookup per draw per frame.
 pub(crate) struct PainterImages<F> {
-    /// Shared rather than owned outright for exactly one caller: a worker
-    /// script's fetch outlives the turn that started it, so its future must
-    /// own its handle on the system instead of borrowing the painter that
-    /// holds it. Everything else still reads it as a plain `&F`.
-    store: Rc<F>,
+    store: F,
     inbox: ImageInbox,
     /// The commit the table was built for.
     key: Option<u64>,
@@ -85,7 +80,7 @@ impl<F: ResourceFetcher> PainterImages<F> {
         B: FnOnce(ImageReports) -> F,
     {
         let (reports, inbox) = ImageInbox::new();
-        let store = Rc::new(build(reports));
+        let store = build(reports);
         Self {
             store,
             inbox,
@@ -98,12 +93,6 @@ impl<F: ResourceFetcher> PainterImages<F> {
     /// The host's resource system, for the startup loads that need it.
     pub(crate) fn store(&self) -> &F {
         &self.store
-    }
-
-    /// A handle on it that outlives the borrow, for a load that outlives the
-    /// turn that started it.
-    pub(crate) fn handle(&self) -> Rc<F> {
-        Rc::clone(&self.store)
     }
 
     /// Names every source the document asked about, starting whatever load
@@ -120,7 +109,7 @@ impl<F: ResourceFetcher> PainterImages<F> {
     /// Gives the store its moment in the turn: loads that completed off this
     /// thread since the last turn are forwarded into the sink here.
     pub(crate) fn service(&self) {
-        self.store.service_images();
+        self.store.service_loads();
     }
 
     /// Takes the reports the store has queued. Empty when a wakeup raced

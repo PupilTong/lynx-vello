@@ -19,7 +19,7 @@ use crate::resource::{
     CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceDescriptor, ResourceFetcher,
     ResourcePriority, ResourceRequest, StyleSheetPayload,
 };
-use crate::view::{LoadedSource, LynxViewError, StyleSheetSource, WorkerScript};
+use crate::view::{LoadedSource, LynxViewError, StyleSheetSource};
 
 /// Namespaces request ids per view, so two views' requests never collide in a
 /// host that keys its own bookkeeping on them.
@@ -70,27 +70,6 @@ pub(super) async fn load_entry<F: ResourceFetcher>(
         })?
         .to_owned();
     Ok(LoadedSource::Entry { source, url })
-}
-
-/// Loads one worker script: resolve, fetch, decode.
-///
-/// The only load that happens after a view is built, and the only one whose
-/// failure is not the view's: a `Worker` whose script cannot be had is one
-/// `error` event, and the view goes on.
-pub(super) async fn load_worker_script<F: ResourceFetcher>(
-    fetcher: &F,
-    mut requests: RequestId,
-    specifier: &str,
-) -> Result<WorkerScript, LynxViewError> {
-    let (request, url) = resolve(fetcher, &mut requests, specifier).await?;
-    let response = fetcher.fetch_resource(request).await?;
-    let source = str::from_utf8(&response.bytes)
-        .map_err(|error| LynxViewError::InvalidScriptEncoding {
-            url: url.clone(),
-            message: error.to_string(),
-        })?
-        .to_owned();
-    Ok(WorkerScript { source, url })
 }
 
 /// Resolves a specifier and returns the fetch request plus the resolved URL —

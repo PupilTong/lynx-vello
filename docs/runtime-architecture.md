@@ -46,8 +46,6 @@ crates/bobcat-core/src/
   main/runtime/worker_scope.rs  what a worker realm is made of
   main/tree/lib.rs     Lynx document and UA component policy
   main/workers.rs      the group's worker thread and its second QuickJS runtime
-  paint/workers.rs     fetching worker scripts off the frame path, polled with
-                       the group's own host wakeup
 ```
 
 Shared command, event, viewport, and link vocabulary stays in `view` beside
@@ -400,7 +398,7 @@ fetcher for it (`request_image`), the fetcher answers through the view's
 `ImageReports` with the intrinsic size, and the document records the load and
 recommits. A frame that names a source not yet loaded paints nothing for it,
 the same not-yet-loaded state a browser shows. Each painter turn gives the
-fetcher a moment of its own (`service_images`) to forward loads that completed
+fetcher a moment of its own (`service_loads`) to forward loads that completed
 elsewhere. Composition then reads the frame's images once per commit through
 `FrameImages::read`, synchronously and off the swap-chain window, each with the
 `ImageSizeHint` of its largest draw in the frame — the size a host decodes to.

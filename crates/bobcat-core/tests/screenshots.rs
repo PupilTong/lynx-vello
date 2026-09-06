@@ -95,13 +95,13 @@ fn declaration(property: &str, value: &str) -> PreparsedDeclaration {
 
 /// A booted, offscreen-attached view over `source`, waited out so the frame
 /// it captured is the one its entry module committed.
-fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble> {
+fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::resource::ViewReports) -> Rc<FetcherDouble> {
     let source = source.to_vec();
     move |_sink| Rc::new(FetcherDouble::new(source).resolving_to(SCRIPT_URL))
 }
 
 async fn booted(
-    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::resource::ViewReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> LynxView<Rc<FetcherDouble>> {
     let mut view = solo_view(
@@ -233,12 +233,12 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
     let mut view = booted(
-        |sink| {
+        |reports| {
             Rc::new(
                 FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
                     .resolving_to(SCRIPT_URL)
                     .with_images(Rc::clone(&images))
-                    .serving(sink),
+                    .serving(reports.images),
             )
         },
         ViewSources::new(SCRIPT_URL),

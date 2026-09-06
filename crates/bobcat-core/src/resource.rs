@@ -1,5 +1,7 @@
 //! Host-injected resource acquisition contracts for Bobcat.
 
+use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,6 +12,141 @@ use thiserror::Error;
 use url::Url;
 
 use crate::style::PreparsedStyleSheet;
+
+/// Names one script load for the life of the view that asked for it.
+///
+/// Opaque on purpose: a host keys its own bookkeeping on it and hands it back,
+/// and nothing about which engine object is waiting is a host's business.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ScriptRequestId(pub(crate) u64);
+
+/// One script the engine wants loaded.
+#[derive(Clone, Debug)]
+pub struct ScriptRequest {
+    pub id: ScriptRequestId,
+    /// The specifier the page wrote. Resolution is the host's, and the URL it
+    /// resolves to comes back with the answer.
+    pub specifier: Arc<str>,
+}
+
+/// One finished script load.
+#[derive(Clone, Debug)]
+pub enum ScriptEvent {
+    Loaded {
+        id: ScriptRequestId,
+        /// The resolved URL, which is the name the script is registered and
+        /// reported under.
+        url: String,
+        bytes: Bytes,
+    },
+    Failed {
+        id: ScriptRequestId,
+        message: Arc<str>,
+    },
+}
+
+#[derive(Default)]
+struct ScriptQueue {
+    events: RefCell<Vec<ScriptEvent>>,
+}
+
+/// The host's end: how a store says a script load finished.
+///
+/// The script twin of [`dom::ImageReports`], and deliberately the same shape,
+/// because the two answer the same question — something was asked for at an
+/// arbitrary moment and finishes at another one. Thread-bound by construction
+/// for the same reason: an [`Rc`] cannot move to another thread, so a host
+/// that loads off-thread marshals completions back itself, in the moment
+/// [`ResourceFetcher::service_loads`] gives it.
+///
+/// **Waking the painter is the host's too.** A report made between turns needs
+/// a turn to be drained, and the host holds the wakeup it gave the view. This
+/// is not a courtesy: the painter has no thread and no event loop of its own,
+/// so a report nobody wakes for is a script that never arrives.
+#[derive(Clone)]
+pub struct ScriptReports {
+    queue: Rc<ScriptQueue>,
+}
+
+impl fmt::Debug for ScriptReports {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScriptReports")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScriptReports {
+    /// The script asked for under `id` is these bytes, from `url`.
+    ///
+    /// Answer each id exactly once, with this or [`Self::failed`], unless the
+    /// view is torn down first. Non-blocking, and it must not re-enter the
+    /// store.
+    pub fn loaded(&self, id: ScriptRequestId, url: &str, bytes: Bytes) {
+        self.queue.events.borrow_mut().push(ScriptEvent::Loaded {
+            id,
+            url: url.to_owned(),
+            bytes,
+        });
+    }
+
+    /// The script asked for under `id` will not arrive. Terminal; the engine
+    /// does not retry, and `message` is what the realm is told.
+    pub fn failed(&self, id: ScriptRequestId, message: &str) {
+        self.queue.events.borrow_mut().push(ScriptEvent::Failed {
+            id,
+            message: Arc::from(message),
+        });
+    }
+}
+
+/// The painter's end of the same queue.
+///
+/// Public for the same reason [`dom::ImageInbox`] is: a host's own tests, and
+/// anything that drives a resource system without a view around it, need to
+/// mint the pair.
+pub struct ScriptInbox {
+    queue: Rc<ScriptQueue>,
+}
+
+impl fmt::Debug for ScriptInbox {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScriptInbox")
+            .field("queued", &self.queue.events.borrow().len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScriptInbox {
+    #[must_use]
+    pub fn new() -> (ScriptReports, Self) {
+        let queue = Rc::new(ScriptQueue::default());
+        (
+            ScriptReports {
+                queue: Rc::clone(&queue),
+            },
+            Self { queue },
+        )
+    }
+
+    #[must_use]
+    pub fn drain(&self) -> Vec<ScriptEvent> {
+        std::mem::take(&mut *self.queue.events.borrow_mut())
+    }
+}
+
+/// The sinks one view reports through, handed to the builder that makes its
+/// resource system.
+///
+/// One value rather than an argument each, so a later sink reads as an added
+/// field at the few places that build one rather than a changed signature at
+/// every embedder.
+#[derive(Debug)]
+pub struct ViewReports {
+    pub images: dom::ImageReports,
+    pub scripts: ScriptReports,
+}
 
 /// The host's whole resource system: bytes, stylesheets and images.
 ///
@@ -82,6 +219,30 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// wants: a source is asked for once and then never drawn.
     fn request_image(&self, _source: &str) {}
 
+    /// Names one script and begins loading it. Non-blocking, exactly like
+    /// [`Self::request_image`] and for exactly the same reason: a `Worker`'s
+    /// script is asked for at an arbitrary moment, not while a view is being
+    /// built, and the painter has no executor to await one on. The awaiting
+    /// members above are the shape for construction, where the embedder's own
+    /// executor is driving; this is the shape for everything after.
+    ///
+    /// For every request it is asked for, a host eventually calls exactly one
+    /// of [`ScriptReports::loaded`] or [`ScriptReports::failed`], unless the
+    /// view is torn down first — and rings the view's wakeup if it answered
+    /// between turns, since nothing else will.
+    ///
+    /// The default serves nothing, which leaves every `Worker` reporting a
+    /// load failure to the realm that constructed it. That is what a host with
+    /// no script support should do.
+    fn request_script(&self, request: ScriptRequest) {
+        self.report_unsupported_script(request);
+    }
+
+    /// How the default [`Self::request_script`] refuses. Split out so a host
+    /// that overrides the request but cannot serve one specifier still has the
+    /// engine's own wording for it.
+    fn report_unsupported_script(&self, _request: ScriptRequest) {}
+
     /// The sources the frame just encoded, deduplicated in paint order.
     ///
     /// Advisory: it informs residency and nothing else, and a host that
@@ -89,7 +250,7 @@ pub trait ResourceFetcher: dom::FrameImages {
     fn retain_images(&self, _frame: &[Arc<str>]) {}
 
     /// The host's own moment in every painter turn, on this thread, before
-    /// the turn reads the reports queued so far.
+    /// the turn reads the reports queued so far — images and scripts alike.
     ///
     /// A host whose loads finish somewhere else — a decode thread, a
     /// browser worker — forwards each completion into its
@@ -98,7 +259,7 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// requested or resolved anything. Waking the painter for that turn is
     /// still the host's, through the wakeup it gave the view. A host that
     /// reports inline has nothing to do, and the default does nothing.
-    fn service_images(&self) {}
+    fn service_loads(&self) {}
 }
 
 /// A shared handle serves whatever it points at.
@@ -141,6 +302,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).fetch_style_sheet(request).await
     }
 
+    fn request_script(&self, request: ScriptRequest) {
+        (**self).request_script(request);
+    }
+
     fn request_image(&self, source: &str) {
         (**self).request_image(source);
     }
@@ -149,8 +314,8 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).retain_images(frame);
     }
 
-    fn service_images(&self) {
-        (**self).service_images();
+    fn service_loads(&self) {
+        (**self).service_loads();
     }
 }
 

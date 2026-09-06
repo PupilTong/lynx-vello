@@ -15,7 +15,6 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Wake, Waker};
 
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
@@ -269,35 +268,6 @@ pub trait EventRequester: Send + Sync + 'static {
     fn request_event(&self);
 }
 
-/// The group's wakeup, as a [`Waker`].
-///
-/// [`EventRequester`]'s bounds are already exactly [`Wake`]'s, so the host's
-/// own wakeup *is* a waker — nothing has to be built to stand in for it. The
-/// one erasure happens here, inside the only function generic over `R`, which
-/// is why a `Waker` can sit on the non-generic [`GroupInner`] and reach a
-/// painter that names no `R` at all.
-///
-/// It is what the painter polls its off-turn work with. A fetch that becomes
-/// ready between turns rings the host's event loop directly, in one hop —
-/// without `bobcat-main` in the path, so it neither queues behind a long
-/// synchronous JavaScript call nor goes missing once the view it belongs to
-/// has been released.
-struct HostWake<R>(Arc<R>);
-
-impl<R: EventRequester> Wake for HostWake<R> {
-    fn wake(self: Arc<Self>) {
-        self.0.request_event();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.request_event();
-    }
-}
-
-pub(crate) fn host_waker<R: EventRequester>(requester: &Arc<R>) -> Waker {
-    Waker::from(Arc::new(HostWake(Arc::clone(requester))))
-}
-
 /// The requester for a host with no event loop to wake: an offscreen view
 /// driven by its own `tick`, a benchmark, a test.
 #[derive(Clone, Copy, Debug, Default)]
@@ -440,9 +410,6 @@ struct GroupInner {
     /// flight for a view that has ended cannot find a later one wearing its
     /// name.
     next_view: Cell<u64>,
-    /// The host's own wakeup, ready to poll a future with. Every painter in
-    /// the group holds a clone.
-    host_wake: Waker,
     home: GroupHome,
 }
 
@@ -493,9 +460,6 @@ impl LynxGroup {
     ) -> Result<Self, LynxViewError> {
         let (commands, command_receiver) = flume::unbounded();
         let (ready, started) = flume::bounded(1);
-        // Built before the requester is handed to the thread that owns it:
-        // this is the last place `R` is nameable.
-        let host_wake = host_waker(&event_requester);
         let home = spawn_group(
             style_threads,
             GroupLink {
@@ -510,7 +474,6 @@ impl LynxGroup {
             inner: Rc::new(GroupInner {
                 commands,
                 next_view: Cell::new(0),
-                host_wake,
                 home,
             }),
         };
@@ -558,8 +521,8 @@ impl LynxGroup {
         sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
-        F: ResourceFetcher + 'static,
-        B: FnOnce(dom::ImageReports) -> F,
+        F: ResourceFetcher,
+        B: FnOnce(crate::resource::ViewReports) -> F,
     {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
@@ -621,7 +584,6 @@ impl LynxGroup {
                 .expect("the link is held until the painter is"),
             output,
             resources,
-            self.inner.host_wake.clone(),
         ));
         // Pushing the sources *is* the wait for this view's startup message:
         // one loop over one inbox, so there is no arm to forget and no second
@@ -679,7 +641,7 @@ impl<F> Drop for LynxView<F> {
     }
 }
 
-impl<F: ResourceFetcher + 'static> LynxView<F> {
+impl<F: ResourceFetcher> LynxView<F> {
     /// Routes one normalized OS input event against the frame the painter
     /// last read.
     pub fn dispatch_input(&mut self, event: InputEvent) {
@@ -804,7 +766,7 @@ struct ViewStartup<F> {
     control: Arc<StartupControl>,
 }
 
-impl<F: ResourceFetcher + 'static> ViewStartup<F> {
+impl<F: ResourceFetcher> ViewStartup<F> {
     async fn serve(
         &mut self,
         style_sheets: Vec<String>,

@@ -11,11 +11,11 @@ use bobcat_core::resource::{
     CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
     ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
     ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
-    StyleSheetPayload, StyleSheetResponse,
+    StyleSheetPayload, StyleSheetResponse, ViewReports,
 };
 use bobcat_core::script::ScriptError;
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError,
     PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bytes::Bytes;
@@ -42,8 +42,8 @@ pub async fn solo_view<R, F, B>(
 ) -> Result<LynxView<F>, LynxViewError>
 where
     R: EventRequester,
-    F: ResourceFetcher + 'static,
-    B: FnOnce(ImageReports) -> F,
+    F: ResourceFetcher,
+    B: FnOnce(ViewReports) -> F,
 {
     LynxGroup::new(event_requester, StyleThreads::Auto)
         .await?
@@ -61,9 +61,7 @@ where
 /// Drains the terminal boot event preserved after construction. Construction
 /// has already awaited the same outcome before it returns, and every `pump`
 /// here runs the view's own turn on this thread.
-pub fn wait_for_script<F: ResourceFetcher + 'static>(
-    view: &mut LynxView<F>,
-) -> Result<(), ScriptError> {
+pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.

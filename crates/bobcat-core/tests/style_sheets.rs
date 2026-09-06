@@ -69,7 +69,7 @@ fn sources(style_sheets: &[&str]) -> ViewSources {
 }
 
 async fn view_with(
-    resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
+    resources: impl FnOnce(bobcat_core::resource::ViewReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
 ) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
     solo_view(
