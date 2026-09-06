@@ -1,5 +1,5 @@
 [package]
-name = "bobcat"
+name = "bobcat-cli"
 description = "Native Bobcat CLI and HTTP screenshot embedders"
 version.workspace = true
 edition.workspace = true

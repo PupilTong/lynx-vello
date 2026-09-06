@@ -53,7 +53,7 @@ and decoded images never do.
 
 The dependency graph is:
 
-`bobcat` is one native embedder crate. Its independent `cli` and `server`
+`bobcat-cli` is one native embedder crate. Its independent `cli` and `server`
 features gate the two modules and their optional dependencies; both are enabled
 by default. The `bobcat` and `bobcat-server` binaries require `cli` and `server`
 respectively. The product labels below name those two features of the same
@@ -660,8 +660,8 @@ create/append/drop/flush DOM API is exposed to JavaScript.
 cargo check -p bobcat-core
 cargo check -p bobcat-core --target wasm32-unknown-unknown
 cargo check -p bobcat-source
-cargo check -p bobcat --no-default-features --features cli
-cargo check -p bobcat --no-default-features --features server
+cargo check -p bobcat-cli --no-default-features --features cli
+cargo check -p bobcat-cli --no-default-features --features server
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets
 ```

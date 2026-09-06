@@ -1,12 +1,12 @@
-# bobcat
+# bobcat-cli
 
 One native embedder crate with two independent Cargo features. Both are
 enabled by default; use `--no-default-features` to build only one product.
 
 ```sh
-cargo run -p bobcat --no-default-features --features cli --bin bobcat -- --help
-LYNX_USE_PORT=8080 cargo run -p bobcat --no-default-features --features server --bin bobcat-server
-cargo build -p bobcat --all-features --bins
+cargo run -p bobcat-cli --no-default-features --features cli --bin bobcat -- --help
+LYNX_USE_PORT=8080 cargo run -p bobcat-cli --no-default-features --features server --bin bobcat-server
+cargo build -p bobcat-cli --all-features --bins
 ```
 
 - `cli`: the `bobcat` binary, interactive window/headless runner and PNG output.

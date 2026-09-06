@@ -39,8 +39,8 @@ jobs:
 
       - name: Independent native embedder features
         run: |
-          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
-          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat-cli --no-default-features --features server --all-targets --no-deps -- -D warnings
 
       - name: Benchmarks measure the shipped feature set
         # Cargo unifies dev-dependency features into the library itself, so
@@ -123,7 +123,7 @@ jobs:
         # tokio's `rt-multi-thread`, which refuses to compile for wasm32, and
         # feature unification would drag it into any build that includes dev
         # targets. The packages are named rather than `--workspace` because
-        # bobcat is a native embedder crate that does not target wasm32.
+        # bobcat-cli is a native embedder crate that does not target wasm32.
         run: >-
           cargo clippy --target wasm32-unknown-unknown --lib
           -p bobcat-wasm
@@ -210,14 +210,14 @@ jobs:
         run: >-
           cargo clippy
           -p bobcat-source
-          -p bobcat
+          -p bobcat-cli
           --all-targets --no-deps -- -D warnings
 
       - name: Independent embedder features
         run: |
-          cargo clippy --locked -p bobcat --no-default-features --all-targets --no-deps -- -D warnings
-          cargo clippy --locked -p bobcat --no-default-features --features cli --all-targets --no-deps -- -D warnings
-          cargo clippy --locked -p bobcat --no-default-features --features server --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat-cli --no-default-features --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
+          cargo clippy --locked -p bobcat-cli --no-default-features --features server --all-targets --no-deps -- -D warnings
 
   element-papi:
     name: Element PAPI runtime tests (Ubuntu)
