@@ -111,6 +111,7 @@ pub struct Node<T> {
     custom_subtree_may_contain: bool,
 
     pub(crate) parsed_inline_style: Option<Arc<Locked<PropertyDeclarationBlock>>>,
+    pub(crate) presentational_hints: Option<Arc<Locked<PropertyDeclarationBlock>>>,
 
     pub(crate) shadow: Option<Box<ShadowLinks>>,
 
@@ -209,6 +210,7 @@ impl<T> Node<T> {
             custom_state: CustomElementState::default(),
             custom_subtree_may_contain: false,
             parsed_inline_style: None,
+            presentational_hints: None,
             shadow: None,
             style_data: ElementDataWrapper::default(),
             stylo_data_present: AtomicBool::new(false),
@@ -483,6 +485,11 @@ impl<T> Node<T> {
             ("custom_state", size_of::<CustomElementState>(), true),
             (
                 "parsed_inline_style",
+                size_of::<Option<Arc<Locked<PropertyDeclarationBlock>>>>(),
+                true,
+            ),
+            (
+                "presentational_hints",
                 size_of::<Option<Arc<Locked<PropertyDeclarationBlock>>>>(),
                 true,
             ),
@@ -892,6 +899,10 @@ impl<T> fmt::Debug for Node<T> {
                 "has_parsed_inline_style",
                 &self.parsed_inline_style.is_some(),
             )
+            .field(
+                "has_presentational_hints",
+                &self.presentational_hints.is_some(),
+            )
             .field("dirty_descendants", &self.has_dirty_descendants())
             .field("children", &self.children)
             .finish_non_exhaustive()
@@ -965,10 +976,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<NodeData>(), 16);
         // A handle is identity and storage position in one 8-byte value, and
         // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
-        // parent link costs 8 bytes rather than 16.
+        // parent link costs 8 bytes rather than 16. Presentational hints add
+        // one optional Arc; the declaration block allocates only when used.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 224 } else { 216 }
+            if cfg!(debug_assertions) { 232 } else { 224 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,

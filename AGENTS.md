@@ -549,8 +549,12 @@ useful signal for currently-compatible versions of those libraries.
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
   newline. Sibling runs and nested text share the establishing element's
-  paragraph. Core reflects `text-maxline` and `text-maxlength` into inline
-  `--lynx-text-maxline` / `--lynx-text-maxlength`; the UA registers both with
+  paragraph. Core reflects `text-maxline` and `text-maxlength` into
+  `--lynx-text-maxline` / `--lynx-text-maxlength` presentational hints through
+  `Document::set_presentational_hint`. Each element's optional declaration
+  block enters Stylo at `CascadeOrigin::PresHints`, independently of inline
+  style: author CSS can override a limit, and replacing or removing inline
+  style reveals the attribute's current value. The UA registers both with
   `<integer>` syntax and `inherits: false`. DOM's borrowed `StyleView` reads
   their computed values through `TextContainerStyle`, and
   `BlockStyle::from_container_style` consumes those inputs. Normal and animated

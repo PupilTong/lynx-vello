@@ -74,7 +74,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
     format!(
         "page, view, scroll-view, list {{ box-sizing: border-box; {display} }}\n\
          {overflow}\
-         page {{ width: 100%; height: 100%; }}\n\
+         page {{ width: 100%; height: 100%; font-family: sans-serif; }}\n\
          wrapper {{ display: contents; }}\n\
          {scrollers}\
          {text}\
@@ -90,6 +90,7 @@ pub(super) fn ua_stylesheet(config: PageConfig) -> String {
 #[cfg(test)]
 mod tests {
     use dom::stylo::computed_values::box_sizing;
+    use dom::stylo::values::computed::font::{FontFamily, GenericFontFamily};
     use dom::stylo::values::computed::{Display, Overflow};
 
     use super::super::LynxDocument;
@@ -124,6 +125,31 @@ mod tests {
             let style = style_of(&document, container);
             assert_eq!(style.clone_box_sizing(), box_sizing::T::BorderBox, "{tag}");
             assert_eq!(style.clone_display(), Display::Linear, "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_default_font_family_is_inherited_and_author_overridable() {
+        let mut document = document();
+        let page = document.document_element().id();
+        let view = child(&mut document, "view", "");
+        let text = super::super::test_support::element_under(&mut document, view, "text", "");
+
+        for (css, family) in [
+            ("", GenericFontFamily::SansSerif),
+            (
+                "page { font-family: system-ui; }",
+                GenericFontFamily::SystemUi,
+            ),
+        ] {
+            document.add_stylesheet(css, dom::StylesheetOrigin::Author);
+            document.layout();
+            for node in [page, view, text] {
+                assert_eq!(
+                    &style_of(&document, node).get_font().clone_font_family(),
+                    FontFamily::generic(family),
+                );
+            }
         }
     }
 
