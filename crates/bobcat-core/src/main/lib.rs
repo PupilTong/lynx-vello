@@ -3,7 +3,7 @@
 //! The embedder's own thread starts this owner from `LynxGroup::new` and keeps
 //! every painter itself. This thread builds the script runtime and the style
 //! pool the group shares, then adopts one view at a time: it creates each
-//! document, applies every startup source pushed to it, boots each realm, and
+//! document, requests and mounts its startup sources, boots each realm, and
 //! owns document and realm until that view is released or the group is.
 
 pub(crate) mod quickjs;
@@ -40,8 +40,8 @@ use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
     Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand, LoadedSource,
-    LynxViewError, MainSources, StyleSheetSource, StyleThreads, ToMain, ToPainter, ViewId,
-    Viewport, frame_slot,
+    LynxViewError, MainSources, SourceRequest, StyleSheetSource, StyleThreads, ToMain, ToPainter,
+    ViewId, Viewport, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DETACHED_VIEW, DetachedLink};
@@ -52,7 +52,7 @@ pub(crate) struct EntryModule {
     pub(crate) url: String,
 }
 
-/// One view's construction cancellation flag.
+/// One view's construction and boot cancellation flag.
 ///
 /// It only prevents work that has not entered synchronous JavaScript yet.
 /// Once `QuickJS` is executing, cancellation takes effect when that call
@@ -144,9 +144,8 @@ impl<R: EventRequester> ToPainterSender<R> {
 
     /// Announces one notification, then wakes the thread that paints.
     ///
-    /// One wake, not two: the notification is already queued, and the painter
-    /// waits on that queue directly — during construction by awaiting it, and
-    /// afterwards on the host's own turns, which this requester asks for.
+    /// Enqueue before requesting a host turn, so its pump observes the
+    /// notification. Startup and running views use this same path.
     pub(crate) fn send(&self, notification: ToPainter) {
         if self.notifications.send(notification).is_ok() {
             self.requester.request_event();
@@ -337,6 +336,7 @@ enum ViewSlot<R: EventRequester> {
 
 /// A view's document between its first source and its entry module.
 struct Booting<R: EventRequester> {
+    requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
 }
@@ -368,6 +368,8 @@ impl<R: EventRequester> Booting<R> {
             config,
             fonts,
             default_font_family,
+            style_sheets,
+            entry,
         } = sources;
         let mut document = new_document(viewport, config);
         if let Some(pool) = style_pool {
@@ -381,12 +383,27 @@ impl<R: EventRequester> Booting<R> {
         {
             return Err(EngineError::UnknownFontFamily(family).into());
         }
-        Ok(Self { document, notify })
+        let requests = style_sheets
+            .into_iter()
+            .map(SourceRequest::StyleSheet)
+            .chain(std::iter::once(SourceRequest::Entry(entry)))
+            .collect::<Vec<_>>()
+            .into_iter();
+        Ok(Self {
+            requests,
+            document,
+            notify,
+        })
     }
 
-    /// Applies one pushed source. The entry's arrival is what ends the wait:
-    /// the painter sends stylesheets in cascade order with the entry last, so
-    /// mounting in arrival order *is* the cascade.
+    fn request_next(&mut self) {
+        if let Some(request) = self.requests.next() {
+            self.notify.send(ToPainter::RequestSource(request));
+        }
+    }
+
+    /// Mounts the requested source, then requests the next. The entry is
+    /// requested only after every author sheet has been mounted.
     fn apply(
         mut self: Box<Self>,
         js_runtime: &mut ScriptRuntime,
@@ -407,6 +424,7 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
+        self.request_next();
         Booted::Waiting(self)
     }
 
@@ -420,7 +438,9 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
-        let Self { document, notify } = *self;
+        let Self {
+            document, notify, ..
+        } = *self;
         let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
             Ok(runtime) => runtime,
             Err(error) => return Booted::Failed(error.into_script_error().into()),
@@ -460,8 +480,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
     // one pool because they cannot traverse at once — the single thread that
     // drives them both is already inside whichever traversal is running.
     //
-    // Both are built before the first view attaches, so starting the workers
-    // overlaps the fetches that view's painter already has in flight.
+    // Both are ready before group construction returns and any view attaches.
     let started = ScriptRuntime::new()
         .map_err(LynxViewError::from)
         .and_then(|mut runtime| {
@@ -513,7 +532,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
 }
 
 /// One view a group's thread carries: its slot, the link it reports through,
-/// and the flag its embedder can still cancel its construction with.
+/// and the flag its embedder cancels when dropping the view.
 struct CarriedView<R: EventRequester> {
     id: ViewId,
     /// `None` only while a source is being mounted: mounting one consumes the
@@ -557,7 +576,7 @@ impl<R: EventRequester> CarriedView<R> {
     /// failed, or its construction was cancelled and nobody is listening for
     /// an outcome.
     fn apply(&mut self, js_runtime: &mut ScriptRuntime, command: ToMain) -> bool {
-        if matches!(command, ToMain::Shutdown) {
+        if self.control.is_cancelled() || matches!(command, ToMain::Shutdown) {
             return false;
         }
         // A running view is served in place: everything after boot is the
@@ -572,13 +591,40 @@ impl<R: EventRequester> CarriedView<R> {
             );
             return true;
         }
-        let Some(ViewSlot::Booting(booting)) = self.slot.take() else {
+        let Some(ViewSlot::Booting(mut booting)) = self.slot.take() else {
             unreachable!("a carried view holds its slot between commands")
         };
-        let ToMain::SourceLoaded { source } = command else {
-            unreachable!("a view that has not booted has nothing else to apply")
+        let outcome = match command {
+            ToMain::SourceLoaded { source: Ok(source) } => {
+                booting.apply(js_runtime, source, &self.control)
+            }
+            ToMain::SourceLoaded { source: Err(error) } => Booted::Failed(error),
+            other => {
+                match other {
+                    ToMain::Resize {
+                        width,
+                        height,
+                        device_pixel_ratio,
+                    } => {
+                        booting.document.set_viewport(width, height);
+                        booting.document.set_device_pixel_ratio(device_pixel_ratio);
+                    }
+                    ToMain::ImageEvents(events) => {
+                        booting.document.apply_image_events(&events);
+                    }
+                    ToMain::BeginFrame { seq, .. } => {
+                        self.notify.send(ToPainter::BeginFrameServiced(seq));
+                    }
+                    // No committed tree or realm exists to route these to yet.
+                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
+                    #[cfg(test)]
+                    ToMain::Probe(probe) => probe(&mut booting.document),
+                    ToMain::SourceLoaded { .. } | ToMain::Shutdown => unreachable!(),
+                }
+                Booted::Waiting(booting)
+            }
         };
-        match booting.apply(js_runtime, source, &self.control) {
+        match outcome {
             Booted::Waiting(booting) => self.slot = Some(ViewSlot::Booting(booting)),
             Booted::Running(runtime) => {
                 // Boot's outcome and boot's pixels ride one FIFO, in this
@@ -588,11 +634,11 @@ impl<R: EventRequester> CarriedView<R> {
                 self.notify
                     .send(ToPainter::Engine(EngineEvent::ScriptFinished));
                 self.notify.send(ToPainter::FrameChanged);
-                self.notify.send(ToPainter::Started(Ok(())));
                 self.slot = Some(ViewSlot::Running(runtime));
             }
             Booted::Failed(error) => {
-                self.notify.send(ToPainter::Started(Err(error)));
+                self.notify
+                    .send(ToPainter::Engine(EngineEvent::StartupFailed(error)));
                 return false;
             }
             Booted::Gone => return false,
@@ -645,13 +691,16 @@ fn attach<R: EventRequester>(
         })
     });
     match Booting::new(viewport, sources, style_pool, notify.clone()) {
-        Ok(booting) => views.push(CarriedView::new(
-            view,
-            ViewSlot::Booting(Box::new(booting)),
-            notify,
-            control,
-        )),
-        Err(error) => notify.send(ToPainter::Started(Err(error))),
+        Ok(mut booting) => {
+            booting.request_next();
+            views.push(CarriedView::new(
+                view,
+                ViewSlot::Booting(Box::new(booting)),
+                notify,
+                control,
+            ));
+        }
+        Err(error) => notify.send(ToPainter::Engine(EngineEvent::StartupFailed(error))),
     }
 }
 
@@ -777,7 +826,7 @@ fn apply_main_command<R: EventRequester>(
 ) {
     match command {
         ToMain::SourceLoaded { .. } => {
-            unreachable!("sources are answered once, before boot returns")
+            unreachable!("sources are requested only during boot")
         }
         ToMain::DispatchEvent {
             target,

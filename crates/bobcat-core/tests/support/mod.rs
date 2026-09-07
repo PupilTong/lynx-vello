@@ -13,7 +13,6 @@ use bobcat_core::resource::{
     ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
     StyleSheetPayload, StyleSheetResponse,
 };
-use bobcat_core::script::ScriptError;
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
     PreparsedStyleSheet, StyleThreads, ViewSources,
@@ -42,7 +41,7 @@ pub async fn solo_view<R, F, B>(
 ) -> Result<LynxView<F>, LynxViewError>
 where
     R: EventRequester,
-    F: ResourceFetcher,
+    F: ResourceFetcher + 'static,
     B: FnOnce(ImageReports) -> F,
 {
     LynxGroup::new(event_requester, StyleThreads::Auto)
@@ -58,10 +57,10 @@ where
         .await
 }
 
-/// Drains the terminal boot event preserved after construction. Construction
-/// has already awaited the same outcome before it returns, and every `pump`
-/// here runs the view's own turn on this thread.
-pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(), ScriptError> {
+/// Drives normal painter turns until the terminal boot event arrives.
+pub fn wait_for_script<F: ResourceFetcher + 'static>(
+    view: &mut LynxView<F>,
+) -> Result<(), LynxViewError> {
     // Generous, like the engine's own BEGIN_FRAME_TIMEOUT: a debug-build
     // boot takes about two seconds on its own, so a tight deadline only
     // ever fires spuriously under parallel test load.
@@ -70,7 +69,8 @@ pub fn wait_for_script<F: ResourceFetcher>(view: &mut LynxView<F>) -> Result<(),
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
-                EngineEvent::ScriptRunError(error) => return Err(error),
+                EngineEvent::ScriptRunError(error) => return Err(error.into()),
+                EngineEvent::StartupFailed(error) => return Err(error),
                 // Not a script failure, but a view that cannot draw will
                 // never finish anything either; failing here beats waiting
                 // out the deadline.

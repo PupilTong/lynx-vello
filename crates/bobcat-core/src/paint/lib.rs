@@ -22,11 +22,10 @@ mod tests;
 
 use std::cell::Cell;
 use std::fmt;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::Waker;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -53,36 +52,12 @@ use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
 use crate::view::Screenshot;
 use crate::view::{
     ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, GroupCommand,
-    LoadedSource, LynxViewError, ToMain, ToPainter, ViewId, frame_slot,
+    SourceRequest, ToMain, ToPainter, ViewId, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DetachedLink, NoWakeup, detached_link};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How the wait on one host fetch ended.
-enum FetchOutcome {
-    Loaded(LoadedSource),
-    /// Startup is decided — either the fetch itself failed, which *is* the
-    /// failure, or the main thread spoke first and this fetch is abandoned.
-    Ended(Result<(), LynxViewError>),
-}
-
-/// Which of the two things a fetch waits on happened first.
-enum FetchStep {
-    Loaded(Result<LoadedSource, LynxViewError>),
-    /// `bobcat-main` spoke, or stopped being able to.
-    Received(Result<ToPainter, flume::RecvError>),
-}
-
-/// The main thread stopped before it could say how startup went.
-fn main_thread_gone() -> LynxViewError {
-    EngineError::Thread {
-        name: "script",
-        message: "the Lynx main thread stopped before startup completed".to_owned(),
-    }
-    .into()
-}
 
 /// The painter's monotonic animation timeline. Its epoch is view
 /// construction, and one reading is shared by every operation in a frame.
@@ -172,8 +147,12 @@ pub(crate) struct PainterLink {
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
+    source_request: Option<SourceRequest>,
+    resources_failed: bool,
+    resource_waker: Waker,
+    control: Arc<crate::main::StartupControl>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
-    /// A field rather than a local because a startup drain runs in pieces.
+    /// Coalesces announcements during a normal drain or offscreen frame wait.
     pending_announce: bool,
 }
 
@@ -183,6 +162,8 @@ impl PainterLink {
         commands: flume::Sender<GroupCommand>,
         notifications: flume::Receiver<ToPainter>,
         frames: Arc<FrameHub>,
+        resource_waker: Waker,
+        control: Arc<crate::main::StartupControl>,
     ) -> Self {
         Self {
             view,
@@ -196,6 +177,10 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
+            source_request: None,
+            resources_failed: false,
+            resource_waker,
+            control,
             pending_announce: false,
         }
     }
@@ -238,7 +223,15 @@ impl PainterLink {
     fn apply(&mut self, notification: ToPainter) {
         match notification {
             ToPainter::FrameChanged => self.pending_announce = true,
-            ToPainter::Engine(event) => self.events.push(event),
+            ToPainter::Engine(event) => {
+                if matches!(
+                    event,
+                    EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
+                ) {
+                    self.resources_failed = true;
+                }
+                self.events.push(event);
+            }
             ToPainter::ListenerAvailable(name) => {
                 self.listener_names.insert(name);
             }
@@ -249,9 +242,7 @@ impl PainterLink {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::Started(_) => {
-                unreachable!("startup messages are served before the view exists")
-            }
+            ToPainter::RequestSource(request) => self.source_request = Some(request),
         }
     }
 
@@ -330,96 +321,6 @@ impl PainterLink {
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
         self.notifications.drain().collect()
-    }
-
-    /// Waits for one host fetch **while still watching the inbox**.
-    ///
-    /// A fetch is the one await in construction that is not on the link, and
-    /// `bobcat-main` mounts each pushed source while the next fetch is
-    /// already in flight — so a failure it decides there, or a trap's last
-    /// words, can land while the host is still holding the answer. Polling
-    /// the inbox *beside* the fetch — rather than in place of it — is what
-    /// keeps an outcome that has already been decided observable.
-    async fn await_fetch(
-        &mut self,
-        load: impl Future<Output = Result<LoadedSource, LynxViewError>>,
-    ) -> FetchOutcome {
-        let mut load = std::pin::pin!(load);
-        // A second handle on the same queue, so the wait does not borrow the
-        // link that handling a message needs. Dropping a pending `recv_async`
-        // deregisters its waker and takes no message with it, so abandoning
-        // one to serve the fetch loses nothing.
-        let inbox = self.notifications.clone();
-        loop {
-            let mut next = std::pin::pin!(inbox.recv_async());
-            let step = std::future::poll_fn(|context| {
-                if let Poll::Ready(loaded) = load.as_mut().poll(context) {
-                    return Poll::Ready(FetchStep::Loaded(loaded));
-                }
-                // Registers the waker on the inbox too, so anything the main
-                // thread says resumes this even though the fetch has not.
-                next.as_mut().poll(context).map(FetchStep::Received)
-            })
-            .await;
-            match step {
-                FetchStep::Loaded(Ok(source)) => return FetchOutcome::Loaded(source),
-                FetchStep::Loaded(Err(error)) => return FetchOutcome::Ended(Err(error)),
-                FetchStep::Received(Err(flume::RecvError::Disconnected)) => {
-                    self.settle();
-                    return FetchOutcome::Ended(Err(main_thread_gone()));
-                }
-                FetchStep::Received(Ok(notification)) => {
-                    if let Some(result) = self.take_startup(notification) {
-                        return FetchOutcome::Ended(result);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Waits for one thing `bobcat-main` has to say, and applies it.
-    ///
-    /// The tail of construction: every source has been pushed, so the only
-    /// thing that can move startup on is a message.
-    async fn await_startup(&mut self) -> Option<Result<(), LynxViewError>> {
-        let inbox = self.notifications.clone();
-        match inbox.recv_async().await {
-            Ok(notification) => self.take_startup(notification),
-            Err(flume::RecvError::Disconnected) => {
-                self.settle();
-                Some(Err(main_thread_gone()))
-            }
-        }
-    }
-
-    /// What one message means during construction. `Some` once startup has an
-    /// outcome.
-    ///
-    /// The single place that decides; both readers feed it, so awaiting one
-    /// message and draining a queue of them cannot disagree.
-    fn take_startup(&mut self, notification: ToPainter) -> Option<Result<(), LynxViewError>> {
-        match notification {
-            ToPainter::Started(result) => {
-                self.settle();
-                Some(result)
-            }
-            // A script error during startup *is* the startup failure. On
-            // wasm32 under `panic = "abort"` it is the only thing a trapping
-            // main thread can say before it stops running destructors, so
-            // treating it as terminal here is what keeps construction from
-            // waiting forever.
-            ToPainter::Engine(EngineEvent::ScriptRunError(error)) => {
-                self.settle();
-                Some(Err(error.into()))
-            }
-            // Frames, lifecycle events, listener edges, boot's image
-            // requests: the steady-state path, so every fact boot published
-            // lands where the host's first turn finds it.
-            other => {
-                self.apply(other);
-                None
-            }
-        }
     }
 }
 
@@ -523,6 +424,7 @@ pub(crate) struct Painter<F> {
     refill_requested_for: Option<u64>,
     /// The whole image resource system. Owned here and nowhere else.
     images: images::PainterImages<F>,
+    sources: sources::SourceLoads,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -813,6 +715,7 @@ impl<F> Painter<F> {
     pub(super) fn shutdown(&self) {
         // Close the sink before the store drops: a loader still in flight
         // must find it detached rather than queue into a dead view.
+        self.link.control.cancel();
         self.images.detach();
         self.link.send(ToMain::Shutdown);
     }
@@ -875,7 +778,7 @@ impl TestPainter {
     }
 }
 
-impl<F: crate::resource::ResourceFetcher> Painter<F> {
+impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
     pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
@@ -904,56 +807,8 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             composed_scene: Scene::new(),
             refill_requested_for: None,
             images: images::PainterImages::new(resources),
+            sources: sources::SourceLoads::new(),
             thread_bound: PhantomData,
-        }
-    }
-
-    /// Pushes every source to `bobcat-main`, then waits until it answers
-    /// startup.
-    ///
-    /// This is the painter's only wait on the Lynx main thread during
-    /// construction, and it is a drain of the same one inbox the steady state
-    /// drains. The order of the pushes is the protocol: sheets in cascade
-    /// order, the entry last, so the receiving side mounts in arrival order
-    /// and boots on the entry's arrival.
-    ///
-    /// It cannot deadlock against `bobcat-main`: that thread waits on
-    /// nothing but this loop's own sends, and this loop's fetches wait on
-    /// the host, never on that thread.
-    pub(super) async fn serve_startup(
-        &mut self,
-        style_sheets: Vec<String>,
-        entry: String,
-    ) -> Result<(), LynxViewError> {
-        // Split borrows: the fetch borrows the store across an await while
-        // the same loop keeps draining the link.
-        let Self { link, images, .. } = self;
-        let fetcher = images.store();
-        let mut requests = sources::mint_namespace();
-        for specifier in &style_sheets {
-            let load = sources::load_style_sheet(fetcher, &mut requests, specifier);
-            match link.await_fetch(load).await {
-                FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
-                // A fetch failure is the startup failure and the painter is
-                // already holding it: sending it across to be told back would
-                // be a round trip to learn what we just decided.
-                FetchOutcome::Ended(result) => return result,
-            }
-        }
-        match link
-            .await_fetch(sources::load_entry(fetcher, &mut requests, &entry))
-            .await
-        {
-            FetchOutcome::Loaded(source) => link.send(ToMain::SourceLoaded { source }),
-            FetchOutcome::Ended(result) => return result,
-        }
-        loop {
-            // Everything is pushed, so the only thing that can move startup
-            // on is a message. A main thread that has gone is a receive
-            // error here, not a separate flag to carry.
-            if let Some(result) = link.await_startup().await {
-                return result;
-            }
         }
     }
 
@@ -970,6 +825,17 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
     /// unasked, and the frame that needed those images would never arrive.
     fn sync(&mut self) {
         self.link.sync();
+        if self.link.resources_failed || self.link.notifications.is_disconnected() {
+            self.sources.cancel();
+            self.link.source_request = None;
+        } else {
+            if let Some(request) = self.link.source_request.take() {
+                self.sources.request(self.images.store(), request);
+            }
+            if let Some(source) = self.sources.poll(&self.link.resource_waker) {
+                self.link.send(ToMain::SourceLoaded { source });
+            }
+        }
         self.service_images();
     }
 

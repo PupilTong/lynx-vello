@@ -46,8 +46,8 @@ crates/bobcat-core/src/
 Shared command, event, viewport, and link vocabulary stays in `view` beside
 the public handle that owns one end of it; a stateful type whose owner is
 fixed lives under `paint` or `main`. Construction splits `ViewSources` once:
-document inputs move into the main-owned startup request, while entry and
-stylesheet specifiers stay with the embedder-owned painter and its
+document inputs and source specifiers move into the main-owned startup state.
+Main requests loads from the embedder-owned painter and its
 `ResourceFetcher`. Fetched source bytes cross to `main`; the fetcher, caches,
 and decoded images never do.
 
@@ -193,33 +193,34 @@ optional background section yet because `bobcat-core` does not yet provide a
 background-thread realm; each source-facing embedder reports that limitation
 explicitly.
 
-`LynxGroup::new` starts `bobcat-main` and awaits the script runtime and style
-pool it will share. `create_lynx_view` then validates the viewport, creates
-that view's link, sends the group's thread an attachment to build the document
-from, builds the painter and the `DrawTarget` it was given on the calling
-thread, and asynchronously awaits one startup result.
-`bobcat-main` creates the fresh document itself, registers fonts, receives
-each author stylesheet — fetched by the painter through the view's
-`ResourceFetcher` — and mounts those sheets in cascade order, receives the
-UTF-8 entry MTS module, creates QuickJS, and completes boot before answering.
-The actual network or file IO may run wherever the fetcher chooses; fetch
-futures are driven by the embedder-owned painter during construction, then
-only the loaded source crosses the link. Every document mutation and
-post-fetch runtime action remains on `bobcat-main`.
+`LynxGroup::new` awaits the shared script runtime and style pool.
+`create_lynx_view` validates metrics, attaches the document inputs and source URLs
+on main, and builds the painter and draw target on the calling thread. It then
+returns a loading view. Only metrics, attachment and target failures are returned
+by construction.
 
-The resolved entry URL becomes its exact module specifier. A resource,
-encoding, font, realm, script-boot, or thread failure yields `LynxViewError`
-and no view. Dropping the unresolved constructor cancels pending resource
-work or stops startup before `QuickJS` begins, releases the painter it built,
-and directly joins `bobcat-main`. Synchronous startup JavaScript is not
-externally interrupted, so teardown waits for it to return. Successful
-construction has already completed boot; `EngineEvent::ScriptFinished`
-remains queued for compatibility with the host's lifecycle loop.
-`ScriptRunError` is reserved for
-a fatal owner-thread failure after startup, while `ListenerFailed` remains
-non-fatal. The engine enqueues every event before invoking the
-construction-time `EventRequester`, so the host can pump immediately without
-polling. Requests carry a specifier plus its optional base URL, not a semantic
+Main registers fonts, requests each author stylesheet in cascade order, mounts
+its response, and finally requests the entry. The painter polls the fetcher's
+resource futures during ordinary `pump` turns, alongside image servicing. A
+pending future owns an `Rc` of the same concrete fetcher used for images; its
+waker calls the group's `EventRequester`, and its continuation runs on the next
+host turn. Neither the fetcher nor its futures need `Send` or `Sync`. Main awaits
+no IO, so another view can boot or handle events while this view loads.
+
+The response carries a loaded source or error. Main owns the boot outcome:
+`ScriptFinished` reports success; `StartupFailed(LynxViewError)` reports resource,
+encoding, font, realm or boot failure exactly once through `pump`. Main requests
+no further sources after failure. Its resolved entry URL is the module specifier.
+`ScriptRunError` reports fatal runtime failure; listener and timer failures stay
+non-fatal. Every main notification and pending resource wake requests a host turn.
+There is no separate startup inbox consumer or await on the painter link.
+
+Dropping an unresolved constructor releases its attachment and target. Dropping
+a loading view also drops its pending resource future on the calling thread and
+cancels its boot before QuickJS begins. JavaScript already executing may finish.
+Other views and their group remain alive; the last group/view handle joins main.
+
+Requests carry a specifier plus its optional base URL, not a semantic
 resource kind or transport hints. The embedder locates bytes by normalized
 resolved URL; `fetch_style_sheet` selects the stylesheet payload contract.
 Other buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
@@ -634,19 +635,15 @@ create/append/drop/flush DOM API is exposed to JavaScript.
    `create_lynx_view` validates the metrics, creates the view's link, attaches
    the view to that thread, and builds the painter — including the
    `DrawTarget` the embedder named and the per-view `ResourceFetcher` — on
-   the calling thread, then awaits a startup message.
+   the calling thread, then returns a loading view.
 2. `bobcat-main` creates the private document from `PageConfig` and the device
    metrics, gives it a handle on the group's style pool, and registers fonts.
-   In parallel, the calling thread drives the painter-owned fetcher for each
-   stylesheet and then the entry MTS source, sending only loaded sources
-   across the link in that order.
-3. `bobcat-main` mounts each received sheet, opens the view's QuickJS realm on
-   the group's runtime on entry arrival, installs Bobcat callbacks, preloads
-   `bobcat:runtime`, `bobcat:element`, `bobcat:timers`, and the resolved entry
-   URL, then runs the TLA-based `bobcat:boot` module. Only complete success sends `Started` back
-   through the same painter inbox. Cancelling construction drops pending
-   resource futures on the calling thread, releases the painter, and takes
-   that view off the group's thread; other views in the group keep running.
+   It requests each stylesheet in cascade order, then the entry MTS source.
+   Ordinary painter turns service the requests and return sources or errors.
+3. Main mounts sheets and, on entry arrival, opens the realm, installs callbacks,
+   and evaluates `bobcat:boot`. `ScriptFinished` or `StartupFailed` reports the
+   outcome through the same lifecycle event path. Dropping the view cancels its
+   pending resource work and attachment; other views continue.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
    scene encode — writes the `Arc<CommittedFrame>` into the mailbox, announces
    it on the `ToPainter` FIFO, and wakes the embedder through its

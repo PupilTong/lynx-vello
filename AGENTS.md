@@ -176,28 +176,28 @@ useful signal for currently-compatible versions of those libraries.
   draw target, and fetcher in place on the calling thread. The view's `F`
   parameter is that painter-owned fetcher; the wakeup is a separate group
   constructor generic held by `bobcat-main`.
-  The calling thread drives stylesheet and entry fetches and
-  sends only loaded sources across the link. `bobcat-main` creates the
-  document itself, registers its fonts, mounts each received stylesheet,
-  opens a realm on the group's QuickJS runtime when the entry arrives, and
-  boots it before returning success. A resource, font, realm, or boot failure
-  yields `LynxViewError` and no view, and nothing later mounts a stylesheet or
-  starts a second entry.
-  Cancelling the unresolved `create_lynx_view` future drops pending resource
-  work on the calling thread or stops that view's startup before QuickJS
-  begins, then releases the painter it built and takes the half-built view
-  off the group's thread, leaving the group and its other views running;
-  synchronous startup JavaScript is allowed to finish rather than being
-  externally interrupted.
+  Construction returns a loading view once the painter and draw target exist.
+  `bobcat-main` creates the document, registers fonts, and requests each stylesheet
+  in cascade order followed by the entry module. The painter services these
+  requests and images in ordinary `pump` turns. Buffered resource futures stay
+  on the calling thread; their wakers use the group's `EventRequester` to request
+  another turn. Loaded sources or errors return to main through the link.
+  Main mounts each sheet and boots the entry in its QuickJS realm. Success is
+  `ScriptFinished`; resource, font, realm, or boot failure is `StartupFailed`.
+  Constructor errors cover metrics, attachment and draw-target setup only.
+  Cancelling an unresolved constructor releases its partial attachment and target.
+  Dropping a loading view cancels pending resource work on the calling thread
+  and stops that view before QuickJS begins; synchronous JavaScript already
+  executing is allowed to finish. The group and other views keep running.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
   the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
   Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
   responsibilities; core validates the entry module's source as UTF-8, registers
-  its resolved URL in QuickJS's preloaded ESM graph. Successful construction
-  has already completed boot; its `ScriptFinished` lifecycle edge remains
-  queued for `pump`. The protocol's `fetch_style_sheet` answers with either
+  its resolved URL in QuickJS's preloaded ESM graph. Construction does not wait
+  for boot; its outcome arrives through `pump`. The protocol's
+  `fetch_style_sheet` answers with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
   itself, since a `.web.bundle` ships CSS a build step already tokenized and
   re-serializing it to a sheet blob is the startup cost the design rules out.
@@ -255,8 +255,8 @@ useful signal for currently-compatible versions of those libraries.
   OS facts in (`dispatch_input`/`resize`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
-  `ScriptFinished` preserves the successful entry-module boot edge after
-  `new` has awaited it, `ScriptRunError` reports a fatal script-runtime failure
+  `ScriptFinished` reports successful entry-module boot,
+  `StartupFailed` reports source/configuration/boot failure, `ScriptRunError` reports a fatal script-runtime failure
   during later owner-thread work, `ListenerFailed` reports a listener that
   threw during event delivery, and `TimerFailed` reports a `setTimeout` or
   `setInterval` callback that threw when it came due — the last two separate
@@ -340,8 +340,7 @@ useful signal for currently-compatible versions of those libraries.
   `WindowTarget` — a `'static` surface target, so a windowing embedder passes
   a shared handle (`Arc<winit::Window>`) and a browser an owned canvas — and
   `DrawTarget::Offscreen` asks for a windowless GPU target instead. Either is
-  built inside `new`, on the calling thread, while `bobcat-main` is already
-  fetching; a view that exists therefore has somewhere to put a frame, and no
+  built inside `new`, on the calling thread, while `bobcat-main` prepares the document; a view that exists therefore has somewhere to put a frame, and no
   state, error, or sentence has to describe one that does not.
   `FrameSize::for_viewport` exposes the physical size that construction will
   compute, for a host that must size the surface's backing store — a canvas —

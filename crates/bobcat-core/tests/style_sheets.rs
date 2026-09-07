@@ -112,9 +112,10 @@ async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
             .resolving_to(SCRIPT_URL),
     );
 
-    view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
-        .expect("the text arm mounts");
+        .expect("loading view");
+    wait_for_script(&mut view).expect("the text arm mounts");
 }
 
 /// A BOM survives the fetch boundary intact and reaches the decode step.
@@ -130,13 +131,13 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
             .resolving_to(SCRIPT_URL),
     );
 
-    view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
-        .expect("a BOM-prefixed sheet mounts");
+        .expect("loading view");
+    wait_for_script(&mut view).expect("a BOM-prefixed sheet mounts");
 }
 
-/// A stylesheet that will not decode fails the construction, so no document
-/// and no main thread outlive it.
+/// A stylesheet that will not decode reports a precise startup failure.
 #[tokio::test]
 async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
     let fetcher = Rc::new(
@@ -145,8 +146,10 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
             .resolving_to(SCRIPT_URL),
     );
 
-    let error = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
+        .expect("loading view");
+    let error = wait_for_script(&mut view)
         .expect_err("invalid UTF-8 CSS is rejected, not silently dropped");
     // The reported URL is the resolved one, as it is for a script.
     assert!(
@@ -173,6 +176,7 @@ async fn every_listed_sheet_issues_its_own_stylesheet_request() {
     let mut view = view_with(|_sink| fetcher.clone(), sources(&[SHEET_URL, SHEET_URL]))
         .await
         .expect("both sheets mount");
+    wait_for_script(&mut view).expect("script execution");
     assert_eq!(fetcher.style_sheet_fetch_count(), 2);
     assert_eq!(
         fetcher.fetch_count(),
@@ -180,5 +184,4 @@ async fn every_listed_sheet_issues_its_own_stylesheet_request() {
         "a stylesheet must not be fetched through the byte path when the host answers it \
          pre-parsed; the one byte fetch is the entry module"
     );
-    wait_for_script(&mut view).expect("script execution");
 }

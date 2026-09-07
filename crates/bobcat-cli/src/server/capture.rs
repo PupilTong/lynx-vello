@@ -15,13 +15,22 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, LynxGroup, LynxView, NoWakeup, Screenshot, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::PageSource;
 use reqwest::Client;
 use tokio::sync::oneshot;
 use url::Url;
+
+#[derive(Default)]
+struct CaptureWakeup(tokio::sync::Notify);
+
+impl EventRequester for CaptureWakeup {
+    fn request_event(&self) {
+        self.0.notify_one();
+    }
+}
 
 const MAX_QUEUED_CAPTURES: usize = 8;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
@@ -323,7 +332,11 @@ async fn capture_page(
     for warning in page.compatibility_warnings() {
         eprintln!("bobcat-server: warning: {warning}");
     }
-    let resources = Resources::new(resources_config(&page, request.timeout), || {});
+    let wakeup = Arc::new(CaptureWakeup::default());
+    let resources = Resources::new(resources_config(&page, request.timeout), {
+        let wakeup = Arc::clone(&wakeup);
+        move || wakeup.request_event()
+    });
     page.register_with(&resources);
     for note in resources.take_notes() {
         eprintln!("bobcat-server: warning: {note}");
@@ -331,10 +344,11 @@ async fn capture_page(
     let sources = page.view_sources();
     drop(page);
 
-    let mut view = tokio::time::timeout(request.timeout, async {
+    let startup_deadline = tokio::time::Instant::now() + request.timeout;
+    let mut view = tokio::time::timeout_at(startup_deadline, async {
         // Preserve per-capture runtime isolation: the view keeps this
         // job's group alive until capture finishes and the view drops.
-        let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Auto).await?;
+        let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
         group
             .create_lynx_view(
                 VIEWPORT_WIDTH,
@@ -352,6 +366,17 @@ async fn capture_page(
         url: request.url.clone(),
         source: Box::new(source),
     })?;
+
+    tokio::time::timeout_at(startup_deadline, async {
+        loop {
+            if check_events(&mut view, &request.url)? {
+                return Ok::<_, CaptureFailure>(());
+            }
+            wakeup.0.notified().await;
+        }
+    })
+    .await
+    .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))??;
 
     view.tick(true).map_err(|source| CaptureFailure::Render {
         url: request.url.clone(),
@@ -450,10 +475,17 @@ async fn settle(
     Ok(())
 }
 
-fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<(), CaptureFailure> {
+fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, CaptureFailure> {
+    let mut finished = false;
     for event in view.pump() {
         match event {
-            EngineEvent::ScriptFinished => {}
+            EngineEvent::ScriptFinished => finished = true,
+            EngineEvent::StartupFailed(source) => {
+                return Err(CaptureFailure::StartView {
+                    url: url.clone(),
+                    source: Box::new(source),
+                });
+            }
             EngineEvent::ScriptRunError(error) => {
                 return Err(CaptureFailure::Script {
                     url: url.clone(),
@@ -475,7 +507,7 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<(), Cap
             _ => eprintln!("bobcat-server: ignored an unknown engine event"),
         }
     }
-    Ok(())
+    Ok(finished)
 }
 
 #[cfg(test)]

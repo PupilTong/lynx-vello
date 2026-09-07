@@ -15,19 +15,23 @@ use bobcat_core::resource::{
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
     ResourceRequest, ResourceResponse,
 };
-use bobcat_core::{DrawTarget, EventRequester, NoWakeup, ViewSources};
+use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
-/// Which thread ran something, by identity rather than by name.
-///
-/// The painter is whichever thread constructed the view — under
-/// `#[tokio::test]`, which is current-thread, that is the test's own — and it
-/// has no name to match on.
+struct HostWakeup(flume::Sender<()>);
+impl EventRequester for HostWakeup {
+    fn request_event(&self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// Identifies the calling thread, which owns each fetch and continuation.
 fn thread_tag() -> String {
     format!("{:?}", std::thread::current().id())
 }
 
 struct HopState {
+    resume: flume::Receiver<()>,
     ready: AtomicBool,
     started: AtomicBool,
     waker: Mutex<Option<Waker>>,
@@ -56,6 +60,10 @@ impl Future for ThreadHop {
             std::thread::Builder::new()
                 .name("fetch-io".to_owned())
                 .spawn(move || {
+                    state
+                        .resume
+                        .recv()
+                        .expect("the host releases IO after pump returns");
                     state.ready.store(true, Ordering::Release);
                     if let Some(waker) = state.waker.lock().expect("hop waker").take() {
                         waker.wake();
@@ -68,6 +76,7 @@ impl Future for ThreadHop {
 }
 
 struct ThreadedFetcher {
+    resume: flume::Receiver<()>,
     base: FetcherDouble,
     records: Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -111,6 +120,7 @@ impl ResourceFetcher for ThreadedFetcher {
         self.record("fetch");
         let response = std::pin::pin!(self.base.fetch_resource(request));
         let state = Arc::new(HopState {
+            resume: self.resume.clone(),
             ready: AtomicBool::new(false),
             started: AtomicBool::new(false),
             waker: Mutex::new(None),
@@ -123,13 +133,16 @@ impl ResourceFetcher for ThreadedFetcher {
 
 #[tokio::test]
 async fn resource_continuations_stay_on_the_painter() {
+    let (wake, awakened) = flume::unbounded();
+    let (release, resume) = flume::bounded(1);
     let records = Arc::new(Mutex::new(Vec::new()));
     let fetcher = Rc::new(ThreadedFetcher {
+        resume,
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         records: Arc::clone(&records),
     });
     let mut view = solo_view(
-        Arc::new(NoWakeup),
+        Arc::new(HostWakeup(wake)),
         393.0,
         727.0,
         1.0,
@@ -140,6 +153,37 @@ async fn resource_continuations_stay_on_the_painter() {
     .await
     .expect("startup completes");
 
+    assert!(
+        records.lock().expect("thread records").is_empty(),
+        "creation performs no fetch"
+    );
+    awakened
+        .recv_timeout(HANG_BUDGET)
+        .expect("main requests the entry");
+    assert!(view.pump().is_empty(), "the IO is still held pending");
+    assert!(
+        awakened.try_recv().is_err(),
+        "no other main notification can wake the next turn"
+    );
+    release
+        .send(())
+        .expect("release the resource on its IO thread");
+    loop {
+        awakened
+            .recv_timeout(HANG_BUDGET)
+            .expect("main or resource completion wakes the host");
+        let mut finished = false;
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => finished = true,
+                EngineEvent::StartupFailed(error) => panic!("boot failed: {error}"),
+                _ => {}
+            }
+        }
+        if finished {
+            break;
+        }
+    }
     let records = records.lock().expect("thread records");
     assert!(
         records.iter().any(|(phase, _)| phase == "resolve"),
@@ -159,8 +203,6 @@ async fn resource_continuations_stay_on_the_painter() {
         "every fetch call and continuation belongs to the painter: {records:?}"
     );
     drop(records);
-    wait_for_script(&mut view)
-        .expect("new returns only after boot and preserves the successful lifecycle event");
 }
 
 struct PendingResource {
@@ -277,15 +319,15 @@ impl EventRequester for DropObservedRequester {
 }
 
 #[tokio::test]
-async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread() {
+async fn dropping_loading_view_cancels_resource_and_reaps_main() {
     hang_budget(async {
-        cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body().await;
+        dropping_loading_view_cancels_resource_and_reaps_main_body().await;
     })
     .await;
 }
 
-async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body() {
-    let (started_sender, started) = tokio::sync::oneshot::channel();
+async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
+    let (started_sender, mut started) = tokio::sync::oneshot::channel();
     let (dropped_sender, dropped) = flume::unbounded();
     let fetcher = Rc::new(PendingFetcher {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
@@ -295,7 +337,7 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body
     let fetcher_weak = Rc::downgrade(&fetcher);
     let requester = Arc::new(DropObservedRequester);
     let requester_weak = Arc::downgrade(&requester);
-    let mut construction = Box::pin(solo_view(
+    let mut view = solo_view(
         requester,
         393.0,
         727.0,
@@ -303,19 +345,26 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body
         DrawTarget::Offscreen,
         |_reports| fetcher,
         ViewSources::new("main.js"),
+    )
+    .await
+    .expect("creation returns a loading view even when the fetch never answers");
+    assert!(matches!(
+        started.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
     ));
-
-    // No deadline on the ordering itself. Either construction completes while a
-    // fetch is pending — the bug this names — or the fetch is polled and the
-    // signal arrives; both are decided by what the code does, not by how fast
-    // the machine did it. A genuine hang is caught by `HANG_BUDGET` around the
-    // whole test, where a wall-clock number is honest, rather than here, where
-    // it would also fail a machine that was merely slow.
-    tokio::select! {
-        result = &mut construction => panic!("pending resource unexpectedly completed: {result:?}"),
-        signal = started => signal.expect("the resource future is polled"),
+    loop {
+        assert!(view.pump().is_empty());
+        if started.try_recv().is_ok() {
+            break;
+        }
+        tokio::task::yield_now().await;
     }
-    drop(construction);
+    // Public operations are legal during loading, including offscreen's
+    // main-thread acknowledgement, which must not wait for the entry fetch.
+    view.resize(400.0, 800.0, 1.0)
+        .expect("resize while loading");
+    view.tick(false).expect("tick while loading");
+    drop(view);
 
     // The pending future dies on the thread that created it — the painter,
     // which is this one — because dropping the construction drops the painter
@@ -336,57 +385,115 @@ async fn cancelling_new_drops_the_resource_future_and_reaps_the_main_thread_body
     );
 }
 
-/// A view whose default font family nothing registers fails construction
-/// promptly, even though its host would never have answered a fetch.
-///
-/// `boot` decides this before it asks for a single source, so no fetch is
-/// ever outstanding — which is exactly why this does *not* cover the
-/// hang-while-a-fetch-is-pending case. That one needs the outcome to arrive
-/// while a fetch is in flight, which no native path produces, and is covered
-/// as a unit test in `crates/bobcat-core/src/paint/tests.rs`.
+/// Configuration errors are lifecycle events even when no source was requested.
 #[tokio::test]
-async fn an_unknown_font_family_fails_construction_without_waiting_on_the_host() {
-    let (started_sender, started) = tokio::sync::oneshot::channel();
-    let (dropped_sender, _dropped) = flume::unbounded();
-    let fetcher = Rc::new(PendingFetcher {
-        base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
-        started: Mutex::new(Some(started_sender)),
-        dropped: Mutex::new(Some(dropped_sender)),
-    });
+async fn an_unknown_font_family_reports_failure_without_fetching() {
+    hang_budget(async {
+        let fetcher = Rc::new(FetcherDouble::new(Vec::new()));
+        let mut view = solo_view(
+            Arc::new(NoWakeup),
+            32.0,
+            24.0,
+            1.0,
+            DrawTarget::Offscreen,
+            |_| fetcher.clone(),
+            ViewSources {
+                default_font_family: Some("no-such-family".to_owned()),
+                ..ViewSources::new("main.js")
+            },
+        )
+        .await
+        .expect("loading view exists");
+        let error = wait_for_script(&mut view).expect_err("unknown family fails boot");
+        assert!(error.to_string().contains("no-such-family"));
+        assert_eq!(fetcher.fetch_count(), 0);
+        assert!(view.pump().is_empty(), "failure is delivered once");
+    })
+    .await;
+}
 
-    let construction = solo_view(
+#[tokio::test]
+async fn a_resource_resolution_failure_is_an_event_and_stops_further_sources() {
+    let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
+    let mut view = solo_view(
         Arc::new(NoWakeup),
-        393.0,
-        727.0,
+        32.0,
+        24.0,
         1.0,
         DrawTarget::Offscreen,
-        |_reports| fetcher,
+        |_| fetcher.clone(),
         ViewSources {
-            // Nothing registers this family, so `boot` fails on it — before
-            // its first park, and so before the fetch it already asked for
-            // could possibly have been answered.
-            default_font_family: Some("no-such-family".to_owned()),
+            style_sheets: vec!["first.css".into(), "second.css".into()],
             ..ViewSources::new("main.js")
         },
-    );
-
-    let outcome = tokio::time::timeout(HANG_BUDGET, async {
-        // Pinning the construction lets the fetch actually start before the
-        // assertion, so the test exercises the interleaving it is named for
-        // rather than passing because nothing had begun.
-        let mut construction = std::pin::pin!(construction);
-        tokio::select! {
-            result = construction.as_mut() => return result,
-            _ = started => {}
-        }
-        construction.await
-    })
+    )
     .await
-    .expect("a decided startup failure must not wait on a fetch that never answers");
-
-    let error = outcome.expect_err("the unknown font family fails the view");
-    assert!(
-        format!("{error}").contains("no-such-family"),
-        "and the failure that comes back is the real one: {error}"
+    .expect("resource failure does not prevent construction");
+    assert_eq!(fetcher.resolve_count(), 0);
+    assert!(matches!(
+        wait_for_script(&mut view),
+        Err(bobcat_core::LynxViewError::Resource(_))
+    ));
+    assert_eq!(
+        fetcher.resolve_count(),
+        1,
+        "main stops requesting sources after failure"
     );
+    assert_eq!(fetcher.fetch_count(), 0);
+    assert!(view.pump().is_empty());
+}
+
+#[tokio::test]
+async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
+    hang_budget(async {
+        let group =
+            bobcat_core::LynxGroup::new(Arc::new(NoWakeup), bobcat_core::StyleThreads::Sequential)
+                .await
+                .expect("group");
+        let (started_sender, mut started) = tokio::sync::oneshot::channel();
+        let (dropped_sender, dropped) = flume::unbounded();
+        let mut pending = group
+            .create_lynx_view(
+                32.0,
+                24.0,
+                1.0,
+                DrawTarget::Offscreen,
+                |_| PendingFetcher {
+                    base: FetcherDouble::new(Vec::new()),
+                    started: Mutex::new(Some(started_sender)),
+                    dropped: Mutex::new(Some(dropped_sender)),
+                },
+                ViewSources::new("pending.js"),
+            )
+            .await
+            .expect("pending view");
+        loop {
+            assert!(pending.pump().is_empty());
+            if started.try_recv().is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let mut sibling = group
+            .create_lynx_view(
+                32.0,
+                24.0,
+                1.0,
+                DrawTarget::Offscreen,
+                |_| FetcherDouble::new(Vec::new()),
+                ViewSources::new("sibling.js"),
+            )
+            .await
+            .expect("sibling view");
+        wait_for_script(&mut sibling).expect("sibling boots while first fetch stays pending");
+        drop(pending);
+        assert_eq!(
+            dropped.recv().expect("pending fetch cancelled"),
+            thread_tag()
+        );
+        sibling
+            .tick(true)
+            .expect("sibling still runs after cancellation");
+    })
+    .await;
 }
