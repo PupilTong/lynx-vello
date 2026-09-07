@@ -348,3 +348,35 @@ test('a Lynx XML load preserves the host-selected page configuration', async () 
 
   await view.dispose()
 })
+
+test('a template load resolves the URL and releases active pointer capture', async () => {
+  FakeWorker.instances.length = 0
+  const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
+  const view = await BobcatCanvas.create(canvas, 80, 60, 1, LYNX_XML_PAGE_CONFIG)
+  const worker = FakeWorker.instances[0]
+  canvas.emit('pointerdown', { clientX: 20, clientY: 20, pointerId: 7 })
+  await view.loadTemplate('../archive/main.web.bundle')
+  const request = worker.messages.find(({ operation }) => operation === 'loadTemplate')
+  assert.equal(request.url, 'https://example.test/archive/main.web.bundle')
+  assert.equal(worker.messages.filter(({ type }) => type === 'bobcat-pointer').at(-1).phase, 3)
+  assert.deepEqual(canvas.released, [7])
+  await view.dispose()
+})
+
+
+test('a ZIP load forwards owned bytes and the archive URL without document resolution', async () => {
+  FakeWorker.instances.length = 0
+  const canvas = new FakeCanvas({ height: 60, left: 0, top: 0, width: 80 })
+  const view = await BobcatCanvas.create(canvas, 80, 60, 1, LYNX_XML_PAGE_CONFIG)
+  const worker = FakeWorker.instances[0]
+  const bytes = new Uint8Array([80, 75, 3, 4])
+  canvas.emit('pointerdown', { clientX: 20, clientY: 20, pointerId: 7 })
+  await view.loadZip(bytes, 'bobcat-memory://archive/dist/main.web.bundle')
+  bytes.fill(0)
+  const request = worker.messages.find(({ operation }) => operation === 'loadZip')
+  assert.equal(request.url, 'bobcat-memory://archive/dist/main.web.bundle')
+  assert.deepEqual(Array.from(request.bytes), [80, 75, 3, 4])
+  assert.deepEqual(canvas.released, [7])
+  await assert.rejects(view.loadZip('bad', 'https://example.test/main'), TypeError)
+  await view.dispose()
+})

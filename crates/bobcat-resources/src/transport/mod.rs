@@ -81,7 +81,7 @@ pub(crate) struct Transports {
     pub registry: Registry,
     pub http: HttpSettings,
     #[cfg(not(target_arch = "wasm32"))]
-    pub disk: Option<crate::cache::disk::DiskCache>,
+    pub disk: Option<std::sync::Arc<crate::cache::disk::DiskCache>>,
 }
 
 impl std::fmt::Debug for Transports {

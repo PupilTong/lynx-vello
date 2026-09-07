@@ -19,6 +19,13 @@ interface Indicator {
 type BobcatCanvasFactory = Pick<typeof BobcatCanvas, 'create'>;
 
 interface Shell {
+  readonly uploadPanel: HTMLFormElement;
+  readonly entryInput: HTMLInputElement;
+  readonly loadButton: HTMLButtonElement;
+  readonly uploadStatus: HTMLElement;
+  readonly zipInput: HTMLInputElement;
+  readonly zipStatus: HTMLElement;
+  readonly expandButton: HTMLButtonElement;
   readonly canvasHost: HTMLElement;
   readonly canvasSize: HTMLElement;
   readonly editor: HTMLTextAreaElement;
@@ -111,6 +118,32 @@ function mountShell(): Shell {
         </div>
 
         <div class="workspace-grid" id="renderer-workspace" data-active-tab="canvas">
+          <form class="upload-panel" id="canvas-source-panel" aria-labelledby="canvas-source-title">
+            <div class="pane-heading">
+              <div>
+                <p class="panel-kicker">SOURCE</p>
+                <h3 id="canvas-source-title">Canvas source</h3>
+              </div>
+              <button id="load-template" class="primary-button" type="submit" disabled>Load template</button>
+            </div>
+            <div class="upload-fields">
+              <div class="source-field">
+                <label for="canvas-zip">Local ZIP file</label>
+                <p id="zip-help" class="field-help">Choose a ZIP archive containing your template and resources.</p>
+                <input id="canvas-zip" type="file" required accept=".zip,application/zip,application/x-zip-compressed" aria-describedby="zip-help zip-status">
+                <output id="zip-status" class="field-help" aria-live="polite">No ZIP selected</output>
+              </div>
+              <div class="source-field">
+                <label for="entry-template-url">Entry template URL</label>
+                <input id="entry-template-url" type="text" required placeholder="dist/main.web.bundle" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="template-loading-note">
+              </div>
+              <p id="template-loading-note" class="field-help">Enter a path from the ZIP root, or a full URL whose pathname matches it. Supports .lynx.xml, binary .web.bundle, and source-based .lynx.bundle templates.</p>
+            </div>
+            <div class="editor-footer">
+              <output id="upload-status" class="field-help" aria-live="polite">Choose a ZIP and enter its template path.</output>
+            </div>
+          </form>
+
           <form class="editor-panel" id="lynx-xml-panel" hidden>
             <div class="pane-heading editor-heading">
               <div>
@@ -144,7 +177,13 @@ function mountShell(): Shell {
                 <p class="panel-kicker">LIVE FRAME</p>
                 <h3 id="canvas-title">Bobcat canvas</h3>
               </div>
-              <output id="canvas-size">—</output>
+              <div class="preview-actions">
+                <output id="canvas-size">—</output>
+                <button id="expand-preview" type="button" aria-controls="canvas-source-panel lynx-xml-panel" aria-pressed="false" title="Expand canvas and hide source panel">
+                  <span class="expand-icon" aria-hidden="true">⤢</span>
+                  <span id="expand-preview-label">Expand</span>
+                </button>
+              </div>
             </div>
             <div class="canvas-frame">
               <div class="canvas-host" id="canvas-host">
@@ -164,6 +203,13 @@ function mountShell(): Shell {
   `;
 
   return {
+    uploadPanel: requiredElement<HTMLFormElement>(root, '#canvas-source-panel'),
+    entryInput: requiredElement<HTMLInputElement>(root, '#entry-template-url'),
+    loadButton: requiredElement<HTMLButtonElement>(root, '#load-template'),
+    uploadStatus: requiredElement<HTMLElement>(root, '#upload-status'),
+    zipInput: requiredElement<HTMLInputElement>(root, '#canvas-zip'),
+    zipStatus: requiredElement<HTMLElement>(root, '#zip-status'),
+    expandButton: requiredElement<HTMLButtonElement>(root, '#expand-preview'),
     canvasHost: requiredElement<HTMLElement>(root, '#canvas-host'),
     canvasSize: requiredElement<HTMLElement>(root, '#canvas-size'),
     editor: requiredElement<HTMLTextAreaElement>(root, '#lynx-xml-editor'),
@@ -202,13 +248,24 @@ function tabUrl(tab: WorkspaceTab): URL {
 
 function createTabRouter(shell: Shell): TabRouter {
   const listeners = new Set<() => void>();
+  let expanded = false;
 
   const apply = (): void => {
     const active = workspaceTab(
       new URL(window.location.href).searchParams.get(TAB_PARAMETER),
     );
     shell.workspace.dataset['activeTab'] = active;
-    shell.editorForm.hidden = active !== 'lynx-xml';
+    shell.workspace.dataset['expanded'] = String(expanded);
+    shell.editorForm.hidden = expanded || active !== 'lynx-xml';
+    shell.uploadPanel.hidden = expanded || active !== 'canvas';
+    shell.expandButton.setAttribute('aria-pressed', String(expanded));
+    shell.expandButton.title = expanded
+      ? 'Restore canvas and show source panel'
+      : 'Expand canvas and hide source panel';
+    requiredElement<HTMLElement>(shell.expandButton, '#expand-preview-label').textContent =
+      expanded ? 'Restore' : 'Expand';
+    requiredElement<HTMLElement>(shell.expandButton, '.expand-icon').textContent =
+      expanded ? '⤡' : '⤢';
     shell.previewTitle.textContent =
       active === 'lynx-xml' ? 'Rendered output' : 'Bobcat canvas';
     document.title =
@@ -232,6 +289,24 @@ function createTabRouter(shell: Shell): TabRouter {
       listener();
     }
   };
+
+  shell.expandButton.addEventListener('click', () => {
+    expanded = !expanded;
+    apply();
+  });
+  shell.workspace.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && expanded) {
+      expanded = false;
+      apply();
+      shell.expandButton.focus();
+    }
+  });
+  shell.zipInput.addEventListener('change', () => {
+    const file = shell.zipInput.files?.[0];
+    shell.zipStatus.textContent = file === undefined
+      ? 'No ZIP selected'
+      : `${file.name} · ${formattedBytes(file.size)}`;
+  });
 
   for (const link of shell.tabLinks) {
     link.addEventListener('click', (event) => {
@@ -400,7 +475,7 @@ function createCanvas(): HTMLCanvasElement {
   canvas.className = 'bobcat-canvas';
   canvas.setAttribute(
     'aria-label',
-    'A geometric layout rendered from the Lynx XML editor',
+    'Lynx template rendered by Bobcat',
   );
   return canvas;
 }
@@ -452,6 +527,30 @@ class PreviewRenderer {
       throw new Error('Lynx XML source exceeds the 16 MiB browser limit');
     }
 
+    const sourceUrl = URL.createObjectURL(sourceBlob);
+    try {
+      await this.#load((view) => view.loadLynxXml(sourceUrl));
+    } finally {
+      URL.revokeObjectURL(sourceUrl);
+    }
+  }
+
+  async renderArchive(file: File, entry: string): Promise<void> {
+    if (file.size > 64 * 1024 * 1024) {
+      throw new Error('ZIP exceeds the 64 MiB upload limit');
+    }
+    if (entry.trim() === '') {
+      throw new Error('Enter the template path inside the ZIP');
+    }
+    const entryUrl = new URL(entry.trim(), 'bobcat-memory://archive/');
+    if (!['bobcat-memory:', 'http:', 'https:'].includes(entryUrl.protocol)) {
+      throw new Error('Use a ZIP-relative path or an HTTP(S) entry template URL');
+    }
+    const bytes = await file.arrayBuffer();
+    await this.#load((view) => view.loadZip(bytes, entryUrl));
+  }
+
+  async #load(load: (view: BobcatCanvas) => Promise<void>): Promise<void> {
     const generation = ++this.#generation;
     let view = this.#view;
     if (view === undefined) {
@@ -511,14 +610,7 @@ class PreviewRenderer {
       }
     }
 
-    // Each load builds a fresh native view from the new page's sources, so
-    // there is nothing to clear first.
-    const sourceUrl = URL.createObjectURL(sourceBlob);
-    try {
-      await view.loadLynxXml(sourceUrl);
-    } finally {
-      URL.revokeObjectURL(sourceUrl);
-    }
+    await load(view);
     if (generation !== this.#generation) {
       return;
     }
@@ -607,43 +699,64 @@ function setSourceStatus(
   shell.sourceStatus.dataset['state'] = state;
 }
 
-function installEditor(
+function installSources(
   shell: Shell,
   renderer: PreviewRenderer,
 ): (label: string) => Promise<void> {
   let rendering = false;
 
-  const renderSource = async (label: string): Promise<void> => {
+  const renderSource = async (label: string, archive = false): Promise<void> => {
     if (rendering) {
       return;
     }
     rendering = true;
     const source = shell.editor.value;
+    const status = archive ? shell.uploadStatus : shell.sourceStatus;
+    const setStatus = (value: string, state: SourceState): void => {
+      status.textContent = value;
+      status.dataset['state'] = state;
+    };
     shell.editor.readOnly = true;
     shell.editorForm.setAttribute('aria-busy', 'true');
     shell.renderButton.disabled = true;
+    shell.loadButton.disabled = true;
+    shell.loadButton.textContent = archive ? 'Loading…' : 'Load template';
+    shell.zipInput.disabled = true;
+    shell.entryInput.disabled = true;
+    shell.uploadPanel.setAttribute('aria-busy', 'true');
     shell.renderButtonLabel.textContent = 'Rendering…';
-    setSourceStatus(shell, `Rendering ${label}…`, 'pending');
+    setStatus(`Rendering ${label}…`, 'pending');
     setIndicator(shell.renderer, 'Rendering…', 'pending');
     shell.message.textContent = `Preparing the native Lynx view for ${label}…`;
 
     try {
-      await renderer.render(source);
-      setSourceStatus(shell, `Rendered ${label}`, 'ok');
+      if (archive) {
+        const file = shell.zipInput.files?.[0];
+        if (file === undefined) throw new Error('Choose a ZIP file first');
+        await renderer.renderArchive(file, shell.entryInput.value);
+      } else {
+        await renderer.render(source);
+      }
+      setStatus(`Rendered ${label}`, 'ok');
       setIndicator(shell.renderer, 'Offscreen WebGPU', 'ok');
       shell.message.textContent =
         'Render complete. The Render Worker, canvas, and Wasm instance stay warm for the next submission.';
     } catch (error) {
       const message = errorMessage(error);
-      setSourceStatus(shell, `Render failed: ${message}`, 'error');
+      setStatus(`Render failed: ${message}`, 'error');
       setIndicator(shell.renderer, 'Source error', 'error');
-      shell.message.textContent = `Unable to render Lynx XML: ${message}`;
+      shell.message.textContent = `Unable to render ${label}: ${message}`;
       throw error;
     } finally {
       rendering = false;
       shell.editor.readOnly = false;
       shell.editorForm.removeAttribute('aria-busy');
       shell.renderButton.disabled = false;
+      shell.loadButton.disabled = false;
+      shell.loadButton.textContent = 'Load template';
+      shell.zipInput.disabled = false;
+      shell.entryInput.disabled = false;
+      shell.uploadPanel.removeAttribute('aria-busy');
       shell.renderButtonLabel.textContent = 'Submit XML';
     }
   };
@@ -663,6 +776,13 @@ function installEditor(
   shell.editorForm.addEventListener('submit', (event) => {
     event.preventDefault();
     void renderSource('submitted XML').catch((error: unknown) => {
+      console.error(error);
+    });
+  });
+
+  shell.uploadPanel.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void renderSource(shell.entryInput.value, true).catch((error: unknown) => {
       console.error(error);
     });
   });
@@ -725,7 +845,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
     { once: true },
   );
   router.subscribe(() => renderer.scheduleResize());
-  const renderSource = installEditor(shell, renderer);
+  const renderSource = installSources(shell, renderer);
   await renderSource('demo.lynx.xml');
 }
 

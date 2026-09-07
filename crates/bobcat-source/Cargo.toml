@@ -16,6 +16,8 @@ serde_json = { workspace = true }
 cssparser = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
+percent-encoding = { workspace = true }
+zip = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }

@@ -154,17 +154,11 @@ the family checked against them, when a view is built, so both must precede a
 load, and a family nothing provides makes that load reject. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
 Worker, named in the load, mounted as author-origin rules in cascade order. The
-stylesheet contract has a second arm for a host that already parsed its CSS,
-but a browser host never does, so this embedder always takes the text arm.
-The browser registry is one normalized-URL-to-bytes map. Script and stylesheet
-registration populate that same map; `fetch_resource` and `fetch_style_sheet`
-decide how the selected bytes are interpreted.
-
-The browser facade still does not decode `.web.bundle` containers. A caller
-may load suitable JavaScript by URL or a raw Lynx XML source card;
-bundle retrieval, decode, `PageConfig` parsing, and `StyleInfo` lowering remain
-external work, exactly as in the native CLI — where the CLI does perform them
-and hands core the pre-parsed arm.
+stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and
+XML loads take the text arm; `loadTemplate` and `loadZip` decode binary containers through
+`bobcat-source::PageSource` and registers their lowered `StyleInfo` through
+the pre-parsed arm. Source retrieval and adaptation remain embedder work,
+with core receiving only `ViewSources` and its resource-fetcher contract.
 
 ## Pointer input
 
@@ -316,3 +310,44 @@ including its XML, web and native binary parsers, with no Cargo feature flags.
 The `loadLynxXml` API continues to accept XML responses only.
 The one-shot response adapter preserves final-URL fragments and reports
 background presence without registering its body. Host PageConfig stays authoritative.
+
+`loadTemplate(url)` fetches a binary web or source-based native bundle with a
+16 MiB response bound and delegates decoding, configuration and StyleInfo
+registration to `PageSource`. Native bytecode and missing root entries retain
+the shared parser's errors. The renderer uses the input URL as the resource
+base and the bundle configuration for that view; subsequent raw XML loads
+still use the host configuration.
+
+Both Pages tabs use the same two-column workspace. Canvas provides a local
+ZIP picker and an entry field: a ZIP-root-relative path, or an HTTP(S) URL whose
+decoded pathname exactly matches an archive member. Clicking **Load template**
+passes the ZIP bytes and absolute entry URL to `loadZip`. Relative paths receive
+a `bobcat-memory://archive/` base. The Render Worker delegates decoding,
+entry selection and resource registration to the platform-independent
+`bobcat-source::ZipSource`; Pages contains no ZIP parser or storage layer.
+The COOP/COEP service worker remains responsible only for browser isolation.
+
+`ZipSource::page` applies `PageSource` to the selected member (strict UTF-8 XML,
+web binary, or source-based native bundle with a root entry). `register_with`
+moves the files into `bobcat-resources` under the entry URL's origin and their
+ZIP-root paths. Relative resources resolve from the entry's directory; matching
+absolute URLs also use the registry, while other URLs follow the embedder's
+ordinary transport policy. The shared decoder enforces 64 MiB compressed,
+128 MiB actual decompressed output and 4096 entries, rejecting unsafe paths,
+duplicates and symlinks. Stored/deflated, single-disk ZIPs are supported;
+ZIP64 archive directories are outside this bounded package format.
+
+Each browser page receives a separate `Resources::new_scope()`. Registrations
+stay alive for delayed image loads, and image caches and completion queues
+cannot leak an old ZIP's images into a replacement using the same paths. IO
+workers, the browser image decoder and native disk cache remain shared. The
+previous page stays usable if ZIP or template parsing fails before replacement;
+retiring a view releases its scope once outstanding resource work completes.
+ZIP tests live in bobcat-source and run in native CI and the existing Wasm test
+step. The Pages deployment workflow builds and publishes the site.
+
+The **Expand** button sits in the preview heading outside the canvas and hides
+the active source panel. **Restore** or Escape returns to the split layout,
+preserving the selected ZIP, entry text and XML edits. Both tabs share the
+expanded state, and the existing ResizeObserver resizes the warm canvas.
+Narrow screens stack the source and preview panels vertically.
