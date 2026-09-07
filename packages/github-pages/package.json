@@ -7,12 +7,10 @@
     "build": "rsbuild build",
     "dev": "rsbuild dev",
     "preview": "rsbuild preview",
-    "test": "vitest run src/archive.test.ts src/service-worker.test.ts",
     "test:type": "tsc --noEmit"
   },
   "dependencies": {
-    "bobcat-wasm": "workspace:*",
-    "fflate": "^0.8.3"
+    "bobcat-wasm": "workspace:*"
   },
   "devDependencies": {
     "@rsbuild/core": "2.1.4",

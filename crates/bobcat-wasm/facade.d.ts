@@ -54,6 +54,14 @@ export declare class BobcatCanvas {
    */
   loadTemplate(url: string | URL): Promise<void>
 
+  /**
+   * Decode a ZIP and its selected template using bobcat-source. entryUrl must
+   * be absolute: its decoded pathname selects the member and its origin maps
+   * the ZIP resources. XML is strict UTF-8; binary bundles require root.
+   * The shared loader limits input to 64 MiB, output to 128 MiB, and 4096 entries.
+   */
+  loadZip(data: ArrayBuffer | Uint8Array, entryUrl: string | URL): Promise<void>
+
   /** Retains font faces for every page this canvas loads; call before a load. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<void>
 

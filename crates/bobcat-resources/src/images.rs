@@ -105,6 +105,10 @@ impl ImageState {
         }
     }
 
+    pub(crate) fn budget(&self) -> usize {
+        self.bitmaps.budget()
+    }
+
     /// Bytes held by decoded bitmaps.
     pub(crate) fn bitmap_bytes(&self) -> usize {
         self.bitmaps.used_bytes()

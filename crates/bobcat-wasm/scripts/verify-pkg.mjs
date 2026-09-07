@@ -38,6 +38,7 @@ for (const requiredMethod of [
   'registerStyleSheet(',
   'registerLynxXml(',
   'loadTemplate(',
+  'loadZip(',
   'bobcatrenderer_load(',
   'pump(',
   'registerFonts(',
@@ -206,7 +207,7 @@ for (const requiredLoadStep of [
   "await fetchSource('script', message.url, MAX_SCRIPT_BYTES)",
   'renderer.registerStyleSheet(sheet.url, sheet.bytes)',
   'renderer.registerScript(entry.url, entry.bytes)',
-  'await replaceNativeView(request, entryUrl, styleSheetUrls)',
+  'await replaceNativeView(request, () => renderer.load(entryUrl, styleSheetUrls))',
 ]) {
   if (!loadDispatch.includes(requiredLoadStep)) {
     throw new Error(`Render Worker page load is missing ${requiredLoadStep}`)
@@ -281,7 +282,7 @@ const replaceView = renderWorker.slice(
 for (const requiredReplaceStep of [
   'await scriptCompletion',
   'engineEventGeneration += 1',
-  'await renderer.load(entryUrl, styleSheetUrls)',
+  'await load()',
   'trackScriptCompletion(request)',
 ]) {
   if (!replaceView.includes(requiredReplaceStep)) {

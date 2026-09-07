@@ -13,7 +13,7 @@ use bobcat_core::{
     StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::{PageSource, register_lynx_xml_response};
+use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
 use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
@@ -107,7 +107,7 @@ impl Future for EventWait {
 }
 
 /// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. Its canvas, Wasm instance, and resource system
+/// Worker that constructs it. Its canvas, Wasm instance, IO workers and decoder
 /// outlive every page it shows; each document, element tree,
 /// `QuickJS` realm, engine, and set of Stylo workers stays behind one opaque
 /// `LynxView`, built by [`BobcatRenderer::load`] and replaced wholesale by
@@ -122,7 +122,10 @@ impl Future for EventWait {
 #[wasm_bindgen]
 pub struct BobcatRenderer {
     view: Option<LynxView<ViewResources>>,
+    /// Empty/staged sources for the next load, sharing the platform decoder.
     resources: Resources,
+    /// Current page registrations stay available after boot, including ZIP assets.
+    page_resources: Option<Resources>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -218,6 +221,7 @@ impl BobcatRenderer {
                 view: None,
                 group: None,
                 resources,
+                page_resources: None,
                 canvas,
                 events,
                 config,
@@ -275,6 +279,23 @@ impl BobcatRenderer {
         for warning in page.compatibility_warnings() {
             console_warn(&JsValue::from(warning.to_string()));
         }
+        page.register_with(&self.resources);
+        self.load_sources(page.view_sources(), input).await
+    }
+
+    /// Load a ZIP through bobcat-source's platform-independent archive API.
+    #[wasm_bindgen(js_name = loadZip)]
+    pub async fn load_zip(&mut self, entry_url: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        let input = Url::parse(&entry_url).map_err(js_error)?;
+        let archive = ZipSource::from_bytes(&bytes).map_err(js_error)?;
+        let page = archive.page(&input).map_err(js_error)?;
+        for warning in page.compatibility_warnings() {
+            console_warn(&JsValue::from(warning.to_string()));
+        }
+        archive
+            .register_with(&self.resources, &input)
+            .map_err(js_error)?;
         page.register_with(&self.resources);
         self.load_sources(page.view_sources(), input).await
     }
@@ -419,7 +440,9 @@ impl BobcatRenderer {
             return Ok(self.script_finished);
         };
         let mut fatal = None;
-        warn_notes(&self.resources);
+        if let Some(resources) = &self.page_resources {
+            warn_notes(resources);
+        }
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => self.script_finished = true,
@@ -539,6 +562,7 @@ impl BobcatRenderer {
         self.events.request_event();
         drop(self.view.take());
         drop(self.group.take());
+        self.page_resources = None;
     }
 }
 
@@ -558,6 +582,7 @@ impl BobcatRenderer {
         // previous load already took.
         drop(self.view.take());
         drop(self.group.take());
+        self.page_resources = None;
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -575,26 +600,35 @@ impl BobcatRenderer {
         let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
             .map_err(js_error)?;
         set_canvas_size(&self.canvas, frame_size);
+        // The view retains this scope, including ZIP assets needed after boot.
+        // The next submission stages sources in a fresh scope sharing the
+        // same image decoder and IO workers, but no cached image or URL.
+        let next_resources = self.resources.new_scope();
+        let resources = mem::replace(&mut self.resources, next_resources);
         let group = LynxGroup::new(self.events.clone(), self.style_threads)
             .await
             .map_err(js_error)?;
+        let boot_urls: Vec<_> = std::iter::once(sources.entry.clone())
+            .chain(sources.style_sheets.iter().cloned())
+            .collect();
         let built = group
             .create_lynx_view(
                 self.width,
                 self.height,
                 self.device_pixel_ratio,
                 DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
-                self.resources.builder(),
+                resources.builder(),
                 sources,
             )
             .await;
-        // Construction has finished every source load, so this page's
-        // registered bytes are dead either way. Clearing here keeps a Render
-        // Worker that loads page after page from growing a registry of them;
-        // an image decoded from a registration keeps its own bytes.
-        self.resources.clear_registered();
-        warn_notes(&self.resources);
+        // Boot consumed these scripts/styles; retain only other registrations
+        // (in particular ZIP assets that images may request on later turns).
+        for url in boot_urls {
+            let _ = resources.unregister(&url);
+        }
+        warn_notes(&resources);
         self.view = Some(built.map_err(js_error)?);
+        self.page_resources = Some(resources);
         self.group = Some(group);
         // Boot published its frame before this Worker took a turn, and a
         // frame from below wakes through the same signal — but the wakeup it

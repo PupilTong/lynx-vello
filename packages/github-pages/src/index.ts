@@ -1,5 +1,4 @@
 import './styles.css';
-import { mountArchive, type MountedArchive } from './archive';
 
 import type { BobcatCanvas, PageConfig } from 'bobcat-wasm';
 
@@ -493,7 +492,6 @@ class PreviewRenderer {
   readonly #resizeObserver: ResizeObserver;
   readonly #shell: Shell;
   readonly #windowResize: () => void;
-  #archive: MountedArchive | undefined;
   #canvas: HTMLCanvasElement | undefined;
   #generation = 0;
   #lastSize: CanvasSize | undefined;
@@ -532,25 +530,24 @@ class PreviewRenderer {
     const sourceUrl = URL.createObjectURL(sourceBlob);
     try {
       await this.#load((view) => view.loadLynxXml(sourceUrl));
-      await this.#archive?.dispose();
-      this.#archive = undefined;
     } finally {
       URL.revokeObjectURL(sourceUrl);
     }
   }
 
   async renderArchive(file: File, entry: string): Promise<void> {
-    const archive = await mountArchive(file, entry);
-    try {
-      await this.#load((view) => archive.entryUrl.pathname.endsWith('.xml')
-        ? view.loadLynxXml(archive.entryUrl)
-        : view.loadTemplate(archive.entryUrl));
-    } catch (error) {
-      await archive.dispose();
-      throw error;
+    if (file.size > 64 * 1024 * 1024) {
+      throw new Error('ZIP exceeds the 64 MiB upload limit');
     }
-    await this.#archive?.dispose();
-    this.#archive = archive;
+    if (entry.trim() === '') {
+      throw new Error('Enter the template path inside the ZIP');
+    }
+    const entryUrl = new URL(entry.trim(), 'bobcat-memory://archive/');
+    if (!['bobcat-memory:', 'http:', 'https:'].includes(entryUrl.protocol)) {
+      throw new Error('Use a ZIP-relative path or an HTTP(S) entry template URL');
+    }
+    const bytes = await file.arrayBuffer();
+    await this.#load((view) => view.loadZip(bytes, entryUrl));
   }
 
   async #load(load: (view: BobcatCanvas) => Promise<void>): Promise<void> {
@@ -653,9 +650,7 @@ class PreviewRenderer {
     window.cancelAnimationFrame(this.#resizeFrame);
     this.#resizeObserver.disconnect();
     window.removeEventListener('resize', this.#windowResize);
-    const archive = this.#archive;
-    this.#archive = undefined;
-    await Promise.all([this.#releaseView(), archive?.dispose()]);
+    await this.#releaseView();
   }
 
   async #releaseView(): Promise<void> {

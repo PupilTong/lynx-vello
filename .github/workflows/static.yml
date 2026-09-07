@@ -71,9 +71,6 @@ jobs:
       - name: Type-check GitHub Pages
         run: pnpm --filter github-pages test:type
 
-      - name: Test GitHub Pages ZIP loading
-        run: pnpm --filter github-pages test
-
       - name: Build GitHub Pages
         run: pnpm --filter github-pages build
         env:

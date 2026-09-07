@@ -213,7 +213,7 @@ function trackScriptCompletion(request) {
 // builds a fresh native view and drops the previous one. Sources are fetched
 // and registered before that happens, so a load that cannot fetch leaves the
 // running page untouched.
-async function replaceNativeView(request, entryUrl, styleSheetUrls, templateBytes) {
+async function replaceNativeView(request, load) {
   if (scriptCompletion !== undefined) {
     try {
       await scriptCompletion
@@ -226,11 +226,7 @@ async function replaceNativeView(request, entryUrl, styleSheetUrls, templateByte
   // loop off the renderer while the load owns its mutable borrow.
   engineEventGeneration += 1
   try {
-    if (templateBytes === undefined) {
-      await renderer.load(entryUrl, styleSheetUrls)
-    } else {
-      await renderer.loadTemplate(entryUrl, templateBytes)
-    }
+    await load()
   } catch (error) {
     // A template parse failure leaves the previous native view alive. Resume
     // its event loop after advancing the generation for this attempted load.
@@ -247,9 +243,13 @@ async function dispatchRequest(message) {
 
   const { operation, request } = message
   switch (operation) {
+    case 'loadZip': {
+      await replaceNativeView(request, () => renderer.loadZip(message.url, message.bytes))
+      break
+    }
     case 'loadTemplate': {
       const entry = await fetchSource('template', message.url, MAX_SCRIPT_BYTES)
-      await replaceNativeView(request, entry.url, [], entry.bytes)
+      await replaceNativeView(request, () => renderer.loadTemplate(entry.url, entry.bytes))
       break
     }
     case 'load': {
@@ -264,7 +264,7 @@ async function dispatchRequest(message) {
         renderer.registerStyleSheet(sheet.url, sheet.bytes),
       )
       const entryUrl = renderer.registerScript(entry.url, entry.bytes)
-      await replaceNativeView(request, entryUrl, styleSheetUrls)
+      await replaceNativeView(request, () => renderer.load(entryUrl, styleSheetUrls))
       break
     }
     case 'loadLynxXml': {
@@ -280,8 +280,7 @@ async function dispatchRequest(message) {
       }
       await replaceNativeView(
         request,
-        mainThreadScriptUrl,
-        styleSheetUrl === null ? [] : [styleSheetUrl],
+        () => renderer.load(mainThreadScriptUrl, styleSheetUrl === null ? [] : [styleSheetUrl]),
       )
       break
     }

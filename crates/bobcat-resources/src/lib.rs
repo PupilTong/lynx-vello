@@ -272,7 +272,7 @@ impl Resources {
         #[cfg(not(target_arch = "wasm32"))]
         let disk = config.disk_cache.as_ref().and_then(|disk| {
             match cache::disk::DiskCache::open(&disk.dir, disk.budget_bytes) {
-                Ok(cache) => Some(cache),
+                Ok(cache) => Some(Arc::new(cache)),
                 Err(error) => {
                     notes.push(format!(
                         "the disk cache at `{}` could not be opened: {error}",
@@ -324,6 +324,40 @@ impl Resources {
             shared,
             local: Rc::new(RefCell::new(ImageState::new(
                 config.memory_budget_bytes,
+                receiver,
+            ))),
+        }
+    }
+
+    /// An independent page resource scope sharing only the IO workers,
+    /// platform decoder and disk cache. Registrations, relative URL base,
+    /// decoded images and completion queues start empty. Late image results
+    /// from a retired page cannot populate the replacement page's cache.
+    #[must_use]
+    pub fn new_scope(&self) -> Self {
+        let (completions, receiver) = flume::unbounded();
+        Self {
+            shared: SharedHandle::new(Shared {
+                transports: Transports {
+                    registry: Registry::default(),
+                    http: self.shared.transports.http.clone(),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    disk: self.shared.transports.disk.clone(),
+                },
+                base_url: Mutex::new(None),
+                initial_decode_bound: self.shared.initial_decode_bound,
+                downsample_ratio: self.shared.downsample_ratio,
+                #[cfg(not(target_arch = "wasm32"))]
+                executor: self.shared.executor.clone(),
+                #[cfg(target_arch = "wasm32")]
+                decoder: self.shared.decoder.clone(),
+                completions,
+                wakeup: self.shared.wakeup.clone(),
+                log_to_stderr: self.shared.log_to_stderr,
+                notes: Mutex::new(Vec::new()),
+            }),
+            local: Rc::new(RefCell::new(ImageState::new(
+                self.local.borrow().budget(),
                 receiver,
             ))),
         }
@@ -683,5 +717,38 @@ impl ResourceFetcher for ViewResources {
 impl FrameImages for ViewResources {
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         images::read(&self.resources, source, hint)
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_scope_isolates_registrations_and_late_image_completions() {
+        let old = Resources::new(
+            ResourcesConfig {
+                worker_threads: 1,
+                log_to_stderr: false,
+                ..ResourcesConfig::default()
+            },
+            || {},
+        );
+        let url = "bobcat-memory://archive/image.png";
+        old.register(url, vec![1], None).unwrap();
+        old.set_base_url(Some(Url::parse(url).unwrap()));
+        let replacement = old.new_scope();
+        assert!(replacement.base_url().is_none());
+        assert!(!replacement.unregister(url));
+        replacement.register(url, vec![2], None).unwrap();
+        old.shared.complete(Completion::Failed {
+            source: Arc::from("image.png"),
+            message: "retired page".to_owned(),
+        });
+        images::service(&replacement);
+        assert!(!replacement.knows_image("image.png"));
+        assert!(replacement.take_notes().is_empty());
+        assert!(old.unregister(url));
+        assert!(replacement.unregister(url));
     }
 }

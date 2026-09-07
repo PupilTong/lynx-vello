@@ -611,6 +611,21 @@ export class BobcatCanvas {
     await this.#request('loadTemplate', { url: documentUrl(url) })
   }
 
+  /** Decode local ZIP bytes with bobcat-source and load the selected entry. */
+  async loadZip(data, entryUrl) {
+    if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) {
+      throw new TypeError('BobcatCanvas.loadZip requires an ArrayBuffer or Uint8Array')
+    }
+    if (data.byteLength > 64 * 1024 * 1024) {
+      throw new RangeError('ZIP exceeds the 64 MiB compressed size limit')
+    }
+    this.#pointerInput.reset()
+    await this.#request('loadZip', {
+      bytes: new Uint8Array(data),
+      url: String(entryUrl),
+    })
+  }
+
   /** Retain font faces for every page this canvas loads. Call before a load. */
   async registerFonts(data) {
     await this.#request('registerFonts', { bytes: fontBytes(data) })

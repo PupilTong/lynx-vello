@@ -155,19 +155,16 @@ jobs:
       - name: Build threaded wasm-bindgen bindings
         run: pnpm --filter bobcat-wasm build
 
-      - name: Decode real bundles in Wasm without decoder threads
+      - name: Decode bundles and ZIP resources in Wasm
         run: >-
           wasm-pack test --node crates/bobcat-source
-          --test decode_web_bundle --locked -Z build-std=std,panic_abort
+          --test decode_web_bundle --test zip_source --locked -Z build-std=std,panic_abort
 
       - name: Verify shared-memory and npm artifacts
         run: pnpm --filter bobcat-wasm verify
 
       - name: Type-check GitHub Pages
         run: pnpm --filter github-pages test:type
-
-      - name: Test GitHub Pages ZIP loading
-        run: pnpm --filter github-pages test
 
       - name: Build GitHub Pages
         run: pnpm --filter github-pages build

@@ -31,7 +31,9 @@ flowchart LR
     XML["XML text"] --> XP
     WB["Web bytes"] --> WD
     NB["Native external bytes"] --> ND
+    ZIP["ZIP bytes + entry URL"] --> ZA
     subgraph Source["bobcat-source; forbid unsafe code"]
+        ZA["ZipSource: bounded decode and registration"] --> A
         XP["xml: borrowed sections"]
         WD["web: validated rkyv 0.7"] --> T["Shared WebTemplate and StyleInfo"]
         ND["native: source decoding"] --> T
@@ -40,12 +42,13 @@ flowchart LR
         XP --> A
         XP --> B["runtime: one-shot browser registration"]
     end
+    ZA --> R
     A --> R["Embedder-owned Resources"]
     B --> R
     R --> V["LynxView: runtime ownership unchanged"]
     ND --> E["Reject real bytecode and unsupported encodings"]
     classDef focus stroke:#d73a49,stroke-width:3px
-    class T,A,B,E focus
+    class T,A,B,E,ZA focus
 ```
 
 The shared template is authoritative for decoded binary data. Its rkyv field
@@ -65,6 +68,7 @@ not copy or register its unused body. Browser PageConfig remains host-owned.
 | XML | `xml::parse` | Parser itself uses only std |
 | Web | `web::decode`, wire types | rkyv 0.7, bytecheck, JSON and errors |
 | Native | `native::decode`, `native::convert` | Web model plus cssparser |
+| ZIP resources | `ZipSource::{from_bytes, page, register_with}` | Bounded ZIP reader, URLs and resource registration |
 | Runtime adaptation | `PageSource`, `register_lynx_xml_response` | Core, resources and URLs |
 
 `bobcat-source` has no Cargo feature flags. CLI, server, Wasm and tooling all
@@ -92,6 +96,32 @@ Migration:
 cargo run -p bobcat-source \
   --example convert -- input.lynx.bundle output.web.bundle
 ```
+
+## ZIP packages
+
+`ZipSource` is an always-available source API for native and Wasm embedders.
+The host supplies bytes; `from_bytes` validates and decompresses the archive,
+`page(entry_url)` selects the UTF-8 decoded pathname and uses `PageSource` to
+parse it, and `register_with(resources, entry_url)` consumes the archive bytes
+into the host's registry. The entry origin supplies the resource root. URL
+segments are encoded individually, preserving literal `%`, `#` and `?` names.
+A private `bobcat-memory://archive/` origin supports local packages without IO;
+an original HTTP origin lets absolute resource URLs match packaged files.
+
+The parser accepts stored/deflated single-disk ZIPs, with 64 MiB compressed,
+128 MiB actual expanded output and 4096 entries. It bounds central-directory
+metadata before the ZIP dependency builds its index, rejects duplicate names
+before that index can deduplicate them, validates UTF-8 relative paths, rejects
+symlinks and verifies each member through the ZIP reader's CRC check. ZIP64
+archive directories are not accepted under this small-package contract.
+
+Registration lasts for the view's lifetime rather than just script boot,
+because images can be requested later. `Resources::new_scope` gives a replacement
+view separate registrations, base URL, images and completion queues while
+sharing IO workers, the platform decoder and disk cache. Hosts choose when to
+retire that scope; parsing never constructs a view or performs network/file IO.
+The browser only transports ZIP bytes to this API; it has no archive-specific
+CacheStorage or service-worker route.
 
 ## Review fixes and trust boundaries
 
