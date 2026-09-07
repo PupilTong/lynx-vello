@@ -391,16 +391,16 @@ fn a_booted_view_commits_and_publishes() {
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
-/// Terminal notifications remain observable while a resource future is pending.
+/// A terminal event cancels an outstanding completion before the host releases it.
 #[test]
 fn failure_during_pending_fetch_is_delivered_by_pump() {
     let (mut painter, main) = detached();
-    main.notify
-        .send(ToPainter::RequestSource(crate::view::SourceRequest::Entry(
-            "app:///main.js".to_owned(),
-        )));
-    assert!(painter.pump().is_empty());
-    assert!(painter.sources.is_pending());
+    let completion = crate::resource::SourceCompletion::new(
+        painter.link.commands.clone(),
+        painter.link.view,
+        Arc::clone(&painter.link.control),
+    );
+    assert!(!completion.is_cancelled());
     main.notify
         .send(ToPainter::Engine(EngineEvent::StartupFailed(
             crate::view::EngineError::Thread {
@@ -411,9 +411,11 @@ fn failure_during_pending_fetch_is_delivered_by_pump() {
         )));
     let events = painter.pump();
     assert!(matches!(events.as_slice(), [EngineEvent::StartupFailed(_)]));
+    assert!(completion.is_cancelled());
+    drop(completion);
     assert!(
-        !painter.sources.is_pending(),
-        "the pending future is cancelled"
+        main.try_recv().is_err(),
+        "cancellation reports no second failure"
     );
     assert!(painter.pump().is_empty(), "failure is delivered once");
 }

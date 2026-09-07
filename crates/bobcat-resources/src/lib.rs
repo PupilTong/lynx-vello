@@ -34,9 +34,9 @@
 //! hands [`Resources::builder`] to [`bobcat_core::LynxGroup::create_lynx_view`], which
 //! turns it into the per-view [`ViewResources`] that implements the
 //! protocol and carries that view's [`ImageReports`]. Loads complete on
-//! worker threads (or as browser tasks) and are delivered through the
-//! wakeup the embedder supplies at construction; the painter's next turn
-//! applies them.
+//! worker threads (or as browser tasks). Images wake the painter to service
+//! reports; source completions send directly to main through the concrete
+//! handle supplied with each request.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -67,6 +67,7 @@ mod images;
 pub mod mime;
 pub mod preprocess;
 mod registry;
+mod sources;
 pub mod transport;
 
 pub use crate::executor::Wakeup;
@@ -616,6 +617,14 @@ fn metadata(
 }
 
 impl ResourceFetcher for ViewResources {
+    fn request_source(
+        &self,
+        request: bobcat_core::resource::SourceRequest,
+        completion: bobcat_core::resource::SourceCompletion,
+    ) {
+        sources::request(&self.resources, request, completion);
+    }
+
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         matches!(
             capability,

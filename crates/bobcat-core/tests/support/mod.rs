@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    CacheStatus, RequestId, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata,
+    CachePolicy, CacheStatus, LoadedSource, RequestContext, RequestId, ResolveRequest,
+    ResolvedLocator, ResourceCapability, ResourceDescriptor, ResourceError, ResourceErrorKind,
+    ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata, ResourcePriority,
     ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
-    StyleSheetPayload, StyleSheetResponse,
+    SourceCompletion, SourceRequest, StyleSheetPayload, StyleSheetResponse, StyleSheetSource,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
@@ -203,37 +204,34 @@ impl FetcherDouble {
     }
 }
 
-impl ResourceFetcher for FetcherDouble {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.capabilities.contains(&capability)
-    }
-
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
+impl FetcherDouble {
+    fn style_sheet_response(&self, request: ResourceRequest) -> StyleSheetResponse {
         self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
         if let Some(sheet) = self.style_sheet.clone() {
             let metadata = self.metadata(request.resource.clone(), request.context.id);
-            return Ok(StyleSheetResponse {
+            return StyleSheetResponse {
                 metadata,
                 payload: StyleSheetPayload::Preparsed(sheet),
-            });
+            };
         }
         if let Some(bytes) = self.style_sheet_text.clone() {
             let mut metadata = self.metadata(request.resource, request.context.id);
             metadata.content_length = Some(bytes.len() as u64);
-            return Ok(StyleSheetResponse {
+            return StyleSheetResponse {
                 metadata,
                 payload: StyleSheetPayload::Text(Bytes::from(bytes)),
-            });
+            };
         }
         // No dedicated sheet registered, so behave like a host that only
         // moves bytes: run the trait's own default.
-        bobcat_core::resource::fetch_style_sheet_as_text(self, request).await
+        let response = self.resource_response(request);
+        StyleSheetResponse {
+            metadata: response.metadata,
+            payload: StyleSheetPayload::Text(response.bytes),
+        }
     }
 
-    async fn resolve_locator(
+    fn resolve_source_locator(
         &self,
         request: ResolveRequest,
     ) -> Result<ResolvedLocator, ResourceError> {
@@ -260,17 +258,104 @@ impl ResourceFetcher for FetcherDouble {
         })
     }
 
+    fn resource_response(&self, request: ResourceRequest) -> ResourceResponse {
+        self.fetches.fetch_add(1, Ordering::Relaxed);
+        let id = request.context.id;
+        let resource = request.resource;
+        ResourceResponse {
+            metadata: self.metadata(resource, id),
+            bytes: Bytes::from(self.bytes.clone()),
+        }
+    }
+
+    pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
+        // This in-memory test host completes inline.
+        let (specifier, style_sheet) = match request {
+            SourceRequest::StyleSheet(url) => (url, true),
+            SourceRequest::Entry(url) => (url, false),
+        };
+        let context = RequestContext {
+            id: RequestId {
+                namespace: 0,
+                sequence: self.resolve_count() as u64,
+            },
+            priority: ResourcePriority::Critical,
+        };
+        let resource = self.resolve_source_locator(ResolveRequest {
+            context: context.clone(),
+            resource: ResourceDescriptor {
+                specifier: specifier.into(),
+                base_url: None,
+            },
+            percent_decode: false,
+        })?;
+        let url = resource.url.to_string();
+        let request = ResourceRequest {
+            context,
+            resource,
+            headers: http::HeaderMap::new(),
+            cache_policy: CachePolicy::Default,
+        };
+        let bytes = if style_sheet {
+            match self.style_sheet_response(request).payload {
+                StyleSheetPayload::Preparsed(sheet) => {
+                    return Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)));
+                }
+                StyleSheetPayload::Text(bytes) => bytes,
+                _ => unreachable!("test host only returns text or pre-parsed sheets"),
+            }
+        } else {
+            self.resource_response(request).bytes
+        };
+        let source = std::str::from_utf8(&bytes)
+            .map_err(|error| {
+                if style_sheet {
+                    LynxViewError::InvalidStyleSheetEncoding {
+                        url: url.clone(),
+                        message: error.to_string(),
+                    }
+                } else {
+                    LynxViewError::InvalidScriptEncoding {
+                        url: url.clone(),
+                        message: error.to_string(),
+                    }
+                }
+            })?
+            .to_owned();
+        Ok(if style_sheet {
+            LoadedSource::StyleSheet(StyleSheetSource::Text(source))
+        } else {
+            LoadedSource::Entry { source, url }
+        })
+    }
+}
+
+impl ResourceFetcher for FetcherDouble {
+    fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
+        completion.complete(self.load_source(request));
+    }
+
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    async fn fetch_style_sheet(
+        &self,
+        request: ResourceRequest,
+    ) -> Result<StyleSheetResponse, ResourceError> {
+        Ok(self.style_sheet_response(request))
+    }
+    async fn resolve_locator(
+        &self,
+        request: ResolveRequest,
+    ) -> Result<ResolvedLocator, ResourceError> {
+        self.resolve_source_locator(request)
+    }
     async fn fetch_resource(
         &self,
         request: ResourceRequest,
     ) -> Result<ResourceResponse, ResourceError> {
-        self.fetches.fetch_add(1, Ordering::Relaxed);
-        let id = request.context.id;
-        let resource = request.resource;
-        Ok(ResourceResponse {
-            metadata: self.metadata(resource, id),
-            bytes: Bytes::from(self.bytes.clone()),
-        })
+        Ok(self.resource_response(request))
     }
 
     fn request_image(&self, source: &str) {

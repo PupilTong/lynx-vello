@@ -11,7 +11,6 @@
 mod gesture;
 mod graphics;
 pub(crate) mod images;
-mod sources;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod animation_tests;
@@ -25,7 +24,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::Waker;
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant as ClockInstant;
@@ -49,11 +47,12 @@ use crate::main::tree::LynxDocument;
 use crate::main::tree::Viewport;
 #[cfg(test)]
 use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
+use crate::resource::{SourceCompletion, SourceRequest};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, SourceRequest, ToMain,
-    ToPainter, ViewId, frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter,
+    ViewId, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DetachedLink, NoWakeup, detached_link};
@@ -149,8 +148,6 @@ pub(crate) struct PainterLink {
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
     source_request: Option<SourceRequest>,
-    resources_failed: bool,
-    resource_waker: Waker,
     control: Arc<crate::main::StartupControl>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// Coalesces announcements during a normal drain or offscreen frame wait.
@@ -163,7 +160,6 @@ impl PainterLink {
         commands: Sender<ToMain>,
         notifications: Rc<Mailbox<ToPainter>>,
         frames: Arc<FrameHub>,
-        resource_waker: Waker,
         control: Arc<crate::main::StartupControl>,
     ) -> Self {
         notifications.register(view);
@@ -180,8 +176,6 @@ impl PainterLink {
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
             source_request: None,
-            resources_failed: false,
-            resource_waker,
             control,
             pending_announce: false,
         }
@@ -226,7 +220,7 @@ impl PainterLink {
                     event,
                     EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
                 ) {
-                    self.resources_failed = true;
+                    self.control.cancel();
                 }
                 self.events.push(event);
             }
@@ -301,7 +295,7 @@ impl PainterLink {
         let deadline = ClockInstant::now() + timeout;
         self.sync();
         while self.begin_frames_serviced < seq
-            && !self.resources_failed
+            && !self.control.is_cancelled()
             && ClockInstant::now() < deadline
         {
             if !self.notifications.wait_view(deadline) {
@@ -428,7 +422,6 @@ pub(crate) struct Painter<F> {
     refill_requested_for: Option<u64>,
     /// The whole image resource system. Owned here and nowhere else.
     images: images::PainterImages<F>,
-    sources: sources::SourceLoads,
     thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -782,7 +775,7 @@ impl TestPainter {
     }
 }
 
-impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
+impl<F: crate::resource::ResourceFetcher> Painter<F> {
     pub(super) fn with_output<B>(
         viewport: Viewport,
         frame_size: FrameSize,
@@ -811,7 +804,6 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
             composed_scene: Scene::new(),
             refill_requested_for: None,
             images: images::PainterImages::new(resources),
-            sources: sources::SourceLoads::new(),
             thread_bound: PhantomData,
         }
     }
@@ -829,16 +821,18 @@ impl<F: crate::resource::ResourceFetcher + 'static> Painter<F> {
     /// unasked, and the frame that needed those images would never arrive.
     fn sync(&mut self) {
         self.link.sync();
-        if self.link.resources_failed || self.link.notifications.is_disconnected() {
-            self.sources.cancel();
+        if self.link.control.is_cancelled() || self.link.notifications.is_disconnected() {
+            self.link.control.cancel();
             self.link.source_request = None;
-        } else {
-            if let Some(request) = self.link.source_request.take() {
-                self.sources.request(self.images.store(), request);
-            }
-            if let Some(source) = self.sources.poll(&self.link.resource_waker) {
-                self.link.send(ToMain::SourceLoaded { source });
-            }
+        } else if let Some(request) = self.link.source_request.take() {
+            self.images.store().request_source(
+                request,
+                SourceCompletion::new(
+                    self.link.commands.clone(),
+                    self.link.view,
+                    Arc::clone(&self.link.control),
+                ),
+            );
         }
         self.service_images();
     }

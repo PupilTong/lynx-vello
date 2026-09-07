@@ -189,25 +189,28 @@ useful signal for currently-compatible versions of those libraries.
   Construction returns a loading view once the painter and draw target exist.
   `bobcat-main` creates the document, registers fonts, and requests each stylesheet
   in cascade order followed by the entry module. The painter services these
-  requests and images in ordinary `pump` turns. Buffered resource futures stay
-  on the calling thread; their wakers use the group's `EventRequester` to request
-  another turn. Loaded sources or errors return to main through the link.
+  requests and images in ordinary `pump` turns. `ResourceFetcher::request_source`
+  owns URL resolution, fetching and UTF-8 validation. Its concrete, non-cloneable
+  `SourceCompletion` sends the loaded source or error directly to main's group FIFO;
+  no resource Future, poll loop, callback trait object or resource waker lives in core.
+  Main's lifecycle notifications still wake the host through `EventRequester`.
   Main mounts each sheet and boots the entry in its QuickJS realm. Success is
   `ScriptFinished`; resource, font, realm, or boot failure is `StartupFailed`.
   Constructor errors cover metrics, attachment and draw-target setup only.
   Cancelling an unresolved constructor releases its partial attachment and target.
-  Dropping a loading view cancels pending resource work on the calling thread
-  and stops that view before QuickJS begins; synchronous JavaScript already
-  executing is allowed to finish. The group and other views keep running.
+  Dropping a loading view marks source work cancelled and stops that view before
+  QuickJS begins. Fetchers skip cancelled queued work; IO or synchronous JavaScript
+  already executing may finish, and late source results are discarded. The group
+  and other views keep running.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
   the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
   Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
-  responsibilities; core validates the entry module's source as UTF-8, registers
+  responsibilities; the fetcher supplies validated source text, and core registers
   its resolved URL in QuickJS's preloaded ESM graph. Construction does not wait
   for boot; its outcome arrives through `pump`. The protocol's
-  `fetch_style_sheet` answers with either
+  `request_source` answers stylesheet requests with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
   itself, since a `.web.bundle` ships CSS a build step already tokenized and
   re-serializing it to a sheet blob is the startup cost the design rules out.
@@ -217,11 +220,11 @@ useful signal for currently-compatible versions of those libraries.
   the floor, because the wire format keeps attribute selectors and functional
   pseudo-classes as text and stylo builds specified values only through its
   value parsers. Decoding a container stays embedder work: core owns the
-  `PreparsedStyleSheet` vocabulary, and the embedder fills it. A request
-  carries a specifier plus its optional base URL, not a semantic resource kind
-  or transport hints: the embedder locates bytes by normalized resolved URL,
-  while `fetch_style_sheet` selects the stylesheet payload contract. Other
-  buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
+  `PreparsedStyleSheet` vocabulary, and the embedder fills it. Source requests
+  select a stylesheet or entry payload and carry a specifier; the fetcher supplies
+  the base URL and transport policy. The lower-level embedder byte API retains
+  `resolve_locator`, `fetch_resource` and `fetch_style_sheet`; core startup no
+  longer calls them. A `ResourceRequest` carries no
   response-size limit; each fetcher owns the memory bound for the response it
   materializes. Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
@@ -856,8 +859,9 @@ useful signal for currently-compatible versions of those libraries.
   resource provider, registered font containers, selected default font family,
   and Stylo worker *count* are the renderer's own, reapplied to each group it
   builds; the workers themselves belong to the group and retire when it is
-  dropped, and a load clears the registered script and stylesheet bytes once
-  copied. Every style Worker is a managed one: the Render Worker is not a pool
+  dropped. Registered script and stylesheet bytes remain available until the
+  startup outcome arrives; cleanup leaves ZIP assets and the next page's staged
+  sources intact. Every style Worker is a managed one: the Render Worker is not a pool
   member and neither is the view's Lynx-main Worker, which enters traversal
   from outside the pool so Stylo transfers its root closure onto a managed
   worker. `BobcatRenderer::create` therefore takes a count of one to

@@ -35,11 +35,11 @@ use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
 use crate::mailbox::{Mailbox, Sender};
+use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError,
-    MainSources, SourceRequest, StyleSheetSource, StyleThreads, ToMain, ToPainter, ViewId,
-    Viewport, frame_slot,
+    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, LynxViewError, MainSources,
+    StyleThreads, ToMain, ToPainter, ViewId, Viewport, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DETACHED_VIEW, DetachedLink};
@@ -66,7 +66,7 @@ impl StartupControl {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -562,6 +562,12 @@ struct CarriedView<R: EventRequester> {
     /// The newest `BeginFrame` this round has serviced, acknowledged in the
     /// round's tail.
     serviced_begin_frame: Option<u64>,
+}
+
+impl<R: EventRequester> Drop for CarriedView<R> {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
 }
 
 impl<R: EventRequester> CarriedView<R> {

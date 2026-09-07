@@ -15,7 +15,6 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::task::{Wake, Waker};
 
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
@@ -29,9 +28,8 @@ use crate::main::tree::PageConfig;
 use crate::main::{GroupHome, GroupLink, StartupControl, ToPainterSender, spawn_group};
 pub use crate::paint::WindowTarget;
 use crate::paint::{Output, Painter, PainterLink};
-use crate::resource::ResourceFetcher;
+use crate::resource::{LoadedSource, ResourceFetcher, SourceRequest};
 use crate::script::ScriptError;
-use crate::style::PreparsedStyleSheet;
 
 /// View metrics, copied across the view's one thread boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -409,22 +407,6 @@ struct GroupInner {
     /// name.
     next_view: Cell<u64>,
     home: GroupHome,
-    resource_waker: Waker,
-}
-
-struct EventWaker<R>(Arc<R>);
-
-impl<R: EventRequester> Wake for EventWaker<R> {
-    fn wake(self: Arc<Self>) {
-        self.0.request_event();
-    }
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.request_event();
-    }
-}
-
-fn event_waker<R: EventRequester>(requester: Arc<R>) -> Waker {
-    Waker::from(Arc::new(EventWaker(requester)))
 }
 
 impl GroupInner {
@@ -473,7 +455,6 @@ impl LynxGroup {
         let (commands, command_receiver) = Mailbox::channel();
         let (notifications, notification_receiver) = Mailbox::channel();
         let (ready, started) = flume::bounded(1);
-        let resource_waker = event_waker(Arc::clone(&event_requester));
         let home = spawn_group(
             style_threads,
             GroupLink {
@@ -490,7 +471,6 @@ impl LynxGroup {
                 commands,
                 notifications: Rc::new(notification_receiver),
                 next_view: Cell::new(0),
-                resource_waker,
                 home,
             }),
         };
@@ -508,17 +488,17 @@ impl LynxGroup {
     /// Builds the draw target and returns a loading view on the calling thread.
     ///
     /// Main requests each stylesheet in cascade order, then the entry module.
-    /// Ordinary [`LynxView::pump`] turns drive the fetcher's futures; their wakers
-    /// request another host turn through the group's [`EventRequester`]. Boot
+    /// Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher, which
+    /// resolves, loads and decodes them and completes directly into main's FIFO. Boot
     /// completion is [`EngineEvent::ScriptFinished`], and loading, configuration,
     /// or boot failure is [`EngineEvent::StartupFailed`].
     ///
     /// Dropping the unresolved constructor releases its target and attachment.
-    /// Dropping a loading view also cancels its pending resource future on the
-    /// calling thread and prevents boot from entering `QuickJS`. Synchronous
-    /// JavaScript already executing is allowed to finish. Other views continue.
-    /// The fetcher must own its data (`'static`), since a pending resource future
-    /// can outlive the painter turn that started it; it needs no `Send` or `Sync`.
+    /// Dropping a loading view marks its source work cancelled and prevents boot
+    /// from entering `QuickJS`. An IO operation or synchronous JavaScript already
+    /// executing may finish; late source results are discarded. Other views continue.
+    /// The fetcher needs neither `Send`, `Sync`, nor `'static`; only the concrete
+    /// source completion and the fetcher's own job inputs leave this thread.
     ///
     /// # Errors
     ///
@@ -534,7 +514,7 @@ impl LynxGroup {
         sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
-        F: ResourceFetcher + 'static,
+        F: ResourceFetcher,
         B: FnOnce(dom::ImageReports) -> F,
     {
         let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
@@ -553,7 +533,6 @@ impl LynxGroup {
             view,
             &self.inner.commands,
             Rc::clone(&self.inner.notifications),
-            self.inner.resource_waker.clone(),
             Arc::clone(&control),
         );
         // The attachment goes first and the sources follow it on the same
@@ -657,7 +636,7 @@ impl<F> Drop for LynxView<F> {
     }
 }
 
-impl<F: ResourceFetcher + 'static> LynxView<F> {
+impl<F: ResourceFetcher> LynxView<F> {
     /// Routes one normalized OS input event against the frame the painter
     /// last read.
     pub fn dispatch_input(&mut self, event: InputEvent) {
@@ -782,7 +761,7 @@ struct ViewStartup<F> {
     control: Arc<StartupControl>,
 }
 
-impl<F: ResourceFetcher + 'static> ViewStartup<F> {
+impl<F: ResourceFetcher> ViewStartup<F> {
     fn finish(mut self) -> LynxView<F> {
         LynxView {
             painter: self.painter.take().expect("startup owns the painter"),
@@ -804,8 +783,8 @@ impl<F> Drop for ViewStartup<F> {
         // Then the goodbye, which the group's thread answers by releasing
         // this view and nothing else. Either the painter holds the sender,
         // or — if the draw target failed before one existed — the bare link
-        // still does. Pending resource futures die with the painter, on this
-        // thread, which is the thread that created them.
+        // still does. The fetcher sees cancellation before the painter releases it;
+        // any completion still owned by an IO job discards its late result.
         if let Some(painter) = self.painter.as_mut() {
             painter.shutdown();
         } else if let Some(link) = self.link.as_ref() {
@@ -872,30 +851,6 @@ pub(crate) enum ToMain {
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
 }
 
-/// A stylesheet in the one shape the document mounts.
-///
-/// Text arrives as `String` rather than bytes: UTF-8 validation happens on
-/// the painter, where the resolved URL the error has to name is in hand.
-#[derive(Debug)]
-pub(crate) enum StyleSheetSource {
-    Preparsed(Arc<PreparsedStyleSheet>),
-    Text(String),
-}
-
-/// A source, resolved and decoded by the thread that owns the fetcher.
-#[derive(Debug)]
-pub(crate) enum LoadedSource {
-    StyleSheet(StyleSheetSource),
-    Entry { source: String, url: String },
-}
-
-/// One buffered source requested by the document owner.
-#[derive(Debug)]
-pub(crate) enum SourceRequest {
-    StyleSheet(String),
-    Entry(String),
-}
-
 /// Lynx main → painter: everything the main thread has to say back.
 #[derive(Debug)]
 pub(crate) enum ToPainter {
@@ -923,7 +878,6 @@ fn view_link(
     view: ViewId,
     commands: &Sender<ToMain>,
     notifications: Rc<Mailbox<ToPainter>>,
-    resource_waker: Waker,
     control: Arc<StartupControl>,
 ) -> (PainterLink, Arc<FrameHub>) {
     let frames = Arc::new(FrameHub::new(None));
@@ -932,7 +886,6 @@ fn view_link(
         commands.clone(),
         notifications,
         Arc::clone(&frames),
-        resource_waker,
         control,
     );
     (painter, frames)
@@ -975,7 +928,6 @@ pub(crate) fn detached_link<R: EventRequester>(
         DETACHED_VIEW,
         &commands,
         Rc::new(notification_receiver),
-        event_waker(Arc::clone(&requester)),
         Arc::new(StartupControl::default()),
     );
     // The local sender goes here: the painter holds the only clone, so the

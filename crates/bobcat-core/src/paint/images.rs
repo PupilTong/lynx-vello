@@ -5,7 +5,7 @@
 //! holds names and load states; it never sees a store, a buffer or a
 //! `peniko::ImageData`, and no channel between the two can carry one.
 //!
-//! The concrete store is held in an `Rc` shared with pending buffered loads.
+//! The concrete store is owned by value.
 //! It never leaves this thread and needs neither `Send` nor `Sync` —
 //! which is what lets a wasm store hold browser objects directly. Nor does the
 //! handle it reports through: every type on this path is a concrete,
@@ -19,7 +19,6 @@
 //! that will actually load images — does not use, since its decode callbacks
 //! land on the painter's own event loop.
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::vello::peniko::ImageData;
@@ -41,7 +40,7 @@ use crate::resource::ResourceFetcher;
 /// frame that scrolls, and a slice index costs nothing where a URL hash would
 /// have cost a lookup per draw per frame.
 pub(crate) struct PainterImages<F> {
-    store: Rc<F>,
+    store: F,
     inbox: ImageInbox,
     /// The commit the table was built for.
     key: Option<u64>,
@@ -81,7 +80,7 @@ impl<F: ResourceFetcher> PainterImages<F> {
         B: FnOnce(ImageReports) -> F,
     {
         let (reports, inbox) = ImageInbox::new();
-        let store = Rc::new(build(reports));
+        let store = build(reports);
         Self {
             store,
             inbox,
@@ -92,8 +91,8 @@ impl<F: ResourceFetcher> PainterImages<F> {
     }
 
     /// The host's resource system, for the startup loads that need it.
-    pub(crate) fn store(&self) -> Rc<F> {
-        Rc::clone(&self.store)
+    pub(crate) fn store(&self) -> &F {
+        &self.store
     }
 
     /// Names every source the document asked about, starting whatever load

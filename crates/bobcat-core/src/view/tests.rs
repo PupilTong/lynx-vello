@@ -23,7 +23,6 @@ fn links() -> Links {
             view,
             &commands,
             Rc::clone(&inbox),
-            event_waker(Arc::clone(&requester)),
             Arc::new(StartupControl::default()),
         );
         let notify =

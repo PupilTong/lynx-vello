@@ -4,16 +4,13 @@
 mod support;
 
 use std::future::Future;
-use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use bobcat_core::resource::{
     ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
-    ResourceRequest, ResourceResponse,
+    ResourceRequest, ResourceResponse, SourceCompletion, SourceRequest,
 };
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
@@ -25,54 +22,9 @@ impl EventRequester for HostWakeup {
     }
 }
 
-/// Identifies the calling thread, which owns each fetch and continuation.
+/// Identifies where a source is requested, completed or cancelled.
 fn thread_tag() -> String {
     format!("{:?}", std::thread::current().id())
-}
-
-struct HopState {
-    resume: flume::Receiver<()>,
-    ready: AtomicBool,
-    started: AtomicBool,
-    waker: Mutex<Option<Waker>>,
-    records: Arc<Mutex<Vec<(String, String)>>>,
-}
-
-struct ThreadHop {
-    state: Arc<HopState>,
-}
-
-impl Future for ThreadHop {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        self.state
-            .records
-            .lock()
-            .expect("thread records")
-            .push(("poll".to_owned(), thread_tag()));
-        if self.state.ready.load(Ordering::Acquire) {
-            return Poll::Ready(());
-        }
-        *self.state.waker.lock().expect("hop waker") = Some(context.waker().clone());
-        if !self.state.started.swap(true, Ordering::AcqRel) {
-            let state = Arc::clone(&self.state);
-            std::thread::Builder::new()
-                .name("fetch-io".to_owned())
-                .spawn(move || {
-                    state
-                        .resume
-                        .recv()
-                        .expect("the host releases IO after pump returns");
-                    state.ready.store(true, Ordering::Release);
-                    if let Some(waker) = state.waker.lock().expect("hop waker").take() {
-                        waker.wake();
-                    }
-                })
-                .expect("IO worker starts");
-        }
-        Poll::Pending
-    }
 }
 
 struct ThreadedFetcher {
@@ -105,34 +57,32 @@ impl ResourceFetcher for ThreadedFetcher {
         self.base.supports_capability(capability)
     }
 
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        self.record("resolve");
-        self.base.resolve_locator(request).await
+    fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
+        self.record("request");
+        let result = self.base.load_source(request);
+        let resume = self.resume.clone();
+        let records = Arc::clone(&self.records);
+        std::thread::spawn(move || {
+            resume.recv().expect("host releases IO");
+            records
+                .lock()
+                .expect("thread records")
+                .push(("complete".to_owned(), thread_tag()));
+            completion.complete(result);
+        });
     }
 
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        self.record("fetch");
-        let response = std::pin::pin!(self.base.fetch_resource(request));
-        let state = Arc::new(HopState {
-            resume: self.resume.clone(),
-            ready: AtomicBool::new(false),
-            started: AtomicBool::new(false),
-            waker: Mutex::new(None),
-            records: Arc::clone(&self.records),
-        });
-        ThreadHop { state }.await;
-        response.await
+    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
+        panic!("core must not resolve sources")
+    }
+
+    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
+        panic!("core must not poll resource futures")
     }
 }
 
 #[tokio::test]
-async fn resource_continuations_stay_on_the_painter() {
+async fn resource_completion_reaches_main_without_another_painter_turn() {
     let (wake, awakened) = flume::unbounded();
     let (release, resume) = flume::bounded(1);
     let records = Arc::new(Mutex::new(Vec::new()));
@@ -165,6 +115,14 @@ async fn resource_continuations_stay_on_the_painter() {
         awakened.try_recv().is_err(),
         "no other main notification can wake the next turn"
     );
+    for _ in 0..64 {
+        assert!(view.pump().is_empty());
+    }
+    assert_eq!(
+        records.lock().expect("thread records").len(),
+        1,
+        "idle pumps never poll or restart IO"
+    );
     release
         .send(())
         .expect("release the resource on its IO thread");
@@ -185,54 +143,21 @@ async fn resource_continuations_stay_on_the_painter() {
         }
     }
     let records = records.lock().expect("thread records");
-    assert!(
-        records.iter().any(|(phase, _)| phase == "resolve"),
-        "the locator was resolved"
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0], ("request".to_owned(), thread_tag()));
+    assert_eq!(records[1].0, "complete");
+    assert_ne!(
+        records[1].1,
+        thread_tag(),
+        "completion runs on the fetcher's IO thread"
     );
-    assert!(
-        records.iter().filter(|(phase, _)| phase == "poll").count() >= 2,
-        "the resource future yielded and resumed"
-    );
-    // The inversion this change is for: the fetcher belongs to the painter,
-    // which is the thread that created the group. `bobcat-main` owns no
-    // fetcher and awaits nothing — it asks for a source by message and is
-    // answered by one.
-    let painter = thread_tag();
-    assert!(
-        records.iter().all(|(_, owner)| *owner == painter),
-        "every fetch call and continuation belongs to the painter: {records:?}"
-    );
-    drop(records);
-}
-
-struct PendingResource {
-    started: Option<tokio::sync::oneshot::Sender<()>>,
-    dropped: Option<flume::Sender<String>>,
-}
-
-impl Future for PendingResource {
-    type Output = Result<ResourceResponse, bobcat_core::resource::ResourceError>;
-
-    fn poll(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(started) = self.started.take() {
-            let _ = started.send(());
-        }
-        Poll::Pending
-    }
-}
-
-impl Drop for PendingResource {
-    fn drop(&mut self) {
-        if let Some(dropped) = self.dropped.take() {
-            let _ = dropped.send(thread_tag());
-        }
-    }
 }
 
 struct PendingFetcher {
     base: FetcherDouble,
     started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     dropped: Mutex<Option<flume::Sender<String>>>,
+    pending: Mutex<Option<SourceCompletion>>,
 }
 
 impl bobcat_core::FrameImages for PendingFetcher {
@@ -250,22 +175,33 @@ impl ResourceFetcher for PendingFetcher {
         self.base.supports_capability(capability)
     }
 
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        self.base.resolve_locator(request).await
+    fn request_source(&self, _request: SourceRequest, completion: SourceCompletion) {
+        *self.pending.lock().expect("pending completion") = Some(completion);
+        if let Some(started) = self.started.lock().expect("start signal").take() {
+            let _ = started.send(());
+        }
     }
 
-    async fn fetch_resource(
-        &self,
-        _request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        // Bound first: the guards must drop before the await, not live to the
-        // end of the whole expression.
-        let started = self.started.lock().expect("start signal").take();
-        let dropped = self.dropped.lock().expect("drop signal").take();
-        PendingResource { started, dropped }.await
+    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
+        panic!("core must not resolve sources")
+    }
+
+    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
+        panic!("core must not poll resource futures")
+    }
+}
+
+impl Drop for PendingFetcher {
+    fn drop(&mut self) {
+        if let Some(completion) = self.pending.get_mut().expect("pending completion").take() {
+            assert!(
+                completion.is_cancelled(),
+                "view cancellation precedes releasing the fetcher"
+            );
+        }
+        if let Some(dropped) = self.dropped.get_mut().expect("drop signal").take() {
+            let _ = dropped.send(thread_tag());
+        }
     }
 }
 
@@ -333,6 +269,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         started: Mutex::new(Some(started_sender)),
         dropped: Mutex::new(Some(dropped_sender)),
+        pending: Mutex::new(None),
     });
     let fetcher_weak = Rc::downgrade(&fetcher);
     let requester = Arc::new(DropObservedRequester);
@@ -366,13 +303,11 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     view.tick(false).expect("tick while loading");
     drop(view);
 
-    // The pending future dies on the thread that created it — the painter,
-    // which is this one — because dropping the construction drops the painter
-    // that owns the fetcher.
+    // Cancellation is visible before the painter releases its concrete fetcher.
     assert_eq!(
         dropped
             .recv()
-            .expect("cancellation drops the resource future"),
+            .expect("cancellation releases the source completion"),
         thread_tag()
     );
     assert!(
@@ -452,17 +387,19 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 .expect("group");
         let (started_sender, mut started) = tokio::sync::oneshot::channel();
         let (dropped_sender, dropped) = flume::unbounded();
+        let fetcher = Rc::new(PendingFetcher {
+            base: FetcherDouble::new(Vec::new()),
+            started: Mutex::new(Some(started_sender)),
+            dropped: Mutex::new(Some(dropped_sender)),
+            pending: Mutex::new(None),
+        });
         let mut pending = group
             .create_lynx_view(
                 32.0,
                 24.0,
                 1.0,
                 DrawTarget::Offscreen,
-                |_| PendingFetcher {
-                    base: FetcherDouble::new(Vec::new()),
-                    started: Mutex::new(Some(started_sender)),
-                    dropped: Mutex::new(Some(dropped_sender)),
-                },
+                |_| Rc::clone(&fetcher),
                 ViewSources::new("pending.js"),
             )
             .await
@@ -486,7 +423,14 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             .await
             .expect("sibling view");
         wait_for_script(&mut sibling).expect("sibling boots while first fetch stays pending");
+        let completion = fetcher.pending.lock().unwrap().take().unwrap();
         drop(pending);
+        assert!(completion.is_cancelled());
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+            source: "throw new Error('late source must not run')".into(),
+            url: "app:///late.js".into(),
+        }));
+        drop(fetcher);
         assert_eq!(
             dropped.recv().expect("pending fetch cancelled"),
             thread_tag()

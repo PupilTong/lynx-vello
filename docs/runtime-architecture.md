@@ -201,32 +201,40 @@ returns a loading view. Only metrics, attachment and target failures are returne
 by construction.
 
 Main registers fonts, requests each author stylesheet in cascade order, mounts
-its response, and finally requests the entry. The painter polls the fetcher's
-resource futures during ordinary `pump` turns, alongside image servicing. A
-pending future owns an `Rc` of the same concrete fetcher used for images; its
-waker calls the group's `EventRequester`, and its continuation runs on the next
-host turn. Neither the fetcher nor its futures need `Send` or `Sync`. Main awaits
-no IO, so another view can boot or handle events while this view loads.
+its response, and finally requests the entry. In an ordinary `pump` turn the
+painter calls `ResourceFetcher::request_source` with a concrete `SourceCompletion`.
+The fetcher resolves the URL, fetches bytes and validates UTF-8, or supplies a
+pre-parsed stylesheet. Completion consumes the handle and sends directly into the
+existing `Mailbox<ToMain>`, waking main without another painter turn. The handle
+contains a concrete sender, `ViewId` and the existing cancellation flag: no erased
+callback, retained resource Future, `SourceLoads` or `EventWaker` is needed. The
+fetcher itself is owned by value and needs neither `Send`, `Sync` nor `'static`.
+The reference fetcher queues a concrete source job on its native pool, or starts
+a browser task on Wasm. Main awaits no IO, so another view can boot or handle
+events while this view loads.
 
 The response carries a loaded source or error. Main owns the boot outcome:
 `ScriptFinished` reports success; `StartupFailed(LynxViewError)` reports resource,
 encoding, font, realm or boot failure exactly once through `pump`. Main requests
 no further sources after failure. Its resolved entry URL is the module specifier.
 `ScriptRunError` reports fatal runtime failure; listener and timer failures stay
-non-fatal. Every main notification and pending resource wake requests a host turn.
+non-fatal. Every main notification requests a host turn through `EventRequester`.
 There is no separate startup inbox consumer or await on the painter link.
 
 Dropping an unresolved constructor releases its attachment and target. Dropping
-a loading view also drops its pending resource future on the calling thread and
-cancels its boot before QuickJS begins. JavaScript already executing may finish.
-Other views and their group remain alive; the last group/view handle joins main.
+a loading view marks its source work cancelled before releasing the fetcher and
+prevents boot before QuickJS begins. A fetcher checks the completion handle before
+queued IO and after IO, skipping unnecessary decoding. IO and JavaScript already
+executing may finish; cancelled completions are discarded. Dropping an unanswered
+completion for a live view reports a resource failure, including when a worker
+exits before answering. Other views and their group remain alive; the last
+group/view handle joins main.
 
-Requests carry a specifier plus its optional base URL, not a semantic
-resource kind or transport hints. The embedder locates bytes by normalized
-resolved URL; `fetch_style_sheet` selects the stylesheet payload contract.
-Other buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
-response-size limit; each fetcher owns the memory bound for the response it
-materializes.
+Source requests select an entry or stylesheet payload and carry a specifier;
+the fetcher owns base URL and transport policy. Embedders can still use the
+lower-level `resolve_locator`, `fetch_resource` and `fetch_style_sheet` API;
+core startup no longer calls it. A `ResourceRequest` carries no response-size
+limit; each fetcher owns the bound for the response it materializes.
 
 Each group owns `Mailbox<ToMain>` and `Mailbox<ToPainter>`, two instances of
 one addressed FIFO implementation. Both carry `(Option<ViewId>, M)`, with
