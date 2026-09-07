@@ -62,6 +62,15 @@ CSS supplied as text.
   invalidates no retained frame: what it frees was not rendered.
   Stylesheet and device operations schedule the document root in the same call.
   Embedders cannot set, clear, or query internal traversal dirty state.
+- **Attribute-derived styles have their own cascade origin.**
+  `Document::set_presentational_hint` updates an optional per-element
+  `Arc<Locked<PropertyDeclarationBlock>>`, using the same property parser as
+  inline style. `TElement::synthesize_presentational_hints_for_legacy_attributes`
+  contributes that block at Stylo's `CascadeOrigin::PresHints`, below author
+  rules and above normal user rules. Updates re-match the element; Stylo's
+  existing sharing checks compare its hints. The block never serializes into
+  `style`, so replacing inline declarations cannot erase attribute-derived
+  values. Attribute interpretation remains embedder policy.
 - **Payloads are opaque.** The payload arena retains the `T` supplied for
   each element/text node, and `Node<T>::payload` exposes a shared reference.
   The DOM core neither mutates the payload nor derives selector-visible state
@@ -165,7 +174,8 @@ What that covers, and what it does not:
 
 - Lynx page defaults (`display: linear`, border-box, hidden overflow) are
   installed as a UA stylesheet, under the `defaultDisplayLinear` and
-  `defaultOverflowVisible` page-config switches;
+  `defaultOverflowVisible` page-config switches; `page` supplies the inherited
+  `font-family: sans-serif` default at UA origin;
 - view metrics and touch-first device construction (`Viewport::device`);
 - Lynx element identity as the DOM `NodeId`, with no separate id space; the
   native host boundary validates live IDs and mutation preconditions so

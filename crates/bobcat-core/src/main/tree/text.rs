@@ -9,8 +9,8 @@ use dom::NodeId;
 
 use super::LynxDocument;
 
-/// Reflects paragraph-limit attributes into ordinary inline CSS. A later
-/// style replacement or an author declaration can override these values.
+/// Reflects paragraph-limit attributes into CSS presentational hints. Author
+/// declarations can override them without replacing the attribute's value.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -31,7 +31,7 @@ pub(crate) fn apply_attribute_style(
         _ => return,
     };
     let css = count.map_or_else(String::new, |count| (count as u32).to_string());
-    document.set_inline_style_property(element, property, &css);
+    document.set_presentational_hint(element, property, &css);
 }
 
 /// `XTextTruncation` reads both attributes with JavaScript `parseFloat`:
@@ -277,6 +277,33 @@ mod tests {
             assert_height(&mut document, text, height);
             assert_eq!(document.text_block_size(text).unwrap().width, width);
             assert_eq!(document.get(text).unwrap().attribute(attribute), Some("1"));
+        }
+    }
+
+    #[test]
+    fn author_css_overrides_text_attributes_and_removing_it_restores_the_hint() {
+        for (attribute, property, width, height) in [
+            (MAX_LINES, "--lynx-text-maxline", 60.0, 42.0),
+            (MAX_CHARS, "--lynx-text-maxlength", 40.0, 21.0),
+        ] {
+            let (mut document, text) = paragraph("abc def");
+            set_limit(&mut document, text, attribute, Some("1"));
+            document.add_class(text, "override");
+            document.add_stylesheet(
+                &format!("@layer limits {{ .override {{ {property}: 2; }} }}"),
+                dom::StylesheetOrigin::Author,
+            );
+            for value in [Some("1"), Some("3"), None, Some("1")] {
+                set_limit(&mut document, text, attribute, value);
+                assert_height(&mut document, text, height);
+                assert_eq!(document.text_block_size(text).unwrap().width, width);
+            }
+            document.remove_class(text, "override");
+            assert_height(&mut document, text, 21.0);
+            assert_eq!(
+                document.text_block_size(text).unwrap().width,
+                if attribute == MAX_LINES { 60.0 } else { 20.0 }
+            );
         }
     }
 

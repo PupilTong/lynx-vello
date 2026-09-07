@@ -190,7 +190,7 @@ Scope note: this is the spec for the `parley` integration — see `.claude/agent
 
 Implementation note (2026-09-06): `display: -lynx-text` flattens its subtree
 through `dom` into `hughie::text::block`, including atomic inline boxes.
-Core reflects `text-maxline` / `text-maxlength` into the inline custom properties
+Core reflects `text-maxline` / `text-maxlength` into the custom properties
 `--lynx-text-maxline` / `--lynx-text-maxlength`. Its UA stylesheet registers both
 with `<integer>` syntax and `inherits: false`; the initial values (`0` and `-1`)
 mean unlimited. `dom::layout::StyleView` reads their computed values through
@@ -198,10 +198,14 @@ mean unlimited. `dom::layout::StyleView` reads their computed values through
 for the establishing element's paragraph. Normal restyles and animation ticks
 compare the effective limits when refreshing the layout style snapshot and
 merge changes into layout damage, clearing box measurements through the existing
-invalidation path. Attribute writes require no special invalidation logic, and
-the original strings remain available to attribute selectors. Later inline
-style replacement or overriding CSS can replace the reflected limits; they are
-ordinary cascade inputs. No custom element or public paragraph-limit setter is
+invalidation path. Attribute-derived declarations use the generic
+`Document::set_presentational_hint` seam and a separate optional declaration
+block at Stylo's `CascadeOrigin::PresHints`. Updates schedule matching even
+when no selector mentions the attribute, and the original attribute strings
+remain available to selectors. Author CSS, including inline style, can override
+a limit; removing that override reveals the attribute's current value.
+Unrelated inline style replacement never removes these hints, and hints never
+appear in the `style` attribute. No custom element or public paragraph-limit setter is
 added. Shaped glyphs survive limit changes; both probes and commits use the same
 limits. CSS values receive integer validation, computation, and animation
 interpolation in Stylo; the attribute parser still normalizes Lynx's numeric

@@ -136,18 +136,18 @@ impl StyleEngine {
         &self.lock
     }
 
-    /// Applies one CSSOM-style property update to an inline declaration block.
+    /// Applies one CSSOM-style property update to a declaration block.
     ///
     /// Returning `None` means that the property name or value was invalid, or
     /// that the requested update would not change the declaration block. An
     /// empty value removes the property, matching
     /// `CSSStyleDeclaration.setProperty`.
-    pub(crate) fn update_inline_style_property(
+    pub(crate) fn update_style_property(
         &self,
         existing: Option<&Arc<Locked<PropertyDeclarationBlock>>>,
         property: &str,
         value: &str,
-    ) -> Option<(Option<Arc<Locked<PropertyDeclarationBlock>>>, String)> {
+    ) -> Option<PropertyDeclarationBlock> {
         let context = self.parser_context(CssRuleType::Style);
         let property = PropertyId::parse(property, &context).ok()?;
         let mut block = existing.map_or_else(PropertyDeclarationBlock::new, |existing| {
@@ -180,26 +180,21 @@ impl StyleEngine {
             block.update(source.drain(), Importance::Normal, &mut updates);
         }
 
-        let mut css = String::new();
-        block
-            .to_css(&mut css)
-            .expect("serializing a declaration block into a String cannot fail");
-        let block = (!block.is_empty()).then(|| Arc::new(self.lock.wrap(block)));
-        Some((block, css))
+        Some(block)
     }
 
     /// Builds a complete inline declaration block from a record of
     /// name/value pairs.
     ///
     /// This is the batch counterpart of
-    /// [`Self::update_inline_style_property`], for the setter whose semantics
+    /// [`Self::update_style_property`], for the setter whose semantics
     /// are a *replacement* rather than a mutation. Building from an empty
     /// block is what makes it linear: the per-property path has to clone and
     /// re-serialize the whole block for each declaration, so replaying a
     /// record of `n` declarations through it costs `O(n²)`.
     ///
     /// Each declaration is parsed exactly as
-    /// [`Self::update_inline_style_property`] parses one — a name that does
+    /// [`Self::update_style_property`] parses one — a name that does
     /// not resolve, or a value that does not parse, drops that declaration
     /// and nothing else. An empty value is skipped: `setProperty` with an
     /// empty value removes a property, and there is nothing here to remove.

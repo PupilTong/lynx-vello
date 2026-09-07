@@ -23,10 +23,12 @@ use stylo::context::{QuirksMode, SharedStyleContext};
 use stylo::data::{ElementDataMut, ElementDataRef, ElementDataWrapper};
 use stylo::dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot};
 use stylo::properties::PropertyDeclarationBlock;
+use stylo::rule_tree::{CascadeLevel, CascadeOrigin};
 use stylo::selector_parser::{AttrValue, Lang, NonTSPseudoClass, PseudoElement, SelectorImpl};
 use stylo::servo::animation::AnimationSetKey;
 use stylo::servo_arc::{Arc, ArcBorrow};
 use stylo::shared_lock::{Locked, SharedRwLock};
+use stylo::stylesheets::layer_rule::LayerOrder;
 use stylo::stylist::CascadeData;
 use stylo::values::computed::Display;
 use stylo::values::{AtomIdent, AtomString};
@@ -448,10 +450,17 @@ impl<'a, T: Sync> TElement for &'a Node<T> {
     fn synthesize_presentational_hints_for_legacy_attributes<V>(
         &self,
         _visited_handling: VisitedHandlingMode,
-        _hints: &mut V,
+        hints: &mut V,
     ) where
         V: Push<ApplicableDeclarationBlock>,
     {
+        if let Some(block) = &self.presentational_hints {
+            hints.push(ApplicableDeclarationBlock::from_declarations(
+                block.clone(),
+                CascadeLevel::new(CascadeOrigin::PresHints),
+                LayerOrder::root(),
+            ));
+        }
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::SelectorImpl>::BorrowedLocalName {

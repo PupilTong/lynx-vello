@@ -494,17 +494,50 @@ impl<T> Document<T> {
     /// Rust or wire-format property id.
     pub fn set_inline_style_property(&mut self, id: NodeId, property: &str, value: &str) {
         let existing = self.live_element(id).parsed_inline_style.clone();
-        let Some((block, css)) =
+        let Some(block) =
             self.style_engine()
-                .update_inline_style_property(existing.as_ref(), property, value)
+                .update_style_property(existing.as_ref(), property, value)
         else {
             return;
         };
 
+        let mut css = String::new();
+        block
+            .to_css(&mut css)
+            .expect("serializing a declaration block into a String cannot fail");
+        let block =
+            (!block.is_empty()).then(|| Arc::new(self.style_engine().shared_lock().wrap(block)));
         let base = self.begin_reactions();
         self.enqueue_attribute_changed(id, &STYLE, Some(&css));
         self.apply_inline_style_block(id, block, Some(css));
         self.drain_reactions(base);
+    }
+
+    /// Sets one attribute-derived CSS declaration at the
+    /// [presentational-hint origin](https://drafts.csswg.org/css-cascade-5/#preshint).
+    ///
+    /// Hints outrank normal UA and user rules, but lose to author rules and
+    /// inline style. They never change the `style` attribute and survive its
+    /// replacement or removal. The embedder owns attribute interpretation;
+    /// this method parses the CSS value and schedules the element's restyle.
+    /// An empty value removes the hint; invalid names or values are no-ops,
+    /// as in [`Self::set_inline_style_property`].
+    pub fn set_presentational_hint(&mut self, id: NodeId, property: &str, value: &str) {
+        let existing = self.live_element(id).presentational_hints.clone();
+        let Some(block) =
+            self.style_engine()
+                .update_style_property(existing.as_ref(), property, value)
+        else {
+            return;
+        };
+
+        self.note_visual_mutation();
+        self.live_node_mut(id).presentational_hints =
+            (!block.is_empty()).then(|| Arc::new(self.style_engine().shared_lock().wrap(block)));
+        // A hint is collected during matching, outside the style-attribute
+        // replacement path. Re-match even if no selector uses the attribute.
+        self.add_restyle_hint(id, RestyleHint::RESTYLE_SELF);
+        self.mark_ancestors_dirty_descendants(id);
     }
 
     /// Replaces an element's whole inline declaration block with a record of

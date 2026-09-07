@@ -67,6 +67,103 @@ fn standard_cascade_is_embedder_neutral() {
 }
 
 #[test]
+fn presentational_hints_survive_inline_style_replacement_and_removal() {
+    let mut doc = document();
+    let root = doc.document_element().id();
+    let target = doc.create_element("span", ());
+    let descendant = doc.create_element("label", ());
+    doc.append_child(root, target);
+    doc.append_child(target, descendant);
+    doc.add_stylesheet("span { color: green; }", StylesheetOrigin::User);
+    doc.layout();
+
+    doc.set_presentational_hint(target, "color", "blue");
+    assert_restyle_color(&mut doc, target, BLUE);
+    assert_color!(doc, descendant, BLUE);
+    assert_eq!(doc.get(target).unwrap().attribute("style"), None);
+
+    doc.set_inline_style(target, "width: 10px");
+    assert_restyle_color(&mut doc, target, BLUE);
+    assert_eq!(
+        doc.get(target).unwrap().attribute("style"),
+        Some("width: 10px")
+    );
+    doc.set_inline_style_declarations(target, [("height", "10px")]);
+    assert_restyle_color(&mut doc, target, BLUE);
+
+    doc.set_inline_style_property(target, "color", "red");
+    assert_restyle_color(&mut doc, target, RED);
+    doc.set_presentational_hint(target, "color", "green");
+    assert_restyle_color(&mut doc, target, RED);
+    doc.set_inline_style_property(target, "color", "");
+    assert_restyle_color(&mut doc, target, GREEN);
+    assert_color!(doc, descendant, GREEN);
+
+    doc.set_presentational_hint(target, "color", "blue");
+    doc.remove_attribute(target, "style");
+    assert_restyle_color(&mut doc, target, BLUE);
+    doc.set_presentational_hint(target, "color", "");
+    assert_restyle_color(&mut doc, target, GREEN);
+    assert_color!(doc, descendant, GREEN);
+    assert_eq!(doc.get(target).unwrap().attribute("style"), None);
+}
+
+#[test]
+fn presentational_hints_use_their_own_cascade_origin() {
+    let mut doc = document();
+    let target = doc.document_element().id();
+    doc.add_stylesheet("page { color: red; }", StylesheetOrigin::UserAgent);
+    doc.add_stylesheet("page { color: green; }", StylesheetOrigin::User);
+    doc.add_stylesheet(
+        "@layer defaults { .author { color: red; } }",
+        StylesheetOrigin::Author,
+    );
+    doc.set_presentational_hint(target, "color", "blue");
+    assert_restyle_color(&mut doc, target, BLUE);
+    doc.add_class(target, "author");
+    assert_restyle_color(&mut doc, target, RED);
+    // Later hint updates cannot defeat even a layered author declaration.
+    doc.set_presentational_hint(target, "color", "green");
+    assert_restyle_color(&mut doc, target, RED);
+    doc.remove_class(target, "author");
+    doc.set_presentational_hint(target, "color", "blue");
+
+    for (value, expected) in [("revert", GREEN), ("revert-layer", BLUE)] {
+        doc.set_inline_style_property(target, "color", value);
+        assert_restyle_color(&mut doc, target, expected);
+    }
+    doc.remove_attribute(target, "style");
+    doc.add_stylesheet("page { color: red !important; }", StylesheetOrigin::User);
+    assert_restyle_color(&mut doc, target, RED);
+}
+
+#[test]
+fn style_sharing_distinguishes_siblings_with_different_presentational_hints() {
+    let mut doc = document();
+    let root = doc.document_element().id();
+    doc.set_inline_style(root, "color: green");
+    let children: Vec<_> = ["red", "blue", "", "red", "blue", ""]
+        .into_iter()
+        .map(|color| {
+            let child = doc.create_element("span", ());
+            doc.append_child(root, child);
+            doc.set_presentational_hint(child, "color", color);
+            child
+        })
+        .collect();
+    doc.layout();
+    for (&child, expected) in children.iter().zip([RED, BLUE, GREEN, RED, BLUE, GREEN]) {
+        assert_color!(doc, child, expected);
+    }
+    doc.set_presentational_hint(children[1], "color", "red");
+    doc.set_presentational_hint(children[3], "color", "");
+    doc.layout();
+    for (&child, expected) in children.iter().zip([RED, RED, GREEN, GREEN, BLUE, GREEN]) {
+        assert_color!(doc, child, expected);
+    }
+}
+
+#[test]
 fn id_class_and_style_attributes_are_reflected_dom_state() {
     let mut doc = document();
     doc.add_stylesheet(
