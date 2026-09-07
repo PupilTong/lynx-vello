@@ -154,17 +154,11 @@ the family checked against them, when a view is built, so both must precede a
 load, and a family nothing provides makes that load reject. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
 Worker, named in the load, mounted as author-origin rules in cascade order. The
-stylesheet contract has a second arm for a host that already parsed its CSS,
-but a browser host never does, so this embedder always takes the text arm.
-The browser registry is one normalized-URL-to-bytes map. Script and stylesheet
-registration populate that same map; `fetch_resource` and `fetch_style_sheet`
-decide how the selected bytes are interpreted.
-
-The browser facade still does not decode `.web.bundle` containers. A caller
-may load suitable JavaScript by URL or a raw Lynx XML source card;
-bundle retrieval, decode, `PageConfig` parsing, and `StyleInfo` lowering remain
-external work, exactly as in the native CLI — where the CLI does perform them
-and hands core the pre-parsed arm.
+stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and
+XML loads take the text arm; `loadTemplate` decodes binary containers through
+`bobcat-source::PageSource` and registers their lowered `StyleInfo` through
+the pre-parsed arm. Source retrieval and adaptation remain embedder work,
+with core receiving only `ViewSources` and its resource-fetcher contract.
 
 ## Pointer input
 
@@ -316,3 +310,29 @@ including its XML, web and native binary parsers, with no Cargo feature flags.
 The `loadLynxXml` API continues to accept XML responses only.
 The one-shot response adapter preserves final-URL fragments and reports
 background presence without registering its body. Host PageConfig stays authoritative.
+
+`loadTemplate(url)` fetches a binary web or source-based native bundle with a
+16 MiB response bound and delegates decoding, configuration and StyleInfo
+registration to `PageSource`. Native bytecode and missing root entries retain
+the shared parser's errors. The renderer uses the input URL as the resource
+base and the bundle configuration for that view; subsequent raw XML loads
+still use the host configuration.
+
+Both Pages tabs use the same two-column workspace. Canvas provides a local
+ZIP picker and an entry field: a ZIP-root-relative path, or an HTTP(S) URL whose
+decoded pathname exactly matches an archive member. Clicking **Load template**
+extracts the ZIP locally, mounts its files under a unique, same-origin
+`.bobcat-archives/<id>/` directory in CacheStorage, and loads the entry from
+there. The service worker serves those URLs, including delayed relative image
+requests, with isolation headers; missing members return 404 without network
+fallback. Relative resources resolve from the entry's directory. Absolute
+resource URLs keep their ordinary browser network behavior. ZIP files are
+limited to 64 MiB compressed, 128 MiB of actual streaming output, and 4096
+entries; duplicate and traversing paths are rejected. A failed mount is
+removed, and a successfully replaced or disposed preview releases its archive.
+
+The **Expand** button sits in the preview heading outside the canvas and hides
+the active source panel. **Restore** or Escape returns to the split layout,
+preserving the selected ZIP, entry text and XML edits. Both tabs share the
+expanded state, and the existing ResizeObserver resizes the warm canvas.
+Narrow screens stack the source and preview panels vertically.

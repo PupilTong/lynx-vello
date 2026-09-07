@@ -13,7 +13,7 @@ use bobcat_core::{
     StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::register_lynx_xml_response;
+use bobcat_source::{PageSource, register_lynx_xml_response};
 use js_sys::{Array, Promise};
 use url::Url;
 use wasm_bindgen::prelude::*;
@@ -255,65 +255,28 @@ impl BobcatRenderer {
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
-        // Dropping the previous view stops it, and dropping the group it
-        // belonged to is what joins that Lynx-main Worker — both before
-        // construction of the independent replacement begins.
-        //
-        // A page gets a group of its own rather than reusing this renderer's:
-        // the script runtime is the group's, and a page loaded twice would
-        // otherwise register its entry module a second time under a name the
-        // previous load already took.
-        drop(self.view.take());
-        drop(self.group.take());
-        // Release the old page's post-boot waiter. The Render Worker advances
-        // its generation before calling load, so it exits without pumping the
-        // replacement view.
-        self.events.request_event();
-        self.script_finished = false;
-
-        // A relative `url(...)` in the page's CSS resolves against the page.
-        self.resources.set_base_url(Url::parse(&entry_url).ok());
+        let base_url = Url::parse(&entry_url).map_err(js_error)?;
         let sources = ViewSources {
             config: self.config,
-            fonts: self.fonts.clone(),
-            default_font_family: self.default_font_family.clone(),
             style_sheets: style_sheet_urls,
             ..ViewSources::new(entry_url)
         };
-        // A canvas owns its own resolution — configuring a context does not
-        // set it — and the view builds its surface from this canvas during
-        // construction. So it is sized first, to the same physical target
-        // those metrics give the view.
-        let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
-            .map_err(js_error)?;
-        set_canvas_size(&self.canvas, frame_size);
-        let group = LynxGroup::new(self.events.clone(), self.style_threads)
-            .await
-            .map_err(js_error)?;
-        let built = group
-            .create_lynx_view(
-                self.width,
-                self.height,
-                self.device_pixel_ratio,
-                DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
-                self.resources.builder(),
-                sources,
-            )
-            .await;
-        // Construction has finished every source load, so this page's
-        // registered bytes are dead either way. Clearing here keeps a Render
-        // Worker that loads page after page from growing a registry of them;
-        // an image decoded from a registration keeps its own bytes.
-        self.resources.clear_registered();
-        warn_notes(&self.resources);
-        self.view = Some(built.map_err(js_error)?);
-        self.group = Some(group);
-        // Boot published its frame before this Worker took a turn, and a
-        // frame from below wakes through the same signal — but the wakeup it
-        // sent was consumed by the loop that was waiting on the *previous*
-        // page. This Worker therefore owes itself the first turn.
-        self.events.request_event();
-        Ok(())
+        self.load_sources(sources, base_url).await
+    }
+
+    /// Decode a fetched page container through the shared source adapter.
+    /// Bundle configuration belongs to this page; subsequent raw loads still
+    /// use the host configuration. Relative assets resolve against the input.
+    #[wasm_bindgen(js_name = loadTemplate)]
+    pub async fn load_template(&mut self, url: String, bytes: Vec<u8>) -> Result<(), JsValue> {
+        self.ensure_running()?;
+        let input = Url::parse(&url).map_err(js_error)?;
+        let page = PageSource::from_bytes(&input, &bytes).map_err(js_error)?;
+        for warning in page.compatibility_warnings() {
+            console_warn(&JsValue::from(warning.to_string()));
+        }
+        page.register_with(&self.resources);
+        self.load_sources(page.view_sources(), input).await
     }
 
     /// Internal Render-Worker seam: retain bytes that the browser host already
@@ -379,9 +342,8 @@ impl BobcatRenderer {
     /// Register CSS bytes the browser host fetched, under a URL [`Self::load`]
     /// will name among its stylesheets.
     ///
-    /// A browser embedder never decodes a `.web.bundle`, so the bytes it
-    /// registers are CSS text and core takes the text arm of the stylesheet
-    /// contract.
+    /// Raw stylesheet loads use the text arm of the stylesheet contract;
+    /// bundled `StyleInfo` is registered by the shared source adapter instead.
     #[wasm_bindgen(js_name = registerStyleSheet)]
     #[allow(
         clippy::needless_pass_by_value,
@@ -581,6 +543,67 @@ impl BobcatRenderer {
 }
 
 impl BobcatRenderer {
+    async fn load_sources(
+        &mut self,
+        mut sources: ViewSources,
+        base_url: Url,
+    ) -> Result<(), JsValue> {
+        // Dropping the previous view stops it, and dropping the group it
+        // belonged to is what joins that Lynx-main Worker — both before
+        // construction of the independent replacement begins.
+        //
+        // A page gets a group of its own rather than reusing this renderer's:
+        // the script runtime is the group's, and a page loaded twice would
+        // otherwise register its entry module a second time under a name the
+        // previous load already took.
+        drop(self.view.take());
+        drop(self.group.take());
+        // Release the old page's post-boot waiter. The Render Worker advances
+        // its generation before calling load, so it exits without pumping the
+        // replacement view.
+        self.events.request_event();
+        self.script_finished = false;
+
+        // A relative `url(...)` in the page's CSS resolves against the page.
+        self.resources.set_base_url(Some(base_url));
+        sources.fonts = self.fonts.clone();
+        sources.default_font_family = self.default_font_family.clone();
+        // A canvas owns its own resolution — configuring a context does not
+        // set it — and the view builds its surface from this canvas during
+        // construction. So it is sized first, to the same physical target
+        // those metrics give the view.
+        let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
+            .map_err(js_error)?;
+        set_canvas_size(&self.canvas, frame_size);
+        let group = LynxGroup::new(self.events.clone(), self.style_threads)
+            .await
+            .map_err(js_error)?;
+        let built = group
+            .create_lynx_view(
+                self.width,
+                self.height,
+                self.device_pixel_ratio,
+                DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
+                self.resources.builder(),
+                sources,
+            )
+            .await;
+        // Construction has finished every source load, so this page's
+        // registered bytes are dead either way. Clearing here keeps a Render
+        // Worker that loads page after page from growing a registry of them;
+        // an image decoded from a registration keeps its own bytes.
+        self.resources.clear_registered();
+        warn_notes(&self.resources);
+        self.view = Some(built.map_err(js_error)?);
+        self.group = Some(group);
+        // Boot published its frame before this Worker took a turn, and a
+        // frame from below wakes through the same signal — but the wakeup it
+        // sent was consumed by the loop that was waiting on the *previous*
+        // page. This Worker therefore owes itself the first turn.
+        self.events.request_event();
+        Ok(())
+    }
+
     /// Retains bytes the browser host already fetched under its URL policy,
     /// labelled the way a `Content-Type` would. Returns the normalized
     /// absolute URL.

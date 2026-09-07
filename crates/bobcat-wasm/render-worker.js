@@ -213,7 +213,7 @@ function trackScriptCompletion(request) {
 // builds a fresh native view and drops the previous one. Sources are fetched
 // and registered before that happens, so a load that cannot fetch leaves the
 // running page untouched.
-async function replaceNativeView(request, entryUrl, styleSheetUrls) {
+async function replaceNativeView(request, entryUrl, styleSheetUrls, templateBytes) {
   if (scriptCompletion !== undefined) {
     try {
       await scriptCompletion
@@ -225,7 +225,18 @@ async function replaceNativeView(request, entryUrl, styleSheetUrls) {
   // Advancing the generation first is what keeps the outgoing page's wakeup
   // loop off the renderer while the load owns its mutable borrow.
   engineEventGeneration += 1
-  await renderer.load(entryUrl, styleSheetUrls)
+  try {
+    if (templateBytes === undefined) {
+      await renderer.load(entryUrl, styleSheetUrls)
+    } else {
+      await renderer.loadTemplate(entryUrl, templateBytes)
+    }
+  } catch (error) {
+    // A template parse failure leaves the previous native view alive. Resume
+    // its event loop after advancing the generation for this attempted load.
+    void servePage(engineEventGeneration).catch(reportFatal)
+    throw error
+  }
   trackScriptCompletion(request)
 }
 
@@ -236,14 +247,19 @@ async function dispatchRequest(message) {
 
   const { operation, request } = message
   switch (operation) {
+    case 'loadTemplate': {
+      const entry = await fetchSource('template', message.url, MAX_SCRIPT_BYTES)
+      await replaceNativeView(request, entry.url, [], entry.bytes)
+      break
+    }
     case 'load': {
       const sheets = []
       for (const url of message.styleSheetUrls) {
         sheets.push(await fetchSource('stylesheet', url, MAX_STYLE_SHEET_BYTES))
       }
       const entry = await fetchSource('script', message.url, MAX_SCRIPT_BYTES)
-      // A browser host never decodes a `.web.bundle`, so the bytes it
-      // registers are CSS text; core takes the text arm of the contract.
+      // Raw script loads register CSS text; loadTemplate delegates bundled
+      // StyleInfo registration to the shared source adapter instead.
       const styleSheetUrls = sheets.map((sheet) =>
         renderer.registerStyleSheet(sheet.url, sheet.bytes),
       )

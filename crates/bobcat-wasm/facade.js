@@ -605,6 +605,12 @@ export class BobcatCanvas {
     await this.#request('loadLynxXml', { url: documentUrl(url) })
   }
 
+  /** Fetch and show a binary web or source-based native template container. */
+  async loadTemplate(url) {
+    this.#pointerInput.reset()
+    await this.#request('loadTemplate', { url: documentUrl(url) })
+  }
+
   /** Retain font faces for every page this canvas loads. Call before a load. */
   async registerFonts(data) {
     await this.#request('registerFonts', { bytes: fontBytes(data) })

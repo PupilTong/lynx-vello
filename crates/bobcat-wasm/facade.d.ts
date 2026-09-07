@@ -47,6 +47,13 @@ export declare class BobcatCanvas {
    */
   loadLynxXml(url: string | URL): Promise<void>
 
+  /**
+   * Fetch and decode a binary web or source-based native bundle (root entry).
+   * Uses the container's page configuration and resolves relative resources
+   * against its response URL. Native bytecode is rejected by the shared parser.
+   */
+  loadTemplate(url: string | URL): Promise<void>
+
   /** Retains font faces for every page this canvas loads; call before a load. */
   registerFonts(data: ArrayBuffer | Uint8Array): Promise<void>
 

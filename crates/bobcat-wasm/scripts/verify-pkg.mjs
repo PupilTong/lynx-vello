@@ -37,6 +37,7 @@ for (const requiredMethod of [
   'registerScript(',
   'registerStyleSheet(',
   'registerLynxXml(',
+  'loadTemplate(',
   'bobcatrenderer_load(',
   'pump(',
   'registerFonts(',

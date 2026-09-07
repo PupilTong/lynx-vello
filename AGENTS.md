@@ -790,8 +790,14 @@ useful signal for currently-compatible versions of those libraries.
   while it joins the Lynx main thread. It must not move source fetching, HTTP
   policy, BMP encoding, queueing, or server lifecycle into `bobcat-core`.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
-  facade, built for `wasm32-unknown-unknown` with shared memory. The browser UI
-  thread is a JavaScript-only host coordinator: it creates one explicit
+  facade, built for `wasm32-unknown-unknown` with shared memory. It exposes
+  `loadTemplate` for binary web and source-based native bundles,
+  delegating decoding, page configuration and StyleInfo registration to
+  `bobcat-source::PageSource`. Its original response URL remains the resource
+  base. The Pages Canvas tab mounts local ZIP resources at isolated temporary
+  same-origin URLs served by its service worker, then loads the selected entry;
+  `loadLynxXml` retains its XML-only, host-configured contract.
+  The browser UI thread is a JavaScript-only host coordinator: it creates one explicit
   embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
   Wasm or owns engine state. That Worker initializes the module, constructs one
   opaque `LynxGroup` and one `LynxView` in it per page through

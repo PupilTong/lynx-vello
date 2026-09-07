@@ -16,6 +16,20 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
+async function resourceResponse(request) {
+  const url = new URL(request.url);
+  const archiveRoot = new URL('.bobcat-archives/', self.registration.scope);
+  if (url.origin === archiveRoot.origin && url.pathname.startsWith(archiveRoot.pathname)) {
+    const id = url.pathname.slice(archiveRoot.pathname.length).split('/')[0];
+    const response = await caches.match(request, {
+      cacheName: `bobcat-archive:${id}`,
+      ignoreSearch: true,
+    });
+    return response ?? new Response('Resource is not in the ZIP', { status: 404 });
+  }
+  return fetch(request);
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
 
@@ -25,7 +39,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    fetch(request).then((response) => {
+    resourceResponse(request).then((response) => {
       // Opaque cross-origin responses cannot be reconstructed or given headers.
       if (response.type === 'opaque' || response.status === 0) {
         return response;
