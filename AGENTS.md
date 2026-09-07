@@ -171,9 +171,11 @@ useful signal for currently-compatible versions of those libraries.
   `DrawTarget`. **A view is built from a group, never on its own**:
   `LynxGroup::new` takes the lifecycle wakeup and `StyleThreads`, starts
   `bobcat-main`, and awaits the QuickJS runtime and Stylo pool every view in
-  that group will share. Each group owns one FIFO in each direction;
-  main-to-painter messages carry `ViewId` and are dispatched by the shared
-  host-thread inbox. A painter turn consumes its own messages and buffers
+  that group will share. Each group owns two instances of the same
+  `Mailbox<M>` implementation: `Mailbox<ToMain>` on main and
+  `Mailbox<ToPainter>` on the host thread. Both use `(Option<ViewId>, M)`
+  messages (`None` addresses the group), one FIFO each, and one shared
+  deadline-aware receive implementation. A painter turn consumes its own messages and buffers
   siblings' messages until their turns. Dropping a view unregisters its inbox
   entry and discards late messages; frame mailboxes remain per view so only
   the latest commit is retained. Offscreen ticks wait on the same group FIFO

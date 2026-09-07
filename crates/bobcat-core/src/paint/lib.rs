@@ -10,8 +10,6 @@
 
 mod gesture;
 mod graphics;
-mod inbox;
-pub(crate) use inbox::GroupInbox;
 pub(crate) mod images;
 mod sources;
 
@@ -45,6 +43,7 @@ use web_time::Instant as ClockInstant;
 use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
+use crate::mailbox::{Mailbox, Sender};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
 use crate::main::tree::Viewport;
@@ -53,8 +52,8 @@ use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
 use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, GroupCommand,
-    SourceRequest, ToMain, ToPainter, ViewId, frame_slot,
+    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, SourceRequest, ToMain,
+    ToPainter, ViewId, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DetachedLink, NoWakeup, detached_link};
@@ -136,8 +135,8 @@ pub(crate) struct PainterLink {
     /// Which view on the group's thread these commands are for. Every view in
     /// a group sends on one FIFO, so each command carries its own name.
     view: ViewId,
-    commands: flume::Sender<GroupCommand>,
-    notifications: Rc<GroupInbox>,
+    commands: Sender<ToMain>,
+    notifications: Rc<Mailbox<ToPainter>>,
     frames: Arc<FrameHub>,
     frame: Option<Arc<CommittedFrame>>,
     events: Vec<EngineEvent>,
@@ -161,8 +160,8 @@ pub(crate) struct PainterLink {
 impl PainterLink {
     pub(crate) fn new(
         view: ViewId,
-        commands: flume::Sender<GroupCommand>,
-        notifications: Rc<GroupInbox>,
+        commands: Sender<ToMain>,
+        notifications: Rc<Mailbox<ToPainter>>,
         frames: Arc<FrameHub>,
         resource_waker: Waker,
         control: Arc<crate::main::StartupControl>,
@@ -198,10 +197,7 @@ impl PainterLink {
     /// main thread that has exited; the painter goes on showing what it last
     /// published.
     pub(crate) fn send(&self, command: ToMain) {
-        let _ = self.commands.send(GroupCommand::View {
-            view: self.view,
-            command,
-        });
+        let _ = self.commands.send((Some(self.view), command));
     }
 
     /// Ends the whole group's thread, not just this view.
@@ -211,14 +207,14 @@ impl PainterLink {
     /// group sends this from its own `Drop`, once every view is gone.
     #[cfg(test)]
     fn close_group(&self) {
-        let _ = self.commands.send(GroupCommand::Close);
+        let _ = self.commands.send((None, ToMain::Close));
     }
 
     /// Applies everything that has arrived. However many frames were
     /// announced, the mailbox is read once.
     pub(crate) fn sync(&mut self) {
         let notifications = Rc::clone(&self.notifications);
-        notifications.drain(self.view, |notification| self.apply(notification));
+        notifications.drain_view(self.view, |notification| self.apply(notification));
         self.settle();
     }
 
@@ -290,10 +286,7 @@ impl PainterLink {
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
         self.commands
-            .send(GroupCommand::View {
-                view: self.view,
-                command: ToMain::BeginFrame { now, seq },
-            })
+            .send((Some(self.view), ToMain::BeginFrame { now, seq }))
             .ok()
             .map(|()| seq)
     }
@@ -302,17 +295,16 @@ impl PainterLink {
     /// notifications that precede its acknowledgement.
     ///
     /// The one blocking wait a host's own thread makes on `bobcat-main`, and
-    /// `tick` — offscreen only — is the one call that reaches it. Its
-    /// `recv_timeout` reads the standard library's clock, which no wasm32
-    /// target implements, so an offscreen view belongs to a native host.
+    /// `tick` — offscreen only — is the one call that reaches it. The mailbox
+    /// uses the same deadline wait as main's timer-driven command loop.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
         self.sync();
-        while self.begin_frames_serviced < seq && !self.resources_failed {
-            let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
-                break;
-            };
-            if !self.notifications.wait(remaining) {
+        while self.begin_frames_serviced < seq
+            && !self.resources_failed
+            && ClockInstant::now() < deadline
+        {
+            if !self.notifications.wait_view(deadline) {
                 break;
             }
             self.sync();
@@ -325,7 +317,7 @@ impl PainterLink {
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
         let mut messages = Vec::new();
         self.notifications
-            .drain(self.view, |message| messages.push(message));
+            .drain_view(self.view, |message| messages.push(message));
         messages
     }
 }

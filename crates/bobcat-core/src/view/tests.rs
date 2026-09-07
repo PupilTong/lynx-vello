@@ -9,13 +9,13 @@ struct Links {
     second: PainterLink,
     notify_first: ToPainterSender<NoWakeup>,
     notify_second: ToPainterSender<NoWakeup>,
-    commands: flume::Receiver<GroupCommand>,
+    commands: Mailbox<ToMain>,
 }
 
 fn links() -> Links {
-    let (commands, receiver) = flume::unbounded();
-    let (notifications, inbox) = flume::unbounded();
-    let inbox = Rc::new(GroupInbox::new(inbox));
+    let (commands, receiver) = Mailbox::channel();
+    let (notifications, inbox) = Mailbox::channel();
+    let inbox = Rc::new(inbox);
     let requester = Arc::new(NoWakeup);
     let link = |id| {
         let view = ViewId(id);
@@ -136,11 +136,8 @@ fn an_offscreen_wait_routes_sibling_messages_without_accepting_their_ack() {
 
     let sender = std::thread::spawn(move || {
         assert!(matches!(
-            links.commands.recv().unwrap(),
-            GroupCommand::View {
-                command: ToMain::BeginFrame { .. },
-                ..
-            }
+            links.commands.recv(None).unwrap(),
+            (Some(_), ToMain::BeginFrame { .. })
         ));
         links
             .notify_second

@@ -34,6 +34,7 @@ crates/bobcat-core/src/
                        shared values, messages, and link construction
   paint/lib.rs         Painter, frame clock, and painter-owned link replicas
   paint/sources.rs     painter-owned startup resource loading
+  mailbox.rs           addressed FIFO and deadline waiting for both directions
   paint/gesture.rs     input arbitration
   paint/graphics.rs    window GPU state
   main/lib.rs          document creation, loaded-source mounting, startup,
@@ -227,15 +228,17 @@ Other buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
 response-size limit; each fetcher owns the memory bound for the response it
 materializes.
 
-Each group has one command FIFO and one notification FIFO. `GroupNotification`
-adds a `ViewId` to every main-to-painter message. The host-thread `GroupInbox`
-is their sole receiver: it applies the active view's messages directly and
-buffers other live views' messages until their painter turns. Buffered messages
+Each group owns `Mailbox<ToMain>` and `Mailbox<ToPainter>`, two instances of
+one addressed FIFO implementation. Both carry `(Option<ViewId>, M)`, with
+`None` reserved for the group. Main receives the whole stream, including
+`ToMain::Attach` and `ToMain::Close`. The host consumes a selected view's
+messages directly and buffers siblings until their painter turns. Buffered messages
 retain their per-view order. Dropping a link removes its buffer, and late messages
 for that id are discarded. No notification channel is created when a view attaches.
 
-Offscreen `tick` waits on that same receiver, routing sibling messages as it waits
-for its own `BeginFrameServiced`. A fatal event ends the wait even if the group's
+Main's timer loop and offscreen `tick` share `Mailbox::recv` and its deadline
+handling. The offscreen wait defers sibling messages until it receives its own
+`BeginFrameServiced`. A fatal event ends the wait even if the group's
 other views keep the FIFO open. Each view retains its own latest-frame mailbox;
 consolidating notifications does not queue or retain intermediate committed frames.
 
@@ -455,7 +458,7 @@ the thread that created the LynxGroup (AppKit main, or a Render Worker)
     scroll/dispatch/resize/BeginFrame
     compose: upload scene, acquire, present
     capture, offscreen ticks
-  ── GroupCommand FIFO (ViewId) ──▶   ◀── GroupNotification FIFO (ViewId) ──
+  ── Mailbox<ToMain> (ViewId) ──▶     ◀── Mailbox<ToPainter> (ViewId) ──
                                            ◀── Arc<CommittedFrame> mailbox ──
                                            ◀── EventRequester wakeup ──
       Lynx main thread — the group's, shared by every view in it

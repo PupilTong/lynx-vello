@@ -20,6 +20,7 @@ use std::task::{Wake, Waker};
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
 
+use crate::mailbox::{Mailbox, Sender};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 #[cfg(test)]
@@ -27,7 +28,7 @@ use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupHome, GroupLink, StartupControl, ToPainterSender, spawn_group};
 pub use crate::paint::WindowTarget;
-use crate::paint::{GroupInbox, Output, Painter, PainterLink};
+use crate::paint::{Output, Painter, PainterLink};
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -401,8 +402,8 @@ pub struct LynxGroup {
 /// What a group owns, and what its views hold it alive by.
 struct GroupInner {
     /// Every view's commands, and every attachment, on one FIFO.
-    commands: flume::Sender<GroupCommand>,
-    notifications: Rc<GroupInbox>,
+    commands: Sender<ToMain>,
+    notifications: Rc<Mailbox<ToPainter>>,
     /// The next view's id. Ids are never reused, so a command still in
     /// flight for a view that has ended cannot find a later one wearing its
     /// name.
@@ -441,7 +442,7 @@ impl Drop for GroupInner {
         // that is not sent is a close that never arrives — and this runs only
         // once every view built from the group has already been dropped, so
         // there is nothing left on the thread to end.
-        let _ = self.commands.send(GroupCommand::Close);
+        let _ = self.commands.send((None, ToMain::Close));
         self.home.join();
     }
 }
@@ -469,8 +470,8 @@ impl LynxGroup {
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
-        let (commands, command_receiver) = flume::unbounded();
-        let (notifications, notification_receiver) = flume::unbounded();
+        let (commands, command_receiver) = Mailbox::channel();
+        let (notifications, notification_receiver) = Mailbox::channel();
         let (ready, started) = flume::bounded(1);
         let resource_waker = event_waker(Arc::clone(&event_requester));
         let home = spawn_group(
@@ -487,7 +488,7 @@ impl LynxGroup {
         let group = Self {
             inner: Rc::new(GroupInner {
                 commands,
-                notifications: Rc::new(GroupInbox::new(notification_receiver)),
+                notifications: Rc::new(notification_receiver),
                 next_view: Cell::new(0),
                 resource_waker,
                 home,
@@ -560,19 +561,21 @@ impl LynxGroup {
         // source it must mount on one.
         self.inner
             .commands
-            .send(GroupCommand::Attach(Box::new(Attachment {
-                view,
-                viewport,
-                sources: MainSources {
-                    config,
-                    fonts,
-                    default_font_family,
-                    style_sheets,
-                    entry,
-                },
-                frames,
-                control: Arc::clone(&control),
-            })))
+            .send((
+                Some(view),
+                ToMain::Attach(Box::new(Attachment {
+                    viewport,
+                    sources: MainSources {
+                        config,
+                        fonts,
+                        default_font_family,
+                        style_sheets,
+                        entry,
+                    },
+                    frames,
+                    control: Arc::clone(&control),
+                })),
+            ))
             .map_err(|_| EngineError::Thread {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
@@ -827,26 +830,18 @@ pub(crate) struct ViewId(u64);
 /// group, and so wakes one event loop. That is what lets attachments and
 /// commands share a single channel instead of needing a select over two.
 pub(crate) struct Attachment {
-    pub(crate) view: ViewId,
     pub(crate) viewport: Viewport,
     pub(crate) sources: MainSources,
     pub(crate) frames: Arc<FrameHub>,
     pub(crate) control: Arc<StartupControl>,
 }
 
-/// Everything that reaches a group's `bobcat-main`, from every view on it.
-pub(crate) enum GroupCommand {
-    /// A view to adopt, on the script runtime and style pool this thread
-    /// already holds.
-    Attach(Box<Attachment>),
-    /// One carried view's command.
-    View { view: ViewId, command: ToMain },
-    /// The group handle is gone, and every view built from it with it.
-    Close,
-}
-
 /// Painter → Lynx main: every fact the document must see.
 pub(crate) enum ToMain {
+    /// Create the addressed view on the group's runtime and style pool.
+    Attach(Box<Attachment>),
+    /// The group and its last view have been released.
+    Close,
     DispatchEvent {
         target: NodeId,
         name: &'static str,
@@ -915,13 +910,6 @@ pub(crate) enum ToPainter {
     RequestSource(SourceRequest),
 }
 
-/// Main → painter, on the group's one FIFO. A view id is never reused.
-#[derive(Debug)]
-pub(crate) struct GroupNotification {
-    pub(crate) view: ViewId,
-    pub(crate) notification: ToPainter,
-}
-
 /// The latest committed frame, and only ever the latest.
 pub(crate) type FrameHub = Mutex<Option<Arc<CommittedFrame>>>;
 
@@ -933,8 +921,8 @@ pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedF
 /// Registers a view on its group's inbox and creates its latest-frame mailbox.
 fn view_link(
     view: ViewId,
-    commands: &flume::Sender<GroupCommand>,
-    notifications: Rc<GroupInbox>,
+    commands: &Sender<ToMain>,
+    notifications: Rc<Mailbox<ToPainter>>,
     resource_waker: Waker,
     control: Arc<StartupControl>,
 ) -> (PainterLink, Arc<FrameHub>) {
@@ -961,7 +949,7 @@ pub(crate) struct DetachedLink<R: EventRequester> {
         not(test),
         expect(dead_code, reason = "only a test plays the far end of a link")
     )]
-    pub(crate) commands: flume::Receiver<GroupCommand>,
+    pub(crate) commands: Mailbox<ToMain>,
     /// Everything the main thread's side has to say back.
     pub(crate) notify: ToPainterSender<R>,
 }
@@ -973,12 +961,7 @@ impl<R: EventRequester> DetachedLink<R> {
     /// A detached link carries exactly one view and no group control, so
     /// there is nothing else the tag could have selected.
     pub(crate) fn try_recv(&self) -> Result<ToMain, flume::TryRecvError> {
-        self.commands.try_recv().map(|message| match message {
-            GroupCommand::View { command, .. } => command,
-            GroupCommand::Attach(_) | GroupCommand::Close => {
-                unreachable!("a detached link carries no group control")
-            }
-        })
+        self.commands.try_recv().map(|(_, command)| command)
     }
 }
 
@@ -986,12 +969,12 @@ impl<R: EventRequester> DetachedLink<R> {
 pub(crate) fn detached_link<R: EventRequester>(
     requester: Arc<R>,
 ) -> (PainterLink, DetachedLink<R>) {
-    let (commands, command_receiver) = flume::unbounded();
-    let (notifications, notification_receiver) = flume::unbounded();
+    let (commands, command_receiver) = Mailbox::channel();
+    let (notifications, notification_receiver) = Mailbox::channel();
     let (painter, frames) = view_link(
         DETACHED_VIEW,
         &commands,
-        Rc::new(GroupInbox::new(notification_receiver)),
+        Rc::new(notification_receiver),
         event_waker(Arc::clone(&requester)),
         Arc::new(StartupControl::default()),
     );

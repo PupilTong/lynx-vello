@@ -14,19 +14,16 @@ pub(crate) mod tree;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::future::Future;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
 use std::rc::Rc;
+use std::str;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
-use std::{str, thread};
 
 use dom::{CommittedFrame, StylePool};
 #[cfg(target_arch = "wasm32")]
@@ -37,11 +34,12 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use crate::mailbox::{Mailbox, Sender};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand,
-    GroupNotification, LoadedSource, LynxViewError, MainSources, SourceRequest, StyleSheetSource,
-    StyleThreads, ToMain, ToPainter, ViewId, Viewport, frame_slot,
+    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, LoadedSource, LynxViewError,
+    MainSources, SourceRequest, StyleSheetSource, StyleThreads, ToMain, ToPainter, ViewId,
+    Viewport, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DETACHED_VIEW, DetachedLink};
@@ -113,7 +111,7 @@ impl GroupHome {
 /// and the wakeup that announces both to the thread that paints.
 pub(crate) struct ToPainterSender<R: EventRequester> {
     view: ViewId,
-    notifications: flume::Sender<GroupNotification>,
+    notifications: Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
 }
@@ -134,7 +132,7 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
 impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn new(
         view: ViewId,
-        notifications: flume::Sender<GroupNotification>,
+        notifications: Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
     ) -> Self {
@@ -153,10 +151,7 @@ impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn send(&self, notification: ToPainter) {
         if self
             .notifications
-            .send(GroupNotification {
-                view: self.view,
-                notification,
-            })
+            .send((Some(self.view), notification))
             .is_ok()
         {
             self.requester.request_event();
@@ -185,8 +180,8 @@ impl<R: EventRequester> ToPainterSender<R> {
 pub(crate) struct GroupLink<R: EventRequester> {
     /// Every view's commands, and every attachment, in the order they were
     /// sent.
-    pub(crate) commands: flume::Receiver<GroupCommand>,
-    pub(crate) notifications: flume::Sender<GroupNotification>,
+    pub(crate) commands: Mailbox<ToMain>,
+    pub(crate) notifications: Sender<ToPainter>,
     /// The one event loop every view in this group wakes.
     pub(crate) requester: Arc<R>,
     /// How this thread's own startup went, answered exactly once.
@@ -641,7 +636,10 @@ impl<R: EventRequester> CarriedView<R> {
                     ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
                     #[cfg(test)]
                     ToMain::Probe(probe) => probe(&mut booting.document),
-                    ToMain::SourceLoaded { .. } | ToMain::Shutdown => unreachable!(),
+                    ToMain::Attach(_)
+                    | ToMain::Close
+                    | ToMain::SourceLoaded { .. }
+                    | ToMain::Shutdown => unreachable!(),
                 }
                 Booted::Waiting(booting)
             }
@@ -694,11 +692,11 @@ fn attach<R: EventRequester>(
     views: &mut Vec<CarriedView<R>>,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
-    notifications: &flume::Sender<GroupNotification>,
+    notifications: &Sender<ToPainter>,
+    view: ViewId,
     attachment: Attachment,
 ) {
     let Attachment {
-        view,
         viewport,
         sources,
         frames,
@@ -738,8 +736,8 @@ fn serve_group<R: EventRequester>(
     js_runtime: &mut ScriptRuntime,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
-    commands: &flume::Receiver<GroupCommand>,
-    notifications: &flume::Sender<GroupNotification>,
+    commands: &Mailbox<ToMain>,
+    notifications: &Sender<ToPainter>,
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
@@ -749,16 +747,24 @@ fn serve_group<R: EventRequester>(
             .iter_mut()
             .filter_map(CarriedView::next_timer_deadline)
             .min();
-        match wait_for_command(commands, deadline) {
-            Woken::Command(first) => {
-                for message in std::iter::once(first).chain(commands.drain()) {
-                    match message {
-                        GroupCommand::Close => return,
-                        GroupCommand::Attach(attachment) => {
-                            attach(views, style_pool, requester, notifications, *attachment);
+        match commands.recv(deadline) {
+            Ok(first) => {
+                for (view, command) in std::iter::once(first).chain(commands.drain()) {
+                    match command {
+                        ToMain::Close => return,
+                        ToMain::Attach(attachment) => {
+                            attach(
+                                views,
+                                style_pool,
+                                requester,
+                                notifications,
+                                view.expect("an attachment addresses its view"),
+                                *attachment,
+                            );
                         }
-                        GroupCommand::View { view, command } => {
-                            let Some(index) = views.iter().position(|carried| carried.id == view)
+                        command => {
+                            let Some(index) =
+                                views.iter().position(|carried| Some(carried.id) == view)
                             else {
                                 // A command for a view already released: its
                                 // goodbye won the race with whatever its
@@ -773,70 +779,12 @@ fn serve_group<R: EventRequester>(
                 }
             }
             // A deadline a realm asked for, and nothing else to serve.
-            Woken::Deadline => {}
-            Woken::Disconnected => return,
+            Err(flume::RecvTimeoutError::Timeout) => {}
+            Err(flume::RecvTimeoutError::Disconnected) => return,
         }
         for view in &mut *views {
             view.finish_round(js_runtime);
         }
-    }
-}
-
-/// What ended one round's wait.
-enum Woken {
-    /// A message arrived; more may be queued behind it.
-    Command(GroupCommand),
-    /// The earliest armed timer came due with no command to serve.
-    Deadline,
-    /// Every painter and the group handle are gone, and nothing more will be
-    /// asked of this thread.
-    Disconnected,
-}
-
-/// Waits for the next command, or until `deadline` when a timer names one.
-///
-/// `flume`'s own timed receive reads the standard library's clock, which
-/// wasm32 does not implement, so the wait is assembled here out of the two
-/// pieces both targets do have: the receiver's future, and `park_timeout` —
-/// which is exactly what `flume` blocks on itself. Nothing drives the future
-/// but this loop, and the waker only unparks this thread, so this is a
-/// blocking wait spelled with a future rather than an executor.
-fn wait_for_command(
-    commands: &flume::Receiver<GroupCommand>,
-    deadline: Option<ClockInstant>,
-) -> Woken {
-    let Some(deadline) = deadline else {
-        return commands.recv().map_or(Woken::Disconnected, Woken::Command);
-    };
-    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut receiving = commands.recv_async();
-    loop {
-        match Pin::new(&mut receiving).poll(&mut context) {
-            Poll::Ready(Ok(command)) => return Woken::Command(command),
-            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
-            Poll::Pending => {}
-        }
-        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
-            return Woken::Deadline;
-        };
-        // A spurious wake just polls again; a real one has already queued the
-        // command the poll will find.
-        thread::park_timeout(remaining);
-    }
-}
-
-/// The waker [`wait_for_command`] hands the receiver: the only thing a send
-/// has to do is end this thread's park.
-struct UnparkWaker(thread::Thread);
-
-impl Wake for UnparkWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
     }
 }
 
@@ -876,7 +824,9 @@ fn apply_main_command<R: EventRequester>(
         }
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
-        ToMain::Shutdown => unreachable!("shutdown ends the command loop before dispatch"),
+        ToMain::Attach(_) | ToMain::Close | ToMain::Shutdown => {
+            unreachable!("lifecycle ends or attaches before dispatch")
+        }
         #[cfg(test)]
         ToMain::Probe(probe) => runtime.with_document(probe),
     }
