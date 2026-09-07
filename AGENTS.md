@@ -136,7 +136,10 @@ useful signal for currently-compatible versions of those libraries.
 ## Crates
 
 - `crates/bobcat-source` — the single owner of Lynx source parsing and
-  adaptation. `xml` is the zero-dependency, zero-copy restricted envelope parser
+  adaptation, including the always-available `ZipSource` API for bounded ZIP
+  decoding, entry selection through `PageSource`, and resource registration.
+  Native and Wasm embedders share that API; IO and resource-scope lifetime
+  remain the host's responsibility. `xml` is the zero-dependency, zero-copy restricted envelope parser
   (`engine-version`, `thread="main"` / `thread="background"`); it retains UTF-16
   and UTF-8 error offsets. `web` decodes `SDRA WROF` using the unchanged rkyv 0.7
   wire model. `native` decodes source-based flexible external `.lynx.bundle`
@@ -794,8 +797,11 @@ useful signal for currently-compatible versions of those libraries.
   `loadTemplate` for binary web and source-based native bundles,
   delegating decoding, page configuration and StyleInfo registration to
   `bobcat-source::PageSource`. Its original response URL remains the resource
-  base. The Pages Canvas tab mounts local ZIP resources at isolated temporary
-  same-origin URLs served by its service worker, then loads the selected entry;
+  base. The Pages Canvas tab passes local ZIP bytes and an entry URL through
+  `loadZip` to `bobcat-source::ZipSource`. Each page gets a separate resource
+  scope, retaining archive assets after boot and isolating image caches and
+  completion queues while sharing the platform decoder and IO workers.
+  The service worker only provides cross-origin isolation headers;
   `loadLynxXml` retains its XML-only, host-configured contract.
   The browser UI thread is a JavaScript-only host coordinator: it creates one explicit
   embedder Worker and transfers an `OffscreenCanvas`, but never instantiates
