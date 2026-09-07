@@ -72,21 +72,18 @@ async fn host_capabilities_compose_into_the_opaque_view() {
     );
 }
 
-/// A default family nothing provides fails the construction rather than being
-/// silently ignored — including when the reason is a font container that
-/// carried no usable face. The view that would have rendered in the wrong font
-/// is never built.
+/// An unavailable default family fails startup through the event path,
+/// including when the supplied font container carries no usable face.
 #[tokio::test]
-async fn a_default_family_nothing_provides_fails_construction() {
+async fn a_default_family_nothing_provides_fails_startup() {
     let unusable = ViewSources {
         fonts: vec![FontBlob::from_static(b"not a font")],
         default_font_family: Some("Ahem".to_owned()),
         ..ViewSources::new(ENTRY)
     };
+    let mut view = view(fetcher(), unusable).await.expect("loading view");
     assert!(matches!(
-        view(fetcher(), unusable)
-            .await
-            .expect_err("no usable face registered"),
+        wait_for_script(&mut view).expect_err("no usable face registered"),
         LynxViewError::Engine(EngineError::UnknownFontFamily(_))
     ));
 }

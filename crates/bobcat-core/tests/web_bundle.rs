@@ -3,8 +3,7 @@ mod support;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bobcat_core::script::ScriptError;
-use bobcat_core::{DrawTarget, NoWakeup, PageConfig, ViewSources};
+use bobcat_core::{DrawTarget, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
 const FIXTURES: &[(&str, &[u8])] = &[
@@ -26,7 +25,7 @@ fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
     }
 }
 
-async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), ScriptError> {
+async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
     let fetcher =
         Rc::new(FetcherDouble::new(source.as_bytes().to_vec()).resolving_to(resolved_url));
     let mut view = solo_view(

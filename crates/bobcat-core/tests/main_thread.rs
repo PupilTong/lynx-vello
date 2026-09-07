@@ -6,8 +6,7 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxView, LynxViewError, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
-/// The one way to build a view: hand it its sources and it comes back with
-/// its Lynx main thread already running the entry module.
+/// Builds a loading view; callers drive boot through normal pump turns.
 async fn view(
     source: &[u8],
     resolved_url: &str,
@@ -27,7 +26,7 @@ async fn view(
 
 async fn run(source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
     let mut view = view(source.as_bytes(), resolved_url).await?;
-    wait_for_script(&mut view).map_err(Into::into)
+    wait_for_script(&mut view)
 }
 
 #[tokio::test]
@@ -107,13 +106,13 @@ async fn resolved_script_url_is_preserved_in_errors() {
     assert!(message.contains("app:///broken.js:"), "{message}");
 }
 
-/// Invalid UTF-8 fails the construction outright: no view exists, so no realm
-/// was created and no main thread is running.
+/// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
-    let error = view(&[0xff, 0xfe], "app:///invalid.js")
+    let mut view = view(&[0xff, 0xfe], "app:///invalid.js")
         .await
-        .expect_err("invalid UTF-8 must not reach the VM");
+        .expect("loading view");
+    let error = wait_for_script(&mut view).expect_err("invalid UTF-8 must not reach the VM");
     assert!(matches!(
         error,
         LynxViewError::InvalidScriptEncoding { ref url, .. } if url == "app:///invalid.js"

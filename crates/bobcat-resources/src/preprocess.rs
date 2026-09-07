@@ -5,7 +5,7 @@
 //! settled by [`mime::sniff`], from the label it came with, the extension of
 //! its URL, or its own bytes. That type classifies it. The class then picks
 //! the treatment: text is transcoded to UTF-8 with its BOM removed, so the
-//! engine's strict UTF-8 validation of a script or stylesheet only ever sees
+//! fetcher's strict UTF-8 validation of a script or stylesheet only ever sees
 //! what a browser's decoder would have produced; JSON is text that must also
 //! parse; an image is container-sniffed and its header probed for the size
 //! layout wants, while its pixels stay encoded for the platform decoder;

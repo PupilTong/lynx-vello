@@ -365,6 +365,12 @@ impl MacApplication {
         let mut fatal = None;
         for event in view.pump() {
             match event {
+                EngineEvent::StartupFailed(source) if fatal.is_none() => {
+                    fatal = Some(CliError::StartView {
+                        input: self.input.clone(),
+                        source,
+                    });
+                }
                 EngineEvent::ScriptRunError(source) if fatal.is_none() => {
                     fatal = Some(CliError::Script {
                         input: self.input.clone(),

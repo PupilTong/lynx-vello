@@ -18,26 +18,28 @@ use crate::style::PreparsedStyleSheet;
 /// asked for by message. It is therefore free to be neither `Send` nor `Sync`
 /// and to hold `Rc`, `RefCell` or browser objects directly.
 ///
-/// The two halves have deliberately different shapes, because their callers
-/// do. Bytes and stylesheets are awaited off the frame path, so they are
-/// futures. Images are named synchronously, loaded on the host's own
-/// concurrency, and reported through [`ImageReports`](dom::ImageReports); the pixels are then
-/// read back synchronously by [`dom::FrameImages::read`] during composition,
-/// which cannot suspend. That read may block, and after a successful load it
-/// must not miss — see [`dom::FrameImages`].
+/// Source requests are non-blocking: the fetcher resolves the URL, loads and
+/// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
+/// [`SourceCompletion`] to answer main directly. It owns any executor its IO
+/// needs; core retains and polls no resource future. Images are reported through
+/// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
-/// Every fetch is polled directly on the painter's thread, which has no
-/// ambient Tokio runtime or IO reactor — the CLI drives the whole of
-/// construction with `pollster`, which supplies neither. Implementations own
-/// any executor or reactor their IO requires: move the real file or network
-/// work onto it, wake the future, and Bobcat polls until it is ready. What
-/// the future must not do is assume a runtime its caller never promised.
+/// The lower-level async byte API is available to embedders; core startup uses
+/// only [`Self::request_source`]. Its futures require the caller's own executor.
 #[expect(
     async_fn_in_trait,
-    reason = "the absent `Send` is the point: a resource system is thread-bound, \
-              and its futures are polled only on the painter that owns it"
+    reason = "embedder byte operations may be thread-bound"
 )]
 pub trait ResourceFetcher: dom::FrameImages {
+    /// Begins one source load without blocking the painter. Main requests each
+    /// stylesheet in cascade order, then the entry, with one outstanding source.
+    ///
+    /// Consume `completion` with the result, or retain it until the load finishes.
+    /// Dropping it unanswered reports a failure unless the view has ended.
+    /// Check [`SourceCompletion::is_cancelled`] before starting queued work and
+    /// after IO; a cancelled load no longer needs to decode or deliver a result.
+    fn request_source(&self, request: SourceRequest, completion: SourceCompletion);
+
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
 
     async fn resolve_locator(
@@ -116,6 +118,10 @@ pub trait ResourceFetcher: dom::FrameImages {
 /// value from the builder [`create_lynx_view`](crate::LynxGroup::create_lynx_view) takes,
 /// holding this handle plus that view's reports.
 impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
+    fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
+        (**self).request_source(request, completion);
+    }
+
     fn supports_capability(&self, capability: ResourceCapability) -> bool {
         (**self).supports_capability(capability)
     }
@@ -172,6 +178,108 @@ where
         metadata: response.metadata,
         payload: StyleSheetPayload::Text(response.bytes),
     })
+}
+
+/// One source requested by the document owner. Resolution belongs to the fetcher.
+#[derive(Debug)]
+pub enum SourceRequest {
+    StyleSheet(String),
+    Entry(String),
+}
+
+/// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
+#[derive(Debug)]
+pub enum StyleSheetSource {
+    Preparsed(Arc<PreparsedStyleSheet>),
+    Text(String),
+}
+
+/// A source ready for main. An entry's resolved URL names its preloaded ESM.
+#[derive(Debug)]
+pub enum LoadedSource {
+    StyleSheet(StyleSheetSource),
+    Entry { source: String, url: String },
+}
+
+/// The concrete, transferable right to answer one source request.
+///
+/// This is neither a closure nor a trait object. It sends to the existing group
+/// FIFO and wakes main through that channel, without a painter turn. It cannot
+/// be cloned; consuming it permits at most one result. An unanswered drop
+/// reports failure so a lost worker cannot leave startup waiting forever.
+#[must_use = "complete the source request or retain it until the load finishes"]
+pub struct SourceCompletion {
+    commands: Option<crate::mailbox::Sender<crate::view::ToMain>>,
+    view: crate::view::ViewId,
+    control: Arc<crate::main::StartupControl>,
+}
+
+impl std::fmt::Debug for SourceCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceCompletion")
+            .field("view", &self.view)
+            .field("cancelled", &self.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SourceCompletion {
+    pub(crate) fn new(
+        commands: crate::mailbox::Sender<crate::view::ToMain>,
+        view: crate::view::ViewId,
+        control: Arc<crate::main::StartupControl>,
+    ) -> Self {
+        Self {
+            commands: Some(commands),
+            view,
+            control,
+        }
+    }
+
+    /// Whether the view or its group has ended. Cancellation is cooperative:
+    /// an IO operation already running may finish, but its result is discarded.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.control.is_cancelled()
+            || self
+                .commands
+                .as_ref()
+                .is_none_or(flume::Sender::is_disconnected)
+    }
+
+    /// Sends the result once. A result for a cancelled view is discarded.
+    pub fn complete(mut self, source: Result<LoadedSource, crate::LynxViewError>) {
+        self.send(source);
+    }
+
+    fn send(&mut self, source: Result<LoadedSource, crate::LynxViewError>) {
+        if let Some(commands) = self.commands.take()
+            && !self.control.is_cancelled()
+        {
+            let _ = commands.send((
+                Some(self.view),
+                crate::view::ToMain::SourceLoaded { source },
+            ));
+        }
+    }
+}
+
+impl Drop for SourceCompletion {
+    fn drop(&mut self) {
+        if !self.is_cancelled() {
+            self.send(Err(ResourceError {
+                request_id: None,
+                kind: ResourceErrorKind::Unavailable,
+                phase: ResourceErrorPhase::ReadBody,
+                locator: None,
+                status: None,
+                message: "the fetcher dropped a source request without completing it".into(),
+                retry: RetryAdvice::Never,
+            }
+            .into()));
+        }
+    }
 }
 
 /// A caller-generated identifier unique within one fetcher instance.
@@ -398,8 +506,7 @@ pub enum RetryAdvice {
     After(Duration),
 }
 
-/// A host that answers nothing, ever: every fetch is a future that never
-/// completes and no image is ever readable.
+/// A test host with no sources or readable images.
 ///
 /// The painter owns a resource system unconditionally, so a test that is not
 /// about resources still needs one to name.
@@ -420,6 +527,8 @@ impl dom::FrameImages for NeverAnswers {
 
 #[cfg(test)]
 impl ResourceFetcher for NeverAnswers {
+    fn request_source(&self, _request: SourceRequest, _completion: SourceCompletion) {}
+
     fn supports_capability(&self, _capability: ResourceCapability) -> bool {
         false
     }
@@ -436,5 +545,84 @@ impl ResourceFetcher for NeverAnswers {
         _request: ResourceRequest,
     ) -> Result<ResourceResponse, ResourceError> {
         std::future::pending().await
+    }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    use crate::mailbox::Mailbox;
+    use crate::main::StartupControl;
+    use crate::view::{DETACHED_VIEW, ToMain};
+
+    fn completion() -> (SourceCompletion, Mailbox<ToMain>, Arc<StartupControl>) {
+        let (sender, receiver) = Mailbox::channel();
+        let control = Arc::new(StartupControl::default());
+        (
+            SourceCompletion::new(sender, DETACHED_VIEW, Arc::clone(&control)),
+            receiver,
+            control,
+        )
+    }
+
+    fn source() -> LoadedSource {
+        LoadedSource::Entry {
+            source: String::new(),
+            url: "app:///main.js".into(),
+        }
+    }
+
+    #[test]
+    fn worker_completion_sends_exactly_one_addressed_result() {
+        let (completion, receiver, _) = completion();
+        std::thread::spawn(move || completion.complete(Ok(source())))
+            .join()
+            .unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok((Some(DETACHED_VIEW), ToMain::SourceLoaded { source: Ok(_) }))
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_unanswered_drop_reports_failure() {
+        let (completion, receiver, _) = completion();
+        drop(completion);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok((
+                _,
+                ToMain::SourceLoaded {
+                    source: Err(crate::LynxViewError::Resource(ResourceError {
+                        kind: ResourceErrorKind::Unavailable,
+                        ..
+                    }))
+                }
+            ))
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancellation_discards_both_late_results_and_unanswered_drops() {
+        for answer in [false, true] {
+            let (completion, receiver, control) = completion();
+            control.cancel();
+            assert!(completion.is_cancelled());
+            if answer {
+                completion.complete(Ok(source()));
+            } else {
+                drop(completion);
+            }
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn a_disconnected_main_cancels_the_source() {
+        let (completion, receiver, _) = completion();
+        drop(receiver);
+        assert!(completion.is_cancelled());
     }
 }

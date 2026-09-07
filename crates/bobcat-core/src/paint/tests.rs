@@ -391,48 +391,31 @@ fn a_booted_view_commits_and_publishes() {
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
-/// A startup outcome that arrives while a host fetch is still pending must
-/// still end construction.
-///
-/// This is the hang that shipped in the first draft of the message-driven
-/// startup: while the painter awaited a host future it read nothing, and an
-/// outcome already sitting in the FIFO was never observed. `bobcat-main`
-/// mounts each pushed source while the painter's next fetch is already in
-/// flight, so a failure it decides there lands in exactly this window.
-///
-/// Natively no ordinary failure lands in that window; on wasm32 under
-/// `panic = "abort"` a trapping main thread's `ScriptRunError` is exactly it,
-/// and it is unreachable from an integration test. So the invariant is pinned
-/// here: whatever the painter is waiting on, it is also watching the link.
-#[tokio::test]
-async fn an_outcome_arriving_during_a_pending_fetch_ends_startup() {
+/// A terminal event cancels an outstanding completion before the host releases it.
+#[test]
+fn failure_during_pending_fetch_is_delivered_by_pump() {
     let (mut painter, main) = detached();
-
-    // The outcome is sent from another thread *after* the painter has had
-    // time to suspend on the entry fetch — which is the whole point: an
-    // outcome already in the FIFO would be seen before the fetch began and
-    // would never exercise the wait. `NeverAnswers` keeps the fetch pending
-    // forever, as a host is entitled to.
-    let notify = main.notify.clone();
-    let decided = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        notify.send(ToPainter::Started(Err(crate::view::EngineError::Thread {
-            name: "script",
-            message: "boot failed while a fetch was in flight".to_owned(),
-        }
-        .into())));
-    });
-
-    let error = tokio::time::timeout(
-        Duration::from_secs(10),
-        painter.serve_startup(Vec::new(), "app:///main.js".to_owned()),
-    )
-    .await
-    .expect("a decided outcome must not wait on a fetch that never answers")
-    .expect_err("the decided failure ends construction");
-    assert!(
-        format!("{error}").contains("boot failed while a fetch was in flight"),
-        "and it is the failure the main thread decided: {error}"
+    let completion = crate::resource::SourceCompletion::new(
+        painter.link.commands.clone(),
+        painter.link.view,
+        Arc::clone(&painter.link.control),
     );
-    decided.join().expect("the deciding thread finishes");
+    assert!(!completion.is_cancelled());
+    main.notify
+        .send(ToPainter::Engine(EngineEvent::StartupFailed(
+            crate::view::EngineError::Thread {
+                name: "script",
+                message: "boot failed while a fetch was in flight".to_owned(),
+            }
+            .into(),
+        )));
+    let events = painter.pump();
+    assert!(matches!(events.as_slice(), [EngineEvent::StartupFailed(_)]));
+    assert!(completion.is_cancelled());
+    drop(completion);
+    assert!(
+        main.try_recv().is_err(),
+        "cancellation reports no second failure"
+    );
+    assert!(painter.pump().is_empty(), "failure is delivered once");
 }

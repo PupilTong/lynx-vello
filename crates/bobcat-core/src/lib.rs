@@ -26,6 +26,7 @@
 /// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
+mod mailbox;
 #[path = "main/lib.rs"]
 mod main;
 #[path = "paint/lib.rs"]

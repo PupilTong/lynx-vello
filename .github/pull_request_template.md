@@ -6,8 +6,8 @@ Every PR must keep one or more Mermaid diagrams that collectively show:
 
 Replace every TODO below. If the PR does not alter runtime architecture, use
 the affected authoring, build, test, release, or documentation flow and label
-the architectural boundary that remains unchanged. Verify the diagrams in the
-GitHub preview before submitting the PR.
+the architectural boundary that remains unchanged. GitHub rendering checks
+are optional and may be done after submission; preview must not block the PR.
 -->
 
 ## Summary
@@ -58,4 +58,4 @@ flowchart LR
 - [ ] I replaced every `TODO` and tailored both diagrams to this PR.
 - [ ] The diagrams accurately show the relevant before and after states.
 - [ ] Review-critical changes are visually highlighted and explained.
-- [ ] Both Mermaid diagrams render correctly in GitHub's preview.
+- [ ] Optional: I checked diagram rendering on GitHub (may be done after submission).

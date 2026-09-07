@@ -126,6 +126,8 @@ pub struct BobcatRenderer {
     resources: Resources,
     /// Current page registrations stay available after boot, including ZIP assets.
     page_resources: Option<Resources>,
+    /// Scripts/styles remain registered until the loading view reports boot's outcome.
+    boot_urls: Vec<String>,
     canvas: OffscreenCanvas,
     events: Arc<EventSignal>,
     config: PageConfig,
@@ -222,6 +224,7 @@ impl BobcatRenderer {
                 group: None,
                 resources,
                 page_resources: None,
+                boot_urls: Vec::new(),
                 canvas,
                 events,
                 config,
@@ -440,12 +443,19 @@ impl BobcatRenderer {
             return Ok(self.script_finished);
         };
         let mut fatal = None;
+        let mut boot_finished = false;
         if let Some(resources) = &self.page_resources {
             warn_notes(resources);
         }
         for event in view.pump() {
             match event {
-                EngineEvent::ScriptFinished => self.script_finished = true,
+                EngineEvent::ScriptFinished => {
+                    self.script_finished = true;
+                    boot_finished = true;
+                }
+                EngineEvent::StartupFailed(error) if fatal.is_none() => {
+                    fatal = Some(js_error(error));
+                }
                 // The first failure is the one reported.
                 EngineEvent::ScriptRunError(error) if fatal.is_none() => {
                     fatal = Some(js_error(error));
@@ -457,6 +467,15 @@ impl BobcatRenderer {
                     console_error(&js_error(error));
                 }
                 _ => {}
+            }
+        }
+        if (boot_finished || fatal.is_some())
+            && let Some(resources) = &self.page_resources
+        {
+            // Only release this page's boot sources. ZIP assets remain available
+            // for later frames, and staged sources belong to the next load.
+            for url in self.boot_urls.drain(..) {
+                let _ = resources.unregister(&url);
             }
         }
         if let Some(error) = fatal {
@@ -563,6 +582,7 @@ impl BobcatRenderer {
         drop(self.view.take());
         drop(self.group.take());
         self.page_resources = None;
+        self.boot_urls.clear();
     }
 }
 
@@ -583,6 +603,7 @@ impl BobcatRenderer {
         drop(self.view.take());
         drop(self.group.take());
         self.page_resources = None;
+        self.boot_urls.clear();
         // Release the old page's post-boot waiter. The Render Worker advances
         // its generation before calling load, so it exits without pumping the
         // replacement view.
@@ -621,19 +642,14 @@ impl BobcatRenderer {
                 sources,
             )
             .await;
-        // Boot consumed these scripts/styles; retain only other registrations
-        // (in particular ZIP assets that images may request on later turns).
-        for url in boot_urls {
-            let _ = resources.unregister(&url);
-        }
         warn_notes(&resources);
         self.view = Some(built.map_err(js_error)?);
         self.page_resources = Some(resources);
+        self.boot_urls = boot_urls;
         self.group = Some(group);
-        // Boot published its frame before this Worker took a turn, and a
-        // frame from below wakes through the same signal — but the wakeup it
-        // sent was consumed by the loop that was waiting on the *previous*
-        // page. This Worker therefore owes itself the first turn.
+        // Start servicing the loading view, including source requests queued
+        // during target construction. The previous page's waiter may have
+        // consumed their wakeup before this view was installed.
         self.events.request_event();
         Ok(())
     }

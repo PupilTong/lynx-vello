@@ -1,16 +1,12 @@
 //! Where the fetcher's own work runs, and how it gets back.
 //!
-//! The protocol polls every fetch on the painter's thread and promises no
-//! runtime there, so the IO and decoding this crate does need a home of
-//! their own. Natively that is a small pool of plain threads: a job is a
-//! closure, a completion is a value sent back over a channel, and the
-//! painter drains that channel in its turn. In the browser the Render Worker
-//! is single-threaded and `fetch` and the main thread's decoder are
-//! asynchronous anyway, so a job is a local future and the same channel
-//! carries its result.
+//! The protocol initiates loads on the painter's thread and promises no
+//! ambient runtime. Natively IO and decoding run on a pool of plain threads:
+//! source jobs have a concrete queue variant, while image and byte jobs are
+//! closures. Browser IO runs as local futures on the Render Worker's event loop.
 //!
-//! Either way a completion is followed by the host's wakeup, which is what
-//! turns "finished" into "the painter takes a turn".
+//! Images wake the host to service reports; sources complete directly into
+//! main's FIFO, whose lifecycle notifications subsequently wake the host.
 
 use std::sync::Arc;
 
@@ -19,7 +15,11 @@ use std::sync::Arc;
 pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 
 #[cfg(not(target_arch = "wasm32"))]
-type Job = Box<dyn FnOnce() + Send + 'static>;
+enum Job {
+    Task(Box<dyn FnOnce() + Send + 'static>),
+    // Keep image queue entries small; Box<SourceJob> is a concrete thin pointer.
+    Source(Box<crate::sources::SourceJob>),
+}
 
 /// The native worker pool.
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,7 +49,11 @@ impl Executor {
                     for job in receiver {
                         // A job that panics must not take the worker with
                         // it: the next image still has to load.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                        let _ =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+                                Job::Task(task) => task(),
+                                Job::Source(source) => source.run(),
+                            }));
                     }
                 });
             if let Err(error) = spawned {
@@ -59,9 +63,14 @@ impl Executor {
         Self { jobs }
     }
 
+    /// Source loading has a concrete queue variant and no callback vtable.
+    pub(crate) fn source(&self, job: crate::sources::SourceJob) {
+        let _ = self.jobs.send(Job::Source(Box::new(job)));
+    }
+
     /// Queues `job` for a worker. A job queued after every worker has gone
     /// is dropped, which can only happen during teardown.
     pub(crate) fn run(&self, job: impl FnOnce() + Send + 'static) {
-        let _ = self.jobs.send(Box::new(job));
+        let _ = self.jobs.send(Job::Task(Box::new(job)));
     }
 }

@@ -197,6 +197,12 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
     for event in view.pump() {
         match event {
             EngineEvent::ScriptFinished => finished = true,
+            EngineEvent::StartupFailed(source) => {
+                return Err(CliError::StartView {
+                    input: input.to_owned(),
+                    source,
+                });
+            }
             EngineEvent::ScriptRunError(source) => {
                 return Err(CliError::Script {
                     input: input.to_owned(),

@@ -107,8 +107,9 @@ cascade untouched. The outer Worker, OffscreenCanvas, Wasm module, page
 configuration, latest device metrics, resource provider, font containers, and
 default font family are the renderer's own and are reapplied to each view it
 builds; the view, Lynx-main Worker, VM, and document are replaced. The
-provider clears the registered bytes once construction has copied them, so
-repeated Blob-URL submissions do not accumulate stale sources.
+provider releases the current page's registered scripts and styles after its
+startup outcome arrives, so repeated Blob-URL submissions do not accumulate
+stale sources. Other page assets remain available until that page is retired.
 
 The optional XML background section is reported under a URL derived from the
 final XML response URL, but neither retained nor executed: Bobcat has no
@@ -132,10 +133,10 @@ the `bobcat:boot` module uses top-level await to import the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
 element tree. QuickJS drains its owned pending-job queue until that
-module-evaluation promise settles. `LynxGroup::create_lynx_view` resolves only
-after that boot succeeds and rejects on any resource, font, realm, or boot
-failure, so a failed startup never exposes a half-initialized view. `ScriptFinished` remains
-queued as the successful lifecycle edge consumed by the browser loop. No
+module-evaluation promise settles. `LynxGroup::create_lynx_view` returns a loading
+view once its draw target is ready. Normal `pump()` turns report `ScriptFinished`
+after boot succeeds or `StartupFailed` on resource, font, realm, or boot failure;
+the browser load promise waits for that lifecycle outcome. No
 browser microtask checkpoint or timer interception participates in completion;
 the fallback listener is retained inside the preloaded runtime ESM rather than
 by the browser.
@@ -155,10 +156,18 @@ load, and a family nothing provides makes that load reject. Author stylesheets
 reach core the way the entry module does — fetched and registered by the Render
 Worker, named in the load, mounted as author-origin rules in cascade order. The
 stylesheet contract has a second arm for pre-parsed CSS. Raw JavaScript and
-XML loads take the text arm; `loadTemplate` and `loadZip` decode binary containers through
-`bobcat-source::PageSource` and registers their lowered `StyleInfo` through
+XML loads take the text arm; `loadTemplate` and `loadZip` decode binary containers
+through `bobcat-source::PageSource` and register their lowered `StyleInfo` through
 the pre-parsed arm. Source retrieval and adaptation remain embedder work,
 with core receiving only `ViewSources` and its resource-fetcher contract.
+
+`request_source` launches a browser task that resolves, fetches and validates
+the requested source, then uses its concrete completion handle to send directly
+to main. Painter turns do not poll source IO. Each page owns an independent
+resource scope: boot scripts and styles remain registered until its startup
+outcome arrives; ZIP images and other assets remain available for later frames.
+Sources staged for the next page belong to a separate scope and are not cleared
+when the current page completes.
 
 ## Pointer input
 

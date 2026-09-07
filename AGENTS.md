@@ -20,9 +20,10 @@ A prose-only before/after description does not satisfy this requirement. There
 are no exemptions for small, documentation-only, test-only, dependency, or
 other non-architectural changes: in those cases, diagram the affected authoring,
 build, test, release, or runtime path and explicitly label the architectural
-parts that remain unchanged. Tailor every diagram to the actual PR; remove all
-template placeholders and verify that the Mermaid renders in GitHub's PR
-preview before publishing or updating the PR description. Use
+parts that remain unchanged. Tailor every diagram to the actual PR and remove
+all template placeholders. GitHub rendering checks are optional and may be
+done after publication; unavailable preview must not block creating or updating
+a PR or require user approval to proceed. Use
 `.github/pull_request_template.md` as the minimum required structure.
 
 ## Mission
@@ -171,33 +172,45 @@ useful signal for currently-compatible versions of those libraries.
   `DrawTarget`. **A view is built from a group, never on its own**:
   `LynxGroup::new` takes the lifecycle wakeup and `StyleThreads`, starts
   `bobcat-main`, and awaits the QuickJS runtime and Stylo pool every view in
-  that group will share. `create_lynx_view` validates the viewport, creates
-  the view's link, attaches it to the group's thread, and builds the painter,
+  that group will share. Each group owns two instances of the same
+  `Mailbox<M>` implementation: `Mailbox<ToMain>` on main and
+  `Mailbox<ToPainter>` on the host thread. Both use `(Option<ViewId>, M)`
+  messages (`None` addresses the group), one FIFO each, and one shared
+  deadline-aware receive implementation. A painter turn consumes its own messages and buffers
+  siblings' messages until their turns. Dropping a view unregisters its inbox
+  entry and discards late messages; frame mailboxes remain per view so only
+  the latest commit is retained. Offscreen ticks wait on the same group FIFO
+  and route sibling messages without treating their acknowledgements as their own.
+  `create_lynx_view` validates the viewport, registers the view on that inbox,
+  attaches it to the group's thread, and builds the painter,
   draw target, and fetcher in place on the calling thread. The view's `F`
   parameter is that painter-owned fetcher; the wakeup is a separate group
   constructor generic held by `bobcat-main`.
-  The calling thread drives stylesheet and entry fetches and
-  sends only loaded sources across the link. `bobcat-main` creates the
-  document itself, registers its fonts, mounts each received stylesheet,
-  opens a realm on the group's QuickJS runtime when the entry arrives, and
-  boots it before returning success. A resource, font, realm, or boot failure
-  yields `LynxViewError` and no view, and nothing later mounts a stylesheet or
-  starts a second entry.
-  Cancelling the unresolved `create_lynx_view` future drops pending resource
-  work on the calling thread or stops that view's startup before QuickJS
-  begins, then releases the painter it built and takes the half-built view
-  off the group's thread, leaving the group and its other views running;
-  synchronous startup JavaScript is allowed to finish rather than being
-  externally interrupted.
+  Construction returns a loading view once the painter and draw target exist.
+  `bobcat-main` creates the document, registers fonts, and requests each stylesheet
+  in cascade order followed by the entry module. The painter services these
+  requests and images in ordinary `pump` turns. `ResourceFetcher::request_source`
+  owns URL resolution, fetching and UTF-8 validation. Its concrete, non-cloneable
+  `SourceCompletion` sends the loaded source or error directly to main's group FIFO;
+  no resource Future, poll loop, callback trait object or resource waker lives in core.
+  Main's lifecycle notifications still wake the host through `EventRequester`.
+  Main mounts each sheet and boots the entry in its QuickJS realm. Success is
+  `ScriptFinished`; resource, font, realm, or boot failure is `StartupFailed`.
+  Constructor errors cover metrics, attachment and draw-target setup only.
+  Cancelling an unresolved constructor releases its partial attachment and target.
+  Dropping a loading view marks source work cancelled and stops that view before
+  QuickJS begins. Fetchers skip cancelled queued work; IO or synchronous JavaScript
+  already executing may finish, and late source results are discarded. The group
+  and other views keep running.
   The default family is prepended to the `system-ui`, `sans-serif`,
   and `serif` generic maps, so a Wasm embedder can supply its otherwise-absent
   system-font backend without baking a particular font into core; a name neither
   the containers nor the platform has fails with `EngineError::UnknownFontFamily`.
   Bundle retrieval, `.web.bundle` decoding, and config parsing are embedder
-  responsibilities; core validates the entry module's source as UTF-8, registers
-  its resolved URL in QuickJS's preloaded ESM graph. Successful construction
-  has already completed boot; its `ScriptFinished` lifecycle edge remains
-  queued for `pump`. The protocol's `fetch_style_sheet` answers with either
+  responsibilities; the fetcher supplies validated source text, and core registers
+  its resolved URL in QuickJS's preloaded ESM graph. Construction does not wait
+  for boot; its outcome arrives through `pump`. The protocol's
+  `request_source` answers stylesheet requests with either
   CSS text or a `PreparsedStyleSheet` (`bobcat_core::style`) the host parsed
   itself, since a `.web.bundle` ships CSS a build step already tokenized and
   re-serializing it to a sheet blob is the startup cost the design rules out.
@@ -207,11 +220,11 @@ useful signal for currently-compatible versions of those libraries.
   the floor, because the wire format keeps attribute selectors and functional
   pseudo-classes as text and stylo builds specified values only through its
   value parsers. Decoding a container stays embedder work: core owns the
-  `PreparsedStyleSheet` vocabulary, and the embedder fills it. A request
-  carries a specifier plus its optional base URL, not a semantic resource kind
-  or transport hints: the embedder locates bytes by normalized resolved URL,
-  while `fetch_style_sheet` selects the stylesheet payload contract. Other
-  buffered loads use `fetch_resource`, and a `ResourceRequest` carries no
+  `PreparsedStyleSheet` vocabulary, and the embedder fills it. Source requests
+  select a stylesheet or entry payload and carry a specifier; the fetcher supplies
+  the base URL and transport policy. The lower-level embedder byte API retains
+  `resolve_locator`, `fetch_resource` and `fetch_style_sheet`; core startup no
+  longer calls them. A `ResourceRequest` carries no
   response-size limit; each fetcher owns the memory bound for the response it
   materializes. Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
@@ -255,8 +268,8 @@ useful signal for currently-compatible versions of those libraries.
   OS facts in (`dispatch_input`/`resize`/`pump`/ticks);
   they never start or steer the pipeline. Engine events are enqueued and then
   wake the host's `pump` through the construction-time `EventRequester`;
-  `ScriptFinished` preserves the successful entry-module boot edge after
-  `new` has awaited it, `ScriptRunError` reports a fatal script-runtime failure
+  `ScriptFinished` reports successful entry-module boot,
+  `StartupFailed` reports source/configuration/boot failure, `ScriptRunError` reports a fatal script-runtime failure
   during later owner-thread work, `ListenerFailed` reports a listener that
   threw during event delivery, and `TimerFailed` reports a `setTimeout` or
   `setInterval` callback that threw when it came due — the last two separate
@@ -340,8 +353,7 @@ useful signal for currently-compatible versions of those libraries.
   `WindowTarget` — a `'static` surface target, so a windowing embedder passes
   a shared handle (`Arc<winit::Window>`) and a browser an owned canvas — and
   `DrawTarget::Offscreen` asks for a windowless GPU target instead. Either is
-  built inside `new`, on the calling thread, while `bobcat-main` is already
-  fetching; a view that exists therefore has somewhere to put a frame, and no
+  built inside `new`, on the calling thread, while `bobcat-main` prepares the document; a view that exists therefore has somewhere to put a frame, and no
   state, error, or sentence has to describe one that does not.
   `FrameSize::for_viewport` exposes the physical size that construction will
   compute, for a host that must size the surface's backing store — a canvas —
@@ -847,8 +859,9 @@ useful signal for currently-compatible versions of those libraries.
   resource provider, registered font containers, selected default font family,
   and Stylo worker *count* are the renderer's own, reapplied to each group it
   builds; the workers themselves belong to the group and retire when it is
-  dropped, and a load clears the registered script and stylesheet bytes once
-  copied. Every style Worker is a managed one: the Render Worker is not a pool
+  dropped. Registered script and stylesheet bytes remain available until the
+  startup outcome arrives; cleanup leaves ZIP assets and the next page's staged
+  sources intact. Every style Worker is a managed one: the Render Worker is not a pool
   member and neither is the view's Lynx-main Worker, which enters traversal
   from outside the pool so Stylo transfers its root closure onto a managed
   worker. `BobcatRenderer::create` therefore takes a count of one to

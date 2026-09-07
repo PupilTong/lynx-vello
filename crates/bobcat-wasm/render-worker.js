@@ -200,9 +200,9 @@ function trackScriptCompletion(request) {
     () => postResponse(request, true),
     (error) => postResponse(request, false, error),
   )
-  // Native construction has already rejected any boot failure. This waiter
-  // consumes the successful ScriptFinished edge preserved for the host loop;
-  // only a replacement page or disposal ends the live page it starts.
+  // Construction returns a loading view. Normal pump turns service its
+  // resource requests and deliver either ScriptFinished or StartupFailed.
+  // A failed page remains replaceable, so its event loop stays available.
   void completion
     .catch(() => undefined)
     .then(() => servePage(generation))

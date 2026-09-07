@@ -5,8 +5,8 @@
 //! holds names and load states; it never sees a store, a buffer or a
 //! `peniko::ImageData`, and no channel between the two can carry one.
 //!
-//! Because the store never leaves this thread it is held by value, as a type
-//! parameter rather than a trait object, and needs neither `Send` nor `Sync` —
+//! The concrete store is owned by value.
+//! It never leaves this thread and needs neither `Send` nor `Sync` —
 //! which is what lets a wasm store hold browser objects directly. Nor does the
 //! handle it reports through: every type on this path is a concrete,
 //! thread-bound value, and the only thing here that crosses a thread is the

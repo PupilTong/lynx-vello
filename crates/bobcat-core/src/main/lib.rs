@@ -3,7 +3,7 @@
 //! The embedder's own thread starts this owner from `LynxGroup::new` and keeps
 //! every painter itself. This thread builds the script runtime and the style
 //! pool the group shares, then adopts one view at a time: it creates each
-//! document, applies every startup source pushed to it, boots each realm, and
+//! document, requests and mounts its startup sources, boots each realm, and
 //! owns document and realm until that view is released or the group is.
 
 pub(crate) mod quickjs;
@@ -14,19 +14,16 @@ pub(crate) mod tree;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
-use std::future::Future;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
 use std::rc::Rc;
+use std::str;
 use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll, Wake, Waker};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
-use std::{str, thread};
 
 use dom::{CommittedFrame, StylePool};
 #[cfg(target_arch = "wasm32")]
@@ -37,11 +34,12 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use crate::mailbox::{Mailbox, Sender};
+use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand, LoadedSource,
-    LynxViewError, MainSources, StyleSheetSource, StyleThreads, ToMain, ToPainter, ViewId,
-    Viewport, frame_slot,
+    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, LynxViewError, MainSources,
+    StyleThreads, ToMain, ToPainter, ViewId, Viewport, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DETACHED_VIEW, DetachedLink};
@@ -52,7 +50,7 @@ pub(crate) struct EntryModule {
     pub(crate) url: String,
 }
 
-/// One view's construction cancellation flag.
+/// One view's construction and boot cancellation flag.
 ///
 /// It only prevents work that has not entered synchronous JavaScript yet.
 /// Once `QuickJS` is executing, cancellation takes effect when that call
@@ -68,7 +66,7 @@ impl StartupControl {
         self.cancelled.store(true, Ordering::Release);
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
 }
@@ -112,7 +110,8 @@ impl GroupHome {
 /// The main thread's sending end: notification FIFO, newest-frame mailbox,
 /// and the wakeup that announces both to the thread that paints.
 pub(crate) struct ToPainterSender<R: EventRequester> {
-    notifications: flume::Sender<ToPainter>,
+    view: ViewId,
+    notifications: Sender<ToPainter>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
 }
@@ -122,6 +121,7 @@ pub(crate) struct ToPainterSender<R: EventRequester> {
 impl<R: EventRequester> Clone for ToPainterSender<R> {
     fn clone(&self) -> Self {
         Self {
+            view: self.view,
             notifications: self.notifications.clone(),
             frames: Arc::clone(&self.frames),
             requester: Arc::clone(&self.requester),
@@ -131,11 +131,13 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
 
 impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn new(
-        notifications: flume::Sender<ToPainter>,
+        view: ViewId,
+        notifications: Sender<ToPainter>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
     ) -> Self {
         Self {
+            view,
             notifications,
             frames,
             requester,
@@ -144,11 +146,14 @@ impl<R: EventRequester> ToPainterSender<R> {
 
     /// Announces one notification, then wakes the thread that paints.
     ///
-    /// One wake, not two: the notification is already queued, and the painter
-    /// waits on that queue directly — during construction by awaiting it, and
-    /// afterwards on the host's own turns, which this requester asks for.
+    /// Enqueue before requesting a host turn, so its pump observes the
+    /// notification. Startup and running views use this same path.
     pub(crate) fn send(&self, notification: ToPainter) {
-        if self.notifications.send(notification).is_ok() {
+        if self
+            .notifications
+            .send((Some(self.view), notification))
+            .is_ok()
+        {
             self.requester.request_event();
         }
     }
@@ -175,7 +180,8 @@ impl<R: EventRequester> ToPainterSender<R> {
 pub(crate) struct GroupLink<R: EventRequester> {
     /// Every view's commands, and every attachment, in the order they were
     /// sent.
-    pub(crate) commands: flume::Receiver<GroupCommand>,
+    pub(crate) commands: Mailbox<ToMain>,
+    pub(crate) notifications: Sender<ToPainter>,
     /// The one event loop every view in this group wakes.
     pub(crate) requester: Arc<R>,
     /// How this thread's own startup went, answered exactly once.
@@ -276,6 +282,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let DetachedLink { commands, notify } = link;
             let requester = Arc::clone(notify.requester());
+            let notifications = notify.notifications.clone();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
@@ -304,7 +311,14 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         notify,
                         Arc::new(StartupControl::default()),
                     )];
-                    serve_group(&mut js_runtime, None, &requester, &commands, &mut views);
+                    serve_group(
+                        &mut js_runtime,
+                        None,
+                        &requester,
+                        &commands,
+                        &notifications,
+                        &mut views,
+                    );
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -337,6 +351,7 @@ enum ViewSlot<R: EventRequester> {
 
 /// A view's document between its first source and its entry module.
 struct Booting<R: EventRequester> {
+    requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
 }
@@ -368,6 +383,8 @@ impl<R: EventRequester> Booting<R> {
             config,
             fonts,
             default_font_family,
+            style_sheets,
+            entry,
         } = sources;
         let mut document = new_document(viewport, config);
         if let Some(pool) = style_pool {
@@ -381,12 +398,27 @@ impl<R: EventRequester> Booting<R> {
         {
             return Err(EngineError::UnknownFontFamily(family).into());
         }
-        Ok(Self { document, notify })
+        let requests = style_sheets
+            .into_iter()
+            .map(SourceRequest::StyleSheet)
+            .chain(std::iter::once(SourceRequest::Entry(entry)))
+            .collect::<Vec<_>>()
+            .into_iter();
+        Ok(Self {
+            requests,
+            document,
+            notify,
+        })
     }
 
-    /// Applies one pushed source. The entry's arrival is what ends the wait:
-    /// the painter sends stylesheets in cascade order with the entry last, so
-    /// mounting in arrival order *is* the cascade.
+    fn request_next(&mut self) {
+        if let Some(request) = self.requests.next() {
+            self.notify.send(ToPainter::RequestSource(request));
+        }
+    }
+
+    /// Mounts the requested source, then requests the next. The entry is
+    /// requested only after every author sheet has been mounted.
     fn apply(
         mut self: Box<Self>,
         js_runtime: &mut ScriptRuntime,
@@ -407,6 +439,7 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
+        self.request_next();
         Booted::Waiting(self)
     }
 
@@ -420,7 +453,9 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
-        let Self { document, notify } = *self;
+        let Self {
+            document, notify, ..
+        } = *self;
         let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
             Ok(runtime) => runtime,
             Err(error) => return Booted::Failed(error.into_script_error().into()),
@@ -444,6 +479,7 @@ impl<R: EventRequester> Booting<R> {
 fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>) {
     let GroupLink {
         commands,
+        notifications,
         requester,
         ready,
     } = link;
@@ -460,8 +496,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
     // one pool because they cannot traverse at once — the single thread that
     // drives them both is already inside whichever traversal is running.
     //
-    // Both are built before the first view attaches, so starting the workers
-    // overlaps the fetches that view's painter already has in flight.
+    // Both are ready before group construction returns and any view attaches.
     let started = ScriptRuntime::new()
         .map_err(LynxViewError::from)
         .and_then(|mut runtime| {
@@ -495,6 +530,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
             style_pool.as_ref(),
             &requester,
             &commands,
+            &notifications,
             &mut views,
         );
     }));
@@ -513,7 +549,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
 }
 
 /// One view a group's thread carries: its slot, the link it reports through,
-/// and the flag its embedder can still cancel its construction with.
+/// and the flag its embedder cancels when dropping the view.
 struct CarriedView<R: EventRequester> {
     id: ViewId,
     /// `None` only while a source is being mounted: mounting one consumes the
@@ -526,6 +562,12 @@ struct CarriedView<R: EventRequester> {
     /// The newest `BeginFrame` this round has serviced, acknowledged in the
     /// round's tail.
     serviced_begin_frame: Option<u64>,
+}
+
+impl<R: EventRequester> Drop for CarriedView<R> {
+    fn drop(&mut self) {
+        self.control.cancel();
+    }
 }
 
 impl<R: EventRequester> CarriedView<R> {
@@ -557,7 +599,7 @@ impl<R: EventRequester> CarriedView<R> {
     /// failed, or its construction was cancelled and nobody is listening for
     /// an outcome.
     fn apply(&mut self, js_runtime: &mut ScriptRuntime, command: ToMain) -> bool {
-        if matches!(command, ToMain::Shutdown) {
+        if self.control.is_cancelled() || matches!(command, ToMain::Shutdown) {
             return false;
         }
         // A running view is served in place: everything after boot is the
@@ -572,13 +614,43 @@ impl<R: EventRequester> CarriedView<R> {
             );
             return true;
         }
-        let Some(ViewSlot::Booting(booting)) = self.slot.take() else {
+        let Some(ViewSlot::Booting(mut booting)) = self.slot.take() else {
             unreachable!("a carried view holds its slot between commands")
         };
-        let ToMain::SourceLoaded { source } = command else {
-            unreachable!("a view that has not booted has nothing else to apply")
+        let outcome = match command {
+            ToMain::SourceLoaded { source: Ok(source) } => {
+                booting.apply(js_runtime, source, &self.control)
+            }
+            ToMain::SourceLoaded { source: Err(error) } => Booted::Failed(error),
+            other => {
+                match other {
+                    ToMain::Resize {
+                        width,
+                        height,
+                        device_pixel_ratio,
+                    } => {
+                        booting.document.set_viewport(width, height);
+                        booting.document.set_device_pixel_ratio(device_pixel_ratio);
+                    }
+                    ToMain::ImageEvents(events) => {
+                        booting.document.apply_image_events(&events);
+                    }
+                    ToMain::BeginFrame { seq, .. } => {
+                        self.notify.send(ToPainter::BeginFrameServiced(seq));
+                    }
+                    // No committed tree or realm exists to route these to yet.
+                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
+                    #[cfg(test)]
+                    ToMain::Probe(probe) => probe(&mut booting.document),
+                    ToMain::Attach(_)
+                    | ToMain::Close
+                    | ToMain::SourceLoaded { .. }
+                    | ToMain::Shutdown => unreachable!(),
+                }
+                Booted::Waiting(booting)
+            }
         };
-        match booting.apply(js_runtime, source, &self.control) {
+        match outcome {
             Booted::Waiting(booting) => self.slot = Some(ViewSlot::Booting(booting)),
             Booted::Running(runtime) => {
                 // Boot's outcome and boot's pixels ride one FIFO, in this
@@ -588,11 +660,11 @@ impl<R: EventRequester> CarriedView<R> {
                 self.notify
                     .send(ToPainter::Engine(EngineEvent::ScriptFinished));
                 self.notify.send(ToPainter::FrameChanged);
-                self.notify.send(ToPainter::Started(Ok(())));
                 self.slot = Some(ViewSlot::Running(runtime));
             }
             Booted::Failed(error) => {
-                self.notify.send(ToPainter::Started(Err(error)));
+                self.notify
+                    .send(ToPainter::Engine(EngineEvent::StartupFailed(error)));
                 return false;
             }
             Booted::Gone => return false,
@@ -626,17 +698,17 @@ fn attach<R: EventRequester>(
     views: &mut Vec<CarriedView<R>>,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
+    notifications: &Sender<ToPainter>,
+    view: ViewId,
     attachment: Attachment,
 ) {
     let Attachment {
-        view,
         viewport,
         sources,
-        notifications,
         frames,
         control,
     } = attachment;
-    let notify = ToPainterSender::new(notifications, frames, Arc::clone(requester));
+    let notify = ToPainterSender::new(view, notifications.clone(), frames, Arc::clone(requester));
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
     add_script_panic_reporter({
         let notify = notify.clone();
@@ -645,13 +717,16 @@ fn attach<R: EventRequester>(
         })
     });
     match Booting::new(viewport, sources, style_pool, notify.clone()) {
-        Ok(booting) => views.push(CarriedView::new(
-            view,
-            ViewSlot::Booting(Box::new(booting)),
-            notify,
-            control,
-        )),
-        Err(error) => notify.send(ToPainter::Started(Err(error))),
+        Ok(mut booting) => {
+            booting.request_next();
+            views.push(CarriedView::new(
+                view,
+                ViewSlot::Booting(Box::new(booting)),
+                notify,
+                control,
+            ));
+        }
+        Err(error) => notify.send(ToPainter::Engine(EngineEvent::StartupFailed(error))),
     }
 }
 
@@ -667,7 +742,8 @@ fn serve_group<R: EventRequester>(
     js_runtime: &mut ScriptRuntime,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
-    commands: &flume::Receiver<GroupCommand>,
+    commands: &Mailbox<ToMain>,
+    notifications: &Sender<ToPainter>,
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
@@ -677,16 +753,24 @@ fn serve_group<R: EventRequester>(
             .iter_mut()
             .filter_map(CarriedView::next_timer_deadline)
             .min();
-        match wait_for_command(commands, deadline) {
-            Woken::Command(first) => {
-                for message in std::iter::once(first).chain(commands.drain()) {
-                    match message {
-                        GroupCommand::Close => return,
-                        GroupCommand::Attach(attachment) => {
-                            attach(views, style_pool, requester, *attachment);
+        match commands.recv(deadline) {
+            Ok(first) => {
+                for (view, command) in std::iter::once(first).chain(commands.drain()) {
+                    match command {
+                        ToMain::Close => return,
+                        ToMain::Attach(attachment) => {
+                            attach(
+                                views,
+                                style_pool,
+                                requester,
+                                notifications,
+                                view.expect("an attachment addresses its view"),
+                                *attachment,
+                            );
                         }
-                        GroupCommand::View { view, command } => {
-                            let Some(index) = views.iter().position(|carried| carried.id == view)
+                        command => {
+                            let Some(index) =
+                                views.iter().position(|carried| Some(carried.id) == view)
                             else {
                                 // A command for a view already released: its
                                 // goodbye won the race with whatever its
@@ -701,70 +785,12 @@ fn serve_group<R: EventRequester>(
                 }
             }
             // A deadline a realm asked for, and nothing else to serve.
-            Woken::Deadline => {}
-            Woken::Disconnected => return,
+            Err(flume::RecvTimeoutError::Timeout) => {}
+            Err(flume::RecvTimeoutError::Disconnected) => return,
         }
         for view in &mut *views {
             view.finish_round(js_runtime);
         }
-    }
-}
-
-/// What ended one round's wait.
-enum Woken {
-    /// A message arrived; more may be queued behind it.
-    Command(GroupCommand),
-    /// The earliest armed timer came due with no command to serve.
-    Deadline,
-    /// Every painter and the group handle are gone, and nothing more will be
-    /// asked of this thread.
-    Disconnected,
-}
-
-/// Waits for the next command, or until `deadline` when a timer names one.
-///
-/// `flume`'s own timed receive reads the standard library's clock, which
-/// wasm32 does not implement, so the wait is assembled here out of the two
-/// pieces both targets do have: the receiver's future, and `park_timeout` —
-/// which is exactly what `flume` blocks on itself. Nothing drives the future
-/// but this loop, and the waker only unparks this thread, so this is a
-/// blocking wait spelled with a future rather than an executor.
-fn wait_for_command(
-    commands: &flume::Receiver<GroupCommand>,
-    deadline: Option<ClockInstant>,
-) -> Woken {
-    let Some(deadline) = deadline else {
-        return commands.recv().map_or(Woken::Disconnected, Woken::Command);
-    };
-    let waker = Waker::from(Arc::new(UnparkWaker(thread::current())));
-    let mut context = Context::from_waker(&waker);
-    let mut receiving = commands.recv_async();
-    loop {
-        match Pin::new(&mut receiving).poll(&mut context) {
-            Poll::Ready(Ok(command)) => return Woken::Command(command),
-            Poll::Ready(Err(flume::RecvError::Disconnected)) => return Woken::Disconnected,
-            Poll::Pending => {}
-        }
-        let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
-            return Woken::Deadline;
-        };
-        // A spurious wake just polls again; a real one has already queued the
-        // command the poll will find.
-        thread::park_timeout(remaining);
-    }
-}
-
-/// The waker [`wait_for_command`] hands the receiver: the only thing a send
-/// has to do is end this thread's park.
-struct UnparkWaker(thread::Thread);
-
-impl Wake for UnparkWaker {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
     }
 }
 
@@ -777,7 +803,7 @@ fn apply_main_command<R: EventRequester>(
 ) {
     match command {
         ToMain::SourceLoaded { .. } => {
-            unreachable!("sources are answered once, before boot returns")
+            unreachable!("sources are requested only during boot")
         }
         ToMain::DispatchEvent {
             target,
@@ -804,7 +830,9 @@ fn apply_main_command<R: EventRequester>(
         }
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
-        ToMain::Shutdown => unreachable!("shutdown ends the command loop before dispatch"),
+        ToMain::Attach(_) | ToMain::Close | ToMain::Shutdown => {
+            unreachable!("lifecycle ends or attaches before dispatch")
+        }
         #[cfg(test)]
         ToMain::Probe(probe) => runtime.with_document(probe),
     }
