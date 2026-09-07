@@ -39,9 +39,9 @@ use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 use crate::view::{
-    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand, LoadedSource,
-    LynxViewError, MainSources, SourceRequest, StyleSheetSource, StyleThreads, ToMain, ToPainter,
-    ViewId, Viewport, frame_slot,
+    Attachment, EngineError, EngineEvent, EventRequester, FrameHub, GroupCommand,
+    GroupNotification, LoadedSource, LynxViewError, MainSources, SourceRequest, StyleSheetSource,
+    StyleThreads, ToMain, ToPainter, ViewId, Viewport, frame_slot,
 };
 #[cfg(test)]
 use crate::view::{DETACHED_VIEW, DetachedLink};
@@ -112,7 +112,8 @@ impl GroupHome {
 /// The main thread's sending end: notification FIFO, newest-frame mailbox,
 /// and the wakeup that announces both to the thread that paints.
 pub(crate) struct ToPainterSender<R: EventRequester> {
-    notifications: flume::Sender<ToPainter>,
+    view: ViewId,
+    notifications: flume::Sender<GroupNotification>,
     frames: Arc<FrameHub>,
     requester: Arc<R>,
 }
@@ -122,6 +123,7 @@ pub(crate) struct ToPainterSender<R: EventRequester> {
 impl<R: EventRequester> Clone for ToPainterSender<R> {
     fn clone(&self) -> Self {
         Self {
+            view: self.view,
             notifications: self.notifications.clone(),
             frames: Arc::clone(&self.frames),
             requester: Arc::clone(&self.requester),
@@ -131,11 +133,13 @@ impl<R: EventRequester> Clone for ToPainterSender<R> {
 
 impl<R: EventRequester> ToPainterSender<R> {
     pub(crate) fn new(
-        notifications: flume::Sender<ToPainter>,
+        view: ViewId,
+        notifications: flume::Sender<GroupNotification>,
         frames: Arc<FrameHub>,
         requester: Arc<R>,
     ) -> Self {
         Self {
+            view,
             notifications,
             frames,
             requester,
@@ -147,7 +151,14 @@ impl<R: EventRequester> ToPainterSender<R> {
     /// Enqueue before requesting a host turn, so its pump observes the
     /// notification. Startup and running views use this same path.
     pub(crate) fn send(&self, notification: ToPainter) {
-        if self.notifications.send(notification).is_ok() {
+        if self
+            .notifications
+            .send(GroupNotification {
+                view: self.view,
+                notification,
+            })
+            .is_ok()
+        {
             self.requester.request_event();
         }
     }
@@ -175,6 +186,7 @@ pub(crate) struct GroupLink<R: EventRequester> {
     /// Every view's commands, and every attachment, in the order they were
     /// sent.
     pub(crate) commands: flume::Receiver<GroupCommand>,
+    pub(crate) notifications: flume::Sender<GroupNotification>,
     /// The one event loop every view in this group wakes.
     pub(crate) requester: Arc<R>,
     /// How this thread's own startup went, answered exactly once.
@@ -275,6 +287,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let DetachedLink { commands, notify } = link;
             let requester = Arc::clone(notify.requester());
+            let notifications = notify.notifications.clone();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
@@ -303,7 +316,14 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         notify,
                         Arc::new(StartupControl::default()),
                     )];
-                    serve_group(&mut js_runtime, None, &requester, &commands, &mut views);
+                    serve_group(
+                        &mut js_runtime,
+                        None,
+                        &requester,
+                        &commands,
+                        &notifications,
+                        &mut views,
+                    );
                 }
                 Err(error) => {
                     notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
@@ -464,6 +484,7 @@ impl<R: EventRequester> Booting<R> {
 fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>) {
     let GroupLink {
         commands,
+        notifications,
         requester,
         ready,
     } = link;
@@ -514,6 +535,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
             style_pool.as_ref(),
             &requester,
             &commands,
+            &notifications,
             &mut views,
         );
     }));
@@ -672,17 +694,17 @@ fn attach<R: EventRequester>(
     views: &mut Vec<CarriedView<R>>,
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
+    notifications: &flume::Sender<GroupNotification>,
     attachment: Attachment,
 ) {
     let Attachment {
         view,
         viewport,
         sources,
-        notifications,
         frames,
         control,
     } = attachment;
-    let notify = ToPainterSender::new(notifications, frames, Arc::clone(requester));
+    let notify = ToPainterSender::new(view, notifications.clone(), frames, Arc::clone(requester));
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
     add_script_panic_reporter({
         let notify = notify.clone();
@@ -717,6 +739,7 @@ fn serve_group<R: EventRequester>(
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
     commands: &flume::Receiver<GroupCommand>,
+    notifications: &flume::Sender<GroupNotification>,
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
@@ -732,7 +755,7 @@ fn serve_group<R: EventRequester>(
                     match message {
                         GroupCommand::Close => return,
                         GroupCommand::Attach(attachment) => {
-                            attach(views, style_pool, requester, *attachment);
+                            attach(views, style_pool, requester, notifications, *attachment);
                         }
                         GroupCommand::View { view, command } => {
                             let Some(index) = views.iter().position(|carried| carried.id == view)

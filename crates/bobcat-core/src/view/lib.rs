@@ -27,7 +27,7 @@ use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupHome, GroupLink, StartupControl, ToPainterSender, spawn_group};
 pub use crate::paint::WindowTarget;
-use crate::paint::{Output, Painter, PainterLink};
+use crate::paint::{GroupInbox, Output, Painter, PainterLink};
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
 use crate::style::PreparsedStyleSheet;
@@ -402,6 +402,7 @@ pub struct LynxGroup {
 struct GroupInner {
     /// Every view's commands, and every attachment, on one FIFO.
     commands: flume::Sender<GroupCommand>,
+    notifications: Rc<GroupInbox>,
     /// The next view's id. Ids are never reused, so a command still in
     /// flight for a view that has ended cannot find a later one wearing its
     /// name.
@@ -469,12 +470,14 @@ impl LynxGroup {
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
         let (commands, command_receiver) = flume::unbounded();
+        let (notifications, notification_receiver) = flume::unbounded();
         let (ready, started) = flume::bounded(1);
         let resource_waker = event_waker(Arc::clone(&event_requester));
         let home = spawn_group(
             style_threads,
             GroupLink {
                 commands: command_receiver,
+                notifications,
                 requester: event_requester,
                 ready,
             },
@@ -484,6 +487,7 @@ impl LynxGroup {
         let group = Self {
             inner: Rc::new(GroupInner {
                 commands,
+                notifications: Rc::new(GroupInbox::new(notification_receiver)),
                 next_view: Cell::new(0),
                 resource_waker,
                 home,
@@ -544,9 +548,10 @@ impl LynxGroup {
         } = sources;
         let view = self.inner.next_id();
         let control = Arc::new(StartupControl::default());
-        let (painter_link, notifications, frames) = view_link(
+        let (painter_link, frames) = view_link(
             view,
             &self.inner.commands,
+            Rc::clone(&self.inner.notifications),
             self.inner.resource_waker.clone(),
             Arc::clone(&control),
         );
@@ -565,7 +570,6 @@ impl LynxGroup {
                     style_sheets,
                     entry,
                 },
-                notifications,
                 frames,
                 control: Arc::clone(&control),
             })))
@@ -811,7 +815,7 @@ impl<F> Drop for ViewStartup<F> {
 ///
 /// Every view in a group sends on one FIFO, so every command names its view;
 /// a group hands the ids out and never reuses one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ViewId(u64);
 
 /// A view for a group's thread to adopt, and everything that view needs
@@ -826,7 +830,6 @@ pub(crate) struct Attachment {
     pub(crate) view: ViewId,
     pub(crate) viewport: Viewport,
     pub(crate) sources: MainSources,
-    pub(crate) notifications: flume::Sender<ToPainter>,
     pub(crate) frames: Arc<FrameHub>,
     pub(crate) control: Arc<StartupControl>,
 }
@@ -912,6 +915,13 @@ pub(crate) enum ToPainter {
     RequestSource(SourceRequest),
 }
 
+/// Main → painter, on the group's one FIFO. A view id is never reused.
+#[derive(Debug)]
+pub(crate) struct GroupNotification {
+    pub(crate) view: ViewId,
+    pub(crate) notification: ToPainter,
+}
+
 /// The latest committed frame, and only ever the latest.
 pub(crate) type FrameHub = Mutex<Option<Arc<CommittedFrame>>>;
 
@@ -920,28 +930,24 @@ pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedF
         .unwrap_or_else(|error| panic!("the frame mailbox is poisoned: {error}"))
 }
 
-/// Builds one view's half of its group's link: the painter's end, and the
-/// two pieces of the main thread's end that cross in its attachment.
-///
-/// The commands go the other way on a channel the group already owns, which
-/// is why only this direction is built here.
+/// Registers a view on its group's inbox and creates its latest-frame mailbox.
 fn view_link(
     view: ViewId,
     commands: &flume::Sender<GroupCommand>,
+    notifications: Rc<GroupInbox>,
     resource_waker: Waker,
     control: Arc<StartupControl>,
-) -> (PainterLink, flume::Sender<ToPainter>, Arc<FrameHub>) {
-    let (notifications, notification_receiver) = flume::unbounded();
+) -> (PainterLink, Arc<FrameHub>) {
     let frames = Arc::new(FrameHub::new(None));
     let painter = PainterLink::new(
         view,
         commands.clone(),
-        notification_receiver,
+        notifications,
         Arc::clone(&frames),
         resource_waker,
         control,
     );
-    (painter, notifications, frames)
+    (painter, frames)
 }
 
 /// Both ends of one view's link, for a caller that is itself the far end: the
@@ -981,9 +987,11 @@ pub(crate) fn detached_link<R: EventRequester>(
     requester: Arc<R>,
 ) -> (PainterLink, DetachedLink<R>) {
     let (commands, command_receiver) = flume::unbounded();
-    let (painter, notifications, frames) = view_link(
+    let (notifications, notification_receiver) = flume::unbounded();
+    let (painter, frames) = view_link(
         DETACHED_VIEW,
         &commands,
+        Rc::new(GroupInbox::new(notification_receiver)),
         event_waker(Arc::clone(&requester)),
         Arc::new(StartupControl::default()),
     );
@@ -994,7 +1002,7 @@ pub(crate) fn detached_link<R: EventRequester>(
         painter,
         DetachedLink {
             commands: command_receiver,
-            notify: ToPainterSender::new(notifications, frames, requester),
+            notify: ToPainterSender::new(DETACHED_VIEW, notifications, frames, requester),
         },
     )
 }
@@ -1002,3 +1010,6 @@ pub(crate) fn detached_link<R: EventRequester>(
 /// The one view a [`detached_link`] carries, and the one
 /// [`crate::main::spawn_test_main_thread`] serves.
 pub(crate) const DETACHED_VIEW: ViewId = ViewId(0);
+
+#[cfg(test)]
+mod tests;

@@ -10,6 +10,8 @@
 
 mod gesture;
 mod graphics;
+mod inbox;
+pub(crate) use inbox::GroupInbox;
 pub(crate) mod images;
 mod sources;
 
@@ -135,7 +137,7 @@ pub(crate) struct PainterLink {
     /// a group sends on one FIFO, so each command carries its own name.
     view: ViewId,
     commands: flume::Sender<GroupCommand>,
-    notifications: flume::Receiver<ToPainter>,
+    notifications: Rc<GroupInbox>,
     frames: Arc<FrameHub>,
     frame: Option<Arc<CommittedFrame>>,
     events: Vec<EngineEvent>,
@@ -160,11 +162,12 @@ impl PainterLink {
     pub(crate) fn new(
         view: ViewId,
         commands: flume::Sender<GroupCommand>,
-        notifications: flume::Receiver<ToPainter>,
+        notifications: Rc<GroupInbox>,
         frames: Arc<FrameHub>,
         resource_waker: Waker,
         control: Arc<crate::main::StartupControl>,
     ) -> Self {
+        notifications.register(view);
         Self {
             view,
             commands,
@@ -214,9 +217,8 @@ impl PainterLink {
     /// Applies everything that has arrived. However many frames were
     /// announced, the mailbox is read once.
     pub(crate) fn sync(&mut self) {
-        while let Ok(notification) = self.notifications.try_recv() {
-            self.apply(notification);
-        }
+        let notifications = Rc::clone(&self.notifications);
+        notifications.drain(self.view, |notification| self.apply(notification));
         self.settle();
     }
 
@@ -305,14 +307,15 @@ impl PainterLink {
     /// target implements, so an offscreen view belongs to a native host.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
-        while self.begin_frames_serviced < seq {
+        self.sync();
+        while self.begin_frames_serviced < seq && !self.resources_failed {
             let Some(remaining) = deadline.checked_duration_since(ClockInstant::now()) else {
                 break;
             };
-            let Ok(notification) = self.notifications.recv_timeout(remaining) else {
+            if !self.notifications.wait(remaining) {
                 break;
-            };
-            self.apply(notification);
+            }
+            self.sync();
         }
         self.settle();
         self.begin_frames_serviced >= seq
@@ -320,7 +323,16 @@ impl PainterLink {
 
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
-        self.notifications.drain().collect()
+        let mut messages = Vec::new();
+        self.notifications
+            .drain(self.view, |message| messages.push(message));
+        messages
+    }
+}
+
+impl Drop for PainterLink {
+    fn drop(&mut self) {
+        self.notifications.remove(self.view);
     }
 }
 
