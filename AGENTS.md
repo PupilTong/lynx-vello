@@ -20,9 +20,10 @@ A prose-only before/after description does not satisfy this requirement. There
 are no exemptions for small, documentation-only, test-only, dependency, or
 other non-architectural changes: in those cases, diagram the affected authoring,
 build, test, release, or runtime path and explicitly label the architectural
-parts that remain unchanged. Tailor every diagram to the actual PR; remove all
-template placeholders and verify that the Mermaid renders in GitHub's PR
-preview before publishing or updating the PR description. Use
+parts that remain unchanged. Tailor every diagram to the actual PR and remove
+all template placeholders. GitHub rendering checks are optional and may be
+done after publication; unavailable preview must not block creating or updating
+a PR or require user approval to proceed. Use
 `.github/pull_request_template.md` as the minimum required structure.
 
 ## Mission
