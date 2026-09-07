@@ -25,8 +25,6 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant as ClockInstant;
 
 use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
@@ -35,12 +33,11 @@ use dom::vello::Scene;
 use dom::vello::peniko::Color;
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
 use rustc_hash::{FxHashMap, FxHashSet};
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant as ClockInstant;
 
 use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
+use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
@@ -152,6 +149,7 @@ pub(crate) struct PainterLink {
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// Coalesces announcements during a normal drain or offscreen frame wait.
     pending_announce: bool,
+    timer_deadline: Option<ClockInstant>,
 }
 
 impl PainterLink {
@@ -178,6 +176,7 @@ impl PainterLink {
             source_request: None,
             control,
             pending_announce: false,
+            timer_deadline: None,
         }
     }
 
@@ -210,6 +209,22 @@ impl PainterLink {
         let notifications = Rc::clone(&self.notifications);
         notifications.drain_view(self.view, |notification| self.apply(notification));
         self.settle();
+        self.nudge_due_timers();
+    }
+
+    fn nudge_due_timers(&mut self) {
+        if self
+            .timer_deadline
+            .is_some_and(|deadline| deadline <= ClockInstant::now())
+        {
+            self.timer_deadline = None;
+            self.send(ToMain::TimersDue);
+        }
+    }
+
+    pub(crate) fn next_wakeup(&self) -> Option<Duration> {
+        self.timer_deadline
+            .map(|deadline| deadline.saturating_duration_since(ClockInstant::now()))
     }
 
     fn apply(&mut self, notification: ToPainter) {
@@ -233,6 +248,7 @@ impl PainterLink {
             ToPainter::BeginFrameServiced(seq) => {
                 self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
             }
+            ToPainter::TimerDeadline(deadline) => self.timer_deadline = deadline,
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
             ToPainter::RequestSource(request) => self.source_request = Some(request),
         }
@@ -1202,6 +1218,10 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
             return false;
         }
         self.is_animating() || self.link.redraw_owed()
+    }
+
+    pub(super) fn next_wakeup(&self) -> Option<Duration> {
+        self.link.next_wakeup()
     }
 
     /// Advances an offscreen view by one frame.

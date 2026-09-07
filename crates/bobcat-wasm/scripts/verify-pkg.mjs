@@ -44,6 +44,7 @@ for (const requiredMethod of [
   'registerFonts(',
   'setDefaultFontFamily(',
   'waitForEngineEvent(',
+  'nextWakeupMs(',
 ]) {
   if (!glue.includes(requiredMethod)) {
     throw new Error(`generated renderer is missing ${requiredMethod}`)
@@ -310,6 +311,17 @@ if (renderWorker.includes('setTimeout(resolve, 1)')) {
 }
 if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
   throw new Error('Render Worker must await core engine events')
+}
+for (const requiredWakeupStep of [
+  'renderer.nextWakeupMs()',
+  'setTimeout(resolve, wakeupMs)',
+  'clearTimeout(deadline)',
+]) {
+  if (!renderWorker.includes(requiredWakeupStep)) {
+    throw new Error(
+      `Render Worker must wait out the realm's own deadline: missing ${requiredWakeupStep}`,
+    )
+  }
 }
 for (const requiredServeStep of [
   '.catch(() => undefined)',

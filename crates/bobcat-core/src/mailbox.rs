@@ -7,14 +7,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
 use flume::RecvTimeoutError;
 use rustc_hash::FxHashMap;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
+use crate::clock::ClockInstant as Instant;
 use crate::view::ViewId;
 
 /// `None` addresses the group; `Some` addresses one of its views.

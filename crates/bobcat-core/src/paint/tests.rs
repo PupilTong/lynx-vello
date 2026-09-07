@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{Output, TestPainter};
+use crate::clock::ClockInstant;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
 use crate::view::{
     DetachedLink, EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter,
@@ -93,6 +94,65 @@ fn one_drain_applies_every_kind_of_notification() {
 
     assert!(view.pump().is_empty(), "an event is handed back once");
     assert!(!view.link.take_redraw(), "and a request is taken once");
+}
+
+#[test]
+fn an_announced_deadline_is_nudged_once_and_only_after_it_has_passed() {
+    let (mut view, main) = detached();
+    assert!(
+        view.next_wakeup().is_none(),
+        "a view whose realm armed nothing asks the host to wait for nothing"
+    );
+
+    main.notify.send(ToPainter::TimerDeadline(Some(
+        ClockInstant::now() + Duration::from_millis(20),
+    )));
+    assert!(view.pump().is_empty());
+    let wakeup = view
+        .next_wakeup()
+        .expect("the announced deadline is the host's wait");
+    assert!(
+        wakeup <= Duration::from_millis(20),
+        "and it is what is left of it, not the whole delay: {wakeup:?}"
+    );
+    assert!(
+        main.try_recv().is_err(),
+        "a deadline still ahead nudges nobody"
+    );
+
+    std::thread::sleep(Duration::from_millis(25));
+    assert_eq!(
+        view.next_wakeup(),
+        Some(Duration::ZERO),
+        "a deadline that has passed asks for the turn the host is in"
+    );
+    assert!(view.pump().is_empty());
+    assert!(
+        matches!(main.try_recv(), Ok(ToMain::TimersDue)),
+        "and that turn is what tells the main thread"
+    );
+    assert!(
+        view.next_wakeup().is_none(),
+        "the deadline is spent as it is sent"
+    );
+    assert!(view.pump().is_empty());
+    assert!(
+        main.try_recv().is_err(),
+        "so the next turn nudges nothing, however long the main thread takes"
+    );
+
+    main.notify.send(ToPainter::TimerDeadline(Some(
+        ClockInstant::now() + Duration::from_secs(30),
+    )));
+    assert!(view.pump().is_empty());
+    assert!(view.next_wakeup().is_some(), "the new deadline is held");
+    main.notify.send(ToPainter::TimerDeadline(None));
+    assert!(view.pump().is_empty());
+    assert!(
+        view.next_wakeup().is_none(),
+        "and an empty schedule takes it back"
+    );
+    assert!(main.try_recv().is_err(), "with nothing nudged for it");
 }
 
 /// Frames do not queue: the mailbox holds one slot, so a painting side

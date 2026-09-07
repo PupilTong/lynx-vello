@@ -285,8 +285,12 @@ useful signal for currently-compatible versions of those libraries.
   next display frame**, whatever its display clock is (a `CVDisplayLink` on
   the window's monitor, `requestAnimationFrame` in a Worker). `is_animating`
   is the narrower fact, answered for any target, that an offscreen host with
-  no display to pace against asks instead. A draw that fails arrives once, as
-  `RenderFailed`.
+  no display to pace against asks instead. `next_wakeup` is the other half of
+  that pacing and the only place the engine names a length rather than a
+  fact: while it answers `Some(duration)` the host owes the view a `pump` no
+  later than that, because a `setTimeout` the realm armed comes due then, and
+  a host waits it out on the same wait it already had. A draw that fails
+  arrives once, as `RenderFailed`.
   **A view spans two threads**: the embedder's own — whichever one created its
   `LynxGroup` — which owns the window, the input capture, the surface
   (the one call macOS allows nowhere else), and the private `Painter`
@@ -966,9 +970,14 @@ useful signal for currently-compatible versions of those libraries.
   `src/timers.mjs` is the one module here that does install globals, because
   bare `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a
   card reaches them. It keeps only the callbacks, filed under the id the
-  host's `setTimer` hands back; the schedule, the clock, and HTML's `long`
-  delay conversion and nesting clamp are `bobcat-main`'s, which is also what
-  waits on the deadline and calls the module's `__BobcatRunTimer` back.
+  host's `setTimer` hands back; the schedule and HTML's `long` delay
+  conversion and nesting clamp are `bobcat-main`'s, and the tail of every
+  command round is what calls the module's `__BobcatRunTimer` back for
+  whatever is due. `bobcat-main` owns no clock: a deadline still ahead of it
+  is announced to that view's painter, read by the host as
+  `LynxView::next_wakeup`, waited out by the host's own event loop, and
+  answered by the `pump` that follows — one more command on the FIFO that
+  thread is already blocked on.
 - `crates/dom` — generic W3C-DOM-subset document tree and
   standards-oriented CSS computation core. `docs/dom-public-api.md` is the
   authoritative normal-build versus test-feature API boundary. It owns a

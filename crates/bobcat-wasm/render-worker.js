@@ -60,7 +60,18 @@ async function nextEngineWakeup() {
   if (renderer.owesFrame()) {
     await nextDisplayFrame()
   } else {
-    await renderer.waitForEngineEvent()
+    const wakeupMs = renderer.nextWakeupMs()
+    if (typeof wakeupMs === 'number') {
+      let deadline
+      await Promise.race([
+        renderer.waitForEngineEvent().then(() => clearTimeout(deadline)),
+        new Promise((resolve) => {
+          deadline = setTimeout(resolve, wakeupMs)
+        }),
+      ])
+    } else {
+      await renderer.waitForEngineEvent()
+    }
   }
 }
 

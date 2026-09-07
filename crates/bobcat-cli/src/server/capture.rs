@@ -463,7 +463,10 @@ async fn settle(
     mut remaining: Duration,
 ) -> Result<(), CaptureFailure> {
     while !remaining.is_zero() {
-        let step = remaining.min(FRAME_INTERVAL);
+        let step = view
+            .next_wakeup()
+            .map_or(FRAME_INTERVAL, |wakeup| wakeup.min(FRAME_INTERVAL))
+            .min(remaining);
         tokio::time::sleep(step).await;
         view.tick(false).map_err(|source| CaptureFailure::Render {
             url: url.clone(),

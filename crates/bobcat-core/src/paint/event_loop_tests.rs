@@ -738,11 +738,8 @@ fn independent_views_can_own_live_script_threads_in_one_process() {
     }
 }
 
-/// A timer is `bobcat-main`'s own business: it comes due while that thread is
-/// parked on a channel nobody is sending to, and the frame its callback
-/// commits is published without a host turn having asked for anything.
 #[test]
-fn a_timer_wakes_the_parked_main_thread_with_no_command_to_serve() {
+fn a_timer_still_ahead_runs_on_the_turn_the_host_says_it_came_due() {
     let mut engine = booted(
         r"
             globalThis.renderPage = function () {
@@ -750,7 +747,7 @@ fn a_timer_wakes_the_parked_main_thread_with_no_command_to_serve() {
               const view = __CreateView(0);
               __AppendElement(page, view);
               globalThis.held = [page, view];
-              setTimeout(() => __SetAttribute(view, 'ticked', 'yes'), 10);
+              setTimeout(() => __SetAttribute(view, 'ticked', 'yes'), 200);
               __FlushElementTree();
             };
             ",
@@ -760,18 +757,52 @@ fn a_timer_wakes_the_parked_main_thread_with_no_command_to_serve() {
         .expect("boot published a frame")
         .commit_id();
 
-    // Nothing is sent to `bobcat-main` across this wait — no probe, no
-    // input, no frame request — so only the deadline can end its park. The
-    // single probe below is what makes that testable: a round applies its
-    // commands before running what is due, so a wait that ended at the probe
-    // instead would answer with the attribute still unset.
-    std::thread::sleep(Duration::from_millis(250));
+    let bound = Instant::now() + Duration::from_secs(1);
+    let wakeup = loop {
+        if let Some(wakeup) = engine.next_wakeup() {
+            break wakeup;
+        }
+        assert!(
+            Instant::now() < bound,
+            "the deadline the entry armed was never announced to the host"
+        );
+        let _ = engine.pump();
+        std::thread::yield_now();
+    };
+    assert!(
+        wakeup <= Duration::from_millis(200),
+        "and what is announced is what is left of the delay: {wakeup:?}"
+    );
 
     assert_eq!(
-        attribute_of(&mut engine, 3, "ticked").as_deref(),
-        Some("yes"),
-        "the deadline, not a command, is what ended the wait"
+        attribute_of(&mut engine, 3, "ticked"),
+        None,
+        "a command must not stand in for the deadline"
     );
+
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(
+        engine.next_wakeup(),
+        Some(Duration::ZERO),
+        "the wait the host was given is over"
+    );
+    let _ = engine.pump();
+    assert!(
+        engine.next_wakeup().is_none(),
+        "and that turn spent the deadline nudging the main thread"
+    );
+
+    let bound = Instant::now() + Duration::from_secs(1);
+    loop {
+        if attribute_of(&mut engine, 3, "ticked").as_deref() == Some("yes") {
+            break;
+        }
+        assert!(
+            Instant::now() < bound,
+            "the nudge is what runs the callback, and it never ran"
+        );
+        std::thread::yield_now();
+    }
     assert_ne!(
         engine
             .published_frame()
@@ -780,6 +811,40 @@ fn a_timer_wakes_the_parked_main_thread_with_no_command_to_serve() {
         booted_commit,
         "and the round the timer ran in committed and published its mutation"
     );
+}
+
+#[test]
+fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
+    let mut engine = booted(
+        r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const view = __CreateView(0);
+              __AppendElement(page, view);
+              globalThis.held = [page, view];
+              setTimeout(() => __SetAttribute(view, 'ticked', 'now'), 0);
+              __FlushElementTree();
+            };
+            ",
+    );
+
+    let bound = Instant::now() + Duration::from_secs(1);
+    loop {
+        for notification in engine.link.drain() {
+            assert!(
+                !matches!(notification, crate::view::ToPainter::TimerDeadline(Some(_))),
+                "a deadline the main thread is already past is never announced"
+            );
+        }
+        if attribute_of(&mut engine, 3, "ticked").as_deref() == Some("now") {
+            break;
+        }
+        assert!(
+            Instant::now() < bound,
+            "a zero-delay callback must not wait on the host"
+        );
+        std::thread::yield_now();
+    }
 }
 
 /// A timer that throws has an event listener's standing, not a script

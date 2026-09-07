@@ -18,7 +18,6 @@ rustc-hash = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 url = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

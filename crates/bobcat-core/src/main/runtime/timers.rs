@@ -7,19 +7,17 @@
 //! one call back into the realm module that filed the callback under it.
 //!
 //! Nothing here runs a callback or touches the document. It answers two
-//! questions and only those: when the command loop's next wait should end,
-//! and which ids that wait made due.
+//! questions and only those: when the earliest arming comes due, and which
+//! ids a round found due.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::time::Duration;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use std::time::Instant as ClockInstant;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use web_time::Instant as ClockInstant;
+
+use crate::clock::ClockInstant;
 
 /// Timers that come due in one round without touching the heap. A card with
 /// more than this many deadlines inside one millisecond is unusual.

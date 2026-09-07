@@ -87,7 +87,11 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         let command = if let Some(command) = script.next_ready() {
             Some(command)
         } else if running {
-            match receiver.recv_timeout(clock.time_until_tick()) {
+            let until_tick = clock.time_until_tick();
+            let wait = view
+                .next_wakeup()
+                .map_or(until_tick, |wakeup| wakeup.min(until_tick));
+            match receiver.recv_timeout(wait) {
                 Ok(HostEvent::Command(command)) => Some(command),
                 Ok(HostEvent::Pump) => {
                     if check_script(&mut view, &program.input)? {
@@ -104,22 +108,31 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
                     None
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    view.tick(false)?;
-                    clock.advance();
+                    if check_script(&mut view, &program.input)? {
+                        script.finish();
+                    }
+                    if clock.time_until_tick().is_zero() {
+                        view.tick(false)?;
+                        clock.advance();
+                    }
                     None
                 }
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         } else {
-            match receiver.recv() {
+            let arrival = match view.next_wakeup() {
+                Some(wakeup) => receiver.recv_timeout(wakeup),
+                None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match arrival {
                 Ok(HostEvent::Command(command)) => Some(command),
-                Ok(HostEvent::Pump) => {
+                Ok(HostEvent::Pump) | Err(RecvTimeoutError::Timeout) => {
                     if check_script(&mut view, &program.input)? {
                         script.finish();
                     }
                     None
                 }
-                Err(_) => return Ok(()),
+                Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         };
 
