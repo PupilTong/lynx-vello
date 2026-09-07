@@ -10,7 +10,7 @@
 //! mirror those two owners; this module holds the handles that join them and
 //! the link that crosses between them.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -20,6 +20,7 @@ use std::time::Duration;
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
 
+use crate::background::WorkerHome;
 use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 #[cfg(target_arch = "wasm32")]
@@ -409,6 +410,11 @@ struct GroupInner {
     /// name.
     next_view: Cell<u64>,
     home: GroupHome,
+    /// The group's worker realms: a second thread and a second `QuickJS`
+    /// runtime, started with this group and shared by every view in it. Here
+    /// rather than on `bobcat-main` because it is the *group* whose workers
+    /// share a runtime.
+    workers: RefCell<WorkerHome>,
 }
 
 impl GroupInner {
@@ -428,6 +434,9 @@ impl Drop for GroupInner {
         // there is nothing left on the thread to end.
         let _ = self.commands.send((None, ToMain::Close));
         self.home.join();
+        // The workers second: `bobcat-main` holds a sender on their channel
+        // too, and the goodbye is the last one of those dropping.
+        self.workers.borrow_mut().join();
     }
 }
 
@@ -457,6 +466,10 @@ impl LynxGroup {
         let (commands, command_receiver) = Mailbox::channel();
         let (notifications, notification_receiver) = Mailbox::channel();
         let (ready, started) = flume::bounded(1);
+        // Beside `bobcat-main`, and reporting onto the same mailbox: a worker
+        // thread that will not start is a group that will not start, which is
+        // what lets every later worker be one send with nothing to check.
+        let workers = WorkerHome::start(commands.clone())?;
         let home = spawn_group(
             style_threads,
             GroupLink {
@@ -474,6 +487,7 @@ impl LynxGroup {
                 notifications: Rc::new(notification_receiver),
                 next_view: Cell::new(0),
                 home,
+                workers: RefCell::new(workers),
             }),
         };
         match started.recv_async().await {
@@ -854,6 +868,21 @@ pub(crate) enum ToMain {
     SourceLoaded {
         source: Result<LoadedSource, LynxViewError>,
     },
+    /// One thing a worker realm said, for the view whose realm created it.
+    ///
+    /// Addressed like every other per-view message, so a view that has been
+    /// released drops its workers' news without anything having to check.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the realm that constructs a `Worker` is what reads one"
+        )
+    )]
+    Worker {
+        key: crate::background::WorkerKey,
+        payload: crate::background::WorkerPayload,
+    },
     Shutdown,
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
@@ -954,6 +983,12 @@ pub(crate) fn detached_link<R: EventRequester>(
 /// The one view a [`detached_link`] carries, and the one
 /// [`crate::main::spawn_test_main_thread`] serves.
 pub(crate) const DETACHED_VIEW: ViewId = ViewId(0);
+
+/// One view id for a test that plays a group without building one.
+#[cfg(test)]
+pub(crate) const fn test_view(id: u64) -> ViewId {
+    ViewId(id)
+}
 
 #[cfg(test)]
 mod tests;

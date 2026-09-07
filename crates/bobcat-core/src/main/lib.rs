@@ -641,8 +641,14 @@ impl<R: EventRequester> CarriedView<R> {
                     ToMain::BeginFrame { seq, .. } => {
                         self.notify.send(ToPainter::BeginFrameServiced(seq));
                     }
-                    // No committed tree or realm exists to route these to yet.
-                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } | ToMain::TimersDue => {}
+                    // No committed tree or realm exists to route these to
+                    // yet. A worker's news is reachable here — a view can be
+                    // booting while a realm it created still speaks — and is
+                    // dropped for the same reason: nothing can hear it.
+                    ToMain::DispatchEvent { .. }
+                    | ToMain::Refill { .. }
+                    | ToMain::TimersDue
+                    | ToMain::Worker { .. } => {}
                     #[cfg(test)]
                     ToMain::Probe(probe) => probe(&mut booting.document),
                     ToMain::Attach(_)
@@ -817,6 +823,9 @@ fn apply_main_command<R: EventRequester>(
         ToMain::SourceLoaded { .. } => {
             unreachable!("sources are requested only during boot")
         }
+        // Nothing in this build constructs a `Worker`, so nothing produces
+        // one; delivering it into the realm that did lands with that object.
+        ToMain::Worker { .. } => {}
         ToMain::DispatchEvent {
             target,
             name,

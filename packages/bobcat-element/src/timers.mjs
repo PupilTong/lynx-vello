@@ -2,8 +2,9 @@
 import { clearTimer, setTimer } from "bobcat-internal:host";
 
 // The realm's half of `setTimeout`, `setInterval`, `clearTimeout`, and
-// `clearInterval`, preloaded as the `bobcat:timers` ESM in the QuickJS
-// main-thread realm.
+// `clearInterval`, preloaded as the `bobcat:timers` ESM. Every realm this
+// engine builds has it: the views' main-thread realms on one runtime, and
+// each worker realm on the group's worker runtime.
 //
 // These four are bare globals rather than named exports, because that is how
 // a card reaches them: a compiled main-thread chunk calls `setTimeout` as a
@@ -17,7 +18,7 @@ import { clearTimer, setTimer } from "bobcat-internal:host";
 // boundary, so the host never sees one — it is filed here under the id the
 // host hands back, and the host asks for it by that id when the timer comes
 // due. Everything about *when* is the host's: it owns the clock, it owns the
-// wait the Lynx main thread parks in between commands, and it owns HTML's
+// wait the thread carrying this realm parks in, and it owns HTML's
 // delay clamp. This side keeps no deadline at all, which is why nothing here
 // can disagree with the schedule.
 //

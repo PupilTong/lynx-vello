@@ -78,6 +78,21 @@ interface BobcatNative {
   clearTimer(id: number): void;
 }
 
+/**
+ * The native functions a worker realm gets instead of the document. Its
+ * `bobcat-internal:host` carries the timer pair and nothing else, because a
+ * worker has no tree to mutate.
+ */
+interface BobcatWorkerNative {
+  /** Hands one JSON-encoded message back to the realm that created us. */
+  postWorkerMessage(data: string): void;
+  /**
+   * Ends this worker once the running task returns. Queued messages and armed
+   * timers go with it.
+   */
+  closeWorker(): void;
+}
+
 declare module "bobcat-internal:host" {
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];
@@ -100,6 +115,29 @@ declare module "bobcat-internal:host" {
   export const stopPropagation: BobcatNative["stopPropagation"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
+}
+
+declare module "bobcat-internal:worker" {
+  export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
+  export const closeWorker: BobcatWorkerNative["closeWorker"];
+}
+
+declare module "bobcat:event-target" {
+  export class EventTarget {
+    addEventListener(
+      eventName: unknown,
+      callback: unknown,
+      options?: unknown,
+    ): undefined;
+    removeEventListener(
+      eventName: unknown,
+      callback: unknown,
+      options?: unknown,
+    ): undefined;
+    dispatchEvent(event: unknown): boolean;
+  }
+  export function installEventTarget(target: object): undefined;
+  export function installEventHandler(target: object, name: string): undefined;
 }
 
 /**
