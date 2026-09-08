@@ -582,8 +582,8 @@ __FlushElementTree();
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         self.tree.borrow_mut().removals = 0;
-        js_runtime
-            .collect_garbage()
+        self.engine
+            .collect_garbage(js_runtime)
             .map_err(|error| MainThreadError::from_engine("collecting garbage", error))
     }
 

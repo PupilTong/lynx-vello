@@ -1,11 +1,12 @@
-//! The main thread's script engine: one `QuickJS` runtime and one realm,
-//! the policy around them.
+//! The main thread's script engine: one `QuickJS` runtime, the realms a
+//! group opens on it, and the policy around them.
 //!
-//! Runtime and realm live in `quickjs-rust-bridge`. What this module adds is
+//! Runtime and realms live in `quickjs-rust-bridge`. What this module adds is
 //! everything the runtime needs and the bridge deliberately leaves open: when
 //! the promise-job queue is drained, how many jobs one checkpoint may run,
-//! how a bridge failure becomes a sanitized [`ScriptError`], and how a module
-//! namespace caches the atoms an export is looked up by.
+//! which realm a drained failure is reported to, how a bridge failure becomes
+//! a sanitized [`ScriptError`], and how a module namespace caches the atoms an
+//! export is looked up by.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -70,31 +71,42 @@ struct ModuleNamespace {
     exports: HashMap<Box<str>, Rc<quickjs::Member>>,
 }
 
-/// One owner-thread-bound `QuickJS` runtime and its single realm, with
-/// Bobcat's job policy on them.
+/// One realm on a [`ScriptRuntime`] — one view's global object, modules and
+/// host functions — with Bobcat's job policy on it.
 ///
-/// The runtime could carry more realms — a bundle's main-thread and
-/// background scripts are the obvious pair — but Bobcat runs one, and the
-/// job queue and execution limits it owns are shared by whatever it carries.
+/// A group opens one of these per view on one runtime, so everything the
+/// runtime owns is shared: the heap, the atom table, the promise-job queue,
+/// the execution limits. Everything a *failure* is made of is not, and lives
+/// here, so one view's broken script cannot be reported to another's.
 ///
 /// Created on the thread that will own it — the engine-owned Lynx main
 /// thread — and never moved off it, which is why nothing here is `Send`.
 pub(crate) struct ScriptEngine {
     realm: quickjs::Context,
     module_namespaces: HashMap<String, ModuleNamespace>,
+    /// A checkpoint error raised beside a failure this realm's caller was
+    /// already reporting, kept for the next entry into *this* realm.
+    ///
+    /// It lives here rather than on the runtime because it is one realm's
+    /// failure: parked runtime-wide it would be handed to whichever realm
+    /// entered next, and a sibling view would fail for something it could
+    /// not have caused. Held here it also dies with the realm that owns it.
+    deferred_checkpoint_error: Option<ScriptError>,
 }
 
 /// The `QuickJS` runtime a group's realms share.
 ///
 /// Everything here is a runtime-wide fact rather than a realm's: one heap,
-/// one atom table, one promise-job queue, one set of execution limits — and
-/// therefore one checkpoint state, since the queue every realm drains is the
-/// same queue.
+/// one atom table, one promise-job queue, one set of execution limits.
+///
+/// *Unfinished work* is one of those facts and lives here: the queue that
+/// stopped short is the queue every realm drains, so whichever realm enters
+/// next finishes it. A *failure* is not, and does not: it belongs to the
+/// realm that raised it, which is where it waits — on [`ScriptEngine`].
 pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
-    deferred_checkpoint_error: Option<ScriptError>,
 }
 
 impl ScriptRuntime {
@@ -108,7 +120,6 @@ impl ScriptRuntime {
             runtime: quickjs::Runtime::with_options(config.runtime_options)?,
             config,
             checkpoint_incomplete: false,
-            deferred_checkpoint_error: None,
         })
     }
 
@@ -121,6 +132,7 @@ impl ScriptRuntime {
         Ok(ScriptEngine {
             realm,
             module_namespaces: HashMap::new(),
+            deferred_checkpoint_error: None,
         })
     }
 
@@ -129,49 +141,93 @@ impl ScriptRuntime {
     /// Sources are runtime-wide and compile per realm, so the modules every
     /// view shares are registered once here rather than once per view — a
     /// second registration of a name is refused, not merged.
+    ///
+    /// No checkpoint runs: registering a source names no realm and enters no
+    /// JavaScript, so there is neither work to finish on some realm's behalf
+    /// nor a realm to report a pending failure to. The entry that imports the
+    /// name reports it, on its own realm.
     pub(crate) fn register_module_source(
         &mut self,
         specifier: &str,
         source: &str,
     ) -> Result<(), ScriptError> {
-        self.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterModule)?;
         self.runtime
             .register_module_source(specifier, source)
             .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
     }
+}
 
+impl ScriptEngine {
+    /// Ends one entry into this realm: the checkpoint runs whether the entry
+    /// succeeded or not, because the jobs it queued are due either way.
+    ///
+    /// A checkpoint error raised beside a failure the caller is already
+    /// reporting has nobody to return it to, so it waits for the next entry
+    /// into this realm — the realm that raised it. The first one waits; a
+    /// second is dropped, since one report of a wedged realm is the report.
+    ///
+    /// An entry that ends in a failure reports one, and drops whatever
+    /// rejections this realm still has queued behind it: one throw rejects
+    /// its module's evaluation promise and everything awaiting it, and
+    /// handing those out one entry at a time would turn one broken script
+    /// into a realm that fails forever. A worker whose script throws at load
+    /// still answers the next message, which is what HTML says it does.
+    /// Pending *jobs* are not dropped — they are still due, and the next
+    /// checkpoint finishes them.
     fn finish_operation<T>(
         &mut self,
+        runtime: &mut ScriptRuntime,
         result: Result<T, ScriptError>,
         phase: ScriptErrorPhase,
     ) -> Result<T, ScriptError> {
         match result {
-            Ok(value) => {
-                self.checkpoint(phase)?;
-                Ok(value)
-            }
+            Ok(value) => match self.checkpoint(runtime, phase) {
+                Ok(_) => Ok(value),
+                Err(checkpoint_error) => {
+                    self.discard_leftover_rejections(runtime);
+                    Err(checkpoint_error)
+                }
+            },
             Err(primary_error) => {
-                if let Err(checkpoint_error) = self.checkpoint(phase) {
+                if let Err(checkpoint_error) = self.checkpoint(runtime, phase) {
                     self.deferred_checkpoint_error
                         .get_or_insert(checkpoint_error);
                 }
+                self.discard_leftover_rejections(runtime);
                 Err(primary_error)
             }
         }
     }
 
-    fn checkpoint(&mut self, phase: ScriptErrorPhase) -> Result<usize, ScriptError> {
-        let drain = match self
+    /// Drops the rejections this realm left behind a failure its caller has
+    /// already been told about. Only this realm's: a sibling's is still news
+    /// to the sibling.
+    fn discard_leftover_rejections(&mut self, runtime: &mut ScriptRuntime) {
+        runtime.runtime.discard_unhandled_rejections(&self.realm);
+    }
+
+    /// Drains the runtime's promise-job queue on this realm's behalf.
+    ///
+    /// The jobs are the runtime's and all of them run, whichever realm
+    /// queued them. The *rejections* reported are this realm's alone: a
+    /// sibling's stays queued until that sibling's own next checkpoint.
+    fn checkpoint(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        phase: ScriptErrorPhase,
+    ) -> Result<usize, ScriptError> {
+        let budget = runtime.config.max_jobs_per_checkpoint.get();
+        let drain = match runtime
             .runtime
-            .drain_pending_jobs_up_to(self.config.max_jobs_per_checkpoint.get())
+            .drain_pending_jobs_up_to(&self.realm, budget)
         {
             Ok(drain) => drain,
             Err(error) => {
-                self.checkpoint_incomplete = true;
+                runtime.checkpoint_incomplete = true;
                 return Err(map_quickjs_error(error, phase));
             }
         };
-        self.checkpoint_incomplete = drain.jobs_remaining;
+        runtime.checkpoint_incomplete = drain.jobs_remaining;
         if drain.jobs_remaining {
             return Err(script_error(
                 ScriptErrorKind::Other,
@@ -182,45 +238,19 @@ impl ScriptRuntime {
         Ok(drain.executed)
     }
 
-    /// Settles the job queue after a failure the caller has already reported.
-    ///
-    /// A checkpoint stops at the first job that throws and leaves the rest
-    /// queued, with `checkpoint_incomplete` set so the next entry point
-    /// finishes the work. That is right when the next entry belongs to
-    /// whoever caused it — and wrong when it does not. A module that throws
-    /// under top-level await rejects *through* the job queue, so its failure
-    /// is left sitting there after being reported; on a runtime carrying one
-    /// realm per `Worker`, the next realm to enter absorbs it and loses a
-    /// whole task to a failure that was never its own.
-    ///
-    /// So a caller that has reported such a failure settles the queue here,
-    /// discarding what these jobs throw because it has already said so once.
-    /// Bounded, because a job that re-queues itself must not spin: if the
-    /// queue will not settle, the flag stays and the next entry finishes it,
-    /// which is exactly the behaviour without this.
-    pub(crate) fn settle_after_failure(&mut self) {
-        const SETTLE_ATTEMPTS: usize = 8;
-        self.deferred_checkpoint_error = None;
-        let budget = self.config.max_jobs_per_checkpoint.get();
-        for _ in 0..SETTLE_ATTEMPTS {
-            match self.runtime.drain_pending_jobs_up_to(budget) {
-                Ok(drain) if !drain.jobs_remaining => {
-                    self.checkpoint_incomplete = false;
-                    return;
-                }
-                // Budget spent, or a job threw and the drain stopped on it:
-                // either way there is more to do.
-                Ok(_) | Err(_) => {}
-            }
-        }
-    }
-
-    fn resume_incomplete_checkpoint(&mut self, phase: ScriptErrorPhase) -> Result<(), ScriptError> {
+    /// Reports what the previous entry left owing before this one starts:
+    /// this realm's parked checkpoint error, then the queue the runtime
+    /// stopped draining.
+    fn resume_incomplete_checkpoint(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        phase: ScriptErrorPhase,
+    ) -> Result<(), ScriptError> {
         if let Some(error) = self.deferred_checkpoint_error.take() {
             return Err(error);
         }
-        if self.checkpoint_incomplete {
-            self.checkpoint(phase)?;
+        if runtime.checkpoint_incomplete {
+            self.checkpoint(runtime, phase)?;
         }
         Ok(())
     }
@@ -229,16 +259,18 @@ impl ScriptRuntime {
     /// document before the batch it belongs to ends.
     ///
     /// A collection is the whole runtime's: in a group it walks every realm
-    /// on it, and every view's finalizers run.
-    pub(crate) fn collect_garbage(&mut self) -> Result<(), ScriptError> {
-        self.resume_incomplete_checkpoint(ScriptErrorPhase::CollectGarbage)?;
-        self.runtime.run_gc();
-        self.checkpoint(ScriptErrorPhase::CollectGarbage)
+    /// on it, and every view's finalizers run. One realm asks for it, though,
+    /// and that realm is the one its checkpoints report to.
+    pub(crate) fn collect_garbage(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+    ) -> Result<(), ScriptError> {
+        self.resume_incomplete_checkpoint(runtime, ScriptErrorPhase::CollectGarbage)?;
+        runtime.runtime.run_gc();
+        self.checkpoint(runtime, ScriptErrorPhase::CollectGarbage)
             .map(|_| ())
     }
-}
 
-impl ScriptEngine {
     fn module_namespace(&mut self, specifier: &str) -> Result<quickjs::Value, ScriptError> {
         if let Some(entry) = self.module_namespaces.get(specifier) {
             return Ok(entry.object.clone());
@@ -304,7 +336,7 @@ impl ScriptEngine {
         arity: u8,
         mut callback: HostCallback,
     ) -> Result<(), ScriptError> {
-        runtime.resume_incomplete_checkpoint(ScriptErrorPhase::RegisterHostModuleFunction)?;
+        self.resume_incomplete_checkpoint(runtime, ScriptErrorPhase::RegisterHostModuleFunction)?;
         self.realm
             .register_host_module_function(
                 module_specifier,
@@ -326,7 +358,7 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::Execute;
-        runtime.resume_incomplete_checkpoint(PHASE)?;
+        self.resume_incomplete_checkpoint(runtime, PHASE)?;
         let result = self
             .realm
             .evaluate(
@@ -338,7 +370,7 @@ impl ScriptEngine {
             )
             .map(|_| ())
             .map_err(|error| map_quickjs_error(error, PHASE));
-        runtime.finish_operation(result, PHASE)
+        self.finish_operation(runtime, result, PHASE)
     }
 
     /// Registers one exact, normalized module name and its UTF-8 source in
@@ -352,7 +384,7 @@ impl ScriptEngine {
         source_name: &str,
     ) -> Result<(), ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
-        runtime.resume_incomplete_checkpoint(PHASE)?;
+        self.resume_incomplete_checkpoint(runtime, PHASE)?;
         let evaluation = self
             .realm
             .evaluate(
@@ -366,7 +398,7 @@ impl ScriptEngine {
                 },
             )
             .map_err(|error| map_quickjs_error(error, PHASE));
-        let evaluation = runtime.finish_operation(evaluation, PHASE)?;
+        let evaluation = self.finish_operation(runtime, evaluation, PHASE)?;
         match self
             .realm
             .settled_promise_result(&evaluation)
@@ -400,7 +432,7 @@ impl ScriptEngine {
         arguments: &[quickjs::HostArgument<'_>],
     ) -> Result<bool, ScriptError> {
         const PHASE: ScriptErrorPhase = ScriptErrorPhase::CallModuleExport;
-        runtime.resume_incomplete_checkpoint(PHASE)?;
+        self.resume_incomplete_checkpoint(runtime, PHASE)?;
         let (object, member) = self.module_export(module_specifier, export_name)?;
         // One crossing carries the lookup and every argument, and nothing
         // here allocates: the primitives are described in place and a string
@@ -420,7 +452,7 @@ impl ScriptEngine {
                 quickjs::CallOutcome::Called(_) => true,
             })
             .map_err(|error| map_quickjs_error(error, PHASE));
-        runtime.finish_operation(result, PHASE)
+        self.finish_operation(runtime, result, PHASE)
     }
 }
 
@@ -428,6 +460,10 @@ impl fmt::Debug for ScriptEngine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ScriptEngine")
+            .field(
+                "deferred_checkpoint_error",
+                &self.deferred_checkpoint_error.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -820,6 +856,155 @@ mod tests {
                 "app:///verify.js",
             )
             .expect("the refused script never entered JavaScript");
+    }
+
+    #[test]
+    fn a_realms_leftover_rejection_never_reaches_a_sibling() {
+        // The shape a group boots: one runtime, one realm per view, and an
+        // entry loaded with `await import(...)`. An entry that throws under
+        // that await rejects *through* the job queue rather than out of
+        // `evaluate`, and leaves behind more than the one rejection its own
+        // caller is handed. The rest is its realm's, and waits for it.
+        let (mut runtime, mut first) = engine();
+        let mut second = runtime.create_realm().expect("a second view's realm");
+        runtime
+            .register_module_source(
+                "app:///first-entry.js",
+                "Promise.reject(new Error('floating'));\nthrow new Error('boom');",
+            )
+            .expect("register the first view's entry");
+        runtime
+            .register_module_source(
+                "app:///second-module.js",
+                "export function ping() { globalThis.pinged = true; }",
+            )
+            .expect("register the second view's module");
+
+        first
+            .execute_module(
+                &mut runtime,
+                "await import('app:///first-entry.js');",
+                "bobcat:boot-first",
+            )
+            .expect_err("the first view's entry fails, and is told so");
+
+        second
+            .execute_module(
+                &mut runtime,
+                "import 'app:///second-module.js';",
+                "bobcat:boot-second",
+            )
+            .expect("the second view boots on a runtime the first one failed on");
+        assert!(
+            second
+                .call_module_export(&mut runtime, "app:///second-module.js", "ping", &[])
+                .expect("an event dispatch into the second view is not the first view's failure")
+        );
+
+        // Nor does it reach the failing realm a second time: one failure is
+        // reported once, and the realm that raised it stays usable.
+        first
+            .execute_script(&mut runtime, "globalThis.retry = true", "retry.js")
+            .expect("the failing realm is not condemned to fail forever");
+    }
+
+    #[test]
+    fn a_reported_failure_takes_its_own_leftovers_with_it() {
+        // One throw rejects the module's evaluation promise and everything
+        // awaiting it. The caller hears one failure; handing out the rest one
+        // entry at a time would make every later entry fail too — which is
+        // what a worker whose script throws at load must not do.
+        let (mut runtime, mut engine) = engine();
+        runtime
+            .register_module_source(
+                "app:///thrower.js",
+                "Promise.reject(new Error('floating'));\nthrow new Error('boom');",
+            )
+            .expect("register");
+
+        let reported = engine
+            .execute_module(
+                &mut runtime,
+                "await import('app:///thrower.js');",
+                "boot.js",
+            )
+            .expect_err("the entry fails");
+        assert_eq!(reported.kind, ScriptErrorKind::Exception);
+
+        engine
+            .execute_script(&mut runtime, "globalThis.answer = 42", "after.js")
+            .expect("the realm answers the next entry");
+        engine
+            .execute_script(
+                &mut runtime,
+                "if (answer !== 42) throw new Error('the next entry never ran')",
+                "verify.js",
+            )
+            .expect("and ran its own code");
+    }
+
+    #[test]
+    fn discarding_a_failures_leftovers_does_not_discard_its_jobs() {
+        // Only rejections are dropped. A job the failing entry queued is
+        // still due, and the checkpoint that follows still runs it — which is
+        // the case the deferred-checkpoint design already got right.
+        let (mut runtime, mut engine) = engine_with(QuickJsConfig {
+            max_jobs_per_checkpoint: NonZeroUsize::MIN,
+            ..QuickJsConfig::default()
+        });
+        engine
+            .execute_script(
+                &mut runtime,
+                "globalThis.order = [];
+                 Promise.resolve().then(() => order.push('queued-1'));
+                 Promise.resolve().then(() => order.push('queued-2'));
+                 throw new Error('primary')",
+                "over-budget.js",
+            )
+            .expect_err("the script throws, and its jobs outrun a one-job checkpoint");
+
+        let budget = engine
+            .execute_script(&mut runtime, "globalThis.blocked = true", "blocked.js")
+            .expect_err("the checkpoint's own budget error is still owed to this realm");
+        assert_eq!(budget.kind, ScriptErrorKind::Other);
+
+        engine
+            .execute_script(
+                &mut runtime,
+                "order.push('next');
+                 if (order.join(',') !== 'queued-1,queued-2,next') {
+                     throw new Error('a queued job was dropped: ' + order.join(','));
+                 }",
+                "reentry.js",
+            )
+            .expect("every job the failing script queued still ran, and ran first");
+    }
+
+    #[test]
+    fn a_deferred_checkpoint_error_waits_for_its_own_realm() {
+        // The parking case, across realms: the first realm's script fails
+        // *and* its checkpoint does, so the checkpoint's error has nobody to
+        // return it to. It waits for that realm, not for whoever enters next.
+        let (mut runtime, mut first) = engine();
+        let mut second = runtime.create_realm().expect("a second view's realm");
+
+        let primary = first
+            .execute_script(
+                &mut runtime,
+                "Promise.reject(new Error('deferred')); throw new Error('primary')",
+                "app:///first.js",
+            )
+            .expect_err("the script's own exception wins");
+        assert_eq!(primary.message.as_ref(), "Error: primary");
+
+        second
+            .execute_script(&mut runtime, "globalThis.answer = 42", "app:///second.js")
+            .expect("the sibling realm runs, holding none of that");
+
+        let deferred = first
+            .execute_script(&mut runtime, "globalThis.again = true", "app:///after.js")
+            .expect_err("the realm that deferred it is the realm that hears it");
+        assert_eq!(deferred.message.as_ref(), "Error: deferred");
     }
 
     #[test]
