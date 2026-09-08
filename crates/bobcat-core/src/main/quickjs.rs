@@ -182,6 +182,39 @@ impl ScriptRuntime {
         Ok(drain.executed)
     }
 
+    /// Settles the job queue after a failure the caller has already reported.
+    ///
+    /// A checkpoint stops at the first job that throws and leaves the rest
+    /// queued, with `checkpoint_incomplete` set so the next entry point
+    /// finishes the work. That is right when the next entry belongs to
+    /// whoever caused it — and wrong when it does not. A module that throws
+    /// under top-level await rejects *through* the job queue, so its failure
+    /// is left sitting there after being reported; on a runtime carrying one
+    /// realm per `Worker`, the next realm to enter absorbs it and loses a
+    /// whole task to a failure that was never its own.
+    ///
+    /// So a caller that has reported such a failure settles the queue here,
+    /// discarding what these jobs throw because it has already said so once.
+    /// Bounded, because a job that re-queues itself must not spin: if the
+    /// queue will not settle, the flag stays and the next entry finishes it,
+    /// which is exactly the behaviour without this.
+    pub(crate) fn settle_after_failure(&mut self) {
+        const SETTLE_ATTEMPTS: usize = 8;
+        self.deferred_checkpoint_error = None;
+        let budget = self.config.max_jobs_per_checkpoint.get();
+        for _ in 0..SETTLE_ATTEMPTS {
+            match self.runtime.drain_pending_jobs_up_to(budget) {
+                Ok(drain) if !drain.jobs_remaining => {
+                    self.checkpoint_incomplete = false;
+                    return;
+                }
+                // Budget spent, or a job threw and the drain stopped on it:
+                // either way there is more to do.
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
     fn resume_incomplete_checkpoint(&mut self, phase: ScriptErrorPhase) -> Result<(), ScriptError> {
         if let Some(error) = self.deferred_checkpoint_error.take() {
             return Err(error);

@@ -28,6 +28,19 @@
 pub mod bench_support;
 mod clock;
 mod mailbox;
+// The group's worker realms. Every command this module defines is served by
+// it and driven by its own tests; the realm-facing half that *names* them from
+// production code is the `Worker` object, which lands separately.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the realm that constructs a `Worker` is what names the rest of this protocol"
+    )
+)]
+#[path = "background/lib.rs"]
+mod background;
+mod esm;
 #[path = "main/lib.rs"]
 mod main;
 #[path = "paint/lib.rs"]
@@ -35,6 +48,8 @@ mod paint;
 pub mod resource;
 pub mod script;
 pub mod style;
+mod threads;
+mod timers;
 #[path = "view/lib.rs"]
 mod view;
 

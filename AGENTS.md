@@ -314,6 +314,35 @@ useful signal for currently-compatible versions of those libraries.
   the two never restyling in parallel; the assumption that buys is that a
   person drives one view at a time. A host that needs two pages genuinely
   parallel gives them a group each, on a thread each.
+  **A group also owns a second thread and a second `QuickJS` runtime,
+  `bobcat-workers`**, for the worker realms every view in it shares — started
+  beside `bobcat-main` in `LynxGroup::new` and joined right after it, so a
+  thread that will not start is a failure to build the *group* rather than of
+  whichever worker happened to be first. That eagerness is what buys every
+  path below it: the group holds one mailbox sender, everything that names a
+  worker holds a clone, and there is no lazily-built state, no lock and no
+  second way for a worker to fail. The price is one parked thread and one
+  idle runtime per group. Separate from `bobcat-main`'s runtime because that
+  is what a worker is for: script that must not stop the thread that owns the
+  document. Since `QuickJS` binds a runtime to one thread, putting the
+  workers' runtime on a thread of its own is also what makes "a worker cannot
+  touch the document" a fact about the program rather than a rule someone has
+  to keep — there is no path from a worker realm to a `LynxDocument`, and no
+  value of either runtime can be named by the other. One realm per live
+  worker, so a second worker costs a global object and a module graph rather
+  than a heap, at the price of the group's workers taking turns. What a
+  worker says rides the group's own mailbox as `ToMain::Worker`, addressed to
+  the view whose realm created it — the same FIFO and the same addressing
+  every other per-view message uses, so a released view drops its workers'
+  news without anything having to check. Its own inbox is a `Mailbox` too,
+  group-addressed throughout, and the timer machinery both kinds of realm run
+  on — the schedule, the two host members, the firing loop — is `crate::timers`
+  beside `crate::clock`, owned by neither thread. So a second realm kind costs
+  the view realms no widening at all — and `bobcat-workers` is the one thread that still uses the
+  deadline form of it. `bobcat-main` hands a view's timer deadline to that
+  view's painter and the host waits it out; a worker realm has no painter and
+  no host turn, so there is nobody to hand it to and the thread waits out its
+  own.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -400,9 +429,19 @@ useful signal for currently-compatible versions of those libraries.
   accepts, and `childElementIds` as comma-joined ids, which need no length
   prefix because a decimal id cannot contain the separator), then registers the
   core-owned compatibility shell as `bobcat:runtime`, the Element PAPI
-  runtime as `bobcat:element`, and the timer runtime as `bobcat:timers` in
-  QuickJS's synchronous preloaded ESM loader.
-  All three JavaScript sources live together in `packages/bobcat-element/src`
+  runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
+  shared `EventTarget` both kinds of realm build on as `bobcat:event-target`,
+  in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
+  gets a deliberately shorter list — `bobcat:event-target`, the worker global
+  scope as `bobcat:worker`, and `bobcat:timers` — because a worker has no
+  document to reach and no page to be the main thread of, so an import of
+  `bobcat:element` fails to resolve rather than failing late. A worker's own
+  script is *inlined* into the one module its realm evaluates, exactly as
+  `ENTRY_PREAMBLE` carries the MTS entry, and never registered on the
+  runtime: an evaluated module belongs to the realm that evaluated it, so two
+  views resolving one URL to different bytes cannot collide and no worker
+  leaves a registration behind.
+  All five JavaScript sources live together in `packages/bobcat-element/src`
   and are embedded by core with `include_str!`. The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
@@ -927,10 +966,14 @@ useful signal for currently-compatible versions of those libraries.
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
 - `packages/bobcat-element` — the dependency-free JavaScript sources for the
-  three ESMs `bobcat-core` preloads into the QuickJS main-thread realm:
-  `src/main-thread-runtime.mjs` provides `bobcat:runtime`,
-  `src/element-papi.mjs` provides `bobcat:element`, and `src/timers.mjs`
-  provides `bobcat:timers`. Core embeds all three with
+  five ESMs `bobcat-core` preloads into its QuickJS realms. Four go on the
+  main-thread runtime: `src/main-thread-runtime.mjs` provides
+  `bobcat:runtime`, `src/element-papi.mjs` provides `bobcat:element`,
+  `src/timers.mjs` provides `bobcat:timers`, and `src/event-target.mjs`
+  provides `bobcat:event-target`. The group's *worker* runtime gets
+  `src/worker-runtime.mjs` as `bobcat:worker`, plus `bobcat:event-target` and
+  `bobcat:timers` again — registered per runtime, because a source is
+  runtime-wide and no value crosses between two runtimes. Core embeds all five with
   `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
   and verifies every named export. The package owns the
   supported `__*` PAPI members and their web-core arities,

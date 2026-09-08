@@ -1,4 +1,14 @@
-//! When the realm's timers come due.
+//! A realm's timers: the schedule, the two members the realm arms them
+//! through, and the loop that fires what is due.
+//!
+//! Not the main thread's, and not a worker's — *a realm's*. Both kinds have
+//! `setTimeout`, both clamp nesting the same way, and neither owns any of
+//! this, so it lives beside [`crate::clock`] where both can reach it.
+//!
+//! Waiting is not here either. `bobcat-main` hands a view's deadline to that
+//! view's painter and the host waits it out; `bobcat-workers` has no painter
+//! to hand one to and waits out its own. What is common is only *when* a
+//! timer is due, which is what [`TimerSchedule::next_deadline`] answers.
 //!
 //! `setTimeout` and `setInterval` split across the one boundary the realm
 //! has. The callback stays in the realm, because no host value could hold
@@ -10,14 +20,20 @@
 //! questions and only those: when the earliest arming comes due, and which
 //! ids a round found due.
 
+use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::rc::Rc;
 use std::time::Duration;
 
+use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::clock::ClockInstant;
+use crate::esm::{HOST_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER};
+use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::script::ScriptError;
 
 /// Timers that come due in one round without touching the heap. A card with
 /// more than this many deadlines inside one millisecond is unusual.
@@ -217,6 +233,161 @@ fn effective_delay(requested: Duration, nesting: u32) -> Duration {
     } else {
         requested
     }
+}
+
+/// Called on `bobcat:timers` when a timer this schedule armed comes due.
+const TIMER_RUN_EXPORT: &str = "__BobcatRunTimer";
+
+/// The timer schedule, and the nesting level the next timer inherits.
+///
+/// Shared with the host members that maintain it, so it is `Rc`: the native
+/// `setTimer` export and the loop that fires what it armed are different
+/// stack frames on the same thread.
+pub(crate) struct TimerState {
+    schedule: RefCell<TimerSchedule>,
+    /// HTML's timer nesting level — zero outside a timer's callback, and the
+    /// running timer's level inside one. It is what a timer started from a
+    /// timer inherits, and so what decides when a chain of them stops being
+    /// allowed to ask for no delay at all.
+    nesting: Cell<u32>,
+}
+
+impl TimerState {
+    pub(crate) fn new() -> Self {
+        Self {
+            schedule: RefCell::new(TimerSchedule::new()),
+            nesting: Cell::new(0),
+        }
+    }
+
+    /// The earliest deadline armed here.
+    ///
+    /// Not a pure question: a cleared or re-armed timer leaves its old heap
+    /// entry behind, and asking is what discards them.
+    pub(crate) fn next_deadline(&self) -> Option<ClockInstant> {
+        self.schedule.borrow_mut().next_deadline()
+    }
+}
+
+/// Runs every timer due now in one realm, in the order the standard fires
+/// them, and answers with whatever their callbacks threw.
+///
+/// `None` means nothing was due, which is what lets a caller with per-batch
+/// bookkeeping — `bobcat-main`, which counts removals toward a collection —
+/// tell an empty batch from a batch that threw nothing.
+///
+/// A timer is its own task, so one that throws neither stops the ones behind
+/// it nor ends the realm: the same standing an event listener that throws
+/// already has.
+pub(crate) fn run_due_timers(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    timers: &TimerState,
+) -> Option<Vec<ScriptError>> {
+    let due = timers.schedule.borrow_mut().take_due(ClockInstant::now());
+    if due.is_empty() {
+        return None;
+    }
+    let mut failures = Vec::new();
+    for timer in due {
+        // The level a timer this callback starts inherits. Restored around
+        // every call, thrown or not, because the next one in the batch is not
+        // nested inside this one.
+        timers.nesting.set(timer.nesting);
+        let ran = engine.call_module_export(
+            js_runtime,
+            TIMER_MODULE_SPECIFIER,
+            TIMER_RUN_EXPORT,
+            &[HostArgument::Number(f64::from(timer.id))],
+        );
+        timers.nesting.set(0);
+        if let Err(error) = ran {
+            failures.push(error);
+        }
+    }
+    Some(failures)
+}
+
+/// Installs the two members a realm's timers speak to.
+///
+/// Neither runs a callback or touches a document: one arms a deadline and
+/// answers with the id it armed, the other disarms one. Firing is the owning
+/// thread's, through [`run_due_timers`].
+pub(crate) fn install_timer_members(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    timers: &Rc<TimerState>,
+) -> Result<(), ScriptError> {
+    let state = Rc::clone(timers);
+    install(engine, js_runtime, "setTimer", 2, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.setTimer";
+        let delay = number_argument(NAME, arguments, 0)?;
+        let repeats = boolean_argument(NAME, arguments, 1)?;
+        let id = state.schedule.borrow_mut().arm(
+            delay,
+            repeats,
+            state.nesting.get(),
+            ClockInstant::now(),
+        );
+        Ok(HostValue::Number(f64::from(id)))
+    })?;
+
+    let state = Rc::clone(timers);
+    install(engine, js_runtime, "clearTimer", 1, move |arguments| {
+        const NAME: &str = "bobcat-internal:host.clearTimer";
+        let id = timer_id_argument(NAME, arguments, 0)?;
+        state.schedule.borrow_mut().clear(id);
+        Ok(HostValue::Undefined)
+    })
+}
+
+fn install(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    name: &str,
+    arity: u8,
+    callback: impl FnMut(&[HostValue]) -> Result<HostValue, String> + 'static,
+) -> Result<(), ScriptError> {
+    engine.register_host_module_function(
+        js_runtime,
+        HOST_MODULE_SPECIFIER,
+        name,
+        arity,
+        Box::new(callback),
+    )
+}
+
+fn argument(arguments: &[HostValue], index: usize) -> &HostValue {
+    arguments.get(index).unwrap_or(&HostValue::Undefined)
+}
+
+fn number_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<f64, String> {
+    match *argument(arguments, index) {
+        HostValue::Number(value) => Ok(value),
+        _ => Err(format!("{function} expects a number for argument {index}")),
+    }
+}
+
+fn boolean_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<bool, String> {
+    match *argument(arguments, index) {
+        HostValue::Boolean(value) => Ok(value),
+        _ => Err(format!("{function} expects a boolean for argument {index}")),
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the integer and range checks above make the value a representable id"
+)]
+fn timer_id_argument(function: &str, arguments: &[HostValue], index: usize) -> Result<u32, String> {
+    let value = number_argument(function, arguments, index)?;
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
+        return Err(format!(
+            "{function} expects a timer id for argument {index}"
+        ));
+    }
+    Ok(value as u32)
 }
 
 #[cfg(test)]
