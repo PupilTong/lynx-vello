@@ -15,10 +15,12 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use dom::input::InputEvent;
 use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
 
+use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
@@ -692,6 +694,11 @@ impl<F: ResourceFetcher> LynxView<F> {
         self.painter.owes_frame()
     }
 
+    #[must_use]
+    pub fn next_wakeup(&self) -> Option<Duration> {
+        self.painter.next_wakeup()
+    }
+
     /// Whether the engine owed the timeline another frame as of the last
     /// turn.
     ///
@@ -842,6 +849,7 @@ pub(crate) enum ToMain {
     /// carry pixels, which is what makes "`ImageData` never crosses a
     /// channel" a property of the type.
     ImageEvents(Vec<dom::ImageEvent>),
+    TimersDue,
     /// Completion of the source request issued by main.
     SourceLoaded {
         source: Result<LoadedSource, LynxViewError>,
@@ -860,6 +868,7 @@ pub(crate) enum ToPainter {
     ListenerAvailable(Arc<str>),
     ListenerUnavailable(Arc<str>),
     BeginFrameServiced(u64),
+    TimerDeadline(Option<ClockInstant>),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
     RequestSource(SourceRequest),

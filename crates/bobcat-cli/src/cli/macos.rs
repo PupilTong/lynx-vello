@@ -18,12 +18,13 @@
 //! display: while [`bobcat_core::LynxView::owes_frame`] holds, a
 //! [`crate::cli::vsync::DisplayLink`] on the monitor the window is on posts one
 //! wakeup per refresh, and stops the moment nothing is owed. The engine names
-//! no interval and this file owns no timer — an animation runs at the rate
-//! the display actually scans out, and a swap chain that had no image to give
-//! is asked again one refresh later rather than on a guess.
+//! no interval for that — an animation runs at the rate the display actually
+//! scans out, and a swap chain that had no image to give is asked again one
+//! refresh later rather than on a guess.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, StyleThreads};
@@ -492,10 +493,9 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     /// from inside that drain the run loop would never return to `AppKit`,
     /// while a wakeup posted from here simply opens the next turn.
     ///
-    /// The loop then always waits: the only thing that asks for a frame is
-    /// the display itself. While the view owes one, the display link posts a
-    /// wakeup per refresh; the turn that answers it draws, and the turn that
-    /// finds nothing owed stops the link.
+    /// The loop then waits: while the view owes a frame, the display link
+    /// posts a wakeup per refresh, and the turn that finds nothing owed stops
+    /// the link. A realm timer sets this loop's own deadline instead.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // A turn that quit opened draws nothing: this thread is the one
         // taking the window down, and a frame presented into a surface being
@@ -510,7 +510,14 @@ impl ApplicationHandler<UserEvent> for MacApplication {
         if let Some(vsync) = self.vsync.as_mut() {
             vsync.set_running(owed);
         }
-        event_loop.set_control_flow(ControlFlow::Wait);
+        let control_flow = self
+            .view
+            .as_ref()
+            .and_then(LynxView::next_wakeup)
+            .map_or(ControlFlow::Wait, |wakeup| {
+                ControlFlow::WaitUntil(Instant::now() + wakeup)
+            });
+        event_loop.set_control_flow(control_flow);
     }
 }
 

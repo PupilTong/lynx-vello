@@ -11,10 +11,10 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-pub(crate) use self::timers::ClockInstant;
 use self::timers::TimerSchedule;
 use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::clock::ClockInstant;
 use crate::main::tree::{LynxDocument, apply_attribute_style};
 use crate::script::ScriptError;
 use crate::view::{EventRequester, ToPainter};
@@ -542,11 +542,6 @@ impl<R: EventRequester> MainThreadRuntime<R> {
     }
 
     /// When the earliest armed timer comes due, if one is armed.
-    ///
-    /// The command loop's wait ends there rather than at the next command,
-    /// which is what makes a timer this thread's own business: no host turn,
-    /// no frame, and no other thread stands between a deadline and the
-    /// callback it belongs to.
     pub(crate) fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
         self.timers.schedule.borrow_mut().next_deadline()
     }

@@ -498,6 +498,14 @@ impl BobcatRenderer {
         self.view.as_ref().is_some_and(LynxView::owes_frame)
     }
 
+    #[wasm_bindgen(js_name = nextWakeupMs)]
+    pub fn next_wakeup_ms(&self) -> Option<f64> {
+        self.view
+            .as_ref()
+            .and_then(LynxView::next_wakeup)
+            .map(|wakeup| wakeup.as_secs_f64() * 1_000.0)
+    }
+
     /// Route one browser `PointerEvent` into the opaque native view.
     ///
     /// The JavaScript facade owns pointer capture and converts client

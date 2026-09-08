@@ -32,8 +32,9 @@ use wasm_thread::Builder as ThreadBuilder;
 use self::quickjs::ScriptRuntime;
 #[cfg(test)]
 use self::runtime::MainThreadError;
-use self::runtime::{ClockInstant, MainThreadRuntime, install_shared_modules};
+use self::runtime::{MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource};
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
@@ -562,6 +563,7 @@ struct CarriedView<R: EventRequester> {
     /// The newest `BeginFrame` this round has serviced, acknowledged in the
     /// round's tail.
     serviced_begin_frame: Option<u64>,
+    announced_deadline: Option<ClockInstant>,
 }
 
 impl<R: EventRequester> Drop for CarriedView<R> {
@@ -583,11 +585,12 @@ impl<R: EventRequester> CarriedView<R> {
             notify,
             control,
             serviced_begin_frame: None,
+            announced_deadline: None,
         }
     }
 
     /// A booting view has no realm, so nothing can have armed a timer on it;
-    /// only a running one can shorten its group's wait.
+    /// only a running one can have a deadline at all.
     fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
         match self.slot.as_mut()? {
             ViewSlot::Booting(_) => None,
@@ -639,7 +642,7 @@ impl<R: EventRequester> CarriedView<R> {
                         self.notify.send(ToPainter::BeginFrameServiced(seq));
                     }
                     // No committed tree or realm exists to route these to yet.
-                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
+                    ToMain::DispatchEvent { .. } | ToMain::Refill { .. } | ToMain::TimersDue => {}
                     #[cfg(test)]
                     ToMain::Probe(probe) => probe(&mut booting.document),
                     ToMain::Attach(_)
@@ -680,13 +683,20 @@ impl<R: EventRequester> CarriedView<R> {
         };
         // After this round's commands, because a listener one of them
         // delivered may have cleared a timer that is already due, and on
-        // every round rather than only the ones a deadline woke, because a
+        // every round rather than only the ones a nudge opened, because a
         // command can arrive while a deadline is already behind us.
         for failure in runtime.run_due_timers(js_runtime) {
             self.notify
                 .send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
         }
         runtime.commit_if_dirty();
+        let host_deadline = runtime
+            .next_timer_deadline()
+            .filter(|deadline| *deadline > ClockInstant::now());
+        if host_deadline != self.announced_deadline {
+            self.announced_deadline = host_deadline;
+            self.notify.send(ToPainter::TimerDeadline(host_deadline));
+        }
         if let Some(seq) = self.serviced_begin_frame.take() {
             self.notify.send(ToPainter::BeginFrameServiced(seq));
         }
@@ -747,51 +757,53 @@ fn serve_group<R: EventRequester>(
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
-        // The earliest deadline any view armed: the thread wakes for whichever
-        // realm needs it first, and the round's tail runs every view's timers.
-        let deadline = views
-            .iter_mut()
-            .filter_map(CarriedView::next_timer_deadline)
-            .min();
-        match commands.recv(deadline) {
-            Ok(first) => {
-                for (view, command) in std::iter::once(first).chain(commands.drain()) {
-                    match command {
-                        ToMain::Close => return,
-                        ToMain::Attach(attachment) => {
-                            attach(
-                                views,
-                                style_pool,
-                                requester,
-                                notifications,
-                                view.expect("an attachment addresses its view"),
-                                *attachment,
-                            );
-                        }
-                        command => {
-                            let Some(index) =
-                                views.iter().position(|carried| Some(carried.id) == view)
-                            else {
-                                // A command for a view already released: its
-                                // goodbye won the race with whatever its
-                                // painter sent last.
-                                continue;
-                            };
-                            if !views[index].apply(js_runtime, command) {
-                                views.swap_remove(index);
-                            }
-                        }
-                    }
-                }
-            }
-            // A deadline a realm asked for, and nothing else to serve.
-            Err(flume::RecvTimeoutError::Timeout) => {}
-            Err(flume::RecvTimeoutError::Disconnected) => return,
-        }
         for view in &mut *views {
             view.finish_round(js_runtime);
         }
+        let first = if any_timer_due(views) {
+            None
+        } else {
+            match commands.recv(None) {
+                Ok(first) => Some(first),
+                Err(_) => return,
+            }
+        };
+        for (view, command) in first.into_iter().chain(commands.drain()) {
+            match command {
+                ToMain::Close => return,
+                ToMain::Attach(attachment) => {
+                    attach(
+                        views,
+                        style_pool,
+                        requester,
+                        notifications,
+                        view.expect("an attachment addresses its view"),
+                        *attachment,
+                    );
+                }
+                command => {
+                    let Some(index) = views.iter().position(|carried| Some(carried.id) == view)
+                    else {
+                        // A command for a view already released: its
+                        // goodbye won the race with whatever its
+                        // painter sent last.
+                        continue;
+                    };
+                    if !views[index].apply(js_runtime, command) {
+                        views.swap_remove(index);
+                    }
+                }
+            }
+        }
     }
+}
+
+fn any_timer_due<R: EventRequester>(views: &mut [CarriedView<R>]) -> bool {
+    let now = ClockInstant::now();
+    views.iter_mut().any(|view| {
+        view.next_timer_deadline()
+            .is_some_and(|deadline| deadline <= now)
+    })
 }
 
 fn apply_main_command<R: EventRequester>(
@@ -828,6 +840,7 @@ fn apply_main_command<R: EventRequester>(
             runtime.begin_frame(now);
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
+        ToMain::TimersDue => {}
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
         ToMain::Attach(_) | ToMain::Close | ToMain::Shutdown => {

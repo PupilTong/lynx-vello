@@ -2125,10 +2125,10 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
     assert!(error.to_string().contains("update-list-info"), "{error}");
 }
 
-/// The realm's timers, from the four globals a card calls to the schedule
-/// the command loop waits on. A zero delay is due the moment it is armed, so
-/// a test spends a round by asking the runtime to run what is due — which is
-/// exactly what the loop does when its wait ends.
+/// The realm's timers, from the four globals a card calls to the schedule the
+/// round's tail runs. A zero delay is due the moment it is armed, so a test
+/// spends a round by asking the runtime to run what is due — which is exactly
+/// what the tail of every round does.
 #[test]
 fn a_timeout_runs_once_with_the_arguments_it_was_given() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
