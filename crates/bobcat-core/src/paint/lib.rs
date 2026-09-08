@@ -37,6 +37,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
+use crate::background::WorkerKey;
 use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 #[cfg(test)]
@@ -144,7 +145,10 @@ pub(crate) struct PainterLink {
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
-    source_request: Option<SourceRequest>,
+    /// Sources the document owner asked for and this turn has not dispatched
+    /// yet. A queue rather than one slot: startup asks for one at a time, but
+    /// a running realm can construct several `Worker`s in one task.
+    source_requests: Vec<(SourceRequest, Option<WorkerKey>)>,
     control: Arc<crate::main::StartupControl>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// Coalesces announcements during a normal drain or offscreen frame wait.
@@ -173,7 +177,7 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
-            source_request: None,
+            source_requests: Vec::new(),
             control,
             pending_announce: false,
             timer_deadline: None,
@@ -205,6 +209,13 @@ impl PainterLink {
 
     /// Applies everything that has arrived. However many frames were
     /// announced, the mailbox is read once.
+    /// The sources this link has been told to fetch, for the tests that play
+    /// the painter's half by hand.
+    #[cfg(test)]
+    pub(crate) fn take_source_requests(&mut self) -> Vec<(SourceRequest, Option<WorkerKey>)> {
+        std::mem::take(&mut self.source_requests)
+    }
+
     pub(crate) fn sync(&mut self) {
         let notifications = Rc::clone(&self.notifications);
         notifications.drain_view(self.view, |notification| self.apply(notification));
@@ -250,7 +261,9 @@ impl PainterLink {
             }
             ToPainter::TimerDeadline(deadline) => self.timer_deadline = deadline,
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::RequestSource(request) => self.source_request = Some(request),
+            ToPainter::RequestSource { request, worker } => {
+                self.source_requests.push((request, worker));
+            }
         }
     }
 
@@ -839,16 +852,27 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         self.link.sync();
         if self.link.control.is_cancelled() || self.link.notifications.is_disconnected() {
             self.link.control.cancel();
-            self.link.source_request = None;
-        } else if let Some(request) = self.link.source_request.take() {
-            self.images.store().request_source(
-                request,
-                SourceCompletion::new(
-                    self.link.commands.clone(),
-                    self.link.view,
-                    Arc::clone(&self.link.control),
-                ),
-            );
+            self.link.source_requests.clear();
+        } else {
+            for (request, worker) in std::mem::take(&mut self.link.source_requests) {
+                // A worker's script carries its key into the completion, so a
+                // failure names the `Worker` it belongs to. A startup source
+                // needs no name: there is one boot to fail.
+                let completion = match worker {
+                    Some(key) => SourceCompletion::for_worker(
+                        self.link.commands.clone(),
+                        self.link.view,
+                        Arc::clone(&self.link.control),
+                        key,
+                    ),
+                    None => SourceCompletion::new(
+                        self.link.commands.clone(),
+                        self.link.view,
+                        Arc::clone(&self.link.control),
+                    ),
+                };
+                self.images.store().request_source(request, completion);
+            }
         }
         self.service_images();
     }

@@ -47,8 +47,14 @@ impl ScriptHarness {
         let (painter, main) = detached_link(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-            .expect("the benchmark realm boots");
+        let runtime = MainThreadRuntime::new(
+            &mut js_runtime,
+            document,
+            main.notify,
+            crate::view::DETACHED_VIEW,
+            crate::view::detached_workers().0,
+        )
+        .expect("the benchmark realm boots");
         Self {
             js_runtime,
             runtime,

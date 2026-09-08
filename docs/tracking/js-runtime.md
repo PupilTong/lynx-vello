@@ -72,6 +72,71 @@ Lynx runs compiled ReactLynx output on **two logical JS contexts that share one 
 | `globalThis.renderPage` / `updatePage` / `updateGlobalProps` / `getPageData` / `removeComponents` / `ssrEncode` / `ssrHydrate` / `__jsReady`-named fn (`LifecycleConstant.jsReady`) | The main entry points for native→MTS lifecycle calls, installed via `Object.assign(globalThis, calledByNative)` | Core | N/A | | lynx-stack/packages/react/runtime/src/snapshot/lynx/calledByNative.ts |
 | `__CreatePage`, `__GetPageElement`, `__GetTemplateParts`, `__GetElementUniqueID`, `__OnLifecycleEvent`, `__FlushElementTree`, `processData`, `processEvalResult` | Element-PAPI-adjacent / bundle-execution globals invoked by the injected runtime glue (full Element PAPI enumeration is out of scope for this section) | Core | N/A | Out of scope here — covered by the Element PAPI section | lynx-stack/packages/react/runtime/src/snapshot/lynx/calledByNative.ts; lynx-stack/packages/react/runtime/src/lynx.ts:29-34 |
 
+#### `Worker` — a bucket-1 addition, not a Lynx binding (IMPLEMENTED)
+
+**Lynx exposes no `Worker` anywhere**, on either target, and this was verified
+rather than assumed:
+
+- The native engine registers no such global. The BTS install list is
+  `nativeConsole`, `__lynxDisableModuleCache`, `SystemInfo`, `LynxJSBI`,
+  `TextCodecHelper` (+ devtool-only `groupId`/`enableDebugMode`)
+  (`lynx/core/runtime/js/bindings/global.cc:54-91`); the BTS chunk wrapper
+  shadows the whole BOM but has nothing named `Worker` to shadow
+  (`lynx/core/runtime/js/bindings/js_app.cc:84-92`); the 230 registered MTS
+  renderer functions contain none
+  (`lynx/core/runtime/lepus/bindings/renderer_functions_def.h`); and the
+  official ambient types declare none
+  (`lynx/js_libraries/types/types/common/global.d.ts:25-53`). QuickJS's own
+  optional `Worker` is not reachable either, though not for the reason one
+  might expect: `quickjs-libc` *is* compiled in
+  (`lynx/third_party/quickjs/BUILD.gn:162-166` defines the `quickjs_libc`
+  target and `:149-152` makes it an unconditional dep of `quickjs_source`),
+  but that class is installed only by `js_std_init_handlers`/
+  `js_init_module_os` under `USE_WORKER`, and nothing under `lynx/core/`
+  calls either — the only `quickjs-libc` entry point the engine uses is
+  `lepus_std_loop` from `core/runtime/js/jsi/quickjs/quickjs_helper.cc`. The
+  enumerated global install lists above are the primary evidence and stand on
+  their own; the PrimJS source submodule is not checked out in this reference
+  clone, so `quickjs-libc.cc` itself was not read.
+  `MessageChannel`, `MessagePort` and a global `postMessage` are
+  likewise absent.
+- `web-core` uses the browser's `Worker` **internally** and never exposes it:
+  a module worker for BTS (`lynx-stack/.../mainthread/Background.ts:52-64`,
+  shared per `lynxGroupId`) and one for binary decoding
+  (`lynx-stack/.../mainthread/TemplateManager.ts:148-158`). The MTS realm is
+  not a worker at all but a sandboxed same-origin iframe
+  (`lynx-stack/.../mainthread/createIFrameRealm.ts:16-73`). MTS chunks are
+  wrapped shadowing only `navigator`/`postMessage`/`window`
+  (`lynx-stack/.../decodeWorker/decode.worker.ts:24-25`), so a card writing
+  `new Worker(...)` there would reach the *browser's* constructor — an
+  incidental leak of the host platform, and a `ReferenceError` on native
+  Lynx.
+
+The nearest Lynx analogue is `ContextProxy` — fixed, named channels
+(`postMessage`/`dispatchEvent`/`addEventListener`/`removeEventListener` plus
+`onTriggerEvent`, `lynx/core/runtime/js/bindings/event/context_proxy_in_js.cc:26-44`)
+carrying a Lynx `MessageEvent` whose `origin` is a context *name*, not a URL.
+You cannot create one, and `web-core` does not even implement its
+`postMessage` (`lynx-stack/.../LynxCrossThreadContext.ts:45-47` just
+`console.error`s) — worth recording as a web-target deviation in its own
+right.
+
+So `Worker` is a **new capability, not a compat obligation**, which under the
+standards policy puts it in bucket 1: implement the real W3C interface. That
+is what `bobcat:runtime` now exports — see AGENTS.md for the shape, the
+forced deviations from HTML (JSON serialization instead of structured clone,
+no transfer list, cooperative `terminate()`), and the thread/runtime topology
+(a group's workers share one `QuickJS` runtime on `bobcat-workers`, separate
+from `bobcat-main`'s, which is what makes "a worker cannot reach the
+document" structural rather than policed).
+
+Still open, and deliberately: a `Worker` is not yet how anything Lynx-shaped
+runs. Wiring the background-thread half of the dual-thread model onto it —
+`lynxCoreInject`, the `tt.*` lifecycle entry points, `ContextProxy` over the
+worker channel, `runOnBackground`/`runOnMainThread` — is separate work, and
+so is `SharedWorker`/`MessagePort` (which the bridge cannot express today:
+the realm deliberately has no `SharedArrayBuffer` or `Atomics`).
+
 #### App / `this`-bound proxy methods (compiled-output-facing, main-thread `AppProxy`, i.e. `this.*` inside `app-service.js`/`loadCard`)
 
 These are not on `lynx` but are the full enumerated property list of the HostObject passed as `this` (`page_object`) into the compiled bundle's `loadCard(...)` entry function — effectively the "core runtime" API surface compiled ReactLynx output actually calls (`updateData`, event dispatch helpers, timers, etc). This is Core/required for any compatible engine.

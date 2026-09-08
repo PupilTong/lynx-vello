@@ -55,18 +55,20 @@ fn a_turn_preserves_other_views_messages_and_their_order() {
     links
         .notify_second
         .send(ToPainter::RequestImages(vec![Arc::from("photo.png")]));
-    links
-        .notify_first
-        .send(ToPainter::RequestSource(SourceRequest::Entry(
-            "entry.js".into(),
-        )));
+    links.notify_first.send(ToPainter::RequestSource {
+        request: SourceRequest::Entry("entry.js".into()),
+        worker: None,
+    });
     links
         .notify_second
         .send(ToPainter::Engine(EngineEvent::ScriptFinished));
 
     assert!(matches!(links.first.drain().as_slice(), [
         ToPainter::Engine(EngineEvent::ScriptFinished),
-        ToPainter::RequestSource(SourceRequest::Entry(url)),
+        ToPainter::RequestSource {
+            request: SourceRequest::Entry(url),
+            worker: None,
+        },
     ] if url == "entry.js"));
     // New arrivals follow the sibling's buffered batch, even after the last
     // sender disconnects.

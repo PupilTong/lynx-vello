@@ -185,6 +185,11 @@ where
 pub enum SourceRequest {
     StyleSheet(String),
     Entry(String),
+    /// A `Worker`'s script. Unlike the two above it is asked for at an
+    /// arbitrary moment rather than during startup, and several can be in
+    /// flight at once — but a host never has to tell them apart, because each
+    /// carries its own [`SourceCompletion`] and that is what remembers.
+    WorkerScript(String),
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
@@ -198,7 +203,16 @@ pub enum StyleSheetSource {
 #[derive(Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
-    Entry { source: String, url: String },
+    Entry {
+        source: String,
+        url: String,
+    },
+    /// A `Worker`'s script, on its way to the group's worker thread. The
+    /// resolved URL is what the worker's module is named by.
+    WorkerScript {
+        source: String,
+        url: String,
+    },
 }
 
 /// The concrete, transferable right to answer one source request.
@@ -212,6 +226,14 @@ pub struct SourceCompletion {
     commands: Option<crate::mailbox::Sender<crate::view::ToMain>>,
     view: crate::view::ViewId,
     control: Arc<crate::main::StartupControl>,
+    /// The `Worker` this answers for, when it answers for one.
+    ///
+    /// A startup source is one of a fixed sequence, so a failure needs no
+    /// name — the view's boot is over either way. A worker's script does:
+    /// several can be in flight, and only the realm's own `Worker` object can
+    /// be told. The key rides here rather than in the error so that the
+    /// unanswered-drop guarantee below stays attributable too.
+    worker: Option<crate::background::WorkerKey>,
 }
 
 impl std::fmt::Debug for SourceCompletion {
@@ -234,6 +256,22 @@ impl SourceCompletion {
             commands: Some(commands),
             view,
             control,
+            worker: None,
+        }
+    }
+
+    /// The same right, for the one source a *running* view asks for.
+    pub(crate) fn for_worker(
+        commands: crate::mailbox::Sender<crate::view::ToMain>,
+        view: crate::view::ViewId,
+        control: Arc<crate::main::StartupControl>,
+        worker: crate::background::WorkerKey,
+    ) -> Self {
+        Self {
+            commands: Some(commands),
+            view,
+            control,
+            worker: Some(worker),
         }
     }
 
@@ -254,14 +292,34 @@ impl SourceCompletion {
     }
 
     fn send(&mut self, source: Result<LoadedSource, crate::LynxViewError>) {
-        if let Some(commands) = self.commands.take()
-            && !self.control.is_cancelled()
-        {
-            let _ = commands.send((
-                Some(self.view),
-                crate::view::ToMain::SourceLoaded { source },
-            ));
+        let Some(commands) = self.commands.take() else {
+            return;
+        };
+        if self.control.is_cancelled() {
+            return;
         }
+        // Which worker an answer belongs to is known here and nowhere else:
+        // the request that named it is gone by now, and several can be in
+        // flight. So a worker's answer leaves as its own message rather than
+        // as a document source, and `SourceLoaded` goes on meaning startup.
+        let message = match self.worker {
+            Some(key) => crate::view::ToMain::WorkerScript {
+                key,
+                script: match source {
+                    Ok(LoadedSource::WorkerScript { source, url }) => {
+                        Ok(crate::background::WorkerScript { source, url })
+                    }
+                    Ok(_) => Err(crate::threads::platform_script_error(
+                        "a worker's script was answered with a document source".to_owned(),
+                    )),
+                    Err(error) => Err(crate::threads::platform_script_error(format!(
+                        "loading the worker's script: {error}"
+                    ))),
+                },
+            },
+            None => crate::view::ToMain::SourceLoaded { source },
+        };
+        let _ = commands.send((Some(self.view), message));
     }
 }
 

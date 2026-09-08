@@ -179,6 +179,9 @@ impl<R: EventRequester> ToPainterSender<R> {
 
 /// The main thread's end of its group's link.
 pub(crate) struct GroupLink<R: EventRequester> {
+    /// The group's worker thread. This thread names workers and hears from
+    /// them; it owns none of them.
+    pub(crate) workers: crate::mailbox::Sender<crate::background::WorkerCommand>,
     /// Every view's commands, and every attachment, in the order they were
     /// sent.
     pub(crate) commands: Mailbox<ToMain>,
@@ -283,14 +286,20 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
         .spawn(move || {
             let DetachedLink { commands, notify } = link;
             let requester = Arc::clone(notify.requester());
+            let (workers, _worker_commands) = crate::view::detached_workers();
             let notifications = notify.notifications.clone();
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
                     .map_err(MainThreadError::into_script_error)?;
-                let mut runtime =
-                    MainThreadRuntime::new(&mut js_runtime, build_document(), notify.clone())
-                        .map_err(MainThreadError::into_script_error)?;
+                let mut runtime = MainThreadRuntime::new(
+                    &mut js_runtime,
+                    build_document(),
+                    notify.clone(),
+                    DETACHED_VIEW,
+                    workers.clone(),
+                )
+                .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&mut js_runtime, &entry.source, &entry.url)
                     .map_err(MainThreadError::into_script_error)?;
@@ -318,6 +327,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         &requester,
                         &commands,
                         &notifications,
+                        &workers,
                         &mut views,
                     );
                 }
@@ -355,6 +365,10 @@ struct Booting<R: EventRequester> {
     requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
+    /// This view's name, and the group's worker thread — both of which the
+    /// realm's `Worker` members need the moment the entry runs.
+    view: ViewId,
+    workers: crate::mailbox::Sender<crate::background::WorkerCommand>,
 }
 
 /// What applying one source did to a booting view.
@@ -379,6 +393,8 @@ impl<R: EventRequester> Booting<R> {
         sources: MainSources,
         style_pool: Option<&Rc<StylePool>>,
         notify: ToPainterSender<R>,
+        view: ViewId,
+        workers: crate::mailbox::Sender<crate::background::WorkerCommand>,
     ) -> Result<Self, LynxViewError> {
         let MainSources {
             config,
@@ -409,12 +425,17 @@ impl<R: EventRequester> Booting<R> {
             requests,
             document,
             notify,
+            view,
+            workers,
         })
     }
 
     fn request_next(&mut self) {
         if let Some(request) = self.requests.next() {
-            self.notify.send(ToPainter::RequestSource(request));
+            self.notify.send(ToPainter::RequestSource {
+                request,
+                worker: None,
+            });
         }
     }
 
@@ -436,6 +457,11 @@ impl<R: EventRequester> Booting<R> {
             LoadedSource::Entry { source, url } => {
                 return self.run_entry(js_runtime, &source, &url, control);
             }
+            // Only a `SourceCompletion` that knows its worker asks for one,
+            // and it never sends the answer this way.
+            LoadedSource::WorkerScript { .. } => {
+                unreachable!("a worker's script is not a document source")
+            }
         }
         if control.is_cancelled() {
             return Booted::Gone;
@@ -455,9 +481,14 @@ impl<R: EventRequester> Booting<R> {
             return Booted::Gone;
         }
         let Self {
-            document, notify, ..
+            document,
+            notify,
+            view,
+            workers,
+            ..
         } = *self;
-        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
+        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify, view, workers)
+        {
             Ok(runtime) => runtime,
             Err(error) => return Booted::Failed(error.into_script_error().into()),
         };
@@ -481,6 +512,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
     let GroupLink {
         commands,
         notifications,
+        workers,
         requester,
         ready,
     } = link;
@@ -532,6 +564,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
             &requester,
             &commands,
             &notifications,
+            &workers,
             &mut views,
         );
     }));
@@ -552,6 +585,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
 /// One view a group's thread carries: its slot, the link it reports through,
 /// and the flag its embedder cancels when dropping the view.
 struct CarriedView<R: EventRequester> {
+    announced_deadline: Option<ClockInstant>,
     id: ViewId,
     /// `None` only while a source is being mounted: mounting one consumes the
     /// booting document and hands back whatever it became. A view that
@@ -563,7 +597,6 @@ struct CarriedView<R: EventRequester> {
     /// The newest `BeginFrame` this round has serviced, acknowledged in the
     /// round's tail.
     serviced_begin_frame: Option<u64>,
-    announced_deadline: Option<ClockInstant>,
 }
 
 impl<R: EventRequester> Drop for CarriedView<R> {
@@ -590,7 +623,7 @@ impl<R: EventRequester> CarriedView<R> {
     }
 
     /// A booting view has no realm, so nothing can have armed a timer on it;
-    /// only a running one can have a deadline at all.
+    /// only a running one can shorten its group's wait.
     fn next_timer_deadline(&mut self) -> Option<ClockInstant> {
         match self.slot.as_mut()? {
             ViewSlot::Booting(_) => None,
@@ -642,13 +675,15 @@ impl<R: EventRequester> CarriedView<R> {
                         self.notify.send(ToPainter::BeginFrameServiced(seq));
                     }
                     // No committed tree or realm exists to route these to
-                    // yet. A worker's news is reachable here — a view can be
-                    // booting while a realm it created still speaks — and is
-                    // dropped for the same reason: nothing can hear it.
+                    // yet. A worker's news is reachable here — its view can
+                    // be re-booting while a realm it created still speaks —
+                    // and is dropped for the same reason: the realm that
+                    // could hear it is gone.
                     ToMain::DispatchEvent { .. }
                     | ToMain::Refill { .. }
                     | ToMain::TimersDue
-                    | ToMain::Worker { .. } => {}
+                    | ToMain::Worker { .. }
+                    | ToMain::WorkerScript { .. } => {}
                     #[cfg(test)]
                     ToMain::Probe(probe) => probe(&mut booting.document),
                     ToMain::Attach(_)
@@ -681,6 +716,14 @@ impl<R: EventRequester> CarriedView<R> {
         true
     }
 
+    /// This view is over: end every worker it started, so nothing it built
+    /// outlives the realm that could hear from it.
+    fn release(mut self) {
+        if let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() {
+            runtime.release_workers();
+        }
+    }
+
     /// The tail of one round. Only a running view has one: a booting view has
     /// published nothing and armed nothing.
     fn finish_round(&mut self, js_runtime: &mut ScriptRuntime) {
@@ -695,7 +738,6 @@ impl<R: EventRequester> CarriedView<R> {
             self.notify
                 .send(ToPainter::Engine(EngineEvent::TimerFailed(failure)));
         }
-        runtime.commit_if_dirty();
         let host_deadline = runtime
             .next_timer_deadline()
             .filter(|deadline| *deadline > ClockInstant::now());
@@ -703,6 +745,7 @@ impl<R: EventRequester> CarriedView<R> {
             self.announced_deadline = host_deadline;
             self.notify.send(ToPainter::TimerDeadline(host_deadline));
         }
+        runtime.commit_if_dirty();
         if let Some(seq) = self.serviced_begin_frame.take() {
             self.notify.send(ToPainter::BeginFrameServiced(seq));
         }
@@ -715,6 +758,7 @@ fn attach<R: EventRequester>(
     style_pool: Option<&Rc<StylePool>>,
     requester: &Arc<R>,
     notifications: &Sender<ToPainter>,
+    workers: &crate::mailbox::Sender<crate::background::WorkerCommand>,
     view: ViewId,
     attachment: Attachment,
 ) {
@@ -732,7 +776,14 @@ fn attach<R: EventRequester>(
             notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
     });
-    match Booting::new(viewport, sources, style_pool, notify.clone()) {
+    match Booting::new(
+        viewport,
+        sources,
+        style_pool,
+        notify.clone(),
+        view,
+        workers.clone(),
+    ) {
         Ok(mut booting) => {
             booting.request_next();
             views.push(CarriedView::new(
@@ -760,6 +811,7 @@ fn serve_group<R: EventRequester>(
     requester: &Arc<R>,
     commands: &Mailbox<ToMain>,
     notifications: &Sender<ToPainter>,
+    workers: &crate::mailbox::Sender<crate::background::WorkerCommand>,
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
@@ -783,6 +835,7 @@ fn serve_group<R: EventRequester>(
                         style_pool,
                         requester,
                         notifications,
+                        workers,
                         view.expect("an attachment addresses its view"),
                         *attachment,
                     );
@@ -796,7 +849,7 @@ fn serve_group<R: EventRequester>(
                         continue;
                     };
                     if !views[index].apply(js_runtime, command) {
-                        views.swap_remove(index);
+                        views.swap_remove(index).release();
                     }
                 }
             }
@@ -823,9 +876,28 @@ fn apply_main_command<R: EventRequester>(
         ToMain::SourceLoaded { .. } => {
             unreachable!("sources are requested only during boot")
         }
+        ToMain::WorkerScript { key, script } => {
+            if let Err(error) = runtime.worker_script_loaded(js_runtime, key, script) {
+                notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(
+                    error.into_script_error(),
+                )));
+            }
+        }
         // Nothing in this build constructs a `Worker`, so nothing produces
         // one; delivering it into the realm that did lands with that object.
-        ToMain::Worker { .. } => {}
+        ToMain::TimersDue => {}
+        ToMain::Worker { key, payload } => {
+            let delivered = catch_unwind(AssertUnwindSafe(|| {
+                runtime.deliver_worker_event(js_runtime, key, payload)
+            }));
+            if let Ok(Err(error)) = delivered {
+                // A handler that threw, which is a listener failing like any
+                // other.
+                notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(
+                    error.into_script_error(),
+                )));
+            }
+        }
         ToMain::DispatchEvent {
             target,
             name,
@@ -849,7 +921,6 @@ fn apply_main_command<R: EventRequester>(
             runtime.begin_frame(now);
             *serviced_begin_frame = Some(seq.max(serviced_begin_frame.unwrap_or(0)));
         }
-        ToMain::TimersDue => {}
         ToMain::Refill { offsets } => runtime.refill_scroll_windows(&offsets),
         ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
         ToMain::Attach(_) | ToMain::Close | ToMain::Shutdown => {

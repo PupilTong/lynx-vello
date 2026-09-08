@@ -1,5 +1,7 @@
 //! The Lynx main-thread runtime over its owned `QuickJS` realm.
 
+mod worker_host;
+
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
 use std::rc::Rc;
@@ -9,8 +11,10 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
+use self::worker_host::{WorkerState, install_worker_host_members};
 use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::background::WorkerCommand;
 use crate::clock::ClockInstant;
 use crate::esm::{
     EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
@@ -19,7 +23,7 @@ use crate::esm::{
 use crate::main::tree::{LynxDocument, apply_attribute_style};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
-use crate::view::{EventRequester, ToPainter};
+use crate::view::{EventRequester, ToPainter, ViewId};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -52,6 +56,7 @@ const ENTRY_PREAMBLE: &str = r#"import {
   _ReportError,
   _SetSourceMapRelease,
   __OnLifecycleEvent,
+  Worker,
 } from "bobcat:runtime";
 import {
   __CreatePage,
@@ -335,6 +340,7 @@ pub(crate) struct MainThreadRuntime<R: EventRequester> {
     tree: Rc<RefCell<TreeHandle<R>>>,
     events: Rc<EventState<R>>,
     timers: Rc<TimerState>,
+    workers: Rc<WorkerState<R>>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -355,18 +361,30 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         js_runtime: &mut ScriptRuntime,
         document: LynxDocument,
         notify: ToPainterSender<R>,
+        view: ViewId,
+        workers: crate::mailbox::Sender<WorkerCommand>,
     ) -> Result<Self, MainThreadError> {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(notify.clone()));
         let timers = Rc::new(TimerState::new());
-        let tree = install_bobcat(&mut engine, js_runtime, document, notify, &events, &timers)?;
+        let workers = Rc::new(WorkerState::new(view, workers, notify.clone()));
+        let tree = install_bobcat(
+            &mut engine,
+            js_runtime,
+            document,
+            notify,
+            &events,
+            &timers,
+            &workers,
+        )?;
         Ok(Self {
             engine,
             tree,
             events,
             timers,
+            workers,
             next_event_id: 0,
         })
     }
@@ -647,6 +665,10 @@ pub(crate) fn install_shared_modules(
         .map_err(|error| MainThreadError::from_engine("registering the timer module", error))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per piece of realm-shared state the host members close over"
+)]
 fn install_bobcat<R: EventRequester>(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -654,6 +676,7 @@ fn install_bobcat<R: EventRequester>(
     notify: ToPainterSender<R>,
     events: &Rc<EventState<R>>,
     timers: &Rc<TimerState>,
+    workers: &Rc<WorkerState<R>>,
 ) -> Result<Rc<RefCell<TreeHandle<R>>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         document,
@@ -665,6 +688,7 @@ fn install_bobcat<R: EventRequester>(
     install_event_members(engine, js_runtime, events)?;
     install_timer_members(engine, js_runtime, timers)
         .map_err(|error| MainThreadError::from_engine("installing the timer members", error))?;
+    install_worker_host_members(engine, js_runtime, workers)?;
 
     Ok(handle)
 }
@@ -1208,4 +1232,5 @@ fn string_argument<'a>(
 }
 
 #[cfg(test)]
+#[path = "tests/lib.rs"]
 mod tests;

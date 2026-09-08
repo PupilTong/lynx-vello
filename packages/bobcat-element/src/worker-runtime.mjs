@@ -14,14 +14,30 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 // # What is here and what is not
 //
 // `postMessage`, `close`, `name`, `self`, the `message` event and the
-// EventTarget surface under it. Not here: `importScripts` (this realm loads
-// ESM, so a worker script uses `import`), `location`, `navigator`, `fetch`,
+// EventTarget surface under it. Not here: `importScripts`, `location`,
+// `navigator`, `fetch`,
 // `XMLHttpRequest`, `MessagePort`, `messageerror` (JSON cannot fail to
 // deserialize what JSON produced), `onerror` (an uncaught exception in here is
 // reported at the parent `Worker` and to the embedder, but this side has no
 // hook to intercept it first), and the DOM — a worker realm holds no document
 // and cannot reach one, which is the whole reason it is on another runtime and
 // another thread.
+//
+// # A worker script is one module, with no imports of its own
+//
+// Neither static nor dynamic. Module resolution here is a lookup in a
+// registry the host filled before the realm existed, and for a worker that
+// registry holds exactly the three modules above; there is no loader
+// callback, so nothing can be fetched on demand. `await import("./x.js")`
+// therefore rejects, and at a worker's top level that rejection is reported
+// as one `error` event on the parent's `Worker` — the worker itself stays up
+// and goes on taking messages.
+//
+// The MTS entry has the same limit for the same reason, so this is not a
+// worker deviation. What *is* particular to a worker: its script is asked for
+// under the worker's own key, so one-script-per-worker is built into the
+// fetch protocol. Supporting a module graph would mean naming a module rather
+// than a worker.
 
 /**
  * The global scope object. `self` and `globalThis` are the same object, as

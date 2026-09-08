@@ -1,7 +1,16 @@
+//! The realm integration's own tests, and the harness they share.
+//!
+//! Worker tests live in the [`workers`] submodule: they need a second
+//! `QuickJS` runtime on a second thread and a hand-played painter, which is
+//! enough apparatus to be worth keeping out of the way of the tests that only
+//! need a realm and a document.
+
+mod workers;
+
 use super::*;
 use crate::main::tree::{PageConfig, Viewport, new_document};
 use crate::paint::PainterLink;
-use crate::view::{NoWakeup, detached_link};
+use crate::view::{DETACHED_VIEW, NoWakeup, detached_link};
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -31,7 +40,7 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
-    const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
+    const AHEM: &[u8] = include_bytes!("../../../../../hughie/tests/fixtures/Ahem.ttf");
 
     let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
     assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
@@ -81,8 +90,14 @@ fn runtime_over_watching_names(
     let (painter, main) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-        .expect("main-thread runtime");
+    let runtime = MainThreadRuntime::new(
+        &mut js_runtime,
+        document,
+        main.notify,
+        DETACHED_VIEW,
+        crate::view::detached_workers().0,
+    )
+    .expect("main-thread runtime");
     let probe = DocumentProbe(Rc::clone(&runtime.tree));
     (js_runtime, runtime, probe, PublishedNames(painter))
 }
@@ -97,12 +112,20 @@ fn two_view_group() -> (
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut views = Vec::new();
-    for _ in 0..2 {
+    for index in 0..2 {
         let (_painter, main) = detached_link(Arc::new(NoWakeup));
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
+        // Two views, so two ids: a realm names its own workers and nothing
+        // else, and these two must not answer to one name.
         views.push(
-            MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-                .expect("main-thread runtime"),
+            MainThreadRuntime::new(
+                &mut js_runtime,
+                document,
+                main.notify,
+                crate::view::test_view(index),
+                crate::view::detached_workers().0,
+            )
+            .expect("main-thread runtime"),
         );
     }
     let second = views.pop().expect("the second view");

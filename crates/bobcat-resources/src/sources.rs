@@ -18,9 +18,10 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     if completion.is_cancelled() {
         return;
     }
-    let (specifier, style_sheet) = match request {
-        SourceRequest::StyleSheet(url) => (url, true),
-        SourceRequest::Entry(url) => (url, false),
+    let (specifier, kind) = match request {
+        SourceRequest::StyleSheet(url) => (url, SourceKind::StyleSheet),
+        SourceRequest::Entry(url) => (url, SourceKind::Entry),
+        SourceRequest::WorkerScript(url) => (url, SourceKind::WorkerScript),
     };
     let id = RequestId {
         namespace: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
@@ -39,7 +40,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
             return;
         }
     };
-    if style_sheet
+    if matches!(kind, SourceKind::StyleSheet)
         && let Some(Registered::StyleSheet(sheet)) = resources.shared.transports.registry.get(&url)
     {
         completion.complete(Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(
@@ -51,7 +52,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
         shared: SharedHandle::clone(&resources.shared),
         url,
         id,
-        style_sheet,
+        kind,
         completion,
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -65,8 +66,21 @@ pub(crate) struct SourceJob {
     shared: SharedHandle,
     url: Url,
     id: RequestId,
-    style_sheet: bool,
+    kind: SourceKind,
     completion: SourceCompletion,
+}
+
+/// Which of the three a job is answering.
+///
+/// Two questions, not three: whether to consult the pre-parsed stylesheet
+/// registry and which encoding error to name, and which `LoadedSource` shape
+/// to build. A worker's script differs from the entry only on the second —
+/// *which* worker is the engine's business, kept in the completion.
+#[derive(Clone, Copy)]
+enum SourceKind {
+    StyleSheet,
+    Entry,
+    WorkerScript,
 }
 
 impl SourceJob {
@@ -110,13 +124,12 @@ impl SourceJob {
             .and_then(|(_, processed)| {
                 let url = self.url.to_string();
                 let source = std::str::from_utf8(&processed.bytes)
-                    .map_err(|error| {
-                        if self.style_sheet {
-                            LynxViewError::InvalidStyleSheetEncoding {
-                                url: url.clone(),
-                                message: error.to_string(),
-                            }
-                        } else {
+                    .map_err(|error| match self.kind {
+                        SourceKind::StyleSheet => LynxViewError::InvalidStyleSheetEncoding {
+                            url: url.clone(),
+                            message: error.to_string(),
+                        },
+                        SourceKind::Entry | SourceKind::WorkerScript => {
                             LynxViewError::InvalidScriptEncoding {
                                 url: url.clone(),
                                 message: error.to_string(),
@@ -124,10 +137,12 @@ impl SourceJob {
                         }
                     })?
                     .to_owned();
-                Ok(if self.style_sheet {
-                    LoadedSource::StyleSheet(StyleSheetSource::Text(source))
-                } else {
-                    LoadedSource::Entry { source, url }
+                Ok(match self.kind {
+                    SourceKind::StyleSheet => {
+                        LoadedSource::StyleSheet(StyleSheetSource::Text(source))
+                    }
+                    SourceKind::Entry => LoadedSource::Entry { source, url },
+                    SourceKind::WorkerScript => LoadedSource::WorkerScript { source, url },
                 })
             });
         self.completion.complete(result);

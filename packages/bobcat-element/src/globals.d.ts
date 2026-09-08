@@ -76,6 +76,20 @@ interface BobcatNative {
   setTimer(delayMilliseconds: number, repeats: boolean): number;
   /** Disarms a timer, whether or not one is armed under that id. */
   clearTimer(id: number): void;
+  /**
+   * Names one worker and asks the group to start it, returning the key every
+   * later call and every delivery back names it by. Everything after this is
+   * asynchronous: a script that cannot be fetched, decoded or evaluated
+   * arrives as an `error` delivery rather than as a throw here.
+   */
+  createWorker(url: string, name: string): number;
+  /** Hands one JSON-encoded message to a worker; a dead key is a no-op. */
+  postWorkerMessage(key: number, data: string): void;
+  /**
+   * Ends a worker between its tasks and drops its realm. Nothing interrupts
+   * one mid-call.
+   */
+  terminateWorker(key: number): void;
 }
 
 /**
@@ -115,6 +129,9 @@ declare module "bobcat-internal:host" {
   export const stopPropagation: BobcatNative["stopPropagation"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
+  export const createWorker: BobcatNative["createWorker"];
+  export const postWorkerMessage: BobcatNative["postWorkerMessage"];
+  export const terminateWorker: BobcatNative["terminateWorker"];
 }
 
 declare module "bobcat-internal:worker" {

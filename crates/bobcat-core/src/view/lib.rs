@@ -227,6 +227,15 @@ pub enum EngineEvent {
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
+    /// A `Worker` failed: its script could not be loaded, it threw on load,
+    /// or something inside it threw while it ran. Not fatal to anything — a
+    /// worker that threw once goes on running — and separate from
+    /// `ListenerFailed` because the document never saw the worker at all.
+    ///
+    /// This is the only way an embedder hears about a background script in
+    /// trouble: the standard's own path is an `error` event on the realm's
+    /// `Worker` itself, which a card that registered no handler swallows.
+    WorkerFailed(ScriptError),
     /// The painter could not produce a frame. Fatal for the draw target:
     /// nothing further will reach the screen, so an embedder reports it and
     /// takes the window down.
@@ -475,6 +484,7 @@ impl LynxGroup {
             GroupLink {
                 commands: command_receiver,
                 notifications,
+                workers: workers.commands(),
                 requester: event_requester,
                 ready,
             },
@@ -872,16 +882,16 @@ pub(crate) enum ToMain {
     ///
     /// Addressed like every other per-view message, so a view that has been
     /// released drops its workers' news without anything having to check.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the realm that constructs a `Worker` is what reads one"
-        )
-    )]
     Worker {
         key: crate::background::WorkerKey,
         payload: crate::background::WorkerPayload,
+    },
+    /// One `Worker`'s script, answered. Its own message rather than a
+    /// `SourceLoaded`, because only the completion knew which worker it was
+    /// for and nothing downstream could work it out.
+    WorkerScript {
+        key: crate::background::WorkerKey,
+        script: Result<crate::background::WorkerScript, ScriptError>,
     },
     Shutdown,
     #[cfg(test)]
@@ -900,7 +910,13 @@ pub(crate) enum ToPainter {
     TimerDeadline(Option<ClockInstant>),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
-    RequestSource(SourceRequest),
+    /// One source the document owner wants fetched, and — when it is a
+    /// `Worker`'s script — which worker it is for. The key stays on this
+    /// side: it is the engine's, and `SourceRequest` is the embedder's.
+    RequestSource {
+        request: SourceRequest,
+        worker: Option<crate::background::WorkerKey>,
+    },
 }
 
 /// The latest committed frame, and only ever the latest.
@@ -983,6 +999,16 @@ pub(crate) fn detached_link<R: EventRequester>(
 /// The one view a [`detached_link`] carries, and the one
 /// [`crate::main::spawn_test_main_thread`] serves.
 pub(crate) const DETACHED_VIEW: ViewId = ViewId(0);
+
+/// The worker channel of a group that was never built: the unit-test and
+/// benchmark seams that drive one view in place. The receiver goes with it,
+/// because dropping it would make every send from the realm fail.
+pub(crate) fn detached_workers() -> (
+    crate::mailbox::Sender<crate::background::WorkerCommand>,
+    crate::mailbox::Mailbox<crate::background::WorkerCommand>,
+) {
+    crate::mailbox::Mailbox::channel()
+}
 
 /// One view id for a test that plays a group without building one.
 #[cfg(test)]

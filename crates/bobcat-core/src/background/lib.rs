@@ -91,7 +91,35 @@ impl WorkerKey {
     pub(crate) const fn get(self) -> u64 {
         self.0
     }
+
+    /// The number a realm holds. Keys cross the host boundary as `f64`, which
+    /// represents every one of them exactly below 2^53.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "keys stop below 2^53, where every integer is exact"
+    )]
+    pub(crate) fn as_number(self) -> f64 {
+        self.0 as f64
+    }
+
+    /// The key a realm named, or `None` for a number that was never one.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the integer and range checks above make the value a representable key"
+    )]
+    pub(crate) fn from_number(value: f64) -> Option<Self> {
+        if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value >= MAX_EXACT_KEY {
+            return None;
+        }
+        Some(Self(value as u64))
+    }
 }
+
+/// The largest integer an `f64` represents exactly, and so the last key a
+/// realm could hold without rounding. A group would have to construct one
+/// worker per microsecond for nearly three centuries to reach it.
+const MAX_EXACT_KEY: f64 = 9_007_199_254_740_992.0;
 
 /// One worker to start: everything the group knows about it before its script
 /// is in hand.

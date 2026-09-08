@@ -270,9 +270,12 @@ impl FetcherDouble {
 
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
         // This in-memory test host completes inline.
+        // No worker in this double: its host never registers a script for
+        // one, and every test that wants one plays the group's worker thread
+        // itself.
         let (specifier, style_sheet) = match request {
             SourceRequest::StyleSheet(url) => (url, true),
-            SourceRequest::Entry(url) => (url, false),
+            SourceRequest::Entry(url) | SourceRequest::WorkerScript(url) => (url, false),
         };
         let context = RequestContext {
             id: RequestId {

@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{Output, TestPainter};
+use crate::background::WorkerKey;
 use crate::clock::ClockInstant;
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::resource::SourceRequest;
 use crate::view::{
     DetachedLink, EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter,
 };
@@ -47,6 +49,38 @@ fn detached() -> (TestPainter, DetachedLink<NoWakeup>) {
         Arc::new(NoWakeup),
         Output::None,
     )
+}
+
+#[test]
+fn a_worker_script_that_cannot_be_loaded_comes_back_naming_its_own_worker() {
+    let (mut painter, main) = detached();
+    // Two in flight at once, which is what makes attribution a question: the
+    // request that named them is gone by the time either is answered.
+    for key in [7_u64, 9] {
+        main.notify.send(ToPainter::RequestSource {
+            request: SourceRequest::WorkerScript(format!("app:///w{key}.js")),
+            worker: Some(WorkerKey::new(key)),
+        });
+    }
+
+    painter.sync();
+
+    // `NeverAnswers` takes neither request, so both completions drop — and an
+    // unanswered drop is the one failure nothing else could attribute.
+    let mut failed = Vec::new();
+    while let Ok((view, command)) = main.commands.try_recv() {
+        if let ToMain::WorkerScript { key, script } = command {
+            assert_eq!(view, Some(crate::view::DETACHED_VIEW));
+            assert!(script.is_err(), "a refused script produces no script");
+            failed.push(key);
+        }
+    }
+    failed.sort();
+    assert_eq!(
+        failed,
+        [WorkerKey::new(7), WorkerKey::new(9)],
+        "each worker hears about its own script and only its own"
+    );
 }
 
 #[test]
