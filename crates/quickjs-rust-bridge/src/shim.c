@@ -986,12 +986,22 @@ int qjs_has_pending_job(QjsRuntime *runtime) {
     return JS_IsJobPending(runtime->raw);
 }
 
-int qjs_take_unhandled_rejection(QjsRuntime *runtime, QjsContext **context,
-                                 QjsValue **value) {
+/* Takes the oldest unhandled rejection `realm` left behind, leaving every
+   other realm's queued rejections in place for that realm's own next
+   checkpoint. A runtime's realms share one job queue but not one another's
+   failures. The tracker's own out-of-memory flag is the runtime's, not a
+   realm's, so whichever realm asks first reports it. */
+int qjs_take_unhandled_rejection(QjsRuntime *runtime, QjsContext *realm,
+                                 QjsContext **context, QjsValue **value) {
     QjsUnhandledRejection *rejection = runtime->rejection_head;
+    QjsUnhandledRejection *previous = NULL;
 
     *context = NULL;
     *value = NULL;
+    while (rejection != NULL && rejection->context != realm) {
+        previous = rejection;
+        rejection = rejection->next;
+    }
     if (rejection == NULL) {
         if (!runtime->rejection_tracker_oom) {
             return QJS_REJECTION_NONE;
@@ -999,9 +1009,13 @@ int qjs_take_unhandled_rejection(QjsRuntime *runtime, QjsContext **context,
         runtime->rejection_tracker_oom = 0;
         return QJS_REJECTION_TRACKER_OOM;
     }
-    runtime->rejection_head = rejection->next;
-    if (runtime->rejection_head == NULL) {
-        runtime->rejection_tail = NULL;
+    if (previous == NULL) {
+        runtime->rejection_head = rejection->next;
+    } else {
+        previous->next = rejection->next;
+    }
+    if (runtime->rejection_tail == rejection) {
+        runtime->rejection_tail = previous;
     }
     JS_FreeValue(rejection->context->raw, rejection->promise);
     *context = rejection->context;

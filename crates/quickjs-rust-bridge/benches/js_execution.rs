@@ -265,7 +265,7 @@ fn promise_job_checkpoint(bencher: divan::Bencher) {
             black_box(
                 driver
                     .runtime
-                    .drain_pending_jobs()
+                    .drain_pending_jobs(&driver.realm)
                     .expect("drain benchmark promise jobs"),
             )
         });

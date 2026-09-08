@@ -87,6 +87,93 @@ fn runtime_over_watching_names(
     (js_runtime, runtime, probe, PublishedNames(painter))
 }
 
+/// Two views' realms on one group's `QuickJS` runtime, each over its own
+/// document — what a `LynxGroup` holds once a second view joins it.
+fn two_view_group() -> (
+    ScriptRuntime,
+    MainThreadRuntime<NoWakeup>,
+    MainThreadRuntime<NoWakeup>,
+) {
+    let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
+    install_shared_modules(&mut js_runtime).expect("the shared modules register");
+    let mut views = Vec::new();
+    for _ in 0..2 {
+        let (_painter, main) = detached_link(Arc::new(NoWakeup));
+        let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
+        views.push(
+            MainThreadRuntime::new(&mut js_runtime, document, main.notify)
+                .expect("main-thread runtime"),
+        );
+    }
+    let second = views.pop().expect("the second view");
+    let first = views.pop().expect("the first view");
+    (js_runtime, first, second)
+}
+
+/// One view's entry failing must not fail the view beside it.
+///
+/// The two realms share one `QuickJS` runtime, and therefore one promise-job
+/// queue and one unhandled-rejection queue. Boot loads the entry with
+/// `await import(...)`, so an entry that throws rejects *through* that queue,
+/// and what it leaves there outlasts the failure its own caller was handed.
+/// Left runtime-wide, the next realm to enter — this one's boot, its event
+/// dispatch, its timer — would be handed a failure it could not have caused.
+#[test]
+fn a_failed_boot_leaves_the_group_s_other_view_alone() {
+    let (mut js_runtime, mut first, mut second) = two_view_group();
+
+    let failure = first
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                Promise.reject(new Error('first view: floating'));
+                throw new Error('first view: boot');
+                ",
+            "app:///first.js",
+        )
+        .expect_err("the first view's entry throws");
+    assert!(
+        failure.to_string().contains("first view"),
+        "the first view hears its own failure: {failure}"
+    );
+
+    second
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                globalThis.seen = [];
+                globalThis.renderPage = function () {
+                  const page = __CreatePage('card', 0);
+                  globalThis.held = [page];
+                  __AddEventListener(page, 'tap', () => seen.push('tap'), {});
+                  setTimeout(() => seen.push('timer'), 0);
+                };
+                ",
+            "app:///second.js",
+        )
+        .expect("the second view boots on a runtime the first one failed on");
+
+    assert!(
+        second
+            .dispatch_event(&mut js_runtime, node_id(2), &tap(), &no_detail())
+            .expect("the second view's dispatch is not the first view's failure"),
+        "the listener ran"
+    );
+    assert!(
+        second.run_due_timers(&mut js_runtime).is_empty(),
+        "the second view's timer callback is not the first view's failure"
+    );
+
+    second
+        .evaluate_module(
+            &mut js_runtime,
+            "if (seen.join('|') !== 'tap|timer') throw new Error(seen.join('|'));",
+            "app:///verify.js",
+            "verifying",
+        )
+        .expect("both entry points ran, and ran the second view's own code");
+}
+
 #[test]
 fn element_papi_boot_builds_the_private_tree() {
     let (mut js_runtime, mut runtime, elements) = runtime();

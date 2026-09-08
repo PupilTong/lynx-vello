@@ -161,6 +161,7 @@ unsafe extern "C" {
     pub(crate) fn qjs_has_pending_job(runtime: *mut QjsRuntime) -> c_int;
     pub(crate) fn qjs_take_unhandled_rejection(
         runtime: *mut QjsRuntime,
+        realm: *mut QjsContext,
         context: *mut *mut QjsContext,
         value: *mut *mut QjsValue,
     ) -> c_int;

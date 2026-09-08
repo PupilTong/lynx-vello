@@ -196,6 +196,12 @@ useful signal for currently-compatible versions of those libraries.
   Main's lifecycle notifications still wake the host through `EventRequester`.
   Main mounts each sheet and boots the entry in its QuickJS realm. Success is
   `ScriptFinished`; resource, font, realm, or boot failure is `StartupFailed`.
+  That failure stays the failing view's, and is reported once: an entry that
+  throws under boot's top-level `await` rejects through the promise-job queue
+  the group's realms share, and what it leaves there neither reaches the next
+  view to boot, dispatch an event, or run a timer on that runtime, nor comes
+  back at the failing realm's own next entry. Queued *jobs* still run — they
+  are the runtime's work, and the next checkpoint finishes them.
   Constructor errors cover metrics, attachment and draw-target setup only.
   Cancelling an unresolved constructor releases its partial attachment and target.
   Dropping a loading view marks source work cancelled and stops that view before
@@ -637,9 +643,17 @@ useful signal for currently-compatible versions of those libraries.
   registered module source) and the `Context` realms created on it, as many
   as the host wants, all on the owning thread. Realms share what the runtime
   owns and nothing else — a `Value` never crosses between them, one
-  registered module source compiles into a separate instance per realm, and
+  registered module source compiles into a separate instance per realm,
   native host modules are installed per realm under one runtime-wide
-  specifier namespace. It owns the QuickJS C build and the
+  specifier namespace, and a *failure* belongs to a realm even though the
+  queue it came out of does not: a pending-job drain names the realm it
+  reports for, runs every queued job whichever realm queued it, and reports
+  only that realm's unhandled rejections. A sibling's stays queued for the
+  sibling's own next drain, and is freed with that realm; a caller that has
+  reported one realm's failure can drop what that realm still has queued
+  behind it, since one throw rejects a module's evaluation promise and
+  everything awaiting it, and pending jobs are not touched by that.
+  It owns the QuickJS C build and the
   narrow unsafe FFI shim, realm/value lifetime and affinity checks, exact
   ECMAScript string conversion, exception sanitization, pending-job pump,
   synchronous preloaded source/native-module loader, loaded-module namespace

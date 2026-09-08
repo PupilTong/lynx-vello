@@ -307,14 +307,11 @@ fn boot(
         .get_mut(&key)
         .expect("the realm was just put in the table");
     if let Err(error) = realm.engine.execute_module(js_runtime, &source, &url) {
+        // Nothing to clean up after: a throw at this module's top level
+        // rejects through the runtime's shared job queue, and what it leaves
+        // there is this realm's — it waits for this worker rather than
+        // reaching the next realm to be entered on this runtime.
         report(to_main, realm, key, "running the worker's script", error);
-        // A throw at a module's top level leaves the runtime's pending-job
-        // state mid-drain, and the next call into *any* realm on this runtime
-        // is handed the leftover. Settled here because this is where it is
-        // reachable today — but it is not a worker's problem: `bobcat-main`
-        // runs many views' entries on one runtime and has the same exposure.
-        // See the note in `ScriptRuntime::settle_after_failure`.
-        js_runtime.settle_after_failure();
     }
     Ok(())
 }
