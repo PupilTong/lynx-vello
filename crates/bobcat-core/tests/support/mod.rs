@@ -280,7 +280,7 @@ impl FetcherDouble {
         // This in-memory test host completes inline.
         let (specifier, style_sheet, base_url) = match request {
             SourceRequest::StyleSheet(url) => (url, true, None),
-            SourceRequest::Entry(url) => (url, false, None),
+            SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
             SourceRequest::Worker {
                 specifier,
                 base_url,

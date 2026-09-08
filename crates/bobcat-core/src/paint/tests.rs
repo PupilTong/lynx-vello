@@ -459,6 +459,7 @@ fn failure_during_pending_fetch_is_delivered_by_pump() {
         painter.link.commands.clone(),
         painter.link.view,
         Arc::clone(&painter.link.control),
+        None,
     );
     assert!(!completion.is_cancelled());
     main.notify

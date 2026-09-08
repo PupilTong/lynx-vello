@@ -56,9 +56,12 @@ fn boot(
     receiver: &flume::Receiver<()>,
 ) -> Result<(), LynxViewError> {
     loop {
-        receiver
-            .recv_timeout(Duration::from_mins(2))
-            .expect("startup wakes the host");
+        let deadline = view.next_wakeup();
+        match receiver.recv_timeout(deadline.unwrap_or(Duration::from_secs(20))) {
+            Ok(()) => {}
+            Err(flume::RecvTimeoutError::Timeout) if deadline.is_some() => {}
+            Err(error) => panic!("startup did not wake the host: {error}"),
+        }
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
@@ -313,5 +316,186 @@ async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading
             "BTS import did not report its outcome"
         );
         let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+}
+
+#[tokio::test]
+async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_level_await() {
+    let (group, resources, receiver) = setup().await;
+    for (url, source) in [
+        (
+            "app:///page/main.js",
+            r"
+            const path = './chunks/unused/../answer.js';
+            const [first, second] = await Promise.all([import(path), import('./chunks/answer.js')]);
+            if (first !== second || first.answer !== 42 || globalThis.moduleRuns !== 1)
+                throw Error('module identity, relative resolution or top-level await failed');
+            globalThis.renderPage = () => {
+                const page = __CreatePage('page', 0);
+                const view = __CreateView(0);
+                __SetInlineStyles(view, 'width:32px;height:24px;background:blue');
+                __AppendElement(page, view);
+            };
+        ",
+        ),
+        (
+            "app:///page/chunks/answer.js",
+            r"
+            import { value } from '../value.js';
+            globalThis.moduleRuns = (globalThis.moduleRuns ?? 0) + 1;
+            await new Promise(resolve => setTimeout(resolve, 1));
+            export const answer = value + (await import('./one.js')).value;
+        ",
+        ),
+        ("app:///page/value.js", "export const value = 41;"),
+        ("app:///page/chunks/one.js", "export const value = 1;"),
+    ] {
+        resources
+            .register(url, source, Some("text/javascript"))
+            .unwrap();
+    }
+    let mut view = view(&group, &resources, ViewSources::new("page/main.js")).await;
+    boot(&mut view, &receiver).unwrap();
+    let screenshot = view.capture().unwrap();
+    let offset = (12 * screenshot.size.width as usize + 16) * 4;
+    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
+}
+
+#[tokio::test]
+async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_boot() {
+    for caught in [true, false] {
+        let (group, resources, receiver) = setup().await;
+        let source = if caught {
+            r"
+                let rejected = 0;
+                for (let i = 0; i < 2; i++) {
+                    try { await import('./missing.js'); }
+                    catch (error) { if (!(error instanceof TypeError)) throw error; rejected++; }
+                }
+                try { await import('./broken.js'); }
+                catch (error) { if (!(error instanceof SyntaxError)) throw error; rejected++; }
+                try { await import('bare-name'); }
+                catch (error) { if (!(error instanceof TypeError)) throw error; rejected++; }
+                if (rejected !== 4) throw Error('missing import rejection');
+            "
+        } else {
+            "await import('./missing.js');"
+        };
+        resources
+            .register("app:///main.js", source, Some("text/javascript"))
+            .unwrap();
+        resources
+            .register(
+                "app:///broken.js",
+                "export const = ;",
+                Some("text/javascript"),
+            )
+            .unwrap();
+        let mut view = view(&group, &resources, ViewSources::new("main.js")).await;
+        let outcome = boot(&mut view, &receiver);
+        if caught {
+            outcome.unwrap();
+        } else {
+            let error = outcome.unwrap_err();
+            assert!(error.to_string().contains("missing.js"), "{error:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn sibling_views_can_import_the_same_urls_with_independent_module_instances() {
+    let (group, resources, receiver) = setup().await;
+    resources
+        .register(
+            "app:///main.js",
+            r"
+        const module = await import('./shared.js');
+        if (module.value !== 42 || globalThis.runs !== 1) throw Error('realm isolation');
+    ",
+            Some("text/javascript"),
+        )
+        .unwrap();
+    resources
+        .register(
+            "app:///shared.js",
+            r"
+        globalThis.runs = (globalThis.runs ?? 0) + 1;
+        export const value = 42;
+    ",
+            Some("text/javascript"),
+        )
+        .unwrap();
+    let mut first = view(&group, &resources, ViewSources::new("main.js")).await;
+    let mut second = view(&group, &resources, ViewSources::new("main.js")).await;
+    let mut finished = 0;
+    while finished < 2 {
+        receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("imports wake the host");
+        for event in first.pump().into_iter().chain(second.pump()) {
+            match event {
+                EngineEvent::ScriptFinished => finished += 1,
+                EngineEvent::StartupFailed(error) => panic!("sibling failed: {error}"),
+                _ => {}
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn imports_started_after_boot_can_commit_a_later_frame() {
+    let (group, resources, receiver) = setup().await;
+    resources
+        .register(
+            "app:///main.js",
+            r"
+        globalThis.renderPage = () => {
+            const page = __CreatePage('page', 0);
+            const child = __CreateView(0);
+            __SetInlineStyles(child, 'width:32px;height:24px;background:red');
+            __AppendElement(page, child);
+            setTimeout(async () => {
+                const module = await import('./color.js');
+                __SetInlineStyles(child, `width:32px;height:24px;background:${module.color}`);
+                __FlushElementTree();
+            }, 25);
+        };
+    ",
+            Some("text/javascript"),
+        )
+        .unwrap();
+    resources
+        .register(
+            "app:///color.js",
+            "export const color = 'blue';",
+            Some("text/javascript"),
+        )
+        .unwrap();
+    let mut view = view(&group, &resources, ViewSources::new("main.js")).await;
+    boot(&mut view, &receiver).unwrap();
+    let stop = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let screenshot = view.capture().unwrap();
+        let offset = (12 * screenshot.size.width as usize + 16) * 4;
+        if screenshot.pixels[offset..offset + 4] == [0, 0, 255, 255] {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < stop,
+            "import never committed its frame"
+        );
+        let wait = view.next_wakeup().unwrap_or(Duration::from_millis(100));
+        let _ = receiver.recv_timeout(wait);
+        for event in view.pump() {
+            assert!(
+                !matches!(
+                    event,
+                    EngineEvent::StartupFailed(_)
+                        | EngineEvent::ScriptRunError(_)
+                        | EngineEvent::TimerFailed(_)
+                ),
+                "{event:?}"
+            );
+        }
     }
 }

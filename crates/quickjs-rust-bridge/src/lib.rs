@@ -5,9 +5,9 @@
 //! limits. A [`Context`] is one realm on it — a global object and the modules
 //! loaded into it — and a runtime can carry as many realms as the host wants,
 //! all on the owning thread. Realms share everything the runtime owns and
-//! nothing else: a [`Value`] never crosses between them, module *source* is
-//! registered once on the runtime but compiled per realm, and native host
-//! modules are installed per realm.
+//! nothing else: a [`Value`] never crosses between them. Shared module sources
+//! register on the runtime and compile per realm; imported sources and native
+//! host modules can be registered on an individual realm.
 //!
 //! Every C heap allocation compiled into this bridge is routed through Rust's
 //! global allocator. Its C formatting calls use one private, allocator-free
@@ -17,9 +17,10 @@
 //! JavaScript shared-memory primitives (`Atomics` and `SharedArrayBuffer`);
 //! this does not disable Rust or host-side synchronization. A realm may also
 //! preload exact-name UTF-8 modules and Rust-backed native host modules into
-//! its synchronous loader, inspect their namespaces, and inspect a
-//! module-evaluation `Promise` after driving the runtime's pending-job queue;
-//! module graph and resource policy remain its caller's responsibility.
+//! its loader, inspect their namespaces, and inspect a module-evaluation
+//! `Promise` after driving the runtime's pending-job queue. Opt-in asynchronous
+//! loading exposes missing source requests and resumes the original imports
+//! after completion; URL normalization and IO remain the caller's policy.
 
 #[allow(
     unsafe_code,
@@ -44,7 +45,7 @@ mod platform_time;
 )]
 mod implementation {
     use std::cell::{Cell, RefCell};
-    use std::ffi::{CString, c_void};
+    use std::ffi::{CStr, CString, c_char, c_int, c_void};
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
@@ -861,6 +862,8 @@ mod implementation {
                 inner: Rc::new(ContextInner {
                     raw,
                     runtime: Rc::clone(&self.inner),
+                    module_normalizer: RefCell::new(None),
+                    normalized_name: RefCell::new(CString::default()),
                 }),
             })
         }
@@ -1105,9 +1108,51 @@ mod implementation {
         }
     }
 
+    /// Synchronous name resolution; source retrieval remains asynchronous.
+    pub type ModuleNormalizer = fn(base: &str, specifier: &str) -> Result<String, String>;
+
     struct ContextInner {
         raw: NonNull<ffi::QjsContext>,
         runtime: Rc<RuntimeInner>,
+        module_normalizer: RefCell<Option<ModuleNormalizer>>,
+        normalized_name: RefCell<CString>,
+    }
+
+    unsafe extern "C" fn normalize_module(
+        opaque: *mut c_void,
+        base: *const c_char,
+        name: *const c_char,
+        error: *mut c_int,
+    ) -> *const c_char {
+        // SAFETY: the shim calls on this context's owner thread, with valid
+        // C strings, and only while its stable Rc allocation is alive.
+        let (context, base, name) = unsafe {
+            (
+                &*opaque.cast::<ContextInner>(),
+                CStr::from_ptr(base),
+                CStr::from_ptr(name),
+            )
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let normalize = context.module_normalizer.borrow().expect("enabled loader");
+            normalize(&base.to_string_lossy(), &name.to_string_lossy())
+        }))
+        .unwrap_or_else(|_| Err("module normalizer panicked".to_owned()));
+        let (failed, message) = match result {
+            Ok(name) => (false, name),
+            Err(message) => (true, message),
+        };
+        let (failed, message) = match CString::new(message) {
+            Ok(message) => (failed, message),
+            Err(_) => (true, c"module name contains a NUL byte".to_owned()),
+        };
+        *context.normalized_name.borrow_mut() = message;
+        // SAFETY: the caller supplied the writable flag; the returned buffer
+        // stays alive until the next callback and is copied immediately by C.
+        unsafe {
+            *error = c_int::from(failed);
+        }
+        context.normalized_name.borrow().as_ptr()
     }
 
     impl Drop for ContextInner {
@@ -1146,6 +1191,89 @@ mod implementation {
 
         fn begin(&self) -> ExecutionGuard {
             self.inner.runtime.interrupt.begin()
+        }
+
+        /// Enables host-driven loading for dynamic imports and their static
+        /// dependencies. Start an external entry with `import()`, rather than
+        /// evaluating its source directly. Take requests after each job checkpoint, complete them
+        /// on this thread, then resume loads and drain the runtime's jobs.
+        /// The normalizer must not enter JavaScript.
+        pub fn enable_module_loading(&mut self, normalize: ModuleNormalizer) {
+            *self.inner.module_normalizer.borrow_mut() = Some(normalize);
+            // SAFETY: the stable allocation outlives its C context; the shim
+            // clears the context opaque before releasing any surviving jobs.
+            unsafe {
+                ffi::qjs_context_enable_module_loading(
+                    self.raw().as_ptr(),
+                    normalize_module,
+                    Rc::as_ptr(&self.inner).cast_mut().cast(),
+                );
+            }
+        }
+
+        /// Takes one not-yet-dispatched module name. Repeated imports share
+        /// one request and one module instance within this realm.
+        pub fn take_module_request(&mut self) -> Option<String> {
+            // SAFETY: C returns a borrowed, terminated name owned by this
+            // context. Copy it before any further operation on the context.
+            unsafe {
+                let name = ffi::qjs_context_take_module_request(self.raw().as_ptr());
+                (!name.is_null()).then(|| CStr::from_ptr(name).to_string_lossy().into_owned())
+            }
+        }
+
+        /// Supplies a realm-local module, or records its load failure. `url`
+        /// is the response URL used as the base for its own imports.
+        pub fn complete_module(
+            &mut self,
+            name: &str,
+            result: Result<(&str, &str), &str>,
+        ) -> Result<(), Error> {
+            let c_string = |text: &str| {
+                CString::new(text).map_err(|_| {
+                    Error::bridge(
+                        ErrorKind::InvalidInput,
+                        ErrorPhase::RegisterModule,
+                        "module name, URL or error contains a NUL byte",
+                    )
+                })
+            };
+            let name = c_string(name)?;
+            let (url, text, error) = match result {
+                Ok((url, text)) => (c_string(url)?, text, None),
+                Err(error) => (CString::default(), "", Some(c_string(error)?)),
+            };
+            // SAFETY: all buffers live through the call, which copies them.
+            let status = unsafe {
+                ffi::qjs_context_complete_module(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    url.as_ptr(),
+                    text.as_ptr(),
+                    text.len(),
+                    error.as_ref().map_or(ptr::null(), |e| e.as_ptr()),
+                )
+            };
+            match status {
+                0 => Ok(()),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                _ => Err(capture_exception(self.raw(), ErrorPhase::RegisterModule)),
+            }
+        }
+
+        /// Retries suspended imports after completing their sources. This
+        /// does not drain promise jobs. Further dependencies may be requested.
+        pub fn resume_module_loads(&mut self) -> Result<(), Error> {
+            let guard = self.begin();
+            // SAFETY: continuations and their values belong to this context.
+            unsafe {
+                ffi::qjs_context_resume_module_loads(self.raw().as_ptr());
+            }
+            guard.finish(Ok(()), ErrorPhase::Evaluate)
         }
 
         pub fn global_object(&self) -> Result<Value, Error> {
@@ -2336,6 +2464,243 @@ mod implementation {
                 .evaluate(EvalSource::new("globalThis.answer"), EvalOptions::default())
                 .unwrap();
             assert_eq!(answer.as_number(), Some(42.0));
+        }
+
+        fn import_test_realm() -> (Runtime, Context) {
+            let runtime = Runtime::new().unwrap();
+            let mut realm = runtime.create_context().unwrap();
+            realm.enable_module_loading(|_, name| Ok(name.to_owned()));
+            (runtime, realm)
+        }
+
+        fn import_eval(realm: &mut Context, source: &str) -> Value {
+            realm
+                .evaluate(
+                    EvalSource {
+                        text: source,
+                        name: Some("entry"),
+                        line_offset: 0,
+                    },
+                    EvalOptions::default(),
+                )
+                .unwrap()
+        }
+
+        #[test]
+        fn deferred_import_fetches_static_graph_and_cycles_before_evaluating() {
+            let (mut runtime, mut realm) = import_test_realm();
+            import_eval(
+                &mut realm,
+                r"
+                globalThis.runs = 0;
+                globalThis.done = false;
+                Promise.all([import('a'), import('a')]).then(([a, again]) => {
+                    if (a !== again || a.answer() !== 42 || runs !== 1)
+                        throw Error('module identity or cycle');
+                    done = true;
+                });
+            ",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("a"));
+            assert!(realm.take_module_request().is_none());
+            realm
+                .complete_module(
+                    "a",
+                    Ok((
+                        "a",
+                        r"
+                import { value } from 'b'; import 'c';
+                runs++; export function answer() { return value; }
+            ",
+                    )),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("b"));
+            realm
+                .complete_module(
+                    "b",
+                    Ok(("b", "import { answer } from 'a'; export const value = 42;")),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("c"));
+            import_eval(
+                &mut realm,
+                "if (runs || done) throw Error('evaluated before graph loaded');",
+            );
+            realm.complete_module("c", Ok(("c", "export {};"))).unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(
+                &mut realm,
+                "if (!done) throw Error('import did not finish');",
+            );
+        }
+
+        #[test]
+        fn deferred_import_failure_is_catchable_and_cached_without_poisoning_the_realm() {
+            let (mut runtime, mut realm) = import_test_realm();
+            import_eval(
+                &mut realm,
+                "globalThis.caught = 0; import('missing').catch(() => caught++);",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("missing"));
+            realm
+                .complete_module("missing", Err("network failed"))
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(&mut realm, "import('missing').catch(() => caught++);");
+            runtime.drain_pending_jobs().unwrap();
+            assert!(realm.take_module_request().is_none());
+            import_eval(
+                &mut realm,
+                "if (caught !== 2) throw Error('lost rejection');",
+            );
+        }
+
+        #[test]
+        fn deferred_modules_are_local_to_each_realm_and_can_outlive_a_sibling() {
+            let (mut runtime, mut first) = import_test_realm();
+            let mut second = runtime.create_context().unwrap();
+            second.enable_module_loading(|_, name| Ok(name.to_owned()));
+            import_eval(&mut first, "import('module');");
+            import_eval(
+                &mut second,
+                "import('module').then(m => globalThis.answer = m.value);",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(first.take_module_request().as_deref(), Some("module"));
+            assert_eq!(second.take_module_request().as_deref(), Some("module"));
+            drop(first);
+            runtime.run_gc();
+            second
+                .complete_module("module", Ok(("module", "export const value = 42;")))
+                .unwrap();
+            second.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(
+                &mut second,
+                "if (answer !== 42) throw Error('sibling import lost');",
+            );
+        }
+
+        #[test]
+        fn deferred_import_uses_response_url_as_base_and_rejects_attributes() {
+            let (mut runtime, mut realm) = import_test_realm();
+            realm.enable_module_loading(|base, name| {
+                Ok(if name == "child" {
+                    format!("{base}/child")
+                } else {
+                    name.to_owned()
+                })
+            });
+            import_eval(
+                &mut realm,
+                "import('alias').then(m => globalThis.answer = m.answer);",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("alias"));
+            realm
+                .complete_module(
+                    "alias",
+                    Ok(("redirected", "export { answer } from 'child';")),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            assert_eq!(
+                realm.take_module_request().as_deref(),
+                Some("redirected/child")
+            );
+            realm
+                .complete_module(
+                    "redirected/child",
+                    Ok(("redirected/child", "export const answer = 42;")),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(
+                &mut realm,
+                r"
+                if (answer !== 42) throw Error('redirect base lost');
+                globalThis.rejected = false;
+                import('unknown', { with: { type: 'json' } }).catch(error => {
+                    if (!(error instanceof TypeError)) throw error;
+                    rejected = true;
+                });
+            ",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert!(realm.take_module_request().is_none());
+            import_eval(
+                &mut realm,
+                "if (!rejected) throw Error('attributes were ignored');",
+            );
+        }
+
+        #[test]
+        fn realm_local_sources_cannot_shadow_shared_or_native_modules() {
+            let (mut runtime, mut realm) = import_test_realm();
+            runtime
+                .register_module_source("shared", "export {};")
+                .unwrap();
+            assert!(
+                realm
+                    .complete_module("shared", Ok(("shared", "export {};")))
+                    .is_err()
+            );
+            realm
+                .register_host_module_function("host", "call", 0, |_| Ok(HostValue::Undefined))
+                .unwrap();
+            assert!(
+                realm
+                    .complete_module("host", Ok(("host", "export {};")))
+                    .is_err()
+            );
+            realm
+                .complete_module("local", Ok(("local", "export {};")))
+                .unwrap();
+            assert!(
+                realm
+                    .register_host_module_function("local", "call", 0, |_| Ok(HostValue::Undefined))
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn imported_module_can_await_another_dynamic_import() {
+            let (mut runtime, mut realm) = import_test_realm();
+            import_eval(
+                &mut realm,
+                "import('outer').then(m => globalThis.answer = m.value);",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("outer"));
+            realm
+                .complete_module(
+                    "outer",
+                    Ok((
+                        "outer",
+                        "export const value = (await import('inner')).value;",
+                    )),
+                )
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            assert_eq!(realm.take_module_request().as_deref(), Some("inner"));
+            realm
+                .complete_module("inner", Ok(("inner", "export const value = 42;")))
+                .unwrap();
+            realm.resume_module_loads().unwrap();
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(
+                &mut realm,
+                "if (answer !== 42) throw Error('top-level await lost');",
+            );
         }
 
         #[test]
@@ -3616,6 +3981,6 @@ mod implementation {
 
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, Runtime, RuntimeOptions,
-    SourceLocation, SourceType, Value, ValueKind,
+    HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, ModuleNormalizer, Runtime,
+    RuntimeOptions, SourceLocation, SourceType, Value, ValueKind,
 };

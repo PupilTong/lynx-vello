@@ -192,6 +192,8 @@ pub enum SourceRequest {
         specifier: String,
         base_url: String,
     },
+    /// A normalized module URL, loaded after an import discovers it.
+    Module(String),
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
@@ -201,8 +203,9 @@ pub enum StyleSheetSource {
     Text(String),
 }
 
-/// A loaded source. An entry payload serves either a main or worker script;
-/// the completion routes it to the runtime that requested it.
+/// A loaded source. `Entry` carries JavaScript for a main entry, imported
+/// module or worker script, including its final response URL. The completion
+/// routes it to the runtime that requested it.
 #[derive(Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
@@ -219,6 +222,7 @@ pub enum LoadedSource {
 pub struct SourceCompletion {
     destination: Option<SourceDestination>,
     view: crate::view::ViewId,
+    module: Option<String>,
     control: Arc<crate::main::StartupControl>,
 }
 
@@ -248,10 +252,12 @@ impl SourceCompletion {
         commands: crate::mailbox::Sender<crate::view::ToMain>,
         view: crate::view::ViewId,
         control: Arc<crate::main::StartupControl>,
+        module: Option<String>,
     ) -> Self {
         Self {
             destination: Some(SourceDestination::Main(commands)),
             view,
+            module,
             control,
         }
     }
@@ -268,6 +274,7 @@ impl SourceCompletion {
         Self {
             destination: Some(SourceDestination::Worker { commands, key }),
             view,
+            module: None,
             control,
         }
     }
@@ -299,7 +306,7 @@ impl SourceCompletion {
                 SourceDestination::Main(commands) => {
                     let _ = commands.send((
                         Some(self.view),
-                        crate::view::ToMain::SourceLoaded { source },
+                        crate::view::ToMain::SourceLoaded { module: self.module.take(), source },
                     ));
                 }
                 SourceDestination::Worker { commands, key } => {
@@ -618,7 +625,7 @@ mod completion_tests {
         let (sender, receiver) = Mailbox::channel();
         let control = Arc::new(StartupControl::default());
         (
-            SourceCompletion::new(sender, DETACHED_VIEW, Arc::clone(&control)),
+            SourceCompletion::new(sender, DETACHED_VIEW, Arc::clone(&control), None),
             receiver,
             control,
         )
@@ -639,7 +646,13 @@ mod completion_tests {
             .unwrap();
         assert!(matches!(
             receiver.try_recv(),
-            Ok((Some(DETACHED_VIEW), ToMain::SourceLoaded { source: Ok(_) }))
+            Ok((
+                Some(DETACHED_VIEW),
+                ToMain::SourceLoaded {
+                    module: None,
+                    source: Ok(_)
+                }
+            ))
         ));
         assert!(receiver.try_recv().is_err());
     }
@@ -653,6 +666,7 @@ mod completion_tests {
             Ok((
                 _,
                 ToMain::SourceLoaded {
+                    module: None,
                     source: Err(crate::LynxViewError::Resource(ResourceError {
                         kind: ResourceErrorKind::Unavailable,
                         ..

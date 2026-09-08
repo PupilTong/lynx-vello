@@ -44,6 +44,9 @@ typedef struct QjsModuleSource {
     char *name;
     uint8_t *source;
     size_t source_length;
+    char *url;
+    char *error;
+    int requested;
     struct QjsModuleSource *next;
 } QjsModuleSource;
 
@@ -132,11 +135,26 @@ typedef struct QjsRuntime {
    a promise job — through the context opaque, which is cleared before the
    context is released so a late callback finds nothing instead of a
    dangling wrapper. */
+typedef const char *QjsModuleNormalize(void *opaque, const char *base,
+                                        const char *name, int *error);
+
+typedef struct QjsDeferredImport {
+    char *base;
+    char *name;
+    JSValue resolve[2];
+    JSValue attributes;
+    struct QjsDeferredImport *next;
+} QjsDeferredImport;
+
 struct QjsContext {
     JSContext *raw;
     QjsRuntime *runtime;
     QjsModuleInstance *module_instances;
     QjsHostModule *host_modules;
+    QjsModuleSource *module_sources;
+    QjsDeferredImport *deferred_imports;
+    QjsModuleNormalize *normalize;
+    void *normalize_opaque;
 };
 
 
@@ -403,8 +421,86 @@ static int qjs_host_module_init(JSContext *raw_context,
     return 0;
 }
 
+static char *qjs_strdup(const char *text) {
+    size_t length = strlen(text) + 1;
+    char *copy = malloc(length);
+    if (copy != NULL)
+        memcpy(copy, text, length);
+    return copy;
+}
+
+static QjsModuleSource *qjs_find_local_source(QjsContext *context,
+                                                const char *name) {
+    QjsModuleSource *source = context->module_sources;
+    while (source != NULL && strcmp(source->name, name) != 0)
+        source = source->next;
+    return source;
+}
+
+static char *qjs_module_normalize(JSContext *raw, const char *base,
+                                   const char *name, void *opaque) {
+    QjsContext *context = JS_GetContextOpaque(raw);
+    QjsModuleSource *source;
+    const char *normalized;
+    int error = 0;
+    (void)opaque;
+    if (context == NULL || context->normalize == NULL)
+        return JS_DefaultModuleNormalizeName(raw, base, name);
+    source = qjs_find_local_source(context, base);
+    if (source != NULL && source->url != NULL)
+        base = source->url;
+    normalized = context->normalize(context->normalize_opaque, base, name, &error);
+    if (error) {
+        JS_ThrowTypeError(raw, "%s", normalized);
+        return NULL;
+    }
+    return js_strdup(raw, normalized);
+}
+
+static int qjs_defer_module(JSContext *raw, const char *base, const char *name,
+                            JSValueConst *resolve, JSValueConst attributes,
+                            void *opaque) {
+    QjsContext *context = JS_GetContextOpaque(raw);
+    QjsDeferredImport *pending;
+    (void)opaque;
+    if (context == NULL) {
+        JS_ThrowInternalError(raw, "this realm is being released");
+        return -1;
+    }
+    pending = calloc(1, sizeof(*pending));
+    if (pending == NULL) {
+        JS_ThrowOutOfMemory(raw);
+        return -1;
+    }
+    pending->base = qjs_strdup(base);
+    pending->name = qjs_strdup(name);
+    if (pending->base == NULL || pending->name == NULL) {
+        free(pending->base);
+        free(pending->name);
+        free(pending);
+        JS_ThrowOutOfMemory(raw);
+        return -1;
+    }
+    pending->resolve[0] = JS_DupValue(raw, resolve[0]);
+    pending->resolve[1] = JS_DupValue(raw, resolve[1]);
+    pending->attributes = JS_DupValue(raw, attributes);
+    pending->next = context->deferred_imports;
+    context->deferred_imports = pending;
+    return 0;
+}
+
+static void qjs_deferred_import_free(JSContext *raw, QjsDeferredImport *pending) {
+    free(pending->base);
+    free(pending->name);
+    JS_FreeValue(raw, pending->resolve[0]);
+    JS_FreeValue(raw, pending->resolve[1]);
+    JS_FreeValue(raw, pending->attributes);
+    free(pending);
+}
+
 static JSModuleDef *qjs_module_loader(JSContext *raw_context,
-                                      const char *module_name, void *opaque) {
+                                      const char *module_name, void *opaque,
+                                      JSValueConst attributes) {
     QjsRuntime *runtime = opaque;
     QjsContext *context = JS_GetContextOpaque(raw_context);
     QjsModuleSource *source;
@@ -413,12 +509,21 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
     QjsHostModuleExport *exported;
     JSValue compiled;
     JSModuleDef *definition;
+    (void)attributes;
 
     if (context == NULL) {
         JS_ThrowInternalError(raw_context, "this realm is being released");
         return NULL;
     }
-    source = qjs_find_module_source(runtime, module_name);
+    source = qjs_find_local_source(context, module_name);
+    if (source == NULL)
+        source = qjs_find_module_source(runtime, module_name);
+    if (source != NULL && source->error != NULL) {
+        JS_ThrowTypeError(raw_context, "%s", source->error);
+        return NULL;
+    }
+    if (source != NULL && source->source == NULL)
+        return NULL;
     if (source != NULL) {
         instance = qjs_find_module_instance(context, source);
         if (instance != NULL) {
@@ -431,7 +536,8 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
         }
         compiled = JS_Eval(raw_context, (const char *)source->source,
                            source->source_length, source->name,
-                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                           JS_EVAL_FLAG_COMPILE_UNLINKED);
         if (JS_IsException(compiled)) {
             free(instance);
             return NULL;
@@ -446,6 +552,22 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
     }
 
     host_module = qjs_find_host_module(context, module_name);
+    if (host_module == NULL && context->normalize != NULL) {
+        source = calloc(1, sizeof(*source));
+        if (source == NULL) {
+            JS_ThrowOutOfMemory(raw_context);
+            return NULL;
+        }
+        source->name = qjs_strdup(module_name);
+        if (source->name == NULL) {
+            free(source);
+            JS_ThrowOutOfMemory(raw_context);
+            return NULL;
+        }
+        source->next = context->module_sources;
+        context->module_sources = source;
+        return NULL;
+    }
     if (host_module == NULL) {
         JS_ThrowReferenceError(raw_context, "module '%s' is not preloaded",
                                module_name);
@@ -468,11 +590,31 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
     return definition;
 }
 
+static int qjs_check_module_attributes(JSContext *raw, void *opaque,
+                                       JSValueConst attributes) {
+    JSPropertyEnum *properties;
+    uint32_t count;
+    (void)opaque;
+    if (JS_IsUndefined(attributes))
+        return 0;
+    if (JS_GetOwnPropertyNames(raw, &properties, &count, attributes,
+                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        return -1;
+    JS_FreePropertyEnum(raw, properties, count);
+    if (count != 0) {
+        JS_ThrowTypeError(raw, "import attributes are not supported");
+        return -1;
+    }
+    return 0;
+}
+
 static void qjs_module_sources_free(QjsModuleSource *module) {
     while (module != NULL) {
         QjsModuleSource *next = module->next;
         free(module->name);
         free(module->source);
+        free(module->url);
+        free(module->error);
         free(module);
         module = next;
     }
@@ -551,7 +693,9 @@ QjsRuntime *qjs_runtime_new(JSClassID host_owner_class_id) {
     JS_SetCanBlock(runtime->raw, 0);
     JS_SetHostPromiseRejectionTracker(runtime->raw,
                                       qjs_promise_rejection_tracker, runtime);
-    JS_SetModuleLoaderFunc(runtime->raw, NULL, qjs_module_loader, runtime);
+    JS_SetModuleLoaderFunc2(runtime->raw, qjs_module_normalize, qjs_module_loader,
+                            qjs_check_module_attributes, runtime);
+    JS_SetModuleLoadDeferrer(runtime->raw, qjs_defer_module, runtime);
     runtime->host_owner_class_id = host_owner_class_id;
     if (JS_NewClass(runtime->raw, runtime->host_owner_class_id,
                     &qjs_host_owner_class) < 0) {
@@ -640,6 +784,12 @@ void qjs_context_free(QjsContext *context) {
     qjs_rejections_drop_context(context->runtime, context);
     qjs_host_modules_free(context, context->host_modules);
     qjs_module_instances_free(context->module_instances);
+    qjs_module_sources_free(context->module_sources);
+    while (context->deferred_imports != NULL) {
+        QjsDeferredImport *pending = context->deferred_imports;
+        context->deferred_imports = pending->next;
+        qjs_deferred_import_free(context->raw, pending);
+    }
     /* Pending jobs and settling promises keep the realm alive past this
        point. They must not find a wrapper the host no longer holds. */
     JS_SetContextOpaque(context->raw, NULL);
@@ -660,7 +810,8 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
     size_t export_name_length;
     int new_module = 0;
 
-    if (qjs_find_module_source(context->runtime, name) != NULL) {
+    if (qjs_find_module_source(context->runtime, name) != NULL ||
+        qjs_find_local_source(context, name) != NULL) {
         return -2;
     }
     module = qjs_find_host_module(context, name);
@@ -726,8 +877,9 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
 }
 
 QjsValue *qjs_module_namespace(QjsContext *context, const char *name) {
-    const QjsModuleSource *source =
-        qjs_find_module_source(context->runtime, name);
+    const QjsModuleSource *source = qjs_find_local_source(context, name);
+    if (source == NULL)
+        source = qjs_find_module_source(context->runtime, name);
     QjsModuleInstance *instance;
     QjsHostModule *host;
     JSModuleDef *definition = NULL;
@@ -750,6 +902,84 @@ QjsValue *qjs_module_namespace(QjsContext *context, const char *name) {
     }
     return qjs_box(context->raw,
                    JS_GetModuleNamespace(context->raw, definition));
+}
+
+void qjs_context_enable_module_loading(QjsContext *context,
+                                        QjsModuleNormalize *normalize,
+                                        void *opaque) {
+    context->normalize = normalize;
+    context->normalize_opaque = opaque;
+}
+
+/* Borrowed until context destruction; taking a request marks it dispatched. */
+const char *qjs_context_take_module_request(QjsContext *context) {
+    QjsModuleSource *source;
+    for (source = context->module_sources; source != NULL; source = source->next) {
+        if (source->source == NULL && source->error == NULL && !source->requested) {
+            source->requested = 1;
+            return source->name;
+        }
+    }
+    return NULL;
+}
+
+int qjs_context_complete_module(QjsContext *context, const char *name,
+                                const char *url, const uint8_t *text,
+                                size_t length, const char *error) {
+    QjsModuleSource *source = qjs_find_local_source(context, name);
+    if (qjs_find_module_source(context->runtime, name) != NULL ||
+        qjs_find_host_module_name(context->runtime, name) != NULL)
+        return -2;
+    if (source != NULL && (source->source != NULL || source->error != NULL))
+        return -2;
+    if (source == NULL) {
+        source = calloc(1, sizeof(*source));
+        if (source == NULL)
+            goto oom;
+        source->name = qjs_strdup(name);
+        if (source->name == NULL) {
+            free(source);
+            goto oom;
+        }
+        source->next = context->module_sources;
+        context->module_sources = source;
+    }
+    if (error != NULL) {
+        source->error = qjs_strdup(error);
+        if (source->error == NULL)
+            goto oom;
+    } else {
+        if (length == SIZE_MAX)
+            goto oom;
+        source->source = malloc(length + 1);
+        source->url = qjs_strdup(url);
+        if (source->source == NULL || source->url == NULL) {
+            free(source->source);
+            free(source->url);
+            source->source = NULL;
+            source->url = NULL;
+            goto oom;
+        }
+        memcpy(source->source, text, length);
+        source->source[length] = 0;
+        source->source_length = length;
+    }
+    return 0;
+ oom:
+    JS_ThrowOutOfMemory(context->raw);
+    return -1;
+}
+
+void qjs_context_resume_module_loads(QjsContext *context) {
+    QjsDeferredImport *pending = context->deferred_imports;
+    context->deferred_imports = NULL;
+    while (pending != NULL) {
+        QjsDeferredImport *next = pending->next;
+        JS_ResumeModuleLoad(context->raw, pending->base, pending->name,
+                            (JSValueConst *)pending->resolve, pending->attributes);
+        qjs_deferred_import_free(context->raw, pending);
+        pending = next;
+    }
 }
 
 void qjs_runtime_run_gc(QjsRuntime *runtime) {

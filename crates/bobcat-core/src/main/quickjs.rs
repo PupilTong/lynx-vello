@@ -92,6 +92,7 @@ pub(crate) struct ScriptEngine {
     /// entered next, and a sibling view would fail for something it could
     /// not have caused. Held here it also dies with the realm that owns it.
     deferred_checkpoint_error: Option<ScriptError>,
+    evaluation: Option<quickjs::Value>,
 }
 
 /// The `QuickJS` runtime a group's realms share.
@@ -133,6 +134,7 @@ impl ScriptRuntime {
             realm,
             module_namespaces: HashMap::new(),
             deferred_checkpoint_error: None,
+            evaluation: None,
         })
     }
 
@@ -284,6 +286,57 @@ impl ScriptEngine {
             .map(|_| ())
     }
 
+    pub(crate) fn enable_module_loading(&mut self) {
+        self.realm.enable_module_loading(normalize_module_url);
+    }
+
+    pub(crate) fn register_module_source(
+        &mut self,
+        name: &str,
+        url: &str,
+        source: &str,
+    ) -> Result<(), ScriptError> {
+        self.realm
+            .complete_module(name, Ok((url, source)))
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
+
+    pub(crate) fn take_module_request(&mut self) -> Option<String> {
+        self.realm.take_module_request()
+    }
+
+    pub(crate) fn complete_module(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        name: &str,
+        result: Result<(&str, &str), &str>,
+    ) -> Result<(), ScriptError> {
+        const PHASE: ScriptErrorPhase = ScriptErrorPhase::ExecuteModule;
+        self.resume_incomplete_checkpoint(runtime, PHASE)?;
+        self.realm
+            .complete_module(name, result)
+            .map_err(|error| map_quickjs_error(error, PHASE))?;
+        let result = self
+            .realm
+            .resume_module_loads()
+            .map_err(|error| map_quickjs_error(error, PHASE));
+        self.finish_operation(runtime, result, PHASE)
+    }
+
+    pub(crate) fn module_finished(&mut self) -> Result<bool, ScriptError> {
+        let Some(evaluation) = self.evaluation.as_ref() else {
+            return Ok(true);
+        };
+        let result = self
+            .realm
+            .settled_promise_result(evaluation)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::ExecuteModule));
+        if !matches!(result, Ok(None)) {
+            self.evaluation = None;
+        }
+        result.map(|value| value.is_some())
+    }
+
     fn module_namespace(&mut self, specifier: &str) -> Result<quickjs::Value, ScriptError> {
         if let Some(entry) = self.module_namespaces.get(specifier) {
             return Ok(entry.object.clone());
@@ -386,11 +439,30 @@ impl ScriptEngine {
         self.finish_operation(runtime, result, PHASE)
     }
 
-    /// Registers one exact, normalized module name and its UTF-8 source in
-    /// the synchronous preloaded module graph.
-    ///
-    /// Source modules and native host modules share one specifier namespace.
+    /// Evaluates an in-memory module through its immediate job checkpoint.
+    /// Worker boot keeps this synchronous contract; main uses `start_module`
+    /// when its boot promise can wait for resources or timers.
     pub(crate) fn execute_module(
+        &mut self,
+        runtime: &mut ScriptRuntime,
+        source: &str,
+        source_name: &str,
+    ) -> Result<(), ScriptError> {
+        self.start_module(runtime, source, source_name)?;
+        if self.module_finished()? {
+            Ok(())
+        } else {
+            Err(script_error(
+                ScriptErrorKind::ModuleEvaluate,
+                ScriptErrorPhase::ExecuteModule,
+                "QuickJS module evaluation remained pending after its job checkpoint",
+            ))
+        }
+    }
+
+    /// Starts module evaluation and retains its completion promise across
+    /// resource and timer turns. `module_finished` observes its settlement.
+    pub(crate) fn start_module(
         &mut self,
         runtime: &mut ScriptRuntime,
         source: &str,
@@ -412,18 +484,8 @@ impl ScriptEngine {
             )
             .map_err(|error| map_quickjs_error(error, PHASE));
         let evaluation = self.finish_operation(runtime, evaluation, PHASE)?;
-        match self
-            .realm
-            .settled_promise_result(&evaluation)
-            .map_err(|error| map_quickjs_error(error, PHASE))?
-        {
-            Some(_) => Ok(()),
-            None => Err(script_error(
-                ScriptErrorKind::ModuleEvaluate,
-                PHASE,
-                "QuickJS module evaluation remained pending after its job checkpoint",
-            )),
-        }
+        self.evaluation = Some(evaluation);
+        self.module_finished().map(|_| ())
     }
 
     /// Calls a function a loaded source module exported, if it exported one
@@ -467,6 +529,28 @@ impl ScriptEngine {
             .map_err(|error| map_quickjs_error(error, PHASE));
         self.finish_operation(runtime, result, PHASE)
     }
+}
+
+/// URL identity is shared by static and dynamic imports. Bare names are
+/// reserved for the built-ins; transport and response policy stay with the host.
+fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
+    if specifier.starts_with("bobcat:") || specifier.starts_with("bobcat-internal:") {
+        return Ok(specifier.to_owned());
+    }
+    if let Ok(url) = url::Url::parse(specifier) {
+        return Ok(url.into());
+    }
+    if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
+        return url::Url::parse(base)
+            .and_then(|url| url.join(specifier))
+            .map(Into::into)
+            .map_err(|error| {
+                format!("cannot resolve module '{specifier}' from '{base}': {error}")
+            });
+    }
+    Err(format!(
+        "bare module specifier '{specifier}' is not supported"
+    ))
 }
 
 impl fmt::Debug for ScriptEngine {
@@ -657,6 +741,19 @@ mod tests {
                 "verify.js",
             )
             .expect("entry completion must be visible");
+    }
+
+    #[test]
+    fn synchronous_module_execution_still_rejects_a_pending_evaluation() {
+        let (mut runtime, mut engine) = engine();
+        let error = engine
+            .execute_module(
+                &mut runtime,
+                "await new Promise(() => {});",
+                "app:///pending-worker.js",
+            )
+            .expect_err("worker boot cannot finish while its module is pending");
+        assert_eq!(error.kind, ScriptErrorKind::ModuleEvaluate);
     }
 
     #[test]

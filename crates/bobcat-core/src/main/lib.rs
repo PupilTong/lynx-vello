@@ -618,6 +618,7 @@ struct CarriedView<R: EventRequester> {
     /// round's tail.
     serviced_begin_frame: Option<u64>,
     announced_deadline: Option<ClockInstant>,
+    boot_reported: bool,
 }
 
 impl<R: EventRequester> Drop for CarriedView<R> {
@@ -635,6 +636,7 @@ impl<R: EventRequester> CarriedView<R> {
     ) -> Self {
         Self {
             id,
+            boot_reported: matches!(slot, ViewSlot::Running(_)),
             slot: Some(slot),
             notify,
             control,
@@ -662,6 +664,23 @@ impl<R: EventRequester> CarriedView<R> {
         // A running view is served in place: everything after boot is the
         // common case, and nothing about it needs the slot by value.
         if let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() {
+            if let ToMain::SourceLoaded {
+                module: Some(name),
+                source,
+            } = command
+            {
+                if let Err(error) = runtime.complete_module(js_runtime, &name, source) {
+                    let error = error.into_script_error();
+                    let event = if self.boot_reported {
+                        EngineEvent::ScriptRunError(error)
+                    } else {
+                        EngineEvent::StartupFailed(error.into())
+                    };
+                    self.notify.send(ToPainter::Engine(event));
+                    return false;
+                }
+                return true;
+            }
             apply_main_command(
                 js_runtime,
                 runtime,
@@ -675,10 +694,14 @@ impl<R: EventRequester> CarriedView<R> {
             unreachable!("a carried view holds its slot between commands")
         };
         let outcome = match command {
-            ToMain::SourceLoaded { source: Ok(source) } => {
-                booting.apply(js_runtime, source, &self.control)
-            }
-            ToMain::SourceLoaded { source: Err(error) } => Booted::Failed(error),
+            ToMain::SourceLoaded {
+                module: None,
+                source: Ok(source),
+            } => booting.apply(js_runtime, source, &self.control),
+            ToMain::SourceLoaded {
+                module: None,
+                source: Err(error),
+            } => Booted::Failed(error),
             other => {
                 match other {
                     ToMain::Resize {
@@ -716,13 +739,6 @@ impl<R: EventRequester> CarriedView<R> {
         match outcome {
             Booted::Waiting(booting) => self.slot = Some(ViewSlot::Booting(booting)),
             Booted::Running(runtime) => {
-                // Boot's outcome and boot's pixels ride one FIFO, in this
-                // order: whatever the entry committed reaches the target on
-                // the turn that reports the ending, with nobody left to ask
-                // for another.
-                self.notify
-                    .send(ToPainter::Engine(EngineEvent::ScriptFinished));
-                self.notify.send(ToPainter::FrameChanged);
                 self.slot = Some(ViewSlot::Running(runtime));
             }
             Booted::Failed(error) => {
@@ -760,6 +776,33 @@ impl<R: EventRequester> CarriedView<R> {
         if let Some(seq) = self.serviced_begin_frame.take() {
             self.notify.send(ToPainter::BeginFrameServiced(seq));
         }
+    }
+
+    /// Inspect all realms after the shared job queue has finished its turns.
+    fn finish_module_loads(&mut self) -> bool {
+        let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() else {
+            return true;
+        };
+        if !self.boot_reported {
+            match runtime.main_module_finished() {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.boot_reported = true;
+                    self.notify
+                        .send(ToPainter::Engine(EngineEvent::ScriptFinished));
+                    self.notify.send(ToPainter::FrameChanged);
+                }
+                Err(error) => {
+                    self.notify
+                        .send(ToPainter::Engine(EngineEvent::StartupFailed(
+                            error.into_script_error().into(),
+                        )));
+                    return false;
+                }
+            }
+        }
+        runtime.request_modules();
+        true
     }
 }
 
@@ -828,6 +871,8 @@ fn serve_group<R: EventRequester>(
         for view in &mut *views {
             view.finish_round(js_runtime);
         }
+        // A shared checkpoint can discover or finish a sibling's import.
+        views.retain_mut(CarriedView::finish_module_loads);
         let first = if any_timer_due(views) {
             None
         } else {
@@ -884,7 +929,7 @@ fn apply_main_command<R: EventRequester>(
 ) {
     match command {
         ToMain::SourceLoaded { .. } => {
-            unreachable!("sources are requested only during boot")
+            unreachable!("module completions are handled by the carried view")
         }
         ToMain::Worker { key, payload } => {
             if let Err(error) = runtime.dispatch_worker_event(js_runtime, key, payload) {

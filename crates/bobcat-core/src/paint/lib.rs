@@ -144,7 +144,7 @@ pub(crate) struct PainterLink {
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
-    source_request: Option<SourceRequest>,
+    source_requests: Vec<SourceRequest>,
     worker_sources: Vec<(SourceRequest, SourceCompletion)>,
     control: Arc<crate::main::StartupControl>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
@@ -174,7 +174,7 @@ impl PainterLink {
             begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
-            source_request: None,
+            source_requests: Vec::new(),
             worker_sources: Vec::new(),
             control,
             pending_announce: false,
@@ -252,7 +252,7 @@ impl PainterLink {
             }
             ToPainter::TimerDeadline(deadline) => self.timer_deadline = deadline,
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::RequestSource(request) => self.source_request = Some(request),
+            ToPainter::RequestSource(request) => self.source_requests.push(request),
             ToPainter::RequestWorkerSource {
                 request,
                 completion,
@@ -847,17 +847,24 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         self.link.sync();
         if self.link.control.is_cancelled() || self.link.notifications.is_disconnected() {
             self.link.control.cancel();
-            self.link.source_request = None;
+            self.link.source_requests.clear();
             self.link.worker_sources.clear();
-        } else if let Some(request) = self.link.source_request.take() {
-            self.images.store().request_source(
-                request,
-                SourceCompletion::new(
-                    self.link.commands.clone(),
-                    self.link.view,
-                    Arc::clone(&self.link.control),
-                ),
-            );
+        } else {
+            for request in std::mem::take(&mut self.link.source_requests) {
+                let module = match &request {
+                    SourceRequest::Module(url) => Some(url.clone()),
+                    _ => None,
+                };
+                self.images.store().request_source(
+                    request,
+                    SourceCompletion::new(
+                        self.link.commands.clone(),
+                        self.link.view,
+                        Arc::clone(&self.link.control),
+                        module,
+                    ),
+                );
+            }
         }
         for (request, completion) in self.link.worker_sources.drain(..) {
             if !completion.is_cancelled() {

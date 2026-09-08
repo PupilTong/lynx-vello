@@ -38,6 +38,13 @@ pub(crate) type HostDispatch = unsafe extern "C" fn(
 
 pub(crate) type HostRelease = unsafe extern "C" fn(opaque: *mut c_void, handler: *mut c_void);
 
+pub(crate) type ModuleNormalize = unsafe extern "C" fn(
+    opaque: *mut c_void,
+    base: *const c_char,
+    name: *const c_char,
+    error: *mut c_int,
+) -> *const c_char;
+
 #[repr(C)]
 pub(crate) struct QjsRuntime {
     _private: [u8; 0],
@@ -60,6 +67,21 @@ unsafe extern "C" {
     pub(crate) fn qjs_runtime_free(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_context_new(runtime: *mut QjsRuntime) -> *mut QjsContext;
     pub(crate) fn qjs_context_free(context: *mut QjsContext);
+    pub(crate) fn qjs_context_enable_module_loading(
+        context: *mut QjsContext,
+        normalize: ModuleNormalize,
+        opaque: *mut c_void,
+    );
+    pub(crate) fn qjs_context_take_module_request(context: *mut QjsContext) -> *const c_char;
+    pub(crate) fn qjs_context_complete_module(
+        context: *mut QjsContext,
+        name: *const c_char,
+        url: *const c_char,
+        text: *const u8,
+        length: usize,
+        error: *const c_char,
+    ) -> c_int;
+    pub(crate) fn qjs_context_resume_module_loads(context: *mut QjsContext);
     pub(crate) fn qjs_runtime_run_gc(runtime: *mut QjsRuntime);
     pub(crate) fn qjs_runtime_set_memory_limit(runtime: *mut QjsRuntime, limit: usize);
     pub(crate) fn qjs_runtime_set_max_stack_size(runtime: *mut QjsRuntime, size: usize);

@@ -249,7 +249,7 @@ painter calls `ResourceFetcher::request_source` with a concrete `SourceCompletio
 The fetcher resolves the URL, fetches bytes and validates UTF-8, or supplies a
 pre-parsed stylesheet. Completion consumes the handle and sends directly into the
 existing `Mailbox<ToMain>`, waking main without another painter turn. The handle
-contains a concrete sender, `ViewId` and the existing cancellation flag: no erased
+contains a concrete sender, `ViewId`, an optional imported-module name and the existing cancellation flag: no erased
 callback, retained resource Future, `SourceLoads` or `EventWaker` is needed. The
 fetcher itself is owned by value and needs neither `Send`, `Sync` nor `'static`.
 The reference fetcher queues a concrete source job on its native pool, or starts
@@ -428,11 +428,12 @@ release, source cancellation and nonfatal `WorkerFailed` reporting apply to
 BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
 loading or execution.
 
-The script engine's whole surface is five operations:
+Its script surface covers:
 
 - register a Rust-backed named function export in a native ESM module;
 - register UTF-8 source under an exact preloaded module specifier;
-- execute an ESM entry and wait for its evaluation promise to settle;
+- start an ESM entry and retain its evaluation promise until it settles;
+- take module source requests, complete them, and resume suspended imports;
 - call a named export of an already-loaded source module;
 - run a collection.
 
@@ -447,6 +448,38 @@ imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export.
+
+Ordinary ECMAScript `import(specifier)` loads JavaScript ESM asynchronously,
+including computed specifiers, static dependencies, re-exports, cycles and
+nested dynamic imports. Core normalizes absolute and relative URLs against the
+importing module's response URL; bare specifiers are limited to the built-ins.
+Import attributes, JSON modules, import maps and Lynx component-bundle imports
+are outside this JavaScript-module path.
+
+The bridge keeps built-in sources on the shared runtime and entry/imported
+sources on each realm. A missing module creates one `SourceRequest::Module` per
+normalized URL in that realm. The painter forwards every queued request through
+`ResourceFetcher::request_source`; its `SourceCompletion` retains the requested
+module name even on failure. IO never blocks the script thread. Completion
+returns to the owning view's main-thread inbox, registers the source or cached
+load error, resumes import continuations, and drains promise jobs. Repeated
+imports share the same module namespace and evaluation within a realm; sibling
+views can load the same URL independently.
+
+The QuickJS fork adds unlinked compilation and a module-load deferrer. Before
+linking or evaluating an import, it walks the static graph with an attempt-local
+visited set, so missing sources can suspend without partially linking a cycle.
+The bridge retains the original promise continuation on its owning context and
+releases it when the context is destroyed. Loaded module code is not replayed
+when another dependency arrives. Fetch/encoding errors reject with `TypeError`;
+parse and evaluation failures preserve their JavaScript exception. A handled
+rejection leaves the realm usable.
+
+Boot stays pending while top-level await needs resources or timers; ordinary
+host pumping and `next_wakeup` keep both progressing. `ScriptFinished` is sent
+only after the boot promise fulfills. Its rejection sends `StartupFailed`.
+Imports started after boot use the same loading path. Dropping a view cancels
+its completion handles and releases its suspended continuations.
 
 The final `bobcat:boot` module imports `lynx` and the flush binding from the
 two built-ins; the transformed entry itself statically imports both built-ins.

@@ -237,6 +237,20 @@ useful signal for currently-compatible versions of those libraries.
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
   document, tree, engine, and realm cannot be borrowed or decomposed from the
   facade.
+  Ordinary ECMAScript `import()` loads JavaScript ESM through
+  `SourceRequest::Module` and the same concrete `SourceCompletion` channel,
+  during and after boot. Core normalizes module URLs against the importing
+  module's response URL; the fetcher owns transport and UTF-8 validation.
+  Built-in sources remain group-wide; entries and imported sources are
+  realm-local, with one request, namespace and evaluation per normalized URL.
+  The QuickJS fork preflights static dependencies with unlinked compilation,
+  defers incomplete import graphs, and resumes the original promises on main
+  when sources arrive. Cycles never become partially linked while fetching.
+  Top-level await can span resource and timer turns; `ScriptFinished` waits
+  for the boot promise. Handled import failures leave the realm usable, and
+  dropping the view cancels outstanding completions and releases continuations.
+  This is JavaScript ESM loading; import maps, import attributes, JSON modules
+  and Lynx component-bundle imports remain unsupported.
   The crate-private `quickjs::ScriptEngine` is the whole script surface: it
   installs named host callbacks, registers named preloaded ESM source,
   evaluates a module through its TLA completion promise, calls an export the
@@ -676,8 +690,8 @@ useful signal for currently-compatible versions of those libraries.
   The resource module must not decode images/fonts/templates, upload render
   resources, or own cache/retry policy. Runtime configuration, raw realm/value
   handles, interrupts, and source-evaluation entry points remain private. The
-  bridge owns only the generic synchronous preloaded source/native-module
-  loader, loaded-module namespace access, and settled Promise inspection;
+  bridge owns the generic source/native-module loader, deferred import
+  continuations, loaded-module namespace access, and settled Promise inspection;
   Bobcat's specifiers, entry transform, graph membership, and boot policy stay
   in the core adapter.
 - `crates/quickjs-rust-bridge` — owner-thread-bound safe Rust wrapper around
