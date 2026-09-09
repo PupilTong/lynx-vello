@@ -2544,6 +2544,57 @@ mod implementation {
         }
 
         #[test]
+        fn a_failed_static_resolution_leaves_no_cycle_member_marked_resolved() {
+            let (mut runtime, mut realm) = import_test_realm();
+            realm
+                .complete_module(
+                    "a",
+                    Ok((
+                        "a",
+                        "import 'b'; import { c } from 'c'; export const a = c;",
+                    )),
+                )
+                .unwrap();
+            realm
+                .complete_module("b", Ok(("b", "import 'a'; export const b = 1;")))
+                .unwrap();
+            // A static import cannot wait for c: the attempt fails, and b, which
+            // completed early inside the a <-> b cycle, must not stay resolved.
+            let error = realm
+                .evaluate(
+                    EvalSource {
+                        text: "import 'a';",
+                        name: Some("entry"),
+                        line_offset: 0,
+                    },
+                    EvalOptions {
+                        source_type: SourceType::Module,
+                        ..EvalOptions::default()
+                    },
+                )
+                .expect_err("a static import of a pending source cannot wait");
+            assert!(
+                error.message.contains("could not load module 'c'"),
+                "{}",
+                error.message
+            );
+            assert_eq!(realm.take_module_request().as_deref(), Some("c"));
+            assert!(realm.take_module_request().is_none());
+            realm
+                .complete_module("c", Ok(("c", "export const c = 42;")))
+                .unwrap();
+            import_eval(
+                &mut realm,
+                "import('b').then(m => globalThis.answer = m.b);",
+            );
+            runtime.drain_pending_jobs().unwrap();
+            import_eval(
+                &mut realm,
+                "if (answer !== 1) throw Error('cycle member was left half resolved');",
+            );
+        }
+
+        #[test]
         fn deferred_import_failure_is_catchable_and_cached_without_poisoning_the_realm() {
             let (mut runtime, mut realm) = import_test_realm();
             import_eval(
