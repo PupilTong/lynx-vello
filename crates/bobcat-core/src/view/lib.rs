@@ -348,9 +348,9 @@ pub struct ViewSources {
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
     pub entry: String,
-    /// Optional raw BTS module, resolved against the loaded MTS entry URL.
+    /// Optional BTS application module specifier imported by `bobcat:bts`.
     /// The view always starts a BTS context; without this it runs only the
-    /// built-in environment. Compiled Lynx Core bundles are not raw modules.
+    /// built-in environment. Application module loading is not implemented yet.
     pub background_entry: Option<String>,
 }
 

@@ -3,8 +3,9 @@ import "bobcat:worker";
 import { createCrossThreadContext } from "bobcat:cross-thread-context";
 
 // A Worker gets Lynx bindings by evaluating or importing this entry module.
-// The native worker queue starts delivery after the entry finishes, so the
-// entry can register typed listeners before MTS's queued events arrive.
+// The bobcat:bts bootstrap appends await import(entryURL) after initializing
+// the Context. Application module loading belongs to ResourceFetcher and is
+// pending; the bootstrap carries no application source.
 /** @type {any} */
 const scope = globalThis;
 const coreBridge = createCrossThreadContext();

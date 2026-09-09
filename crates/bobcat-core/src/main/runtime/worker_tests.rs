@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::background::WorkerHome;
+use crate::background::{WorkerHome, WorkerScript};
 use crate::mailbox::Mailbox;
 use crate::main::StartupControl;
 use crate::main::workers::WorkerFactory;
@@ -23,15 +23,24 @@ impl Pair {
         Self::with_background(script, None)
     }
 
-    fn with_background(script: &str, background_entry: Option<&str>) -> Self {
-        let mut pair = Self::unbooted(background_entry);
+    fn with_background(script: &str, background_source: Option<&str>) -> Self {
+        let mut pair = Self::unbooted(background_source);
         pair.boot(script).unwrap();
         pair
     }
 
-    fn unbooted(background_entry: Option<&str>) -> Self {
+    fn unbooted(background_source: Option<&str>) -> Self {
         let (to_main, events) = Mailbox::channel();
-        let home = WorkerHome::start(to_main).unwrap();
+        let home = match background_source {
+            Some(source) => WorkerHome::with_entry_for_test(
+                to_main,
+                WorkerScript {
+                    source: source.to_owned(),
+                    url: "test:bts-entry".to_owned(),
+                },
+            ),
+            None => WorkerHome::start(to_main).unwrap(),
+        };
         let (notifications, received) = Mailbox::channel();
         let notify = ToPainterSender::new(
             DETACHED_VIEW,
@@ -52,7 +61,7 @@ impl Pair {
                 &WorkerFactory::new(home.commands()),
                 notify,
                 "app:///nested/main.js",
-                background_entry.map(str::to_owned),
+                background_source.map(|_| "test:bts-entry".to_owned()),
                 Arc::new(StartupControl::default()),
             )
             .unwrap();
@@ -361,10 +370,9 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
             context.dispatchEvent({type: 'request', data: {value: 4}});
         };
     ",
-        Some("./worker.js"),
-    );
-    pair.answer(
-        r"
+        Some(
+            r"
+        export const ready = await Promise.resolve(true);
         const core = lynx.getCoreContext();
         if (core !== lynx.getCoreContext()) throw Error('unstable core context');
         if (name !== 'lynx-bg') throw Error('wrong background name');
@@ -379,6 +387,7 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
             }
         });
     ",
+        ),
     );
     for _ in 0..3 {
         pair.deliver();
@@ -389,45 +398,31 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
 }
 
 #[test]
-fn background_source_is_requested_only_after_the_awaited_main_entry_finishes() {
-    let mut pair = Pair::unbooted(Some("./worker.js"));
-    let notifications = Rc::clone(&pair.notifications);
-    let checkpoints = Rc::new(std::cell::Cell::new(0));
-    let observed = Rc::clone(&checkpoints);
-    pair.runtime
-        .as_mut()
-        .unwrap()
-        .engine
-        .register_host_module_function(
-            &mut pair.js,
-            "test:boot-order",
-            "beforeBackground",
-            0,
-            Box::new(move |_| {
-                if notifications
-                    .drain()
-                    .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
-                {
-                    return Err("BTS started before the entry finished".into());
-                }
-                observed.set(observed.get() + 1);
-                Ok(quickjs_rust_bridge::HostValue::Undefined)
-            }),
-        )
-        .unwrap();
-    pair.boot(
+fn background_starts_only_after_the_awaited_main_entry_finishes() {
+    let mut pair = Pair::with_background(
         r"
-        import { beforeBackground } from 'test:boot-order';
-        beforeBackground();
+        import { Worker } from 'bobcat-internal';
+        globalThis.finished = false;
+        globalThis.connected = false;
+        const add = Worker.prototype.addEventListener;
+        Worker.prototype.addEventListener = function (...args) {
+            if (!finished) throw Error('BTS connected before MTS entry finished');
+            connected = true;
+            return add.apply(this, args);
+        };
         await Promise.resolve();
-        beforeBackground();
-    ",
-    )
-    .unwrap();
-    assert_eq!(checkpoints.get(), 2);
-    // The request exists now, after both sides of the entry's top-level await.
-    pair.answer("lynx.getCoreContext().dispatchEvent({type: 'ready'});");
+        finished = true;
+        ",
+        Some("lynx.getCoreContext().dispatchEvent({type: 'ready'});"),
+    );
+    pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
+    assert!(
+        !pair
+            .notifications
+            .drain()
+            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
+    );
 }
 
 #[test]
@@ -442,15 +437,14 @@ fn context_post_message_remains_a_noop_on_both_realms() {
         context.postMessage({type: 'request', data: 'ignored'});
         context.dispatchEvent({type: 'request', data: 'typed'});
     ",
-        Some("./worker.js"),
-    );
-    pair.answer(
-        r"
+        Some(
+            r"
         const core = lynx.getCoreContext();
         core.addEventListener('request', e => core.dispatchEvent({type: 'reply', data: e.data}));
         core.postMessage({type: 'ignored', data: 'ignored'});
         core.dispatchEvent({type: 'ready'});
     ",
+        ),
     );
     pair.deliver();
     pair.deliver();
@@ -469,16 +463,15 @@ fn background_listener_failure_is_nonfatal_and_later_context_events_still_arrive
         context.dispatchEvent({type: 'request', data: 0});
         context.dispatchEvent({type: 'request', data: 1});
     ",
-        Some("./worker.js"),
-    );
-    pair.answer(
-        r"
+        Some(
+            r"
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             if (event.data === 0) throw Error('BTS listener boom');
             core.dispatchEvent({type: 'reply', data: event.data});
         });
     ",
+        ),
     );
     pair.deliver();
     pair.deliver();
@@ -533,7 +526,7 @@ fn an_omitted_background_entry_boots_without_host_io() {
 
 #[test]
 fn a_rejected_main_entry_never_starts_its_background_context() {
-    let mut pair = Pair::unbooted(Some("./worker.js"));
+    let mut pair = Pair::unbooted(Some("throw Error('BTS must not run');"));
     let error = pair
         .boot(
             r"
@@ -552,22 +545,5 @@ fn a_rejected_main_entry_never_starts_its_background_context() {
     );
     drop(pair.runtime.take());
     pair.home.join();
-    assert!(pair.events.try_recv().is_err());
-}
-
-#[test]
-fn dropping_a_view_with_pending_background_source_cancels_and_releases_it() {
-    let mut pair = Pair::with_background(
-        "lynx.getJSContext().dispatchEvent({type: 'queued', data: 1});",
-        Some("./worker.js"),
-    );
-    let completion = pair.source();
-    drop(pair.runtime.take());
-    assert!(completion.is_cancelled());
-    pair.home.join();
-    completion.complete(Ok(LoadedSource::Entry {
-        source: "throw Error('cancelled BTS ran');".into(),
-        url: "app:///late-bts.js".into(),
-    }));
     assert!(pair.events.try_recv().is_err());
 }

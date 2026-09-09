@@ -107,6 +107,21 @@ pub(super) fn run(commands: &Mailbox<WorkerCommand>, to_main: &Sender<ToMain>) {
     }
 }
 
+/// Preloads a fixture through the existing runtime API for Context tests.
+#[cfg(test)]
+pub(super) fn run_with_entry(
+    commands: &Mailbox<WorkerCommand>,
+    to_main: &Sender<ToMain>,
+    entry: &WorkerScript,
+) {
+    let mut runtime = ScriptRuntime::new().unwrap();
+    install_worker_modules(&mut runtime).unwrap();
+    runtime
+        .register_module_source(&entry.url, &entry.source)
+        .unwrap();
+    serve(&mut Ok(runtime), commands, to_main, &mut Workers::default());
+}
+
 fn serve(
     runtime: &mut Result<ScriptRuntime, ScriptError>,
     commands: &Mailbox<WorkerCommand>,

@@ -264,65 +264,53 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
 }
 
 #[tokio::test]
-async fn xml_background_context_receives_entry_events_and_commits_its_reply() {
+async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading() {
     let (group, resources, receiver) = setup().await;
     let page = PageSource::from_bytes(
         &"app:///card.lynx.xml".parse().unwrap(),
         br#"
         <lynx engine-version="4.2">
           <script thread="main"><![CDATA[
-            const page = __CreatePage();
-            const box = __CreateView();
-            __SetInlineStyles(box, 'width:32px;height:24px;background:black');
-            __AppendElement(page, box);
-            const jsContext = lynx.getJSContext();
-            jsContext.addEventListener('paint', event => {
-                if (event.data.sender !== 'bts') throw Error('wrong context sender');
-                __SetInlineStyles(box, `width:32px;height:24px;background:${event.data.color}`);
-            });
-            // The entry executes before core starts its BTS worker. This event
-            // must survive until that worker has installed its listener.
-            jsContext.dispatchEvent({type: 'initialize', data: {color: 'blue'}});
+            __CreatePage();
+            lynx.getJSContext().dispatchEvent({type: 'initialize'});
           ]]></script>
           <script thread="background"><![CDATA[
-            const coreContext = lynx.getCoreContext();
-            coreContext.addEventListener('initialize', event => {
-                coreContext.dispatchEvent({
-                    type: 'paint',
-                    data: {sender: 'bts', color: event.data.color},
-                });
-            });
+            throw Error('XML body was executed without being imported');
           ]]></script>
         </lynx>
         "#,
     )
     .unwrap();
     page.register_with(&resources);
-    let mut view = view(&group, &resources, page.view_sources()).await;
+    let sources = page.view_sources();
+    let background_url = sources.background_entry.clone().unwrap();
+    let mut view = view(&group, &resources, sources).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut script_finished = false;
-    loop {
+    let mut import_failed = false;
+    while !script_finished || !import_failed {
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => script_finished = true,
+                EngineEvent::WorkerFailed(error) => {
+                    // The bootstrap imports the XML entry. Loading that module
+                    // from ResourceFetcher is explicitly deferred in this MVP.
+                    assert!(!import_failed, "duplicate import failure");
+                    assert!(error.message.contains(&background_url), "{error}");
+                    assert!(error.message.contains("not preloaded"), "{error}");
+                    import_failed = true;
+                }
                 EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
-                EngineEvent::WorkerFailed(error)
-                | EngineEvent::ListenerFailed(error)
-                | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
+                EngineEvent::ListenerFailed(error) | EngineEvent::ScriptRunError(error) => {
+                    panic!("script: {error}")
+                }
                 EngineEvent::RenderFailed(error) => panic!("render: {error}"),
                 _ => {}
             }
         }
-        if script_finished {
-            let screenshot = view.capture().unwrap();
-            let offset = (12 * screenshot.size.width as usize + 16) * 4;
-            if screenshot.pixels[offset..offset + 4] == [0, 0, 255, 255] {
-                break;
-            }
-        }
         assert!(
             std::time::Instant::now() < deadline,
-            "the XML BTS context reply did not paint"
+            "BTS import did not report its outcome"
         );
         let _ = receiver.recv_timeout(Duration::from_millis(5));
     }

@@ -367,12 +367,13 @@ useful signal for currently-compatible versions of those libraries.
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   **After the MTS entry import succeeds, boot creates a BTS Worker** named
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
-  `ViewSources.background_entry` optionally supplies a raw BTS module URL;
-  otherwise the built-in entry loads without a fetch. The
-  loader composes an ordinary entry module that imports `bobcat:bts` before
-  the raw script; without a raw script it supplies the built-in module itself.
-  That JavaScript module installs global `lynx.getCoreContext()`. All workers
-  use the same scope, with no BTS kind in the worker protocol.
+  `bobcat:bts` installs global `lynx.getCoreContext()` and, when
+  `ViewSources.background_entry` is supplied, executes `await import(entry)`.
+  XML uses this identical startup path. The bootstrap contains no application
+  source and does not fetch it in advance. Application module loading through
+  `ResourceFetcher` is explicitly deferred; an entry not already preloaded
+  reports a worker import error. Without an entry, only the built-in
+  environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable peers built on `bobcat:cross-thread-context`: `dispatchEvent({type,
   data})` sends to the peer and returns `3`, and receiving uses EventTarget

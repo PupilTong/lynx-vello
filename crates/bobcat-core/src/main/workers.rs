@@ -71,26 +71,24 @@ impl WorkerFactory {
                     view: creator.view,
                     name,
                 }))?;
-                let (specifier, prefix) = if specifier == BTS_MODULE_SPECIFIER {
+                if specifier == BTS_MODULE_SPECIFIER {
+                    let mut source = BTS_MODULE_SOURCE.to_owned();
                     if let Some(entry) = &background_entry {
-                        // Compose the BTS entry at the source boundary. The
-                        // worker receives an ordinary module, with its imports
-                        // already spelled out, just like an authored script.
-                        (entry.clone(), "import \"bobcat:bts\";\n")
-                    } else {
-                        // The built-in entry is available without host IO.
-                        creator.send(WorkerCommand::Script {
-                            key,
-                            script: Ok(WorkerScript {
-                                source: BTS_MODULE_SOURCE.to_owned(),
-                                url: BTS_MODULE_SPECIFIER.to_owned(),
-                            }),
-                        })?;
-                        return Ok(HostValue::String(id.to_string()));
+                        let entry =
+                            serde_json::to_string(entry).expect("a string is JSON serializable");
+                        source.push_str("\nawait import(");
+                        source.push_str(&entry);
+                        source.push_str(");\n");
                     }
-                } else {
-                    (specifier, "")
-                };
+                    creator.send(WorkerCommand::Script {
+                        key,
+                        script: Ok(WorkerScript {
+                            source,
+                            url: BTS_MODULE_SPECIFIER.to_owned(),
+                        }),
+                    })?;
+                    return Ok(HostValue::String(id.to_string()));
+                }
                 // Start is enqueued before the painter can possibly answer.
                 // The completion is weak: outstanding IO must not keep the
                 // group's worker thread alive while its owner joins it.
@@ -104,7 +102,6 @@ impl WorkerFactory {
                         key,
                         creator.view,
                         Arc::clone(&creator.control),
-                        prefix,
                     ),
                 });
                 Ok(HostValue::String(id.to_string()))

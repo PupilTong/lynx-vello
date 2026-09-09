@@ -230,9 +230,6 @@ enum SourceDestination {
             crate::background::WorkerCommand,
         )>,
         key: crate::background::WorkerKey,
-        /// Loader-owned imports to prepend to the fetched entry. This source
-        /// composition is finished before the ordinary script reaches workers.
-        prefix: &'static str,
     },
 }
 
@@ -267,14 +264,9 @@ impl SourceCompletion {
         key: crate::background::WorkerKey,
         view: crate::view::ViewId,
         control: Arc<crate::main::StartupControl>,
-        prefix: &'static str,
     ) -> Self {
         Self {
-            destination: Some(SourceDestination::Worker {
-                commands,
-                key,
-                prefix,
-            }),
+            destination: Some(SourceDestination::Worker { commands, key }),
             view,
             control,
         }
@@ -310,14 +302,9 @@ impl SourceCompletion {
                         crate::view::ToMain::SourceLoaded { source },
                     ));
                 }
-                SourceDestination::Worker {
-                    commands,
-                    key,
-                    prefix,
-                } => {
+                SourceDestination::Worker { commands, key } => {
                     let script = match source {
-                        Ok(LoadedSource::Entry { mut source, url }) => {
-                            source.insert_str(0, prefix);
+                        Ok(LoadedSource::Entry { source, url }) => {
                             Ok(crate::background::WorkerScript { source, url })
                         }
                         Ok(LoadedSource::StyleSheet(_)) => {

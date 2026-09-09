@@ -99,9 +99,11 @@ QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
     │     ├──▶ bobcat:event-target
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
-    ├──▶ bobcat:bts (BTS only: global lynx.getCoreContext)
-    │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
-    └── the worker's own script, inlined
+    └── the worker's entry source
+          └── bobcat:bts initializes global lynx.getCoreContext
+                ├──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
+                └──▶ await import(BTS entry) when configured
+                      Application module loading: deferred
   No bobcat:element and no bobcat:runtime here: a worker has no document to
   reach and no page to be the main thread of, so reaching for either fails to
   resolve rather than failing late.
@@ -216,9 +218,10 @@ the Lynx main thread.
 The browser reference embedder uses the shared `register_lynx_xml_response` adapter inside
 its Render Worker after fetching one XML URL. Native and browser XML adapters
 register the optional background script and pass its URL as
-`ViewSources.background_entry`; the BTS worker evaluates that raw module with
-`lynx.getCoreContext()` available. Compiled bundle manifests still need the
-Lynx Core module/init shell and are not executed by this MVP.
+`ViewSources.background_entry`; `bobcat:bts` imports that entry after
+initializing `lynx.getCoreContext()`. Application module loading through
+ResourceFetcher is deferred, so an entry not preloaded in QuickJS reports an
+import error. Compiled bundle manifests also need the Lynx Core module/init shell.
 
 `LynxGroup::new` awaits the shared script runtime and style pool.
 `create_lynx_view` validates metrics, attaches the document inputs and source URLs
@@ -373,12 +376,19 @@ Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
 module `bobcat:bts`. All workers use the same scope and protocol; the entry
 module installs the BTS bindings in JavaScript. Workers that do not import it
-have no automatic `lynx` global. With `ViewSources.background_entry`,
-the fetcher loads the raw module against the resolved MTS entry URL through
-the existing worker request/completion path. The loader prepends
-`import "bobcat:bts"` before handing the source to the worker FIFO. Without a
-raw entry, main sends the built-in module source directly, with no host IO.
-It costs one worker realm per view, with no additional OS thread or runtime.
+have no automatic `lynx` global. Main sends the built-in `bobcat:bts` source
+directly to the ordinary Worker FIFO. When `ViewSources.background_entry` is
+configured, the bootstrap appends `await import(entry)`, matching MTS boot's
+import structure. XML takes exactly this path; no application source is
+prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
+only initializes the Context.
+
+Application module loading through ResourceFetcher is explicitly deferred.
+This change adds no module collection, loader API or realm-local source
+registry. Current imports require a preloaded module; otherwise the normal
+nonfatal `WorkerFailed` event reports the missing source. Context tests preload
+a fixture using the existing runtime API. The runtime cost remains one worker
+realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` are stable peers.
 Their shared `bobcat:cross-thread-context` module implements Lynx's custom

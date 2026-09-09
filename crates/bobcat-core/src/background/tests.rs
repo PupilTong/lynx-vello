@@ -16,6 +16,20 @@ use super::{
 use crate::mailbox::{Mailbox, Sender};
 use crate::view::{ToMain, ViewId, test_view};
 
+impl WorkerHome {
+    pub(crate) fn with_entry_for_test(to_main: Sender<ToMain>, entry: WorkerScript) -> Self {
+        let (commands, receiver) = Mailbox::channel();
+        let thread = super::ThreadBuilder::new()
+            .name("bobcat-test-workers".into())
+            .spawn(move || super::thread::run_with_entry(&receiver, &to_main, &entry))
+            .unwrap();
+        Self {
+            commands: Some(commands),
+            thread: Some(thread),
+        }
+    }
+}
+
 /// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(10);
 

@@ -98,8 +98,12 @@ group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
 same scope; BTS bindings belong to that JavaScript entry, with no worker kind
 in the protocol. `ViewSources.background_entry` selects an optional raw
 module; native/browser XML adapters supply the background section's URL.
-Without a script, the built-in BTS environment still starts. Compiled BTS
-bundle manifests require Lynx Core's module/init shell and remain pending.
+The `bobcat:bts` bootstrap initializes the Context and then awaits an import
+of that entry. Application source is neither prefetched nor included in the
+Worker script. Application module loading through ResourceFetcher is explicitly
+deferred, so unpreloaded entries currently report an import error. Without an
+entry, the built-in BTS environment still starts. Compiled BTS bundle manifests
+also require Lynx Core's module/init shell and remain pending.
 
 The implemented pair is MTS `lynx.getJSContext()` ↔ BTS `lynx.getCoreContext()`.
 This is a Lynx-only protocol, despite the `dispatchEvent` name:
