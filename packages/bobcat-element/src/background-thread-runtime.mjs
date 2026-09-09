@@ -2,10 +2,9 @@
 import "bobcat:worker";
 import { createCrossThreadContext } from "bobcat:cross-thread-context";
 
-// A Worker gets Lynx bindings by evaluating or importing this entry module.
-// The bobcat:bts bootstrap appends await import(entryURL) after initializing
-// the Context. Application module loading belongs to ResourceFetcher and is
-// pending; the bootstrap carries no application source.
+// The bobcat:bts bootstrap and the BTS application's entry preamble import
+// this runtime. Like MTS, lynx is a module binding, never a global property.
+// Application module loading through ResourceFetcher remains pending.
 /** @type {any} */
 const scope = globalThis;
 const coreContext = createCrossThreadContext();
@@ -22,4 +21,3 @@ export const lynx = {
     return coreContext;
   },
 };
-scope.lynx = lynx;

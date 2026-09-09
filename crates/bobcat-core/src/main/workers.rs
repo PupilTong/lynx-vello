@@ -10,7 +10,7 @@ use quickjs_rust_bridge::HostValue;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use super::{StartupControl, ToPainterSender};
 use crate::background::{WorkerCommand, WorkerKey, WorkerScript, WorkerStart};
-use crate::esm::{BTS_MODULE_SOURCE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::mailbox::Sender;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -72,7 +72,7 @@ impl WorkerFactory {
                     name,
                 }))?;
                 if specifier == BTS_MODULE_SPECIFIER {
-                    let mut source = BTS_MODULE_SOURCE.to_owned();
+                    let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     if let Some(entry) = &background_entry {
                         let entry =
                             serde_json::to_string(entry).expect("a string is JSON serializable");

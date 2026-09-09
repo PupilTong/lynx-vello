@@ -25,8 +25,14 @@ pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 pub(crate) const CONTEXT_MODULE_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/cross-thread-context.mjs");
 
-/// The built-in BTS entry, loaded like any other Worker script. It installs
-/// Lynx bindings in JavaScript; the worker protocol carries no realm kind.
+/// The built-in BTS bootstrap, loaded like any other Worker script.
 pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
-pub(crate) const BTS_MODULE_SOURCE: &str =
+
+/// BTS bindings live separately from the bootstrap that awaits the app entry.
+pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
+pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/background-thread-runtime.mjs");
+
+/// Named imports prepended to a BTS application entry, as for MTS. The
+/// bootstrap uses the same import to initialize the Context before the app.
+pub(crate) const BTS_ENTRY_PREAMBLE: &str = "import { lynx } from \"bobcat:bts-runtime\";\n";

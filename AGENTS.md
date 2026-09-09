@@ -367,8 +367,12 @@ useful signal for currently-compatible versions of those libraries.
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   **After the MTS entry import succeeds, boot creates a BTS Worker** named
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
-  `bobcat:bts` installs global `lynx.getCoreContext()` and, when
+  `bobcat:bts` imports `lynx` from `bobcat:bts-runtime` and, when
   `ViewSources.background_entry` is supplied, executes `await import(entry)`.
+  BTS application entries receive the same named import as a preamble, like
+  MTS entries importing `bobcat:runtime`; neither installs `globalThis.lynx`.
+  Keeping the runtime separate lets the app import its bindings without a
+  dependency back to the bootstrap awaiting it.
   XML uses this identical startup path. The bootstrap contains no application
   source and does not fetch it in advance. Application module loading through
   `ResourceFetcher` is explicitly deferred; an entry not already preloaded
@@ -478,7 +482,7 @@ useful signal for currently-compatible versions of those libraries.
   in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
   gets a deliberately shorter list — `bobcat:event-target`, the worker global
   scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
-  the BTS-only bootstrap `bobcat:bts` — because a worker has no
+  the BTS bindings `bobcat:bts-runtime` — because a worker has no
   document to reach and no page to be the main thread of, so an import of
   `bobcat:element` fails to resolve rather than failing late. A worker's own
   script is *inlined* into the one module its realm evaluates, exactly as

@@ -116,9 +116,8 @@ pub(super) fn run_with_entry(
 ) {
     let mut runtime = ScriptRuntime::new().unwrap();
     install_worker_modules(&mut runtime).unwrap();
-    runtime
-        .register_module_source(&entry.url, &entry.source)
-        .unwrap();
+    let source = format!("{}{}", crate::esm::BTS_ENTRY_PREAMBLE, entry.source);
+    runtime.register_module_source(&entry.url, &source).unwrap();
     serve(&mut Ok(runtime), commands, to_main, &mut Workers::default());
 }
 

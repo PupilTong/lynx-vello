@@ -9,9 +9,9 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::esm::{
-    BTS_MODULE_SOURCE, BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, TIMER_MODULE_SOURCE,
-    TIMER_MODULE_SPECIFIER,
+    BTS_RUNTIME_MODULE_SOURCE, BTS_RUNTIME_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE,
+    CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE,
+    TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -48,7 +48,7 @@ const WORKER_MODULE_SOURCE: &str =
 /// runtime shares.
 ///
 /// The worker runtime carries its global scope, timers, shared event machinery
-/// and the BTS entry module. Each script chooses its own imports.
+/// and the BTS runtime module. Each script chooses its own imports.
 /// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
 /// document to reach and no page to be the main thread of, and registering
 /// them would make an import that must fail merely fail late.
@@ -56,7 +56,7 @@ pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(
     js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
     js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
     js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;
-    js_runtime.register_module_source(BTS_MODULE_SPECIFIER, BTS_MODULE_SOURCE)?;
+    js_runtime.register_module_source(BTS_RUNTIME_MODULE_SPECIFIER, BTS_RUNTIME_MODULE_SOURCE)?;
     js_runtime.register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
 }
 

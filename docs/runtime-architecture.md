@@ -100,8 +100,9 @@ QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
     └── the worker's entry source
-          └── bobcat:bts initializes global lynx.getCoreContext
-                ├──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
+          └── bobcat:bts (bootstrap)
+                ├──▶ bobcat:bts-runtime exports lynx
+                │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
                 └──▶ await import(BTS entry) when configured
                       Application module loading: deferred
   No bobcat:element and no bobcat:runtime here: a worker has no document to
@@ -374,9 +375,13 @@ handler that throws reports `ListenerFailed` and leaves the view serving.
 
 Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
-module `bobcat:bts`. All workers use the same scope and protocol; the entry
-module installs the BTS bindings in JavaScript. Workers that do not import it
-have no automatic `lynx` global. Main sends the built-in `bobcat:bts` source
+module `bobcat:bts`. All workers use the same scope and protocol. BTS `lynx`
+is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
+`globalThis.lynx`. The bootstrap and BTS application entry preamble both use
+`import { lynx } from "bobcat:bts-runtime"`, matching MTS's named import from
+`bobcat:runtime`. The application therefore imports its bindings without
+creating a dependency back to the bootstrap awaiting it.
+Main sends the built-in `bobcat:bts` source
 directly to the ordinary Worker FIFO. When `ViewSources.background_entry` is
 configured, the bootstrap appends `await import(entry)`, matching MTS boot's
 import structure. XML takes exactly this path; no application source is

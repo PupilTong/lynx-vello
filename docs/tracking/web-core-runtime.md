@@ -98,8 +98,10 @@ group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
 same scope; BTS bindings belong to that JavaScript entry, with no worker kind
 in the protocol. `ViewSources.background_entry` selects an optional raw
 module; native/browser XML adapters supply the background section's URL.
-The `bobcat:bts` bootstrap initializes the Context and then awaits an import
-of that entry. Application source is neither prefetched nor included in the
+The `bobcat:bts` bootstrap imports `lynx` from `bobcat:bts-runtime` and
+then awaits an import of that entry. The application entry receives the same
+named import as a preamble, matching MTS's strategy; `globalThis.lynx` stays
+absent on both sides. Application source is neither prefetched nor included in the
 Worker script. Application module loading through ResourceFetcher is explicitly
 deferred, so unpreloaded entries currently report an import error. Without an
 entry, the built-in BTS environment still starts. Compiled BTS bundle manifests

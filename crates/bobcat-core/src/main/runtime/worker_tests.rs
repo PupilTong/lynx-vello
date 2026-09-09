@@ -334,8 +334,8 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     );
     pair.answer(
         r"
-        import { lynx } from 'bobcat:bts';
-        if (lynx !== globalThis.lynx) throw Error('module/global identity');
+        import { lynx } from 'bobcat:bts-runtime';
+        if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
         core.addEventListener('request', event => {
             core.dispatchEvent({type: 'reply', data: [name, event.data]});
@@ -353,6 +353,7 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
     let mut pair = Pair::with_background(
         r"
         import { EventTarget } from 'bobcat:event-target';
+        if ('lynx' in globalThis) throw Error('MTS lynx leaked into globals');
         globalThis.context = lynx.getJSContext();
         if (!(context instanceof EventTarget)) throw Error('JS context must inherit EventTarget');
         if (context !== lynx.getJSContext()) throw Error('unstable JS context');
@@ -376,6 +377,7 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
             r"
         import { EventTarget } from 'bobcat:event-target';
         export const ready = await Promise.resolve(true);
+        if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
         const core = lynx.getCoreContext();
         if (!(core instanceof EventTarget)) throw Error('core context must inherit EventTarget');
         if (core !== lynx.getCoreContext()) throw Error('unstable core context');
