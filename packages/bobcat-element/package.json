@@ -2,7 +2,7 @@
   "name": "bobcat-element",
   "version": "0.0.0",
   "private": true,
-  "description": "The ESMs Bobcat preloads in its QuickJS realms: bobcat:runtime, bobcat:element, bobcat:timers and bobcat:event-target on the main thread, and bobcat:worker with bobcat:event-target and bobcat:timers on the group's worker runtime.",
+  "description": "The ESMs Bobcat preloads in its QuickJS realms: bobcat-internal (Worker), bobcat:runtime, bobcat:element, bobcat:timers and bobcat:event-target on the main thread, and bobcat:worker with bobcat:event-target and bobcat:timers on the group's worker runtime.",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {

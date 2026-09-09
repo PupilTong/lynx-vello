@@ -11,6 +11,7 @@ pub(crate) mod quickjs;
 pub(crate) mod runtime;
 #[path = "tree/lib.rs"]
 pub(crate) mod tree;
+mod workers;
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]
 use std::cell::RefCell;
@@ -34,6 +35,8 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
+use self::workers::WorkerFactory;
+use crate::background::WorkerCommand;
 use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
 use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource};
@@ -179,6 +182,7 @@ impl<R: EventRequester> ToPainterSender<R> {
 
 /// The main thread's end of its group's link.
 pub(crate) struct GroupLink<R: EventRequester> {
+    pub(crate) workers: Sender<WorkerCommand>,
     /// Every view's commands, and every attachment, in the order they were
     /// sent.
     pub(crate) commands: Mailbox<ToMain>,
@@ -318,6 +322,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         &requester,
                         &commands,
                         &notifications,
+                        &WorkerFactory::new(Mailbox::channel().0),
                         &mut views,
                     );
                 }
@@ -352,6 +357,7 @@ enum ViewSlot<R: EventRequester> {
 
 /// A view's document between its first source and its entry module.
 struct Booting<R: EventRequester> {
+    workers: WorkerFactory,
     requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
@@ -377,6 +383,7 @@ impl<R: EventRequester> Booting<R> {
     fn new(
         viewport: Viewport,
         sources: MainSources,
+        workers: WorkerFactory,
         style_pool: Option<&Rc<StylePool>>,
         notify: ToPainterSender<R>,
     ) -> Result<Self, LynxViewError> {
@@ -406,6 +413,7 @@ impl<R: EventRequester> Booting<R> {
             .collect::<Vec<_>>()
             .into_iter();
         Ok(Self {
+            workers,
             requests,
             document,
             notify,
@@ -424,7 +432,7 @@ impl<R: EventRequester> Booting<R> {
         mut self: Box<Self>,
         js_runtime: &mut ScriptRuntime,
         source: LoadedSource,
-        control: &StartupControl,
+        control: &Arc<StartupControl>,
     ) -> Booted<R> {
         match source {
             LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)) => {
@@ -449,20 +457,28 @@ impl<R: EventRequester> Booting<R> {
         js_runtime: &mut ScriptRuntime,
         source: &str,
         url: &str,
-        control: &StartupControl,
+        control: &Arc<StartupControl>,
     ) -> Booted<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
         let Self {
-            document, notify, ..
+            document,
+            notify,
+            workers,
+            ..
         } = *self;
-        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify) {
+        let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify.clone()) {
             Ok(runtime) => runtime,
             Err(error) => return Booted::Failed(error.into_script_error().into()),
         };
         if control.is_cancelled() {
             return Booted::Gone;
+        }
+        if let Err(error) =
+            runtime.install_workers(js_runtime, &workers, notify, url, Arc::clone(control))
+        {
+            return Booted::Failed(error.into_script_error().into());
         }
         if let Err(error) = runtime.run_main_thread_script(js_runtime, source, url) {
             if control.is_cancelled() {
@@ -479,6 +495,7 @@ impl<R: EventRequester> Booting<R> {
 
 fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>) {
     let GroupLink {
+        workers,
         commands,
         notifications,
         requester,
@@ -524,6 +541,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
     // The table lives outside the guard so a panic here can still be reported
     // to every view it ends — which is all of them, this thread being what
     // they share.
+    let workers = WorkerFactory::new(workers);
     let mut views = Vec::new();
     let served = catch_unwind(AssertUnwindSafe(|| {
         serve_group(
@@ -532,6 +550,7 @@ fn run_group<R: EventRequester>(style_threads: StyleThreads, link: GroupLink<R>)
             &requester,
             &commands,
             &notifications,
+            &workers,
             &mut views,
         );
     }));
@@ -717,6 +736,7 @@ fn attach<R: EventRequester>(
     notifications: &Sender<ToPainter>,
     view: ViewId,
     attachment: Attachment,
+    workers: &WorkerFactory,
 ) {
     let Attachment {
         viewport,
@@ -732,7 +752,13 @@ fn attach<R: EventRequester>(
             notify.send(ToPainter::Engine(EngineEvent::ScriptRunError(error)));
         })
     });
-    match Booting::new(viewport, sources, style_pool, notify.clone()) {
+    match Booting::new(
+        viewport,
+        sources,
+        workers.clone(),
+        style_pool,
+        notify.clone(),
+    ) {
         Ok(mut booting) => {
             booting.request_next();
             views.push(CarriedView::new(
@@ -760,6 +786,7 @@ fn serve_group<R: EventRequester>(
     requester: &Arc<R>,
     commands: &Mailbox<ToMain>,
     notifications: &Sender<ToPainter>,
+    workers: &WorkerFactory,
     views: &mut Vec<CarriedView<R>>,
 ) {
     loop {
@@ -785,6 +812,7 @@ fn serve_group<R: EventRequester>(
                         notifications,
                         view.expect("an attachment addresses its view"),
                         *attachment,
+                        workers,
                     );
                 }
                 command => {
@@ -823,9 +851,13 @@ fn apply_main_command<R: EventRequester>(
         ToMain::SourceLoaded { .. } => {
             unreachable!("sources are requested only during boot")
         }
-        // Nothing in this build constructs a `Worker`, so nothing produces
-        // one; delivering it into the realm that did lands with that object.
-        ToMain::Worker { .. } => {}
+        ToMain::Worker { key, payload } => {
+            if let Err(error) = runtime.dispatch_worker_event(js_runtime, key, payload) {
+                notify.send(ToPainter::Engine(EngineEvent::ListenerFailed(
+                    error.into_script_error(),
+                )));
+            }
+        }
         ToMain::DispatchEvent {
             target,
             name,

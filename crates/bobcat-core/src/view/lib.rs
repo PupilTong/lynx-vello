@@ -227,6 +227,8 @@ pub enum EngineEvent {
     /// Not fatal either: only the timer that threw is affected, a repeating
     /// one stays armed, and the realm goes on.
     TimerFailed(ScriptError),
+    /// A worker failed to load or threw. The owning view remains usable.
+    WorkerFailed(ScriptError),
     /// The painter could not produce a frame. Fatal for the draw target:
     /// nothing further will reach the screen, so an embedder reports it and
     /// takes the window down.
@@ -473,6 +475,7 @@ impl LynxGroup {
         let home = spawn_group(
             style_threads,
             GroupLink {
+                workers: workers.commands(),
                 commands: command_receiver,
                 notifications,
                 requester: event_requester,
@@ -872,13 +875,6 @@ pub(crate) enum ToMain {
     ///
     /// Addressed like every other per-view message, so a view that has been
     /// released drops its workers' news without anything having to check.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the realm that constructs a `Worker` is what reads one"
-        )
-    )]
     Worker {
         key: crate::background::WorkerKey,
         payload: crate::background::WorkerPayload,
@@ -901,6 +897,10 @@ pub(crate) enum ToPainter {
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
     RequestSource(SourceRequest),
+    RequestWorkerSource {
+        request: SourceRequest,
+        completion: crate::resource::SourceCompletion,
+    },
 }
 
 /// The latest committed frame, and only ever the latest.

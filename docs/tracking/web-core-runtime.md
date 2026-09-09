@@ -78,3 +78,15 @@ All endpoints are declared once in `lynx-stack/packages/web-platform/web-core/ts
 ## Also see
 
 Scope note: this is the primary spec for `.claude/agents/lynx-js-runtime-bridge.md` and informs `.claude/agents/lynx-reactlynx-compat.md`.
+
+## Bobcat Worker construction (2026-09-09)
+
+The engine now exposes `import { Worker } from "bobcat-internal"` on the main
+realm. It creates one context per object on the existing group worker runtime,
+loads through the view's fetcher, queues early messages, and supports parent
+message/error listeners and termination. This is the worker transport needed
+under the BTS integration above; it does not yet install the ReactLynx BTS
+bootstrap, RPC ports or background `lynx` APIs. Its event/lifetime model follows
+the [HTML Worker interface](https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface),
+with the current module-only, JSON-only scope and cooperative termination
+recorded in `../runtime-architecture.md`.

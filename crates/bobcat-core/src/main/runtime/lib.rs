@@ -371,6 +371,65 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         })
     }
 
+    pub(super) fn install_workers(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        workers: &super::workers::WorkerFactory,
+        notify: ToPainterSender<R>,
+        base_url: &str,
+        control: Arc<super::StartupControl>,
+    ) -> Result<(), MainThreadError> {
+        workers
+            .install(&mut self.engine, js_runtime, notify, base_url, control)
+            .map_err(|error| MainThreadError::from_engine("installing Worker", error))
+    }
+
+    pub(crate) fn dispatch_worker_event(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        key: crate::background::WorkerKey,
+        payload: crate::background::WorkerPayload,
+    ) -> Result<(), MainThreadError> {
+        use crate::background::WorkerPayload;
+        let failed = matches!(payload, WorkerPayload::Failed(_));
+        let (kind, data) = match payload {
+            WorkerPayload::Message(data) => ("message", data),
+            WorkerPayload::Closed => ("closed", String::new()),
+            WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
+                let kind = if failed { "failed" } else { "error" };
+                let location = error.location.as_ref();
+                let data = serde_json::json!({
+                    "message": error.message.as_ref(),
+                    "filename": location.and_then(|l| l.source.as_deref()).unwrap_or(""),
+                    "lineno": location.and_then(|l| l.line).unwrap_or(0),
+                    "colno": location.and_then(|l| l.column).unwrap_or(0),
+                })
+                .to_string();
+                self.tree
+                    .borrow()
+                    .notify
+                    .send(ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)));
+                (kind, data)
+            }
+        };
+        let key = key.get().to_string();
+        let called = self
+            .engine
+            .call_module_export(
+                js_runtime,
+                super::workers::MODULE,
+                "__BobcatDispatchWorkerEvent",
+                &[
+                    HostArgument::String(&key),
+                    HostArgument::String(kind),
+                    HostArgument::String(&data),
+                ],
+            )
+            .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
+        let finished = self.finish_batch(js_runtime, called.is_ok());
+        called.map(|_| ()).and(finished)
+    }
+
     /// Commits and publishes when anything is stale. Called by the command
     /// loop at the end of every round.
     pub(crate) fn commit_if_dirty(&mut self) {
@@ -627,6 +686,9 @@ __FlushElementTree();
 pub(crate) fn install_shared_modules(
     js_runtime: &mut ScriptRuntime,
 ) -> Result<(), MainThreadError> {
+    js_runtime
+        .register_module_source(super::workers::MODULE, super::workers::SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering Worker", error))?;
     js_runtime
         .register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)
         .map_err(|error| {
@@ -1209,3 +1271,6 @@ fn string_argument<'a>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod worker_tests;

@@ -170,3 +170,94 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     sibling.tick(true).unwrap();
     assert!(failed.pump().is_empty());
 }
+
+#[tokio::test]
+async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
+    let (group, first_resources, receiver) = setup().await;
+    let second_resources = Resources::new(
+        ResourcesConfig {
+            base_url: Some("app:///".parse().unwrap()),
+            log_to_stderr: false,
+            ..ResourcesConfig::default()
+        },
+        || {},
+    );
+    for (resources, color, entry) in [
+        (&first_resources, "blue", "app:///nested/first.js"),
+        (&second_resources, "red", "app:///nested/second.js"),
+    ] {
+        resources.register(entry, r"
+            import { Worker } from 'bobcat-internal';
+            const page = __CreatePage();
+            const box = __CreateView();
+            __SetInlineStyles(box, 'width:32px;height:24px;background:black');
+            __AppendElement(page, box);
+            const received = [];
+            // Both requests can reach the painter in the same pump turn.
+            for (const name of ['first', 'second']) {
+                const worker = new Worker('./worker.js', {name});
+                worker.onmessage = event => {
+                    received.push(event.data);
+                    if (received.length === 2) {
+                        if (received[0].color !== received[1].color ||
+                            received[0].name === received[1].name) throw Error('wrong worker context');
+                        __SetInlineStyles(box, `width:32px;height:24px;background:${event.data.color}`);
+                    }
+                    worker.terminate();
+                };
+                worker.postMessage('ready');
+            }
+        ", Some("text/javascript")).unwrap();
+        resources
+            .register(
+                "app:///nested/worker.js",
+                format!("onmessage = () => postMessage({{name, color: '{color}'}});"),
+                Some("text/javascript"),
+            )
+            .unwrap();
+    }
+    let mut first = view(
+        &group,
+        &first_resources,
+        ViewSources::new("nested/first.js"),
+    )
+    .await;
+    let mut second = view(
+        &group,
+        &second_resources,
+        ViewSources::new("nested/second.js"),
+    )
+    .await;
+    boot(&mut first, &receiver).unwrap();
+    boot(&mut second, &receiver).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut ready = true;
+        for (view, color) in [
+            (&mut first, [0, 0, 255, 255]),
+            (&mut second, [255, 0, 0, 255]),
+        ] {
+            for event in view.pump() {
+                match event {
+                    EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
+                    EngineEvent::WorkerFailed(error)
+                    | EngineEvent::ListenerFailed(error)
+                    | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
+                    EngineEvent::RenderFailed(error) => panic!("render: {error}"),
+                    _ => {}
+                }
+            }
+            let screenshot = view.capture().unwrap();
+            let offset = (12 * screenshot.size.width as usize + 16) * 4;
+            ready &= screenshot.pixels[offset..offset + 4] == color;
+        }
+        if ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker messages did not paint"
+        );
+        let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+}

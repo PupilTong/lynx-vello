@@ -145,6 +145,7 @@ pub(crate) struct PainterLink {
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
     source_request: Option<SourceRequest>,
+    worker_sources: Vec<(SourceRequest, SourceCompletion)>,
     control: Arc<crate::main::StartupControl>,
     /// Whether a drain has seen a frame announcement it has not adopted yet.
     /// Coalesces announcements during a normal drain or offscreen frame wait.
@@ -174,6 +175,7 @@ impl PainterLink {
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
             source_request: None,
+            worker_sources: Vec::new(),
             control,
             pending_announce: false,
             timer_deadline: None,
@@ -251,6 +253,12 @@ impl PainterLink {
             ToPainter::TimerDeadline(deadline) => self.timer_deadline = deadline,
             ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
             ToPainter::RequestSource(request) => self.source_request = Some(request),
+            ToPainter::RequestWorkerSource {
+                request,
+                completion,
+            } => {
+                self.worker_sources.push((request, completion));
+            }
         }
     }
 
@@ -840,6 +848,7 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         if self.link.control.is_cancelled() || self.link.notifications.is_disconnected() {
             self.link.control.cancel();
             self.link.source_request = None;
+            self.link.worker_sources.clear();
         } else if let Some(request) = self.link.source_request.take() {
             self.images.store().request_source(
                 request,
@@ -849,6 +858,11 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
                     Arc::clone(&self.link.control),
                 ),
             );
+        }
+        for (request, completion) in self.link.worker_sources.drain(..) {
+            if !completion.is_cancelled() {
+                self.images.store().request_source(request, completion);
+            }
         }
         self.service_images();
     }

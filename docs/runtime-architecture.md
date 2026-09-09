@@ -33,7 +33,6 @@ crates/bobcat-core/src/
   view/lib.rs          LynxView, ViewSources, the startup guard, and the
                        shared values, messages, and link construction
   paint/lib.rs         Painter, frame clock, and painter-owned link replicas
-  paint/sources.rs     painter-owned startup resource loading
   mailbox.rs           addressed FIFO and deadline waiting for both directions
   paint/gesture.rs     input arbitration
   paint/graphics.rs    window GPU state
@@ -41,6 +40,7 @@ crates/bobcat-core/src/
                        and inbox
   main/quickjs.rs      owner-thread-bound QuickJS adapter
   main/runtime/lib.rs  realm/DOM integration
+  main/workers.rs      main-thread Worker construction and commands
   main/tree/lib.rs     Lynx document and UA component policy
   background/lib.rs    the group's worker realms: keys, commands, and the
                        one sender everything that names a worker holds
@@ -84,6 +84,9 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
           │     ├── named compatibility exports + engine EventTarget
           │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.mjs)
+          ├──▶ bobcat-internal (explicit import; Worker class in worker.mjs)
+          │     ├──▶ bobcat:event-target
+          │     └──▶ bobcat-internal:host (createWorker, sendWorkerMessage, terminateWorker)
           └──▶ bobcat:element (packages/bobcat-element/src/element-papi.mjs)
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ private dom::Document<()> tree
@@ -314,7 +317,55 @@ separation is also what makes "a worker cannot touch the document" structural
 — there is no path from a worker realm to a `LynxDocument`, and no value of
 either runtime can be named by the other.
 
-Its whole surface is five operations:
+The main realm can explicitly import `Worker` from `bobcat-internal`:
+
+```js
+import { Worker } from "bobcat-internal";
+const worker = new Worker("./worker.js", { type: "module", name: "data" });
+worker.onmessage = event => { /* event.data */ };
+worker.postMessage({ command: "start" });
+// worker.terminate();
+```
+
+Every construction opens its own context on the existing `bobcat-workers`
+thread. The class is an `EventTarget` with `onmessage` and `onerror`; it is
+neither installed on `globalThis` nor available inside a worker. Modules are
+the only script kind, also when `type` is omitted; explicit `classic` is
+rejected. This internal API currently retains the worker scope's JSON
+transport (`JSON.stringify([message])`), not structured clone. Transfer lists,
+external module fetching, credentials options, and worker-local `onerror`
+remain unsupported. For example, `undefined` becomes `null`, cycles and
+BigInt throw, and typed arrays do not preserve their type.
+
+```text
+main realm: new Worker(url)
+  ├── Start(key, view, name) ───────────────────────▶ worker FIFO
+  └── RequestWorkerSource ──▶ painter ──▶ ResourceFetcher::request_source
+                                           │ SourceRequest::Worker {specifier, base_url}
+                                           └── SourceCompletion ──▶ worker FIFO: Script(key)
+main realm: postMessage / terminate ───────────────▶ worker FIFO
+main realm: Worker message/error handler ◀── ToMain::Worker(view, key)
+```
+
+The base URL is the creating view's resolved entry URL; resolution, fetching
+and UTF-8 validation remain fetcher policy. Multiple worker requests are
+buffered without coalescing. `Start` is sent before the painter is asked to
+fetch, so messages posted during loading queue against an existing key. The
+completion sends directly to workers: it needs no main-thread turn and cannot
+be held behind a long main-thread script. It holds a weak sender so outstanding
+host IO cannot prolong the group's join.
+
+Worker keys are allocated once per group on main and never reused. The main
+realm retains Worker objects until termination, close, or load failure.
+`terminate()` immediately removes the receiving handle and asks workers to
+end its context between tasks; it does not interrupt synchronous JavaScript.
+Late source results and messages cannot restart or reach a terminated context.
+Releasing the view, including failed entry boot, cancels source work and sends
+`ReleaseView` as its native callbacks are dropped. Worker errors reach the
+parent's `error` handler and the embedder as nonfatal `WorkerFailed`; a parent
+handler that throws reports `ListenerFailed` and leaves the view serving.
+
+The script engine's whole surface is five operations:
 
 - register a Rust-backed named function export in a native ESM module;
 - register UTF-8 source under an exact preloaded module specifier;
