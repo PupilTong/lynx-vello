@@ -1,11 +1,12 @@
+use tokio::sync::mpsc;
+
 use super::*;
-use crate::background::WorkerCommand;
-use crate::mailbox::Mailbox;
-use crate::main::StartupControl;
+use crate::background::{WorkerCommand, WorkerEvent};
+use crate::link::ToMain;
 use crate::main::tree::{PageConfig, Viewport, new_document};
 use crate::main::workers::WorkerFactory;
-use crate::paint::PainterLink;
-use crate::view::{NoWakeup, detached_link};
+use crate::paint::{PainterLink, detached_link};
+use crate::view::NoWakeup;
 
 /// The handle a packed id names. A handle carries a generation as well as
 /// an arena key, so a test spells one the way script sees it — and for a
@@ -25,7 +26,7 @@ fn no_detail() -> Arc<str> {
     Arc::from("")
 }
 
-fn runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
+fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     runtime_over(new_document(
         Viewport::new(393.0, 727.0),
         PageConfig::default(),
@@ -34,7 +35,7 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
 
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
-fn text_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
+fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
     let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
@@ -42,9 +43,7 @@ fn text_runtime() -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe)
     runtime_over(document)
 }
 
-fn runtime_over(
-    document: LynxDocument,
-) -> (ScriptRuntime, MainThreadRuntime<NoWakeup>, DocumentProbe) {
+fn runtime_over(document: LynxDocument) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     let (js_runtime, runtime, elements, _) = runtime_over_watching_names(document);
     (js_runtime, runtime, elements)
 }
@@ -53,10 +52,13 @@ fn runtime_over(
 /// observe what script built without going through the runtime's own
 /// methods.
 struct DocumentProbe {
-    tree: Rc<RefCell<TreeHandle<NoWakeup>>>,
-    // These tests exercise only MTS. Keep the worker command boundary open;
-    // worker_tests executes both sides against a real worker runtime.
-    _workers: Mailbox<WorkerCommand>,
+    tree: Rc<RefCell<TreeHandle>>,
+    // These tests exercise only MTS. Keep the far ends open so the realm's
+    // sends succeed; worker_tests executes both sides against a real worker
+    // runtime.
+    _commands: mpsc::UnboundedReceiver<ToMain>,
+    _workers: mpsc::UnboundedReceiver<WorkerCommand>,
+    _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
 }
 
 impl DocumentProbe {
@@ -65,9 +67,9 @@ impl DocumentProbe {
     }
 }
 
-/// The painting side's replica of the realm's name set, driven by
-/// hand: a test resyncs it where a routing pass would and then asks what
-/// the realm has published.
+/// The painting side's view of the realm's name set, driven by hand: a test
+/// resyncs it where a routing pass would and then asks what the realm has
+/// published.
 struct PublishedNames(PainterLink);
 
 impl PublishedNames {
@@ -83,29 +85,30 @@ fn runtime_over_watching_names(
     document: LynxDocument,
 ) -> (
     ScriptRuntime,
-    MainThreadRuntime<NoWakeup>,
+    MainThreadRuntime,
     DocumentProbe,
     PublishedNames,
 ) {
-    let (painter, main) = detached_link(Arc::new(NoWakeup));
+    let (painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
+    let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
         .expect("main-thread runtime");
-    let (workers, inbox) = Mailbox::channel();
-    runtime
+    let (workers, inbox) = mpsc::unbounded_channel();
+    let worker_events = runtime
         .install_workers(
             &mut js_runtime,
             &WorkerFactory::new(workers),
-            main.notify,
+            outbox,
             "app:///main.js",
             None,
-            Arc::new(StartupControl::default()),
         )
         .unwrap();
     let probe = DocumentProbe {
         tree: Rc::clone(&runtime.tree),
+        _commands: commands,
         _workers: inbox,
+        _worker_events: worker_events,
     };
     (js_runtime, runtime, probe, PublishedNames(painter))
 }
@@ -114,35 +117,40 @@ fn runtime_over_watching_names(
 /// document — what a `LynxGroup` holds once a second view joins it.
 fn two_view_group() -> (
     ScriptRuntime,
-    MainThreadRuntime<NoWakeup>,
-    MainThreadRuntime<NoWakeup>,
-    Mailbox<WorkerCommand>,
+    MainThreadRuntime,
+    MainThreadRuntime,
+    GroupFarEnds,
 ) {
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut views = Vec::new();
-    let (workers, inbox) = Mailbox::channel();
+    let mut ends = GroupFarEnds::default();
+    let (workers, inbox) = mpsc::unbounded_channel();
+    ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
     for _ in 0..2 {
-        let (_painter, main) = detached_link(Arc::new(NoWakeup));
+        let (_painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
             .expect("main-thread runtime");
-        runtime
-            .install_workers(
-                &mut js_runtime,
-                &workers,
-                main.notify,
-                "app:///main.js",
-                None,
-                Arc::new(StartupControl::default()),
-            )
+        let worker_events = runtime
+            .install_workers(&mut js_runtime, &workers, outbox, "app:///main.js", None)
             .unwrap();
+        ends.commands.push(commands);
+        ends.worker_events.push(worker_events);
         views.push(runtime);
     }
     let second = views.pop().expect("the second view");
     let first = views.pop().expect("the first view");
-    (js_runtime, first, second, inbox)
+    (js_runtime, first, second, ends)
+}
+
+/// The far ends of a group's channels, held so the realms' sends succeed.
+#[derive(Default)]
+struct GroupFarEnds {
+    commands: Vec<mpsc::UnboundedReceiver<ToMain>>,
+    workers: Option<mpsc::UnboundedReceiver<WorkerCommand>>,
+    worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
 }
 
 #[test]
@@ -898,32 +906,33 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut painter, main) = detached_link(Arc::new(NoWakeup));
-    let state = EventState::new(main.notify);
+    let (mut painter, outbox, _commands) = detached_link(Arc::new(NoWakeup));
+    let state = EventState::new(outbox);
     let (a, b) = (node_id(3), node_id(4));
-    // The edges as a sequence, so both what crossed and what did not are
-    // one assertion rather than a pair of membership questions.
-    let mut drain = || {
-        painter
-            .drain()
-            .into_iter()
-            .map(|notification| match notification {
-                ToPainter::ListenerAvailable(name) => format!("+{name}"),
-                ToPainter::ListenerUnavailable(name) => format!("-{name}"),
-                other => panic!("the name index publishes only listener edges, got {other:?}"),
-            })
-            .collect::<Vec<_>>()
+    // One call at a time, so what crossed and what did not is asserted per
+    // registration rather than inferred from the set afterwards. The names
+    // come back sorted because a set has no order of its own.
+    let published = |painter: &mut PainterLink| {
+        painter.sync();
+        let mut names: Vec<String> = painter
+            .listener_names()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        names.sort();
+        names
     };
+    let edge = |painter: &mut PainterLink| painter.take_published_edge();
 
     state.enable(a, "tap", false);
+    assert!(edge(&mut painter), "a name's first registration crosses");
     state.enable(a, "tap", true);
+    assert!(!edge(&mut painter), "its second anywhere does not");
     state.enable(a, "scroll", false);
+    assert!(edge(&mut painter));
     state.enable(b, "tap", false);
-    assert_eq!(
-        drain(),
-        ["+tap", "+scroll"],
-        "only a name's first registration anywhere crosses"
-    );
+    assert!(!edge(&mut painter));
+    assert_eq!(published(&mut painter), ["scroll", "tap"]);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
     assert_eq!(state.by_node.borrow()[&b].len(), 1);
 
@@ -932,19 +941,20 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     state.enable(a, "tap", false);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
     assert!(
-        drain().is_empty(),
+        !edge(&mut painter),
         "a repeat registration publishes nothing"
     );
 
     state.disable(a, "scroll", false);
-    assert_eq!(drain(), ["-scroll"], "the last removal closes the name");
+    assert!(edge(&mut painter), "the last removal closes the name");
+    assert_eq!(published(&mut painter), ["tap"]);
     assert_eq!(state.by_node.borrow()[&a].len(), 2);
 
     // Dropping an element takes its own registrations and only those.
     state.forget_node(a);
     assert!(!state.by_node.borrow().contains_key(&a));
     assert!(
-        drain().is_empty(),
+        !edge(&mut painter),
         "the sibling registration still holds the name open"
     );
     assert_eq!(
@@ -958,7 +968,8 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     state.forget_node(b);
     assert!(state.listeners.borrow().is_empty());
     assert!(state.by_node.borrow().is_empty());
-    assert_eq!(drain(), ["-tap"], "the last listener unpublishes its name");
+    assert!(edge(&mut painter), "the last listener unpublishes its name");
+    assert!(published(&mut painter).is_empty());
 }
 
 /// The replica is what the painting side filters against, so a
@@ -2289,10 +2300,10 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
     assert!(error.to_string().contains("update-list-info"), "{error}");
 }
 
-/// The realm's timers, from the four globals a card calls to the schedule the
-/// round's tail runs. A zero delay is due the moment it is armed, so a test
-/// spends a round by asking the runtime to run what is due — which is exactly
-/// what the tail of every round does.
+/// The realm's timers, from the four globals a card calls to the schedule a
+/// page's epilogue runs. A zero delay is due the moment it is armed, so a
+/// test spends a turn by asking the runtime to run what is due — which is
+/// exactly what the first step of every epilogue does.
 #[test]
 fn a_timeout_runs_once_with_the_arguments_it_was_given() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
@@ -2315,7 +2326,7 @@ fn a_timeout_runs_once_with_the_arguments_it_was_given() {
         runtime.run_due_timers(&mut js_runtime).is_empty(),
         "the callback returned"
     );
-    // Nothing is armed any more, so a second round finds nothing to run.
+    // Nothing is armed any more, so a second pass finds nothing to run.
     assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     assert_eq!(runtime.next_timer_deadline(), None);
 
@@ -2385,9 +2396,9 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
         assert!(runtime.run_due_timers(&mut js_runtime).is_empty());
     }
 
-    // Three rounds ran it and the third disarmed it, so the last three found
-    // nothing — a repeat neither runs twice in one round nor outlives its
-    // own `clearInterval`.
+    // Three passes ran it and the third disarmed it, so the last three found
+    // nothing — a repeat neither runs twice in one pass nor outlives its own
+    // `clearInterval`.
     runtime
         .evaluate_module(
             &mut js_runtime,

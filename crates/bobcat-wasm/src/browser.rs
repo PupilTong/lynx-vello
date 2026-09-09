@@ -145,8 +145,12 @@ pub struct BobcatRenderer {
     /// workers themselves are the group's and retire with it; only the size
     /// is wrapper state.
     style_threads: StyleThreads,
-    /// The group the current view belongs to, and the one thing that joins
-    /// its Lynx-main Worker. One page, one group: see [`Self::load`].
+    /// The group the current view belongs to, and the one thing that ends its
+    /// two Workers: the Lynx-main one, and the worker-realm one after it.
+    ///
+    /// Ending is all it is on this target. Under `panic=abort` a trapped
+    /// Worker never signals its join handle, so teardown here says the goodbye
+    /// and does not wait for either. One page, one group: see [`Self::load`].
     group: Option<LynxGroup>,
     script_finished: bool,
     disposed: bool,
@@ -586,7 +590,8 @@ impl BobcatRenderer {
 
     /// Release the current native view before the outer facade terminates its
     /// Render Worker and the Wasm session with it. Dropping the view stops it,
-    /// and dropping its group joins that Lynx-main Worker.
+    /// and dropping its group ends its two Workers — the Lynx-main one, and
+    /// the worker-realm one after it.
     #[wasm_bindgen(js_name = dispose)]
     pub fn dispose(&mut self) {
         self.disposed = true;

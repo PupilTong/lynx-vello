@@ -10,28 +10,25 @@
 //! mirror those two owners; this module holds the handles that join them and
 //! the link that crosses between them.
 
-use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dom::input::InputEvent;
-use dom::{CommittedFrame, FontBlob, NodeId, StylePool, Vector2D};
+use dom::{FontBlob, StylePool};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::background::WorkerHome;
-use crate::clock::ClockInstant;
-use crate::mailbox::{Mailbox, Sender};
+use crate::link::{Published, ToMain, ViewCancel, ViewNotice};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
-#[cfg(test)]
-use crate::main::tree::LynxDocument;
 use crate::main::tree::PageConfig;
-use crate::main::{GroupHome, GroupLink, StartupControl, ToPainterSender, spawn_group};
+use crate::main::{GroupHome, GroupLink, spawn_group};
 pub use crate::paint::WindowTarget;
 use crate::paint::{Output, Painter, PainterLink};
-use crate::resource::{LoadedSource, ResourceFetcher, SourceRequest};
+use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
 
 /// View metrics, copied across the view's one thread boundary.
@@ -145,6 +142,11 @@ pub enum DrawTarget {
     /// loop would answer it — so a Wasm view is refused this target at
     /// construction rather than hanging on it.
     Offscreen,
+    /// Nowhere at all. Test-only, so an in-crate test that exercises routing,
+    /// events or timers pays for no GPU device; production has exactly the
+    /// two targets an embedder can name.
+    #[cfg(test)]
+    None,
 }
 
 impl DrawTarget {
@@ -163,6 +165,8 @@ impl fmt::Debug for DrawTarget {
         formatter.write_str(match self {
             Self::Window(_) => "DrawTarget::Window",
             Self::Offscreen => "DrawTarget::Offscreen",
+            #[cfg(test)]
+            Self::None => "DrawTarget::None",
         })
     }
 }
@@ -406,14 +410,14 @@ impl ViewSources {
 /// per view: its views wake one event loop, the one belonging to the thread
 /// they were all created on.
 ///
-/// Views in a group take turns rather than run at once. The thread serves
-/// one command round for one view at a time, so a second view costs no
-/// second heap, no second module graph and no second set of Stylo workers,
-/// at the price of the two never restyling in parallel. What buys that is
-/// the assumption that a person drives one view at a time; a host that needs
-/// two pages genuinely parallel gives them a group each, on a thread each.
+/// Views in a group take turns rather than run at once. Every entry into a
+/// realm is synchronous on that one thread, so a second view costs no second
+/// heap, no second module graph and no second set of Stylo workers, at the
+/// price of the two never restyling in parallel. What buys that is the
+/// assumption that a person drives one view at a time; a host that needs two
+/// pages genuinely parallel gives them a group each, on a thread each.
 ///
-/// Dropping the group does not end its views: the thread is joined once the
+/// Dropping the group does not end its views: its threads are joined once the
 /// group and the last view built from it are both gone.
 pub struct LynxGroup {
     inner: Rc<GroupInner>,
@@ -421,41 +425,29 @@ pub struct LynxGroup {
 
 /// What a group owns, and what its views hold it alive by.
 struct GroupInner {
-    /// Every view's commands, and every attachment, on one FIFO.
-    commands: Sender<ToMain>,
-    notifications: Rc<Mailbox<ToPainter>>,
-    /// The next view's id. Ids are never reused, so a command still in
-    /// flight for a view that has ended cannot find a later one wearing its
-    /// name.
-    next_view: Cell<u64>,
+    /// The group's inbox. `Option` only so the goodbye — dropping the last
+    /// sender — can be said before the join below waits for it.
+    attach: Option<mpsc::UnboundedSender<GroupCommand>>,
     home: GroupHome,
-    /// The group's worker realms: a second thread and a second `QuickJS`
-    /// runtime, started with this group and shared by every view in it. Here
-    /// rather than on `bobcat-main` because it is the *group* whose workers
-    /// share a runtime.
-    workers: RefCell<WorkerHome>,
-}
-
-impl GroupInner {
-    fn next_id(&self) -> ViewId {
-        let id = self.next_view.get();
-        self.next_view.set(id + 1);
-        ViewId(id)
-    }
+    /// The group's other thread, held here rather than by `bobcat-main`:
+    /// `bobcat-workers` is a runtime of the group's own, and all `bobcat-main`
+    /// is given of it is one sender.
+    workers: WorkerHome,
 }
 
 impl Drop for GroupInner {
     fn drop(&mut self) {
-        // Goodbye first, join second, exactly as a view's shutdown is. The
-        // group holds a sender on the FIFO `bobcat-main` parks on, so a close
-        // that is not sent is a close that never arrives — and this runs only
-        // once every view built from the group has already been dropped, so
-        // there is nothing left on the thread to end.
-        let _ = self.commands.send((None, ToMain::Close));
+        // Goodbye first, join second. Closing the inbox is what ends the
+        // group's task, and this runs only once every view built from the
+        // group has already been dropped, so there is nothing left on the
+        // thread to end.
+        drop(self.attach.take());
         self.home.join();
-        // The workers second: `bobcat-main` holds a sender on their channel
-        // too, and the goodbye is the last one of those dropping.
-        self.workers.borrow_mut().join();
+        // Main first, because its view tasks and its `WorkerFactory` hold
+        // senders on the worker thread's channel. Once `bobcat-main` has
+        // returned, the group's own sender is the last one, and
+        // `WorkerHome::join` drops it and waits.
+        self.workers.join();
     }
 }
 
@@ -466,54 +458,55 @@ impl fmt::Debug for LynxGroup {
 }
 
 impl LynxGroup {
-    /// Starts this group's `bobcat-main` and waits until the script runtime
-    /// and style pool it shares are up.
+    /// Starts this group's two threads — `bobcat-main` and `bobcat-workers` —
+    /// and waits until the script runtime and style pool `bobcat-main` shares
+    /// out are up.
     ///
-    /// Both are ready before views attach. A worker that cannot start fails
-    /// the group here, before any view can use its runtime or pool.
+    /// All of it is ready before views attach. A thread or a style worker that
+    /// cannot start fails the group here, rather than whichever view or
+    /// `Worker` happened to ask for it first.
     ///
     /// # Errors
     ///
-    /// [`LynxViewError::Engine`] if `bobcat-main` or a style worker will not
-    /// start — asking for more workers than Stylo indexes is one such
-    /// refusal — and [`LynxViewError::Script`] if the shared `QuickJS`
-    /// runtime cannot be created.
+    /// [`LynxViewError::Engine`] if `bobcat-main`, `bobcat-workers` or a style
+    /// worker will not start — asking for more workers than Stylo indexes is
+    /// one such refusal — and [`LynxViewError::Script`] if the shared
+    /// `QuickJS` runtime cannot be created.
     pub async fn new<R: EventRequester>(
         event_requester: Arc<R>,
         style_threads: StyleThreads,
     ) -> Result<Self, LynxViewError> {
-        let (commands, command_receiver) = Mailbox::channel();
-        let (notifications, notification_receiver) = Mailbox::channel();
-        let (ready, started) = flume::bounded(1);
-        // Beside `bobcat-main`, and reporting onto the same mailbox: a worker
-        // thread that will not start is a group that will not start, which is
-        // what lets every later worker be one send with nothing to check.
-        let workers = WorkerHome::start(commands.clone())?;
+        // The group's second runtime, started here beside `bobcat-main`
+        // rather than by it: `bobcat-main` is handed one sender on it and
+        // nothing else. First, because a `bobcat-main` that will not spawn
+        // leaves this local to end the worker thread — `WorkerHome`'s own
+        // `Drop` joins it — rather than a thread parked on a channel nobody
+        // holds.
+        let workers = WorkerHome::start()?;
+        let (attach, attachments) = mpsc::unbounded_channel();
+        let (ready, started) = oneshot::channel();
         let home = spawn_group(
             style_threads,
             GroupLink {
-                workers: workers.commands(),
-                commands: command_receiver,
-                notifications,
+                attach: attachments,
                 requester: event_requester,
                 ready,
+                workers: workers.commands(),
             },
         )?;
         // Into the handle before the first await, so every exit path from
-        // here on closes the thread and joins it — including this one.
+        // here on closes both threads and joins them — including this one.
         let group = Self {
             inner: Rc::new(GroupInner {
-                commands,
-                notifications: Rc::new(notification_receiver),
-                next_view: Cell::new(0),
+                attach: Some(attach),
                 home,
-                workers: RefCell::new(workers),
+                workers,
             }),
         };
-        match started.recv_async().await {
+        match started.await {
             Ok(Ok(())) => Ok(group),
             Ok(Err(error)) => Err(error),
-            Err(flume::RecvError::Disconnected) => Err(EngineError::Thread {
+            Err(_) => Err(EngineError::Thread {
                 name: "script",
                 message: "the Lynx main thread ended before it reported startup".to_owned(),
             }
@@ -523,9 +516,10 @@ impl LynxGroup {
 
     /// Builds the draw target and returns a loading view on the calling thread.
     ///
-    /// Main requests each stylesheet in cascade order, then the entry module.
-    /// Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher, which
-    /// resolves, loads and decodes them and completes directly into main's FIFO. Boot
+    /// The view's task requests each stylesheet in cascade order, then the entry
+    /// module. Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher,
+    /// which resolves, loads and decodes them and completes the request it was
+    /// handed, waking whichever task was awaiting that source. Boot
     /// completion is [`EngineEvent::ScriptFinished`], and loading, configuration,
     /// or boot failure is [`EngineEvent::StartupFailed`].
     ///
@@ -566,37 +560,35 @@ impl LynxGroup {
             init_data,
             global_props,
         } = sources;
-        let view = self.inner.next_id();
-        let control = Arc::new(StartupControl::default());
-        let (painter_link, frames) = view_link(
-            view,
-            &self.inner.commands,
-            Rc::clone(&self.inner.notifications),
-            Arc::clone(&control),
-        );
-        // The attachment goes first and the sources follow it on the same
-        // FIFO, so the thread has this view's document before the first
-        // source it must mount on one.
+        // One view, one set of channels: nothing here is shared with a
+        // sibling, so nothing has to be addressed or deferred.
+        let cancel = ViewCancel::default();
+        let (commands, command_receiver) = mpsc::unbounded_channel();
+        let (notices, notice_receiver) = mpsc::unbounded_channel();
+        let (frames, frame_receiver) = watch::channel(Published::default());
+        let painter_link =
+            PainterLink::new(commands, notice_receiver, frame_receiver, cancel.clone());
         self.inner
-            .commands
-            .send((
-                Some(view),
-                ToMain::Attach(Box::new(Attachment {
-                    viewport,
-                    sources: MainSources {
-                        config,
-                        fonts,
-                        default_font_family,
-                        style_sheets,
-                        entry,
-                        background_entry,
-                        init_data,
-                        global_props,
-                    },
-                    frames,
-                    control: Arc::clone(&control),
-                })),
-            ))
+            .attach
+            .as_ref()
+            .expect("a group hands out attachments until it is dropped")
+            .send(GroupCommand::Attach(Box::new(ViewAttachment {
+                viewport,
+                sources: MainSources {
+                    config,
+                    fonts,
+                    default_font_family,
+                    style_sheets,
+                    entry,
+                    background_entry,
+                    init_data,
+                    global_props,
+                },
+                commands: command_receiver,
+                notices,
+                frames,
+                cancel: cancel.clone(),
+            })))
             .map_err(|_| EngineError::Thread {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
@@ -608,7 +600,7 @@ impl LynxGroup {
             link: Some(painter_link),
             painter: None,
             group: Some(Rc::clone(&self.inner)),
-            control,
+            cancel,
         };
         let output = Output::build(target, frame_size).await?;
         // The store is built here, on the thread that owns the painter and
@@ -650,6 +642,11 @@ pub struct LynxView<F> {
     /// what keeps that thread — and the runtime and pool on it — alive for as
     /// long as any view built from the group is, in whatever order the
     /// embedder drops them.
+    ///
+    /// **Last field, and it must stay last.** Fields drop in declaration
+    /// order, so the painter — and with it this view's command sender, which
+    /// is what ends its task — goes first, and the handle that joins the
+    /// thread goes after there is nothing left on it.
     #[expect(dead_code, reason = "held to keep the group's thread alive")]
     group: Rc<GroupInner>,
 }
@@ -734,9 +731,15 @@ impl<F: ResourceFetcher> LynxView<F> {
         self.painter.owes_frame()
     }
 
+    /// How long a host may park before this view needs a turn of its own.
+    ///
+    /// Always `None`: nothing the engine owes itself is the host's to wait
+    /// out any more. A realm's timers come due on `bobcat-main`, which waits
+    /// them out itself and wakes this thread through its
+    /// [`EventRequester`] like any other publication.
     #[must_use]
-    pub fn next_wakeup(&self) -> Option<Duration> {
-        self.painter.next_wakeup()
+    pub const fn next_wakeup(&self) -> Option<Duration> {
+        None
     }
 
     /// Whether the engine owed the timeline another frame as of the last
@@ -794,6 +797,44 @@ impl<F: ResourceFetcher> LynxView<F> {
     }
 }
 
+/// What an in-crate test reaches a live view through.
+///
+/// Every one of these is an observation the engine already makes somewhere;
+/// none of them is a second way to drive a view. They are here rather than in
+/// the harness because the painter is private to the view.
+#[cfg(test)]
+impl<F: ResourceFetcher> LynxView<F> {
+    /// The painting half, so a test can pin the frame clock or read the
+    /// gesture arena the way `pump` and `tick` do.
+    pub(crate) const fn painter(&mut self) -> &mut Painter<F> {
+        &mut self.painter
+    }
+
+    /// This view's cancellation flag, which is what a source completion the
+    /// host still holds is answered against.
+    pub(crate) const fn cancel(&self) -> &ViewCancel {
+        self.painter.view_cancel()
+    }
+
+    /// Runs `probe` against the document on the thread that owns it,
+    /// answering `None` if that thread never got to it.
+    pub(crate) fn probe_document<T: Send + 'static>(
+        &mut self,
+        probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
+    ) -> Option<T> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.painter.send(ToMain::Probe(Box::new(move |document| {
+            let _ = sender.send(probe(document));
+        })));
+        receiver.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    /// The newest committed frame this view has published.
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<dom::CommittedFrame>> {
+        self.painter.published_frame()
+    }
+}
+
 /// A half-built view whose destructor is the cancellation protocol for
 /// [`LynxGroup::create_lynx_view`].
 struct ViewStartup<F> {
@@ -805,7 +846,7 @@ struct ViewStartup<F> {
     /// this guards is a view that does not exist yet, and dropping one
     /// cancels it.
     group: Option<Rc<GroupInner>>,
-    control: Arc<StartupControl>,
+    cancel: ViewCancel,
 }
 
 impl<F: ResourceFetcher> ViewStartup<F> {
@@ -822,196 +863,43 @@ impl<F> Drop for ViewStartup<F> {
         if self.group.take().is_none() {
             return;
         }
-        // Cancellation first: `bobcat-main` checks the flag at every gate
-        // between this view's sources, so a source that lands in the same
-        // instant cannot carry its boot onward into QuickJS. It is this
-        // view's flag alone — the group's other views go on booting.
-        self.control.cancel();
-        // Then the goodbye, which the group's thread answers by releasing
-        // this view and nothing else. Either the painter holds the sender,
-        // or — if the draw target failed before one existed — the bare link
-        // still does. The fetcher sees cancellation before the painter releases it;
-        // any completion still owned by an IO job discards its late result.
+        // Cancellation first: the view's task checks the flag at every gate
+        // between its sources, so a source that lands in the same instant
+        // cannot carry its boot onward into QuickJS. It is this view's flag
+        // alone — the group's other views go on booting.
+        self.cancel.cancel();
+        // Then the goodbye, which is dropping the command sender — either
+        // the painter's or, if the draw target failed before one existed,
+        // the bare link's. The fetcher sees cancellation before the painter
+        // releases it; any completion still owned by an IO job discards its
+        // late result.
         if let Some(painter) = self.painter.as_mut() {
             painter.shutdown();
-        } else if let Some(link) = self.link.as_ref() {
-            link.send(ToMain::Shutdown);
         }
+        drop(self.link.take());
     }
 }
 
-/// Which view on a group's thread a command is for.
-///
-/// Every view in a group sends on one FIFO, so every command names its view;
-/// a group hands the ids out and never reuses one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ViewId(u64);
+/// Everything a group's thread is ever told.
+pub(crate) enum GroupCommand {
+    /// Serve one more view on the group's runtime and style pool.
+    Attach(Box<ViewAttachment>),
+}
 
-/// A view for a group's thread to adopt, and everything that view needs
-/// which is not already the group's.
+/// A view for a group's thread to adopt: everything that view needs which is
+/// not already the group's, and both ends of the link it will speak through.
 ///
 /// Nothing here is generic over the embedder's [`EventRequester`]. The one
 /// part of a view's link that knows it is the requester itself, and that is
 /// the group's — every view in a group paints on the thread that created the
-/// group, and so wakes one event loop. That is what lets attachments and
-/// commands share a single channel instead of needing a select over two.
-pub(crate) struct Attachment {
+/// group, and so wakes one event loop.
+pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
     pub(crate) sources: MainSources,
-    pub(crate) frames: Arc<FrameHub>,
-    pub(crate) control: Arc<StartupControl>,
-}
-
-/// Painter → Lynx main: every fact the document must see.
-pub(crate) enum ToMain {
-    /// Create the addressed view on the group's runtime and style pool.
-    Attach(Box<Attachment>),
-    /// The group and its last view have been released.
-    Close,
-    DispatchEvent {
-        target: NodeId,
-        name: &'static str,
-        detail: String,
-    },
-    Resize {
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    },
-    BeginFrame {
-        now: f64,
-        seq: u64,
-    },
-    Refill {
-        offsets: Vec<(NodeId, Vector2D<f32>)>,
-    },
-    /// The host's image reports: completed or failed loads. No variant can
-    /// carry pixels, which is what makes "`ImageData` never crosses a
-    /// channel" a property of the type.
-    ImageEvents(Vec<dom::ImageEvent>),
-    TimersDue,
-    /// Completion of the source request issued by main.
-    SourceLoaded {
-        module: Option<String>,
-        source: Result<LoadedSource, LynxViewError>,
-    },
-    /// One thing a worker realm said, for the view whose realm created it.
-    ///
-    /// Addressed like every other per-view message, so a view that has been
-    /// released drops its workers' news without anything having to check.
-    Worker {
-        key: crate::background::WorkerKey,
-        payload: crate::background::WorkerPayload,
-    },
-    Shutdown,
-    #[cfg(test)]
-    Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
-}
-
-/// Lynx main → painter: everything the main thread has to say back.
-#[derive(Debug)]
-pub(crate) enum ToPainter {
-    /// The frame mailbox holds something the painter has not read.
-    FrameChanged,
-    Engine(EngineEvent),
-    ListenerAvailable(Arc<str>),
-    ListenerUnavailable(Arc<str>),
-    BeginFrameServiced(u64),
-    TimerDeadline(Option<ClockInstant>),
-    /// Sources the last paint walk met that the store has not been asked for.
-    RequestImages(Vec<Arc<str>>),
-    RequestSource(SourceRequest),
-    RequestWorkerSource {
-        request: SourceRequest,
-        completion: crate::resource::SourceCompletion,
-    },
-}
-
-/// The latest committed frame, and only ever the latest.
-pub(crate) type FrameHub = Mutex<Option<Arc<CommittedFrame>>>;
-
-pub(crate) fn frame_slot(hub: &FrameHub) -> MutexGuard<'_, Option<Arc<CommittedFrame>>> {
-    hub.lock()
-        .unwrap_or_else(|error| panic!("the frame mailbox is poisoned: {error}"))
-}
-
-/// Registers a view on its group's inbox and creates its latest-frame mailbox.
-fn view_link(
-    view: ViewId,
-    commands: &Sender<ToMain>,
-    notifications: Rc<Mailbox<ToPainter>>,
-    control: Arc<StartupControl>,
-) -> (PainterLink, Arc<FrameHub>) {
-    let frames = Arc::new(FrameHub::new(None));
-    let painter = PainterLink::new(
-        view,
-        commands.clone(),
-        notifications,
-        Arc::clone(&frames),
-        control,
-    );
-    (painter, frames)
-}
-
-/// Both ends of one view's link, for a caller that is itself the far end: the
-/// crate's benchmarks and the unit tests that drive a document in place
-/// rather than over a group's thread.
-pub(crate) struct DetachedLink<R: EventRequester> {
-    /// What the painter sent, still tagged with the view a group's thread
-    /// would have routed it to. Only the unit tests that play that thread
-    /// read it; a benchmark needs the reporting half alone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "only a test plays the far end of a link")
-    )]
-    pub(crate) commands: Mailbox<ToMain>,
-    /// Everything the main thread's side has to say back.
-    pub(crate) notify: ToPainterSender<R>,
-}
-
-#[cfg(test)]
-impl<R: EventRequester> DetachedLink<R> {
-    /// The next command the painter sent, with the view tag stripped off.
-    ///
-    /// A detached link carries exactly one view and no group control, so
-    /// there is nothing else the tag could have selected.
-    pub(crate) fn try_recv(&self) -> Result<ToMain, flume::TryRecvError> {
-        self.commands.try_recv().map(|(_, command)| command)
-    }
-}
-
-/// Builds a link with nothing on the far end of it.
-pub(crate) fn detached_link<R: EventRequester>(
-    requester: Arc<R>,
-) -> (PainterLink, DetachedLink<R>) {
-    let (commands, command_receiver) = Mailbox::channel();
-    let (notifications, notification_receiver) = Mailbox::channel();
-    let (painter, frames) = view_link(
-        DETACHED_VIEW,
-        &commands,
-        Rc::new(notification_receiver),
-        Arc::new(StartupControl::default()),
-    );
-    // The local sender goes here: the painter holds the only clone, so the
-    // receiver still reports a disconnect when that painter is dropped.
-    drop(commands);
-    (
-        painter,
-        DetachedLink {
-            commands: command_receiver,
-            notify: ToPainterSender::new(DETACHED_VIEW, notifications, frames, requester),
-        },
-    )
-}
-
-/// The one view a [`detached_link`] carries, and the one
-/// [`crate::main::spawn_test_main_thread`] serves.
-pub(crate) const DETACHED_VIEW: ViewId = ViewId(0);
-
-/// One view id for a test that plays a group without building one.
-#[cfg(test)]
-pub(crate) const fn test_view(id: u64) -> ViewId {
-    ViewId(id)
+    pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
+    pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
+    pub(crate) frames: watch::Sender<Published>,
+    pub(crate) cancel: ViewCancel,
 }
 
 #[cfg(test)]

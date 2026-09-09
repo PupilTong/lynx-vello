@@ -16,40 +16,38 @@
 //! second worker costs a global object and a module graph rather than a heap —
 //! at the price of the group's workers taking turns.
 //!
-//! The thread is started with the group and joined with it, beside
-//! `bobcat-main`. A thread that will not start is a failure to build the
-//! *group*, named there, rather than a failure of whichever worker happened
-//! to be first — which is what lets everything below it be a plain channel
-//! send with no state to consult.
+//! The thread is started by `LynxGroup::new`, beside `bobcat-main` rather
+//! than by it, and joined by the group handle's drop once `bobcat-main` has
+//! returned. It is a runtime environment of the group's own: `bobcat-main`
+//! holds one sender on it and speaks three messages — start a context with
+//! its script, post to one, stop one — and hears events back. A thread that
+//! will not start is a failure to build the *group*, named there, rather than
+//! a failure of whichever worker happened to be first — which is what lets
+//! everything below it be a plain channel send with no state to consult.
 //!
 //! # Who talks to whom
 //!
-//! Everything about a worker's *life* is here: which ones exist, which are
-//! still waiting for a script, what was posted to one before its realm was up.
-//! `bobcat-main` holds no worker state at all — it names one and forwards, and
-//! hears back what the worker had to say.
+//! Everything about a worker's *life* is here: which ones exist, and what
+//! each is waiting for. `bobcat-main` holds no worker state at all beyond one
+//! sender per worker — it names one and forwards, and hears back what the
+//! worker had to say.
 //!
 //! ```text
-//!   bobcat-main ──── Start / Message / Terminate ────▶ bobcat-workers
-//!               ◀──────── ToMain::Worker ─────────────
+//!   bobcat-main ──── Start ─────────────▶ bobcat-workers
+//!               ──── Post / Terminate ──▶ the worker's own task
+//!               ◀─────── WorkerEvent ────
 //!
-//!   painter     ──────── WorkerCommand::Script ──────▶
+//!   host        ──── the script ────────▶ the worker's own task
 //! ```
 //!
 //! A worker's *answer* deliberately skips `bobcat-main`: the thread that owns
 //! a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is its
 //! painter, and routing the script through the main thread would queue a
 //! worker's boot behind whatever synchronous JavaScript that thread is in the
-//! middle of. The *ask* rides the link the realm already has, because `new
-//! Worker(...)` runs on `bobcat-main` anyway: it sends `Start` here and one
-//! `FetchWorkerScript` to its painter, in that order, and the two land on one
-//! channel in that order — the painter's answer cannot exist until it has
-//! seen a notification `bobcat-main` sent after the `Start`.
-//!
-//! What a worker says goes back on the group's own mailbox, addressed to the
-//! view whose realm created it — the same FIFO and the same addressing every
-//! other thing `bobcat-main` serves uses. One park, no selector, and a view
-//! that has been released drops its workers' news for free.
+//! middle of. The ask rides the link the realm already has, because `new
+//! Worker(...)` runs on `bobcat-main` anyway; what the host is handed is the
+//! far end of a one-shot whose receiving end already travelled here inside
+//! the `Start`, so no ordering between the two has to be arranged.
 //!
 //! # What is shared, and where it lives
 //!
@@ -67,13 +65,14 @@ mod thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
+use tokio::sync::{mpsc, oneshot};
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
-use crate::mailbox::{Mailbox, Sender};
+use crate::resource::LoadedSource;
 use crate::script::ScriptError;
 use crate::threads::{self, JoinHandle};
-use crate::view::{EngineError, ToMain, ViewId};
+use crate::view::{EngineError, LynxViewError};
 
 /// Names one `Worker` for the life of its group.
 ///
@@ -93,53 +92,47 @@ impl WorkerKey {
     }
 }
 
-/// One worker to start: everything the group knows about it before its script
-/// is in hand.
+/// One worker to start: everything it will ever be given, in one message.
 ///
-/// No URL: the thread that fetches is the one that answers, and its answer
-/// carries the resolved URL the module is named by.
+/// No URL and no state: the thread that fetches is the one that answers, its
+/// answer carries the resolved URL the module is named by, and everything
+/// else a worker has — what is posted to it, what it says back — is a channel
+/// that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
-    /// The view whose realm created it, and whose realm its messages reach.
-    pub(crate) view: ViewId,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
-}
-
-/// One worker script, resolved, fetched and decoded by the thread that owns
-/// the fetcher.
-#[derive(Debug)]
-pub(crate) struct WorkerScript {
-    pub(crate) source: String,
-    /// The resolved URL, which is what the worker's module is named by and
-    /// what every error against it reports.
-    pub(crate) url: String,
+    /// Its script, answered by whichever thread owns the creating view's
+    /// fetcher. A `Start` for the built-in background context arrives with
+    /// this already answered.
+    pub(crate) script: oneshot::Receiver<Result<LoadedSource, LynxViewError>>,
+    /// What the creating realm posts, and what tells this worker to stop: a
+    /// released realm sends a [`WorkerMessage::Terminate`] on it before it
+    /// drops the sending end. The closing itself ends the worker too, for the
+    /// realm that was gone before it could say anything.
+    pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
+    /// Where this worker reports, which is the creating view's own channel.
+    pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
 }
 
 /// Everything the worker thread is ever told.
 pub(crate) enum WorkerCommand {
-    /// A realm constructed a `Worker`. Nothing about it is running yet: this
-    /// is what makes the key live and what gives the queue below something to
-    /// queue in front of.
+    /// A realm constructed a `Worker`.
     Start(WorkerStart),
-    /// A painter answered one `FetchWorkerScript`, with the script or the
-    /// reason there is none.
-    Script {
-        key: WorkerKey,
-        script: Result<WorkerScript, String>,
-    },
-    /// One JSON-encoded message for a worker's realm.
-    Message { key: WorkerKey, data: String },
-    /// `Worker.terminate()`: end it between tasks and drop its realm.
-    Terminate { key: WorkerKey },
-    /// A view is gone, and with it every worker it created.
-    ReleaseView(ViewId),
 }
 
-/// The worker thread → `bobcat-main`, on the group's own mailbox, addressed
-/// to the view whose realm created the worker.
+/// Everything one worker in particular is ever told.
+pub(crate) enum WorkerMessage {
+    /// One JSON-encoded message for the worker's realm.
+    Post(String),
+    /// `Worker.terminate()`, and a released realm stopping what it created:
+    /// end it between tasks and drop its realm, discarding whatever was
+    /// queued behind this.
+    Terminate,
+}
+
+/// One worker realm → the view whose realm created it.
 pub(crate) struct WorkerEvent {
-    pub(crate) view: ViewId,
     pub(crate) key: WorkerKey,
     pub(crate) payload: WorkerPayload,
 }
@@ -161,36 +154,37 @@ pub(crate) enum WorkerPayload {
 
 /// The group's right to talk to `bobcat-workers`, and to end it.
 ///
-/// One per [`LynxGroup`](crate::LynxGroup), started beside `bobcat-main` and
-/// joined after it. Everything that names a worker — the main thread, each
-/// painter — holds a [`Sender`](flume::Sender) cloned from here and nothing
-/// else: there is no shared state to guard, so there is no lock, no atomic
-/// and no handle to pass around.
+/// One per [`LynxGroup`](crate::LynxGroup), started by `LynxGroup::new` and
+/// joined by the group handle's drop, after `bobcat-main`. Everything that
+/// names a worker holds a sender cloned from here and nothing else — one of
+/// them is `bobcat-main`'s, which is the whole of what that thread has of this
+/// one: there is no shared state to guard, so there is no lock, no atomic and
+/// no handle to pass around.
 pub(crate) struct WorkerHome {
     /// `None` once the goodbye has been said, which is what dropping the last
     /// sender is.
-    commands: Option<Sender<WorkerCommand>>,
+    commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
     thread: Option<JoinHandle>,
 }
 
 impl WorkerHome {
     /// Starts the group's worker thread.
     ///
-    /// Eager, beside `bobcat-main`: a group pays one parked thread and one
-    /// `QuickJS` runtime whether or not a card ever constructs a `Worker`,
-    /// and in exchange every path below is one send. Starting it on the first
-    /// worker instead would buy that back with a lock, a state machine and a
-    /// second way for a worker to fail.
+    /// Eager, and beside `bobcat-main` rather than under it: a group pays one
+    /// parked thread and one `QuickJS` runtime whether or not a card ever
+    /// constructs a `Worker`, and in exchange every path below is one send.
+    /// Starting it on the first worker instead would buy that back with a
+    /// lock, a state machine and a second way for a worker to fail.
     ///
     /// # Errors
     ///
     /// [`EngineError::Thread`] if the thread will not start, which is a
     /// failure to build the group.
-    pub(crate) fn start(to_main: Sender<ToMain>) -> Result<Self, EngineError> {
-        let (commands, command_receiver) = Mailbox::channel();
+    pub(crate) fn start() -> Result<Self, EngineError> {
+        let (commands, command_receiver) = mpsc::unbounded_channel();
         let thread = ThreadBuilder::new()
             .name("bobcat-workers".to_owned())
-            .spawn(move || thread::run(&command_receiver, &to_main))
+            .spawn(move || thread::run(command_receiver))
             .map_err(|error| EngineError::Thread {
                 name: "worker",
                 message: error.to_string(),
@@ -202,7 +196,7 @@ impl WorkerHome {
     }
 
     /// The sending end, for anything that names a worker.
-    pub(crate) fn commands(&self) -> Sender<WorkerCommand> {
+    pub(crate) fn commands(&self) -> mpsc::UnboundedSender<WorkerCommand> {
         self.commands
             .clone()
             .expect("a group hands out senders until it is dropped")
@@ -212,11 +206,25 @@ impl WorkerHome {
     ///
     /// The goodbye *is* dropping the last sender, so it is taken here rather
     /// than left to the field's own drop: a wait reachable with the sender
-    /// still alive would never return.
+    /// still alive would never return. This one is the last only once
+    /// `bobcat-main` has returned and taken its own with it, which is why the
+    /// group joins that thread first.
     pub(crate) fn join(&mut self) {
         drop(self.commands.take());
         if let Some(thread) = self.thread.take() {
             threads::join(thread);
         }
+    }
+}
+
+impl Drop for WorkerHome {
+    /// The join is idempotent, and this is what makes it unconditional: a
+    /// group that fails between starting this thread and serving its first
+    /// view — a `bobcat-main` that would not spawn, or an embedder that
+    /// dropped the handle before the startup answer reached it — still ends
+    /// `bobcat-workers` and waits for it, rather than leaving a thread parked
+    /// on a channel nobody holds.
+    fn drop(&mut self) {
+        self.join();
     }
 }

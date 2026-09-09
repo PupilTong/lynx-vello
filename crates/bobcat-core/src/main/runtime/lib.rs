@@ -9,7 +9,6 @@ use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
@@ -17,10 +16,10 @@ use crate::esm::{
     EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
     TIMER_MODULE_SPECIFIER,
 };
+use crate::link::{ViewNotice, ViewOutbox};
 use crate::main::tree::{LynxDocument, apply_attribute_style};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
-use crate::view::{EventRequester, ToPainter};
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -147,31 +146,31 @@ const REMOVALS_PER_COLLECTION: u32 = 32;
 
 /// The main thread's outright ownership of the document, plus the publish
 /// seam its commits leave through.
-struct TreeHandle<R: EventRequester> {
+struct TreeHandle {
     document: LynxDocument,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
-    notify: ToPainterSender<R>,
+    outbox: ViewOutbox,
 }
 
-impl<R: EventRequester> TreeHandle<R> {
+impl TreeHandle {
     /// Runs the whole pipeline and publishes the committed frame — the
     /// native half of `__FlushElementTree`, and the only place frames leave
     /// this thread.
     fn flush(&mut self) {
-        self.notify.publish_frame(self.document.commit());
+        self.outbox.publish_frame(self.document.commit());
         // The walk that just ran is the one place that knows which image
         // sources this frame needs; ask the painter to name them. Empty on
         // every commit that met no new image, which is almost all of them.
         let wanted = self.document.take_wanted_images();
         if !wanted.is_empty() {
-            self.notify.request_images(wanted);
+            self.outbox.notify(ViewNotice::RequestImages(wanted));
         }
     }
 
-    /// Commits and publishes only when something is stale — the tail of
-    /// every served command round, which is what makes "we do not guarantee
+    /// Commits and publishes only when something is stale — the epilogue of
+    /// every entry into the realm, which is what makes "we do not guarantee
     /// the tree is not flushed outside `__FlushElementTree`" true.
     fn commit_if_dirty(&mut self) {
         if self.document.needs_render() {
@@ -207,7 +206,7 @@ type NodeListeners = SmallVec<[(Arc<str>, bool); INLINE_NODE_LISTENERS]>;
 /// Shared with the host functions that maintain it, so it is `Rc` rather than
 /// owned: the native `enableEventListener` export and the dispatch driver are
 /// different stack frames on the same thread.
-struct EventState<R: EventRequester> {
+struct EventState {
     /// The nodes the realm has a listener on, per event name and pass. Keyed
     /// by name first so a walk resolves it once and then tests each step
     /// without touching the name again — and so an event no listener wants
@@ -226,7 +225,7 @@ struct EventState<R: EventRequester> {
     /// after the index it announces has been updated and its borrow released,
     /// so the truth is never behind what has crossed, and no `RefCell` is
     /// held across one.
-    notify: ToPainterSender<R>,
+    outbox: ViewOutbox,
     /// Set by the native `stopPropagation` export. A pure flag write: the
     /// realm is inside a `call_module_export` when it runs, and re-entering
     /// the realm from a host function would nest an execution guard, which
@@ -234,12 +233,12 @@ struct EventState<R: EventRequester> {
     stopped: Cell<bool>,
 }
 
-impl<R: EventRequester> EventState<R> {
-    fn new(notify: ToPainterSender<R>) -> Self {
+impl EventState {
+    fn new(outbox: ViewOutbox) -> Self {
         Self {
             listeners: RefCell::default(),
             by_node: RefCell::default(),
-            notify,
+            outbox,
             stopped: Cell::default(),
         }
     }
@@ -266,7 +265,7 @@ impl<R: EventRequester> EventState<R> {
                 .or_default()
                 .push((Arc::clone(&shared), capture));
             if first_for_name {
-                self.notify.send(ToPainter::ListenerAvailable(shared));
+                self.outbox.listener_edge(shared, true);
             }
         }
     }
@@ -290,7 +289,7 @@ impl<R: EventRequester> EventState<R> {
         drop(listeners);
         self.forget_node_listener(node, name, capture);
         if let Some(name) = closed {
-            self.notify.send(ToPainter::ListenerUnavailable(name));
+            self.outbox.listener_edge(name, false);
         }
     }
 
@@ -314,7 +313,7 @@ impl<R: EventRequester> EventState<R> {
         }
         drop(listeners);
         for name in closed {
-            self.notify.send(ToPainter::ListenerUnavailable(name));
+            self.outbox.listener_edge(name, false);
         }
     }
 
@@ -331,15 +330,23 @@ impl<R: EventRequester> EventState<R> {
 }
 
 /// The private main-thread runtime used by the engine pipeline.
-pub(crate) struct MainThreadRuntime<R: EventRequester> {
+pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
     // Retained in this realm for the subsequent boot/lynx integration.
     // None until startup prepares them; omitted host inputs become JS undefined.
     init_data: Option<quickjs_rust_bridge::Value>,
     global_props: Option<quickjs_rust_bridge::Value>,
-    notify: ToPainterSender<R>,
-    tree: Rc<RefCell<TreeHandle<R>>>,
-    events: Rc<EventState<R>>,
+    /// This realm's side of the workers it created, shared with the three
+    /// host functions that drive them. `None` until `install_workers` runs.
+    ///
+    /// Declared after every field that holds a handle of this realm, because
+    /// the last clone of it going is what sends each live worker its
+    /// `Terminate`: those messages go out after the JavaScript that could
+    /// still have named a worker is gone.
+    workers: Option<Rc<super::workers::WorkerOwner>>,
+    outbox: ViewOutbox,
+    tree: Rc<RefCell<TreeHandle>>,
+    events: Rc<EventState>,
     timers: Rc<TimerState>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
@@ -348,7 +355,7 @@ pub(crate) struct MainThreadRuntime<R: EventRequester> {
     next_event_id: u32,
 }
 
-impl<R: EventRequester> fmt::Debug for MainThreadRuntime<R> {
+impl fmt::Debug for MainThreadRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MainThreadRuntime")
@@ -356,23 +363,23 @@ impl<R: EventRequester> fmt::Debug for MainThreadRuntime<R> {
     }
 }
 
-impl<R: EventRequester> MainThreadRuntime<R> {
+impl MainThreadRuntime {
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         document: LynxDocument,
-        notify: ToPainterSender<R>,
+        outbox: ViewOutbox,
     ) -> Result<Self, MainThreadError> {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let events = Rc::new(EventState::new(notify.clone()));
+        let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
         let tree = install_bobcat(
             &mut engine,
             js_runtime,
             document,
-            notify.clone(),
+            outbox.clone(),
             &events,
             &timers,
         )?;
@@ -380,7 +387,8 @@ impl<R: EventRequester> MainThreadRuntime<R> {
             engine,
             init_data: None,
             global_props: None,
-            notify,
+            workers: None,
+            outbox,
             tree,
             events,
             timers,
@@ -405,25 +413,37 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         Ok(())
     }
 
+    /// Installs the realm's `Worker` bindings, handing back the one channel
+    /// everything this view's workers say arrives on.
     pub(crate) fn install_workers(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         workers: &super::workers::WorkerFactory,
-        notify: ToPainterSender<R>,
+        outbox: ViewOutbox,
         base_url: &str,
         background_entry: Option<String>,
-        control: Arc<super::StartupControl>,
-    ) -> Result<(), MainThreadError> {
-        workers
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<crate::background::WorkerEvent>, MainThreadError>
+    {
+        let (owner, incoming) = workers
             .install(
                 &mut self.engine,
                 js_runtime,
-                notify,
+                outbox,
                 base_url,
                 background_entry,
-                control,
             )
-            .map_err(|error| MainThreadError::from_engine("installing Worker", error))
+            .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
+        self.workers = Some(owner);
+        Ok(incoming)
+    }
+
+    /// How many of this realm's workers are still running, which is how many
+    /// `Terminate`s releasing it would send.
+    #[cfg(test)]
+    pub(crate) fn live_workers(&self) -> usize {
+        self.workers
+            .as_ref()
+            .map_or(0, |owner| owner.live_workers())
     }
 
     pub(crate) fn dispatch_worker_event(
@@ -434,6 +454,14 @@ impl<R: EventRequester> MainThreadRuntime<R> {
     ) -> Result<(), MainThreadError> {
         use crate::background::WorkerPayload;
         let failed = matches!(payload, WorkerPayload::Failed(_));
+        // A worker that closed itself, or whose script or realm failed, has
+        // ended: this is where the realm learns it, and so where the right to
+        // tell it to stop stops being worth keeping.
+        if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_))
+            && let Some(owner) = self.workers.as_ref()
+        {
+            owner.forget(key);
+        }
         let (kind, data) = match payload {
             WorkerPayload::Message(data) => ("message", data),
             WorkerPayload::Closed => ("closed", String::new()),
@@ -447,10 +475,8 @@ impl<R: EventRequester> MainThreadRuntime<R> {
                     "colno": location.and_then(|l| l.column).unwrap_or(0),
                 })
                 .to_string();
-                self.tree
-                    .borrow()
-                    .notify
-                    .send(ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)));
+                self.outbox
+                    .engine_event(crate::EngineEvent::WorkerFailed(error));
                 (kind, data)
             }
         };
@@ -472,8 +498,8 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         called.map(|_| ()).and(finished)
     }
 
-    /// Commits and publishes when anything is stale. Called by the command
-    /// loop at the end of every round.
+    /// Commits and publishes when anything is stale. Called by the page's
+    /// epilogue, after every entry into the realm.
     pub(crate) fn commit_if_dirty(&mut self) {
         self.tree.borrow_mut().commit_if_dirty();
     }
@@ -485,7 +511,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
     }
 
     /// Writes the painting side's scroll offsets into the document and
-    /// repaints: the commit at the end of this round bakes windows
+    /// repaints: the commit this entry's epilogue makes bakes windows
     /// re-centered on them. This is the only way a user scroll reaches the
     /// document — between refills the offsets live on the painting side
     /// alone.
@@ -683,12 +709,9 @@ __FlushElementTree();
         )
     }
 
-    pub(crate) fn request_modules(&mut self) {
-        while let Some(url) = self.engine.take_module_request() {
-            self.notify.send(ToPainter::RequestSource(
-                crate::resource::SourceRequest::Module(url),
-            ));
-        }
+    /// The next module an import in this realm is waiting for, if any.
+    pub(crate) fn take_module_request(&mut self) -> Option<String> {
+        self.engine.take_module_request()
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
@@ -796,18 +819,18 @@ pub(crate) fn install_shared_modules(
         .map_err(|error| MainThreadError::from_engine("registering the timer module", error))
 }
 
-fn install_bobcat<R: EventRequester>(
+fn install_bobcat(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
     document: LynxDocument,
-    notify: ToPainterSender<R>,
-    events: &Rc<EventState<R>>,
+    outbox: ViewOutbox,
+    events: &Rc<EventState>,
     timers: &Rc<TimerState>,
-) -> Result<Rc<RefCell<TreeHandle<R>>>, MainThreadError> {
+) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
     let handle = Rc::new(RefCell::new(TreeHandle {
         document,
         removals: 0,
-        notify,
+        outbox,
     }));
 
     install_host_module(engine, js_runtime, &handle, events)?;
@@ -862,11 +885,11 @@ macro_rules! tree_members {
     })*};
 }
 
-fn install_host_module<R: EventRequester>(
+fn install_host_module(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    handle: &Rc<RefCell<TreeHandle<R>>>,
-    events: &Rc<EventState<R>>,
+    handle: &Rc<RefCell<TreeHandle>>,
+    events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
         fn createPage() |document| {
@@ -982,10 +1005,10 @@ fn install_host_module<R: EventRequester>(
 /// None of them touches the document. The first two only maintain an index —
 /// which nodes are worth visiting — and the third only sets a flag; see
 /// [`EventState::stopped`].
-fn install_event_members<R: EventRequester>(
+fn install_event_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    events: &Rc<EventState<R>>,
+    events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     let state = Rc::clone(events);
     install(
@@ -1043,10 +1066,10 @@ fn install_event_members<R: EventRequester>(
 /// whole-block replacement and building it from empty is what the setter
 /// means. Nothing in the realm — the Element PAPI included — receives a
 /// document handle.
-fn install_attribute_members<R: EventRequester>(
+fn install_attribute_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    handle: &Rc<RefCell<TreeHandle<R>>>,
+    handle: &Rc<RefCell<TreeHandle>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
         fn setAttribute(
@@ -1175,10 +1198,10 @@ fn write_record_field(record: &mut String, text: &str) {
     record.push_str(text);
 }
 
-fn borrow_tree<'a, R: EventRequester>(
+fn borrow_tree<'a>(
     function: &str,
-    tree: &'a Rc<RefCell<TreeHandle<R>>>,
-) -> Result<RefMut<'a, TreeHandle<R>>, String> {
+    tree: &'a Rc<RefCell<TreeHandle>>,
+) -> Result<RefMut<'a, TreeHandle>, String> {
     tree.try_borrow_mut()
         .map_err(|_| format!("{function} cannot re-enter the element tree"))
 }

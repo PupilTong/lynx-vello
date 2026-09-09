@@ -1,20 +1,25 @@
-//! The main realm's Worker handle: name a context, ask the painter for its
-//! source, and forward commands. Contexts and pending messages live on workers.
+//! The main realm's Worker handle: start a worker realm, ask the host for its
+//! script, and route what the realm posts to it.
+//!
+//! Nothing about a worker's *state* is here. This side owns exactly one thing
+//! per worker — the sending end of its message channel — and a released realm
+//! sends a `Terminate` on every one of them, which is how a view stops the
+//! workers it created. The channel closing behind that message ends a worker
+//! too, but it is the backstop rather than the protocol.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 
 use quickjs_rust_bridge::HostValue;
+use rustc_hash::FxHashMap;
+use tokio::sync::{mpsc, oneshot};
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
-use super::{StartupControl, ToPainterSender};
-use crate::background::{WorkerCommand, WorkerKey, WorkerScript, WorkerStart};
+use crate::background::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerStart};
 use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
-use crate::mailbox::Sender;
-use crate::resource::{SourceCompletion, SourceRequest};
+use crate::link::{ViewNotice, ViewOutbox};
+use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
-use crate::view::{EventRequester, ToPainter, ViewId};
 
 pub(super) const MODULE: &str = "bobcat-internal";
 pub(super) const SOURCE: &str = include_str!("../../../../packages/bobcat-element/src/worker.mjs");
@@ -22,33 +27,38 @@ pub(super) const SOURCE: &str = include_str!("../../../../packages/bobcat-elemen
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock.
 #[derive(Clone)]
 pub(crate) struct WorkerFactory {
-    commands: Sender<WorkerCommand>,
+    commands: mpsc::UnboundedSender<WorkerCommand>,
     next: Rc<Cell<u64>>,
 }
 
 impl WorkerFactory {
-    pub(crate) fn new(commands: Sender<WorkerCommand>) -> Self {
+    pub(crate) fn new(commands: mpsc::UnboundedSender<WorkerCommand>) -> Self {
         Self {
             commands,
             next: Rc::new(Cell::new(1)),
         }
     }
 
-    pub(super) fn install<R: EventRequester>(
+    /// Installs the three members a realm creates and drives workers through,
+    /// and hands back the owner they share and the channel everything they say
+    /// arrives on.
+    pub(super) fn install(
         &self,
         engine: &mut ScriptEngine,
         runtime: &mut ScriptRuntime,
-        notify: ToPainterSender<R>,
+        outbox: ViewOutbox,
         base_url: &str,
         background_entry: Option<String>,
-        control: Arc<StartupControl>,
-    ) -> Result<(), ScriptError> {
-        // The native functions hold the owner until the realm is dropped,
-        // including when entry boot fails after it constructed workers.
+    ) -> Result<(Rc<WorkerOwner>, mpsc::UnboundedReceiver<WorkerEvent>), ScriptError> {
+        let (events, incoming) = mpsc::unbounded_channel();
+        // The native functions hold clones of the owner until the realm is
+        // dropped, including when entry boot fails after it constructed
+        // workers. The caller keeps one too, which is what outlives them.
         let owner = Rc::new(WorkerOwner {
             factory: self.clone(),
-            view: notify.view,
-            control,
+            outbox,
+            events,
+            live: RefCell::default(),
         });
         let creator = Rc::clone(&owner);
         let base_url = base_url.to_owned();
@@ -66,11 +76,7 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                creator.send(WorkerCommand::Start(WorkerStart {
-                    key,
-                    view: creator.view,
-                    name,
-                }))?;
+                let script = creator.start(key, name)?;
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     if let Some(entry) = &background_entry {
@@ -80,29 +86,25 @@ impl WorkerFactory {
                         source.push_str(&entry);
                         source.push_str(");\n");
                     }
-                    creator.send(WorkerCommand::Script {
-                        key,
-                        script: Ok(WorkerScript {
-                            source,
-                            url: BTS_MODULE_SPECIFIER.to_owned(),
-                        }),
-                    })?;
+                    // The built-in background script is this thread's own, so
+                    // it answers its own request rather than asking a host
+                    // that has no bytes for it.
+                    let _ = script.send(Ok(LoadedSource::Entry {
+                        source,
+                        url: BTS_MODULE_SPECIFIER.to_owned(),
+                    }));
                     return Ok(HostValue::String(id.to_string()));
                 }
-                // Start is enqueued before the painter can possibly answer.
-                // The completion is weak: outstanding IO must not keep the
-                // group's worker thread alive while its owner joins it.
-                notify.send(ToPainter::RequestWorkerSource {
+                // The answer travels to the worker task without another turn
+                // here: what the host is handed is the far end of the
+                // one-shot that already rode to `bobcat-workers` with the
+                // `Start` above.
+                creator.outbox.notify(ViewNotice::RequestSource {
                     request: SourceRequest::Worker {
                         specifier,
                         base_url: base_url.clone(),
                     },
-                    completion: SourceCompletion::worker(
-                        creator.factory.commands.downgrade(),
-                        key,
-                        creator.view,
-                        Arc::clone(&creator.control),
-                    ),
+                    completion: creator.outbox.completion_for(script),
                 });
                 Ok(HostValue::String(id.to_string()))
             }),
@@ -114,47 +116,119 @@ impl WorkerFactory {
             "sendWorkerMessage",
             2,
             Box::new(move |arguments| {
-                sender.send(WorkerCommand::Message {
-                    key: key(arguments)?,
-                    data: string(arguments, 1)?.to_owned(),
-                })?;
+                let key = key(arguments)?;
+                let data = string(arguments, 1)?.to_owned();
+                sender.post(key, WorkerMessage::Post(data));
                 Ok(HostValue::Undefined)
             }),
         )?;
+        let terminator = Rc::clone(&owner);
         engine.register_host_module_function(
             runtime,
             HOST_MODULE_SPECIFIER,
             "terminateWorker",
             1,
             Box::new(move |arguments| {
-                owner.send(WorkerCommand::Terminate {
-                    key: key(arguments)?,
-                })?;
+                terminator.terminate(key(arguments)?);
                 Ok(HostValue::Undefined)
             }),
-        )
+        )?;
+        Ok((owner, incoming))
     }
 }
 
-struct WorkerOwner {
+/// One realm's whole side of its workers.
+pub(super) struct WorkerOwner {
     factory: WorkerFactory,
-    view: ViewId,
-    control: Arc<StartupControl>,
-}
-
-impl WorkerOwner {
-    fn send(&self, command: WorkerCommand) -> Result<(), String> {
-        self.factory
-            .commands
-            .send((None, command))
-            .map_err(|_| "the worker thread has ended".to_owned())
-    }
+    outbox: ViewOutbox,
+    /// Cloned into every `Start`, so the channel stays open while the realm
+    /// does even when it has no worker at all.
+    events: mpsc::UnboundedSender<WorkerEvent>,
+    /// The one thing this side keeps per worker: the right to tell it to
+    /// stop. What ends a worker is a message from the realm that created it —
+    /// `terminate()`, or the `Drop` below as that realm is released. The
+    /// channel closing when this map goes is the backstop, not the protocol.
+    ///
+    /// It holds exactly the workers still running: [`Self::start`] enters one,
+    /// and it leaves again the moment this side learns the worker is over —
+    /// [`Self::terminate`] for the realm's own `terminate()`, and
+    /// [`Self::forget`] for a worker that ended on its own.
+    live: RefCell<FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>>,
 }
 
 impl Drop for WorkerOwner {
+    /// A released realm stops its own workers rather than leaving each to
+    /// notice that nobody is talking to it any more.
+    ///
+    /// JavaScript first, then the message: the realm's host functions hold
+    /// clones of this owner and the runtime holds the last one, so this runs
+    /// once that realm's context has been freed and every worker it names is
+    /// one this view will never hear from again.
+    ///
+    /// The message is the protocol; the channel closing behind it — the
+    /// senders drained here go out of scope with this statement — is the
+    /// backstop, for a worker whose realm was gone before it could speak.
     fn drop(&mut self) {
-        self.control.cancel();
-        let _ = self.send(WorkerCommand::ReleaseView(self.view));
+        for (_, messages) in self.live.borrow_mut().drain() {
+            let _ = messages.send(WorkerMessage::Terminate);
+        }
+    }
+}
+
+impl WorkerOwner {
+    /// Names one worker on `bobcat-workers` and hands back the right to
+    /// answer its script.
+    fn start(
+        &self,
+        key: WorkerKey,
+        name: String,
+    ) -> Result<oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>, String> {
+        let (script, awaiting) = oneshot::channel();
+        let (messages, incoming) = mpsc::unbounded_channel();
+        self.factory
+            .commands
+            .send(WorkerCommand::Start(WorkerStart {
+                key,
+                name,
+                script: awaiting,
+                messages: incoming,
+                events: self.events.clone(),
+            }))
+            .map_err(|_| "the worker thread has ended".to_owned())?;
+        self.live.borrow_mut().insert(key, messages);
+        Ok(script)
+    }
+
+    fn post(&self, key: WorkerKey, message: WorkerMessage) {
+        if let Some(messages) = self.live.borrow().get(&key) {
+            let _ = messages.send(message);
+        }
+    }
+
+    /// `Worker.terminate()`: the worker takes nothing more, including what is
+    /// already queued for it, which is why this is a message rather than
+    /// simply dropping the sender.
+    fn terminate(&self, key: WorkerKey) {
+        if let Some(messages) = self.live.borrow_mut().remove(&key) {
+            let _ = messages.send(WorkerMessage::Terminate);
+        }
+    }
+
+    /// Drops what this side kept of a worker that ended on its own — it
+    /// called `close()`, or its script or realm failed — so `live` goes on
+    /// naming only the workers still running and the `Drop` above sends no
+    /// `Terminate` to a task that has already returned.
+    ///
+    /// The sender goes with the entry, which closes that channel. Harmless
+    /// either way: there is nothing left listening on it.
+    pub(super) fn forget(&self, key: WorkerKey) {
+        self.live.borrow_mut().remove(&key);
+    }
+
+    /// How many workers this realm still has running.
+    #[cfg(test)]
+    pub(super) fn live_workers(&self) -> usize {
+        self.live.borrow().len()
     }
 }
 

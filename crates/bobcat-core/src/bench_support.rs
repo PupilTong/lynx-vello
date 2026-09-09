@@ -13,15 +13,16 @@
 use std::sync::Arc;
 
 use dom::event::EventSteps;
+use tokio::sync::mpsc;
 
-use crate::background::WorkerCommand;
-use crate::mailbox::Mailbox;
+use crate::background::{WorkerCommand, WorkerEvent};
+use crate::link::ToMain;
+use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::main::{StartupControl, WorkerFactory};
-use crate::paint::PainterLink;
-use crate::view::{NoWakeup, detached_link};
+use crate::paint::{PainterLink, detached_link};
+use crate::view::NoWakeup;
 
 /// A booted Element PAPI realm over a private Lynx document.
 ///
@@ -30,13 +31,16 @@ use crate::view::{NoWakeup, detached_link};
 pub struct ScriptHarness {
     /// The runtime the realm lives on, as a group owns one.
     js_runtime: ScriptRuntime,
-    runtime: MainThreadRuntime<NoWakeup>,
+    runtime: MainThreadRuntime,
     /// The painting end of the same link the engine builds, so a benchmark
     /// can ask the question the router asks — and pay what it pays.
     link: PainterLink,
-    /// Like the detached painter, retain the worker endpoint. These benchmarks
-    /// measure MTS operations; the worker thread itself is outside the harness.
-    _workers: Mailbox<WorkerCommand>,
+    /// The far ends nobody serves. Retained so the realm's sends succeed:
+    /// these benchmarks measure MTS operations, and neither a painter nor a
+    /// worker thread is inside the harness.
+    _commands: mpsc::UnboundedReceiver<ToMain>,
+    _workers: mpsc::UnboundedReceiver<WorkerCommand>,
+    _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
 }
 
 impl std::fmt::Debug for ScriptHarness {
@@ -60,27 +64,28 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (painter, main) = detached_link(Arc::new(NoWakeup));
+        let (painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
             .expect("the benchmark realm boots");
-        let (workers, inbox) = Mailbox::channel();
-        runtime
+        let (workers, inbox) = mpsc::unbounded_channel();
+        let worker_events = runtime
             .install_workers(
                 &mut js_runtime,
                 &WorkerFactory::new(workers),
-                main.notify,
+                outbox,
                 "bench:///main.js",
                 None,
-                Arc::new(StartupControl::default()),
             )
             .expect("the benchmark Worker bindings install");
         Self {
             js_runtime,
             runtime,
             link: painter,
+            _commands: commands,
             _workers: inbox,
+            _worker_events: worker_events,
         }
     }
 

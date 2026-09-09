@@ -2,19 +2,32 @@
 //! painter. No GPU is needed to verify contexts, transport and teardown.
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use super::*;
-use crate::background::{WorkerHome, WorkerScript};
-use crate::mailbox::Mailbox;
-use crate::main::StartupControl;
+use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
+use crate::link::{ViewCancel, ViewNotice, block_on_deadline};
 use crate::main::workers::WorkerFactory;
+use crate::paint::{PainterLink, detached_link};
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
-use crate::view::{DETACHED_VIEW, NoWakeup, ToMain};
+use crate::view::NoWakeup;
+
+/// How long a test waits for a thread that should already be working.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 struct Pair {
-    runtime: Option<MainThreadRuntime<NoWakeup>>,
+    runtime: Option<MainThreadRuntime>,
     js: ScriptRuntime,
-    events: Mailbox<ToMain>,
-    notifications: Rc<Mailbox<ToPainter>>,
+    /// What this view's workers said, which is where every worker event
+    /// arrives now — one channel per view rather than one per group.
+    events: mpsc::UnboundedReceiver<WorkerEvent>,
+    /// The host's end of the view's link: the test plays the painter, so it
+    /// is what answers every source request.
+    notices: PainterLink,
+    /// This view's cancellation flag, the one every completion it hands out
+    /// was built with. The test plays the painter, so releasing a view is
+    /// something it has to spell.
+    cancel: ViewCancel,
     home: WorkerHome,
 }
 
@@ -30,46 +43,36 @@ impl Pair {
     }
 
     fn unbooted(background_source: Option<&str>) -> Self {
-        let (to_main, events) = Mailbox::channel();
         let home = match background_source {
-            Some(source) => WorkerHome::with_entry_for_test(
-                to_main,
-                WorkerScript {
-                    source: source.to_owned(),
-                    url: "test:bts-entry".to_owned(),
-                },
-            ),
-            None => WorkerHome::start(to_main).unwrap(),
+            Some(source) => {
+                WorkerHome::with_entry_for_test((source.to_owned(), "test:bts-entry".to_owned()))
+            }
+            None => WorkerHome::start().unwrap(),
         };
-        let (notifications, received) = Mailbox::channel();
-        let notify = ToPainterSender::new(
-            DETACHED_VIEW,
-            notifications,
-            Arc::default(),
-            Arc::new(NoWakeup),
-        );
+        let (notices, outbox, _commands) = detached_link(Arc::new(NoWakeup));
+        let cancel = notices.view_cancel().clone();
         let mut js = ScriptRuntime::new().unwrap();
         install_shared_modules(&mut js).unwrap();
         let document = crate::main::tree::new_document(
             crate::view::Viewport::new(32.0, 24.0),
             crate::main::tree::PageConfig::default(),
         );
-        let mut runtime = MainThreadRuntime::new(&mut js, document, notify.clone()).unwrap();
-        runtime
+        let mut runtime = MainThreadRuntime::new(&mut js, document, outbox.clone()).unwrap();
+        let events = runtime
             .install_workers(
                 &mut js,
                 &WorkerFactory::new(home.commands()),
-                notify,
+                outbox,
                 "app:///nested/main.js",
                 background_source.map(|_| "test:bts-entry".to_owned()),
-                Arc::new(StartupControl::default()),
             )
             .unwrap();
         Self {
             runtime: Some(runtime),
             js,
             events,
-            notifications: Rc::new(received),
+            notices,
+            cancel,
             home,
         }
     }
@@ -82,13 +85,15 @@ impl Pair {
         )
     }
 
-    fn source(&self) -> SourceCompletion {
+    /// The next source request the realm made, which for these tests is
+    /// always a worker script.
+    fn source(&mut self) -> SourceCompletion {
         loop {
-            let (_, notification) = self.notifications.try_recv().expect("source requested");
-            if let ToPainter::RequestWorkerSource {
+            let notice = self.notices.take_notice().expect("source requested");
+            if let ViewNotice::RequestSource {
                 request,
                 completion,
-            } = notification
+            } = notice
             {
                 assert!(
                     matches!(request, SourceRequest::Worker { specifier, base_url }
@@ -99,27 +104,40 @@ impl Pair {
         }
     }
 
-    fn answer(&self, source: &str) {
+    fn answer(&mut self, source: &str) {
         self.source().complete(Ok(LoadedSource::Entry {
             source: source.into(),
             url: "app:///nested/worker.js".into(),
         }));
     }
 
+    /// Waits for one worker event and hands it to the realm, as the view's
+    /// own task does.
     fn deliver(&mut self) {
-        let (view, event) = self
-            .events
-            .recv(Some(ClockInstant::now() + Duration::from_secs(10)))
-            .unwrap();
-        assert_eq!(view, Some(DETACHED_VIEW));
-        let ToMain::Worker { key, payload } = event else {
-            panic!("worker event")
-        };
+        let event = self.next_event().expect("a worker event arrives");
         self.runtime
             .as_mut()
             .unwrap()
-            .dispatch_worker_event(&mut self.js, key, payload)
+            .dispatch_worker_event(&mut self.js, event.key, event.payload)
             .unwrap();
+    }
+
+    fn next_event(&mut self) -> Option<WorkerEvent> {
+        block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE).flatten()
+    }
+
+    /// How many workers this realm still holds the right to stop.
+    fn live_workers(&self) -> usize {
+        self.runtime.as_ref().unwrap().live_workers()
+    }
+
+    /// Everything the realm has said to its host so far.
+    fn notices(&mut self) -> Vec<ViewNotice> {
+        let mut notices = Vec::new();
+        while let Some(notice) = self.notices.take_notice() {
+            notices.push(notice);
+        }
+        notices
     }
 
     fn check(&mut self, source: &str) {
@@ -141,6 +159,38 @@ impl Drop for Pair {
         drop(self.runtime.take());
         self.home.join();
     }
+}
+
+/// Whether any notice reports a worker failure with this message.
+fn worker_failed(notices: &[ViewNotice], message: &str) -> bool {
+    notices.iter().any(|notice| {
+        matches!(notice, ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error))
+            if error.message.contains(message))
+    })
+}
+
+/// Every worker failure a batch of notices carries.
+fn worker_failures(notices: Vec<ViewNotice>) -> Vec<crate::script::ScriptError> {
+    notices
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether any notice asks the host for a worker's script.
+fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
+    notices.iter().any(|notice| {
+        matches!(
+            notice,
+            ViewNotice::RequestSource {
+                request: SourceRequest::Worker { .. },
+                ..
+            }
+        )
+    })
 }
 
 #[test]
@@ -306,10 +356,7 @@ fn a_late_publish_hook_failure_does_not_discard_later_queued_events() {
     pair.check(
         r#"if (JSON.stringify(results) !== '["survives"]') throw Error(JSON.stringify(results));"#,
     );
-    assert!(pair.notifications.drain().any(|(_, notification)| {
-        matches!(notification, ToPainter::Engine(crate::EngineEvent::WorkerFailed(error))
-            if error.message.contains("queued publish failure"))
-    }));
+    assert!(worker_failed(&pair.notices(), "queued publish failure"));
 }
 
 #[test]
@@ -377,14 +424,7 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
     for _ in 0..4 {
         pair.deliver();
     }
-    let errors: Vec<_> = pair
-        .notifications
-        .drain()
-        .filter_map(|(_, notification)| match notification {
-            ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
-            _ => None,
-        })
-        .collect();
+    let errors = worker_failures(pair.notices());
     assert_eq!(errors.len(), 2);
     assert!(errors[0].message.contains("sync lepus failure"));
     assert!(errors[1].message.contains("async lepus failure"));
@@ -420,10 +460,7 @@ fn a_js_lifetime_event_calls_the_background_hook_without_releasing_the_worker() 
     );
     pair.deliver();
     pair.deliver();
-    assert!(pair.notifications.drain().any(|(_, notification)| {
-        matches!(notification, ToPainter::Engine(crate::EngineEvent::WorkerFailed(error))
-            if error.message.contains("lifetime hook failure"))
-    }));
+    assert!(worker_failed(&pair.notices(), "lifetime hook failure"));
     pair.check(
         r#"
         import { lynx } from 'bobcat:runtime';
@@ -486,18 +523,12 @@ fn terminate_discards_events_already_queued_on_main() {
     );
     pair.answer("postMessage('already queued');");
     // Waiting for the worker's response proves it has run before terminate.
-    let event = pair
-        .events
-        .recv(Some(ClockInstant::now() + Duration::from_secs(10)))
-        .unwrap();
+    let event = pair.next_event().expect("the worker answered");
     pair.check("worker.terminate(); worker.terminate(); worker.postMessage('ignored');");
-    let (_, ToMain::Worker { key, payload }) = event else {
-        panic!("worker event")
-    };
     pair.runtime
         .as_mut()
         .unwrap()
-        .dispatch_worker_event(&mut pair.js, key, payload)
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
         .unwrap();
 }
 
@@ -540,15 +571,102 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
     let mut pair =
         Pair::new("import { Worker } from 'bobcat-internal'; new Worker('./worker.js');");
     let completion = pair.source();
+    // Where `Painter::shutdown` sets it: first, before anything this view
+    // owns is released, so a host still holding a completion learns that its
+    // load no longer matters without waiting for a turn of the engine's.
+    pair.cancel.cancel();
+    assert!(
+        completion.is_cancelled(),
+        "cancellation precedes releasing the fetcher"
+    );
+    // Releasing the realm drops the one sender its worker was listening on,
+    // which is what ends that worker's task — and this must finish even
+    // though the host is still holding the completion.
     drop(pair.runtime.take());
-    assert!(completion.is_cancelled());
-    // This must finish even though the host still holds the completion.
     pair.home.join();
+    assert!(
+        completion.is_cancelled(),
+        "nobody is waiting for this script any more"
+    );
     completion.complete(Ok(LoadedSource::Entry {
         source: "throw Error('cancelled worker ran');".into(),
         url: "app:///late.js".into(),
     }));
     assert!(pair.events.try_recv().is_err());
+}
+
+/// A released realm stops the workers it created, rather than leaving each of
+/// them to discover that nobody is talking to it any more.
+///
+/// Pinned with a worker that would never end on its own: it arms an interval,
+/// so its task always has work and a thread that waited for it to finish would
+/// wait forever. What ends it is the `Terminate` its realm sends as it drops.
+///
+/// The message is the protocol and the channel closing behind it is the
+/// backstop, but the two are not separately observable from here: the same
+/// statement sends the one and drops the other. So what this pins is that the
+/// worker's task ends, not which of the two ended it — read through the events
+/// channel, whose senders are the realm's own and one clone per live worker
+/// task.
+#[test]
+fn releasing_a_realm_ends_a_worker_that_would_never_end_on_its_own() {
+    let mut pair = Pair::new(
+        "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
+    );
+    pair.answer("setInterval(() => postMessage('tick'), 1);");
+    // The first tick proves the realm booted and its interval is running, so
+    // what the drop below has to stop is a live worker.
+    pair.next_event().expect("the worker's interval fires");
+    drop(pair.runtime.take());
+    // One deadline for the whole loop rather than one per iteration: this
+    // worker posts a tick every millisecond, so a per-iteration deadline is
+    // one a live worker keeps resetting and the failure this test names would
+    // never arrive.
+    let deadline = ClockInstant::now() + PATIENCE;
+    loop {
+        match block_on_deadline(pair.events.recv(), deadline) {
+            // Every sender is gone: the realm's own, and the clone the
+            // worker's task held for as long as it ran.
+            Some(None) => break,
+            // A tick the worker had already sent, or sent before it read the
+            // message that ends it. The clock is checked here too because
+            // `block_on_deadline` polls before it consults it, so a ready tick
+            // is handed back even past the deadline.
+            Some(Some(_)) if ClockInstant::now() < deadline => {}
+            _ => panic!("the worker outlived the realm that created it"),
+        }
+    }
+}
+
+/// A worker that ended on its own is forgotten by the realm that created it.
+///
+/// `close()` ends the worker's task, and the `Closed` event is where this side
+/// learns of it — so that is where the right to tell that worker to stop stops
+/// being worth keeping. What the realm holds afterwards is the workers still
+/// running, which is what a release sends its `Terminate`s to.
+#[test]
+fn a_worker_that_closes_itself_is_forgotten_by_the_realm() {
+    let mut pair = Pair::new(
+        "import { Worker } from 'bobcat-internal'; globalThis.worker = new Worker('./worker.js');",
+    );
+    pair.answer("close();");
+    // Boot creates the BTS worker beside the entry's own, so the realm has
+    // two of them and this close accounts for exactly one.
+    assert_eq!(pair.live_workers(), 2, "the entry's worker and lynx-bg");
+    let event = pair
+        .next_event()
+        .expect("the worker reports that it closed");
+    assert!(matches!(event.payload, WorkerPayload::Closed));
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    assert_eq!(
+        pair.live_workers(),
+        1,
+        "a worker that closed itself is no longer one of the realm's"
+    );
 }
 
 #[test]
@@ -602,12 +720,7 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
         }
     ",
     );
-    assert!(
-        !pair
-            .notifications
-            .drain()
-            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
-    );
+    assert!(!asked_for_a_worker(&pair.notices()));
     pair.check(
         "if (typeof globalThis.Worker !== 'undefined') throw Error('Worker leaked into globals');",
     );
@@ -715,12 +828,7 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
-    assert!(
-        !pair
-            .notifications
-            .drain()
-            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
-    );
+    assert!(!asked_for_a_worker(&pair.notices()));
 }
 
 #[test]
@@ -773,14 +881,7 @@ fn background_listener_failure_is_nonfatal_and_later_context_events_still_arrive
     );
     pair.deliver();
     pair.deliver();
-    let failures: Vec<_> = pair
-        .notifications
-        .drain()
-        .filter_map(|(_, notification)| match notification {
-            ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
-            _ => None,
-        })
-        .collect();
+    let failures = worker_failures(pair.notices());
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("BTS listener boom"));
     pair.check(
@@ -808,18 +909,15 @@ fn an_omitted_background_entry_boots_without_host_io() {
         worker.postMessage('barrier');
     ",
     );
-    // The ordinary worker's Script follows the built-in BTS's Start and Script
-    // in the same FIFO. Its answer proves that BTS boot has had its turn.
+    // The built-in BTS worker is started before this one and answers its own
+    // script without the host, so an ordinary worker that replies proves the
+    // thread served both.
     pair.answer("onmessage = event => postMessage(event.data);");
     pair.deliver();
     pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
-    assert!(!pair.notifications.drain().any(|(_, notification)| {
-        matches!(
-            notification,
-            ToPainter::RequestWorkerSource { .. }
-                | ToPainter::Engine(crate::EngineEvent::WorkerFailed(_))
-        )
-    }));
+    let notices = pair.notices();
+    assert!(!asked_for_a_worker(&notices));
+    assert!(worker_failures(notices).is_empty());
 }
 
 #[test]
@@ -835,12 +933,7 @@ fn a_rejected_main_entry_never_starts_its_background_context() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("main entry rejected"));
-    assert!(
-        !pair
-            .notifications
-            .drain()
-            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
-    );
+    assert!(!asked_for_a_worker(&pair.notices()));
     drop(pair.runtime.take());
     pair.home.join();
     assert!(pair.events.try_recv().is_err());

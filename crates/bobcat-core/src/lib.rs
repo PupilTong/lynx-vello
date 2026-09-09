@@ -22,6 +22,8 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[cfg(target_arch = "wasm32")]
+mod alarm;
 #[path = "background/lib.rs"]
 mod background;
 /// The private script boundary, exposed only so this crate's own benchmarks
@@ -30,7 +32,7 @@ mod background;
 pub mod bench_support;
 mod clock;
 mod esm;
-mod mailbox;
+mod link;
 #[path = "main/lib.rs"]
 mod main;
 #[path = "paint/lib.rs"]
@@ -38,6 +40,8 @@ mod paint;
 pub mod resource;
 pub mod script;
 pub mod style;
+#[cfg(test)]
+mod test_support;
 mod threads;
 mod timers;
 #[path = "view/lib.rs"]

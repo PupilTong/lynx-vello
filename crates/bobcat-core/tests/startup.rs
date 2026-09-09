@@ -221,15 +221,25 @@ impl Drop for PendingFetcher {
 /// otherwise, which is the definition of a flaky test rather than a slow one.
 /// Eight times the observed cold path leaves no plausible load that crosses
 /// it while still failing a real deadlock in under two minutes.
+///
+/// It is spent in two different shapes, and they see different things.
+/// [`hang_budget`] wraps an async test in `tokio::time::timeout`, which cannot
+/// expire inside a synchronously blocking poll. The one blocking use —
+/// `recv_timeout` around `dropping_the_group_joins_both_of_its_threads`, whose
+/// whole body is a pair of blocking joins — does measure synchronous work, and
+/// the budget is what fails that test rather than letting it hang. Anything
+/// that waits *inside* that test's own thread takes a smaller budget, so a
+/// step that never finishes is reported as that step rather than as a
+/// teardown that would not return.
 const HANG_BUDGET: Duration = Duration::from_mins(2);
 
 /// Fails `future` with a clear message if it has not finished within
 /// [`HANG_BUDGET`].
 ///
-/// Every wall-clock deadline in this file lives here, once, around a whole
-/// test. Per-step deadlines are the thing to avoid: they turn "this step was
-/// slower than I guessed" into a failure, and there is no step here whose
-/// duration is a property worth asserting.
+/// Every wall-clock deadline the async tests in this file carry lives here,
+/// once, around a whole test. Per-step deadlines are the thing to avoid: they
+/// turn "this step was slower than I guessed" into a failure, and there is no
+/// step here whose duration is a property worth asserting.
 ///
 /// What it can and cannot see is worth stating, because it is what makes this
 /// safe. `timeout` polls the inner future before it consults the clock, so
@@ -239,8 +249,10 @@ const HANG_BUDGET: Duration = Duration::from_mins(2);
 /// parked on a signal that never arrives yields, the runtime reaches the
 /// timer, and this fires. That asymmetry is the whole point. It detects the
 /// deadlock it is for and structurally cannot fail a machine that was only
-/// slow. Verified by shrinking the budget to 1ms: the tests still passed,
-/// and only an added async stall tripped it.
+/// slow. Verified by shrinking the budget to 1ms: the tests that go through
+/// this wrapper still passed, and only an added async stall tripped it. That
+/// experiment says nothing about the blocking `recv_timeout` below, which has
+/// no such blind spot.
 async fn hang_budget<F: Future<Output = ()>>(future: F) {
     tokio::time::timeout(HANG_BUDGET, future)
         .await
@@ -440,4 +452,164 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             .expect("sibling still runs after cancellation");
     })
     .await;
+}
+
+/// A host that answers worker scripts with something other than the entry,
+/// which the shared double — one payload for every source — cannot do.
+struct TwoScriptFetcher {
+    base: FetcherDouble,
+    worker: &'static str,
+}
+
+impl bobcat_core::FrameImages for TwoScriptFetcher {
+    fn read(
+        &self,
+        source: &str,
+        hint: bobcat_core::ImageSizeHint,
+    ) -> Option<bobcat_core::vello::peniko::ImageData> {
+        self.base.read(source, hint)
+    }
+}
+
+impl ResourceFetcher for TwoScriptFetcher {
+    fn supports_capability(&self, capability: ResourceCapability) -> bool {
+        self.base.supports_capability(capability)
+    }
+
+    fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
+        if matches!(request, SourceRequest::Worker { .. }) {
+            completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+                source: self.worker.to_owned(),
+                url: "app:///worker.js".to_owned(),
+            }));
+            return;
+        }
+        completion.complete(self.base.load_source(request));
+    }
+
+    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
+        panic!("core must not resolve sources")
+    }
+
+    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
+        panic!("core must not poll resource futures")
+    }
+}
+
+/// The entry the view in the test below boots: one worker whose interval
+/// throws, so that the worker's liveness is observable from the embedder.
+const WORKER_ENTRY: &str = "import { Worker } from 'bobcat-internal';
+     globalThis.worker = new Worker('./worker.js');
+     globalThis.renderPage = function () { __CreatePage('card', 0); };";
+
+/// Pumps until a worker of this view reports a failure carrying `message`,
+/// which for the test below is its interval callback throwing: proof that the
+/// worker booted and that its timer is armed and firing, rather than that some
+/// other worker of the view's went wrong.
+///
+/// A fraction of [`HANG_BUDGET`], because this runs inside the thread the
+/// budget is watching: a worker that never boots has to fail here, naming the
+/// worker, rather than run the outer wait out and be reported as a teardown
+/// that would not return.
+fn wait_for_worker_error<F: ResourceFetcher + 'static>(
+    view: &mut bobcat_core::LynxView<F>,
+    message: &str,
+) {
+    let deadline = std::time::Instant::now() + HANG_BUDGET / 4;
+    loop {
+        for event in view.pump() {
+            if let EngineEvent::WorkerFailed(error) = event {
+                assert!(
+                    error.to_string().contains(message),
+                    "unexpected worker failure: {error}"
+                );
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker's interval never fired"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// What a panic on the teardown thread said, so the failure the test reports
+/// is the one that happened rather than the wait that noticed it.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload.downcast_ref::<String>().map_or_else(
+        || {
+            payload
+                .downcast_ref::<&str>()
+                .map_or_else(|| "a panic with no message".to_owned(), ToString::to_string)
+        },
+        Clone::clone,
+    )
+}
+
+/// A group is two threads, and dropping the group handle joins both of them
+/// within the deadline while a worker with an armed interval exists.
+///
+/// That is all this checks. The worker arms an interval that throws, which is
+/// what makes its liveness observable from the embedder: every tick is a
+/// nonfatal `WorkerFailed`, so reaching the drops means a worker is running
+/// and would go on running. Why its task then ends — the `Terminate` its realm
+/// sends, or the channel closing behind that message — is not something the
+/// two joins returning can tell apart.
+///
+/// A plain `#[test]` on a thread of its own because both joins are blocking:
+/// a deadline around a future cannot fire inside one, so the wait that fails
+/// this test has to be on a different thread from the joins it is watching.
+/// That is also why the body catches its own panic and sends the message
+/// across: an assertion inside the thread would otherwise reach the test only
+/// as a channel that never delivered, which reads as a teardown hang.
+#[test]
+fn dropping_the_group_joins_both_of_its_threads() {
+    let (finished, teardown) = flume::bounded(1);
+    std::thread::Builder::new()
+        .name("group-teardown".to_owned())
+        .spawn(move || {
+            let outcome = std::panic::catch_unwind(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a per-thread runtime");
+                runtime.block_on(async {
+                    let group = bobcat_core::LynxGroup::new(
+                        Arc::new(NoWakeup),
+                        bobcat_core::StyleThreads::Sequential,
+                    )
+                    .await
+                    .expect("the group starts");
+                    let mut view = group
+                        .create_lynx_view(
+                            32.0,
+                            24.0,
+                            1.0,
+                            DrawTarget::Offscreen,
+                            |_| {
+                                Rc::new(TwoScriptFetcher {
+                                    base: FetcherDouble::new(WORKER_ENTRY.as_bytes().to_vec())
+                                        .resolving_to("app:///main.js"),
+                                    worker: "setInterval(() => { throw new Error('tick'); }, 10);",
+                                })
+                            },
+                            ViewSources::new("main.js"),
+                        )
+                        .await
+                        .expect("the view is created");
+                    wait_for_script(&mut view).expect("the entry boots");
+                    wait_for_worker_error(&mut view, "tick");
+                    drop(view);
+                    drop(group);
+                });
+            });
+            let _ = finished.send(outcome.map_err(|payload| panic_text(payload.as_ref())));
+        })
+        .expect("the teardown thread starts");
+    match teardown.recv_timeout(HANG_BUDGET) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic)) => panic!("the teardown thread failed before its joins: {panic}"),
+        Err(error) => panic!("dropping the group did not join both of its threads: {error}"),
+    }
 }
