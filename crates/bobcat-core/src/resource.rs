@@ -306,7 +306,10 @@ impl SourceCompletion {
                 SourceDestination::Main(commands) => {
                     let _ = commands.send((
                         Some(self.view),
-                        crate::view::ToMain::SourceLoaded { module: self.module.take(), source },
+                        crate::view::ToMain::SourceLoaded {
+                            module: self.module.take(),
+                            source,
+                        },
                     ));
                 }
                 SourceDestination::Worker { commands, key } => {

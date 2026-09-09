@@ -2501,7 +2501,7 @@ mod implementation {
                 });
             ",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert_eq!(realm.take_module_request().as_deref(), Some("a"));
             assert!(realm.take_module_request().is_none());
             realm
@@ -2536,7 +2536,7 @@ mod implementation {
             );
             realm.complete_module("c", Ok(("c", "export {};"))).unwrap();
             realm.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             import_eval(
                 &mut realm,
                 "if (!done) throw Error('import did not finish');",
@@ -2587,7 +2587,7 @@ mod implementation {
                 &mut realm,
                 "import('b').then(m => globalThis.answer = m.b);",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             import_eval(
                 &mut realm,
                 "if (answer !== 1) throw Error('cycle member was left half resolved');",
@@ -2601,15 +2601,15 @@ mod implementation {
                 &mut realm,
                 "globalThis.caught = 0; import('missing').catch(() => caught++);",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert_eq!(realm.take_module_request().as_deref(), Some("missing"));
             realm
                 .complete_module("missing", Err("network failed"))
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             import_eval(&mut realm, "import('missing').catch(() => caught++);");
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert!(realm.take_module_request().is_none());
             import_eval(
                 &mut realm,
@@ -2627,7 +2627,7 @@ mod implementation {
                 &mut second,
                 "import('module').then(m => globalThis.answer = m.value);",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&second).unwrap();
             assert_eq!(first.take_module_request().as_deref(), Some("module"));
             assert_eq!(second.take_module_request().as_deref(), Some("module"));
             drop(first);
@@ -2636,7 +2636,7 @@ mod implementation {
                 .complete_module("module", Ok(("module", "export const value = 42;")))
                 .unwrap();
             second.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&second).unwrap();
             import_eval(
                 &mut second,
                 "if (answer !== 42) throw Error('sibling import lost');",
@@ -2657,7 +2657,7 @@ mod implementation {
                 &mut realm,
                 "import('alias').then(m => globalThis.answer = m.answer);",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert_eq!(realm.take_module_request().as_deref(), Some("alias"));
             realm
                 .complete_module(
@@ -2677,7 +2677,7 @@ mod implementation {
                 )
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             import_eval(
                 &mut realm,
                 r"
@@ -2689,7 +2689,7 @@ mod implementation {
                 });
             ",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert!(realm.take_module_request().is_none());
             import_eval(
                 &mut realm,
@@ -2733,7 +2733,7 @@ mod implementation {
                 &mut realm,
                 "import('outer').then(m => globalThis.answer = m.value);",
             );
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert_eq!(realm.take_module_request().as_deref(), Some("outer"));
             realm
                 .complete_module(
@@ -2745,13 +2745,13 @@ mod implementation {
                 )
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             assert_eq!(realm.take_module_request().as_deref(), Some("inner"));
             realm
                 .complete_module("inner", Ok(("inner", "export const value = 42;")))
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            runtime.drain_pending_jobs().unwrap();
+            runtime.drain_pending_jobs(&realm).unwrap();
             import_eval(
                 &mut realm,
                 "if (answer !== 42) throw Error('top-level await lost');",

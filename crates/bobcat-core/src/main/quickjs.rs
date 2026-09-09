@@ -534,7 +534,10 @@ impl ScriptEngine {
 /// URL identity is shared by static and dynamic imports. Bare names are
 /// reserved for the built-ins; transport and response policy stay with the host.
 fn normalize_module_url(base: &str, specifier: &str) -> Result<String, String> {
-    if specifier.starts_with("bobcat:") || specifier.starts_with("bobcat-internal:") {
+    if specifier == super::workers::MODULE
+        || specifier.starts_with("bobcat:")
+        || specifier.starts_with("bobcat-internal:")
+    {
         return Ok(specifier.to_owned());
     }
     if let Ok(url) = url::Url::parse(specifier) {
