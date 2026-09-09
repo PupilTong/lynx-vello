@@ -349,6 +349,22 @@ useful signal for currently-compatible versions of those libraries.
   view's painter and the host waits it out; a worker realm has no painter and
   no host turn, so there is nobody to hand it to and the thread waits out its
   own.
+  **The main-thread `Worker` class is exported by `bobcat-internal`.**
+  It is an explicit ESM import, creates a distinct context on the group's
+  existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
+  `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
+  module scripts (also with omitted options) and the existing worker scope's
+  JSON transport; structured clone, transfer lists and external module
+  fetching remain pending. `main/workers.rs` installs its three native
+  operations before entry boot. `Start` precedes the painter's resource
+  request; `SourceRequest::Worker` carries the entry's resolved URL as its
+  base, and `SourceCompletion` answers directly to the worker FIFO through a
+  weak sender, so outstanding IO cannot hold the group open. The painter
+  preserves every concurrent worker request. Dropping the main realm cancels
+  its source work and releases its workers, including after failed boot.
+  `ToMain::Worker` delivers messages and errors to the owning realm; worker
+  errors also produce nonfatal `EngineEvent::WorkerFailed`. See
+  `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -383,22 +399,6 @@ useful signal for currently-compatible versions of those libraries.
   wider pool is a construction error rather than a silent clamp — reported the
   way any other boot failure is, and by `LynxGroup::new`, so no group and
   therefore no view exists for it.
-  **The main-thread `Worker` class is exported by `bobcat-internal`.**
-  It is an explicit ESM import, creates a distinct context on the group's
-  existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
-  `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
-  module scripts (also with omitted options) and the existing worker scope's
-  JSON transport; structured clone, transfer lists and external module
-  fetching remain pending. `main/workers.rs` installs its three native
-  operations before entry boot. `Start` precedes the painter's resource
-  request; `SourceRequest::Worker` carries the entry's resolved URL as its
-  base, and `SourceCompletion` answers directly to the worker FIFO through a
-  weak sender, so outstanding IO cannot hold the group open. The painter
-  preserves every concurrent worker request. Dropping the main realm cancels
-  its source work and releases its workers, including after failed boot.
-  `ToMain::Worker` delivers messages and errors to the owning realm; worker
-  errors also produce nonfatal `EngineEvent::WorkerFailed`. See
-  `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   **Wasm takes the same path.** `navigator.hardwareConcurrency` reaches
   `StyleThreads::for_parallelism`, which is `Auto`'s own arithmetic, so
   comparable hardware gets the same pool on both targets and the facade does no
