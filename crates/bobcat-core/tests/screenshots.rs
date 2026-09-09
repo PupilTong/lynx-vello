@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{
-    DrawTarget, FontBlob, LynxView, NoWakeup, PreparsedDeclaration, PreparsedRule,
+    DrawTarget, FontBlob, LynxView, NoWakeup, Painter, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
 };
 use flashbulb::{Image, Screenshots};
@@ -125,8 +125,8 @@ fn fetcher(source: &[u8]) -> impl FnOnce(bobcat_core::ImageReports) -> Rc<Fetche
 async fn booted(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
-) -> LynxView<Rc<FetcherDouble>> {
-    let mut view = solo_view(
+) -> (LynxView<Rc<FetcherDouble>>, Painter) {
+    let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         393.0,
         727.0,
@@ -138,14 +138,14 @@ async fn booted(
     .await
     .expect("view");
     wait_for_script(&mut view).expect("script execution");
-    view
+    (view, painter)
 }
 
 /// A view whose stylesheet request the double answers pre-parsed.
 async fn booted_with_sheet(
     source: &[u8],
     sheet: PreparsedStyleSheet,
-) -> LynxView<Rc<FetcherDouble>> {
+) -> (LynxView<Rc<FetcherDouble>>, Painter) {
     booted_with_sheet_at(source, sheet, 393.0, 727.0).await
 }
 
@@ -154,8 +154,8 @@ async fn booted_with_sheet_at(
     sheet: PreparsedStyleSheet,
     width: f32,
     height: f32,
-) -> LynxView<Rc<FetcherDouble>> {
-    let mut view = solo_view(
+) -> (LynxView<Rc<FetcherDouble>>, Painter) {
+    let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         width,
         height,
@@ -176,20 +176,29 @@ async fn booted_with_sheet_at(
     .await
     .expect("view");
     wait_for_script(&mut view).expect("script execution");
-    view
+    (view, painter)
 }
 
-/// Drives the view until the painter has resolved a frame that draws an
+/// Drives both halves until the painter has resolved a frame that draws an
 /// image.
 ///
 /// The store's retain log is the precise signal: it is written by the
 /// painter's resolve pass, so a non-empty working set means a committed frame
-/// actually named an image and the painter read its pixels. Each round is a
-/// forced tick, which is the one call that waits for the commit behind it.
-fn settle_images(view: &mut LynxView<Rc<FetcherDouble>>, images: &flashbulb::TestImages) {
+/// actually named an image and the painter read its pixels.
+///
+/// The view's turn comes first in every round. It is the one call that
+/// services the resource protocol at all, and the image reports it sends ride
+/// the same command FIFO the tick's `BeginFrame` then follows — so the
+/// acknowledgement the tick waits for implies a commit that saw them.
+fn settle_images(
+    view: &mut LynxView<Rc<FetcherDouble>>,
+    painter: &mut Painter,
+    images: &flashbulb::TestImages,
+) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let _ = view.tick(true);
+        let _ = view.pump();
+        let _ = painter.tick(true);
         if images.retained().iter().any(|set| !set.is_empty()) {
             return;
         }
@@ -226,13 +235,13 @@ fn checker_store() -> Rc<flashbulb::TestImages> {
 
 #[tokio::test]
 async fn fetched_script_reaches_the_offscreen_draw_target() {
-    let mut view = booted(
+    let (_view, mut painter) = booted(
         fetcher(MAIN_THREAD_SCRIPT.as_bytes()),
         ViewSources::new(SCRIPT_URL),
     )
     .await;
 
-    let shot = view.capture().expect("capture the committed page");
+    let shot = painter.capture().expect("capture the committed page");
     assert_eq!(shot.size.width, 393);
     assert_eq!(shot.size.height, 727);
     assert_eq!(
@@ -254,7 +263,7 @@ async fn fetched_script_reaches_the_offscreen_draw_target() {
 #[tokio::test]
 async fn an_embedder_image_store_reaches_the_private_painter() {
     let images = checker_store();
-    let mut view = booted(
+    let (mut view, mut painter) = booted(
         |sink| {
             Rc::new(
                 FetcherDouble::new(IMAGE_SCRIPT.as_bytes().to_vec())
@@ -266,9 +275,9 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
         ViewSources::new(SCRIPT_URL),
     )
     .await;
-    settle_images(&mut view, &images);
+    settle_images(&mut view, &mut painter, &images);
 
-    let shot = view.capture().expect("capture the committed image");
+    let shot = painter.capture().expect("capture the committed image");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["embedder-image-store"], &image);
@@ -291,7 +300,7 @@ async fn an_embedder_image_store_reaches_the_private_painter() {
 #[tokio::test]
 async fn an_image_element_loads_and_paints_from_its_src() {
     let images = checker_store();
-    let mut view = booted(
+    let (mut view, mut painter) = booted(
         |sink| {
             Rc::new(
                 FetcherDouble::new(IMAGE_ELEMENT_SCRIPT.as_bytes().to_vec())
@@ -303,9 +312,11 @@ async fn an_image_element_loads_and_paints_from_its_src() {
         ViewSources::new(SCRIPT_URL),
     )
     .await;
-    settle_images(&mut view, &images);
+    settle_images(&mut view, &mut painter, &images);
 
-    let shot = view.capture().expect("capture the committed image element");
+    let shot = painter
+        .capture()
+        .expect("capture the committed image element");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["image-element"], &image);
@@ -319,7 +330,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
 
     // Selecting the face by name is what proves the container registered: an
     // unknown default family fails the construction.
-    let mut view = booted(
+    let (_view, mut painter) = booted(
         fetcher(TEXT_SCRIPT.as_bytes()),
         ViewSources {
             fonts: vec![FontBlob::from_static(ROBOTO)],
@@ -329,7 +340,7 @@ async fn raw_text_reaches_the_private_painter_as_glyphs() {
     )
     .await;
 
-    let shot = view.capture().expect("capture the committed page");
+    let shot = painter.capture().expect("capture the committed page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["raw-text-runs"], &image);
@@ -353,7 +364,7 @@ globalThis.renderPage = function () {
   }
 };
 ";
-    let mut view = solo_view(
+    let (mut view, mut painter) = solo_view(
         Arc::new(NoWakeup),
         220.0,
         60.0,
@@ -369,7 +380,7 @@ globalThis.renderPage = function () {
     .await
     .expect("view");
     wait_for_script(&mut view).expect("script execution");
-    let shot = view.capture().expect("capture both text boxes");
+    let shot = painter.capture().expect("capture both text boxes");
     assert_eq!((shot.size.width, shot.size.height), (440, 120));
     let pixel = |x: usize, y: usize| {
         let offset = (y * shot.size.width as usize + x) * 4;
@@ -418,7 +429,7 @@ globalThis.renderPage = function renderPage() {
             declaration("background-color", color),
         ]
     };
-    let mut view = booted_with_sheet_at(
+    let (_view, mut painter) = booted_with_sheet_at(
         SWAP_SCRIPT.as_bytes(),
         PreparsedStyleSheet {
             rules: vec![
@@ -437,7 +448,7 @@ globalThis.renderPage = function renderPage() {
     )
     .await;
 
-    let shot = view.capture().expect("capture the restyled page");
+    let shot = painter.capture().expect("capture the restyled page");
     let count = |wanted: [u8; 4]| {
         shot.pixels
             .chunks_exact(4)
@@ -457,7 +468,7 @@ globalThis.renderPage = function renderPage() {
 /// and the committed frame is compared against a golden.
 #[tokio::test]
 async fn a_preparsed_author_sheet_paints() {
-    let mut view = booted_with_sheet(
+    let (_view, mut painter) = booted_with_sheet(
         STYLED_SCRIPT.as_bytes(),
         PreparsedStyleSheet {
             rules: vec![
@@ -483,7 +494,7 @@ async fn a_preparsed_author_sheet_paints() {
     )
     .await;
 
-    let shot = view.capture().expect("capture the styled page");
+    let shot = painter.capture().expect("capture the styled page");
     let image = Image::from_rgba8(shot.size.width, shot.size.height, shot.pixels)
         .expect("captured RGBA image");
     screenshots().assert_matches(&["preparsed-author-sheet"], &image);

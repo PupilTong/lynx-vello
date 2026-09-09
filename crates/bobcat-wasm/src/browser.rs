@@ -10,7 +10,7 @@ use std::{fmt, mem};
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, FontBlob, FrameSize, LynxGroup, LynxView, PageConfig,
-    StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
+    Painter, StyleThreads, ViewSources, WindowTarget, configure_wasm_workers,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::{PageSource, ZipSource, register_lynx_xml_response};
@@ -121,6 +121,11 @@ impl Future for EventWait {
 /// commit uses.
 #[wasm_bindgen]
 pub struct BobcatRenderer {
+    /// This canvas's painter, built once and kept across page loads: the
+    /// WebGPU context belongs to the canvas, and rebuilding it per page would
+    /// tear the surface down and put it back for no reason. Declared before
+    /// the view so its surface is released before anything else here is.
+    painter: Option<Painter>,
     view: Option<LynxView<ViewResources>>,
     /// Empty/staged sources for the next load, sharing the platform decoder.
     resources: Resources,
@@ -206,6 +211,21 @@ impl BobcatRenderer {
             configure_wasm_workers(worker_url).map_err(js_error)?;
 
             let events = Arc::new(EventSignal::default());
+            // A canvas owns its own resolution — configuring a context does
+            // not set it — and the painter builds its surface from this
+            // canvas. So it is sized first, to the same physical target those
+            // metrics give the painter.
+            let frame_size =
+                FrameSize::for_viewport(width, height, device_pixel_ratio).map_err(js_error)?;
+            set_canvas_size(&canvas, frame_size);
+            let painter = Painter::new(
+                DrawTarget::window(WindowTarget::OffscreenCanvas(canvas.clone())),
+                width,
+                height,
+                device_pixel_ratio,
+            )
+            .await
+            .map_err(js_error)?;
             let resources = Resources::new(
                 ResourcesConfig {
                     image_port: Some(image_port),
@@ -224,6 +244,7 @@ impl BobcatRenderer {
             };
 
             Ok(Self {
+                painter: Some(painter),
                 view: None,
                 group: None,
                 resources,
@@ -418,10 +439,10 @@ impl BobcatRenderer {
         }))
     }
 
-    /// Answer one durable engine wakeup: run the view's turn on this
-    /// Worker — routing whatever was queued, drawing the frame it owes — and
-    /// hand back the lifecycle events it produced. Returns whether the entry
-    /// module has finished booting.
+    /// Answer one durable engine wakeup: run both turns on this Worker — the
+    /// painter draws the frame it owes, then the view services its host's
+    /// resources — and hand back the lifecycle events they produced. Returns
+    /// whether the entry module has finished booting.
     ///
     /// One call covers everything because the engine has one wakeup: a commit
     /// and a `ScriptFinished` arrive on the same signal, and the Worker turn
@@ -445,10 +466,19 @@ impl BobcatRenderer {
         // Clear the durable edge before serving, so anything the turn itself
         // publishes re-arms it and the Worker comes back for it.
         self.events.take();
-        let Some(view) = self.view.as_mut() else {
-            return Ok(self.script_finished);
-        };
         let mut fatal = None;
+        // The painter first: the pixels a fatal script error left behind
+        // reach the canvas on the turn that reports it, with nobody left to
+        // ask for another frame. A draw target that failed cannot be reached
+        // again, so it is reported once and the painter draws nothing after.
+        if let Some(painter) = self.painter.as_mut()
+            && let Err(error) = painter.pump()
+        {
+            fatal = Some(js_error(error));
+        }
+        let Some(view) = self.view.as_mut() else {
+            return fatal.map_or(Ok(self.script_finished), Err);
+        };
         let mut boot_finished = false;
         if let Some(resources) = &self.page_resources {
             warn_notes(resources);
@@ -464,9 +494,6 @@ impl BobcatRenderer {
                 }
                 // The first failure is the one reported.
                 EngineEvent::ScriptRunError(error) if fatal.is_none() => {
-                    fatal = Some(js_error(error));
-                }
-                EngineEvent::RenderFailed(error) if fatal.is_none() => {
                     fatal = Some(js_error(error));
                 }
                 EngineEvent::ListenerFailed(error)
@@ -503,15 +530,7 @@ impl BobcatRenderer {
     /// acquire never waits, so the display is the only honest pace there is.
     #[wasm_bindgen(js_name = owesFrame)]
     pub fn owes_frame(&self) -> bool {
-        self.view.as_ref().is_some_and(LynxView::owes_frame)
-    }
-
-    #[wasm_bindgen(js_name = nextWakeupMs)]
-    pub fn next_wakeup_ms(&self) -> Option<f64> {
-        self.view
-            .as_ref()
-            .and_then(LynxView::next_wakeup)
-            .map(|wakeup| wakeup.as_secs_f64() * 1_000.0)
+        self.painter.as_ref().is_some_and(Painter::owes_frame)
     }
 
     /// Route one browser `PointerEvent` into the opaque native view.
@@ -554,9 +573,10 @@ impl BobcatRenderer {
         let event = InputEvent::pointer(Point2D::new(x, y), pointer_id, device, phase)
             .with_default_prevented(default_prevented);
         // A pointer that arrives before any page is loaded has nothing to
-        // reach; there is no view to route it against and nothing to buffer.
-        if let Some(view) = self.view.as_mut() {
-            view.dispatch_input(event);
+        // reach; the painter is attached to no view, so it routes nothing and
+        // there is nothing to buffer.
+        if let Some(painter) = self.painter.as_mut() {
+            painter.dispatch_input(event);
             // Routing happened here, on this Worker; the frame it may owe is
             // this Worker's to take, and the loop is parked until it is told.
             self.events.request_event();
@@ -578,11 +598,11 @@ impl BobcatRenderer {
         self.width = width;
         self.height = height;
         self.device_pixel_ratio = device_pixel_ratio;
-        if let Some(view) = self.view.as_mut() {
-            view.resize(width, height, device_pixel_ratio)
+        if let Some(painter) = self.painter.as_mut() {
+            painter
+                .resize(width, height, device_pixel_ratio)
                 .map_err(js_error)?;
-            let frame_size = view.frame_size();
-            set_canvas_size(&self.canvas, frame_size);
+            set_canvas_size(&self.canvas, painter.frame_size());
             self.events.request_event();
         }
         Ok(())
@@ -596,8 +616,12 @@ impl BobcatRenderer {
     pub fn dispose(&mut self) {
         self.disposed = true;
         self.events.request_event();
+        if let Some(painter) = self.painter.as_mut() {
+            painter.detach();
+        }
         drop(self.view.take());
         drop(self.group.take());
+        drop(self.painter.take());
         self.page_resources = None;
         self.boot_urls.clear();
     }
@@ -609,14 +633,21 @@ impl BobcatRenderer {
         mut sources: ViewSources,
         base_url: Url,
     ) -> Result<(), JsValue> {
-        // Dropping the previous view stops it, and dropping the group it
-        // belonged to is what joins that Lynx-main Worker — both before
-        // construction of the independent replacement begins.
+        // Detaching first, then dropping the previous view — which stops it —
+        // and then the group it belonged to, which is what ends its two
+        // Workers, the Lynx-main one and the worker-realm one after it. All
+        // before construction of the independent
+        // replacement begins. The painter is not one of them: it owns this
+        // canvas's surface, keeps showing the old page's last frame while the
+        // new one loads, and is re-attached below.
         //
         // A page gets a group of its own rather than reusing this renderer's:
         // the script runtime is the group's, and a page loaded twice would
         // otherwise register its entry module a second time under a name the
         // previous load already took.
+        if let Some(painter) = self.painter.as_mut() {
+            painter.detach();
+        }
         drop(self.view.take());
         drop(self.group.take());
         self.page_resources = None;
@@ -631,13 +662,23 @@ impl BobcatRenderer {
         self.resources.set_base_url(Some(base_url));
         sources.fonts = self.fonts.clone();
         sources.default_font_family = self.default_font_family.clone();
-        // A canvas owns its own resolution — configuring a context does not
-        // set it — and the view builds its surface from this canvas during
-        // construction. So it is sized first, to the same physical target
-        // those metrics give the view.
-        let frame_size = FrameSize::for_viewport(self.width, self.height, self.device_pixel_ratio)
-            .map_err(js_error)?;
-        set_canvas_size(&self.canvas, frame_size);
+        // A draw target that failed cannot be reached again, so a page loaded
+        // after one gets a painter of its own. Dropping the old one first is
+        // what releases this canvas's WebGPU context before the replacement
+        // asks for another.
+        if self.painter.as_ref().is_none_or(Painter::has_failed) {
+            drop(self.painter.take());
+            self.painter = Some(
+                Painter::new(
+                    DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
+                    self.width,
+                    self.height,
+                    self.device_pixel_ratio,
+                )
+                .await
+                .map_err(js_error)?,
+            );
+        }
         // The view retains this scope, including ZIP assets needed after boot.
         // The next submission stages sources in a fresh scope sharing the
         // same image decoder and IO workers, but no cached image or URL.
@@ -649,18 +690,24 @@ impl BobcatRenderer {
         let boot_urls: Vec<_> = std::iter::once(sources.entry.clone())
             .chain(sources.style_sheets.iter().cloned())
             .collect();
-        let built = group
-            .create_lynx_view(
-                self.width,
-                self.height,
-                self.device_pixel_ratio,
-                DrawTarget::window(WindowTarget::OffscreenCanvas(self.canvas.clone())),
-                resources.builder(),
-                sources,
-            )
-            .await;
+        let built = group.create_lynx_view(
+            self.width,
+            self.height,
+            self.device_pixel_ratio,
+            resources.builder(),
+            sources,
+        );
         warn_notes(&resources);
-        self.view = Some(built.map_err(js_error)?);
+        let view = built.map_err(js_error)?;
+        if let Some(painter) = self.painter.as_mut() {
+            // Attaching imposes the painter's metrics on the view, so a page
+            // built at the wrapper's size lays out at the canvas's. The canvas
+            // itself is not resized here: it already carries that resolution,
+            // and setting a canvas's size clears its bitmap — which would
+            // blank the previous page's last frame while this one loads.
+            painter.attach(&view).map_err(js_error)?;
+        }
+        self.view = Some(view);
         self.page_resources = Some(resources);
         self.boot_urls = boot_urls;
         self.group = Some(group);

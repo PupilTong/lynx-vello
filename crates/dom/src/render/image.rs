@@ -170,6 +170,18 @@ pub trait FrameImages {
     /// the hint or the intrinsic size that was reported with the load: a
     /// reduced-scale decode composes correctly.
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData>;
+
+    /// The sources the frame just resolved, deduplicated in paint order.
+    ///
+    /// Advisory: it informs residency and nothing else, and a store that
+    /// ignores it is still correct. Called once per resolve pass, immediately
+    /// after the reads that pass made.
+    ///
+    /// There is no default, deliberately. A store that keeps bitmaps has to
+    /// decide what its working set is, and a silent no-op inherited from the
+    /// trait is the one answer that cannot be reviewed — writing `{}` says
+    /// the same thing where someone can see it.
+    fn retain(&self, frame: &[Arc<str>]);
 }
 
 /// Composes every image draw as nothing: the pixel source for a scene built
@@ -187,12 +199,19 @@ impl<T: FrameImages + ?Sized> FrameImages for Rc<T> {
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         (**self).read(source, hint)
     }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        (**self).retain(frame);
+    }
 }
 
 impl FrameImages for NoImages {
     fn read(&self, _source: &str, _hint: ImageSizeHint) -> Option<ImageData> {
         None
     }
+
+    /// Nothing is held, so there is no working set to narrow.
+    fn retain(&self, _frame: &[Arc<str>]) {}
 }
 
 /// Completed loads waiting for the painter to take its next turn.

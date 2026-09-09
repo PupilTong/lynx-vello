@@ -2,32 +2,34 @@
 //! handles, and the vocabulary of the one thread boundary they cross.
 //!
 //! A view has two owners. The embedder's own thread — whichever one created
-//! the [`LynxGroup`] — holds the view and, inside it, the private painter: it
-//! captures input, creates the surface, routes, composes, presents, and
-//! drains lifecycle events, all inside the calls the embedder makes. The Lynx
-//! main thread owns each document and each script realm, and belongs to the
-//! group rather than to any one view. The sibling `paint` and `main` modules
-//! mirror those two owners; this module holds the handles that join them and
-//! the link that crosses between them.
+//! the [`LynxGroup`] — holds the view: it owns the host's resource system,
+//! services it, and drains lifecycle events, all inside the calls the
+//! embedder makes. The Lynx main thread owns each document and each script
+//! realm, and belongs to the group rather than to any one view.
+//!
+//! Pixels are a third party. A [`Painter`](crate::Painter) is built
+//! separately, on the same embedder thread, and observes a view's frames for
+//! as long as it is attached to it; a view can outlive its painter and a
+//! painter can outlive its view. The sibling `paint` and `main` modules hold
+//! those two, and this one holds the handles that join them.
 
+use std::cell::Cell;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Duration;
 
-use dom::input::InputEvent;
-use dom::{FontBlob, StylePool};
+use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::background::WorkerHome;
+use crate::clock::ClockInstant;
 use crate::link::{Published, ToMain, ViewCancel, ViewNotice};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
 use crate::main::{GroupHome, GroupLink, spawn_group};
 pub use crate::paint::WindowTarget;
-use crate::paint::{Output, Painter, PainterLink};
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
 
@@ -75,10 +77,10 @@ pub struct FrameSize {
 impl FrameSize {
     /// The physical target a CSS viewport at this device scale needs.
     ///
-    /// The same computation [`LynxGroup::create_lynx_view`] and
-    /// [`LynxView::resize`] make,
-    /// exposed because a host that owns the surface's backing store — a
-    /// browser canvas — has to size it before it hands the view a target.
+    /// The same computation [`Painter::new`](crate::Painter::new) and
+    /// [`Painter::resize`](crate::Painter::resize) make, exposed because a
+    /// host that owns the surface's backing store — a browser canvas — has to
+    /// size it before it hands a painter a target.
     ///
     /// # Errors
     ///
@@ -126,27 +128,25 @@ impl FrameSize {
     }
 }
 
-/// Where a view's pixels go, named once and kept for the view's whole life.
+/// Where a painter's pixels go, named once and kept for its whole life.
 ///
-/// There is no attaching a target later: [`LynxGroup::create_lynx_view`]
-/// builds it, on the thread that will draw into it, before the view exists.
+/// There is no attaching a target later: [`Painter::new`](crate::Painter::new)
+/// builds it, on the thread that will draw into it, before the painter
+/// exists — and a painter then shows whichever views it attaches to through
+/// that one target.
 pub enum DrawTarget {
     /// A window's presentation stack, built from a `'static` surface target —
     /// a shared window handle or an owned canvas.
     Window(WindowTarget),
-    /// A texture the view owns and nothing displays. [`LynxView::tick`]
-    /// renders into it and [`LynxView::capture`] reads it back.
+    /// A texture the painter owns and nothing displays.
+    /// [`Painter::tick`](crate::Painter::tick) renders into it and
+    /// [`Painter::capture`](crate::Painter::capture) reads it back.
     ///
     /// Native only in practice: building one blocks the calling thread on a
     /// device request, and in a browser that thread is the one whose event
-    /// loop would answer it — so a Wasm view is refused this target at
+    /// loop would answer it — so a Wasm painter is refused this target at
     /// construction rather than hanging on it.
     Offscreen,
-    /// Nowhere at all. Test-only, so an in-crate test that exercises routing,
-    /// events or timers pays for no GPU device; production has exactly the
-    /// two targets an embedder can name.
-    #[cfg(test)]
-    None,
 }
 
 impl DrawTarget {
@@ -165,8 +165,6 @@ impl fmt::Debug for DrawTarget {
         formatter.write_str(match self {
             Self::Window(_) => "DrawTarget::Window",
             Self::Offscreen => "DrawTarget::Offscreen",
-            #[cfg(test)]
-            Self::None => "DrawTarget::None",
         })
     }
 }
@@ -193,8 +191,15 @@ pub enum EngineError {
     Thread { name: &'static str, message: String },
     #[error("no registered or system font family is named `{0}`")]
     UnknownFontFamily(String),
-    #[error("this view presents into a window; `tick` advances an offscreen view")]
+    #[error("this painter presents into a window; `tick` advances an offscreen one")]
     NotOffscreen,
+    /// One view has at most one interactive painter, and one painter observes
+    /// at most one *live* view. A link whose view has been released is not an
+    /// attachment and never has to be detached by hand: attaching releases it.
+    /// Two live pairings are what this refuses, and detaching whichever one is
+    /// in the way is what clears it.
+    #[error("a painter is already attached")]
+    PainterAttached,
 }
 
 /// A view construction or startup failure. Construction reports target and
@@ -233,10 +238,6 @@ pub enum EngineEvent {
     TimerFailed(ScriptError),
     /// A worker failed to load or threw. The owning view remains usable.
     WorkerFailed(ScriptError),
-    /// The painter could not produce a frame. Fatal for the draw target:
-    /// nothing further will reach the screen, so an embedder reports it and
-    /// takes the window down.
-    RenderFailed(EngineError),
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at size.
@@ -261,7 +262,7 @@ impl fmt::Debug for Screenshot {
 /// One implementation per platform — a winit event-loop proxy, an `AppKit`
 /// source, a Worker's signal — and [`LynxGroup::new`] is generic over it, so
 /// the wake is a direct call rather than a virtual one. One serves a whole
-/// group: its views paint on the thread that created it, and so wake one
+/// group: its views live on the thread that created it, and so wake one
 /// event loop. The Lynx main thread holds the only handle to it, and calls it
 /// whenever it has published something a view's next [`LynxView::pump`] would
 /// find: a committed frame, a lifecycle event. It must never call back into a
@@ -340,10 +341,10 @@ impl StyleThreads {
 /// [`LynxGroup::new`], and no field here could name them a second time.
 ///
 /// It carries no resource system either, and has no field that could hold
-/// one: the host's fetcher belongs to the painter, is passed to
+/// one: the host's fetcher belongs to the view, is passed to
 /// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
 /// Construction splits this in two — the document inputs cross to
-/// `bobcat-main`, including the specifiers it requests from the painter's
+/// `bobcat-main`, including the specifiers it requests from the view's
 /// resource fetcher as startup proceeds.
 #[derive(Debug)]
 pub struct ViewSources {
@@ -405,7 +406,7 @@ impl ViewSources {
 ///
 /// One group per thread, and one thread per group. The handle is `!Send` and
 /// `!Sync` — it hands out `Rc`s of what it owns — so the embedder thread
-/// that creates a group is the thread every view in it paints on. That is
+/// that creates a group is the thread every view in it lives on. That is
 /// also why one [`EventRequester`] serves the whole group rather than one
 /// per view: its views wake one event loop, the one belonging to the thread
 /// they were all created on.
@@ -514,7 +515,13 @@ impl LynxGroup {
         }
     }
 
-    /// Builds the draw target and returns a loading view on the calling thread.
+    /// Returns a loading view on the calling thread.
+    ///
+    /// Synchronous, and it builds nothing that could block: the view is a set
+    /// of channels, the host's resource system, and the group handle that
+    /// keeps its thread alive. Where its pixels go is a separate question,
+    /// answered by attaching a [`Painter`](crate::Painter) to it — which may
+    /// be before boot, after it, or never.
     ///
     /// The view's task requests each stylesheet in cascade order, then the entry
     /// module. Ordinary [`LynxView::pump`] turns dispatch requests to the fetcher,
@@ -523,33 +530,34 @@ impl LynxGroup {
     /// completion is [`EngineEvent::ScriptFinished`], and loading, configuration,
     /// or boot failure is [`EngineEvent::StartupFailed`].
     ///
-    /// Dropping the unresolved constructor releases its target and attachment.
     /// Dropping a loading view marks its source work cancelled and prevents boot
     /// from entering `QuickJS`. An IO operation or synchronous JavaScript already
     /// executing may finish; late source results are discarded. Other views continue.
-    /// The fetcher needs neither `Send`, `Sync`, nor `'static`; only the concrete
-    /// source completion and the fetcher's own job inputs leave this thread.
+    /// The fetcher needs neither `Send` nor `Sync`; only the concrete source
+    /// completion and the fetcher's own job inputs leave this thread.
     ///
     /// # Errors
     ///
-    /// [`LynxViewError`] if metrics are invalid, the draw target cannot be built,
-    /// or the group's main thread cannot accept the attachment.
-    pub async fn create_lynx_view<F, B>(
+    /// [`LynxViewError`] if the metrics are invalid, or the group's main
+    /// thread cannot accept the attachment.
+    pub fn create_lynx_view<F, B>(
         &self,
         width: f32,
         height: f32,
         device_pixel_ratio: f32,
-        target: DrawTarget,
         resources: B,
         sources: ViewSources,
     ) -> Result<LynxView<F>, LynxViewError>
     where
-        F: ResourceFetcher,
+        F: ResourceFetcher + 'static,
         B: FnOnce(dom::ImageReports) -> F,
     {
-        let frame_size = FrameSize::for_viewport(width, height, device_pixel_ratio)?;
+        // Validated here even though no target is built from it: these are the
+        // metrics the document lays out against, and a painter that later
+        // attaches imposes its own.
+        FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        // Main owns source ordering; the painter owns the fetcher.
+        // Main owns source ordering; the view owns the fetcher.
         let ViewSources {
             config,
             fonts,
@@ -566,8 +574,6 @@ impl LynxGroup {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        let painter_link =
-            PainterLink::new(commands, notice_receiver, frame_receiver, cancel.clone());
         self.inner
             .attach
             .as_ref()
@@ -593,60 +599,82 @@ impl LynxGroup {
                 name: "script",
                 message: "the group's Lynx main thread is gone".to_owned(),
             })?;
-        // The link goes into the guard before the first await, so every exit
-        // path has a real goodbye to send — including the one where the draw
-        // target failed and there is no painter yet.
-        let mut startup = ViewStartup {
-            link: Some(painter_link),
-            painter: None,
-            group: Some(Rc::clone(&self.inner)),
+        // The sink comes first and the store is built *from* it, so a store
+        // without its report channel is unrepresentable and the two are paired
+        // by construction. That pairing is per view: a host whose registry
+        // outlives the view returns a per-view value holding a shared handle
+        // on it, and that value — not the registry — is what carries the sink.
+        // A load in flight when a view is replaced therefore reports to the
+        // queue it was started for, which teardown has already detached,
+        // rather than into its successor's document.
+        let (reports, inbox) = ImageInbox::new();
+        Ok(LynxView {
             cancel,
-        };
-        let output = Output::build(target, frame_size).await?;
-        // The store is built here, on the thread that owns the painter and
-        // always will, out of the sink it reports through — one sink, one
-        // store, one view. Nothing about it ever crosses a thread, which is
-        // why it needs neither `Send` nor `Sync`, and why it is a type rather
-        // than a trait object.
-        startup.painter = Some(Painter::with_output(
-            viewport,
-            frame_size,
-            startup
-                .link
-                .take()
-                .expect("the link is held until the painter is"),
-            output,
-            resources,
-        ));
-        Ok(startup.finish())
+            commands,
+            notices: notice_receiver,
+            frames: frame_receiver,
+            inbox,
+            fetcher: Rc::new(resources(reports)),
+            failed: false,
+            painter_attached: Rc::new(Cell::new(false)),
+            timeline_epoch: ClockInstant::now(),
+            group: Rc::clone(&self.inner),
+        })
     }
 }
 
-/// A loading or running Lynx view: a window's worth of Lynx, on a thread its
+/// A loading or running Lynx view: a page's worth of Lynx, on a thread its
 /// [`LynxGroup`] owns.
 ///
-/// The view stays on the thread that built it, and that thread is where it
-/// paints: it owns its one draw target, the gesture router, the scroll
-/// intents and the composition outright, so an embedder chooses the painting
-/// thread by choosing where it creates the group. The target is chosen at
-/// construction too, and never afterwards. Nothing here is a queue and
-/// nothing here draws by itself — every call applies immediately, and the
-/// frame those calls owe is produced by the next [`LynxView::pump`], which
-/// is also the turn that hands back what the realm had to say. A host parked
-/// on its own event loop therefore takes a turn after it hands a fact in;
-/// facts from the Lynx main thread arrive with the construction-time
-/// [`EventRequester`] wakeup.
+/// The view stays on the thread that built it. It owns the host's resource
+/// system — sources and images both — and services it in [`Self::pump`], the
+/// one call that advances the resource protocol at all. Nothing here is a
+/// queue: every call applies immediately, and the facts the realm has to hand
+/// back arrive on the [`EventRequester`] wakeup the group was built with.
+///
+/// It owns no pixels and no draw target. A [`Painter`](crate::Painter)
+/// attached to it observes the frames it publishes and reads images out of
+/// its fetcher; dropping the view leaves that painter showing the last frame
+/// it drew, and dropping the painter leaves the view running with nothing
+/// watching it.
 pub struct LynxView<F> {
-    painter: Painter<F>,
+    /// Set the instant this view is released, before anything else is, so a
+    /// host still holding one of its source completions sees it cancelled
+    /// without waiting for a turn of its own.
+    cancel: ViewCancel,
+    /// The goodbye. Dropping this closes the view's task's inbox, which is
+    /// what ends it — so it drops before the fetcher whose completions that
+    /// task may still be holding.
+    commands: mpsc::UnboundedSender<ToMain>,
+    notices: mpsc::UnboundedReceiver<ViewNotice>,
+    frames: watch::Receiver<Published>,
+    /// Where the host's completed image loads land. Detached in `Drop` before
+    /// the fetcher goes, so a loader still in flight finds it closed rather
+    /// than queueing into a released view.
+    inbox: ImageInbox,
+    /// The host's whole resource system. An `Rc` because an attached painter
+    /// holds a `Weak` of it to read pixels through — non-owning, so this view
+    /// releasing it is what releases it.
+    fetcher: Rc<F>,
+    /// Whether a fatal lifecycle event has arrived. Nothing further is
+    /// dispatched to the host's resource system after one.
+    failed: bool,
+    /// Whether an interactive painter is already observing this view. Written
+    /// by `Painter::attach` and cleared by the link's own drop.
+    painter_attached: Rc<Cell<bool>>,
+    /// When this view's document started, which is the epoch its animations
+    /// are timed against. A painter adopts it at `attach`, so a painter that
+    /// changes views does not restart the new one's timeline.
+    timeline_epoch: ClockInstant,
     /// The group whose thread carries this view. Held rather than read: it is
     /// what keeps that thread — and the runtime and pool on it — alive for as
     /// long as any view built from the group is, in whatever order the
     /// embedder drops them.
     ///
     /// **Last field, and it must stay last.** Fields drop in declaration
-    /// order, so the painter — and with it this view's command sender, which
-    /// is what ends its task — goes first, and the handle that joins the
-    /// thread goes after there is nothing left on it.
+    /// order, so this view's command sender — which is what ends its task —
+    /// goes first, and the handle that joins the thread goes after there is
+    /// nothing left on it.
     #[expect(dead_code, reason = "held to keep the group's thread alive")]
     group: Rc<GroupInner>,
 }
@@ -655,165 +683,161 @@ impl<F> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
-            .field("painter", &self.painter)
+            .field("painter_attached", &self.painter_attached.get())
+            .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
 }
 
 impl<F> Drop for LynxView<F> {
     fn drop(&mut self) {
-        // Goodbye, and no join: the thread is the group's and carries the
-        // group's other views. `bobcat-main` answers this by releasing this
-        // view's document and realm and going on serving its siblings, and
-        // the group is what joins the thread once the last of them is gone.
-        // The draw target goes with the painter, in the drop glue that runs
-        // the moment this returns — still on this thread, and still before
-        // the embedder's next statement, which is what lets it drop the
-        // window handle straight afterwards on a platform where only its own
-        // thread may destroy one.
-        self.painter.shutdown();
+        // Cancellation first: a host still holding one of this view's source
+        // completions must see it before the fetcher that holds it is
+        // released. It is this view's flag alone — the group's other views go
+        // on booting.
+        self.cancel.cancel();
+        // Then the sink, before the store it reports into drops: a loader
+        // still in flight must find it detached rather than queue into a
+        // released view.
+        self.inbox.detach();
+        // The fields then drop in declaration order — the goodbye, which is
+        // the command sender closing, before the fetcher. `bobcat-main`
+        // answers that by releasing this view's document and realm and going
+        // on serving its siblings, and the group is what joins the thread
+        // once the last of them is gone.
     }
 }
 
-impl<F: ResourceFetcher> LynxView<F> {
-    /// Routes one normalized OS input event against the frame the painter
-    /// last read.
-    pub fn dispatch_input(&mut self, event: InputEvent) {
-        self.painter.dispatch_input(event);
-    }
-
-    /// Applies new device metrics, if they moved at all.
-    pub fn resize(
-        &mut self,
-        width: f32,
-        height: f32,
-        device_pixel_ratio: f32,
-    ) -> Result<(), EngineError> {
-        self.painter.resize(width, height, device_pixel_ratio)
-    }
-
-    /// Asks for a frame nothing else would have asked for.
-    pub fn refresh(&self) {
-        self.painter.refresh();
-    }
-
-    /// Reports whether the window is visible. An occluded one is not drawn,
-    /// and the frame it owed is produced when it comes back.
-    pub fn set_occluded(&mut self, occluded: bool) {
-        self.painter.set_occluded(occluded);
-    }
-
-    /// Runs one turn — draw the frame the view owes, then hand back every
-    /// lifecycle event the engine has produced since the last call.
+impl<F: ResourceFetcher + 'static> LynxView<F> {
+    /// Runs one view turn: hand the host's resource system everything the
+    /// document asked for, take back what it has finished, and hand back
+    /// every lifecycle event the engine has produced since the last call.
     ///
-    /// This is where a windowed view draws, so a host calls it at the point
-    /// in its own turn where a wait for the display is acceptable, and once
-    /// per turn.
+    /// **This is the only call that advances the resource protocol.** A
+    /// painter observing this view asks the host for nothing — it draws what
+    /// has already been published and reads pixels the fetcher already holds
+    /// — so a host that wants an image to arrive takes this turn.
     #[must_use]
     pub fn pump(&mut self) -> Vec<EngineEvent> {
-        self.painter.serve()
-    }
-
-    /// Whether the view has a frame to put on its window.
-    ///
-    /// Read it at the end of a turn: while it holds, the host owes the view
-    /// another [`Self::pump`] at its own next display frame — a
-    /// `requestAnimationFrame`, a display link, whatever that host's display
-    /// clock is. The engine names no interval, because it owns no clock: a
-    /// running animation, a swap chain that had no image to give, and a
-    /// frame a [`Self::refresh`] left owed are one answer here, and one
-    /// answer is all a vsync-driven host needs.
-    ///
-    /// Only a visible window ever answers `true`; an offscreen view's frames
-    /// are the host's to ask for through [`Self::tick`].
-    #[must_use]
-    pub fn owes_frame(&self) -> bool {
-        self.painter.owes_frame()
-    }
-
-    /// How long a host may park before this view needs a turn of its own.
-    ///
-    /// Always `None`: nothing the engine owes itself is the host's to wait
-    /// out any more. A realm's timers come due on `bobcat-main`, which waits
-    /// them out itself and wakes this thread through its
-    /// [`EventRequester`] like any other publication.
-    #[must_use]
-    pub const fn next_wakeup(&self) -> Option<Duration> {
-        None
-    }
-
-    /// Whether the engine owed the timeline another frame as of the last
-    /// turn.
-    ///
-    /// Narrower than [`Self::owes_frame`] and answered for any target: this
-    /// is the animation itself, which an offscreen host — with no display to
-    /// pace against and no window to owe — asks about directly.
-    #[must_use]
-    pub fn is_animating(&self) -> bool {
-        self.painter.is_animating()
-    }
-
-    #[must_use]
-    pub const fn frame_size(&self) -> FrameSize {
-        self.painter.frame_size()
-    }
-
-    /// Advances an offscreen view by one frame, answering whether it drew.
-    ///
-    /// The one call that blocks this thread on `bobcat-main`, which is why
-    /// only an offscreen view has it — and why a browser view, which cannot
-    /// have an offscreen target at all, can never reach it.
-    ///
-    /// # Errors
-    ///
-    /// [`EngineError::NotOffscreen`] if this view presents into a window —
-    /// its frames come from [`Self::pump`], on the host's own clock.
-    pub fn tick(&mut self, force: bool) -> Result<bool, EngineError> {
-        self.painter.tick(force)
-    }
-
-    /// Reads back what the view last rendered.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
-        self.painter.capture()
+        let mut events = Vec::new();
+        let mut image_requests = Vec::new();
+        while let Ok(notice) = self.notices.try_recv() {
+            match notice {
+                ViewNotice::Engine(event) => {
+                    if matches!(
+                        event,
+                        EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
+                    ) {
+                        self.failed = true;
+                        self.cancel.cancel();
+                    }
+                    events.push(event);
+                }
+                ViewNotice::RequestImages(sources) => image_requests.extend(sources),
+                // A view that failed or was released asks its host for
+                // nothing more: the completion is dropped instead, which is
+                // what tells whoever was awaiting it that no source is coming.
+                ViewNotice::RequestSource {
+                    request,
+                    completion,
+                } => {
+                    if !self.failed && !completion.is_cancelled() {
+                        self.fetcher.request_source(request, completion);
+                    }
+                }
+            }
+        }
+        // The host's own moment in the turn comes before the sources this
+        // turn discovered are named, so a load that finished between turns is
+        // reported whether or not this turn asked for anything.
+        //
+        // A view that has failed asks its host for nothing at all, images
+        // included: the document those pixels were for is finished with, and
+        // the same rule already governs the source requests above.
+        if !self.failed {
+            self.fetcher.service_images();
+            for source in image_requests {
+                self.fetcher.request_image(source.as_ref());
+            }
+        }
+        // Drained either way, so what a host reported before the failure is
+        // discarded here rather than left to accumulate behind a view that
+        // will never commit again.
+        let reports = self.inbox.drain();
+        if !self.failed && !reports.is_empty() {
+            let _ = self.commands.send(ToMain::ImageEvents(reports));
+        }
+        events
     }
 
     /// Warms `sources` in the store, ahead of any paint walk meeting them.
     ///
     /// There is no matching "load and tell me when it is done": discovery is
-    /// automatic. The paint walk reports every source it meets, the painter
+    /// automatic. The paint walk reports every source it meets, this view
     /// names it against the store, and the document relayouts when the pixels
     /// and their intrinsic size arrive. This only moves that work earlier.
     ///
-    /// Applies immediately, like every other call here — the painter is this
-    /// thread.
+    /// Applies immediately, like every other call here — the fetcher is on
+    /// this thread.
     pub fn prefetch_images<I, S>(&mut self, sources: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<Arc<str>>,
     {
-        self.painter
-            .prefetch_images(sources.into_iter().map(Into::into).collect());
+        for source in sources {
+            self.fetcher.request_image(source.into().as_ref());
+        }
+    }
+}
+
+/// What a painter reaches a view through. None of it is a second way to drive
+/// a view: every one is something the view already publishes, handed over
+/// without a copy.
+impl<F: ResourceFetcher + 'static> LynxView<F> {
+    /// A second receiver on this view's publication watch.
+    pub(crate) fn frames(&self) -> watch::Receiver<Published> {
+        self.frames.clone()
+    }
+
+    /// This view's command sender, which a painter keeps a `Weak` of: the
+    /// strong one stays here, so a painter can never keep a released view's
+    /// task alive.
+    pub(crate) const fn commands(&self) -> &mpsc::UnboundedSender<ToMain> {
+        &self.commands
+    }
+
+    /// A non-owning handle on the host's resource system, for reading the
+    /// pixels a committed frame draws.
+    ///
+    /// `Weak` deliberately: this view is the fetcher's owner, and dropping it
+    /// releases the host's store there and then, even under an attached
+    /// painter.
+    pub(crate) fn images(&self) -> Weak<dyn FrameImages> {
+        Rc::downgrade(&self.fetcher) as Weak<dyn FrameImages>
+    }
+
+    /// Whether an interactive painter is already observing this view.
+    pub(crate) const fn painter_attached(&self) -> &Rc<Cell<bool>> {
+        &self.painter_attached
+    }
+
+    /// When this view's document started, which is the epoch its animations
+    /// are timed against.
+    pub(crate) const fn timeline_epoch(&self) -> ClockInstant {
+        self.timeline_epoch
     }
 }
 
 /// What an in-crate test reaches a live view through.
 ///
 /// Every one of these is an observation the engine already makes somewhere;
-/// none of them is a second way to drive a view. They are here rather than in
-/// the harness because the painter is private to the view.
+/// none of them is a second way to drive a view.
 #[cfg(test)]
-impl<F: ResourceFetcher> LynxView<F> {
-    /// The painting half, so a test can pin the frame clock or read the
-    /// gesture arena the way `pump` and `tick` do.
-    pub(crate) const fn painter(&mut self) -> &mut Painter<F> {
-        &mut self.painter
-    }
-
+impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// This view's cancellation flag, which is what a source completion the
     /// host still holds is answered against.
     pub(crate) const fn cancel(&self) -> &ViewCancel {
-        self.painter.view_cancel()
+        &self.cancel
     }
 
     /// Runs `probe` against the document on the thread that owns it,
@@ -823,60 +847,17 @@ impl<F: ResourceFetcher> LynxView<F> {
         probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
     ) -> Option<T> {
         let (sender, receiver) = std::sync::mpsc::channel();
-        self.painter.send(ToMain::Probe(Box::new(move |document| {
+        let _ = self.commands.send(ToMain::Probe(Box::new(move |document| {
             let _ = sender.send(probe(document));
         })));
-        receiver.recv_timeout(Duration::from_secs(30)).ok()
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .ok()
     }
 
     /// The newest committed frame this view has published.
     pub(crate) fn published_frame(&mut self) -> Option<Arc<dom::CommittedFrame>> {
-        self.painter.published_frame()
-    }
-}
-
-/// A half-built view whose destructor is the cancellation protocol for
-/// [`LynxGroup::create_lynx_view`].
-struct ViewStartup<F> {
-    /// Held only until the painter exists, so a draw target that fails still
-    /// leaves something able to say goodbye to `bobcat-main`.
-    link: Option<PainterLink>,
-    painter: Option<Painter<F>>,
-    /// `None` once the view has been handed over. While it is `Some`, what
-    /// this guards is a view that does not exist yet, and dropping one
-    /// cancels it.
-    group: Option<Rc<GroupInner>>,
-    cancel: ViewCancel,
-}
-
-impl<F: ResourceFetcher> ViewStartup<F> {
-    fn finish(mut self) -> LynxView<F> {
-        LynxView {
-            painter: self.painter.take().expect("startup owns the painter"),
-            group: self.group.take().expect("startup owns the group handle"),
-        }
-    }
-}
-
-impl<F> Drop for ViewStartup<F> {
-    fn drop(&mut self) {
-        if self.group.take().is_none() {
-            return;
-        }
-        // Cancellation first: the view's task checks the flag at every gate
-        // between its sources, so a source that lands in the same instant
-        // cannot carry its boot onward into QuickJS. It is this view's flag
-        // alone — the group's other views go on booting.
-        self.cancel.cancel();
-        // Then the goodbye, which is dropping the command sender — either
-        // the painter's or, if the draw target failed before one existed,
-        // the bare link's. The fetcher sees cancellation before the painter
-        // releases it; any completion still owned by an IO job discards its
-        // late result.
-        if let Some(painter) = self.painter.as_mut() {
-            painter.shutdown();
-        }
-        drop(self.link.take());
+        self.frames.borrow_and_update().frame.clone()
     }
 }
 

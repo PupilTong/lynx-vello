@@ -2,10 +2,9 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::link::ToMain;
+use crate::link::{DetachedView, ViewObserver, detached_outbox};
 use crate::main::tree::{PageConfig, Viewport, new_document};
 use crate::main::workers::WorkerFactory;
-use crate::paint::{PainterLink, detached_link};
 use crate::view::NoWakeup;
 
 /// The handle a packed id names. A handle carries a generation as well as
@@ -56,7 +55,6 @@ struct DocumentProbe {
     // These tests exercise only MTS. Keep the far ends open so the realm's
     // sends succeed; worker_tests executes both sides against a real worker
     // runtime.
-    _commands: mpsc::UnboundedReceiver<ToMain>,
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
 }
@@ -70,12 +68,12 @@ impl DocumentProbe {
 /// The painting side's view of the realm's name set, driven by hand: a test
 /// resyncs it where a routing pass would and then asks what the realm has
 /// published.
-struct PublishedNames(PainterLink);
+struct PublishedNames(DetachedView);
 
 impl PublishedNames {
     fn contains(&mut self, name: &str) -> bool {
-        self.0.sync();
-        self.0.has_listener(name)
+        self.0.published.sync();
+        self.0.published.has_listener(name)
     }
 }
 
@@ -89,7 +87,7 @@ fn runtime_over_watching_names(
     DocumentProbe,
     PublishedNames,
 ) {
-    let (painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
+    let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
@@ -106,11 +104,10 @@ fn runtime_over_watching_names(
         .unwrap();
     let probe = DocumentProbe {
         tree: Rc::clone(&runtime.tree),
-        _commands: commands,
         _workers: inbox,
         _worker_events: worker_events,
     };
-    (js_runtime, runtime, probe, PublishedNames(painter))
+    (js_runtime, runtime, probe, PublishedNames(far_end))
 }
 
 /// Two views' realms on one group's `QuickJS` runtime, each over its own
@@ -129,14 +126,14 @@ fn two_view_group() -> (
     ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
     for _ in 0..2 {
-        let (_painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
+        let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
         let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
             .expect("main-thread runtime");
         let worker_events = runtime
             .install_workers(&mut js_runtime, &workers, outbox, "app:///main.js", None)
             .unwrap();
-        ends.commands.push(commands);
+        ends.views.push(far_end);
         ends.worker_events.push(worker_events);
         views.push(runtime);
     }
@@ -148,7 +145,7 @@ fn two_view_group() -> (
 /// The far ends of a group's channels, held so the realms' sends succeed.
 #[derive(Default)]
 struct GroupFarEnds {
-    commands: Vec<mpsc::UnboundedReceiver<ToMain>>,
+    views: Vec<DetachedView>,
     workers: Option<mpsc::UnboundedReceiver<WorkerCommand>>,
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
 }
@@ -906,15 +903,15 @@ fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
 /// global edges of the name set, no more and no fewer.
 #[test]
 fn the_listener_indexes_and_the_published_edges_stay_in_step() {
-    let (mut painter, outbox, _commands) = detached_link(Arc::new(NoWakeup));
+    let (outbox, mut far_end) = detached_outbox(Arc::new(NoWakeup));
     let state = EventState::new(outbox);
     let (a, b) = (node_id(3), node_id(4));
     // One call at a time, so what crossed and what did not is asserted per
     // registration rather than inferred from the set afterwards. The names
     // come back sorted because a set has no order of its own.
-    let published = |painter: &mut PainterLink| {
-        painter.sync();
-        let mut names: Vec<String> = painter
+    let published = |observer: &mut ViewObserver| {
+        observer.sync();
+        let mut names: Vec<String> = observer
             .listener_names()
             .iter()
             .map(std::string::ToString::to_string)
@@ -922,17 +919,23 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
         names.sort();
         names
     };
-    let edge = |painter: &mut PainterLink| painter.take_published_edge();
+    let edge = |observer: &mut ViewObserver| observer.take_published_edge();
 
     state.enable(a, "tap", false);
-    assert!(edge(&mut painter), "a name's first registration crosses");
+    assert!(
+        edge(&mut far_end.published),
+        "a name's first registration crosses"
+    );
     state.enable(a, "tap", true);
-    assert!(!edge(&mut painter), "its second anywhere does not");
+    assert!(
+        !edge(&mut far_end.published),
+        "its second anywhere does not"
+    );
     state.enable(a, "scroll", false);
-    assert!(edge(&mut painter));
+    assert!(edge(&mut far_end.published));
     state.enable(b, "tap", false);
-    assert!(!edge(&mut painter));
-    assert_eq!(published(&mut painter), ["scroll", "tap"]);
+    assert!(!edge(&mut far_end.published));
+    assert_eq!(published(&mut far_end.published), ["scroll", "tap"]);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
     assert_eq!(state.by_node.borrow()[&b].len(), 1);
 
@@ -941,20 +944,23 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     state.enable(a, "tap", false);
     assert_eq!(state.by_node.borrow()[&a].len(), 3);
     assert!(
-        !edge(&mut painter),
+        !edge(&mut far_end.published),
         "a repeat registration publishes nothing"
     );
 
     state.disable(a, "scroll", false);
-    assert!(edge(&mut painter), "the last removal closes the name");
-    assert_eq!(published(&mut painter), ["tap"]);
+    assert!(
+        edge(&mut far_end.published),
+        "the last removal closes the name"
+    );
+    assert_eq!(published(&mut far_end.published), ["tap"]);
     assert_eq!(state.by_node.borrow()[&a].len(), 2);
 
     // Dropping an element takes its own registrations and only those.
     state.forget_node(a);
     assert!(!state.by_node.borrow().contains_key(&a));
     assert!(
-        !edge(&mut painter),
+        !edge(&mut far_end.published),
         "the sibling registration still holds the name open"
     );
     assert_eq!(
@@ -968,8 +974,11 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
     state.forget_node(b);
     assert!(state.listeners.borrow().is_empty());
     assert!(state.by_node.borrow().is_empty());
-    assert!(edge(&mut painter), "the last listener unpublishes its name");
-    assert!(published(&mut painter).is_empty());
+    assert!(
+        edge(&mut far_end.published),
+        "the last listener unpublishes its name"
+    );
+    assert!(published(&mut far_end.published).is_empty());
 }
 
 /// The replica is what the painting side filters against, so a

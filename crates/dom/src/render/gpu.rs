@@ -146,6 +146,18 @@ impl PlaneBank {
     pub fn images(&self) -> &[vello::peniko::ImageData] {
         &self.images
     }
+
+    /// Forgets which commit the retained textures were baked from, so the
+    /// next [`Self::prepare`] re-bakes them.
+    ///
+    /// For a target that changes documents: commit ids restart at one per
+    /// document, so a bank still holding the previous page's id would answer
+    /// the new page's first frame with the old page's planes. The textures
+    /// themselves stay registered and are reused at their current sizes —
+    /// only the identity is dropped.
+    pub fn forget(&mut self) {
+        self.commit = None;
+    }
 }
 
 #[derive(Debug)]
@@ -261,6 +273,28 @@ impl Headless {
     #[must_use]
     pub fn plane_images(&self) -> &[vello::peniko::ImageData] {
         self.planes.images()
+    }
+
+    /// Drops everything this renderer retained of the frames it has drawn:
+    /// the planes' commit identity (see [`PlaneBank::forget`]), the render
+    /// target, and the readback buffer sized for it.
+    ///
+    /// For a target that changes documents. The target is given up rather than
+    /// kept because it *is* the last frame here — there is no surface in front
+    /// of it, so a reader would otherwise be handed the previous document's
+    /// pixels as this one's. [`Self::render_frame`] builds a new one, and
+    /// [`Self::has_rendered`] answers `false` until it does.
+    pub fn forget(&mut self) {
+        self.planes.forget();
+        self.target = None;
+        self.readback = None;
+    }
+
+    /// Whether a frame has been rendered into this renderer's target since it
+    /// was built or last forgotten.
+    #[must_use]
+    pub fn has_rendered(&self) -> bool {
+        self.target.is_some()
     }
 
     /// Renders a scene into the retained headless texture.

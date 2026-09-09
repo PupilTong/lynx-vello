@@ -1,63 +1,11 @@
-//! What one view's link is, now that it is one view's: no addressing, no
-//! sibling buffering, and a goodbye that is the channels themselves.
+//! What a view is on its own: a running page with no painter anywhere near
+//! it, and a goodbye that is the channels themselves.
 
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::paint::{DetachedEnds, TestPainter};
-use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
+use crate::resource::{LoadedSource, SourceCompletion};
 use crate::test_support::TestViewSpec;
-
-fn viewport() -> Viewport {
-    Viewport::new(393.0, 727.0)
-}
-
-fn frame_size() -> FrameSize {
-    FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid")
-}
-
-/// Two views, each with its own link and nothing between them.
-fn two_views() -> [(TestPainter, DetachedEnds); 2] {
-    [
-        TestPainter::detached(viewport(), frame_size(), Arc::new(NoWakeup)),
-        TestPainter::detached(viewport(), frame_size(), Arc::new(NoWakeup)),
-    ]
-}
-
-/// The property the old addressed FIFO had to buy with a per-view buffer:
-/// one view's turn neither consumes nor delays anything belonging to
-/// another, whatever order the two published in.
-#[test]
-fn a_views_notices_and_frames_are_independent_of_a_siblings() {
-    let [(mut first, first_end), (mut second, second_end)] = two_views();
-
-    second_end.outbox.listener_edge(Arc::from("tap"), true);
-    first_end.outbox.engine_event(EngineEvent::ScriptFinished);
-    let _asked = second_end
-        .outbox
-        .request_source(SourceRequest::Entry("second.js".into()));
-    second_end.outbox.engine_event(EngineEvent::ScriptFinished);
-
-    // The first view's turn sees exactly its own one event, and takes it
-    // once.
-    assert!(matches!(
-        first.pump().as_slice(),
-        [EngineEvent::ScriptFinished]
-    ));
-    assert!(first.pump().is_empty());
-    assert!(!first.link.has_listener("tap"), "and none of the sibling's");
-
-    // The sibling's is still there afterwards, in the order it was
-    // published, and still there after the last sender is gone.
-    drop(first_end);
-    drop(second_end);
-    assert!(matches!(
-        second.pump().as_slice(),
-        [EngineEvent::ScriptFinished]
-    ));
-    assert!(second.link.has_listener("tap"));
-    assert!(second.pump().is_empty());
-}
 
 /// The goodbye is structural: nothing sends it, and nothing can forget to.
 ///
@@ -65,7 +13,7 @@ fn a_views_notices_and_frames_are_independent_of_a_siblings() {
 /// view drops the last handle on its group, which joins `bobcat-main`, and
 /// that thread cannot return while a view task is still serving.
 #[test]
-fn dropping_the_last_embedder_sender_ends_the_view_and_cancels_its_sources() {
+fn dropping_the_view_ends_its_task_and_cancels_its_sources() {
     let view = TestViewSpec::new(
         r"
         globalThis.renderPage = function () {
@@ -73,13 +21,13 @@ fn dropping_the_last_embedder_sender_ends_the_view_and_cancels_its_sources() {
         };
         ",
     )
-    .create(Arc::new(NoWakeup));
+    .create_view(Arc::new(NoWakeup));
     // A source the host is still holding when the view goes.
     let (completion, answer) = SourceCompletion::new(view.cancel().clone());
     drop(view);
     assert!(
         completion.is_cancelled(),
-        "the flag is set before the painter releases the host's fetcher"
+        "the flag is set before the view releases the host's fetcher"
     );
     completion.complete(Ok(LoadedSource::Entry {
         source: "throw new Error('a cancelled source must not run')".into(),
@@ -91,50 +39,73 @@ fn dropping_the_last_embedder_sender_ends_the_view_and_cancels_its_sources() {
     );
 }
 
-/// An offscreen wait is this view's own: nothing another view acknowledges
-/// can satisfy it, and a fatal event ends it rather than letting it wait out
-/// its whole deadline.
+/// A view with no painter is a running view: it boots, its realm's timers
+/// come due on `bobcat-main`, and their commits publish — with no host call
+/// between the boot and the frame beyond the turns the host takes anyway.
 #[test]
-fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_on_a_failure() {
-    let [(mut first, first_end), (_second, second_end)] = two_views();
-    let mut first_end = first_end;
-    let seq = first
-        .link
-        .begin_frame(0.0)
-        .expect("the view's task is listening");
-    assert!(matches!(
-        first_end.commands.blocking_recv(),
-        Some(ToMain::BeginFrame { .. })
-    ));
+fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
+    let mut view = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const box = __CreateView(0);
+          __AppendElement(page, box);
+          globalThis.held = [page, box];
+          setTimeout(() => {
+            __SetAttribute(box, 'ticked', 'yes');
+            __FlushElementTree();
+          }, 20);
+          __FlushElementTree();
+        };
+        ",
+    )
+    .create_view(Arc::new(NoWakeup));
 
-    second_end.outbox.begin_frame_serviced(seq);
-    assert!(
-        !first.link.wait_begin_frame(seq, Duration::ZERO),
-        "a sibling's acknowledgement is not this view's"
-    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut booted = false;
+    while !booted {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => booted = true,
+                EngineEvent::StartupFailed(error) => panic!("the view did not boot: {error}"),
+                EngineEvent::ScriptRunError(error) => panic!("the entry failed: {error}"),
+                _ => {}
+            }
+        }
+        assert!(Instant::now() < deadline, "a painterless view never booted");
+        std::thread::yield_now();
+    }
+    let booted_commit = view
+        .published_frame()
+        .expect("boot's flush published a frame")
+        .commit_id();
 
-    first_end.outbox.engine_event(EngineEvent::StartupFailed(
-        EngineError::UnknownFontFamily("missing".into()).into(),
-    ));
-    let started = Instant::now();
-    assert!(
-        !first.link.wait_begin_frame(seq, Duration::from_secs(10)),
-        "and a failure ends the wait rather than outlasting it"
+    // Nothing in this loop drives the timer: `published_frame` reads the
+    // watch and sends nothing at all.
+    loop {
+        let commit = view
+            .published_frame()
+            .expect("a frame stays published")
+            .commit_id();
+        if commit != booted_commit {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the timer never came due on the engine's own clock"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        view.probe_document(|tree| {
+            let page = tree.document_element().id();
+            let box_id = tree.get(page).expect("the page is live").child_ids()[0];
+            tree.get(box_id)
+                .and_then(|live| live.attribute("ticked").map(str::to_owned))
+        })
+        .expect("the view's task answers probes")
+        .as_deref(),
+        Some("yes"),
+        "and the entry the timer ran in committed its mutation"
     );
-    // Ended by the event rather than by the deadline: nothing will service
-    // the round after a fatal one, so waiting the ten seconds out would be
-    // ten seconds of a host's own thread.
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "the wait outlasted the failure that ended it"
-    );
-    assert!(matches!(
-        first.pump().as_slice(),
-        [EngineEvent::StartupFailed(_)]
-    ));
-
-    // The acknowledgement it was owed does arrive, and satisfies the next
-    // wait: the failure ended the wait, not the link.
-    first_end.outbox.begin_frame_serviced(seq);
-    assert!(first.link.wait_begin_frame(seq, Duration::ZERO));
 }

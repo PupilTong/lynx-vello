@@ -16,21 +16,22 @@ use bobcat_core::resource::{
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
-    PreparsedStyleSheet, StyleThreads, ViewSources,
+    Painter, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bytes::Bytes;
 use url::Url;
 
-/// One view in a group of its own, at Stylo's own thread count.
+/// One view in a group of its own, with a painter attached to it, at Stylo's
+/// own thread count.
 ///
 /// Almost every test here is about a page rather than about sharing, so it
-/// wants exactly one view and never names the group again. The handle is
-/// dropped as this returns: the view holds the group's thread alive by
-/// itself, and dropping the view is what ends it.
+/// wants exactly one view and never names the group again. The group handle
+/// is dropped as this returns: the view holds its thread alive by itself, and
+/// dropping the view is what ends it.
 ///
 /// # Errors
 ///
-/// Whatever building the group or the view failed with.
+/// Whatever building the group, the view or the painter failed with.
 pub async fn solo_view<R, F, B>(
     event_requester: Arc<R>,
     width: f32,
@@ -39,26 +40,24 @@ pub async fn solo_view<R, F, B>(
     target: DrawTarget,
     resources: B,
     sources: ViewSources,
-) -> Result<LynxView<F>, LynxViewError>
+) -> Result<(LynxView<F>, Painter), LynxViewError>
 where
     R: EventRequester,
     F: ResourceFetcher + 'static,
     B: FnOnce(ImageReports) -> F,
 {
-    LynxGroup::new(event_requester, StyleThreads::Auto)
+    let view = LynxGroup::new(event_requester, StyleThreads::Auto)
         .await?
-        .create_lynx_view(
-            width,
-            height,
-            device_pixel_ratio,
-            target,
-            resources,
-            sources,
-        )
-        .await
+        .create_lynx_view(width, height, device_pixel_ratio, resources, sources)?;
+    let mut painter = Painter::new(target, width, height, device_pixel_ratio).await?;
+    painter.attach(&view)?;
+    Ok((view, painter))
 }
 
-/// Drives normal painter turns until the terminal boot event arrives.
+/// Drives normal view turns until the terminal boot event arrives.
+///
+/// The view alone: booting needs the resource protocol serviced, which is
+/// `LynxView::pump`'s and nobody else's.
 pub fn wait_for_script<F: ResourceFetcher + 'static>(
     view: &mut LynxView<F>,
 ) -> Result<(), LynxViewError> {
@@ -72,10 +71,6 @@ pub fn wait_for_script<F: ResourceFetcher + 'static>(
                 EngineEvent::ScriptFinished => return Ok(()),
                 EngineEvent::ScriptRunError(error) => return Err(error.into()),
                 EngineEvent::StartupFailed(error) => return Err(error),
-                // Not a script failure, but a view that cannot draw will
-                // never finish anything either; failing here beats waiting
-                // out the deadline.
-                EngineEvent::RenderFailed(error) => panic!("the painter failed: {error}"),
                 _ => {}
             }
         }
@@ -106,6 +101,11 @@ pub struct FetcherDouble {
     /// test through an `Arc` so it can publish pixels and read the retain log
     /// while the painter owns its own handle.
     pub images: Option<Rc<flashbulb::TestImages>>,
+    /// Every call the view made on this host's image half, counted whether or
+    /// not a store was installed — which is what a test asserting that a view
+    /// stopped asking reads.
+    pub image_requests: AtomicUsize,
+    pub image_services: AtomicUsize,
 }
 
 impl FetcherDouble {
@@ -122,7 +122,17 @@ impl FetcherDouble {
             style_sheet_text: None,
             style_sheet_fetches: AtomicUsize::new(0),
             images: None,
+            image_requests: AtomicUsize::new(0),
+            image_services: AtomicUsize::new(0),
         }
+    }
+
+    pub fn image_request_count(&self) -> usize {
+        self.image_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn image_service_count(&self) -> usize {
+        self.image_services.load(Ordering::Relaxed)
     }
 
     /// Serves images from `images`, which the test keeps a handle on so it
@@ -375,15 +385,14 @@ impl ResourceFetcher for FetcherDouble {
     }
 
     fn request_image(&self, source: &str) {
+        self.image_requests.fetch_add(1, Ordering::Relaxed);
         if let Some(images) = self.images.as_ref() {
             images.request(source);
         }
     }
 
-    fn retain_images(&self, frame: &[Arc<str>]) {
-        if let Some(images) = self.images.as_ref() {
-            images.retain(frame);
-        }
+    fn service_images(&self) {
+        self.image_services.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -398,5 +407,11 @@ impl bobcat_core::FrameImages for FetcherDouble {
         self.images
             .as_ref()
             .and_then(|images| images.read(source, hint))
+    }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        if let Some(images) = self.images.as_ref() {
+            images.retain(frame);
+        }
     }
 }

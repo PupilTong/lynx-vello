@@ -50,6 +50,10 @@ impl bobcat_core::FrameImages for ThreadedFetcher {
     ) -> Option<bobcat_core::vello::peniko::ImageData> {
         self.base.read(source, hint)
     }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        self.base.retain(frame);
+    }
 }
 
 impl ResourceFetcher for ThreadedFetcher {
@@ -91,7 +95,7 @@ async fn resource_completion_reaches_main_without_another_painter_turn() {
         base: FetcherDouble::new(Vec::new()).resolving_to("app:///main.js"),
         records: Arc::clone(&records),
     });
-    let mut view = solo_view(
+    let (mut view, _painter) = solo_view(
         Arc::new(HostWakeup(wake)),
         393.0,
         727.0,
@@ -167,6 +171,10 @@ impl bobcat_core::FrameImages for PendingFetcher {
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::vello::peniko::ImageData> {
         self.base.read(source, hint)
+    }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        self.base.retain(frame);
     }
 }
 
@@ -286,7 +294,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     let fetcher_weak = Rc::downgrade(&fetcher);
     let requester = Arc::new(DropObservedRequester);
     let requester_weak = Arc::downgrade(&requester);
-    let mut view = solo_view(
+    let (mut view, mut painter) = solo_view(
         requester,
         393.0,
         727.0,
@@ -310,12 +318,15 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     }
     // Public operations are legal during loading, including offscreen's
     // main-thread acknowledgement, which must not wait for the entry fetch.
-    view.resize(400.0, 800.0, 1.0)
+    painter
+        .resize(400.0, 800.0, 1.0)
         .expect("resize while loading");
-    view.tick(false).expect("tick while loading");
+    painter.tick(false).expect("tick while loading");
     drop(view);
 
-    // Cancellation is visible before the painter releases its concrete fetcher.
+    // Cancellation is visible before the view releases its concrete fetcher —
+    // and dropping the view alone releases it, because the painter still
+    // attached to it holds nothing but a weak handle.
     assert_eq!(
         dropped
             .recv()
@@ -324,12 +335,13 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     );
     assert!(
         fetcher_weak.upgrade().is_none(),
-        "the painter released its owned fetcher"
+        "the view released its owned fetcher"
     );
     assert!(
         requester_weak.upgrade().is_none(),
         "bobcat-main exited and released its requester"
     );
+    drop(painter);
 }
 
 /// Configuration errors are lifecycle events even when no source was requested.
@@ -337,7 +349,7 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
 async fn an_unknown_font_family_reports_failure_without_fetching() {
     hang_budget(async {
         let fetcher = Rc::new(FetcherDouble::new(Vec::new()));
-        let mut view = solo_view(
+        let (mut view, _painter) = solo_view(
             Arc::new(NoWakeup),
             32.0,
             24.0,
@@ -362,7 +374,7 @@ async fn an_unknown_font_family_reports_failure_without_fetching() {
 #[tokio::test]
 async fn a_resource_resolution_failure_is_an_event_and_stops_further_sources() {
     let fetcher = Rc::new(FetcherDouble::new(Vec::new()).resolving_to("not a URL"));
-    let mut view = solo_view(
+    let (mut view, _painter) = solo_view(
         Arc::new(NoWakeup),
         32.0,
         24.0,
@@ -410,11 +422,9 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 32.0,
                 24.0,
                 1.0,
-                DrawTarget::Offscreen,
                 |_| Rc::clone(&fetcher),
                 ViewSources::new("pending.js"),
             )
-            .await
             .expect("pending view");
         loop {
             assert!(pending.pump().is_empty());
@@ -428,12 +438,16 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
                 32.0,
                 24.0,
                 1.0,
-                DrawTarget::Offscreen,
                 |_| FetcherDouble::new(Vec::new()),
                 ViewSources::new("sibling.js"),
             )
-            .await
             .expect("sibling view");
+        let mut sibling_painter = bobcat_core::Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .expect("the sibling's painter is built");
+        sibling_painter
+            .attach(&sibling)
+            .expect("a fresh view takes a painter");
         wait_for_script(&mut sibling).expect("sibling boots while first fetch stays pending");
         let completion = fetcher.pending.lock().unwrap().take().unwrap();
         drop(pending);
@@ -447,7 +461,7 @@ async fn a_pending_view_does_not_block_a_sibling_in_the_same_group() {
             dropped.recv().expect("pending fetch cancelled"),
             thread_tag()
         );
-        sibling
+        sibling_painter
             .tick(true)
             .expect("sibling still runs after cancellation");
     })
@@ -468,6 +482,10 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
         hint: bobcat_core::ImageSizeHint,
     ) -> Option<bobcat_core::vello::peniko::ImageData> {
         self.base.read(source, hint)
+    }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        self.base.retain(frame);
     }
 }
 
@@ -586,7 +604,6 @@ fn dropping_the_group_joins_both_of_its_threads() {
                             32.0,
                             24.0,
                             1.0,
-                            DrawTarget::Offscreen,
                             |_| {
                                 Rc::new(TwoScriptFetcher {
                                     base: FetcherDouble::new(WORKER_ENTRY.as_bytes().to_vec())
@@ -596,7 +613,6 @@ fn dropping_the_group_joins_both_of_its_threads() {
                             },
                             ViewSources::new("main.js"),
                         )
-                        .await
                         .expect("the view is created");
                     wait_for_script(&mut view).expect("the entry boots");
                     wait_for_worker_error(&mut view, "tick");

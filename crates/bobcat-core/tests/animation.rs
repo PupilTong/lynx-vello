@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, LynxView, NoWakeup, PreparsedDeclaration, PreparsedKeyframe, PreparsedRule,
-    PreparsedStyleSheet, ViewSources,
+    DrawTarget, LynxView, NoWakeup, Painter, PreparsedDeclaration, PreparsedKeyframe,
+    PreparsedRule, PreparsedStyleSheet, ViewSources,
 };
 use support::{FetcherDouble, solo_view, wait_for_script};
 
@@ -79,9 +79,9 @@ fn resources(sheet: PreparsedStyleSheet) -> FetcherDouble {
 
 /// A view built the only way there is to build one: its sheet and its entry
 /// module are its construction inputs.
-async fn booted() -> LynxView<Rc<FetcherDouble>> {
+async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
     let fetcher = Rc::new(resources(slider_sheet()));
-    let mut view = solo_view(
+    let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         32.0,
         24.0,
@@ -96,12 +96,12 @@ async fn booted() -> LynxView<Rc<FetcherDouble>> {
     .await
     .expect("view");
     wait_for_script(&mut view).expect("script execution");
-    view
+    (view, painter)
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(view: &mut LynxView<Rc<FetcherDouble>>) -> usize {
-    let shot = view.capture().expect("capture the committed frame");
+fn red_left_edge(painter: &mut Painter) -> usize {
+    let shot = painter.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
         .chunks_exact(4)
@@ -116,24 +116,24 @@ fn red_left_edge(view: &mut LynxView<Rc<FetcherDouble>>) -> usize {
 /// timeline is the engine's, and no embedder API touches it.
 #[tokio::test]
 async fn a_view_animates_with_the_host_arranging_no_timeline() {
-    let mut view = booted().await;
+    let (_view, mut painter) = booted().await;
 
-    view.tick(true).expect("first frame");
-    // The view answers this from the painter it owns, over the frame that
-    // tick just read, so there is no reply to be ahead of.
+    painter.tick(true).expect("first frame");
+    // The painter answers this over the frame that tick just read, so there
+    // is no reply to be ahead of.
     assert!(
-        view.is_animating(),
+        painter.is_animating(),
         "the engine's clock keeps the animation asking for frames"
     );
-    let first = red_left_edge(&mut view);
+    let first = red_left_edge(&mut painter);
 
     // A quarter of the 1s travel is 4px. The square is *not* asserted to have
     // moved right: the animation is infinite, boot takes an unknown slice of
     // the first second, and a sample near 16px wraps back to 0. Only that it
     // moved at all, which no phase can fake at a quarter of a period.
     tokio::time::sleep(Duration::from_millis(250)).await;
-    view.tick(true).expect("later frame");
-    let later = red_left_edge(&mut view);
+    painter.tick(true).expect("later frame");
+    let later = red_left_edge(&mut painter);
 
     assert_ne!(
         later, first,
@@ -147,14 +147,14 @@ async fn a_view_animates_with_the_host_arranging_no_timeline() {
 /// readings.
 #[tokio::test]
 async fn an_exported_curve_moves_pixels_between_commits() {
-    let mut view = booted().await;
+    let (_view, mut painter) = booted().await;
     // The synchronizing tick promotes the pending animation to running,
     // which is when the commit exports its curve.
-    view.tick(true).expect("first frame");
+    painter.tick(true).expect("first frame");
 
-    let first = red_left_edge(&mut view);
+    let first = red_left_edge(&mut painter);
     tokio::time::sleep(Duration::from_millis(250)).await;
-    let later = red_left_edge(&mut view);
+    let later = red_left_edge(&mut painter);
 
     assert_ne!(
         later, first,

@@ -53,25 +53,16 @@ function nextDisplayFrame() {
 // One durable wakeup carries everything the engine has to say: a lifecycle
 // event to drain and a frame to draw. A commit resolves it and the same
 // Worker turn presents — no frame clock stands between the two. The clock is
-// only ever the continuation's: a frame the view still owes — an animation, a
-// swap chain that had no image to give — is taken at this display's rate, and
-// the engine names no interval for it.
+// only ever the continuation's: a frame the painter still owes — an
+// animation, a swap chain that had no image to give — is taken at this
+// display's rate, and the engine names no interval for it. A realm timer is
+// not this loop's to wait out either: the engine waits its own out and arms
+// this signal when the round it ran commits.
 async function nextEngineWakeup() {
   if (renderer.owesFrame()) {
     await nextDisplayFrame()
   } else {
-    const wakeupMs = renderer.nextWakeupMs()
-    if (typeof wakeupMs === 'number') {
-      let deadline
-      await Promise.race([
-        renderer.waitForEngineEvent().then(() => clearTimeout(deadline)),
-        new Promise((resolve) => {
-          deadline = setTimeout(resolve, wakeupMs)
-        }),
-      ])
-    } else {
-      await renderer.waitForEngineEvent()
-    }
+    await renderer.waitForEngineEvent()
   }
 }
 

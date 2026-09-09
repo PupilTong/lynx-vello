@@ -116,7 +116,7 @@ impl TestImages {
         }
     }
 
-    /// The working sets reported through `retain_images`, in order.
+    /// The working sets reported through [`FrameImages::retain`], in order.
     #[must_use]
     pub fn retained(&self) -> Vec<Vec<Arc<str>>> {
         self.retained.lock().expect("test image retain log").clone()
@@ -184,6 +184,14 @@ impl FrameImages for TestImages {
             .push((source.to_owned(), hint));
         self.entries().get(source)?.clone()
     }
+
+    /// Records the working set a resolve pass reported.
+    fn retain(&self, frame: &[Arc<str>]) {
+        self.retained
+            .lock()
+            .expect("test image retain log")
+            .push(frame.to_vec());
+    }
 }
 
 impl TestImages {
@@ -203,14 +211,6 @@ impl TestImages {
         if let Some((width, height)) = load {
             self.report_loaded(source, width, height);
         }
-    }
-
-    /// Records the working set a resolve pass reported.
-    pub fn retain(&self, frame: &[Arc<str>]) {
-        self.retained
-            .lock()
-            .expect("test image retain log")
-            .push(frame.to_vec());
     }
 }
 

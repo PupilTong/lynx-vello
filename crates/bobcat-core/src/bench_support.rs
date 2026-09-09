@@ -16,12 +16,11 @@ use dom::event::EventSteps;
 use tokio::sync::mpsc;
 
 use crate::background::{WorkerCommand, WorkerEvent};
-use crate::link::ToMain;
+use crate::link::{DetachedView, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::paint::{PainterLink, detached_link};
 use crate::view::NoWakeup;
 
 /// A booted Element PAPI realm over a private Lynx document.
@@ -32,13 +31,12 @@ pub struct ScriptHarness {
     /// The runtime the realm lives on, as a group owns one.
     js_runtime: ScriptRuntime,
     runtime: MainThreadRuntime,
-    /// The painting end of the same link the engine builds, so a benchmark
-    /// can ask the question the router asks — and pay what it pays.
-    link: PainterLink,
-    /// The far ends nobody serves. Retained so the realm's sends succeed:
-    /// these benchmarks measure MTS operations, and neither a painter nor a
-    /// worker thread is inside the harness.
-    _commands: mpsc::UnboundedReceiver<ToMain>,
+    /// The far end of the same link the engine builds, so a benchmark can ask
+    /// the question the router asks — and pay what it pays. Retaining it is
+    /// also what keeps the realm's sends succeeding: these benchmarks measure
+    /// MTS operations, and neither a host nor a worker thread is inside the
+    /// harness.
+    view: DetachedView,
     _workers: mpsc::UnboundedReceiver<WorkerCommand>,
     _worker_events: mpsc::UnboundedReceiver<WorkerEvent>,
 }
@@ -49,7 +47,6 @@ impl std::fmt::Debug for ScriptHarness {
             .debug_struct("ScriptHarness")
             .field("js_runtime", &self.js_runtime)
             .field("runtime", &self.runtime)
-            .field("link", &self.link)
             .finish_non_exhaustive()
     }
 }
@@ -64,7 +61,7 @@ impl ScriptHarness {
     #[must_use]
     pub fn new() -> Self {
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let (painter, outbox, commands) = detached_link(Arc::new(NoWakeup));
+        let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
         let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
@@ -82,8 +79,7 @@ impl ScriptHarness {
         Self {
             js_runtime,
             runtime,
-            link: painter,
-            _commands: commands,
+            view,
             _workers: inbox,
             _worker_events: worker_events,
         }
@@ -156,8 +152,8 @@ impl ScriptHarness {
     /// accounts for every registration the realm has made so far rather than
     /// only those a previous call happened to drain.
     pub fn has_listeners(&mut self, name: &str) -> bool {
-        self.link.sync();
-        self.link.has_listener(name)
+        self.view.published.sync();
+        self.view.published.has_listener(name)
     }
 
     /// The serialized inline style of an element, so a benchmark can assert

@@ -1,8 +1,9 @@
 //! Bounded admission and the dedicated thread that owns Bobcat screenshot
 //! capture.
 //!
-//! `LynxView` is deliberately `!Send`: its handle and private painter stay on
-//! the embedder thread that constructed them, while the engine's Lynx-main
+//! `LynxView` and `Painter` are both deliberately `!Send`: a view owns the
+//! host's resource system and a painter owns the GPU target, and both stay on
+//! the capture thread that constructed them, while the engine's Lynx-main
 //! thread owns the document and realm. HTTP tasks therefore enqueue plain
 //! request data and receive only an owned RGBA screenshot back.
 
@@ -15,7 +16,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Screenshot, StyleThreads,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
 use bobcat_source::PageSource;
@@ -345,20 +346,26 @@ async fn capture_page(
     drop(page);
 
     let startup_deadline = tokio::time::Instant::now() + request.timeout;
-    let mut view = tokio::time::timeout_at(startup_deadline, async {
+    let (mut view, mut painter) = tokio::time::timeout_at(startup_deadline, async {
         // Preserve per-capture runtime isolation: the view keeps this
         // job's group alive until capture finishes and the view drops.
         let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
-        group
-            .create_lynx_view(
-                VIEWPORT_WIDTH,
-                VIEWPORT_HEIGHT,
-                DEVICE_PIXEL_RATIO,
-                DrawTarget::Offscreen,
-                resources.builder(),
-                sources,
-            )
-            .await
+        let view = group.create_lynx_view(
+            VIEWPORT_WIDTH,
+            VIEWPORT_HEIGHT,
+            DEVICE_PIXEL_RATIO,
+            resources.builder(),
+            sources,
+        )?;
+        let mut painter = Painter::new(
+            DrawTarget::Offscreen,
+            VIEWPORT_WIDTH,
+            VIEWPORT_HEIGHT,
+            DEVICE_PIXEL_RATIO,
+        )
+        .await?;
+        painter.attach(&view)?;
+        Ok::<_, bobcat_core::LynxViewError>((view, painter))
     })
     .await
     .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))?
@@ -378,21 +385,30 @@ async fn capture_page(
     .await
     .map_err(|_| CaptureFailure::timeout("page startup", request.timeout))??;
 
-    view.tick(true).map_err(|source| CaptureFailure::Render {
-        url: request.url.clone(),
-        source: Box::new(source),
-    })?;
+    painter
+        .tick(true)
+        .map_err(|source| CaptureFailure::Render {
+            url: request.url.clone(),
+            source: Box::new(source),
+        })?;
     check_events(&mut view, &request.url)?;
 
     // UI Judge treats settle time as an explicit post-readiness delay rather
     // than part of `timeoutMs`; preserve that observable behavior.
-    settle(&mut view, &request.url, request.screenshot_settle).await?;
+    settle(
+        &mut view,
+        &mut painter,
+        &request.url,
+        request.screenshot_settle,
+    )
+    .await?;
 
-    let screenshot = view.capture().map_err(|source| CaptureFailure::Render {
+    let screenshot = painter.capture().map_err(|source| CaptureFailure::Render {
         url: request.url.clone(),
         source: Box::new(source),
     })?;
     check_events(&mut view, &request.url)?;
+    drop(painter);
     drop(view);
     Ok(screenshot)
 }
@@ -459,19 +475,26 @@ async fn load_input(client: &Client, url: &Url) -> Result<LoadedInput, CaptureFa
 
 async fn settle(
     view: &mut LynxView<ViewResources>,
+    painter: &mut Painter,
     url: &Url,
     mut remaining: Duration,
 ) -> Result<(), CaptureFailure> {
     while !remaining.is_zero() {
-        let step = view
-            .next_wakeup()
-            .map_or(FRAME_INTERVAL, |wakeup| wakeup.min(FRAME_INTERVAL))
-            .min(remaining);
+        // One display frame at a time. A realm timer is not this loop's to
+        // wait out: the engine waits its own out and commits on its own
+        // thread, and the next tick picks that commit up.
+        let step = FRAME_INTERVAL.min(remaining);
         tokio::time::sleep(step).await;
-        view.tick(false).map_err(|source| CaptureFailure::Render {
-            url: url.clone(),
-            source: Box::new(source),
-        })?;
+        // The view's turn first: it is the one call that services the host's
+        // resource system, and the tick that follows waits for the commit
+        // behind whatever it reported.
+        check_events(view, url)?;
+        painter
+            .tick(false)
+            .map_err(|source| CaptureFailure::Render {
+                url: url.clone(),
+                source: Box::new(source),
+            })?;
         check_events(view, url)?;
         remaining = remaining.saturating_sub(step);
     }
@@ -503,12 +526,6 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
             }
             EngineEvent::TimerFailed(error) => {
                 eprintln!("bobcat-server: timer callback failed: {error}");
-            }
-            EngineEvent::RenderFailed(source) => {
-                return Err(CaptureFailure::Render {
-                    url: url.clone(),
-                    source: Box::new(source),
-                });
             }
             _ => eprintln!("bobcat-server: ignored an unknown engine event"),
         }

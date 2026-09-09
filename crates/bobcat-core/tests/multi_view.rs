@@ -19,8 +19,8 @@ use std::sync::{Arc, Barrier};
 use std::thread::ThreadId;
 
 use bobcat_core::{
-    DrawTarget, LynxGroup, MAX_STYLE_THREADS, NoWakeup, PreparsedDeclaration, PreparsedRule,
-    PreparsedStyleSheet, StyleThreads, ViewSources,
+    DrawTarget, LynxGroup, MAX_STYLE_THREADS, NoWakeup, Painter, PreparsedDeclaration,
+    PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use support::{FetcherDouble, wait_for_script};
 
@@ -122,15 +122,17 @@ fn run_view(color: &'static str, ready: &Barrier) -> ViewReport {
                 32.0,
                 24.0,
                 1.0,
-                DrawTarget::Offscreen,
                 |_reports| fetcher(entry_url, color),
                 sources(entry_url),
             )
-            .await
             .expect("the view is built");
+        let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .expect("the view's painter is built");
+        painter.attach(&view).expect("a fresh view takes a painter");
         wait_for_script(&mut view).expect("the entry module boots");
-        view.tick(true).expect("the first frame");
-        let shot = view.capture().expect("the committed frame");
+        painter.tick(true).expect("the first frame");
+        let shot = painter.capture().expect("the committed frame");
         let top_left = <[u8; 4]>::try_from(&shot.pixels[..4]).expect("an RGBA frame");
         ViewReport {
             painter: std::thread::current().id(),
@@ -212,21 +214,25 @@ async fn two_views_in_one_group_share_its_thread_and_still_paint_their_own_page(
                 32.0,
                 24.0,
                 1.0,
-                DrawTarget::Offscreen,
                 |_reports| fetcher(entry_url, color),
                 sources(entry_url),
             )
-            .await
             .expect("the view is built on the group's thread");
+        // One painter per view: a view has at most one, and two views on one
+        // thread are two.
+        let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+            .await
+            .expect("each view's painter is built");
+        painter.attach(&view).expect("a fresh view takes a painter");
         wait_for_script(&mut view).expect("the entry module boots");
-        views.push(view);
+        views.push((view, painter));
     }
 
     let painted: Vec<[u8; 4]> = views
         .iter_mut()
-        .map(|view| {
-            view.tick(true).expect("the first frame");
-            let shot = view.capture().expect("the committed frame");
+        .map(|(_view, painter)| {
+            painter.tick(true).expect("the first frame");
+            let shot = painter.capture().expect("the committed frame");
             <[u8; 4]>::try_from(&shot.pixels[..4]).expect("an RGBA frame")
         })
         .collect();
