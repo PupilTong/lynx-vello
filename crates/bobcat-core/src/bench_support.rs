@@ -14,9 +14,12 @@ use std::sync::Arc;
 
 use dom::event::EventSteps;
 
+use crate::background::WorkerCommand;
+use crate::mailbox::Mailbox;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::{StartupControl, WorkerFactory};
 use crate::paint::PainterLink;
 use crate::view::{NoWakeup, detached_link};
 
@@ -24,7 +27,6 @@ use crate::view::{NoWakeup, detached_link};
 ///
 /// The same pair the engine's main thread owns: one realm and the document
 /// it holds outright.
-#[derive(Debug)]
 pub struct ScriptHarness {
     /// The runtime the realm lives on, as a group owns one.
     js_runtime: ScriptRuntime,
@@ -32,6 +34,20 @@ pub struct ScriptHarness {
     /// The painting end of the same link the engine builds, so a benchmark
     /// can ask the question the router asks — and pay what it pays.
     link: PainterLink,
+    /// Like the detached painter, retain the worker endpoint. These benchmarks
+    /// measure MTS operations; the worker thread itself is outside the harness.
+    _workers: Mailbox<WorkerCommand>,
+}
+
+impl std::fmt::Debug for ScriptHarness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScriptHarness")
+            .field("js_runtime", &self.js_runtime)
+            .field("runtime", &self.runtime)
+            .field("link", &self.link)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScriptHarness {
@@ -47,12 +63,24 @@ impl ScriptHarness {
         let (painter, main) = detached_link(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
             .expect("the benchmark realm boots");
+        let (workers, inbox) = Mailbox::channel();
+        runtime
+            .install_workers(
+                &mut js_runtime,
+                &WorkerFactory::new(workers),
+                main.notify,
+                "bench:///main.js",
+                None,
+                Arc::new(StartupControl::default()),
+            )
+            .expect("the benchmark Worker bindings install");
         Self {
             js_runtime,
             runtime,
             link: painter,
+            _workers: inbox,
         }
     }
 

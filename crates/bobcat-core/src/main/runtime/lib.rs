@@ -372,7 +372,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         })
     }
 
-    pub(super) fn install_workers(
+    pub(crate) fn install_workers(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         workers: &super::workers::WorkerFactory,

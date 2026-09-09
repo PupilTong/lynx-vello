@@ -35,7 +35,7 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
-use self::workers::WorkerFactory;
+pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
 use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};

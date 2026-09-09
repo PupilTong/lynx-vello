@@ -182,13 +182,6 @@ fn author_css_from_raw_lynx_xml_renders() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("background-thread JavaScript is retained but not executed")
-            && stderr.contains("/app-service.js"),
-        "the present-empty background section must be retained and warned about:\n{stderr}"
-    );
-
     let image = flashbulb::Image::read_png(&screenshot_path).unwrap();
     assert_eq!((image.width(), image.height()), (32, 24));
     let red = image

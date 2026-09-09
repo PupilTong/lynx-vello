@@ -21,13 +21,13 @@ pub(super) const SOURCE: &str = include_str!("../../../../packages/bobcat-elemen
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock.
 #[derive(Clone)]
-pub(super) struct WorkerFactory {
+pub(crate) struct WorkerFactory {
     commands: Sender<WorkerCommand>,
     next: Rc<Cell<u64>>,
 }
 
 impl WorkerFactory {
-    pub(super) fn new(commands: Sender<WorkerCommand>) -> Self {
+    pub(crate) fn new(commands: Sender<WorkerCommand>) -> Self {
         Self {
             commands,
             next: Rc::new(Cell::new(1)),
