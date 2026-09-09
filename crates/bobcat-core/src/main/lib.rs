@@ -376,6 +376,8 @@ struct Booting<R: EventRequester> {
     requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
+    init_data: Option<serde_json::Value>,
+    global_props: Option<serde_json::Value>,
 }
 
 /// What applying one source did to a booting view.
@@ -409,6 +411,8 @@ impl<R: EventRequester> Booting<R> {
             style_sheets,
             entry,
             background_entry,
+            init_data,
+            global_props,
         } = sources;
         let mut document = new_document(viewport, config);
         if let Some(pool) = style_pool {
@@ -434,6 +438,8 @@ impl<R: EventRequester> Booting<R> {
             requests,
             document,
             notify,
+            init_data,
+            global_props,
         })
     }
 
@@ -484,6 +490,8 @@ impl<R: EventRequester> Booting<R> {
             notify,
             workers,
             background_entry,
+            init_data,
+            global_props,
             ..
         } = *self;
         let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify.clone()) {
@@ -492,6 +500,10 @@ impl<R: EventRequester> Booting<R> {
         };
         if control.is_cancelled() {
             return Booted::Gone;
+        }
+        if let Err(error) = runtime.prepare_initial_data(init_data.as_ref(), global_props.as_ref())
+        {
+            return Booted::Failed(error.into_script_error().into());
         }
         if let Err(error) = runtime.install_workers(
             js_runtime,

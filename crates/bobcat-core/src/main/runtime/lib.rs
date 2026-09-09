@@ -333,6 +333,10 @@ impl<R: EventRequester> EventState<R> {
 /// The private main-thread runtime used by the engine pipeline.
 pub(crate) struct MainThreadRuntime<R: EventRequester> {
     engine: ScriptEngine,
+    // Retained in this realm for the subsequent boot/lynx integration.
+    // None until startup prepares them; omitted host inputs become JS undefined.
+    init_data: Option<quickjs_rust_bridge::Value>,
+    global_props: Option<quickjs_rust_bridge::Value>,
     tree: Rc<RefCell<TreeHandle<R>>>,
     events: Rc<EventState<R>>,
     timers: Rc<TimerState>,
@@ -365,11 +369,30 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         let tree = install_bobcat(&mut engine, js_runtime, document, notify, &events, &timers)?;
         Ok(Self {
             engine,
+            init_data: None,
+            global_props: None,
             tree,
             events,
             timers,
             next_event_id: 0,
         })
+    }
+
+    pub(super) fn prepare_initial_data(
+        &mut self,
+        init_data: Option<&serde_json::Value>,
+        global_props: Option<&serde_json::Value>,
+    ) -> Result<(), MainThreadError> {
+        let init_data = self
+            .engine
+            .json_value(init_data)
+            .map_err(|error| MainThreadError::from_engine("converting initial page data", error))?;
+        let global_props = self.engine.json_value(global_props).map_err(|error| {
+            MainThreadError::from_engine("converting initial global properties", error)
+        })?;
+        self.init_data = Some(init_data);
+        self.global_props = Some(global_props);
+        Ok(())
     }
 
     pub(crate) fn install_workers(

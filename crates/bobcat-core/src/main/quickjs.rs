@@ -158,6 +158,19 @@ impl ScriptRuntime {
 }
 
 impl ScriptEngine {
+    /// Materializes host JSON in this view's realm. JSON numbers use
+    /// JavaScript Number semantics, including rounding large integers.
+    pub(crate) fn json_value(
+        &mut self,
+        value: Option<&serde_json::Value>,
+    ) -> Result<quickjs::Value, ScriptError> {
+        let result = match value {
+            Some(value) => self.realm.parse_json(&value.to_string()),
+            None => self.realm.undefined(),
+        };
+        result.map_err(|error| map_quickjs_error(error, ScriptErrorPhase::Initialize))
+    }
+
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///
@@ -559,6 +572,45 @@ mod tests {
             Ok(value) => value,
             Err(payload) => panic::resume_unwind(payload),
         }
+    }
+
+    #[test]
+    fn host_json_distinguishes_omission_and_preserves_json_types() {
+        let (mut runtime, mut engine) = engine();
+        assert_eq!(
+            engine.json_value(None).unwrap().kind(),
+            quickjs::ValueKind::Undefined
+        );
+        assert_eq!(
+            engine
+                .json_value(Some(&serde_json::Value::Null))
+                .unwrap()
+                .kind(),
+            quickjs::ValueKind::Null
+        );
+        let input = serde_json::json!({
+            "items": [null, false, -1.25, "中文\0🦀", [], {}],
+            "__proto__": {"polluted": true},
+            "large": u64::MAX,
+        });
+        let value = engine.json_value(Some(&input)).unwrap();
+        let global = engine.realm.global_object().unwrap();
+        engine.realm.set_property(&global, "data", &value).unwrap();
+        engine
+            .execute_script(
+                &mut runtime,
+                r"
+            if (data.items[0] !== null || data.items[1] !== false ||
+                data.items[2] !== -1.25 || data.items[3] !== '中文\0🦀' ||
+                !Array.isArray(data.items[4]) || Object.keys(data.items[5]).length !== 0 ||
+                !Object.hasOwn(data, '__proto__') || data.polluted !== undefined ||
+                typeof data.large !== 'number' || data.large !== 18446744073709551615) {
+                throw new Error('host data conversion mismatch');
+            }
+        ",
+                "verify.js",
+            )
+            .unwrap();
     }
 
     #[test]
