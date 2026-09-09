@@ -21,7 +21,9 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     }
     let (specifier, style_sheet, base_url) = match request {
         SourceRequest::StyleSheet(url) => (url, true, resources.base_url()),
-        SourceRequest::Entry(url) => (url, false, resources.base_url()),
+        SourceRequest::Entry(url) | SourceRequest::Module(url) => {
+            (url, false, resources.base_url())
+        }
         SourceRequest::Worker {
             specifier,
             base_url,
@@ -127,8 +129,8 @@ impl SourceJob {
                     failure.into_error(Some(self.id), Some(Arc::from(self.url.as_str()))),
                 )
             })
-            .and_then(|(_, processed)| {
-                let url = self.url.to_string();
+            .and_then(|(fetched, processed)| {
+                let url = fetched.url.to_string();
                 let source = std::str::from_utf8(&processed.bytes)
                     .map_err(|error| {
                         if self.style_sheet {

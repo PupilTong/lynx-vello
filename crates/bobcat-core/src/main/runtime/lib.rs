@@ -337,6 +337,7 @@ pub(crate) struct MainThreadRuntime<R: EventRequester> {
     // None until startup prepares them; omitted host inputs become JS undefined.
     init_data: Option<quickjs_rust_bridge::Value>,
     global_props: Option<quickjs_rust_bridge::Value>,
+    notify: ToPainterSender<R>,
     tree: Rc<RefCell<TreeHandle<R>>>,
     events: Rc<EventState<R>>,
     timers: Rc<TimerState>,
@@ -366,11 +367,20 @@ impl<R: EventRequester> MainThreadRuntime<R> {
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(notify.clone()));
         let timers = Rc::new(TimerState::new());
-        let tree = install_bobcat(&mut engine, js_runtime, document, notify, &events, &timers)?;
+        engine.enable_module_loading();
+        let tree = install_bobcat(
+            &mut engine,
+            js_runtime,
+            document,
+            notify.clone(),
+            &events,
+            &timers,
+        )?;
         Ok(Self {
             engine,
             init_data: None,
             global_props: None,
+            notify,
             tree,
             events,
             timers,
@@ -635,8 +645,8 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         source_name: &str,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
-        js_runtime
-            .register_module_source(source_name, &entry_source)
+        self.engine
+            .register_module_source(source_name, source_name, &entry_source)
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
             })?;
@@ -673,6 +683,46 @@ __FlushElementTree();
         )
     }
 
+    pub(crate) fn request_modules(&mut self) {
+        while let Some(url) = self.engine.take_module_request() {
+            self.notify.send(ToPainter::RequestSource(
+                crate::resource::SourceRequest::Module(url),
+            ));
+        }
+    }
+
+    pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
+        self.engine
+            .module_finished()
+            .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
+    }
+
+    pub(crate) fn complete_module(
+        &mut self,
+        js_runtime: &mut ScriptRuntime,
+        name: &str,
+        source: Result<crate::resource::LoadedSource, crate::LynxViewError>,
+    ) -> Result<(), MainThreadError> {
+        use crate::resource::LoadedSource;
+        let loaded = match source {
+            Ok(LoadedSource::Entry { source, url }) => Ok((url, source)),
+            Ok(LoadedSource::StyleSheet(_)) => {
+                Err("a module request returned a stylesheet".to_owned())
+            }
+            Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
+        };
+        self.engine
+            .complete_module(
+                js_runtime,
+                name,
+                loaded
+                    .as_ref()
+                    .map(|(url, source)| (url.as_str(), source.as_str()))
+                    .map_err(String::as_str),
+            )
+            .map_err(|error| MainThreadError::from_engine("loading an imported module", error))
+    }
+
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         self.tree.borrow_mut().removals = 0;
         self.engine
@@ -705,7 +755,7 @@ __FlushElementTree();
     ) -> Result<(), MainThreadError> {
         let result = self
             .engine
-            .execute_module(js_runtime, source, name)
+            .start_module(js_runtime, source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));
         let finished = self.finish_batch(js_runtime, result.is_ok());
         result.and(finished)

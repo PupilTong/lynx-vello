@@ -126,14 +126,16 @@ primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 
 Startup is an asynchronous host boundary whose owned work runs on the Lynx
-main Worker. It creates the document, awaits core resource futures, mounts the
-stylesheets, then creates QuickJS and preloads `bobcat:runtime`,
+main Worker. It creates the document, requests sources through the painter, mounts the
+stylesheets, then creates a QuickJS realm and preloads `bobcat:runtime`,
 `bobcat:element`, and the resolved entry URL;
 the `bobcat:boot` module uses top-level await to import the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
 realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
-element tree. QuickJS drains its owned pending-job queue until that
-module-evaluation promise settles. `LynxGroup::create_lynx_view` returns a loading
+element tree. QuickJS drains its owned pending-job queue at each turn.
+Dynamic imports request JavaScript modules through the same asynchronous
+resource completions; unresolved imports and top-level await retain the boot
+promise while the Worker continues servicing resources and timer deadlines. `LynxGroup::create_lynx_view` returns a loading
 view once its draw target is ready. Normal `pump()` turns report `ScriptFinished`
 after boot succeeds or `StartupFailed` on resource, font, realm, or boot failure;
 the browser load promise waits for that lifecycle outcome. No

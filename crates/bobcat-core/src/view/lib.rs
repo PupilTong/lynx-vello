@@ -892,6 +892,7 @@ pub(crate) enum ToMain {
     TimersDue,
     /// Completion of the source request issued by main.
     SourceLoaded {
+        module: Option<String>,
         source: Result<LoadedSource, LynxViewError>,
     },
     /// One thing a worker realm said, for the view whose realm created it.
