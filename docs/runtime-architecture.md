@@ -99,11 +99,9 @@ QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
     │     ├──▶ bobcat:event-target
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
-    └── the worker's entry source
-          └── bobcat:bts installs global lynx.getCoreContext, then
-                ├──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
-                └──▶ await import(resolved BTS application URL)
-                      realm-local source; empty module if no app entry
+    ├──▶ bobcat:bts (BTS only: global lynx.getCoreContext)
+    │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
+    └── the worker's own script, inlined
   No bobcat:element and no bobcat:runtime here: a worker has no document to
   reach and no page to be the main thread of, so reaching for either fails to
   resolve rather than failing late.
@@ -377,19 +375,10 @@ module `bobcat:bts`. All workers use the same scope and protocol; the entry
 module installs the BTS bindings in JavaScript. Workers that do not import it
 have no automatic `lynx` global. With `ViewSources.background_entry`,
 the fetcher loads the raw module against the resolved MTS entry URL through
-the existing worker request/completion path. The completion sends a program
-whose root is always `bobcat:bts` and whose application entry is a separate
-preloaded module. The bootstrap installs the Context, then executes
-`await import(resolved_background_entry_url)`, matching MTS boot's import
-structure. XML takes exactly this path. Without an application entry, the
-same bootstrap imports an empty module with no host IO.
-
-Application source registration belongs to the worker realm. The loader uses
-that realm's sources and the runtime's shared built-ins; local sources cannot
-shadow a shared or local native module. Two views may load different bytes at
-one URL, imports execute once per realm, and dropping the realm releases its
-source registrations. This costs one worker realm and its application source
-per view, with no additional OS thread or runtime.
+the existing worker request/completion path. The loader prepends
+`import "bobcat:bts"` before handing the source to the worker FIFO. Without a
+raw entry, main sends the built-in module source directly, with no host IO.
+It costs one worker realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` are stable peers.
 Their shared `bobcat:cross-thread-context` module implements Lynx's custom

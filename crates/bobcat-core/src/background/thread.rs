@@ -16,9 +16,7 @@ use super::scope::{
     WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members, install_worker_modules,
     worker_boot_source,
 };
-use super::{
-    WorkerCommand, WorkerEvent, WorkerKey, WorkerPayload, WorkerProgram, WorkerScript, WorkerStart,
-};
+use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerPayload, WorkerScript, WorkerStart};
 use crate::mailbox::{Mailbox, Sender};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -205,7 +203,7 @@ fn start_worker(
     workers: &mut Workers,
     key: WorkerKey,
     pending: Pending,
-    script: Result<WorkerProgram, String>,
+    script: Result<WorkerScript, String>,
 ) {
     let Pending { view, name, queued } = pending;
     let script = match script {
@@ -265,7 +263,7 @@ fn boot(
     key: WorkerKey,
     view: ViewId,
     name: &str,
-    script: WorkerProgram,
+    script: WorkerScript,
 ) -> Result<(), ScriptError> {
     let js_runtime = match runtime {
         Ok(runtime) => runtime,
@@ -273,16 +271,10 @@ fn boot(
         // for. Each hears the same reason.
         Err(error) => return Err(error.clone()),
     };
-    let WorkerProgram {
-        entry: WorkerScript { source, url },
-        modules,
-    } = script;
+    let WorkerScript { source, url } = script;
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
-    for module in modules {
-        engine.register_module_source(&module.url, &module.source)?;
-    }
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
     install_worker_members(&mut engine, js_runtime, &timers, &closing, {

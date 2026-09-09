@@ -158,17 +158,6 @@ impl ScriptRuntime {
 }
 
 impl ScriptEngine {
-    /// Preloads a source into this realm's module graph only.
-    pub(crate) fn register_module_source(
-        &mut self,
-        name: &str,
-        source: &str,
-    ) -> Result<(), ScriptError> {
-        self.realm
-            .register_module_source(name, source)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
-    }
-
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///

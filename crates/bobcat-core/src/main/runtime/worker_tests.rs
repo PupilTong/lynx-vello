@@ -389,46 +389,6 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
 }
 
 #[test]
-fn bts_bootstrap_imports_separate_application_modules_in_each_worker_realm() {
-    let mut pair = Pair::with_background(
-        r"
-        import { Worker } from 'bobcat-internal';
-        globalThis.results = [];
-        const manual = new Worker('bobcat:bts');
-        manual.onmessage = e => results.push(e.data);
-        manual.postMessage({type: 'request', data: null});
-        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
-        lynx.getJSContext().dispatchEvent({type: 'request'});
-        ",
-        Some("./worker.js"),
-    );
-    for answer in [20, 22] {
-        pair.answer(&format!(
-            r"
-            // These names are private to the bootstrap module. App bindings
-            // must not collide with them or share globals with another realm.
-            const scope = globalThis;
-            const coreBridge = scope.lynx.getCoreContext();
-            const lynx = null;
-            if (scope.runs) throw Error('shared application realm');
-            scope.runs = 1;
-            export const answer = await Promise.resolve({answer});
-            coreBridge.addEventListener('request', async () => {{
-                const entry = await import('app:///nested/worker.js');
-                if (scope.runs !== 1) throw Error('entry executed twice');
-                coreBridge.dispatchEvent({{type: 'reply', data: entry.answer}});
-            }});
-        "
-        ));
-    }
-    pair.deliver();
-    pair.deliver();
-    pair.check(
-        "if (results[0].data !== 20 || results[1] !== 22) throw Error(JSON.stringify(results));",
-    );
-}
-
-#[test]
 fn background_source_is_requested_only_after_the_awaited_main_entry_finishes() {
     let mut pair = Pair::unbooted(Some("./worker.js"));
     let notifications = Rc::clone(&pair.notifications);

@@ -368,12 +368,10 @@ useful signal for currently-compatible versions of those libraries.
   **After the MTS entry import succeeds, boot creates a BTS Worker** named
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
   `ViewSources.background_entry` optionally supplies a raw BTS module URL;
-  `bobcat:bts` installs global `lynx.getCoreContext()` and then executes
-  `await import(resolved_background_entry_url)`, just as MTS boot imports its
-  application entry. XML uses this identical path. With no background entry,
-  the import targets an empty module without host IO. The application source
-  is registered in its worker realm, never concatenated into the bootstrap.
-  All workers
+  otherwise the built-in entry loads without a fetch. The
+  loader composes an ordinary entry module that imports `bobcat:bts` before
+  the raw script; without a raw script it supplies the built-in module itself.
+  That JavaScript module installs global `lynx.getCoreContext()`. All workers
   use the same scope, with no BTS kind in the worker protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable peers built on `bobcat:cross-thread-context`: `dispatchEvent({type,
@@ -480,12 +478,12 @@ useful signal for currently-compatible versions of those libraries.
   scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
   the BTS-only bootstrap `bobcat:bts` — because a worker has no
   document to reach and no page to be the main thread of, so an import of
-  `bobcat:element` fails to resolve rather than failing late. Each worker
-  evaluates its entry with the worker/timer preamble. A program may also carry
-  preloaded dependency sources: BTS uses this to import its application entry
-  from `bobcat:bts`. These sources belong to the realm and are freed with it;
-  different views may resolve the same URL to different bytes. Shared built-in
-  sources remain registered once on the runtime and compiled per realm.
+  `bobcat:element` fails to resolve rather than failing late. A worker's own
+  script is *inlined* into the one module its realm evaluates, exactly as
+  `ENTRY_PREAMBLE` carries the MTS entry, and never registered on the
+  runtime: an evaluated module belongs to the realm that evaluated it, so two
+  views resolving one URL to different bytes cannot collide and no worker
+  leaves a registration behind.
   All eight JavaScript sources live together in `packages/bobcat-element/src`
   and are embedded by core with `include_str!`. The Element module imports
   native
