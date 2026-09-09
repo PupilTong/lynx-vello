@@ -2517,7 +2517,11 @@ mod implementation {
                 )
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            assert_eq!(realm.take_module_request().as_deref(), Some("b"));
+            // one attempt reports the whole missing frontier
+            let mut frontier = [realm.take_module_request(), realm.take_module_request()];
+            frontier.sort();
+            assert_eq!(frontier, [Some("b".to_owned()), Some("c".to_owned())]);
+            assert!(realm.take_module_request().is_none());
             realm
                 .complete_module(
                     "b",
@@ -2525,7 +2529,7 @@ mod implementation {
                 )
                 .unwrap();
             realm.resume_module_loads().unwrap();
-            assert_eq!(realm.take_module_request().as_deref(), Some("c"));
+            assert!(realm.take_module_request().is_none());
             import_eval(
                 &mut realm,
                 "if (runs || done) throw Error('evaluated before graph loaded');",
