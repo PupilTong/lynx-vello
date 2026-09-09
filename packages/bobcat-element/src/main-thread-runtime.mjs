@@ -41,7 +41,7 @@ function createContextSink() {
 }
 
 const coreContext = createContextSink();
-const jsBridge = createCrossThreadContext();
+const jsContext = createCrossThreadContext();
 const nativeContext = createContextSink();
 const engineContext = new EventTarget();
 
@@ -53,9 +53,9 @@ const engineContext = new EventTarget();
  */
 export function __BobcatConnectBackground(worker) {
   worker.addEventListener("message", (/** @type {{ data: any }} */ event) => {
-    jsBridge.receive(event.data);
+    jsContext.receive(event.data);
   });
-  jsBridge.connect((event) => worker.postMessage(event));
+  jsContext.connect((event) => worker.postMessage(event));
 }
 
 const globalEventEmitter = {
@@ -114,7 +114,7 @@ export const lynx = {
     return coreContext;
   },
   getJSContext: function () {
-    return jsBridge.context;
+    return jsContext;
   },
   getNative: function () {
     return nativeContext;

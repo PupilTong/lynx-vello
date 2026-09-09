@@ -8,18 +8,18 @@ import { createCrossThreadContext } from "bobcat:cross-thread-context";
 // pending; the bootstrap carries no application source.
 /** @type {any} */
 const scope = globalThis;
-const coreBridge = createCrossThreadContext();
+const coreContext = createCrossThreadContext();
 
-coreBridge.connect((event) => scope.postMessage(event));
+coreContext.connect((event) => scope.postMessage(event));
 scope.addEventListener("message", (/** @type {{data: any}} */ event) => {
-  coreBridge.receive(event.data);
+  coreContext.receive(event.data);
 });
 
 // This is the raw BTS environment's MVP. Loading a compiled ReactLynx BTS
 // bundle also needs Lynx Core's module/init shell, which is not installed here.
 export const lynx = {
   getCoreContext() {
-    return coreBridge.context;
+    return coreContext;
   },
 };
 scope.lynx = lynx;

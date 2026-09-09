@@ -1,59 +1,50 @@
 // @ts-check
 
-// Lynx's ContextProxy dispatch sends a typed event to the other realm. Its
-// numeric result and unimplemented postMessage are distinct from EventTarget;
-// only listener storage and local receive delivery use the shared EventTarget.
-import { EventTarget, installEventTarget } from "bobcat:event-target";
+import { EventTarget } from "bobcat:event-target";
 
 /** @typedef {{ type: string, data?: unknown }} ContextEvent */
 
-export function createCrossThreadContext() {
+class CrossThreadContext extends EventTarget {
   /** @type {((event: ContextEvent) => void) | undefined} */
-  let sender;
+  #sender;
   /** @type {ContextEvent[]} */
-  let pending = [];
+  #pending = [];
 
-  const context = {
-    addEventListener: EventTarget.prototype.addEventListener,
-    removeEventListener: EventTarget.prototype.removeEventListener,
-    /** @param {ContextEvent} event */
-    dispatchEvent(event) {
-      if (sender === undefined) {
-        // Keep the event itself, as web-core's pre-connection RPC queue does.
-        // The Worker transport snapshots it only when it is actually sent.
-        pending.push(event);
-      } else {
-        sender(event);
-      }
-      return 3;
-    },
-    /** @param {unknown} [_message] */
-    postMessage(_message) {
-      // web-core's ContextProxy does not implement this separate operation.
-      return undefined;
-    },
-  };
-  installEventTarget(context);
+  /** @param {ContextEvent} event */
+  // @ts-expect-error Lynx ContextProxy dispatch returns 3, not EventTarget's boolean.
+  dispatchEvent(event) {
+    if (this.#sender === undefined) {
+      // Keep the event itself until the Worker transport snapshots the send.
+      this.#pending.push(event);
+    } else {
+      this.#sender(event);
+    }
+    return 3;
+  }
 
-  return {
-    context,
-    /** @param {(event: ContextEvent) => void} send */
-    connect(send) {
-      sender = send;
-      const queued = pending;
-      pending = [];
-      for (const event of queued) {
-        send(event);
-      }
-    },
-    /** @param {ContextEvent} event */
-    receive(event) {
-      // Invoke local dispatch directly: context.dispatchEvent sends outward.
-      // installEventTarget initialized its listener state; Reflect.apply keeps
-      // the public ContextProxy's numeric dispatch result out of that type.
-      Reflect.apply(EventTarget.prototype.dispatchEvent, context, [
-        { type: event.type, data: event.data ?? {} },
-      ]);
-    },
-  };
+  /** @param {unknown} [_message] */
+  postMessage(_message) {
+    // web-core's ContextProxy does not implement this separate operation.
+    return undefined;
+  }
+
+  /** @param {(event: ContextEvent) => void} send */
+  connect(send) {
+    this.#sender = send;
+    const queued = this.#pending;
+    this.#pending = [];
+    for (const event of queued) {
+      send(event);
+    }
+  }
+
+  /** @param {ContextEvent} event */
+  receive(event) {
+    // Local delivery calls the base method; this.dispatchEvent sends outward.
+    super.dispatchEvent({ type: event.type, data: event.data ?? {} });
+  }
+}
+
+export function createCrossThreadContext() {
+  return new CrossThreadContext();
 }

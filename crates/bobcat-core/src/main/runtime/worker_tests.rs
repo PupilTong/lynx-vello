@@ -352,7 +352,9 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
 fn background_contexts_exchange_typed_events_and_flush_early_references_in_order() {
     let mut pair = Pair::with_background(
         r"
+        import { EventTarget } from 'bobcat:event-target';
         globalThis.context = lynx.getJSContext();
+        if (!(context instanceof EventTarget)) throw Error('JS context must inherit EventTarget');
         if (context !== lynx.getJSContext()) throw Error('unstable JS context');
         globalThis.results = [];
         context.addEventListener('request', () => { throw Error('local echo'); });
@@ -372,8 +374,10 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
     ",
         Some(
             r"
+        import { EventTarget } from 'bobcat:event-target';
         export const ready = await Promise.resolve(true);
         const core = lynx.getCoreContext();
+        if (!(core instanceof EventTarget)) throw Error('core context must inherit EventTarget');
         if (core !== lynx.getCoreContext()) throw Error('unstable core context');
         if (name !== 'lynx-bg') throw Error('wrong background name');
         if (typeof document !== 'undefined' || typeof __CreatePage !== 'undefined') {

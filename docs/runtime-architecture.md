@@ -390,8 +390,10 @@ nonfatal `WorkerFailed` event reports the missing source. Context tests preload
 a fixture using the existing runtime API. The runtime cost remains one worker
 realm per view, with no additional OS thread or runtime.
 
-MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` are stable peers.
-Their shared `bobcat:cross-thread-context` module implements Lynx's custom
+MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` return stable
+`CrossThreadContext extends EventTarget` instances. `createCrossThreadContext`
+returns the instance directly; `receive` calls `super.dispatchEvent` for local
+listener delivery. Their shared `bobcat:cross-thread-context` module implements Lynx's custom
 `dispatchEvent({type, data})`: send to the other context and return numeric `3`.
 It never dispatches locally. The receiver uses the shared EventTarget listener
 machinery, with `data ?? {}`; a missing listener drops the event. `postMessage`

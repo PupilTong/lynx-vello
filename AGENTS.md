@@ -375,8 +375,9 @@ useful signal for currently-compatible versions of those libraries.
   reports a worker import error. Without an entry, only the built-in
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
-  stable peers built on `bobcat:cross-thread-context`: `dispatchEvent({type,
-  data})` sends to the peer and returns `3`, and receiving uses EventTarget
+  stable `CrossThreadContext extends EventTarget` instances returned directly
+  by `createCrossThreadContext`. `dispatchEvent({type, data})` sends to the peer
+  and returns `3`, and receiving calls `super.dispatchEvent` with EventTarget
   listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
   web-core. MTS queues event references until the Worker is connected; after
   that, the existing JSON transport snapshots each send. The worker FIFO
