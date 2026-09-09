@@ -128,5 +128,34 @@ after the app script installs listeners (`lynx/js_libraries/lynx-core/src/appMan
 Native `ContextProxy::PostMessage` does send a `message` event, unlike web-core
 (`lynx/core/runtime/common/bindings/event/context_proxy.cc:72-76`); this MVP
 follows the web target. Structured clone, transfer lists, other Context
-directions, automatic framework lifecycle/hydration and Lynx Core bootstrap
+directions, framework hydration and Lynx Core bootstrap
 remain pending. See `../runtime-architecture.md` for lifetime/error boundaries.
+
+## Bobcat lifecycle and event bridge (2026-09-09)
+
+Implemented Lynx-specific contracts:
+
+- After entry import, call a function-valued `globalThis.renderPage` first;
+  otherwise emit engine `__RenderPage` with `[processedData]`. This priority
+  follows the user's explicit choice; current web-core checks engine listeners
+  first (`mainthread/LynxEngineContext.ts:247`).
+- MTS `__OnLifecycleEvent(data)` sends a Context event and BTS dynamically
+  invokes `lynx.getApp().OnLifecycleEvent(data)` with the app as receiver
+  (`createMainThreadGlobalAPIs.ts:87`, `lynx-core/src/app/app.ts:984`).
+- String `__AddEvent` handlers publish snapshots through `publishEvent`;
+  `publicComponentEvent(componentId, handlerName, event)` preserves explicit
+  component identity. Both hooks are looked up at delivery and buffer until
+  first installed (`web-worker-rpc/src/Rpc.ts:303,350`). Current Bobcat PAPI has
+  no `__CreateComponent`, so it cannot produce a non-page component ID. Do not
+  reinterpret `parentComponentUniqueID` as that ID (`element_apis/event_apis.rs:321`).
+- BTS `getNativeApp().callLepusMethod(name, data, callback?)` calls the current
+  MTS global function and awaits its result before the optional callback;
+  exceptions report an error without invoking that callback. No engine
+  `__CallLepusMethod` fallback exists (`mainthread/Background.ts:195`).
+- Normal teardown emits MTS `__DestroyLifetime` with undefined data before
+  posting BTS `app.callDestroyLifetimeFun()` and releasing the worker. Hook
+  errors do not skip release (`mainthread/LynxViewInstance.ts:417`,
+  `crossThreadHandlers/registerDisposeHandler.ts:15`).
+
+These calls reuse ordinary Worker JSON messages; module loading, Lynx Core
+bootstrap, component creation and global event fan-out remain separate work.

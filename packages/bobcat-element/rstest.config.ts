@@ -18,6 +18,12 @@ export default defineConfig({
       config.plugins.push(
         new NormalModuleReplacementPlugin(/^bobcat-internal:host$/, testHost),
         new NormalModuleReplacementPlugin(/^bobcat:event-target$/, eventTarget),
+        new NormalModuleReplacementPlugin(/^bobcat:cross-thread-context$/, fileURLToPath(
+          new URL("./src/cross-thread-context.mjs", import.meta.url),
+        )),
+        new NormalModuleReplacementPlugin(/^bobcat:runtime$/, fileURLToPath(
+          new URL("./src/main-thread-runtime.mjs", import.meta.url),
+        )),
       );
     },
   },

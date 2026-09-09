@@ -404,6 +404,16 @@ useful signal for currently-compatible versions of those libraries.
   the Lynx Core module/init shell and remain pending. Each view costs one
   additional realm on the group's existing worker runtime. `ScriptFinished`
   continues to mean MTS boot; BTS errors are nonfatal `WorkerFailed` events.
+  BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
+  app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
+  and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
+  named MTS global function and asynchronously returns its resolved result
+  to an optional callback. String `__AddEvent` handlers publish snapshots
+  containing target/currentTarget `dataset`, `id` and `uid`, never handles.
+  Current PAPI elements have no component metadata and use `publishEvent`;
+  explicit component calls preserve the supplied ID. Normal teardown runs
+  MTS `__DestroyLifetime` while the tree is alive, then posts BTS's destroy
+  hook before the existing Worker `ReleaseView`, even if a hook throws.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -512,7 +522,7 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx` from `bobcat:runtime`, `__FlushElementTree` from
+  its boot helpers from `bobcat:runtime`, `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads — uses top-level await on
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
@@ -526,9 +536,10 @@ useful signal for currently-compatible versions of those libraries.
   `__OnLifecycleEvent`; transformed entries receive every binding through the
   prepended import, and the module installs none of them on `globalThis`.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
-  listeners never cross the host boundary and its only engine-driven delivery
-  today is the boot fallback's `__RenderPage` event, whose `data` is the
-  `processData` result. The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
+  listeners stay in MTS. Its boot fallback's `__RenderPage` event carries the
+  `processData` result as `[data]`; a function-valued global `renderPage` takes
+  precedence. Teardown sends `__DestroyLifetime` with undefined data.
+  The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
   and the module does not invent the background-only `lynxCoreInject` realm.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries

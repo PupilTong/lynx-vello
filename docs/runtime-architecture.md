@@ -399,9 +399,9 @@ directly to the ordinary Worker FIFO. When `ViewSources.background_entry` is
 configured, the bootstrap appends `await import(entry)`, matching MTS boot's
 import structure. XML takes exactly this path; no application source is
 prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
-only initializes the Context.
+initializes the Context and the app/native-app hook surfaces.
 
-Application module loading through ResourceFetcher is explicitly deferred.
+BTS application module loading through ResourceFetcher is explicitly deferred.
 This change adds no module collection, loader API or realm-local source
 registry. Current imports require a preloaded module; otherwise the normal
 nonfatal `WorkerFailed` event reports the missing source. Context tests preload
@@ -427,6 +427,39 @@ can be registered first. No new mailbox or RPC registry is needed. Worker
 release, source cancellation and nonfatal `WorkerFailed` reporting apply to
 BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
 loading or execution.
+
+The BTS runtime exposes stable `lynx.getApp()` and `lynx.getNativeApp()`
+objects. MTS `__OnLifecycleEvent(data)` sends the existing Context event;
+the BTS listener calls the current `app.OnLifecycleEvent(data)` with the app
+as receiver. Separate runtime Worker messages carry `publishEvent`,
+`publicComponentEvent`, `callDestroyLifetimeFun` and `callLepusMethod`, so
+these calls do not become application Context events. Context and runtime
+messages share the MTS queue before Worker connection.
+
+String `__AddEvent` handlers, including an empty string, now publish a JSON
+snapshot to BTS. Target identities contain `dataset`, `id` and `uid`; no
+element handle or propagation method crosses the boundary. Catch forms still
+stop the MTS walk before publishing. BTS reads the app hook at each delivery,
+and each publish hook retains early calls until its first installation.
+Handler names remain opaque. The component call preserves its explicit
+component ID, but current Element PAPI creation has no `__CreateComponent`
+or component metadata, so its string handlers use `publishEvent`. An owner
+unique ID is not a framework component ID. Global handler fan-out remains
+pending with the existing native event path.
+
+`lynx.getNativeApp().callLepusMethod(name, data, callback?)` calls the current
+MTS `globalThis[name]` with `globalThis` as receiver. It returns `undefined`
+immediately; a supplied callback receives the resolved result asynchronously,
+including `undefined` for a missing method. Failed calls report through the
+worker error path without running success callbacks. Only calls with a
+callback retain an ID, which is removed on reply or BTS teardown.
+
+Normal view/group teardown invokes MTS `__DestroyLifetime` while the document
+is alive, then posts `callDestroyLifetimeFun` in a `finally` block. Dropping
+the MTS realm queues the existing `ReleaseView` after that message on the
+worker FIFO. BTS invokes its optional app hook before release; a throwing hook
+reports an error without aborting release. This adds no worker kind, mailbox,
+thread, or application module loader.
 
 Its script surface covers:
 
@@ -481,7 +514,7 @@ only after the boot promise fulfills. Its rejection sends `StartupFailed`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx` and the flush binding from the
+The final `bobcat:boot` module imports its runtime helpers and the flush binding from the
 two built-ins; the transformed entry itself statically imports both built-ins.
 Boot then runs:
 
@@ -489,23 +522,23 @@ Boot then runs:
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-const data = globalThis.processData?.(undefined);
-if (typeof globalThis.renderPage === "function") {
-  globalThis.renderPage(data);
-} else {
-  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
-}
+__BobcatRenderPage();
 __FlushElementTree();
 ```
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
-realm-local EventTarget returned by `lynx.getEngine()`. Rust evaluates one boot
+realm-local EventTarget returned by `lynx.getEngine()`. The JS runtime helper
+calls `processData(undefined)` if present, then calls a function-valued global
+`renderPage` or dispatches `{type: "__RenderPage", data: [processedData]}`.
+The global function takes precedence, as explicitly requested for Bobcat.
+Rust evaluates one boot
 module; it does not issue a second native lifecycle call after evaluating the
 entry.
 
-The engine EventTarget retains JavaScript listeners and receives only the boot
-fallback's `__RenderPage` delivery today. The remaining MTS `getCoreContext`
+The engine EventTarget receives the boot fallback's `__RenderPage` delivery
+and the teardown signal `__DestroyLifetime` with `data: undefined`.
+The remaining MTS `getCoreContext`
 and `getNative` sinks retain and deliver nothing. They make chunks installable before
 Bobcat has the corresponding runtime subsystems; they do not install runtime
 bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide

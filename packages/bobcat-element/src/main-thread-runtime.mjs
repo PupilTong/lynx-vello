@@ -2,8 +2,8 @@
 
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
-// The JS Context reaches this view's BTS Worker. Native modules, the error
-// reporter and general lifecycle delivery remain sinks. A compiled chunk
+// The JS Context and lifecycle/event calls reach this view's BTS Worker.
+// Native modules and the error reporter remain sinks. A compiled chunk
 // still probes those APIs while it installs
 // the ReactLynx snapshot runtime, so this module exports explicit sinks for
 // that bootstrap surface. The one local delivery path is `lynx.getEngine()`:
@@ -44,6 +44,56 @@ const coreContext = createContextSink();
 const jsContext = createCrossThreadContext();
 const nativeContext = createContextSink();
 const engineContext = new EventTarget();
+/** @type {any} */
+const scope = globalThis;
+/** @type {import("./worker.mjs").Worker | undefined} */
+let backgroundWorker;
+/** @type {{message: any, isContext: boolean}[]} */
+let pendingBackgroundMessages = [];
+
+/** @param {any} message @param {boolean} [isContext] */
+function sendToBackground(message, isContext = false) {
+  if (backgroundWorker === undefined) {
+    pendingBackgroundMessages.push({ message, isContext });
+  } else {
+    // A Context event can carry other user properties. Only its public fields
+    // cross this channel, so an extra property cannot select our runtime calls.
+    backgroundWorker.postMessage(isContext
+      ? { type: message.type, data: message.data }
+      : message);
+  }
+}
+
+// Context events and runtime calls share the same FIFO, including calls the
+// MTS entry makes before boot constructs its Worker. Keep references until
+// postMessage performs the existing JSON snapshot.
+jsContext.connect((event) => sendToBackground(event, true));
+
+/** @param {any} message */
+async function callLepusMethod(message) {
+  try {
+    const method = scope[message.name];
+    const result = typeof method === "function"
+      ? await method.call(scope, message.data)
+      : undefined;
+    if (message.id !== undefined) {
+      sendToBackground({
+        bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
+        result,
+      });
+    }
+  } catch (error) {
+    // Deliver failures to the calling worker even without a callback. Its
+    // normal error path reports them; a success callback must not run.
+    sendToBackground({
+      bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
+      error: {
+        name: error instanceof Error ? error.name : "Error",
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+}
 
 /**
  * Called by boot only after the MTS entry finishes importing. Entry-level
@@ -53,9 +103,55 @@ const engineContext = new EventTarget();
  */
 export function __BobcatConnectBackground(worker) {
   worker.addEventListener("message", (/** @type {{ data: any }} */ event) => {
-    jsContext.receive(event.data);
+    const message = event.data;
+    if (message?.bobcat === "runtime") {
+      if (message.method === "callLepusMethod") {
+        void callLepusMethod(message);
+      }
+    } else {
+      jsContext.receive(message);
+    }
   });
-  jsContext.connect((event) => worker.postMessage(event));
+  backgroundWorker = worker;
+  const queued = pendingBackgroundMessages;
+  pendingBackgroundMessages = [];
+  for (const { message, isContext } of queued) {
+    sendToBackground(message, isContext);
+  }
+}
+
+/**
+ * @param {unknown} componentId
+ * @param {string} handlerName
+ * @param {unknown} event
+ */
+export function __BobcatPublishEvent(componentId, handlerName, event) {
+  sendToBackground({
+    bobcat: "runtime",
+    method: componentId ? "publicComponentEvent" : "publishEvent",
+    args: componentId ? [componentId, handlerName, event] : [handlerName, event],
+  });
+}
+
+export function __BobcatRenderPage() {
+  let data = undefined;
+  if (typeof scope.processData === "function") {
+    data = scope.processData(data);
+  }
+  if (typeof scope.renderPage === "function") {
+    scope.renderPage(data);
+  } else {
+    engineContext.dispatchEvent({ type: "__RenderPage", data: [data] });
+  }
+}
+
+export function __BobcatDispose() {
+  try {
+    engineContext.dispatchEvent({ type: "__DestroyLifetime", data: undefined });
+  } finally {
+    // Rust releases the worker after this send, on the same worker FIFO.
+    sendToBackground({ bobcat: "runtime", method: "callDestroyLifetimeFun" });
+  }
 }
 
 const globalEventEmitter = {
@@ -99,8 +195,9 @@ export function _SetSourceMapRelease() {
   return undefined;
 }
 
-export function __OnLifecycleEvent() {
-  return undefined;
+/** @param {unknown} data */
+export function __OnLifecycleEvent(data) {
+  jsContext.dispatchEvent({ type: "__OnLifecycleEvent", data });
 }
 
 export const NativeModules = undefined;

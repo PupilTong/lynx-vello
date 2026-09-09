@@ -131,6 +131,10 @@ declare module "bobcat:cross-thread-context" {
 
 declare module "bobcat:worker" {}
 
+declare module "bobcat:runtime" {
+  export const __BobcatPublishEvent: typeof import("./main-thread-runtime.mjs").__BobcatPublishEvent;
+}
+
 declare module "bobcat:event-target" {
   export class EventTarget {
     addEventListener(

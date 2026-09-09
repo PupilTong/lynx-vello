@@ -138,9 +138,348 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.dispose(&mut self.js);
+        }
         drop(self.runtime.take());
         self.home.join();
     }
+}
+
+#[test]
+fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        globalThis.processData = () => ({ answer: 42 });
+        globalThis.renderPage = false;
+        await Promise.resolve();
+        lynx.getEngine().addEventListener('__RenderPage', e => {
+            __OnLifecycleEvent(['render', e.data]);
+        });
+        ",
+        Some(
+            r"
+        const app = lynx.getApp();
+        app.OnLifecycleEvent = function(data) {
+            if (this !== app) throw Error('wrong app receiver');
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data });
+            this.OnLifecycleEvent = data => {
+                lynx.getCoreContext().dispatchEvent({ type: 'reply', data: ['replacement', data] });
+            };
+        };
+        ",
+        ),
+    );
+    pair.deliver();
+    pair.check(
+        r#"
+        import { __OnLifecycleEvent } from 'bobcat:runtime';
+        if (JSON.stringify(results) !== '[["render",[{"answer":42}]]]') throw Error(JSON.stringify(results));
+        __OnLifecycleEvent(['update', 7]);
+        "#,
+    );
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results[1]) !== '["replacement",["update",7]]') throw Error(JSON.stringify(results));"#,
+    );
+}
+
+#[test]
+fn string_handlers_reach_background_with_event_snapshots() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        const page = __CreatePage('card', 0);
+        const child = __CreateView(0);
+        __SetID(child, 'button');
+        __SetAttribute(child, 'data-item-name', 'first');
+        __AppendElement(page, child);
+        __AddEvent(page, 'bindEvent', 'tap', 'opaque:root');
+        __AddEvent(child, 'bindEvent', 'tap', '');
+        __AddEventListener(child, 'tap', e => {
+            e.detail.answer = 99;
+            __SetID(child, 'changed');
+        });
+        ",
+        Some(
+            r"
+        const app = lynx.getApp();
+        app.publishEvent = function(name, event) {
+            if (this !== app) throw Error('wrong publish receiver');
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data: [name, event] });
+        };
+        ",
+        ),
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_event(
+            &mut pair.js,
+            dom::NodeId::from_bits(3).unwrap(),
+            "tap",
+            r#"{"answer":42}"#,
+        )
+        .unwrap();
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r"
+        const [child, page] = results;
+        if (child[0] !== '' || page[0] !== 'opaque:root') throw Error('handler name changed');
+        const e = child[1];
+        if (e.target.id !== 'button' || e.currentTarget.uid !== 3 ||
+            e.target.dataset.itemName !== 'first' || e.detail.answer !== 42 ||
+            'elementRefptr' in e.target || 'stopPropagation' in e ||
+            page[1].currentTarget.uid !== 2) throw Error(JSON.stringify(results));
+        ",
+    );
+}
+
+#[test]
+fn publish_hooks_install_lazily_and_component_ids_stay_opaque() {
+    let mut pair = Pair::with_background(
+        r"
+        import { __BobcatPublishEvent } from 'bobcat:runtime';
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        __BobcatPublishEvent(undefined, 'first', { value: 1 });
+        __BobcatPublishEvent('component:7', 'second', { value: 2 });
+        lynx.getJSContext().dispatchEvent({ type: 'install' });
+        __BobcatPublishEvent(undefined, 'third', { value: 3 });
+        ",
+        Some(
+            r"
+        const app = lynx.getApp();
+        const core = lynx.getCoreContext();
+        const reply = data => core.dispatchEvent({ type: 'reply', data });
+        core.addEventListener('install', () => {
+            app.publishEvent = function(...args) {
+                if (this !== app) throw Error('wrong page receiver');
+                reply(args);
+            };
+            app.publicComponentEvent = function(...args) {
+                if (this !== app) throw Error('wrong component receiver');
+                reply(args);
+            };
+            app.publishEvent = (...args) => reply(['replacement', ...args]);
+        });
+        ",
+        ),
+    );
+    for _ in 0..3 {
+        pair.deliver();
+    }
+    pair.check(
+        r#"
+        const expected = [["first",{"value":1}],["component:7","second",{"value":2}],["replacement","third",{"value":3}]];
+        if (JSON.stringify(results) !== JSON.stringify(expected)) throw Error(JSON.stringify(results));
+        "#,
+    );
+}
+
+#[test]
+fn a_late_publish_hook_failure_does_not_discard_later_queued_events() {
+    let mut pair = Pair::with_background(
+        r"
+        import { __BobcatPublishEvent } from 'bobcat:runtime';
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        __BobcatPublishEvent(undefined, 'throws', {});
+        __BobcatPublishEvent(undefined, 'survives', {});
+        lynx.getJSContext().dispatchEvent({ type: 'install' });
+        ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('install', () => {
+            lynx.getApp().publishEvent = name => {
+                if (name === 'throws') throw Error('queued publish failure');
+                core.dispatchEvent({ type: 'reply', data: name });
+            };
+        });
+        ",
+        ),
+    );
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '["survives"]') throw Error(JSON.stringify(results));"#,
+    );
+    assert!(pair.notifications.drain().any(|(_, notification)| {
+        matches!(notification, ToPainter::Engine(crate::EngineEvent::WorkerFailed(error))
+            if error.message.contains("queued publish failure"))
+    }));
+}
+
+#[test]
+fn lepus_calls_return_async_results_to_the_matching_background_callback() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        globalThis.echo = async function(data) {
+            if (this !== globalThis) throw Error('wrong main receiver');
+            await Promise.resolve();
+            return { answer: data + 1 };
+        };
+        ",
+        Some(
+            r"
+        const native = lynx.getNativeApp();
+        if (native !== lynx.getNativeApp()) throw Error('unstable native app');
+        let calls = 0;
+        for (const value of [1, 5]) {
+            const returned = native.callLepusMethod('echo', value, data => {
+                calls++;
+                lynx.getCoreContext().dispatchEvent({ type: 'reply', data: [value, data] });
+            });
+            if (returned !== undefined || calls !== 0) throw Error('callback was synchronous');
+        }
+        native.callLepusMethod('missing', null, data => {
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data: ['missing', data === undefined] });
+        });
+        ",
+        ),
+    );
+    // Three requests followed by their three replies through the same FIFO.
+    for _ in 0..6 {
+        pair.deliver();
+    }
+    pair.check(
+        r#"
+        const expected = [[1,{"answer":2}],[5,{"answer":6}],["missing",true]];
+        if (JSON.stringify(results) !== JSON.stringify(expected)) throw Error(JSON.stringify(results));
+        "#,
+    );
+}
+
+#[test]
+fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        globalThis.failSync = () => { throw Error('sync lepus failure'); };
+        globalThis.failAsync = async () => { throw Error('async lepus failure'); };
+        ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        lynx.getNativeApp().callLepusMethod('failSync', {}, () => {
+            core.dispatchEvent({ type: 'reply', data: 'unexpected callback' });
+        });
+        lynx.getNativeApp().callLepusMethod('failAsync', {});
+        core.addEventListener('ping', () => core.dispatchEvent({ type: 'reply', data: 'alive' }));
+        ",
+        ),
+    );
+    for _ in 0..4 {
+        pair.deliver();
+    }
+    let errors: Vec<_> = pair
+        .notifications
+        .drain()
+        .filter_map(|(_, notification)| match notification {
+            ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 2);
+    assert!(errors[0].message.contains("sync lepus failure"));
+    assert!(errors[1].message.contains("async lepus failure"));
+    pair.check(
+        "import { lynx } from 'bobcat:runtime'; lynx.getJSContext().dispatchEvent({ type: 'ping' });",
+    );
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results) !== '["alive"]') throw Error(JSON.stringify(results));"#,
+    );
+}
+
+#[test]
+fn view_shutdown_runs_both_lifetime_hooks_before_releasing_the_worker() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage('card', 0);
+        lynx.getEngine().addEventListener('__DestroyLifetime', event => {
+            if (event.data !== undefined) throw Error('unexpected destroy arguments');
+            __SetID(page, 'still-live');
+            if (__GetID(page) !== 'still-live') throw Error('DOM destroyed before lifetime');
+            __OnLifecycleEvent(['before-destroy']);
+            throw Error('main destroy failure');
+        });
+        ",
+        Some(
+            r"
+        const app = lynx.getApp();
+        app.OnLifecycleEvent = function(data) { postMessage(data); };
+        app.callDestroyLifetimeFun = function(...args) {
+            if (this !== app || args.length !== 0) throw Error('wrong destroy call');
+            postMessage('destroyed');
+            throw Error('background destroy failure');
+        };
+        ",
+        ),
+    );
+    let runtime = pair.runtime.take().unwrap();
+    let notify = runtime.tree.borrow().notify.clone();
+    let notifications = notify.notifications.clone();
+    let mut views = vec![crate::main::CarriedView::new(
+        DETACHED_VIEW,
+        crate::main::ViewSlot::Running(runtime),
+        notify,
+        Arc::new(StartupControl::default()),
+    )];
+    let (sender, commands) = Mailbox::channel();
+    sender
+        .send((Some(DETACHED_VIEW), ToMain::Shutdown))
+        .unwrap();
+    sender.send((None, ToMain::Close)).unwrap();
+    crate::main::serve_group(
+        &mut pair.js,
+        None,
+        &Arc::new(NoWakeup),
+        &commands,
+        &notifications,
+        &WorkerFactory::new(pair.home.commands()),
+        &mut views,
+    );
+    assert!(views.is_empty());
+    pair.home.join();
+    let messages: Vec<_> = pair.events.drain().map(|(_, event)| event).collect();
+    assert_eq!(messages.len(), 3);
+    let ToMain::Worker {
+        payload: crate::background::WorkerPayload::Message(first),
+        ..
+    } = &messages[0]
+    else {
+        panic!("lifecycle must precede destroy");
+    };
+    assert_eq!(first, r#"[["before-destroy"]]"#);
+    let ToMain::Worker {
+        payload: crate::background::WorkerPayload::Message(second),
+        ..
+    } = &messages[1]
+    else {
+        panic!("background destroy must run");
+    };
+    assert_eq!(second, r#"["destroyed"]"#);
+    let ToMain::Worker {
+        payload: crate::background::WorkerPayload::Errored(error),
+        ..
+    } = &messages[2]
+    else {
+        panic!("destroy failure must be reported");
+    };
+    assert!(error.message.contains("background destroy failure"));
+    assert!(pair.notifications.drain().any(|(_, notification)| {
+        matches!(notification, ToPainter::Engine(crate::EngineEvent::ListenerFailed(error))
+            if error.message.contains("main destroy failure"))
+    }));
 }
 
 #[test]
