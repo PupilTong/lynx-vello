@@ -653,7 +653,7 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ __BobcatConnectBackground, __BobcatRenderPage }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -663,7 +663,15 @@ await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
-__BobcatRenderPage();
+let data = undefined;
+if (typeof globalThis.processData === "function") {{
+  data = globalThis.processData(data);
+}}
+if (typeof globalThis.renderPage === "function") {{
+  globalThis.renderPage(data);
+}} else {{
+  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
+}}
 __FlushElementTree();
 "#
         );
@@ -713,23 +721,6 @@ __FlushElementTree();
                     .map_err(String::as_str),
             )
             .map_err(|error| MainThreadError::from_engine("loading an imported module", error))
-    }
-
-    /// Runs the JS lifetime hooks while the document and worker transport
-    /// still exist. Dropping the realm then queues `ReleaseView` behind the BTS
-    /// destroy message on the same worker FIFO, even if a hook threw.
-    pub(super) fn dispose(&mut self, js_runtime: &mut ScriptRuntime) {
-        if let Err(error) = self.engine.call_module_export(
-            js_runtime,
-            RUNTIME_MODULE_SPECIFIER,
-            "__BobcatDispose",
-            &[],
-        ) {
-            self.tree
-                .borrow()
-                .notify
-                .send(ToPainter::Engine(crate::EngineEvent::ListenerFailed(error)));
-        }
     }
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {

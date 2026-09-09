@@ -54,8 +54,7 @@ async fn public_view_boots_through_the_engine_render_event() {
         globalThis.processData = function () { return 'processed'; };
         const engine = lynx.getEngine();
         engine.addEventListener('__RenderPage', function (event) {
-          if (this !== engine || !Array.isArray(event.data) ||
-              event.data.length !== 1 || event.data[0] !== 'processed') {
+          if (this !== engine || event.data !== 'processed') {
             throw new Error('invalid engine render event');
           }
           __AppendElement(__CreatePage('card', 0), __CreateView(0));

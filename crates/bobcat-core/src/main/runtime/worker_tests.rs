@@ -138,9 +138,6 @@ impl Pair {
 
 impl Drop for Pair {
     fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.as_mut() {
-            runtime.dispose(&mut self.js);
-        }
         drop(self.runtime.take());
         self.home.join();
     }
@@ -176,7 +173,7 @@ fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
     pair.check(
         r#"
         import { __OnLifecycleEvent } from 'bobcat:runtime';
-        if (JSON.stringify(results) !== '[["render",[{"answer":42}]]]') throw Error(JSON.stringify(results));
+        if (JSON.stringify(results) !== '[["render",{"answer":42}]]') throw Error(JSON.stringify(results));
         __OnLifecycleEvent(['update', 7]);
         "#,
     );
@@ -401,85 +398,41 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
 }
 
 #[test]
-fn view_shutdown_runs_both_lifetime_hooks_before_releasing_the_worker() {
+fn a_js_lifetime_event_calls_the_background_hook_without_releasing_the_worker() {
     let mut pair = Pair::with_background(
         r"
-        const page = __CreatePage('card', 0);
-        lynx.getEngine().addEventListener('__DestroyLifetime', event => {
-            if (event.data !== undefined) throw Error('unexpected destroy arguments');
-            __SetID(page, 'still-live');
-            if (__GetID(page) !== 'still-live') throw Error('DOM destroyed before lifetime');
-            __OnLifecycleEvent(['before-destroy']);
-            throw Error('main destroy failure');
-        });
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        lynx.getEngine().dispatchEvent({ type: '__DestroyLifetime' });
         ",
         Some(
             r"
         const app = lynx.getApp();
-        app.OnLifecycleEvent = function(data) { postMessage(data); };
+        const core = lynx.getCoreContext();
         app.callDestroyLifetimeFun = function(...args) {
-            if (this !== app || args.length !== 0) throw Error('wrong destroy call');
-            postMessage('destroyed');
-            throw Error('background destroy failure');
+            if (this !== app || args.length !== 0) throw Error('wrong lifetime call');
+            core.dispatchEvent({ type: 'reply', data: 'hook' });
+            throw Error('lifetime hook failure');
         };
+        core.addEventListener('ping', () => core.dispatchEvent({ type: 'reply', data: 'alive' }));
         ",
         ),
     );
-    let runtime = pair.runtime.take().unwrap();
-    let notify = runtime.tree.borrow().notify.clone();
-    let notifications = notify.notifications.clone();
-    let mut views = vec![crate::main::CarriedView::new(
-        DETACHED_VIEW,
-        crate::main::ViewSlot::Running(runtime),
-        notify,
-        Arc::new(StartupControl::default()),
-    )];
-    let (sender, commands) = Mailbox::channel();
-    sender
-        .send((Some(DETACHED_VIEW), ToMain::Shutdown))
-        .unwrap();
-    sender.send((None, ToMain::Close)).unwrap();
-    crate::main::serve_group(
-        &mut pair.js,
-        None,
-        &Arc::new(NoWakeup),
-        &commands,
-        &notifications,
-        &WorkerFactory::new(pair.home.commands()),
-        &mut views,
-    );
-    assert!(views.is_empty());
-    pair.home.join();
-    let messages: Vec<_> = pair.events.drain().map(|(_, event)| event).collect();
-    assert_eq!(messages.len(), 3);
-    let ToMain::Worker {
-        payload: crate::background::WorkerPayload::Message(first),
-        ..
-    } = &messages[0]
-    else {
-        panic!("lifecycle must precede destroy");
-    };
-    assert_eq!(first, r#"[["before-destroy"]]"#);
-    let ToMain::Worker {
-        payload: crate::background::WorkerPayload::Message(second),
-        ..
-    } = &messages[1]
-    else {
-        panic!("background destroy must run");
-    };
-    assert_eq!(second, r#"["destroyed"]"#);
-    let ToMain::Worker {
-        payload: crate::background::WorkerPayload::Errored(error),
-        ..
-    } = &messages[2]
-    else {
-        panic!("destroy failure must be reported");
-    };
-    assert!(error.message.contains("background destroy failure"));
+    pair.deliver();
+    pair.deliver();
     assert!(pair.notifications.drain().any(|(_, notification)| {
-        matches!(notification, ToPainter::Engine(crate::EngineEvent::ListenerFailed(error))
-            if error.message.contains("main destroy failure"))
+        matches!(notification, ToPainter::Engine(crate::EngineEvent::WorkerFailed(error))
+            if error.message.contains("lifetime hook failure"))
     }));
+    pair.check(
+        r#"
+        import { lynx } from 'bobcat:runtime';
+        if (JSON.stringify(results) !== '["hook"]') throw Error(JSON.stringify(results));
+        lynx.getJSContext().dispatchEvent({ type: 'ping' });
+        "#,
+    );
+    pair.deliver();
+    pair.check(r#"if (JSON.stringify(results) !== '["hook","alive"]') throw Error(JSON.stringify(results));"#);
 }
 
 #[test]

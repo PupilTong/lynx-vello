@@ -283,8 +283,7 @@ fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
                   return 42;
                 };
                 engine.addEventListener('__RenderPage', function (event) {
-                  if (this !== engine || event.type !== '__RenderPage' ||
-                      !Array.isArray(event.data) || event.data.length !== 1 || event.data[0] !== 42) {
+                  if (this !== engine || event.type !== '__RenderPage' || event.data !== 42) {
                     throw new Error('the engine render event lost its target or processed data');
                   }
                   __AppendElement(page, __CreateView(0));

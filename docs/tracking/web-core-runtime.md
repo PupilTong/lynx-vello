@@ -136,7 +136,7 @@ remain pending. See `../runtime-architecture.md` for lifetime/error boundaries.
 Implemented Lynx-specific contracts:
 
 - After entry import, call a function-valued `globalThis.renderPage` first;
-  otherwise emit engine `__RenderPage` with `[processedData]`. This priority
+  otherwise emit engine `__RenderPage` with raw `processedData`. This priority
   follows the user's explicit choice; current web-core checks engine listeners
   first (`mainthread/LynxEngineContext.ts:247`).
 - MTS `__OnLifecycleEvent(data)` sends a Context event and BTS dynamically
@@ -152,10 +152,15 @@ Implemented Lynx-specific contracts:
   MTS global function and awaits its result before the optional callback;
   exceptions report an error without invoking that callback. No engine
   `__CallLepusMethod` fallback exists (`mainthread/Background.ts:195`).
-- Normal teardown emits MTS `__DestroyLifetime` with undefined data before
-  posting BTS `app.callDestroyLifetimeFun()` and releasing the worker. Hook
-  errors do not skip release (`mainthread/LynxViewInstance.ts:417`,
-  `crossThreadHandlers/registerDisposeHandler.ts:15`).
+- An explicit JS engine `__DestroyLifetime` event forwards to the current BTS
+  `app.callDestroyLifetimeFun()` with the app receiver and no arguments. It
+  performs only framework hook delivery; Rust teardown and Worker ownership
+  are unchanged, and outstanding Lepus callbacks remain live. The automatic
+  dispose sequence in web-core is not adopted in this JS-only bridge.
+
+The existing raw render payload is retained by explicit user decision. The
+reference engine's positional-argument array is not introduced here; existing
+consumers and render tests continue to receive the processed value directly.
 
 These calls reuse ordinary Worker JSON messages; module loading, Lynx Core
 bootstrap, component creation and global event fan-out remain separate work.

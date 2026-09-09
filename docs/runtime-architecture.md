@@ -452,14 +452,13 @@ MTS `globalThis[name]` with `globalThis` as receiver. It returns `undefined`
 immediately; a supplied callback receives the resolved result asynchronously,
 including `undefined` for a missing method. Failed calls report through the
 worker error path without running success callbacks. Only calls with a
-callback retain an ID, which is removed on reply or BTS teardown.
+callback retain an ID, which is removed on reply or request encoding failure.
 
-Normal view/group teardown invokes MTS `__DestroyLifetime` while the document
-is alive, then posts `callDestroyLifetimeFun` in a `finally` block. Dropping
-the MTS realm queues the existing `ReleaseView` after that message on the
-worker FIFO. BTS invokes its optional app hook before release; a throwing hook
-reports an error without aborting release. This adds no worker kind, mailbox,
-thread, or application module loader.
+An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
+forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`
+hook. This is framework event delivery only: it does not terminate the Worker,
+clear pending Lepus callbacks, or release Rust objects. Automatic Rust teardown
+has no added JS entry point, and no dispose API is introduced.
 
 Its script surface covers:
 
@@ -514,7 +513,7 @@ only after the boot promise fulfills. Its rejection sends `StartupFailed`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports its runtime helpers and the flush binding from the
+The final `bobcat:boot` module imports `lynx` and the flush binding from the
 two built-ins; the transformed entry itself statically imports both built-ins.
 Boot then runs:
 
@@ -522,23 +521,23 @@ Boot then runs:
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-__BobcatRenderPage();
+const data = globalThis.processData?.(undefined);
+if (typeof globalThis.renderPage === "function") {
+  globalThis.renderPage(data);
+} else {
+  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
+}
 __FlushElementTree();
 ```
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
-realm-local EventTarget returned by `lynx.getEngine()`. The JS runtime helper
-calls `processData(undefined)` if present, then calls a function-valued global
-`renderPage` or dispatches `{type: "__RenderPage", data: [processedData]}`.
-The global function takes precedence, as explicitly requested for Bobcat.
-Rust evaluates one boot
+realm-local EventTarget returned by `lynx.getEngine()`. Rust evaluates one boot
 module; it does not issue a second native lifecycle call after evaluating the
 entry.
 
-The engine EventTarget receives the boot fallback's `__RenderPage` delivery
-and the teardown signal `__DestroyLifetime` with `data: undefined`.
-The remaining MTS `getCoreContext`
+The engine EventTarget retains JavaScript listeners and receives only the boot
+fallback's `__RenderPage` delivery today. The remaining MTS `getCoreContext`
 and `getNative` sinks retain and deliver nothing. They make chunks installable before
 Bobcat has the corresponding runtime subsystems; they do not install runtime
 bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide

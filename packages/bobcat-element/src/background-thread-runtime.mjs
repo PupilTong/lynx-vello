@@ -111,11 +111,7 @@ scope.addEventListener("message", (/** @type {{data: any}} */ event) => {
       publicComponentEvent(message.args);
       break;
     case "callDestroyLifetimeFun":
-      try {
-        app.callDestroyLifetimeFun?.call(app);
-      } finally {
-        callbacks.clear();
-      }
+      app.callDestroyLifetimeFun?.call(app);
       break;
     case "callLepusMethodResult": {
       const callback = callbacks.get(message.id);

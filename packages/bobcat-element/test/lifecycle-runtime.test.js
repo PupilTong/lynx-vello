@@ -206,26 +206,37 @@ describe("MTS/BTS lifecycle runtime", () => {
     }
   });
 
-  it("forwards destroy even if MTS throws and clears callbacks if BTS destroy throws", async () => {
+  it("forwards explicit destroy events to the current app hook without disposing the runtime", async () => {
     const callback = rstest.fn();
     bts.getNativeApp().callLepusMethod("missingLepusMethod", {}, callback);
     await deliverToMain();
     const lateReply = toBackground.shift();
     const engine = mts.lynx.getEngine();
-    const failMtsDestroy = () => { throw new Error("MTS destroy"); };
-    engine.addEventListener("__DestroyLifetime", failMtsDestroy);
-    bts.getApp().callDestroyLifetimeFun = function (...args) {
-      expect(this).toBe(bts.getApp());
+    const app = bts.getApp();
+    app.callDestroyLifetimeFun = function (...args) {
+      expect(this).toBe(app);
       expect(args).toEqual([]);
       throw new Error("BTS destroy");
     };
-    try {
-      expect(() => mts.__BobcatDispose()).toThrow("MTS destroy");
-      expect(() => deliverToBackground()).toThrow("BTS destroy");
-      receiveInBackground({ data: lateReply });
-      expect(callback).not.toHaveBeenCalled();
-    } finally {
-      engine.removeEventListener("__DestroyLifetime", failMtsDestroy);
-    }
+    engine.dispatchEvent({ type: "__DestroyLifetime", data: "ignored" });
+    expect(toBackground).toEqual([{ bobcat: "runtime", method: "callDestroyLifetimeFun" }]);
+    expect(() => deliverToBackground()).toThrow("BTS destroy");
+    receiveInBackground({ data: lateReply });
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(undefined);
+
+    const replacement = rstest.fn(/** @this {typeof app} */ function (...args) {
+      expect(this).toBe(app);
+      expect(args).toEqual([]);
+    });
+    app.callDestroyLifetimeFun = replacement;
+    engine.dispatchEvent({ type: "__DestroyLifetime" });
+    deliverToBackground();
+    expect(replacement).toHaveBeenCalledTimes(1);
+
+    bts.getNativeApp().callLepusMethod("missingLepusMethod", {}, callback);
+    await deliverToMain();
+    deliverToBackground();
+    expect(callback).toHaveBeenCalledTimes(2);
   });
 });

@@ -411,9 +411,10 @@ useful signal for currently-compatible versions of those libraries.
   to an optional callback. String `__AddEvent` handlers publish snapshots
   containing target/currentTarget `dataset`, `id` and `uid`, never handles.
   Current PAPI elements have no component metadata and use `publishEvent`;
-  explicit component calls preserve the supplied ID. Normal teardown runs
-  MTS `__DestroyLifetime` while the tree is alive, then posts BTS's destroy
-  hook before the existing Worker `ReleaseView`, even if a hook throws.
+  explicit component calls preserve the supplied ID. An explicit JS engine
+  `__DestroyLifetime` event forwards to BTS `callDestroyLifetimeFun` as a
+  framework hook only. It does not terminate a Worker, clear pending native-app
+  callbacks or release Rust objects; Rust lifetime management stays unchanged.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -522,7 +523,7 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  its boot helpers from `bobcat:runtime`, `__FlushElementTree` from
+  `lynx` from `bobcat:runtime`, `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads — uses top-level await on
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
@@ -536,10 +537,9 @@ useful signal for currently-compatible versions of those libraries.
   `__OnLifecycleEvent`; transformed entries receive every binding through the
   prepended import, and the module installs none of them on `globalThis`.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
-  listeners stay in MTS. Its boot fallback's `__RenderPage` event carries the
-  `processData` result as `[data]`; a function-valued global `renderPage` takes
-  precedence. Teardown sends `__DestroyLifetime` with undefined data.
-  The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
+  listeners never cross the host boundary and its only engine-driven delivery
+  today is the boot fallback's `__RenderPage` event, whose `data` is the
+  `processData` result. The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
   and the module does not invent the background-only `lynxCoreInject` realm.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries

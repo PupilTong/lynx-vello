@@ -133,26 +133,9 @@ export function __BobcatPublishEvent(componentId, handlerName, event) {
   });
 }
 
-export function __BobcatRenderPage() {
-  let data = undefined;
-  if (typeof scope.processData === "function") {
-    data = scope.processData(data);
-  }
-  if (typeof scope.renderPage === "function") {
-    scope.renderPage(data);
-  } else {
-    engineContext.dispatchEvent({ type: "__RenderPage", data: [data] });
-  }
-}
-
-export function __BobcatDispose() {
-  try {
-    engineContext.dispatchEvent({ type: "__DestroyLifetime", data: undefined });
-  } finally {
-    // Rust releases the worker after this send, on the same worker FIFO.
-    sendToBackground({ bobcat: "runtime", method: "callDestroyLifetimeFun" });
-  }
-}
+engineContext.addEventListener("__DestroyLifetime", () => {
+  sendToBackground({ bobcat: "runtime", method: "callDestroyLifetimeFun" });
+});
 
 const globalEventEmitter = {
   addListener: noop,

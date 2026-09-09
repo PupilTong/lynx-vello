@@ -516,14 +516,12 @@ impl<R: EventRequester> Booting<R> {
             return Booted::Failed(error.into_script_error().into());
         }
         if let Err(error) = runtime.run_main_thread_script(js_runtime, source, url) {
-            runtime.dispose(js_runtime);
             if control.is_cancelled() {
                 return Booted::Gone;
             }
             return Booted::Failed(error.into_script_error().into());
         }
         if control.is_cancelled() {
-            runtime.dispose(js_runtime);
             return Booted::Gone;
         }
         Booted::Running(runtime)
@@ -630,12 +628,6 @@ impl<R: EventRequester> Drop for CarriedView<R> {
 }
 
 impl<R: EventRequester> CarriedView<R> {
-    fn dispose(&mut self, js_runtime: &mut ScriptRuntime) {
-        if let Some(ViewSlot::Running(runtime)) = self.slot.as_mut() {
-            runtime.dispose(js_runtime);
-        }
-    }
-
     fn new(
         id: ViewId,
         slot: ViewSlot<R>,
@@ -875,30 +867,23 @@ fn serve_group<R: EventRequester>(
     workers: &WorkerFactory,
     views: &mut Vec<CarriedView<R>>,
 ) {
-    'serving: loop {
+    loop {
         for view in &mut *views {
             view.finish_round(js_runtime);
         }
         // A shared checkpoint can discover or finish a sibling's import.
-        views.retain_mut(|view| {
-            if view.finish_module_loads() {
-                true
-            } else {
-                view.dispose(js_runtime);
-                false
-            }
-        });
+        views.retain_mut(CarriedView::finish_module_loads);
         let first = if any_timer_due(views) {
             None
         } else {
             match commands.recv(None) {
                 Ok(first) => Some(first),
-                Err(_) => break,
+                Err(_) => return,
             }
         };
         for (view, command) in first.into_iter().chain(commands.drain()) {
             match command {
-                ToMain::Close => break 'serving,
+                ToMain::Close => return,
                 ToMain::Attach(attachment) => {
                     attach(
                         views,
@@ -919,15 +904,11 @@ fn serve_group<R: EventRequester>(
                         continue;
                     };
                     if !views[index].apply(js_runtime, command) {
-                        views[index].dispose(js_runtime);
                         views.swap_remove(index);
                     }
                 }
             }
         }
-    }
-    for view in views {
-        view.dispose(js_runtime);
     }
 }
 
