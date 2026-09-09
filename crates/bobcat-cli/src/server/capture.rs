@@ -498,6 +498,9 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
             EngineEvent::ListenerFailed(error) => {
                 eprintln!("bobcat-server: event listener failed: {error}");
             }
+            EngineEvent::WorkerFailed(error) => {
+                eprintln!("bobcat-server: worker failed: {error}");
+            }
             EngineEvent::TimerFailed(error) => {
                 eprintln!("bobcat-server: timer callback failed: {error}");
             }

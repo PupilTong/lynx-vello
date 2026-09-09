@@ -32,7 +32,8 @@ use crate::style::PreparsedStyleSheet;
 )]
 pub trait ResourceFetcher: dom::FrameImages {
     /// Begins one source load without blocking the painter. Main requests each
-    /// stylesheet in cascade order, then the entry, with one outstanding source.
+    /// stylesheet in cascade order, then the entry, with one outstanding startup
+    /// source. Worker scripts can be requested concurrently after entry begins.
     ///
     /// Consume `completion` with the result, or retain it until the load finishes.
     /// Dropping it unanswered reports a failure unless the view has ended.
@@ -185,6 +186,12 @@ where
 pub enum SourceRequest {
     StyleSheet(String),
     Entry(String),
+    /// A worker script resolved against the creating view's entry URL.
+    /// Complete with `LoadedSource::Entry`; the result goes to its worker.
+    Worker {
+        specifier: String,
+        base_url: String,
+    },
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
@@ -194,7 +201,8 @@ pub enum StyleSheetSource {
     Text(String),
 }
 
-/// A source ready for main. An entry's resolved URL names its preloaded ESM.
+/// A loaded source. An entry payload serves either a main or worker script;
+/// the completion routes it to the runtime that requested it.
 #[derive(Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
@@ -203,15 +211,26 @@ pub enum LoadedSource {
 
 /// The concrete, transferable right to answer one source request.
 ///
-/// This is neither a closure nor a trait object. It sends to the existing group
-/// FIFO and wakes main through that channel, without a painter turn. It cannot
+/// This is neither a closure nor a trait object. It sends directly to the
+/// requesting runtime's FIFO, without another painter or main-thread turn. It cannot
 /// be cloned; consuming it permits at most one result. An unanswered drop
 /// reports failure so a lost worker cannot leave startup waiting forever.
 #[must_use = "complete the source request or retain it until the load finishes"]
 pub struct SourceCompletion {
-    commands: Option<crate::mailbox::Sender<crate::view::ToMain>>,
+    destination: Option<SourceDestination>,
     view: crate::view::ViewId,
     control: Arc<crate::main::StartupControl>,
+}
+
+enum SourceDestination {
+    Main(crate::mailbox::Sender<crate::view::ToMain>),
+    Worker {
+        commands: flume::WeakSender<(
+            Option<crate::view::ViewId>,
+            crate::background::WorkerCommand,
+        )>,
+        key: crate::background::WorkerKey,
+    },
 }
 
 impl std::fmt::Debug for SourceCompletion {
@@ -231,7 +250,23 @@ impl SourceCompletion {
         control: Arc<crate::main::StartupControl>,
     ) -> Self {
         Self {
-            commands: Some(commands),
+            destination: Some(SourceDestination::Main(commands)),
+            view,
+            control,
+        }
+    }
+
+    pub(crate) fn worker(
+        commands: flume::WeakSender<(
+            Option<crate::view::ViewId>,
+            crate::background::WorkerCommand,
+        )>,
+        key: crate::background::WorkerKey,
+        view: crate::view::ViewId,
+        control: Arc<crate::main::StartupControl>,
+    ) -> Self {
+        Self {
+            destination: Some(SourceDestination::Worker { commands, key }),
             view,
             control,
         }
@@ -242,10 +277,13 @@ impl SourceCompletion {
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.control.is_cancelled()
-            || self
-                .commands
-                .as_ref()
-                .is_none_or(flume::Sender::is_disconnected)
+            || match self.destination.as_ref() {
+                None => true,
+                Some(SourceDestination::Main(commands)) => commands.is_disconnected(),
+                Some(SourceDestination::Worker { commands, .. }) => commands
+                    .upgrade()
+                    .is_none_or(|sender| sender.is_disconnected()),
+            }
     }
 
     /// Sends the result once. A result for a cancelled view is discarded.
@@ -254,13 +292,34 @@ impl SourceCompletion {
     }
 
     fn send(&mut self, source: Result<LoadedSource, crate::LynxViewError>) {
-        if let Some(commands) = self.commands.take()
+        if let Some(destination) = self.destination.take()
             && !self.control.is_cancelled()
         {
-            let _ = commands.send((
-                Some(self.view),
-                crate::view::ToMain::SourceLoaded { source },
-            ));
+            match destination {
+                SourceDestination::Main(commands) => {
+                    let _ = commands.send((
+                        Some(self.view),
+                        crate::view::ToMain::SourceLoaded { source },
+                    ));
+                }
+                SourceDestination::Worker { commands, key } => {
+                    let script = match source {
+                        Ok(LoadedSource::Entry { source, url }) => {
+                            Ok(crate::background::WorkerScript { source, url })
+                        }
+                        Ok(LoadedSource::StyleSheet(_)) => {
+                            Err("the fetcher returned a stylesheet for a worker".to_owned())
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if let Some(commands) = commands.upgrade() {
+                        let _ = commands.send((
+                            None,
+                            crate::background::WorkerCommand::Script { key, script },
+                        ));
+                    }
+                }
+            }
         }
     }
 }

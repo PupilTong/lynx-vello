@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bobcat_core::LynxViewError;
 use bobcat_core::resource::{
-    CachePolicy, LoadedSource, RequestId, SourceCompletion, SourceRequest, StyleSheetSource,
+    CachePolicy, LoadedSource, RequestId, ResourceErrorKind, ResourceErrorPhase, SourceCompletion,
+    SourceRequest, StyleSheetSource,
 };
 use http::HeaderMap;
 use url::Url;
@@ -18,9 +19,28 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     if completion.is_cancelled() {
         return;
     }
-    let (specifier, style_sheet) = match request {
-        SourceRequest::StyleSheet(url) => (url, true),
-        SourceRequest::Entry(url) => (url, false),
+    let (specifier, style_sheet, base_url) = match request {
+        SourceRequest::StyleSheet(url) => (url, true, resources.base_url()),
+        SourceRequest::Entry(url) => (url, false, resources.base_url()),
+        SourceRequest::Worker {
+            specifier,
+            base_url,
+        } => {
+            let base = match Url::parse(&base_url) {
+                Ok(base) => base,
+                Err(error) => {
+                    completion.complete(Err(error::Failure::new(
+                        ResourceErrorKind::InvalidUrl,
+                        ResourceErrorPhase::Resolve,
+                        format!("invalid worker base URL: {error}"),
+                    )
+                    .into_error(None, Some(base_url.into()))
+                    .into()));
+                    return;
+                }
+            };
+            (specifier, false, Some(base))
+        }
     };
     let id = RequestId {
         namespace: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
@@ -29,7 +49,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     let url = match resources
         .shared
         .transports
-        .resolve(&specifier, resources.base_url().as_ref())
+        .resolve(&specifier, base_url.as_ref())
     {
         Ok(url) => url,
         Err(failure) => {

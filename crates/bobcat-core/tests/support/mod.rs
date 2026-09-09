@@ -238,8 +238,16 @@ impl FetcherDouble {
         self.resolves.fetch_add(1, Ordering::Relaxed);
         let override_url = self.resolve_to.lock().expect("resolve override").clone();
         let cache_key = self.cache_key.clone();
-        let text = override_url
-            .unwrap_or_else(|| format!("https://example.test/{}", request.resource.specifier));
+        let text = override_url.unwrap_or_else(|| {
+            request.resource.base_url.as_ref().map_or_else(
+                || format!("https://example.test/{}", request.resource.specifier),
+                |base| {
+                    base.join(&request.resource.specifier)
+                        .expect("test source URL")
+                        .to_string()
+                },
+            )
+        });
         let url = Url::parse(&text).map_err(|error| ResourceError {
             request_id: Some(request.context.id),
             kind: ResourceErrorKind::InvalidUrl,
@@ -270,9 +278,17 @@ impl FetcherDouble {
 
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
         // This in-memory test host completes inline.
-        let (specifier, style_sheet) = match request {
-            SourceRequest::StyleSheet(url) => (url, true),
-            SourceRequest::Entry(url) => (url, false),
+        let (specifier, style_sheet, base_url) = match request {
+            SourceRequest::StyleSheet(url) => (url, true, None),
+            SourceRequest::Entry(url) => (url, false, None),
+            SourceRequest::Worker {
+                specifier,
+                base_url,
+            } => (
+                specifier,
+                false,
+                Some(Url::parse(&base_url).expect("entry URL")),
+            ),
         };
         let context = RequestContext {
             id: RequestId {
@@ -285,7 +301,7 @@ impl FetcherDouble {
             context: context.clone(),
             resource: ResourceDescriptor {
                 specifier: specifier.into(),
-                base_url: None,
+                base_url,
             },
             percent_decode: false,
         })?;

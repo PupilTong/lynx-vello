@@ -22,25 +22,15 @@
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+#[path = "background/lib.rs"]
+mod background;
 /// The private script boundary, exposed only so this crate's own benchmarks
 /// can drive it. Not a contract: hidden, unstable, and free to change.
 #[doc(hidden)]
 pub mod bench_support;
 mod clock;
-mod mailbox;
-// The group's worker realms. Every command this module defines is served by
-// it and driven by its own tests; the realm-facing half that *names* them from
-// production code is the `Worker` object, which lands separately.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the realm that constructs a `Worker` is what names the rest of this protocol"
-    )
-)]
-#[path = "background/lib.rs"]
-mod background;
 mod esm;
+mod mailbox;
 #[path = "main/lib.rs"]
 mod main;
 #[path = "paint/lib.rs"]

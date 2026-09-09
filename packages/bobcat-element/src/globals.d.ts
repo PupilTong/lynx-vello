@@ -94,6 +94,9 @@ interface BobcatWorkerNative {
 }
 
 declare module "bobcat-internal:host" {
+  export function createWorker(url: string, name: string): string;
+  export function sendWorkerMessage(key: string, data: string): void;
+  export function terminateWorker(key: string): void;
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];
   export const setAttribute: BobcatNative["setAttribute"];
@@ -252,3 +255,9 @@ declare var __RemoveEventListener: (
 declare var __StopPropagation: (event?: unknown) => undefined;
 declare var __StopImmediatePropagation: (event?: unknown) => undefined;
 declare var __FlushElementTree: () => undefined;
+
+/** Main-thread-only Worker context constructor. */
+declare module "bobcat-internal" {
+  export const Worker: typeof import("./worker.mjs").Worker;
+  export type Worker = import("./worker.mjs").Worker;
+}
