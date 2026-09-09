@@ -2,9 +2,9 @@
 
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
-// Bobcat does not have the background-thread realm, cross-context transport,
-// native-module registry, error reporter, or general lifecycle delivery path
-// yet. A compiled main-thread chunk still probes those APIs while it installs
+// The JS Context reaches this view's BTS Worker. Native modules, the error
+// reporter and general lifecycle delivery remain sinks. A compiled chunk
+// still probes those APIs while it installs
 // the ReactLynx snapshot runtime, so this module exports explicit sinks for
 // that bootstrap surface. The one local delivery path is `lynx.getEngine()`:
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
@@ -22,6 +22,7 @@
 // is shared as a module and each runtime compiles its own copy.
 
 import { EventTarget } from "bobcat:event-target";
+import { createCrossThreadContext } from "bobcat:cross-thread-context";
 
 function noop() {
   return undefined;
@@ -40,9 +41,22 @@ function createContextSink() {
 }
 
 const coreContext = createContextSink();
-const jsContext = createContextSink();
+const jsBridge = createCrossThreadContext();
 const nativeContext = createContextSink();
 const engineContext = new EventTarget();
+
+/**
+ * Called by boot only after the MTS entry finishes importing. Entry-level
+ * listeners already exist; events it sent before Worker construction are
+ * flushed in order through the same Worker transport as later events.
+ * @param {import("./worker.mjs").Worker} worker
+ */
+export function __BobcatConnectBackground(worker) {
+  worker.addEventListener("message", (/** @type {{ data: any }} */ event) => {
+    jsBridge.receive(event.data);
+  });
+  jsBridge.connect((event) => worker.postMessage(event));
+}
 
 const globalEventEmitter = {
   addListener: noop,
@@ -100,7 +114,7 @@ export const lynx = {
     return coreContext;
   },
   getJSContext: function () {
-    return jsContext;
+    return jsBridge.context;
   },
   getNative: function () {
     return nativeContext;

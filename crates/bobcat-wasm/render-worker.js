@@ -283,7 +283,7 @@ async function dispatchRequest(message) {
       const [
         mainThreadScriptUrl,
         styleSheetUrl,
-        _backgroundThreadScriptUrl,
+        backgroundThreadScriptUrl,
         compatibilityWarnings,
       ] = renderer.registerLynxXml(url, source)
       for (const warning of compatibilityWarnings) {
@@ -291,7 +291,11 @@ async function dispatchRequest(message) {
       }
       await replaceNativeView(
         request,
-        () => renderer.load(mainThreadScriptUrl, styleSheetUrl === null ? [] : [styleSheetUrl]),
+        () => renderer.load(
+          mainThreadScriptUrl,
+          styleSheetUrl === null ? [] : [styleSheetUrl],
+          backgroundThreadScriptUrl,
+        ),
       )
       break
     }

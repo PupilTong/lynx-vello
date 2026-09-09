@@ -1,5 +1,9 @@
 use super::*;
+use crate::background::WorkerCommand;
+use crate::mailbox::Mailbox;
+use crate::main::StartupControl;
 use crate::main::tree::{PageConfig, Viewport, new_document};
+use crate::main::workers::WorkerFactory;
 use crate::paint::PainterLink;
 use crate::view::{NoWakeup, detached_link};
 
@@ -48,11 +52,16 @@ fn runtime_over(
 /// A same-thread window onto the runtime-owned document, so a test can
 /// observe what script built without going through the runtime's own
 /// methods.
-struct DocumentProbe(Rc<RefCell<TreeHandle<NoWakeup>>>);
+struct DocumentProbe {
+    tree: Rc<RefCell<TreeHandle<NoWakeup>>>,
+    // These tests exercise only MTS. Keep the worker command boundary open;
+    // worker_tests executes both sides against a real worker runtime.
+    _workers: Mailbox<WorkerCommand>,
+}
 
 impl DocumentProbe {
     fn tree(&self) -> RefMut<'_, LynxDocument> {
-        RefMut::map(self.0.borrow_mut(), |handle| &mut handle.document)
+        RefMut::map(self.tree.borrow_mut(), |handle| &mut handle.document)
     }
 }
 
@@ -81,9 +90,23 @@ fn runtime_over_watching_names(
     let (painter, main) = detached_link(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify)
+    let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
         .expect("main-thread runtime");
-    let probe = DocumentProbe(Rc::clone(&runtime.tree));
+    let (workers, inbox) = Mailbox::channel();
+    runtime
+        .install_workers(
+            &mut js_runtime,
+            &WorkerFactory::new(workers),
+            main.notify,
+            "app:///main.js",
+            None,
+            Arc::new(StartupControl::default()),
+        )
+        .unwrap();
+    let probe = DocumentProbe {
+        tree: Rc::clone(&runtime.tree),
+        _workers: inbox,
+    };
     (js_runtime, runtime, probe, PublishedNames(painter))
 }
 
@@ -93,21 +116,33 @@ fn two_view_group() -> (
     ScriptRuntime,
     MainThreadRuntime<NoWakeup>,
     MainThreadRuntime<NoWakeup>,
+    Mailbox<WorkerCommand>,
 ) {
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut views = Vec::new();
+    let (workers, inbox) = Mailbox::channel();
+    let workers = WorkerFactory::new(workers);
     for _ in 0..2 {
         let (_painter, main) = detached_link(Arc::new(NoWakeup));
         let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        views.push(
-            MainThreadRuntime::new(&mut js_runtime, document, main.notify)
-                .expect("main-thread runtime"),
-        );
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, main.notify.clone())
+            .expect("main-thread runtime");
+        runtime
+            .install_workers(
+                &mut js_runtime,
+                &workers,
+                main.notify,
+                "app:///main.js",
+                None,
+                Arc::new(StartupControl::default()),
+            )
+            .unwrap();
+        views.push(runtime);
     }
     let second = views.pop().expect("the second view");
     let first = views.pop().expect("the first view");
-    (js_runtime, first, second)
+    (js_runtime, first, second, inbox)
 }
 
 /// One view's entry failing must not fail the view beside it.
@@ -120,7 +155,7 @@ fn two_view_group() -> (
 /// dispatch, its timer — would be handed a failure it could not have caused.
 #[test]
 fn a_failed_boot_leaves_the_group_s_other_view_alone() {
-    let (mut js_runtime, mut first, mut second) = two_view_group();
+    let (mut js_runtime, mut first, mut second, _workers) = two_view_group();
 
     let failure = first
         .run_main_thread_script(

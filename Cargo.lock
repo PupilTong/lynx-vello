@@ -334,6 +334,7 @@ name = "bobcat-resources"
 version = "0.1.0"
 dependencies = [
  "bobcat-core",
+ "bobcat-source",
  "bytes",
  "flashbulb",
  "flume",

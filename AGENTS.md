@@ -155,8 +155,8 @@ useful signal for currently-compatible versions of those libraries.
   core/resources dependencies. IO and view construction stay with the embedder;
   the browser's `loadLynxXml` API still accepts only XML responses. Native XML keeps
   strict UTF-8 and private memory URLs; the browser retains replacement
-  decoding, final-response fragment URLs, host PageConfig, and registers no
-  unsupported background body. See `docs/source-architecture.md` for boundaries,
+  decoding, final-response fragment URLs and host PageConfig. Both register
+  raw XML background scripts for the BTS worker. See `docs/source-architecture.md` for boundaries,
   migration and parser resource bounds.
 - `crates/bobcat-core` — unified native runtime core. Its public runtime is the
   opaque `LynxGroup` and `LynxView<F>` facades plus the protocol-only, host-injected
@@ -365,6 +365,22 @@ useful signal for currently-compatible versions of those libraries.
   `ToMain::Worker` delivers messages and errors to the owning realm; worker
   errors also produce nonfatal `EngineEvent::WorkerFailed`. See
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
+  **After the MTS entry import succeeds, boot creates a BTS Worker** named
+  `lynx-bg` through that same class, using the engine entry `bobcat:bts-entry`.
+  `ViewSources.background_entry` optionally supplies a raw BTS module URL;
+  otherwise the environment starts with an empty script and no fetch. The
+  worker scope imports `bobcat:bts` before a BTS script to install global
+  `lynx.getCoreContext()`. MTS `lynx.getJSContext()` and this BTS Context are
+  stable peers built on `bobcat:cross-thread-context`: `dispatchEvent({type,
+  data})` sends to the peer and returns `3`, and receiving uses EventTarget
+  listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
+  web-core. MTS queues event references until the Worker is connected; after
+  that, the existing JSON transport snapshots each send. The worker FIFO
+  delays incoming delivery until BTS script evaluation completes. Raw XML
+  adapters supply the optional entry; compiled bundle manifests still need
+  the Lynx Core module/init shell and remain pending. Each view costs one
+  additional realm on the group's existing worker runtime. `ScriptFinished`
+  continues to mean MTS boot; BTS errors are nonfatal `WorkerFailed` events.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an
@@ -452,10 +468,12 @@ useful signal for currently-compatible versions of those libraries.
   prefix because a decimal id cannot contain the separator), then registers the
   core-owned compatibility shell as `bobcat:runtime`, the Element PAPI
   runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
-  shared `EventTarget` both kinds of realm build on as `bobcat:event-target`,
+  shared `EventTarget` as `bobcat:event-target` and the typed Context protocol
+  as `bobcat:cross-thread-context`,
   in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
   gets a deliberately shorter list — `bobcat:event-target`, the worker global
-  scope as `bobcat:worker`, and `bobcat:timers` — because a worker has no
+  scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
+  the BTS-only bootstrap `bobcat:bts` — because a worker has no
   document to reach and no page to be the main thread of, so an import of
   `bobcat:element` fails to resolve rather than failing late. A worker's own
   script is *inlined* into the one module its realm evaluates, exactly as
@@ -463,7 +481,7 @@ useful signal for currently-compatible versions of those libraries.
   runtime: an evaluated module belongs to the realm that evaluated it, so two
   views resolving one URL to different bytes cannot collide and no worker
   leaves a registration behind.
-  All six JavaScript sources live together in `packages/bobcat-element/src`
+  All eight JavaScript sources live together in `packages/bobcat-element/src`
   and are embedded by core with `include_str!`. The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
@@ -474,12 +492,12 @@ useful signal for currently-compatible versions of those libraries.
   `lynx` from `bobcat:runtime`, `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads — uses top-level await on
-  `import(entry_url)`, and then runs
+  `import(entry_url)`, creates and connects the BTS Worker, and then runs
   `processData` → (`globalThis.renderPage` when present, otherwise the
   `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
   JavaScript; the global function is a compatibility path, not a boot
   requirement. The runtime module directly exports a `lynx` object, an empty
-  `SystemInfo` snapshot, init/global props, context sinks, the native-module
+  `SystemInfo` snapshot, init/global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
   performance/error hooks, and
   `__OnLifecycleEvent`; transformed entries receive every binding through the
@@ -487,7 +505,7 @@ useful signal for currently-compatible versions of those libraries.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
   listeners never cross the host boundary and its only engine-driven delivery
   today is the boot fallback's `__RenderPage` event, whose `data` is the
-  `processData` result. The other context sinks retain and deliver nothing,
+  `processData` result. The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
   and the module does not invent the background-only `lynxCoreInject` realm.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries
@@ -974,8 +992,8 @@ useful signal for currently-compatible versions of those libraries.
   raw stylesheet and its main-thread body to the same `load`; both are repeatable. The
   exported `LYNX_XML_PAGE_CONFIG` names the source format's fixed page defaults;
   a host may still deliberately override them.
-  The optional background body is reported by URL and neither retained nor
-  executed, matching the runtime limitation above.
+  The optional background body is registered at its section URL and loaded
+  into the view's BTS worker, with the Context MVP described above.
   Transferring the canvas does not transfer its DOM event target, so the
   `BobcatCanvas` facade retains that element and automatically forwards active
   `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences. It claims

@@ -30,10 +30,8 @@ pub struct PageSource {
 
 /// The view-facing result of registering one browser-loaded Lynx XML response.
 ///
-/// Main-thread script and author CSS bytes have already been copied into the
-/// supplied resource registry. A background-thread section is named and
-/// reported, but its body is neither retained here nor registered because the
-/// current runtime cannot execute it.
+/// Both script bodies and author CSS have already been copied into the supplied
+/// resource registry. Their URLs are passed to the view for execution.
 #[derive(Debug)]
 pub struct LynxXmlResponseRegistration {
     entry_url: Url,
@@ -55,7 +53,7 @@ impl LynxXmlResponseRegistration {
         self.style_sheet_url.as_ref()
     }
 
-    /// The logical URL of a present, unsupported background-thread section.
+    /// The registered background-thread module URL, when the section was present.
     #[must_use]
     pub const fn background_thread_url(&self) -> Option<&Url> {
         self.background_thread_url.as_ref()
@@ -75,8 +73,6 @@ impl LynxXmlResponseRegistration {
 pub enum CompatibilityWarning {
     /// Rules from these component CSS fragments currently mount globally.
     ComponentScopedCss { css_ids: Vec<i32> },
-    /// This raw XML background script is retained but is not executed.
-    BackgroundThreadScript { url: Url },
 }
 
 impl fmt::Display for CompatibilityWarning {
@@ -94,13 +90,6 @@ impl fmt::Display for CompatibilityWarning {
                 write!(
                     formatter,
                     "); per-component scoping is not implemented, so their rules apply globally"
-                )
-            }
-            Self::BackgroundThreadScript { url } => {
-                write!(
-                    formatter,
-                    "a Lynx XML background-thread script at {}; background-thread JavaScript is retained but not executed",
-                    section_url_label(url)
                 )
             }
         }
@@ -173,16 +162,6 @@ struct MappedLynxXml<'source> {
     main_thread: (Url, &'source str),
     style: Option<(Url, &'source str)>,
     background_thread: Option<(Url, &'source str)>,
-}
-
-impl MappedLynxXml<'_> {
-    fn compatibility_warnings(&self) -> Vec<CompatibilityWarning> {
-        self.background_thread
-            .as_ref()
-            .map(|(url, _)| CompatibilityWarning::BackgroundThreadScript { url: url.clone() })
-            .into_iter()
-            .collect()
-    }
 }
 
 impl LynxXmlSectionUrls {
@@ -312,7 +291,6 @@ impl PageSource {
 
     fn from_lynx_xml(input: &Url, source: &str) -> Result<Self, SourceError> {
         let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::InMemory)?;
-        let compatibility_warnings = mapped.compatibility_warnings();
         let background_script = mapped
             .background_thread
             .map(|(url, source)| (url, Arc::from(source)));
@@ -327,7 +305,7 @@ impl PageSource {
             background_script,
             style_sheet,
             config: raw_lynx_xml_config(),
-            compatibility_warnings,
+            compatibility_warnings: Vec::new(),
         })
     }
 
@@ -372,11 +350,15 @@ impl PageSource {
     }
 
     /// The sources a view for this input is built from: the author CSS this
-    /// input carried, if any, and its entry MTS module.
+    /// input carried, if any, its entry MTS module, and any raw BTS module.
     #[must_use]
     pub fn view_sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
+            background_entry: self
+                .background_script
+                .as_ref()
+                .map(|(url, _)| url.to_string()),
             style_sheets: self
                 .style_sheet
                 .as_ref()
@@ -401,30 +383,18 @@ impl PageSource {
 /// Section identities are fragments of `input`, which must be the final
 /// response URL so relative imports and CSS URLs retain the browser-observed
 /// redirect base. `source` is already Unicode: replacement characters emitted
-/// by the browser's UTF-8 decoder are ordinary contents here. Only main-thread
-/// script and author CSS are copied into `resources`; a present background
-/// body is deliberately not copied because the runtime cannot load it.
+/// by the browser's UTF-8 decoder are ordinary contents here. Both script bodies
+/// and author CSS are copied into `resources` for the view to load.
 pub fn register_lynx_xml_response(
     input: &Url,
     source: &str,
     resources: &Resources,
 ) -> Result<LynxXmlResponseRegistration, SourceError> {
     let mapped = map_lynx_xml(input, source, LynxXmlUrlPolicy::ResponseFragments)?;
-    let compatibility_warnings = mapped
-        .background_thread
-        .as_ref()
-        .map(|(url, _)| {
-            format!(
-                "a Lynx XML background-thread script at {}; background-thread execution is not implemented",
-                section_url_label(url)
-            )
-        })
-        .into_iter()
-        .collect();
-    let background_thread_url = mapped
-        .background_thread
-        .as_ref()
-        .map(|(url, _)| url.clone());
+    let background_thread_url = mapped.background_thread.map(|(url, source)| {
+        register_text(resources, &url, source, "text/javascript; charset=utf-8");
+        url
+    });
     let (entry_url, main_thread_script) = mapped.main_thread;
     register_text(
         resources,
@@ -442,7 +412,7 @@ pub fn register_lynx_xml_response(
         entry_url,
         style_sheet_url,
         background_thread_url,
-        compatibility_warnings,
+        compatibility_warnings: Vec::new(),
     })
 }
 
@@ -505,19 +475,6 @@ fn diagnostic_url(input: &Url) -> String {
     redacted.set_query(None);
     redacted.set_fragment(None);
     bounded_diagnostic(redacted.to_string())
-}
-
-fn section_url_label(url: &Url) -> String {
-    let mut label = if url.cannot_be_a_base() {
-        format!("{}:[redacted]", url.scheme())
-    } else {
-        url.path().to_owned()
-    };
-    if let Some(fragment) = url.fragment() {
-        label.push('#');
-        label.push_str(fragment);
-    }
-    bounded_diagnostic(label)
 }
 
 fn bounded_diagnostic(mut value: String) -> String {
@@ -661,6 +618,7 @@ mod tests {
         let sources = page.view_sources();
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://bundle/lepus-root.js");
+        assert!(sources.background_entry.is_none());
         assert!(sources.style_sheets.is_empty());
         assert!(page.compatibility_warnings().is_empty());
 
@@ -693,12 +651,7 @@ mod tests {
             page.style_sheet.as_ref().map(|(url, _)| url.as_str()),
             Some("bobcat-memory://lynx-xml/style.css")
         );
-        assert_eq!(
-            page.compatibility_warnings(),
-            &[CompatibilityWarning::BackgroundThreadScript {
-                url: Url::parse("bobcat-memory://lynx-xml/app-service.js").expect("test URL"),
-            }]
-        );
+        assert!(page.compatibility_warnings().is_empty());
         assert!(matches!(
             page.style_sheet.as_ref(),
             Some((_, PageStyleSheet::Text(source))) if source.is_empty()
@@ -711,6 +664,10 @@ mod tests {
         assert_eq!(sources.config, page.config());
         assert_eq!(sources.entry, "bobcat-memory://lynx-xml/main-thread.js");
         assert_eq!(
+            sources.background_entry.as_deref(),
+            Some("bobcat-memory://lynx-xml/app-service.js")
+        );
+        assert_eq!(
             sources.style_sheets,
             vec!["bobcat-memory://lynx-xml/style.css".to_owned()]
         );
@@ -718,18 +675,18 @@ mod tests {
         let resources = resources();
         page.register_with(&resources);
         assert!(resources.unregister(&sources.entry));
-        assert!(resources.unregister("bobcat-memory://lynx-xml/app-service.js"));
+        assert!(resources.unregister(sources.background_entry.as_deref().unwrap()));
         assert!(resources.unregister(&sources.style_sheets[0]));
     }
 
     #[test]
-    fn browser_response_maps_and_registers_only_view_sources() {
+    fn browser_response_registers_both_script_realms_at_final_response_fragments() {
         let input = Url::parse("https://cdn.example/final/card.lynx.xml?revision=2#request")
             .expect("test URL");
         let resources = resources();
         let registered = register_lynx_xml_response(
             &input,
-            "<lynx engine-version=\"4.2\"><style></style><script thread=\"main\">main</script><script thread=\"background\">unused</script></lynx>",
+            "<lynx engine-version=\"4.2\"><style></style><script thread=\"main\">main</script><script thread=\"background\">lynx.getCoreContext();</script></lynx>",
             &resources,
         )
         .expect("valid browser XML response");
@@ -746,12 +703,7 @@ mod tests {
             registered.background_thread_url().map(Url::as_str),
             Some("https://cdn.example/final/card.lynx.xml?revision=2#background-thread")
         );
-        assert_eq!(
-            registered.compatibility_warnings(),
-            &[
-                "a Lynx XML background-thread script at /final/card.lynx.xml#background-thread; background-thread execution is not implemented"
-            ]
-        );
+        assert!(registered.compatibility_warnings().is_empty());
         assert!(resources.unregister(registered.entry_url().as_str()));
         assert!(
             resources.unregister(
@@ -762,7 +714,7 @@ mod tests {
             )
         );
         assert!(
-            !resources.unregister(
+            resources.unregister(
                 registered
                     .background_thread_url()
                     .expect("present background URL")
@@ -781,6 +733,7 @@ mod tests {
 
         assert!(page.style_sheet.is_none());
         assert!(page.background_script.is_none());
+        assert!(page.view_sources().background_entry.is_none());
         assert!(page.compatibility_warnings().is_empty());
         assert_eq!(
             page.view_sources().entry,
@@ -848,20 +801,12 @@ mod tests {
     }
 
     #[test]
-    fn opaque_urls_are_redacted_in_errors_and_warnings() {
+    fn opaque_urls_are_redacted_in_errors() {
         let input = Url::parse("data:text/xml,super-secret-source").expect("test data URL");
         let error = register_lynx_xml_response(&input, "<lynx", &resources())
             .expect_err("malformed XML must fail");
         assert!(error.to_string().contains("data:[redacted]"));
         assert!(!error.to_string().contains("super-secret-source"));
-
-        let warning = CompatibilityWarning::BackgroundThreadScript {
-            url: xml_section_url(&input, "background-thread"),
-        };
-        assert_eq!(
-            warning.to_string(),
-            "a Lynx XML background-thread script at data:[redacted]#background-thread; background-thread JavaScript is retained but not executed"
-        );
     }
 
     #[test]
@@ -902,21 +847,6 @@ mod tests {
         assert_eq!(
             warning.to_string(),
             "component-scoped CSS fragments (css ids 4, 9); per-component scoping is not implemented, so their rules apply globally"
-        );
-    }
-
-    #[test]
-    fn background_warning_names_the_section_without_leaking_url_credentials() {
-        let warning = CompatibilityWarning::BackgroundThreadScript {
-            url: Url::parse(
-                "https://user:secret@example.test/card.xml?token=secret#background-thread",
-            )
-            .expect("test URL"),
-        };
-
-        assert_eq!(
-            warning.to_string(),
-            "a Lynx XML background-thread script at /card.xml#background-thread; background-thread JavaScript is retained but not executed"
         );
     }
 }

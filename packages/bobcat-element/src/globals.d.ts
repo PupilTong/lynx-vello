@@ -125,6 +125,12 @@ declare module "bobcat-internal:worker" {
   export const closeWorker: BobcatWorkerNative["closeWorker"];
 }
 
+declare module "bobcat:cross-thread-context" {
+  export const createCrossThreadContext: typeof import("./cross-thread-context.mjs").createCrossThreadContext;
+}
+
+declare module "bobcat:worker" {}
+
 declare module "bobcat:event-target" {
   export class EventTarget {
     addEventListener(

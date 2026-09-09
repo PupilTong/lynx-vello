@@ -104,6 +104,15 @@ pub(crate) struct WorkerStart {
     pub(crate) view: ViewId,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
+    pub(crate) kind: WorkerKind,
+}
+
+/// The BTS context adds Lynx bindings before its script; ordinary workers
+/// retain their document-free worker scope without a `lynx` global.
+#[derive(Clone, Copy)]
+pub(crate) enum WorkerKind {
+    Dedicated,
+    Background,
 }
 
 /// One worker script, resolved, fetched and decoded by the thread that owns

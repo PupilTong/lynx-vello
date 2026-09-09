@@ -9,8 +9,8 @@ use quickjs_rust_bridge::HostValue;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use super::{StartupControl, ToPainterSender};
-use crate::background::{WorkerCommand, WorkerKey, WorkerStart};
-use crate::esm::HOST_MODULE_SPECIFIER;
+use crate::background::{WorkerCommand, WorkerKey, WorkerKind, WorkerScript, WorkerStart};
+use crate::esm::{BTS_ENTRY_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::mailbox::Sender;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -40,6 +40,7 @@ impl WorkerFactory {
         runtime: &mut ScriptRuntime,
         notify: ToPainterSender<R>,
         base_url: &str,
+        background_entry: Option<String>,
         control: Arc<StartupControl>,
     ) -> Result<(), ScriptError> {
         // The native functions hold the owner until the realm is dropped,
@@ -59,6 +60,7 @@ impl WorkerFactory {
             Box::new(move |arguments| {
                 let specifier = string(arguments, 0)?.to_owned();
                 let name = string(arguments, 1)?.to_owned();
+                let is_background = specifier == BTS_ENTRY_SPECIFIER;
                 let id = creator.factory.next.get();
                 creator
                     .factory
@@ -69,7 +71,30 @@ impl WorkerFactory {
                     key,
                     view: creator.view,
                     name,
+                    kind: if is_background {
+                        WorkerKind::Background
+                    } else {
+                        WorkerKind::Dedicated
+                    },
                 }))?;
+                let specifier = if is_background {
+                    if let Some(entry) = &background_entry {
+                        entry.clone()
+                    } else {
+                        // An empty BTS still has its own realm and Context.
+                        // No host IO is needed for an engine-owned entry.
+                        creator.send(WorkerCommand::Script {
+                            key,
+                            script: Ok(WorkerScript {
+                                source: String::new(),
+                                url: BTS_ENTRY_SPECIFIER.to_owned(),
+                            }),
+                        })?;
+                        return Ok(HostValue::String(id.to_string()));
+                    }
+                } else {
+                    specifier
+                };
                 // Start is enqueued before the painter can possibly answer.
                 // The completion is weak: outstanding IO must not keep the
                 // group's worker thread alive while its owner joins it.

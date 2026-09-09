@@ -65,6 +65,7 @@ impl Group {
             key,
             view: Self::view(view),
             name: name.to_owned(),
+            kind: super::WorkerKind::Dedicated,
         }));
         key
     }

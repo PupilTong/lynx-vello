@@ -259,6 +259,7 @@ impl BobcatRenderer {
         &mut self,
         entry_url: String,
         style_sheet_urls: Vec<String>,
+        background_entry_url: Option<String>,
     ) -> Result<(), JsValue> {
         self.ensure_running()?;
 
@@ -266,6 +267,7 @@ impl BobcatRenderer {
         let sources = ViewSources {
             config: self.config,
             style_sheets: style_sheet_urls,
+            background_entry: background_entry_url,
             ..ViewSources::new(entry_url)
         };
         self.load_sources(sources, base_url).await
@@ -322,9 +324,9 @@ impl BobcatRenderer {
     /// The returned array is
     /// `[main, styleOrNull, backgroundOrNull, compatibilityWarnings]`. Its
     /// first three slots preserve the existing internal Worker ABI; the last
-    /// carries shared, sanitized warning text. A background section is named
-    /// but not copied into the registry because Bobcat has no background-thread
-    /// runtime. The source adapter returns no page configuration: this
+    /// carries shared, sanitized warning text. Both script bodies are registered;
+    /// the background URL is passed to [`Self::load`] for the page's BTS worker.
+    /// The source adapter returns no page configuration: this
     /// renderer's host-selected [`PageConfig`] remains authoritative in
     /// [`Self::load`].
     #[wasm_bindgen(js_name = registerLynxXml)]
@@ -338,8 +340,8 @@ impl BobcatRenderer {
             .map_err(|error| js_error(format!("the Lynx XML response URL is invalid: {error}")))?;
         // JavaScript has already applied the browser's replacement-mode UTF-8
         // decoder. The one-shot adapter parses, maps and registers directly
-        // from this string, so it neither clones the whole envelope nor keeps
-        // an unsupported background body alive.
+        // from this string, retaining just the scripts and author CSS needed
+        // by the view.
         let registered =
             register_lynx_xml_response(&input_url, &source, &self.resources).map_err(js_error)?;
         let compatibility_warnings = Array::new();

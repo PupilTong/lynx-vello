@@ -8,6 +8,7 @@ use bobcat_core::{
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
+use bobcat_source::PageSource;
 
 struct Wake(flume::Sender<()>);
 impl EventRequester for Wake {
@@ -257,6 +258,71 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
         assert!(
             std::time::Instant::now() < deadline,
             "worker messages did not paint"
+        );
+        let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+}
+
+#[tokio::test]
+async fn xml_background_context_receives_entry_events_and_commits_its_reply() {
+    let (group, resources, receiver) = setup().await;
+    let page = PageSource::from_bytes(
+        &"app:///card.lynx.xml".parse().unwrap(),
+        br#"
+        <lynx engine-version="4.2">
+          <script thread="main"><![CDATA[
+            const page = __CreatePage();
+            const box = __CreateView();
+            __SetInlineStyles(box, 'width:32px;height:24px;background:black');
+            __AppendElement(page, box);
+            const jsContext = lynx.getJSContext();
+            jsContext.addEventListener('paint', event => {
+                if (event.data.sender !== 'bts') throw Error('wrong context sender');
+                __SetInlineStyles(box, `width:32px;height:24px;background:${event.data.color}`);
+            });
+            // The entry executes before core starts its BTS worker. This event
+            // must survive until that worker has installed its listener.
+            jsContext.dispatchEvent({type: 'initialize', data: {color: 'blue'}});
+          ]]></script>
+          <script thread="background"><![CDATA[
+            const coreContext = lynx.getCoreContext();
+            coreContext.addEventListener('initialize', event => {
+                coreContext.dispatchEvent({
+                    type: 'paint',
+                    data: {sender: 'bts', color: event.data.color},
+                });
+            });
+          ]]></script>
+        </lynx>
+        "#,
+    )
+    .unwrap();
+    page.register_with(&resources);
+    let mut view = view(&group, &resources, page.view_sources()).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut script_finished = false;
+    loop {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => script_finished = true,
+                EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
+                EngineEvent::WorkerFailed(error)
+                | EngineEvent::ListenerFailed(error)
+                | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
+                EngineEvent::RenderFailed(error) => panic!("render: {error}"),
+                _ => {}
+            }
+        }
+        if script_finished {
+            let screenshot = view.capture().unwrap();
+            let offset = (12 * screenshot.size.width as usize + 16) * 4;
+            if screenshot.pixels[offset..offset + 4] == [0, 0, 255, 255] {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the XML BTS context reply did not paint"
         );
         let _ = receiver.recv_timeout(Duration::from_millis(5));
     }

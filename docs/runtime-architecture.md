@@ -83,6 +83,7 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
     └──▶ await import(resolved entry MTS URL)
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
           │     ├── named compatibility exports + engine EventTarget
+          │     ├──▶ bobcat:cross-thread-context (MTS getJSContext)
           │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.mjs)
           ├──▶ bobcat-internal (explicit import; Worker class in worker.mjs)
           │     ├──▶ bobcat:event-target
@@ -98,6 +99,8 @@ QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
     │     ├──▶ bobcat:event-target
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)
     ├──▶ bobcat:timers ──▶ bobcat-internal:host (setTimer, clearTimer only)
+    ├──▶ bobcat:bts (BTS only: global lynx.getCoreContext)
+    │     └──▶ bobcat:cross-thread-context ──▶ bobcat:event-target
     └── the worker's own script, inlined
   No bobcat:element and no bobcat:runtime here: a worker has no document to
   reach and no page to be the main thread of, so reaching for either fails to
@@ -211,10 +214,11 @@ on the capture/embedder thread, or synchronous view teardown while it joins
 the Lynx main thread.
 
 The browser reference embedder uses the shared `register_lynx_xml_response` adapter inside
-its Render Worker after fetching one XML URL. No shipped embedder executes the
-optional background section yet because `bobcat-core` does not yet provide a
-background-thread realm; each source-facing embedder reports that limitation
-explicitly.
+its Render Worker after fetching one XML URL. Native and browser XML adapters
+register the optional background script and pass its URL as
+`ViewSources.background_entry`; the BTS worker evaluates that raw module with
+`lynx.getCoreContext()` available. Compiled bundle manifests still need the
+Lynx Core module/init shell and are not executed by this MVP.
 
 `LynxGroup::new` awaits the shared script runtime and style pool.
 `create_lynx_view` validates metrics, attaches the document inputs and source URLs
@@ -339,7 +343,7 @@ BigInt throw, and typed arrays do not preserve their type.
 
 ```text
 main realm: new Worker(url)
-  ├── Start(key, view, name) ───────────────────────▶ worker FIFO
+  ├── Start(key, view, name, kind) ────────────────▶ worker FIFO
   └── RequestWorkerSource ──▶ painter ──▶ ResourceFetcher::request_source
                                            │ SourceRequest::Worker {specifier, base_url}
                                            └── SourceCompletion ──▶ worker FIFO: Script(key)
@@ -364,6 +368,34 @@ Releasing the view, including failed entry boot, cancels source work and sends
 `ReleaseView` as its native callbacks are dropped. Worker errors reach the
 parent's `error` handler and the embedder as nonfatal `WorkerFailed`; a parent
 handler that throws reports `ListenerFailed` and leaves the view serving.
+
+Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
+Boot constructs it through the same `bobcat-internal` class, using the reserved
+engine entry `bobcat:bts-entry`. `main/workers.rs` marks that start as BTS;
+`background/scope.rs` imports `bobcat:bts` before the worker's source. Ordinary
+workers have no automatic `lynx` global. With `ViewSources.background_entry`,
+the fetcher loads the raw module against the resolved MTS entry URL through
+the existing worker request/completion path. Without it, main sends an empty
+script directly to the worker FIFO: the environment still exists, with no IO.
+It costs one worker realm per view, with no additional OS thread or runtime.
+
+MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` are stable peers.
+Their shared `bobcat:cross-thread-context` module implements Lynx's custom
+`dispatchEvent({type, data})`: send to the other context and return numeric `3`.
+It never dispatches locally. The receiver uses the shared EventTarget listener
+machinery, with `data ?? {}`; a missing listener drops the event. `postMessage`
+on these Context objects remains a no-op, matching web-core's unimplemented
+operation. This differs from Worker `postMessage`, which carries the events.
+
+The MTS Context exists during entry evaluation. Until the Worker is connected,
+it queues event references in FIFO order, matching web-core's pre-port RPC
+queue; connection sends them through Worker's JSON transport. Once connected,
+that transport snapshots each event at dispatch time. The worker's existing
+source queue delays delivery until the BTS entry finishes, so its listeners
+can be registered first. No new mailbox or RPC registry is needed. Worker
+release, source cancellation and nonfatal `WorkerFailed` reporting apply to
+BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
+loading or execution.
 
 The script engine's whole surface is five operations:
 
@@ -391,6 +423,8 @@ Boot then runs:
 
 ```js
 await import(entryMtsUrl);
+const { Worker } = await import("bobcat-internal");
+__BobcatConnectBackground(new Worker("bobcat:bts-entry", { name: "lynx-bg" }));
 const data = globalThis.processData?.(undefined);
 if (typeof globalThis.renderPage === "function") {
   globalThis.renderPage(data);
@@ -407,8 +441,8 @@ module; it does not issue a second native lifecycle call after evaluating the
 entry.
 
 The engine EventTarget retains JavaScript listeners and receives only the boot
-fallback's `__RenderPage` delivery today. The other context sinks retain and
-deliver nothing. They make compiled main-thread chunks installable before
+fallback's `__RenderPage` delivery today. The remaining MTS `getCoreContext`
+and `getNative` sinks retain and deliver nothing. They make chunks installable before
 Bobcat has the corresponding runtime subsystems; they do not install runtime
 bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide
 missing Element PAPI members such as `__AddClass`.

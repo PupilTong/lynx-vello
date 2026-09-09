@@ -19,3 +19,12 @@ pub(crate) const TIMER_MODULE_SOURCE: &str =
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 pub(crate) const EVENT_TARGET_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/event-target.mjs");
+
+/// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
+pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
+pub(crate) const CONTEXT_MODULE_SOURCE: &str =
+    include_str!("../../../packages/bobcat-element/src/cross-thread-context.mjs");
+
+/// Engine-owned Worker entry selected by the MTS boot module. Its source is
+/// built in unless the view supplies a raw background entry to load.
+pub(crate) const BTS_ENTRY_SPECIFIER: &str = "bobcat:bts-entry";

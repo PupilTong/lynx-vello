@@ -16,7 +16,9 @@ use super::scope::{
     WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members, install_worker_modules,
     worker_boot_source,
 };
-use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerPayload, WorkerScript, WorkerStart};
+use super::{
+    WorkerCommand, WorkerEvent, WorkerKey, WorkerKind, WorkerPayload, WorkerScript, WorkerStart,
+};
 use crate::mailbox::{Mailbox, Sender};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -48,6 +50,7 @@ struct Workers {
 struct Pending {
     view: ViewId,
     name: String,
+    kind: WorkerKind,
     /// HTML queues what is posted before a worker's global scope exists and
     /// delivers it once the scope is up, which is what this is: without it
     /// the commonest shape there is — construct, then post — would lose its
@@ -151,15 +154,20 @@ fn apply(
     command: WorkerCommand,
 ) {
     match command {
-        WorkerCommand::Start(WorkerStart { key, view, name }) => {
-            // Nothing to arrange and nothing that can fail: the painter has
-            // already been told to fetch, by the same realm, in the same
-            // call. All this makes is somewhere to queue.
+        WorkerCommand::Start(WorkerStart {
+            key,
+            view,
+            name,
+            kind,
+        }) => {
+            // The script follows on this FIFO, either from the painter or
+            // immediately for the built-in empty BTS. Make somewhere to queue.
             workers.pending.insert(
                 key,
                 Pending {
                     view,
                     name,
+                    kind,
                     queued: Vec::new(),
                 },
             );
@@ -206,7 +214,12 @@ fn start_worker(
     pending: Pending,
     script: Result<WorkerScript, String>,
 ) {
-    let Pending { view, name, queued } = pending;
+    let Pending {
+        view,
+        name,
+        kind,
+        queued,
+    } = pending;
     let script = match script {
         Ok(script) => script,
         Err(message) => {
@@ -223,7 +236,18 @@ fn start_worker(
             return;
         }
     };
-    if let Err(error) = boot(runtime, to_main, workers, key, view, &name, script) {
+    if let Err(error) = boot(
+        runtime,
+        to_main,
+        workers,
+        WorkerStart {
+            key,
+            view,
+            name,
+            kind,
+        },
+        script,
+    ) {
         report_event(
             to_main,
             WorkerEvent {
@@ -261,11 +285,15 @@ fn boot(
     runtime: &mut Result<ScriptRuntime, ScriptError>,
     to_main: &Sender<ToMain>,
     workers: &mut Workers,
-    key: WorkerKey,
-    view: ViewId,
-    name: &str,
+    start: WorkerStart,
     script: WorkerScript,
 ) -> Result<(), ScriptError> {
+    let WorkerStart {
+        key,
+        view,
+        name,
+        kind,
+    } = start;
     let js_runtime = match runtime {
         Ok(runtime) => runtime,
         // The runtime failed once, for every worker that will ever be asked
@@ -291,7 +319,7 @@ fn boot(
             );
         }
     })?;
-    let source = worker_boot_source(name, &source);
+    let source = worker_boot_source(&name, &source, kind);
     // In the table before the script runs, which is the whole point.
     workers.realms.insert(
         key,

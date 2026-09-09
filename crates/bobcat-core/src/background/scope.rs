@@ -9,7 +9,8 @@ use std::rc::Rc;
 use quickjs_rust_bridge::HostValue;
 
 use crate::esm::{
-    EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER,
+    EVENT_TARGET_SOURCE, TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
 };
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -42,28 +43,34 @@ pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 const WORKER_MODULE_SOURCE: &str =
     include_str!("../../../../packages/bobcat-element/src/worker-runtime.mjs");
 
+const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
+const BTS_MODULE_SOURCE: &str =
+    include_str!("../../../../packages/bobcat-element/src/background-thread-runtime.mjs");
+
 /// Registers the source modules every worker realm on the group's *worker*
 /// runtime shares.
 ///
-/// Deliberately short: the worker runtime carries the `EventTarget` its global
-/// scope is built on, that global scope, and the timers — and nothing else.
+/// The worker runtime carries its global scope, timers, shared event machinery
+/// and the BTS bootstrap. Only BTS automatically imports the latter.
 /// `bobcat:element` and `bobcat:runtime` are absent because a worker has no
 /// document to reach and no page to be the main thread of, and registering
 /// them would make an import that must fail merely fail late.
 pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
     js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
     js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
+    js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;
+    js_runtime.register_module_source(BTS_MODULE_SPECIFIER, BTS_MODULE_SOURCE)?;
     js_runtime.register_module_source(TIMER_MODULE_SPECIFIER, TIMER_MODULE_SOURCE)
 }
 
-/// The one module a worker realm ever evaluates: its global scope, its
-/// timers, its name, and its own script, in that order.
+/// The worker entry: global scope, timers, optional BTS bindings, name, then
+/// its own script.
 ///
 /// The script is *inlined* rather than registered and imported, the same way
 /// `ENTRY_PREAMBLE` carries the MTS entry. A module that is only evaluated
 /// belongs to the realm that evaluated it and is never named on the runtime,
 /// so two views that resolve one URL to different bytes cannot collide, and a
-/// worker leaves no registration behind. The two static imports run before
+/// worker leaves no registration behind. The static imports run before
 /// anything in the body, which is what puts the global scope and the timer
 /// globals in place first; `name` is written between them and the script
 /// because `self.name` is readable from a worker's top level.
@@ -71,13 +78,17 @@ pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(
 /// The cost is the entry's cost: the preamble shifts the script's line
 /// numbers by the lines above it. The module still carries the script's own
 /// resolved URL, so a stack trace names the right file.
-pub(super) fn worker_boot_source(name: &str, script: &str) -> String {
+pub(super) fn worker_boot_source(name: &str, script: &str, kind: super::WorkerKind) -> String {
     let name = serde_json::to_string(name)
         .expect("serializing a Rust string as a JavaScript string cannot fail");
+    let background = match kind {
+        super::WorkerKind::Dedicated => "",
+        super::WorkerKind::Background => "import \"bobcat:bts\";\n",
+    };
     format!(
         r#"import "{WORKER_MODULE_SPECIFIER}";
 import "{TIMER_MODULE_SPECIFIER}";
-globalThis.name = {name};
+{background}globalThis.name = {name};
 {script}"#
     )
 }

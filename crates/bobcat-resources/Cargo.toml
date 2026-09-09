@@ -38,6 +38,7 @@ web-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+bobcat-source = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 png = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
