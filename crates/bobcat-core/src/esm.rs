@@ -25,6 +25,8 @@ pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 pub(crate) const CONTEXT_MODULE_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/cross-thread-context.mjs");
 
-/// Engine-owned Worker entry selected by the MTS boot module. Its source is
-/// built in unless the view supplies a raw background entry to load.
-pub(crate) const BTS_ENTRY_SPECIFIER: &str = "bobcat:bts-entry";
+/// The built-in BTS entry, loaded like any other Worker script. It installs
+/// Lynx bindings in JavaScript; the worker protocol carries no realm kind.
+pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
+pub(crate) const BTS_MODULE_SOURCE: &str =
+    include_str!("../../../packages/bobcat-element/src/background-thread-runtime.mjs");

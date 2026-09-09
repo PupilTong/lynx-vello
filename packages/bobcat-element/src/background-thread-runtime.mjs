@@ -2,7 +2,7 @@
 import "bobcat:worker";
 import { createCrossThreadContext } from "bobcat:cross-thread-context";
 
-// Only BTS imports this module. A plain Worker still has no `lynx` global.
+// A Worker gets Lynx bindings by evaluating or importing this entry module.
 // The native worker queue starts delivery after the entry finishes, so the
 // entry can register typed listeners before MTS's queued events arrive.
 /** @type {any} */

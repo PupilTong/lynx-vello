@@ -366,11 +366,14 @@ useful signal for currently-compatible versions of those libraries.
   errors also produce nonfatal `EngineEvent::WorkerFailed`. See
   `docs/runtime-architecture.md` for the transport and lifetime boundaries.
   **After the MTS entry import succeeds, boot creates a BTS Worker** named
-  `lynx-bg` through that same class, using the engine entry `bobcat:bts-entry`.
+  `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
   `ViewSources.background_entry` optionally supplies a raw BTS module URL;
-  otherwise the environment starts with an empty script and no fetch. The
-  worker scope imports `bobcat:bts` before a BTS script to install global
-  `lynx.getCoreContext()`. MTS `lynx.getJSContext()` and this BTS Context are
+  otherwise the built-in entry loads without a fetch. The
+  loader composes an ordinary entry module that imports `bobcat:bts` before
+  the raw script; without a raw script it supplies the built-in module itself.
+  That JavaScript module installs global `lynx.getCoreContext()`. All workers
+  use the same scope, with no BTS kind in the worker protocol.
+  MTS `lynx.getJSContext()` and this BTS Context are
   stable peers built on `bobcat:cross-thread-context`: `dispatchEvent({type,
   data})` sends to the peer and returns `3`, and receiving uses EventTarget
   listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in

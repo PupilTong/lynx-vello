@@ -94,7 +94,9 @@ recorded in `../runtime-architecture.md`.
 ## Bobcat BTS Context MVP (2026-09-09)
 
 After `await import(entry_url)`, boot creates a BTS Worker on the existing
-group worker thread. `ViewSources.background_entry` selects an optional raw
+group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
+same scope; BTS bindings belong to that JavaScript entry, with no worker kind
+in the protocol. `ViewSources.background_entry` selects an optional raw
 module; native/browser XML adapters supply the background section's URL.
 Without a script, the built-in BTS environment still starts. Compiled BTS
 bundle manifests require Lynx Core's module/init shell and remain pending.

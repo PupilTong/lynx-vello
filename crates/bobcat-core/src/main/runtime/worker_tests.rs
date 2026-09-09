@@ -313,6 +313,33 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
 }
 
 #[test]
+fn an_ordinary_worker_can_install_bts_through_its_own_import() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.result = null;
+        const worker = new Worker('./worker.js', {name: 'ordinary'});
+        worker.onmessage = event => result = event.data;
+        worker.postMessage({type: 'request', data: 42});
+        ",
+    );
+    pair.answer(
+        r"
+        import { lynx } from 'bobcat:bts';
+        if (lynx !== globalThis.lynx) throw Error('module/global identity');
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', event => {
+            core.dispatchEvent({type: 'reply', data: [name, event.data]});
+        });
+        ",
+    );
+    pair.deliver();
+    pair.check(
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42]}') throw Error(JSON.stringify(result));",
+    );
+}
+
+#[test]
 fn background_contexts_exchange_typed_events_and_flush_early_references_in_order() {
     let mut pair = Pair::with_background(
         r"

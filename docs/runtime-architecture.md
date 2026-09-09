@@ -343,7 +343,7 @@ BigInt throw, and typed arrays do not preserve their type.
 
 ```text
 main realm: new Worker(url)
-  ├── Start(key, view, name, kind) ────────────────▶ worker FIFO
+  ├── Start(key, view, name) ────────────────▶ worker FIFO
   └── RequestWorkerSource ──▶ painter ──▶ ResourceFetcher::request_source
                                            │ SourceRequest::Worker {specifier, base_url}
                                            └── SourceCompletion ──▶ worker FIFO: Script(key)
@@ -371,12 +371,13 @@ handler that throws reports `ListenerFailed` and leaves the view serving.
 
 Each successful MTS entry import now starts one BTS Worker named `lynx-bg`.
 Boot constructs it through the same `bobcat-internal` class, using the reserved
-engine entry `bobcat:bts-entry`. `main/workers.rs` marks that start as BTS;
-`background/scope.rs` imports `bobcat:bts` before the worker's source. Ordinary
-workers have no automatic `lynx` global. With `ViewSources.background_entry`,
+module `bobcat:bts`. All workers use the same scope and protocol; the entry
+module installs the BTS bindings in JavaScript. Workers that do not import it
+have no automatic `lynx` global. With `ViewSources.background_entry`,
 the fetcher loads the raw module against the resolved MTS entry URL through
-the existing worker request/completion path. Without it, main sends an empty
-script directly to the worker FIFO: the environment still exists, with no IO.
+the existing worker request/completion path. The loader prepends
+`import "bobcat:bts"` before handing the source to the worker FIFO. Without a
+raw entry, main sends the built-in module source directly, with no host IO.
 It costs one worker realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` are stable peers.
@@ -424,7 +425,7 @@ Boot then runs:
 ```js
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
-__BobcatConnectBackground(new Worker("bobcat:bts-entry", { name: "lynx-bg" }));
+__BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
 const data = globalThis.processData?.(undefined);
 if (typeof globalThis.renderPage === "function") {
   globalThis.renderPage(data);

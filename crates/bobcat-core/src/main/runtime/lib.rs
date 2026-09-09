@@ -13,7 +13,7 @@ use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
-    BTS_ENTRY_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
+    BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
     EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
     TIMER_MODULE_SPECIFIER,
 };
@@ -628,7 +628,7 @@ import "{TIMER_MODULE_SPECIFIER}";
 
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
-__BobcatConnectBackground(new Worker("{BTS_ENTRY_SPECIFIER}", {{ name: "lynx-bg" }}));
+__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
 let data = undefined;
 if (typeof globalThis.processData === "function") {{

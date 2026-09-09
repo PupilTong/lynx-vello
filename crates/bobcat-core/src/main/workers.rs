@@ -9,8 +9,8 @@ use quickjs_rust_bridge::HostValue;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use super::{StartupControl, ToPainterSender};
-use crate::background::{WorkerCommand, WorkerKey, WorkerKind, WorkerScript, WorkerStart};
-use crate::esm::{BTS_ENTRY_SPECIFIER, HOST_MODULE_SPECIFIER};
+use crate::background::{WorkerCommand, WorkerKey, WorkerScript, WorkerStart};
+use crate::esm::{BTS_MODULE_SOURCE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::mailbox::Sender;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -60,7 +60,6 @@ impl WorkerFactory {
             Box::new(move |arguments| {
                 let specifier = string(arguments, 0)?.to_owned();
                 let name = string(arguments, 1)?.to_owned();
-                let is_background = specifier == BTS_ENTRY_SPECIFIER;
                 let id = creator.factory.next.get();
                 creator
                     .factory
@@ -71,29 +70,26 @@ impl WorkerFactory {
                     key,
                     view: creator.view,
                     name,
-                    kind: if is_background {
-                        WorkerKind::Background
-                    } else {
-                        WorkerKind::Dedicated
-                    },
                 }))?;
-                let specifier = if is_background {
+                let (specifier, prefix) = if specifier == BTS_MODULE_SPECIFIER {
                     if let Some(entry) = &background_entry {
-                        entry.clone()
+                        // Compose the BTS entry at the source boundary. The
+                        // worker receives an ordinary module, with its imports
+                        // already spelled out, just like an authored script.
+                        (entry.clone(), "import \"bobcat:bts\";\n")
                     } else {
-                        // An empty BTS still has its own realm and Context.
-                        // No host IO is needed for an engine-owned entry.
+                        // The built-in entry is available without host IO.
                         creator.send(WorkerCommand::Script {
                             key,
                             script: Ok(WorkerScript {
-                                source: String::new(),
-                                url: BTS_ENTRY_SPECIFIER.to_owned(),
+                                source: BTS_MODULE_SOURCE.to_owned(),
+                                url: BTS_MODULE_SPECIFIER.to_owned(),
                             }),
                         })?;
                         return Ok(HostValue::String(id.to_string()));
                     }
                 } else {
-                    specifier
+                    (specifier, "")
                 };
                 // Start is enqueued before the painter can possibly answer.
                 // The completion is weak: outstanding IO must not keep the
@@ -108,6 +104,7 @@ impl WorkerFactory {
                         key,
                         creator.view,
                         Arc::clone(&creator.control),
+                        prefix,
                     ),
                 });
                 Ok(HostValue::String(id.to_string()))
