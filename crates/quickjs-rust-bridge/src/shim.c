@@ -786,6 +786,12 @@ QjsValue *qjs_new_boolean(QjsContext *context, int value) {
     return qjs_box(context->raw, JS_NewBool(context->raw, value != 0));
 }
 
+/* The caller supplies length bytes followed by the sentinel QuickJS requires. */
+QjsValue *qjs_parse_json(QjsContext *context, const char *json, size_t length) {
+    return qjs_box(context->raw,
+                  JS_ParseJSON(context->raw, json, length, "<host JSON>"));
+}
+
 QjsValue *qjs_new_number(QjsContext *context, double value) {
     return qjs_box(context->raw, JS_NewFloat64(context->raw, value));
 }

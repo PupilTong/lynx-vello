@@ -145,6 +145,48 @@ fn two_view_group() -> (
     (js_runtime, first, second, inbox)
 }
 
+#[test]
+fn initial_values_stay_with_their_view_without_changing_boot() {
+    let (mut js, mut first, mut second, _workers) = two_view_group();
+    first
+        .prepare_initial_data(
+            Some(&serde_json::json!(42)),
+            Some(&serde_json::json!("中文")),
+        )
+        .unwrap();
+    second
+        .prepare_initial_data(None, Some(&serde_json::Value::Null))
+        .unwrap();
+    first.engine.collect_garbage(&mut js).unwrap();
+    assert_eq!(first.init_data.as_ref().unwrap().as_number(), Some(42.0));
+    assert_eq!(
+        first.global_props.as_ref().unwrap().to_utf16().unwrap(),
+        "中文".encode_utf16().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        second.init_data.as_ref().unwrap().kind(),
+        quickjs_rust_bridge::ValueKind::Undefined
+    );
+    assert_eq!(
+        second.global_props.as_ref().unwrap().kind(),
+        quickjs_rust_bridge::ValueKind::Null
+    );
+    first
+        .run_main_thread_script(
+            &mut js,
+            r"
+        globalThis.processData = data => {
+            if (data !== undefined) throw new Error('init data was wired into boot');
+        };
+        if (Object.keys(lynx.__globalProps).length !== 0) {
+            throw new Error('global properties were wired into lynx');
+        }
+    ",
+            "app:///initial-values.js",
+        )
+        .unwrap();
+}
+
 /// One view's entry failing must not fail the view beside it.
 ///
 /// The two realms share one `QuickJS` runtime, and therefore one promise-job

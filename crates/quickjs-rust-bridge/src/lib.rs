@@ -1355,6 +1355,27 @@ mod implementation {
             self.set_property(&global, name, &function)
         }
 
+        /// Parses JSON into a value owned by this realm, without evaluating
+        /// JavaScript or consulting the realm's mutable `JSON.parse` property.
+        pub fn parse_json(&mut self, json: &str) -> Result<Value, Error> {
+            self.reclaim();
+            let json = CString::new(json).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::ConstructValue,
+                    "JSON text contains an unescaped NUL byte",
+                )
+            })?;
+            let guard = self.begin();
+            // SAFETY: the context is live on its owner thread and CString
+            // supplies the trailing sentinel required by JS_ParseJSON.
+            let raw = unsafe {
+                ffi::qjs_parse_json(self.raw().as_ptr(), json.as_ptr(), json.as_bytes().len())
+            };
+            let result = self.value_or_exception(raw, ErrorPhase::ConstructValue);
+            guard.finish(result, ErrorPhase::ConstructValue)
+        }
+
         pub fn undefined(&self) -> Result<Value, Error> {
             self.construct(ErrorPhase::ConstructValue, |context| unsafe {
                 ffi::qjs_new_undefined(context)
@@ -2212,6 +2233,50 @@ mod implementation {
             worker.join().expect("worker should finish cleanly");
             assert!(!handle.request_interrupt_if_running());
             result
+        }
+
+        #[test]
+        fn parses_json_without_running_source_or_mutable_builtins() {
+            let mut realm = single_realm();
+            realm
+                .evaluate(
+                    EvalSource::new("JSON.parse = () => { throw new Error('replaced'); }"),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            let value = realm.parse_json(r#"{"__proto__":{"polluted":true},"nested":[null,true,42,"a\u0000🦀"],"empty":{}}"#).unwrap();
+            let global = realm.global_object().unwrap();
+            realm.set_property(&global, "data", &value).unwrap();
+            realm
+                .evaluate(
+                    EvalSource::new(
+                        r"
+                if (!Object.hasOwn(data, '__proto__') || data.polluted !== undefined ||
+                    Object.getPrototypeOf(data) !== Object.prototype ||
+                    !Array.isArray(data.nested) || data.nested[0] !== null ||
+                    data.nested[1] !== true || data.nested[2] !== 42 ||
+                    data.nested[3] !== 'a\u0000🦀' || Object.keys(data.empty).length !== 0) {
+                    throw new Error('JSON value mismatch');
+                }
+            ",
+                    ),
+                    EvalOptions::default(),
+                )
+                .unwrap();
+            for invalid in [
+                "{",
+                "undefined",
+                "({})",
+                "1; globalThis.executed = true",
+                "1\0",
+            ] {
+                assert!(realm.parse_json(invalid).is_err(), "{invalid:?}");
+            }
+            assert_eq!(realm.parse_json("42").unwrap().as_number(), Some(42.0));
+            assert_eq!(
+                realm.property(&global, "executed").unwrap().kind(),
+                ValueKind::Undefined
+            );
         }
 
         #[test]

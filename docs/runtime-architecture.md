@@ -7,7 +7,8 @@ capabilities and OS facts:
 
 - a `ViewSources` — page config, owned font bytes, an optional default font
   family, author stylesheet URLs in cascade order, and the one entry MTS
-  module URL — and, as a separate argument, the builder of the view's
+  module URL, plus optional `init_data` and `global_props` JSON values — and,
+  as a separate argument, the builder of the view's
   `ResourceFetcher`, which is also its `FrameImages` and owns every byte and
   pixel the view ever loads (`crates/bobcat-resources` is the reference
   implementation all shipped embedders use);
@@ -54,6 +55,18 @@ Shared command, event, viewport, and link vocabulary stays in `view` beside
 the public handle that owns one end of it; a stateful type whose owner is
 fixed lives under `paint` or `main`. Construction splits `ViewSources` once:
 document inputs and source specifiers move into the main-owned startup state.
+
+`ViewSources::init_data` and `global_props` are optional `serde_json::Value`
+inputs. They travel with that state and are converted before entry boot using
+the bridge's `Context::parse_json`, then retained as values in the view's own
+realm. Omission becomes JavaScript `undefined`; explicit JSON `null` stays
+`null`, and JSON numbers become JavaScript Numbers (large integers can round).
+Conversion currently serializes JSON once and lets QuickJS parse it, without
+evaluating it as source or calling the mutable `JSON.parse` global. Conversion
+failure follows the existing `StartupFailed` path. Passing these values to
+`processData`/`renderPage`, installing them on `lynx`, and background-thread
+delivery are deferred; the current boot behavior is unchanged.
+
 Main requests loads from the embedder-owned painter and its
 `ResourceFetcher`. Fetched source bytes cross to `main`; the fetcher, caches,
 and decoded images never do.

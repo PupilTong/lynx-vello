@@ -352,6 +352,13 @@ pub struct ViewSources {
     /// The view always starts a BTS context; without this it runs only the
     /// built-in environment. Application module loading is not implemented yet.
     pub background_entry: Option<String>,
+    /// Initial page data. `None` becomes JavaScript `undefined`; JSON `null`
+    /// remains `null`. Converted in the view's realm, but not yet passed to boot.
+    /// Numbers use JavaScript `Number` semantics, so large integers can round.
+    pub init_data: Option<serde_json::Value>,
+    /// Initial global properties, converted like [`Self::init_data`].
+    /// Installing these on `lynx` is not yet wired.
+    pub global_props: Option<serde_json::Value>,
 }
 
 /// The document half of [`ViewSources`]: what crosses to `bobcat-main` for
@@ -364,6 +371,8 @@ pub(crate) struct MainSources {
     pub(crate) style_sheets: Vec<String>,
     pub(crate) entry: String,
     pub(crate) background_entry: Option<String>,
+    pub(crate) init_data: Option<serde_json::Value>,
+    pub(crate) global_props: Option<serde_json::Value>,
 }
 
 impl ViewSources {
@@ -376,6 +385,8 @@ impl ViewSources {
             style_sheets: Vec::new(),
             entry: entry.into(),
             background_entry: None,
+            init_data: None,
+            global_props: None,
         }
     }
 }
@@ -552,6 +563,8 @@ impl LynxGroup {
             style_sheets,
             entry,
             background_entry,
+            init_data,
+            global_props,
         } = sources;
         let view = self.inner.next_id();
         let control = Arc::new(StartupControl::default());
@@ -577,6 +590,8 @@ impl LynxGroup {
                         style_sheets,
                         entry,
                         background_entry,
+                        init_data,
+                        global_props,
                     },
                     frames,
                     control: Arc::clone(&control),
