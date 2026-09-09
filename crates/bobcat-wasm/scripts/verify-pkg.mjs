@@ -251,11 +251,12 @@ for (const requiredLynxXmlLoaderStep of [
 }
 for (const requiredLynxXmlDispatchStep of [
   'renderer.registerLynxXml(url, source)',
-  '_backgroundThreadScriptUrl',
+  'backgroundThreadScriptUrl',
   'for (const warning of compatibilityWarnings)',
   'console.warn(',
   'await replaceNativeView(',
   'styleSheetUrl === null ? [] : [styleSheetUrl]',
+  'backgroundThreadScriptUrl,\n        )',
 ]) {
   if (!lynxXmlDispatch.includes(requiredLynxXmlDispatchStep)) {
     throw new Error(

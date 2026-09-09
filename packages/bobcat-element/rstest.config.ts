@@ -6,6 +6,9 @@ import { defineConfig } from "@rstest/core";
 const testHost = fileURLToPath(
   new URL("./test/native-host.mjs", import.meta.url),
 );
+const eventTarget = fileURLToPath(
+  new URL("./src/event-target.mjs", import.meta.url),
+);
 
 export default defineConfig({
   name: "bobcat-element",
@@ -14,6 +17,7 @@ export default defineConfig({
       config.plugins ??= [];
       config.plugins.push(
         new NormalModuleReplacementPlugin(/^bobcat-internal:host$/, testHost),
+        new NormalModuleReplacementPlugin(/^bobcat:event-target$/, eventTarget),
       );
     },
   },

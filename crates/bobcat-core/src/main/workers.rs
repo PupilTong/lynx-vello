@@ -9,8 +9,8 @@ use quickjs_rust_bridge::HostValue;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use super::{StartupControl, ToPainterSender};
-use crate::background::{WorkerCommand, WorkerKey, WorkerStart};
-use crate::esm::HOST_MODULE_SPECIFIER;
+use crate::background::{WorkerCommand, WorkerKey, WorkerScript, WorkerStart};
+use crate::esm::{BTS_ENTRY_PREAMBLE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::mailbox::Sender;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::script::ScriptError;
@@ -21,13 +21,13 @@ pub(super) const SOURCE: &str = include_str!("../../../../packages/bobcat-elemen
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock.
 #[derive(Clone)]
-pub(super) struct WorkerFactory {
+pub(crate) struct WorkerFactory {
     commands: Sender<WorkerCommand>,
     next: Rc<Cell<u64>>,
 }
 
 impl WorkerFactory {
-    pub(super) fn new(commands: Sender<WorkerCommand>) -> Self {
+    pub(crate) fn new(commands: Sender<WorkerCommand>) -> Self {
         Self {
             commands,
             next: Rc::new(Cell::new(1)),
@@ -40,6 +40,7 @@ impl WorkerFactory {
         runtime: &mut ScriptRuntime,
         notify: ToPainterSender<R>,
         base_url: &str,
+        background_entry: Option<String>,
         control: Arc<StartupControl>,
     ) -> Result<(), ScriptError> {
         // The native functions hold the owner until the realm is dropped,
@@ -70,6 +71,24 @@ impl WorkerFactory {
                     view: creator.view,
                     name,
                 }))?;
+                if specifier == BTS_MODULE_SPECIFIER {
+                    let mut source = BTS_ENTRY_PREAMBLE.to_owned();
+                    if let Some(entry) = &background_entry {
+                        let entry =
+                            serde_json::to_string(entry).expect("a string is JSON serializable");
+                        source.push_str("\nawait import(");
+                        source.push_str(&entry);
+                        source.push_str(");\n");
+                    }
+                    creator.send(WorkerCommand::Script {
+                        key,
+                        script: Ok(WorkerScript {
+                            source,
+                            url: BTS_MODULE_SPECIFIER.to_owned(),
+                        }),
+                    })?;
+                    return Ok(HostValue::String(id.to_string()));
+                }
                 // Start is enqueued before the painter can possibly answer.
                 // The completion is weak: outstanding IO must not keep the
                 // group's worker thread alive while its owner joins it.

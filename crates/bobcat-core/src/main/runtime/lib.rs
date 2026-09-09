@@ -13,6 +13,7 @@ use super::ToPainterSender;
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::clock::ClockInstant;
 use crate::esm::{
+    BTS_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE, CONTEXT_MODULE_SPECIFIER,
     EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE, HOST_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
     TIMER_MODULE_SPECIFIER,
 };
@@ -371,16 +372,24 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         })
     }
 
-    pub(super) fn install_workers(
+    pub(crate) fn install_workers(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         workers: &super::workers::WorkerFactory,
         notify: ToPainterSender<R>,
         base_url: &str,
+        background_entry: Option<String>,
         control: Arc<super::StartupControl>,
     ) -> Result<(), MainThreadError> {
         workers
-            .install(&mut self.engine, js_runtime, notify, base_url, control)
+            .install(
+                &mut self.engine,
+                js_runtime,
+                notify,
+                base_url,
+                background_entry,
+                control,
+            )
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))
     }
 
@@ -611,13 +620,15 @@ impl<R: EventRequester> MainThreadRuntime<R> {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
 import "{TIMER_MODULE_SPECIFIER}";
 
 await import({entry_specifier});
+const {{ Worker }} = await import("bobcat-internal");
+__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
 let data = undefined;
 if (typeof globalThis.processData === "function") {{
@@ -694,6 +705,9 @@ pub(crate) fn install_shared_modules(
         .map_err(|error| {
             MainThreadError::from_engine("registering the EventTarget module", error)
         })?;
+    js_runtime
+        .register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)
+        .map_err(|error| MainThreadError::from_engine("registering the Context module", error))?;
     js_runtime
         .register_module_source(RUNTIME_MODULE_SPECIFIER, RUNTIME_MODULE_SOURCE)
         .map_err(|error| {

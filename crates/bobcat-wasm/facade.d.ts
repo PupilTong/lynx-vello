@@ -42,8 +42,9 @@ export declare class BobcatCanvas {
 
   /**
    * Fetches and parses a Lynx XML source envelope and shows it: the same load
-   * as `load()`, with the envelope's sections as the sources. A
-   * background-thread script produces a console warning and is not executed.
+   * as `load()`, with the envelope's sections as the sources. Its optional
+   * background script runs as a module in the page's BTS worker after the
+   * main-thread entry loads, with `lynx.getCoreContext()` available.
    */
   loadLynxXml(url: string | URL): Promise<void>
 

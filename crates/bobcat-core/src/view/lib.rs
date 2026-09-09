@@ -348,6 +348,10 @@ pub struct ViewSources {
     pub default_font_family: Option<String>,
     pub style_sheets: Vec<String>,
     pub entry: String,
+    /// Optional BTS application module specifier imported by `bobcat:bts`.
+    /// The view always starts a BTS context; without this it runs only the
+    /// built-in environment. Application module loading is not implemented yet.
+    pub background_entry: Option<String>,
 }
 
 /// The document half of [`ViewSources`]: what crosses to `bobcat-main` for
@@ -359,6 +363,7 @@ pub(crate) struct MainSources {
     pub(crate) default_font_family: Option<String>,
     pub(crate) style_sheets: Vec<String>,
     pub(crate) entry: String,
+    pub(crate) background_entry: Option<String>,
 }
 
 impl ViewSources {
@@ -370,6 +375,7 @@ impl ViewSources {
             default_font_family: None,
             style_sheets: Vec::new(),
             entry: entry.into(),
+            background_entry: None,
         }
     }
 }
@@ -545,6 +551,7 @@ impl LynxGroup {
             default_font_family,
             style_sheets,
             entry,
+            background_entry,
         } = sources;
         let view = self.inner.next_id();
         let control = Arc::new(StartupControl::default());
@@ -569,6 +576,7 @@ impl LynxGroup {
                         default_font_family,
                         style_sheets,
                         entry,
+                        background_entry,
                     },
                     frames,
                     control: Arc::clone(&control),

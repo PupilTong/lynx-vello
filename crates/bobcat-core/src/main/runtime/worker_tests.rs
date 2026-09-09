@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::*;
-use crate::background::WorkerHome;
+use crate::background::{WorkerHome, WorkerScript};
 use crate::mailbox::Mailbox;
 use crate::main::StartupControl;
 use crate::main::workers::WorkerFactory;
@@ -14,14 +14,33 @@ struct Pair {
     runtime: Option<MainThreadRuntime<NoWakeup>>,
     js: ScriptRuntime,
     events: Mailbox<ToMain>,
-    notifications: Mailbox<ToPainter>,
+    notifications: Rc<Mailbox<ToPainter>>,
     home: WorkerHome,
 }
 
 impl Pair {
     fn new(script: &str) -> Self {
+        Self::with_background(script, None)
+    }
+
+    fn with_background(script: &str, background_source: Option<&str>) -> Self {
+        let mut pair = Self::unbooted(background_source);
+        pair.boot(script).unwrap();
+        pair
+    }
+
+    fn unbooted(background_source: Option<&str>) -> Self {
         let (to_main, events) = Mailbox::channel();
-        let home = WorkerHome::start(to_main).unwrap();
+        let home = match background_source {
+            Some(source) => WorkerHome::with_entry_for_test(
+                to_main,
+                WorkerScript {
+                    source: source.to_owned(),
+                    url: "test:bts-entry".to_owned(),
+                },
+            ),
+            None => WorkerHome::start(to_main).unwrap(),
+        };
         let (notifications, received) = Mailbox::channel();
         let notify = ToPainterSender::new(
             DETACHED_VIEW,
@@ -42,19 +61,25 @@ impl Pair {
                 &WorkerFactory::new(home.commands()),
                 notify,
                 "app:///nested/main.js",
+                background_source.map(|_| "test:bts-entry".to_owned()),
                 Arc::new(StartupControl::default()),
             )
-            .unwrap();
-        runtime
-            .run_main_thread_script(&mut js, script, "app:///nested/main.js")
             .unwrap();
         Self {
             runtime: Some(runtime),
             js,
             events,
-            notifications: received,
+            notifications: Rc::new(received),
             home,
         }
+    }
+
+    fn boot(&mut self, script: &str) -> Result<(), MainThreadError> {
+        self.runtime.as_mut().unwrap().run_main_thread_script(
+            &mut self.js,
+            script,
+            "app:///nested/main.js",
+        )
     }
 
     fn source(&self) -> SourceCompletion {
@@ -137,6 +162,7 @@ fn constructor_creates_distinct_contexts_and_queues_messages_in_order() {
         pair.answer(
             r"
             if (typeof globalThis.counter !== 'undefined') throw Error('shared context');
+            if (typeof globalThis.lynx !== 'undefined') throw Error('ordinary worker has BTS globals');
             globalThis.counter = 0;
             onmessage = e => postMessage([name, ++counter, e.data, typeof __CreatePage]);
         ",
@@ -293,4 +319,237 @@ fn unsupported_worker_options_fail_before_requesting_a_context() {
     pair.check(
         "if (typeof globalThis.Worker !== 'undefined') throw Error('Worker leaked into globals');",
     );
+}
+
+#[test]
+fn an_ordinary_worker_can_install_bts_through_its_own_import() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.result = null;
+        const worker = new Worker('./worker.js', {name: 'ordinary'});
+        worker.onmessage = event => result = event.data;
+        worker.postMessage({type: 'request', data: 42});
+        ",
+    );
+    pair.answer(
+        r"
+        import { lynx } from 'bobcat:bts-runtime';
+        if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', event => {
+            core.dispatchEvent({type: 'reply', data: [name, event.data]});
+        });
+        ",
+    );
+    pair.deliver();
+    pair.check(
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42]}') throw Error(JSON.stringify(result));",
+    );
+}
+
+#[test]
+fn background_contexts_exchange_typed_events_and_flush_early_references_in_order() {
+    let mut pair = Pair::with_background(
+        r"
+        import { EventTarget } from 'bobcat:event-target';
+        if ('lynx' in globalThis) throw Error('MTS lynx leaked into globals');
+        globalThis.context = lynx.getJSContext();
+        if (!(context instanceof EventTarget)) throw Error('JS context must inherit EventTarget');
+        if (context !== lynx.getJSContext()) throw Error('unstable JS context');
+        globalThis.results = [];
+        context.addEventListener('request', () => { throw Error('local echo'); });
+        context.addEventListener('reply', function (event) {
+            if (this !== context) throw Error('listener receiver');
+            results.push(event.data);
+        });
+        const first = {type: 'request', data: {value: 1}};
+        if (context.dispatchEvent(first) !== 3) throw Error('dispatch result');
+        context.dispatchEvent({type: 'request', data: {value: 2}});
+        await Promise.resolve();
+        first.data.value = 3;
+        globalThis.renderPage = () => {
+            first.data.value = 99;
+            context.dispatchEvent({type: 'request', data: {value: 4}});
+        };
+    ",
+        Some(
+            r"
+        import { EventTarget } from 'bobcat:event-target';
+        export const ready = await Promise.resolve(true);
+        if ('lynx' in globalThis) throw Error('BTS lynx leaked into globals');
+        const core = lynx.getCoreContext();
+        if (!(core instanceof EventTarget)) throw Error('core context must inherit EventTarget');
+        if (core !== lynx.getCoreContext()) throw Error('unstable core context');
+        if (name !== 'lynx-bg') throw Error('wrong background name');
+        if (typeof document !== 'undefined' || typeof __CreatePage !== 'undefined') {
+            throw Error('BTS reached the document');
+        }
+        core.addEventListener('reply', () => { throw Error('local echo'); });
+        core.addEventListener('request', function (event) {
+            if (this !== core) throw Error('listener receiver');
+            if (core.dispatchEvent({type: 'reply', data: event.data}) !== 3) {
+                throw Error('dispatch result');
+            }
+        });
+    ",
+        ),
+    );
+    for _ in 0..3 {
+        pair.deliver();
+    }
+    pair.check(
+        "if (JSON.stringify(results) !== '[{\"value\":3},{\"value\":2},{\"value\":4}]') throw Error(JSON.stringify(results));",
+    );
+}
+
+#[test]
+fn background_starts_only_after_the_awaited_main_entry_finishes() {
+    let mut pair = Pair::with_background(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.finished = false;
+        globalThis.connected = false;
+        const add = Worker.prototype.addEventListener;
+        Worker.prototype.addEventListener = function (...args) {
+            if (!finished) throw Error('BTS connected before MTS entry finished');
+            connected = true;
+            return add.apply(this, args);
+        };
+        await Promise.resolve();
+        finished = true;
+        ",
+        Some("lynx.getCoreContext().dispatchEvent({type: 'ready'});"),
+    );
+    pair.check("if (!connected) throw Error('BTS was not connected');");
+    pair.deliver();
+    assert!(
+        !pair
+            .notifications
+            .drain()
+            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
+    );
+}
+
+#[test]
+fn context_post_message_remains_a_noop_on_both_realms() {
+    let mut pair = Pair::with_background(
+        r"
+        const context = lynx.getJSContext();
+        globalThis.results = [];
+        context.addEventListener('ignored', () => { throw Error('postMessage delivered'); });
+        context.addEventListener('ready', e => results.push(e.data));
+        context.addEventListener('reply', e => results.push(e.data));
+        context.postMessage({type: 'request', data: 'ignored'});
+        context.dispatchEvent({type: 'request', data: 'typed'});
+    ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', e => core.dispatchEvent({type: 'reply', data: e.data}));
+        core.postMessage({type: 'ignored', data: 'ignored'});
+        core.dispatchEvent({type: 'ready'});
+    ",
+        ),
+    );
+    pair.deliver();
+    pair.deliver();
+    pair.check(
+        "if (JSON.stringify(results) !== '[{},\"typed\"]') throw Error(JSON.stringify(results));",
+    );
+}
+
+#[test]
+fn background_listener_failure_is_nonfatal_and_later_context_events_still_arrive() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        const context = lynx.getJSContext();
+        context.addEventListener('reply', e => results.push(e.data));
+        context.dispatchEvent({type: 'request', data: 0});
+        context.dispatchEvent({type: 'request', data: 1});
+    ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', event => {
+            if (event.data === 0) throw Error('BTS listener boom');
+            core.dispatchEvent({type: 'reply', data: event.data});
+        });
+    ",
+        ),
+    );
+    pair.deliver();
+    pair.deliver();
+    let failures: Vec<_> = pair
+        .notifications
+        .drain()
+        .filter_map(|(_, notification)| match notification {
+            ToPainter::Engine(crate::EngineEvent::WorkerFailed(error)) => Some(error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("BTS listener boom"));
+    pair.check(
+        r"
+        import { lynx } from 'bobcat:runtime';
+        if (JSON.stringify(results) !== '[1]') throw Error('lost recovery event');
+        lynx.getJSContext().dispatchEvent({type: 'request', data: 2});
+    ",
+    );
+    pair.deliver();
+    pair.check("if (JSON.stringify(results) !== '[1,2]') throw Error('BTS stopped');");
+}
+
+#[test]
+fn an_omitted_background_entry_boots_without_host_io() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        const context = lynx.getJSContext();
+        if (context !== lynx.getJSContext()) throw Error('unstable JS context');
+        context.dispatchEvent({type: 'unobserved', data: 'empty BTS'});
+        globalThis.answer = null;
+        const worker = new Worker('./worker.js');
+        worker.onmessage = event => answer = event.data;
+        worker.postMessage('barrier');
+    ",
+    );
+    // The ordinary worker's Script follows the built-in BTS's Start and Script
+    // in the same FIFO. Its answer proves that BTS boot has had its turn.
+    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.deliver();
+    pair.check("if (answer !== 'barrier') throw Error('worker barrier failed');");
+    assert!(!pair.notifications.drain().any(|(_, notification)| {
+        matches!(
+            notification,
+            ToPainter::RequestWorkerSource { .. }
+                | ToPainter::Engine(crate::EngineEvent::WorkerFailed(_))
+        )
+    }));
+}
+
+#[test]
+fn a_rejected_main_entry_never_starts_its_background_context() {
+    let mut pair = Pair::unbooted(Some("throw Error('BTS must not run');"));
+    let error = pair
+        .boot(
+            r"
+            lynx.getJSContext().dispatchEvent({type: 'queued', data: 1});
+            await Promise.resolve();
+            throw Error('main entry rejected');
+        ",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("main entry rejected"));
+    assert!(
+        !pair
+            .notifications
+            .drain()
+            .any(|(_, event)| matches!(event, ToPainter::RequestWorkerSource { .. }))
+    );
+    drop(pair.runtime.take());
+    pair.home.join();
+    assert!(pair.events.try_recv().is_err());
 }

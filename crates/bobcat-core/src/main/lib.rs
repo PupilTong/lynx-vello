@@ -35,7 +35,7 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::MainThreadError;
 use self::runtime::{MainThreadRuntime, install_shared_modules};
 use self::tree::{LynxDocument, new_document};
-use self::workers::WorkerFactory;
+pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
 use crate::clock::ClockInstant;
 use crate::mailbox::{Mailbox, Sender};
@@ -288,6 +288,10 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
             let DetachedLink { commands, notify } = link;
             let requester = Arc::clone(notify.requester());
             let notifications = notify.notifications.clone();
+            // Painter-only tests retain the command boundary but do not run
+            // BTS. runtime::worker_tests drives the actual second runtime.
+            let (worker_commands, _worker_inbox) = Mailbox::channel();
+            let workers = WorkerFactory::new(worker_commands);
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut js_runtime = ScriptRuntime::new()?;
                 install_shared_modules(&mut js_runtime)
@@ -295,6 +299,16 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                 let mut runtime =
                     MainThreadRuntime::new(&mut js_runtime, build_document(), notify.clone())
                         .map_err(MainThreadError::into_script_error)?;
+                runtime
+                    .install_workers(
+                        &mut js_runtime,
+                        &workers,
+                        notify.clone(),
+                        &entry.url,
+                        None,
+                        Arc::new(StartupControl::default()),
+                    )
+                    .map_err(MainThreadError::into_script_error)?;
                 runtime
                     .run_main_thread_script(&mut js_runtime, &entry.source, &entry.url)
                     .map_err(MainThreadError::into_script_error)?;
@@ -322,7 +336,7 @@ pub(crate) fn spawn_test_main_thread<R: EventRequester>(
                         &requester,
                         &commands,
                         &notifications,
-                        &WorkerFactory::new(Mailbox::channel().0),
+                        &workers,
                         &mut views,
                     );
                 }
@@ -358,6 +372,7 @@ enum ViewSlot<R: EventRequester> {
 /// A view's document between its first source and its entry module.
 struct Booting<R: EventRequester> {
     workers: WorkerFactory,
+    background_entry: Option<String>,
     requests: std::vec::IntoIter<SourceRequest>,
     document: LynxDocument,
     notify: ToPainterSender<R>,
@@ -393,6 +408,7 @@ impl<R: EventRequester> Booting<R> {
             default_font_family,
             style_sheets,
             entry,
+            background_entry,
         } = sources;
         let mut document = new_document(viewport, config);
         if let Some(pool) = style_pool {
@@ -414,6 +430,7 @@ impl<R: EventRequester> Booting<R> {
             .into_iter();
         Ok(Self {
             workers,
+            background_entry,
             requests,
             document,
             notify,
@@ -466,6 +483,7 @@ impl<R: EventRequester> Booting<R> {
             document,
             notify,
             workers,
+            background_entry,
             ..
         } = *self;
         let mut runtime = match MainThreadRuntime::new(js_runtime, document, notify.clone()) {
@@ -475,9 +493,14 @@ impl<R: EventRequester> Booting<R> {
         if control.is_cancelled() {
             return Booted::Gone;
         }
-        if let Err(error) =
-            runtime.install_workers(js_runtime, &workers, notify, url, Arc::clone(control))
-        {
+        if let Err(error) = runtime.install_workers(
+            js_runtime,
+            &workers,
+            notify,
+            url,
+            background_entry,
+            Arc::clone(control),
+        ) {
             return Booted::Failed(error.into_script_error().into());
         }
         if let Err(error) = runtime.run_main_thread_script(js_runtime, source, url) {

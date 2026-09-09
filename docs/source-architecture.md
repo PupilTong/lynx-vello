@@ -57,9 +57,18 @@ CSS into a restricted binary CSS model would lose source capabilities.
 
 The two registration paths share parsing and URL mapping while retaining
 explicit host policies. Native XML uses strict UTF-8 and private memory URLs,
-retaining its background body. Browser XML uses already replacement-decoded
-text and final-response fragments; it reports a background section but does
-not copy or register its unused body. Browser PageConfig remains host-owned.
+while browser XML uses already replacement-decoded text and final-response
+fragments. Both paths register the optional background body and pass its URL
+as `ViewSources.background_entry`. Core starts the page's BTS worker after
+the MTS entry import completes. Its `bobcat:bts` bootstrap initializes
+`lynx.getCoreContext()` and awaits an import of that URL. Application module
+loading through ResourceFetcher is deferred, so this import currently fails
+unless the module is preloaded in QuickJS. An absent background body leaves the
+BTS worker with its built-in runtime only. Browser PageConfig remains host-owned.
+
+This raw-module path does not execute binary templates' `manifest` scripts.
+Those scripts use Lynx Core's chunk initialization protocol, including
+`lynxCoreInject`, `init` and `requireModule`, which remains pending.
 
 ## API and dependencies
 
@@ -89,8 +98,8 @@ Migration:
 - `PageSource::from_bytes` requires the binary page's `root` entry. Native
   external libraries normally have named modules instead; use
   `PageSource::from_native_bundle(input, bytes, entry_name)` to explicitly
-  select one. Selection does not implement runtime chunk imports or a
-  background realm. The low-level decoder retains all named modules.
+  select one. Selection does not implement runtime chunk imports or execute
+  its paired background chunk. The low-level decoder retains all named modules.
 
 ```sh
 cargo run -p bobcat-source \

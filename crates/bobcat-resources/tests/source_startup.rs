@@ -8,6 +8,7 @@ use bobcat_core::{
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
+use bobcat_source::PageSource;
 
 struct Wake(flume::Sender<()>);
 impl EventRequester for Wake {
@@ -257,6 +258,59 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
         assert!(
             std::time::Instant::now() < deadline,
             "worker messages did not paint"
+        );
+        let _ = receiver.recv_timeout(Duration::from_millis(5));
+    }
+}
+
+#[tokio::test]
+async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading() {
+    let (group, resources, receiver) = setup().await;
+    let page = PageSource::from_bytes(
+        &"app:///card.lynx.xml".parse().unwrap(),
+        br#"
+        <lynx engine-version="4.2">
+          <script thread="main"><![CDATA[
+            __CreatePage();
+            lynx.getJSContext().dispatchEvent({type: 'initialize'});
+          ]]></script>
+          <script thread="background"><![CDATA[
+            throw Error('XML body was executed without being imported');
+          ]]></script>
+        </lynx>
+        "#,
+    )
+    .unwrap();
+    page.register_with(&resources);
+    let sources = page.view_sources();
+    let background_url = sources.background_entry.clone().unwrap();
+    let mut view = view(&group, &resources, sources).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut script_finished = false;
+    let mut import_failed = false;
+    while !script_finished || !import_failed {
+        for event in view.pump() {
+            match event {
+                EngineEvent::ScriptFinished => script_finished = true,
+                EngineEvent::WorkerFailed(error) => {
+                    // The bootstrap imports the XML entry. Loading that module
+                    // from ResourceFetcher is explicitly deferred in this MVP.
+                    assert!(!import_failed, "duplicate import failure");
+                    assert!(error.message.contains(&background_url), "{error}");
+                    assert!(error.message.contains("not preloaded"), "{error}");
+                    import_failed = true;
+                }
+                EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
+                EngineEvent::ListenerFailed(error) | EngineEvent::ScriptRunError(error) => {
+                    panic!("script: {error}")
+                }
+                EngineEvent::RenderFailed(error) => panic!("render: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "BTS import did not report its outcome"
         );
         let _ = receiver.recv_timeout(Duration::from_millis(5));
     }

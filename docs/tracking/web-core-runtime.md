@@ -86,7 +86,47 @@ realm. It creates one context per object on the existing group worker runtime,
 loads through the view's fetcher, queues early messages, and supports parent
 message/error listeners and termination. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
-bootstrap, RPC ports or background `lynx` APIs. Its event/lifetime model follows
+bootstrap or RPC ports. The Context MVP below builds on it. Its event/lifetime model follows
 the [HTML Worker interface](https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface),
 with the current module-only, JSON-only scope and cooperative termination
 recorded in `../runtime-architecture.md`.
+
+## Bobcat BTS Context MVP (2026-09-09)
+
+After `await import(entry_url)`, boot creates a BTS Worker on the existing
+group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
+same scope; BTS bindings belong to that JavaScript entry, with no worker kind
+in the protocol. `ViewSources.background_entry` selects an optional raw
+module; native/browser XML adapters supply the background section's URL.
+The `bobcat:bts` bootstrap imports `lynx` from `bobcat:bts-runtime` and
+then awaits an import of that entry. The application entry receives the same
+named import as a preamble, matching MTS's strategy; `globalThis.lynx` stays
+absent on both sides. Application source is neither prefetched nor included in the
+Worker script. Application module loading through ResourceFetcher is explicitly
+deferred, so unpreloaded entries currently report an import error. Without an
+entry, the built-in BTS environment still starts. Compiled BTS bundle manifests
+also require Lynx Core's module/init shell and remain pending.
+
+The implemented pair is MTS `lynx.getJSContext()` ↔ BTS `lynx.getCoreContext()`.
+This is a Lynx-only protocol, despite the `dispatchEvent` name:
+
+- `dispatchEvent({type, data})` sends to the peer and immediately returns `3`.
+- Receive dispatches by type with `data ?? {}`, using the existing EventTarget
+  listener methods. It does not echo or retain an event for a future listener.
+- Context `postMessage` does not send: web-core leaves it unimplemented.
+- Before MTS connects its Worker, queued events retain references; after
+  connection, the existing JSON Worker transport snapshots each send.
+- Worker source loading queues incoming events until BTS entry evaluation
+  finishes, preserving the opportunity to install listeners first.
+
+Evidence: `lynx-stack/packages/web-platform/web-core/ts/client/LynxCrossThreadContext.ts:35-59`;
+`web-worker-rpc/src/Rpc.ts:82-103,184-190,245-260,482-487`;
+`web-core/tests/cross-thread-context.spec.ts:81-335`. The MTS Context exists in
+`mainthread/Background.ts:114-123` before entry evaluation. BTS starts its
+receive endpoint from `background/background-apis/createNativeApp.ts:110-136`
+after the app script installs listeners (`lynx/js_libraries/lynx-core/src/appManager.ts:51-62`).
+Native `ContextProxy::PostMessage` does send a `message` event, unlike web-core
+(`lynx/core/runtime/common/bindings/event/context_proxy.cc:72-76`); this MVP
+follows the web target. Structured clone, transfer lists, other Context
+directions, automatic framework lifecycle/hydration and Lynx Core bootstrap
+remain pending. See `../runtime-architecture.md` for lifetime/error boundaries.

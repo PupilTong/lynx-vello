@@ -19,3 +19,20 @@ pub(crate) const TIMER_MODULE_SOURCE: &str =
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 pub(crate) const EVENT_TARGET_SOURCE: &str =
     include_str!("../../../packages/bobcat-element/src/event-target.mjs");
+
+/// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
+pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
+pub(crate) const CONTEXT_MODULE_SOURCE: &str =
+    include_str!("../../../packages/bobcat-element/src/cross-thread-context.mjs");
+
+/// The built-in BTS bootstrap, loaded like any other Worker script.
+pub(crate) const BTS_MODULE_SPECIFIER: &str = "bobcat:bts";
+
+/// BTS bindings live separately from the bootstrap that awaits the app entry.
+pub(crate) const BTS_RUNTIME_MODULE_SPECIFIER: &str = "bobcat:bts-runtime";
+pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str =
+    include_str!("../../../packages/bobcat-element/src/background-thread-runtime.mjs");
+
+/// Named imports prepended to a BTS application entry, as for MTS. The
+/// bootstrap uses the same import to initialize the Context before the app.
+pub(crate) const BTS_ENTRY_PREAMBLE: &str = "import { lynx } from \"bobcat:bts-runtime\";\n";

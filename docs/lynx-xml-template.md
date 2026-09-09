@@ -548,9 +548,23 @@ ingestion path.
 mount a present `<style>` body through `StyleSheetPayload::Text` before starting
 that script, and construct the XML page with the fixed `false`/`false`/`true`
 display/overflow/selector defaults unless the browser host deliberately
-overrides them. Native registration retains and warns about a present background body;
-browser registration only names and warns about it without copying its bytes. Neither executes it: Bobcat's background-thread realm and cross-realm protocol are
-still pending.
+overrides them. Both paths register a present background body and pass its URL
+to the view. Once the main-thread entry import finishes, core starts the page's
+BTS worker with `new Worker("bobcat:bts")`. That bootstrap initializes the
+Context and awaits an import of the optional background entry URL. Application
+module loading through ResourceFetcher is deferred; the registered resource
+is not yet preloaded into QuickJS, so this import currently reports a worker
+error. Omitting the body leaves the worker running only the built-in BTS runtime;
+a present empty body is still a registered resource awaiting module loading.
+
+The MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` expose the MVP
+context protocol: `dispatchEvent({ type, data })` sends a named event to
+listeners registered with `addEventListener` on the other side, and
+`removeEventListener` removes those listeners. The transport uses the existing
+Worker JSON encoding. Context `postMessage` remains inert, matching web-core.
+This raw-module entry path does not initialize compiled background chunks from
+binary bundles: their Lynx Core `lynxCoreInject`/`init`/`requireModule` wrapper
+remains pending.
 
 Raw source CSS is evaluated by Stylo, so standard at-rules fall under this
 repo's W3C-correctness policy. Lynx-only selector, unit, and declaration
