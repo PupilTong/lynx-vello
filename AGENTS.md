@@ -404,6 +404,17 @@ useful signal for currently-compatible versions of those libraries.
   the Lynx Core module/init shell and remain pending. Each view costs one
   additional realm on the group's existing worker runtime. `ScriptFinished`
   continues to mean MTS boot; BTS errors are nonfatal `WorkerFailed` events.
+  BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
+  app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
+  and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
+  named MTS global function and asynchronously returns its resolved result
+  to an optional callback. String `__AddEvent` handlers publish snapshots
+  containing target/currentTarget `dataset`, `id` and `uid`, never handles.
+  Current PAPI elements have no component metadata and use `publishEvent`;
+  explicit component calls preserve the supplied ID. An explicit JS engine
+  `__DestroyLifetime` event forwards to BTS `callDestroyLifetimeFun` as a
+  framework hook only. It does not terminate a Worker, clear pending native-app
+  callbacks or release Rust objects; Rust lifetime management stays unchanged.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
   `StyleThreads` passed to `LynxGroup::new`, `Auto` being the usual choice —
   before any view attaches, and every document it goes on to carry holds an

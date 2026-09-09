@@ -20,6 +20,7 @@ import {
   swapElement,
   tagName,
 } from "bobcat-internal:host";
+import { __BobcatPublishEvent } from "bobcat:runtime";
 
 // The Lynx Element PAPI runtime.
 //
@@ -150,11 +151,11 @@ import {
 // in, and whether the walk ends after this node. Everything else about it
 // lives in this file, which is why no host member had to change for it.
 //
-// What a handler *is* decides whether it can run. A worklet runs, through the
-// card's own `runWorklet`. A string is a background-thread handler name, and
-// there is no background realm here to publish it to: it is filed, reported by
-// `__GetEvent`, and never called — while a `catch` form filed that way still
-// ends the walk, because ending it is the form's doing, not the handler's.
+// What a handler *is* decides where it runs. A worklet runs through the
+// card's own `runWorklet`. A string is an opaque background-thread handler
+// name, published with a snapshot of the event through the MTS runtime.
+// A `catch` form ends the local walk before either kind is delivered,
+// because ending it is the form's doing, not the handler's.
 // Anything else non-nullish is ignored, neither filed nor clearing what the
 // name held, which is web-core's behavior for it. Native Lynx would take a
 // callable and file it as a Lepus handler; web-core has nowhere to run one,
@@ -1312,8 +1313,7 @@ function listsFor(handle, name) {
 function addListener(handle, eventName, callback, options) {
   if (typeof callback !== "function") {
     // web-core ignores a non-callable under the default closure type; a
-    // string handler is a background-thread name, which is not delivered
-    // here at all.
+    // string handler is a background-thread name, supported by __AddEvent.
     return undefined;
   }
   const name = String(eventName).toLowerCase();
@@ -1416,15 +1416,14 @@ function addEvent(handle, eventType, eventName, handler) {
 /**
  * Files one handler for one element, event name and Lynx dispatch form.
  *
- * Two handler kinds are filed, and they are not equally deliverable:
+ * Two handler kinds are filed:
  *
  * - a **worklet** (`{ type: "worklet", value }`, what `main-thread:bind*`
  *   compiles to) runs here, through the `runWorklet` the card's own worklet
  *   runtime installs on this realm;
- * - a **string** is a background-thread handler *name*. There is no
- *   background realm to publish it to, so it is filed and never called. It
- *   is filed rather than rejected because a `catch` form still ends the
- *   walk, and because `__GetEvent` has to report what the card handed over.
+ * - a **string** is a background-thread handler *name*, published with an
+ *   event snapshot through the MTS runtime. A `catch` form ends the walk
+ *   here before the background handler receives it.
  *
  * Anything else that is not nullish — a callable above all — is ignored
  * outright, which is what web-core does with it.
@@ -1582,9 +1581,8 @@ export function __UpdateListCallbacks(
  * The identity half of an event's `target`/`currentTarget`.
  *
  * `elementRefptr` is the handle itself, which a main-thread callback is
- * entitled to — it is in the same realm and already holds one. `dataset` is
- * absent: it is every `data-*` attribute, and the native boundary reads one
- * named attribute at a time with no way to enumerate.
+ * entitled to — it is in the same realm and already holds one. Background
+ * delivery builds its own attribute snapshot without this live handle.
  *
  * A node the host routed an event to is connected, and a connected element's
  * handle is held by its parent's up to the permanent page handle, so one
@@ -1599,7 +1597,7 @@ export function __UpdateListCallbacks(
  * reports as the target.
  *
  * @param {number} nodeId
- * @returns {object}
+ * @returns {{id: string | null, uid: number, elementRefptr: object}}
  */
 function targetInfo(nodeId) {
   const handle = handleOf(nodeId);
@@ -1628,8 +1626,8 @@ function targetInfo(nodeId) {
  * @typedef {{
  *   type: string,
  *   eventPhase: number,
- *   target: object,
- *   currentTarget: object | null,
+ *   target: ReturnType<typeof targetInfo>,
+ *   currentTarget: ReturnType<typeof targetInfo> | null,
  *   detail: unknown,
  *   stopPropagation: () => void,
  *   stopImmediatePropagation: () => void,
@@ -1645,6 +1643,45 @@ function targetInfo(nodeId) {
  * @type {Map<number, Dispatch>}
  */
 const dispatches = new Map();
+
+/**
+ * The background event target has values, never a realm-local element handle.
+ * Dataset names follow DOMStringMap's data-* to camelCase conversion.
+ *
+ * @param {ReturnType<typeof targetInfo> | null} target
+ * @returns {{dataset: Record<string, string | null>, id: string | null, uid: number} | null}
+ */
+function backgroundTargetInfo(target) {
+  if (target === null) {
+    return null;
+  }
+  const dataset = Object.fromEntries(
+    splitRecord(attributeNames(target.uid))
+      .filter((name) => name.startsWith("data-") && !/[A-Z]/.test(name))
+      .map((name) => [
+        name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
+        getAttribute(target.uid, name),
+      ]),
+  );
+  return { dataset, id: target.id || null, uid: target.uid };
+}
+
+/**
+ * Snapshot before publication: the Context can queue before BTS is connected,
+ * and the local walk reuses and eventually clears the event's currentTarget.
+ *
+ * @param {DispatchedEvent} event
+ * @returns {Record<string, unknown>}
+ */
+function backgroundEvent(event) {
+  return JSON.parse(JSON.stringify({
+    ...event,
+    target: backgroundTargetInfo(event.target),
+    currentTarget: backgroundTargetInfo(event.currentTarget),
+    stopPropagation: undefined,
+    stopImmediatePropagation: undefined,
+  }));
+}
 
 /**
  * The entry for one dispatch, created on its first delivery.
@@ -1802,9 +1839,14 @@ function endDispatch(id) {
  * @returns {undefined}
  */
 function runEventHandler(handler, event) {
+  if (typeof handler === "string") {
+    // No component PAPI creates a non-page component_id yet. The accepted
+    // parentComponentUniqueID creation argument is an element unique_id,
+    // not a component_id, so these elements use the page event endpoint.
+    __BobcatPublishEvent(undefined, handler, backgroundEvent(event));
+    return undefined;
+  }
   if (typeof handler !== "object" || handler === null) {
-    // A string: a background-thread handler name, with no background realm
-    // to publish it to.
     return undefined;
   }
   const worklet = /** @type {Record<string, unknown>} */ (handler);
@@ -1871,7 +1913,7 @@ function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
   if (handled !== undefined) {
     // Before the handler rather than after it: a `catch` form ends the walk
     // because of what it is, so it has to end it even when its handler is a
-    // background-thread name that nothing here can call.
+    // background-thread name delivered asynchronously.
     if (isCatchType(handled.type)) {
       event.stopPropagation();
     }

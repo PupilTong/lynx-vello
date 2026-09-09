@@ -399,9 +399,9 @@ directly to the ordinary Worker FIFO. When `ViewSources.background_entry` is
 configured, the bootstrap appends `await import(entry)`, matching MTS boot's
 import structure. XML takes exactly this path; no application source is
 prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
-only initializes the Context.
+initializes the Context and the app/native-app hook surfaces.
 
-Application module loading through ResourceFetcher is explicitly deferred.
+BTS application module loading through ResourceFetcher is explicitly deferred.
 This change adds no module collection, loader API or realm-local source
 registry. Current imports require a preloaded module; otherwise the normal
 nonfatal `WorkerFailed` event reports the missing source. Context tests preload
@@ -427,6 +427,38 @@ can be registered first. No new mailbox or RPC registry is needed. Worker
 release, source cancellation and nonfatal `WorkerFailed` reporting apply to
 BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
 loading or execution.
+
+The BTS runtime exposes stable `lynx.getApp()` and `lynx.getNativeApp()`
+objects. MTS `__OnLifecycleEvent(data)` sends the existing Context event;
+the BTS listener calls the current `app.OnLifecycleEvent(data)` with the app
+as receiver. Separate runtime Worker messages carry `publishEvent`,
+`publicComponentEvent`, `callDestroyLifetimeFun` and `callLepusMethod`, so
+these calls do not become application Context events. Context and runtime
+messages share the MTS queue before Worker connection.
+
+String `__AddEvent` handlers, including an empty string, now publish a JSON
+snapshot to BTS. Target identities contain `dataset`, `id` and `uid`; no
+element handle or propagation method crosses the boundary. Catch forms still
+stop the MTS walk before publishing. BTS reads the app hook at each delivery,
+and each publish hook retains early calls until its first installation.
+Handler names remain opaque. The component call preserves its explicit
+component ID, but current Element PAPI creation has no `__CreateComponent`
+or component metadata, so its string handlers use `publishEvent`. An owner
+unique ID is not a framework component ID. Global handler fan-out remains
+pending with the existing native event path.
+
+`lynx.getNativeApp().callLepusMethod(name, data, callback?)` calls the current
+MTS `globalThis[name]` with `globalThis` as receiver. It returns `undefined`
+immediately; a supplied callback receives the resolved result asynchronously,
+including `undefined` for a missing method. Failed calls report through the
+worker error path without running success callbacks. Only calls with a
+callback retain an ID, which is removed on reply or request encoding failure.
+
+An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
+forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`
+hook. This is framework event delivery only: it does not terminate the Worker,
+clear pending Lepus callbacks, or release Rust objects. Automatic Rust teardown
+has no added JS entry point, and no dispose API is introduced.
 
 Its script surface covers:
 

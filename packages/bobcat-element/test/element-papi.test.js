@@ -41,6 +41,20 @@ rstest.mockRequire("bobcat-internal:host", () => {
   };
 });
 
+rstest.mockRequire("bobcat:runtime", () => ({
+  /**
+   * @param {string | undefined} componentId
+   * @param {string} handlerName
+   * @param {Record<string, unknown>} event
+   */
+  __BobcatPublishEvent(componentId, handlerName, event) {
+    const native = /** @type {ReturnType<typeof createMockBobcat>} */ (
+      globalThis.__bobcatTestHost
+    );
+    native.calls.push(["publishEvent", componentId, handlerName, event]);
+  },
+}));
+
 /**
  * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
  *   Defaults to the real boundary's shape (2, 3, 4, ...); a test that needs to
@@ -1728,29 +1742,111 @@ describe("__AddEvent", () => {
     expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
   });
 
-  it("files a background-thread handler name and never calls it", () => {
+  it("publishes an opaque background-thread handler name with its event", () => {
     const { inner } = tree();
     const uid = __GetElementUniqueID(inner);
 
     __AddEvent(inner, "bindEvent", "tap", "3:0:bindtap");
 
-    // Filed and reported, because a card may read it back — and indexed,
-    // because the form still decides the walk.
     expect(__GetEvent(inner, "tap", "bindEvent")).toBe("3:0:bindtap");
     expect(mock.named("enableEventListener")).toEqual([
       ["enableEventListener", uid, BUBBLE, "tap"],
     ]);
-    expect(() => deliver(inner, inner, BUBBLE, "tap")).not.toThrow();
+    deliver(inner, inner, BUBBLE, "tap", JSON.stringify({ x: 12 }));
+
+    const target = { dataset: {}, id: null, uid };
+    expect(mock.named("publishEvent")).toEqual([
+      ["publishEvent", undefined, "3:0:bindtap", {
+        type: "tap",
+        eventPhase: 2,
+        target,
+        currentTarget: target,
+        detail: { x: 12 },
+      }],
+    ]);
   });
 
-  it("ends the walk for a catch form whose handler cannot run here", () => {
+  it("publishes an empty string handler without treating it as removal", () => {
     const { inner } = tree();
+    __AddEvent(inner, "bindEvent", "tap", "");
+
+    deliver(inner, inner, BUBBLE, "tap");
+
+    expect(__GetEvent(inner, "tap", "bindEvent")).toBe("");
+    expect(mock.named("publishEvent")).toHaveLength(1);
+    expect(mock.named("publishEvent")[0]?.[2]).toBe("");
+  });
+
+  it("snapshots targets, datasets and detail before the local walk mutates them", () => {
+    const { outer, inner } = tree();
+    const outerUid = __GetElementUniqueID(outer);
+    const innerUid = __GetElementUniqueID(inner);
+    __SetID(inner, "button");
+    __SetAttribute(inner, "data-item-name", "before");
+    __SetAttribute(inner, "data-count", "2");
+    __SetAttribute(outer, "data-section", "actions");
+    __AddEvent(inner, "bindEvent", "tap", "inner:tap");
+    __AddEvent(outer, "bindEvent", "tap", "outer:tap");
+    /** @type {any} */
+    let retained;
+    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+      retained = event;
+      event.detail.nested.value = "after";
+      __SetAttribute(inner, "data-item-name", "after");
+    }, {});
+
+    walk([
+      { node: inner, target: inner, phase: BUBBLE },
+      { node: outer, target: inner, phase: BUBBLE },
+    ], "tap", JSON.stringify({ nested: { value: "before" } }));
+
+    expect(retained.currentTarget).toBeNull();
+    expect(retained.target.elementRefptr).toBe(inner);
+    expect(mock.named("publishEvent")).toEqual([
+      ["publishEvent", undefined, "inner:tap", {
+        type: "tap",
+        eventPhase: 2,
+        target: {
+          dataset: { itemName: "before", count: "2" },
+          id: "button",
+          uid: innerUid,
+        },
+        currentTarget: {
+          dataset: { itemName: "before", count: "2" },
+          id: "button",
+          uid: innerUid,
+        },
+        detail: { nested: { value: "before" } },
+      }],
+      ["publishEvent", undefined, "outer:tap", {
+        type: "tap",
+        eventPhase: 3,
+        target: {
+          dataset: { itemName: "after", count: "2" },
+          id: "button",
+          uid: innerUid,
+        },
+        currentTarget: {
+          dataset: { section: "actions" },
+          id: null,
+          uid: outerUid,
+        },
+        detail: { nested: { value: "after" } },
+      }],
+    ]);
+  });
+
+  it("stops a catch form before publishing and then runs its local closures", () => {
+    const { inner } = tree();
+    __AddEventListener(inner, "tap", () => mock.calls.push(["closure"]), {});
     __AddEvent(inner, "catchEvent", "tap", "3:0:catchtap");
 
     deliver(inner, inner, BUBBLE, "tap");
 
-    // The form catches, not the handler: nothing ran and the walk still ends.
-    expect(mock.named("stopPropagation")).toHaveLength(1);
+    expect(mock.calls
+      .filter(([name]) => ["stopPropagation", "publishEvent", "closure"].includes(String(name)))
+      .map(([name]) => name))
+      .toEqual(["stopPropagation", "publishEvent", "closure"]);
   });
 
   it("ends the walk for a catch form after its handler ran", () => {
