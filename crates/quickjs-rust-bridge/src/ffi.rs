@@ -74,6 +74,12 @@ unsafe extern "C" {
         source: *const u8,
         source_length: usize,
     ) -> c_int;
+    pub(crate) fn qjs_context_add_module(
+        context: *mut QjsContext,
+        name: *const c_char,
+        source: *const u8,
+        source_length: usize,
+    ) -> c_int;
     pub(crate) fn qjs_context_add_host_module_export(
         context: *mut QjsContext,
         name: *const c_char,

@@ -98,7 +98,10 @@ group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
 same scope; BTS bindings belong to that JavaScript entry, with no worker kind
 in the protocol. `ViewSources.background_entry` selects an optional raw
 module; native/browser XML adapters supply the background section's URL.
-Without a script, the built-in BTS environment still starts. Compiled BTS
+In every case `bobcat:bts` initializes the Context and then awaits an import
+of the application entry, registered only in that worker realm. An absent
+entry becomes an empty module with the same import flow and no host IO.
+Compiled BTS
 bundle manifests require Lynx Core's module/init shell and remain pending.
 
 The implemented pair is MTS `lynx.getJSContext()` ↔ BTS `lynx.getCoreContext()`.

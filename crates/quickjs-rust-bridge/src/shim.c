@@ -61,15 +61,13 @@ typedef struct QjsHostModuleExport {
     struct QjsHostModuleExport *next;
 } QjsHostModuleExport;
 
-/* One runtime keeps one loader namespace, so a specifier a realm claims for
-   a native module is reserved here for as long as any realm claims it. What
-   it buys is that a source module registered later cannot silently shadow a
-   realm's native module. */
-typedef struct QjsHostModuleName {
+/* Reserve realm-owned source and native module names until their last realm
+   releases them, so later shared registrations cannot shadow either. */
+typedef struct QjsLocalModuleName {
     char *name;
     size_t users;
-    struct QjsHostModuleName *next;
-} QjsHostModuleName;
+    struct QjsLocalModuleName *next;
+} QjsLocalModuleName;
 
 /* A native module's exports are `JSValue`s built in one context, so both the
    module and its exports belong to that context. */
@@ -124,7 +122,7 @@ typedef struct QjsRuntime {
     void *host_opaque;
     JSClassID host_owner_class_id;
     QjsModuleSource *module_sources;
-    QjsHostModuleName *host_module_names;
+    QjsLocalModuleName *local_module_names;
 } QjsRuntime;
 
 
@@ -136,6 +134,7 @@ struct QjsContext {
     JSContext *raw;
     QjsRuntime *runtime;
     QjsModuleInstance *module_instances;
+    QjsModuleSource *module_sources;
     QjsHostModule *host_modules;
 };
 
@@ -275,14 +274,24 @@ static int qjs_interrupt_trampoline(JSRuntime *raw, void *opaque) {
     return runtime->interrupt_callback(runtime->interrupt_opaque);
 }
 
-static QjsModuleSource *qjs_find_module_source(QjsRuntime *runtime,
-                                               const char *name) {
-    QjsModuleSource *module = runtime->module_sources;
+static QjsModuleSource *qjs_find_source(QjsModuleSource *module,
+                                       const char *name) {
 
     while (module != NULL && strcmp(module->name, name) != 0) {
         module = module->next;
     }
     return module;
+}
+
+static QjsModuleSource *qjs_find_module_source(QjsRuntime *runtime,
+                                               const char *name) {
+    return qjs_find_source(runtime->module_sources, name);
+}
+
+static QjsModuleSource *qjs_context_module_source(QjsContext *context,
+                                                 const char *name) {
+    QjsModuleSource *source = qjs_find_source(context->module_sources, name);
+    return source != NULL ? source : qjs_find_module_source(context->runtime, name);
 }
 
 static QjsModuleInstance *qjs_find_module_instance(QjsContext *context,
@@ -295,9 +304,9 @@ static QjsModuleInstance *qjs_find_module_instance(QjsContext *context,
     return instance;
 }
 
-static QjsHostModuleName *qjs_find_host_module_name(QjsRuntime *runtime,
+static QjsLocalModuleName *qjs_find_local_module_name(QjsRuntime *runtime,
                                                     const char *name) {
-    QjsHostModuleName *reserved = runtime->host_module_names;
+    QjsLocalModuleName *reserved = runtime->local_module_names;
 
     while (reserved != NULL && strcmp(reserved->name, name) != 0) {
         reserved = reserved->next;
@@ -305,9 +314,9 @@ static QjsHostModuleName *qjs_find_host_module_name(QjsRuntime *runtime,
     return reserved;
 }
 
-static int qjs_reserve_host_module_name(QjsRuntime *runtime,
+static int qjs_reserve_local_module_name(QjsRuntime *runtime,
                                         const char *name) {
-    QjsHostModuleName *reserved = qjs_find_host_module_name(runtime, name);
+    QjsLocalModuleName *reserved = qjs_find_local_module_name(runtime, name);
     size_t name_length;
 
     if (reserved != NULL) {
@@ -326,15 +335,15 @@ static int qjs_reserve_host_module_name(QjsRuntime *runtime,
     }
     memcpy(reserved->name, name, name_length + 1);
     reserved->users = 1;
-    reserved->next = runtime->host_module_names;
-    runtime->host_module_names = reserved;
+    reserved->next = runtime->local_module_names;
+    runtime->local_module_names = reserved;
     return 0;
 }
 
-static void qjs_release_host_module_name(QjsRuntime *runtime,
+static void qjs_release_local_module_name(QjsRuntime *runtime,
                                          const char *name) {
-    QjsHostModuleName *reserved = runtime->host_module_names;
-    QjsHostModuleName *previous = NULL;
+    QjsLocalModuleName *reserved = runtime->local_module_names;
+    QjsLocalModuleName *previous = NULL;
 
     while (reserved != NULL && strcmp(reserved->name, name) != 0) {
         previous = reserved;
@@ -348,7 +357,7 @@ static void qjs_release_host_module_name(QjsRuntime *runtime,
         return;
     }
     if (previous == NULL) {
-        runtime->host_module_names = reserved->next;
+        runtime->local_module_names = reserved->next;
     } else {
         previous->next = reserved->next;
     }
@@ -356,9 +365,9 @@ static void qjs_release_host_module_name(QjsRuntime *runtime,
     free(reserved);
 }
 
-static void qjs_host_module_names_free(QjsHostModuleName *reserved) {
+static void qjs_local_module_names_free(QjsLocalModuleName *reserved) {
     while (reserved != NULL) {
-        QjsHostModuleName *next = reserved->next;
+        QjsLocalModuleName *next = reserved->next;
         free(reserved->name);
         free(reserved);
         reserved = next;
@@ -405,8 +414,8 @@ static int qjs_host_module_init(JSContext *raw_context,
 
 static JSModuleDef *qjs_module_loader(JSContext *raw_context,
                                       const char *module_name, void *opaque) {
-    QjsRuntime *runtime = opaque;
     QjsContext *context = JS_GetContextOpaque(raw_context);
+    (void)opaque;
     QjsModuleSource *source;
     QjsModuleInstance *instance;
     QjsHostModule *host_module;
@@ -418,7 +427,7 @@ static JSModuleDef *qjs_module_loader(JSContext *raw_context,
         JS_ThrowInternalError(raw_context, "this realm is being released");
         return NULL;
     }
-    source = qjs_find_module_source(runtime, module_name);
+    source = qjs_context_module_source(context, module_name);
     if (source != NULL) {
         instance = qjs_find_module_instance(context, source);
         if (instance != NULL) {
@@ -498,7 +507,7 @@ static void qjs_host_modules_free(QjsContext *context,
             free(exported);
             exported = next_export;
         }
-        qjs_release_host_module_name(context->runtime, module->name);
+        qjs_release_local_module_name(context->runtime, module->name);
         free(module->name);
         free(module);
         module = next;
@@ -578,19 +587,15 @@ void qjs_runtime_free(QjsRuntime *runtime) {
     }
     JS_FreeRuntime(runtime->raw);
     qjs_module_sources_free(runtime->module_sources);
-    qjs_host_module_names_free(runtime->host_module_names);
+    qjs_local_module_names_free(runtime->local_module_names);
     free(runtime);
 }
 
-int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
+static int qjs_add_module(QjsModuleSource **sources, const char *name,
                            const uint8_t *source, size_t source_length) {
     QjsModuleSource *module;
     size_t name_length;
 
-    if (qjs_find_module_source(runtime, name) != NULL ||
-        qjs_find_host_module_name(runtime, name) != NULL) {
-        return -2;
-    }
     if (source_length == SIZE_MAX) {
         return -1;
     }
@@ -615,9 +620,34 @@ int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
     memcpy(module->source, source, source_length);
     module->source[source_length] = '\0';
     module->source_length = source_length;
-    module->next = runtime->module_sources;
-    runtime->module_sources = module;
+    module->next = *sources;
+    *sources = module;
     return 0;
+}
+
+int qjs_runtime_add_module(QjsRuntime *runtime, const char *name,
+                           const uint8_t *source, size_t source_length) {
+    if (qjs_find_module_source(runtime, name) != NULL ||
+        qjs_find_local_module_name(runtime, name) != NULL) {
+        return -2;
+    }
+    return qjs_add_module(&runtime->module_sources, name, source, source_length);
+}
+
+int qjs_context_add_module(QjsContext *context, const char *name,
+                           const uint8_t *source, size_t source_length) {
+    if (qjs_context_module_source(context, name) != NULL ||
+        qjs_find_host_module(context, name) != NULL) {
+        return -2;
+    }
+    if (qjs_reserve_local_module_name(context->runtime, name) < 0) {
+        return -1;
+    }
+    int status = qjs_add_module(&context->module_sources, name, source, source_length);
+    if (status != 0) {
+        qjs_release_local_module_name(context->runtime, name);
+    }
+    return status;
 }
 
 QjsContext *qjs_context_new(QjsRuntime *runtime) {
@@ -640,6 +670,11 @@ void qjs_context_free(QjsContext *context) {
     qjs_rejections_drop_context(context->runtime, context);
     qjs_host_modules_free(context, context->host_modules);
     qjs_module_instances_free(context->module_instances);
+    for (QjsModuleSource *source = context->module_sources; source != NULL;
+         source = source->next) {
+        qjs_release_local_module_name(context->runtime, source->name);
+    }
+    qjs_module_sources_free(context->module_sources);
     /* Pending jobs and settling promises keep the realm alive past this
        point. They must not find a wrapper the host no longer holds. */
     JS_SetContextOpaque(context->raw, NULL);
@@ -660,7 +695,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
     size_t export_name_length;
     int new_module = 0;
 
-    if (qjs_find_module_source(context->runtime, name) != NULL) {
+    if (qjs_context_module_source(context, name) != NULL) {
         return -2;
     }
     module = qjs_find_host_module(context, name);
@@ -686,7 +721,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
             return -1;
         }
         memcpy(module->name, name, name_length + 1);
-        if (qjs_reserve_host_module_name(context->runtime, name) < 0) {
+        if (qjs_reserve_local_module_name(context->runtime, name) < 0) {
             free(module->name);
             free(module);
             return -1;
@@ -698,7 +733,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
     exported = calloc(1, sizeof(*exported));
     if (exported == NULL) {
         if (new_module) {
-            qjs_release_host_module_name(context->runtime, module->name);
+            qjs_release_local_module_name(context->runtime, module->name);
             free(module->name);
             free(module);
         }
@@ -708,7 +743,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
     if (exported->name == NULL) {
         free(exported);
         if (new_module) {
-            qjs_release_host_module_name(context->runtime, module->name);
+            qjs_release_local_module_name(context->runtime, module->name);
             free(module->name);
             free(module);
         }
@@ -727,7 +762,7 @@ int qjs_context_add_host_module_export(QjsContext *context, const char *name,
 
 QjsValue *qjs_module_namespace(QjsContext *context, const char *name) {
     const QjsModuleSource *source =
-        qjs_find_module_source(context->runtime, name);
+        qjs_context_module_source(context, name);
     QjsModuleInstance *instance;
     QjsHostModule *host;
     JSModuleDef *definition = NULL;

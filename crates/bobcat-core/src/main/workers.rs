@@ -9,7 +9,7 @@ use quickjs_rust_bridge::HostValue;
 
 use super::quickjs::{ScriptEngine, ScriptRuntime};
 use super::{StartupControl, ToPainterSender};
-use crate::background::{WorkerCommand, WorkerKey, WorkerScript, WorkerStart};
+use crate::background::{WorkerCommand, WorkerKey, WorkerProgram, WorkerScript, WorkerStart};
 use crate::esm::{BTS_MODULE_SOURCE, BTS_MODULE_SPECIFIER, HOST_MODULE_SPECIFIER};
 use crate::mailbox::Sender;
 use crate::resource::{SourceCompletion, SourceRequest};
@@ -71,25 +71,30 @@ impl WorkerFactory {
                     view: creator.view,
                     name,
                 }))?;
-                let (specifier, prefix) = if specifier == BTS_MODULE_SPECIFIER {
+                let (specifier, bootstrap) = if specifier == BTS_MODULE_SPECIFIER {
+                    let bootstrap = WorkerScript {
+                        source: BTS_MODULE_SOURCE.to_owned(),
+                        url: BTS_MODULE_SPECIFIER.to_owned(),
+                    };
                     if let Some(entry) = &background_entry {
-                        // Compose the BTS entry at the source boundary. The
-                        // worker receives an ordinary module, with its imports
-                        // already spelled out, just like an authored script.
-                        (entry.clone(), "import \"bobcat:bts\";\n")
+                        (entry.clone(), Some(bootstrap))
                     } else {
-                        // The built-in entry is available without host IO.
+                        // An absent application entry is an empty module. Both
+                        // paths run the same bootstrap and await its import.
                         creator.send(WorkerCommand::Script {
                             key,
-                            script: Ok(WorkerScript {
-                                source: BTS_MODULE_SOURCE.to_owned(),
-                                url: BTS_MODULE_SPECIFIER.to_owned(),
-                            }),
+                            script: Ok(WorkerProgram::importing(
+                                bootstrap,
+                                WorkerScript {
+                                    source: String::new(),
+                                    url: "bobcat:empty".to_owned(),
+                                },
+                            )),
                         })?;
                         return Ok(HostValue::String(id.to_string()));
                     }
                 } else {
-                    (specifier, "")
+                    (specifier, None)
                 };
                 // Start is enqueued before the painter can possibly answer.
                 // The completion is weak: outstanding IO must not keep the
@@ -104,7 +109,7 @@ impl WorkerFactory {
                         key,
                         creator.view,
                         Arc::clone(&creator.control),
-                        prefix,
+                        bootstrap,
                     ),
                 });
                 Ok(HostValue::String(id.to_string()))

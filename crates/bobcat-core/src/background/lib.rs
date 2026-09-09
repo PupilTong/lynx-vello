@@ -116,6 +116,35 @@ pub(crate) struct WorkerScript {
     pub(crate) url: String,
 }
 
+/// An entry module and the sources its realm can import. Sources belong to
+/// this worker, even when another worker uses the same URLs.
+pub(crate) struct WorkerProgram {
+    pub(crate) entry: WorkerScript,
+    pub(crate) modules: Vec<WorkerScript>,
+}
+
+impl From<WorkerScript> for WorkerProgram {
+    fn from(entry: WorkerScript) -> Self {
+        Self {
+            entry,
+            modules: Vec::new(),
+        }
+    }
+}
+
+impl WorkerProgram {
+    pub(crate) fn importing(mut bootstrap: WorkerScript, entry: WorkerScript) -> Self {
+        let entry_url = serde_json::to_string(&entry.url).expect("a string is JSON serializable");
+        bootstrap.source.push_str("\nawait import(");
+        bootstrap.source.push_str(&entry_url);
+        bootstrap.source.push_str(");\n");
+        Self {
+            entry: bootstrap,
+            modules: vec![entry],
+        }
+    }
+}
+
 /// Everything the worker thread is ever told.
 pub(crate) enum WorkerCommand {
     /// A realm constructed a `Worker`. Nothing about it is running yet: this
@@ -126,7 +155,7 @@ pub(crate) enum WorkerCommand {
     /// reason there is none.
     Script {
         key: WorkerKey,
-        script: Result<WorkerScript, String>,
+        script: Result<WorkerProgram, String>,
     },
     /// One JSON-encoded message for a worker's realm.
     Message { key: WorkerKey, data: String },

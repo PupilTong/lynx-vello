@@ -6,8 +6,8 @@
 //! loaded into it — and a runtime can carry as many realms as the host wants,
 //! all on the owning thread. Realms share everything the runtime owns and
 //! nothing else: a [`Value`] never crosses between them, module *source* is
-//! registered once on the runtime but compiled per realm, and native host
-//! modules are installed per realm.
+//! registered either once on the runtime or privately in a context, compiled
+//! per realm, and native host modules are installed per realm.
 //!
 //! Every C heap allocation compiled into this bridge is routed through Rust's
 //! global allocator. Its C formatting calls use one private, allocator-free
@@ -1154,6 +1154,56 @@ mod implementation {
             })
         }
 
+        /// Registers an exact-name source module in this realm only. Sources
+        /// are released with the realm and may differ at the same URL in
+        /// sibling realms. Shared sources and this realm's native modules
+        /// cannot be shadowed; register before importing the module.
+        pub fn register_module_source(&mut self, name: &str, source: &str) -> Result<(), Error> {
+            self.reclaim();
+            if name.is_empty() {
+                return Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is empty",
+                ));
+            }
+            let name = CString::new(name).map_err(|_| {
+                Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name contains a NUL byte",
+                )
+            })?;
+            // SAFETY: this realm owns the context; the shim copies both input
+            // buffers before returning, and their storage lives through the call.
+            let status = unsafe {
+                ffi::qjs_context_add_module(
+                    self.raw().as_ptr(),
+                    name.as_ptr(),
+                    source.as_ptr(),
+                    source.len(),
+                )
+            };
+            match status {
+                0 => Ok(()),
+                -1 => Err(Error::bridge(
+                    ErrorKind::OutOfMemory,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS could not retain the module source",
+                )),
+                -2 => Err(Error::bridge(
+                    ErrorKind::InvalidInput,
+                    ErrorPhase::RegisterModule,
+                    "module name is already registered",
+                )),
+                _ => Err(Error::bridge(
+                    ErrorKind::Engine,
+                    ErrorPhase::RegisterModule,
+                    "QuickJS returned an unknown module-registration status",
+                )),
+            }
+        }
+
         /// Adds one Rust-backed named export to a native ESM module in this
         /// realm.
         ///
@@ -2271,6 +2321,79 @@ mod implementation {
                 .evaluate(EvalSource::new("globalThis.answer"), EvalOptions::default())
                 .unwrap();
             assert_eq!(answer.as_number(), Some(42.0));
+        }
+
+        #[test]
+        fn realm_sources_are_isolated_cached_and_released_with_their_owner() {
+            let (mut runtime, mut first) = runtime_and_realm();
+            let mut second = runtime.create_context().unwrap();
+            for (realm, answer) in [(&mut first, 20), (&mut second, 22)] {
+                realm.register_module_source("app:///entry.js", &format!(
+                    "globalThis.runs = (globalThis.runs ?? 0) + 1; export const value = await Promise.resolve({answer});"
+                )).unwrap();
+                let evaluation = realm.evaluate(EvalSource {
+                    text: "await import('app:///entry.js'); await import('app:///entry.js');",
+                    name: Some("bobcat:boot"), line_offset: 0,
+                }, EvalOptions { source_type: SourceType::Module, ..EvalOptions::default() }).unwrap();
+                runtime.drain_pending_jobs(realm).unwrap();
+                assert!(realm.settled_promise_result(&evaluation).unwrap().is_some());
+                let namespace = realm.module_namespace("app:///entry.js").unwrap();
+                assert_eq!(
+                    realm.property(&namespace, "value").unwrap().as_number(),
+                    Some(f64::from(answer))
+                );
+                assert_eq!(number(realm, "runs"), Some(1.0));
+            }
+            let mut sibling = runtime.create_context().unwrap();
+            let evaluation = sibling.evaluate(EvalSource::new(
+                "import('app:///entry.js').then(() => globalThis.leaked = 1, () => globalThis.leaked = 0)"
+            ), EvalOptions::default()).unwrap();
+            runtime.drain_pending_jobs(&sibling).unwrap();
+            assert!(
+                sibling
+                    .settled_promise_result(&evaluation)
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(number(&mut sibling, "leaked"), Some(0.0));
+            drop(first);
+            assert!(
+                runtime
+                    .register_module_source("app:///entry.js", "export {};")
+                    .is_err()
+            );
+            drop(second);
+            runtime
+                .register_module_source("app:///entry.js", "export {};")
+                .unwrap();
+        }
+
+        #[test]
+        fn realm_sources_cannot_shadow_shared_sources_or_local_native_modules() {
+            let (mut runtime, mut realm) = runtime_and_realm();
+            runtime
+                .register_module_source("shared", "export {};")
+                .unwrap();
+            assert!(
+                realm
+                    .register_module_source("shared", "export {};")
+                    .is_err()
+            );
+            realm.register_module_source("local", "export {};").unwrap();
+            assert!(realm.register_module_source("local", "export {};").is_err());
+            assert!(
+                realm
+                    .register_host_module_function("local", "call", 0, |_| Ok(HostValue::Undefined))
+                    .is_err()
+            );
+            realm
+                .register_host_module_function("native", "call", 0, |_| Ok(HostValue::Undefined))
+                .unwrap();
+            assert!(
+                realm
+                    .register_module_source("native", "export {};")
+                    .is_err()
+            );
         }
 
         #[test]

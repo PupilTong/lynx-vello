@@ -285,6 +285,10 @@ async fn xml_background_context_receives_entry_events_and_commits_its_reply() {
             jsContext.dispatchEvent({type: 'initialize', data: {color: 'blue'}});
           ]]></script>
           <script thread="background"><![CDATA[
+            // XML bodies are ESM dependencies of bobcat:bts, including TLA.
+            const scope = globalThis;
+            const lynx = scope.lynx;
+            export const ready = await Promise.resolve(true);
             const coreContext = lynx.getCoreContext();
             coreContext.addEventListener('initialize', event => {
                 coreContext.dispatchEvent({

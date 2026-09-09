@@ -76,7 +76,8 @@ impl Group {
             script: Ok(WorkerScript {
                 source: source.to_owned(),
                 url: url.to_owned(),
-            }),
+            }
+            .into()),
         });
     }
 

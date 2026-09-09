@@ -230,9 +230,8 @@ enum SourceDestination {
             crate::background::WorkerCommand,
         )>,
         key: crate::background::WorkerKey,
-        /// Loader-owned imports to prepend to the fetched entry. This source
-        /// composition is finished before the ordinary script reaches workers.
-        prefix: &'static str,
+        /// Optional entry module that imports the fetched application module.
+        bootstrap: Option<crate::background::WorkerScript>,
     },
 }
 
@@ -267,13 +266,13 @@ impl SourceCompletion {
         key: crate::background::WorkerKey,
         view: crate::view::ViewId,
         control: Arc<crate::main::StartupControl>,
-        prefix: &'static str,
+        bootstrap: Option<crate::background::WorkerScript>,
     ) -> Self {
         Self {
             destination: Some(SourceDestination::Worker {
                 commands,
                 key,
-                prefix,
+                bootstrap,
             }),
             view,
             control,
@@ -313,12 +312,17 @@ impl SourceCompletion {
                 SourceDestination::Worker {
                     commands,
                     key,
-                    prefix,
+                    bootstrap,
                 } => {
                     let script = match source {
-                        Ok(LoadedSource::Entry { mut source, url }) => {
-                            source.insert_str(0, prefix);
-                            Ok(crate::background::WorkerScript { source, url })
+                        Ok(LoadedSource::Entry { source, url }) => {
+                            let entry = crate::background::WorkerScript { source, url };
+                            Ok(match bootstrap {
+                                Some(bootstrap) => {
+                                    crate::background::WorkerProgram::importing(bootstrap, entry)
+                                }
+                                None => entry.into(),
+                            })
                         }
                         Ok(LoadedSource::StyleSheet(_)) => {
                             Err("the fetcher returned a stylesheet for a worker".to_owned())
