@@ -16,10 +16,19 @@
 //! came due, a `close()` it may have called, the next deadline, and the
 //! checkpoint generation as of that entry.
 //!
-//! The `select!`s on this thread are of three kinds, and none of them
-//! dispatches anything. [`serve_workers`] is task lifetime: attach versus
-//! join. Each [`boot_worker`] has a pre-boot wait of its own, on the script
-//! versus a `Terminate` that must win, which is one task's two-source wait
+//! A worker's tasks, the token that ends them and the latch this thread reads
+//! are one [`Lifetime`], the same helper a view on `bobcat-main` is built
+//! from. The token is a child of the creating view's, so a released view ends
+//! every worker it made without this thread being told; the explicit
+//! `Terminate` stays the protocol, and is what discards whatever was queued
+//! behind it.
+//!
+//! The `select!`s on this thread are of four kinds, and none of them
+//! dispatches anything. [`serve_workers`] is thread lifetime: attach versus
+//! join. Each [`serve_worker`] waits on its worker's [`Lifetime`]: the end,
+//! versus the next task of that worker to finish. Each [`boot_worker`] has a
+//! pre-boot wait of its own, on the script versus a `Terminate` that must win
+//! or a parent view that was released, which is one task's three-source wait
 //! rather than a scheduler. Each live worker realm has one [`wait_timers`],
 //! waiting on its deadline versus the re-arm that moves it.
 
@@ -31,6 +40,7 @@ use quickjs_rust_bridge::HostArgument;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{self, JoinError, JoinSet, LocalSet};
+use tokio_util::sync::CancellationToken;
 
 use super::scope::{
     WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members, install_worker_modules,
@@ -38,10 +48,11 @@ use super::scope::{
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::clock::ClockInstant;
+use crate::lifetime::Lifetime;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::resource::LoadedSource;
 use crate::script::ScriptError;
-use crate::threads::{panic_message, platform_script_error};
+use crate::threads::{panicked, platform_script_error};
 use crate::timers::{TimerState, run_due_timers};
 
 /// The runtime every worker realm on this thread is opened on.
@@ -132,10 +143,7 @@ fn report_trap(
     if !error.is_panic() {
         return;
     }
-    let error = platform_script_error(format!(
-        "the worker thread panicked: {}",
-        panic_message(error.into_panic().as_ref())
-    ));
+    let error = panicked("the worker thread panicked", error.into_panic().as_ref());
     let _ = events.send(WorkerEvent {
         key,
         payload: WorkerPayload::Failed(error),
@@ -163,24 +171,6 @@ enum WorkerState {
     Gone,
 }
 
-/// Why a worker ended. The first one wins.
-enum WorkerEnd {
-    /// `Worker.terminate()`, or the channel it would have arrived on closing
-    /// with the realm that created this worker.
-    Terminated,
-    /// The script called `close()`.
-    Closed,
-    /// A failure this worker has already been reported.
-    Failed,
-    /// A task of this worker panicked, and nothing has been reported yet.
-    ///
-    /// A `Drop` is handed no payload, so the report is the owner's, out of the
-    /// handle it awaits — and that handle can be gone by then, because
-    /// [`Worker::spawn`] prunes the handles of tasks that have finished. This
-    /// reason is what is left of the panic when it is.
-    Trapped,
-}
-
 /// One worker: what its tasks act on, and the one boundary they enter its
 /// realm through.
 ///
@@ -200,9 +190,14 @@ struct Worker {
     /// The runtime-wide checkpoint generation as of this worker's own last
     /// entry, which is what lets [`follow_checkpoints`] ignore its own bumps.
     own_checkpoint: Cell<u64>,
-    tasks: RefCell<Vec<task::JoinHandle<()>>>,
-    end: mpsc::UnboundedSender<WorkerEnd>,
-    ended: Cell<bool>,
+    /// Every task of this worker, the token that ends them, and the latch this
+    /// thread reads. The token is a child of the creating view's, so a
+    /// released view is what ends this worker when nothing said so.
+    lifetime: Rc<Lifetime>,
+    /// Whether this worker has already been told why it is over. The first
+    /// report wins, so a `Failed` and a `Closed` cannot both arrive. A panic
+    /// has a latch of its own on the lifetime.
+    reported: Cell<bool>,
     /// How many times the epilogue has run, for the test that counts the wakes
     /// a worker answers.
     #[cfg(test)]
@@ -214,61 +209,79 @@ impl Worker {
         js: WorkerRuntime,
         key: WorkerKey,
         events: mpsc::UnboundedSender<WorkerEvent>,
-    ) -> (Rc<Self>, mpsc::UnboundedReceiver<WorkerEnd>) {
-        let (end, ended) = mpsc::unbounded_channel();
-        let worker = Self {
+        token: CancellationToken,
+    ) -> Rc<Self> {
+        Rc::new(Self {
             js,
             key,
             events,
             state: RefCell::new(WorkerState::Loading),
             deadline: watch::channel(None).0,
             own_checkpoint: Cell::new(0),
-            tasks: RefCell::new(Vec::new()),
-            end,
-            ended: Cell::new(false),
+            lifetime: Lifetime::new(token),
+            reported: Cell::new(false),
             #[cfg(test)]
             epilogues: Cell::new(0),
-        };
-        (Rc::new(worker), ended)
+        })
     }
 
-    /// Starts one more task of this worker. A panic anywhere in it ends the
-    /// worker, and the owner turns the handle's report into a `Failed`.
+    /// Starts one more task of this worker.
+    ///
+    /// A panic anywhere in it ends the worker during the unwind — the guard is
+    /// this worker's rather than the lifetime's because the deadline the end
+    /// withdraws is this worker's — and the owner turns the payload the
+    /// lifetime hands it into the `Failed` the creating view hears.
     fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
-        let worker = Rc::clone(self);
-        let handle = task::spawn_local(async move {
-            let _guard = EndOnUnwind(worker);
+        let guard = EndOnUnwind(Rc::clone(self));
+        self.lifetime.spawn(async move {
+            let _guard = guard;
             future.await;
         });
-        let mut tasks = self.tasks.borrow_mut();
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
     }
 
     /// Ends this worker, once. `true` for the call that did it.
-    fn end(&self, reason: WorkerEnd) -> bool {
-        if self.ended.replace(true) {
+    ///
+    /// The owner calls it after its wait too, which is how a cancellation from
+    /// the creating view's thread reaches this thread's latch.
+    fn end(&self) -> bool {
+        if !self.lifetime.end() {
             return false;
         }
         self.deadline
             .send_if_modified(|deadline| deadline.take().is_some());
-        let _ = self.end.send(reason);
         true
     }
 
     fn ended(&self) -> bool {
-        self.ended.get()
+        self.lifetime.ended()
     }
 
     /// The worker is over and nothing of it will ever run: its script never
     /// arrived, or its realm could not be built.
     fn failed(&self, error: ScriptError) {
-        if self.end(WorkerEnd::Failed) {
+        if !self.reported.replace(true) {
             let _ = self.events.send(WorkerEvent {
                 key: self.key,
                 payload: WorkerPayload::Failed(error),
             });
         }
+        self.end();
+    }
+
+    /// Reports a panic as this worker's, and ends it.
+    ///
+    /// One report per worker whichever of the owner's two waits saw the panic
+    /// first, and not gated by [`Self::reported`]: a worker that already
+    /// reported a failed script and then traps is still a `Failed` the
+    /// creating view is owed.
+    fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
+        if self.lifetime.report_panic() {
+            let _ = self.events.send(WorkerEvent {
+                key: self.key,
+                payload: WorkerPayload::Failed(panicked("the worker thread panicked", payload)),
+            });
+        }
+        self.end();
     }
 
     /// Runs one synchronous operation against this worker's realm and settles
@@ -314,12 +327,13 @@ impl Worker {
         // A `close()` from the script that just ran ends the worker rather
         // than parking it again, and discards what it had armed and queued.
         if realm.closing.get() {
-            if self.end(WorkerEnd::Closed) {
+            if !self.reported.replace(true) {
                 let _ = self.events.send(WorkerEvent {
                     key: self.key,
                     payload: WorkerPayload::Closed,
                 });
             }
+            self.end();
             return;
         }
         let deadline = realm.timers.next_deadline();
@@ -392,38 +406,21 @@ impl Worker {
         }
     }
 
-    /// Reclaims every task of this worker, reports a panic once, then releases
-    /// its realm.
+    /// This worker's whole tail: wait, end, reclaim, release its realm.
     ///
-    /// As on `bobcat-main`, the report does not depend on a handle still being
-    /// here: a handle that panicked carries the payload, and a handle
-    /// [`Self::spawn`] pruned once it had finished leaves only
-    /// [`WorkerEnd::Trapped`] behind. Either way the creating view hears one
+    /// The wait is the lifetime's — the end, or the next task of this worker
+    /// to finish — and [`Self::end`] after it is what mirrors a cancellation
+    /// that came from the creating view's thread. A task that panicked hands
+    /// its payload to [`Self::trapped`], so the creating view hears one
     /// `Failed`, which is what a worker nothing will be heard from again is.
-    async fn reap(&self, reason: WorkerEnd) {
-        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
-        for task in &tasks {
-            task.abort();
-        }
-        let mut trapped: Option<String> = None;
-        for task in tasks {
-            let Err(error) = task.await else { continue };
-            if error.is_panic() && trapped.is_none() {
-                trapped = Some(format!(
-                    "the worker thread panicked: {}",
-                    panic_message(error.into_panic().as_ref())
-                ));
-            }
-        }
-        let message = trapped.or_else(|| {
-            matches!(reason, WorkerEnd::Trapped).then(|| "the worker thread panicked".to_owned())
-        });
-        if let Some(message) = message {
-            let _ = self.events.send(WorkerEvent {
-                key: self.key,
-                payload: WorkerPayload::Failed(platform_script_error(message)),
-            });
-        }
+    async fn run_owner(self: &Rc<Self>) {
+        self.lifetime
+            .serve(&mut |payload| self.trapped(payload.as_ref()))
+            .await;
+        self.end();
+        self.lifetime
+            .reap(&mut |payload| self.trapped(payload.as_ref()))
+            .await;
         *self.state.borrow_mut() = WorkerState::Gone;
     }
 
@@ -441,14 +438,16 @@ impl Worker {
 }
 
 /// Ends the worker if the task it guards is unwinding.
+///
+/// The payload is not reachable from a `Drop`, so the report stays the
+/// owner's, out of the `JoinError` the lifetime yields; what runs here is the
+/// end itself, so a sibling polled before the owner already finds it.
 struct EndOnUnwind(Rc<Worker>);
 
 impl Drop for EndOnUnwind {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            // The payload is not reachable from here, so the reason is all
-            // this can say; the owner turns it into the report.
-            self.0.end(WorkerEnd::Trapped);
+            self.0.end();
         }
     }
 }
@@ -462,24 +461,22 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         script,
         messages,
         events,
+        token,
     } = start;
-    let (worker, mut ended) = Worker::new(js, key, events);
+    let worker = Worker::new(js, key, events, token);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
-    // Every reason takes the same path from here; what differs is only what
-    // the creating realm has already been told. `Trapped` is the one the owner
-    // still owes a report for, which is why the reason is read rather than
-    // dropped.
-    let reason = ended.recv().await.unwrap_or(WorkerEnd::Terminated);
-    worker.reap(reason).await;
+    worker.run_owner().await;
 }
 
 /// The worker's boot future: wait for the script, evaluate it, then start the
-/// two waits a live worker has.
+/// waits a live worker has.
 ///
-/// The `select!` below is one task's two-source wait rather than a
+/// The `select!` below is one task's three-source wait rather than a
 /// dispatcher, and it is `biased` for the reason HTML's "terminate a worker"
 /// aborts the fetch: a `Terminate` that lands in the same instant as the
 /// script must win, so a worker told to stop before it booted never boots.
+/// The message arm stays first for that reason; the token arm behind it is
+/// the same fact reaching a worker whose creating view is simply gone.
 /// Returning here drops the script's receiving end, which is what cancels
 /// that fetch.
 ///
@@ -503,11 +500,19 @@ async fn boot_worker(
                 // it is released — and a closed channel is the backstop, for
                 // a realm that was gone before it could say anything.
                 None | Some(WorkerMessage::Terminate) => {
-                    worker.end(WorkerEnd::Terminated);
+                    worker.end();
                     return;
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
             },
+            // The creating view was released while this script was in flight.
+            // Nothing will ever be posted to this worker and nobody is
+            // listening for it, so it ends before it boots — and returning
+            // here drops the script's receiving end, which cancels the fetch.
+            () = worker.lifetime.token().cancelled() => {
+                worker.end();
+                return;
+            }
             answer = &mut script => break answer,
         }
     };
@@ -555,7 +560,7 @@ async fn consume_messages(
             }
         }
     }
-    worker.end(WorkerEnd::Terminated);
+    worker.end();
 }
 
 /// This realm's one wait on its own clock.
@@ -752,7 +757,6 @@ mod tests {
         messages: mpsc::UnboundedSender<WorkerMessage>,
         /// Held so the channels stay open for as long as the worker does.
         _events: mpsc::UnboundedReceiver<WorkerEvent>,
-        _ended: mpsc::UnboundedReceiver<WorkerEnd>,
     }
 
     /// Starts one worker on `js`, with its script already answered.
@@ -767,7 +771,14 @@ mod tests {
             source: String::new(),
             url: format!("app:///worker{key}.js"),
         }));
-        let (worker, ended) = Worker::new(Rc::clone(js), WorkerKey::new(key), events);
+        // A token of its own rather than a child of anything: no view created
+        // this worker, and nothing here releases one.
+        let worker = Worker::new(
+            Rc::clone(js),
+            WorkerKey::new(key),
+            events,
+            CancellationToken::new(),
+        );
         worker.spawn(boot_worker(
             Rc::clone(&worker),
             String::new(),
@@ -778,7 +789,6 @@ mod tests {
             worker,
             messages,
             _events: events_rx,
-            _ended: ended,
         }
     }
 

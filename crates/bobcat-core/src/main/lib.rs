@@ -40,6 +40,7 @@ use dom::StylePool;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{self, JoinError, JoinSet, LocalSet};
+use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -47,8 +48,8 @@ use self::quickjs::ScriptRuntime;
 use self::runtime::install_shared_modules;
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
-use crate::link::{ToMain, ViewCancel, ViewOutbox};
-use crate::threads::{self, JoinHandle, platform_script_error};
+use crate::link::{ToMain, ViewOutbox};
+use crate::threads::{self, JoinHandle};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, MainSources,
     StyleThreads, ViewAttachment, Viewport,
@@ -310,11 +311,10 @@ fn finish_view(
         },
     };
     if let Some((outbox, error)) = trapped {
-        let message = format!(
-            "the Lynx main thread panicked: {}",
-            threads::panic_message(error.into_panic().as_ref())
-        );
-        outbox.engine_event(EngineEvent::ScriptRunError(platform_script_error(message)));
+        outbox.engine_event(EngineEvent::ScriptRunError(threads::panicked(
+            "the Lynx main thread panicked",
+            error.into_panic().as_ref(),
+        )));
     }
     context.js.borrow().mark_checkpoint();
 }
@@ -324,7 +324,10 @@ struct AttachedView {
     viewport: Viewport,
     sources: MainSources,
     commands: mpsc::UnboundedReceiver<ToMain>,
-    cancel: ViewCancel,
+    /// This view's end signal, minted on the embedder's thread. It is what the
+    /// view's owner waits on, what its own end cancels, and the parent of the
+    /// token every worker its realm creates carries.
+    cancel: CancellationToken,
 }
 
 /// Registers a view's fonts and selects its default family, before any
@@ -367,7 +370,7 @@ fn install_script_panic_hook() {
                 let location = info
                     .location()
                     .map_or_else(String::new, |location| format!(" at {location}"));
-                let error = platform_script_error(format!(
+                let error = threads::platform_script_error(format!(
                     "the script Worker aborted after a panic{location}: {}",
                     threads::panic_message(info.payload())
                 ));

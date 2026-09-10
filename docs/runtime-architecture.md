@@ -38,8 +38,10 @@ The source tree mirrors the runtime's owners:
 crates/bobcat-core/src/
   view/lib.rs          LynxGroup, LynxView, ViewSources, DrawTarget, and the
                        vocabulary of the one thread boundary they cross
-  link.rs              one view's link: ToMain, ViewNotice, Published,
-                       ViewCancel, and the outbox the main side publishes on
+  link.rs              one view's link: ToMain, ViewNotice, Published, and
+                       the outbox the main side publishes on
+  lifetime.rs          what a view and a worker are made of alike: their tasks,
+                       the token that ends them, and the owner's wait
   clock.rs             the one clock realm timers are armed against, and
                        `sleep_until`, which picks a waiter by target
   alarm.rs             wasm32 only: the bobcat-alarm thread that serves those
@@ -288,8 +290,8 @@ The fetcher resolves the URL, fetches bytes and validates UTF-8, or supplies a
 pre-parsed stylesheet. Completion consumes the handle and answers the one-shot
 minted with the request, which wakes whichever task was awaiting that source —
 a stylesheet or entry on `bobcat-main`, a worker script on `bobcat-workers` —
-without a turn anywhere else. The handle contains that sender and the view's
-cancellation flag: no erased callback, retained resource Future, `SourceLoads`
+without a turn anywhere else. The handle contains that sender and a clone of the view's
+`CancellationToken`: no erased callback, retained resource Future, `SourceLoads`
 or `EventWaker` is needed. The
 fetcher itself is owned by value and needs neither `Send`, `Sync` nor `'static`.
 The reference fetcher queues a concrete source job on its native pool, or starts
@@ -311,11 +313,16 @@ Its resolved entry URL is the module specifier.
 `ScriptRunError` reports fatal runtime failure; listener and timer failures stay
 non-fatal. Every main notification requests a host turn through `EventRequester`.
 
-Dropping a loading view sets its `ViewCancel` flag, detaches its image inbox,
-and then closes its command channel, which ends its task; boot never enters
-QuickJS after the flag is set. The flag is set synchronously on the embedder's
-thread, so a host still holding a completion reads cancellation without waiting
-for a turn. A fetcher checks the completion handle before
+Dropping a loading view cancels its `CancellationToken`, detaches its image
+inbox, and then closes its command channel; boot never enters QuickJS after the
+cancel. The token is cancelled synchronously on the embedder's thread, so a host
+still holding a completion reads cancellation without waiting for a turn. A burst
+queued behind the release is discarded rather than applied: the view's one
+command consumer reads the token itself at each wake, before applying anything,
+and the release is cancelled before the command sender drops so that read
+already says released. Wake order is not what does it — a command already queued
+wakes that consumer ahead of the owner. A burst already inside the entry when the
+cancel lands finishes. A fetcher checks the completion handle before
 queued IO and after IO, skipping unnecessary decoding. IO and JavaScript already
 executing may finish; cancelled completions are discarded. Dropping an unanswered
 completion for a live view reports a resource failure, including when a worker
@@ -361,13 +368,20 @@ into JavaScript has to settle what its own realm owes; `follow_checkpoints` is
 how it learns to, and comparing the generation against the one the epilogue
 recorded is what keeps a page's own entries from waking it.
 
-An end is a flag rather than a message anything has to race. `Page::end` — the
-command channel closing, a cancelled load, a fatal failure, a panic in any task
-— sets it synchronously, acknowledges whatever `BeginFrame` was pending so a
-blocked painter is released, publishes no deadline, and tells the owner. Every
-entry point returns at once when it is set; the owner then aborts and awaits
-every task of the view, which is what makes it the last owner of the page, and
-drops the realm.
+An end is one signal rather than a message anything has to race. A view and a
+worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
+that object's tasks, the `CancellationToken` that ends them, and a thread-local
+latch. `Page::end` — the command channel closing, a cancelled load, a fatal
+failure, a panic in any task — sets the latch synchronously, cancels the token,
+acknowledges whatever `BeginFrame` was pending so a blocked painter is released,
+and publishes no deadline. Every entry point returns at once when the latch is
+set; the owner, whose one wait is the token versus the next task to finish, then
+mirrors a cancellation that came from another thread onto that latch, aborts and
+awaits every task of the view — which is what makes it the last owner of the
+page — and drops the realm. Why a view ended is recorded nowhere: what the
+embedder was told is whatever was reported before the end, and a release is the
+token having been cancelled from outside. A panic is the one end that still owes
+a report, and the payload rides the `JoinError` the set yields.
 
 ## Public and private boundaries
 
@@ -386,7 +400,7 @@ thread represented in either handle.
 
 The following types are private to `bobcat-core`:
 
-- the link — `ToMain`, `ViewNotice`, `Published`, and `ViewCancel`;
+- the link — `ToMain`, `ViewNotice`, and `Published`;
 - `MainThreadRuntime`, its `DocumentSlot` and `DocumentIngredients`, and its
   Element-PAPI host implementation;
 - `LynxDocument`, `Viewport`, and `new_document`;
@@ -465,7 +479,9 @@ key — the worker's task holds them until its scope exists, which is what HTML
 does. The completion answers the worker's task directly: it needs no
 main-thread turn and cannot be held behind a long main-thread script. A worker
 told to terminate before its script arrives never boots, because that wait is
-a `biased` select with the message channel first.
+a `biased` select with the message channel first; behind that arm the same
+wait watches the worker's own cancellation token, so a view released while a
+script is in flight ends its workers without a message reaching any of them.
 
 Worker keys are allocated once per group on main and never reused. A worker's
 whole state is its own task; `bobcat-main` keeps nothing per worker but the
@@ -473,9 +489,10 @@ sending end of its message channel, and only while that worker runs — a worker
 that closed itself or failed is forgotten where the realm learns of it, when
 that event is dispatched. A released realm sends a terminate on
 every sender it still holds, which is how a view stops the workers it created.
-A closed
-channel ends a worker too, but that is the backstop — for a realm that was
-gone before it could say anything — rather than the protocol. The main
+A closed channel, and the view's own cancellation token — every worker it
+created holds a child of it, so cancelling the view's cancels theirs — end a
+worker too, but those are the backstop, for a realm that was gone before it
+could say anything, rather than the protocol. The main
 realm retains Worker objects until termination, close, or load failure.
 `terminate()` immediately removes the sending handle and asks that worker to
 end its context between tasks, discarding whatever was queued behind it; it

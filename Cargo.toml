@@ -59,6 +59,10 @@ smallvec = { version = "1", features = ["const_new", "union"] }
 socket2 = "0.6.5"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
+# `sync` — and with it `CancellationToken` — is compiled unconditionally, so
+# the engine needs no feature of this crate at all; the defaults are off so
+# that no codec, net, io or time module is built for it.
+tokio-util = { version = "0.7", default-features = false }
 tower = "0.5.3"
 url = "2"
 percent-encoding = "2"

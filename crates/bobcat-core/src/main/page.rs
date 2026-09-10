@@ -8,7 +8,8 @@
 //! what polls, parks and wakes them:
 //!
 //! - the owner, [`serve_view`], which builds the page, spawns the rest, and then has exactly one
-//!   wait of its own — the view's end;
+//!   wait of its own — the view's [`Lifetime`], which is the end or the next task of the view to
+//!   finish;
 //! - [`consume_commands`], the one ordered consumer of the command stream;
 //! - [`boot_page`], the page's boot future: the sheets in cascade order, the entry, and then the
 //!   realm;
@@ -42,6 +43,24 @@
 //! sibling's checkpoint are independent tasks and may run between any two
 //! bursts.
 //!
+//! # The end
+//!
+//! One [`Lifetime`] per view carries the tasks, the token that ends them and
+//! the latch this thread reads. The token is the embedder's: `LynxView::drop`
+//! and a fatal `pump` event cancel it, [`serve_view`]'s drop guard cancels it
+//! on every exit, and each worker this view's realm creates holds a child of
+//! it. What ended a view is not recorded anywhere, because nothing reads it:
+//! what the embedder was told is whatever was reported before the end, and a
+//! release is the token having been cancelled from outside.
+//!
+//! Between an embedder-side cancel and the owner's turn a task may still run
+//! one entry, because only this thread writes the latch. A command queued
+//! behind a release lands in exactly that window — its wake is served before
+//! the owner's — so the discard cannot rest on the owner running first:
+//! [`consume_commands`] reads the token itself, once per burst, at the wake
+//! boundary. A burst already inside [`Page::apply`] when the cancel lands
+//! finishes, the way synchronous JavaScript already executing does.
+//!
 //! # Borrows
 //!
 //! No `RefCell` borrow and no borrow of the shared script runtime is ever
@@ -51,18 +70,22 @@
 //!
 //! # Waits
 //!
-//! After this module every `select!` in this crate is one of three kinds, and
+//! After this module every `select!` in this crate is one of four kinds, and
 //! each is a wait rather than a dispatcher:
 //!
-//! - **task lifetime** — `group_task` and `serve_workers`, each waiting on attach versus join;
+//! - **thread lifetime** — `group_task` and `serve_workers`, each waiting on attach versus join;
+//! - **an object's lifetime** — one [`Lifetime::serve`] per view and per worker, waiting on the end
+//!   versus the next task of that object to finish;
 //! - **a realm's clock** — one [`wait_timers`] per live realm, waiting on its deadline versus the
 //!   re-arm that moves it: a view's is here, a worker's is in `background/thread.rs`;
-//! - **the worker's pre-boot wait** — its script versus a `Terminate` that must win.
+//! - **the worker's pre-boot wait** — its script versus a `Terminate` that must win, or its parent
+//!   view being released.
 //!
 //! How many there are is the group's shape rather than a constant: one of the
-//! first kind per engine thread, one of the second per live realm, one of the
-//! third per worker that has not booted yet. `link.rs`'s `block_on_deadline`
-//! is a hand-rolled poll loop rather than a select.
+//! first kind per engine thread, one of the second per live view and per live
+//! worker, one of the third per live realm, one of the fourth per worker that
+//! has not booted yet. `link.rs`'s `block_on_deadline` is a hand-rolled poll
+//! loop rather than a select.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -71,16 +94,17 @@ use std::pin::pin;
 use std::rc::Rc;
 
 use tokio::sync::{mpsc, watch};
-use tokio::task;
+use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
 use super::runtime::{DocumentIngredients, MainThreadRuntime};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
-use crate::link::{CancelOnExit, SourceAnswer, ToMain, ViewOutbox};
+use crate::lifetime::Lifetime;
+use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
-use crate::threads::{panic_message, platform_script_error};
+use crate::threads::panicked;
 use crate::view::{EngineEvent, LynxViewError, MainSources, Viewport};
 
 /// What the page is, which is the only thing that decides what a command can
@@ -99,24 +123,6 @@ enum Realm {
     /// The realm could not be opened, or the view is over and the owner has
     /// reclaimed it. A terminal state, so every entry point is total.
     Gone,
-}
-
-/// Why a view ended. The first one wins; all three take the same path from
-/// there, and what differs is only what the embedder has already been told.
-enum End {
-    /// The embedder dropped the view — its command channel closed — or
-    /// cancelled it before the realm opened.
-    Released,
-    /// A failure this view has already been reported.
-    Failed,
-    /// A task of this view panicked, and nothing has been reported yet.
-    ///
-    /// The payload is not reachable from the guard that ends the view — a
-    /// `Drop` is handed no payload — so the report is the owner's, out of the
-    /// handle it awaits. That handle can be gone by then, because [`Page::spawn`]
-    /// prunes the handles of tasks that have finished, and this reason is what
-    /// is left of the panic when it is.
-    Trapped,
 }
 
 /// One view's page: what every task of that view acts on.
@@ -145,13 +151,16 @@ pub(super) struct Page {
     /// only when it moves, so no `Sleep` is rebuilt for a wake that changed
     /// nothing.
     deadline: watch::Sender<Option<ClockInstant>>,
-    /// Every task of this view, so the owner can reclaim all of them.
-    tasks: RefCell<Vec<task::JoinHandle<()>>>,
-    /// The first end wins; the owner awaits the receiving end.
-    end: mpsc::UnboundedSender<End>,
-    /// What makes an end immediate. Everything checks it first, so the abort
-    /// that follows only reclaims the tasks rather than being what stops them.
-    ended: Cell<bool>,
+    /// Every task of this view, the token that ends them, and the latch this
+    /// thread reads. A worker this view's realm creates carries a child of
+    /// that token, so releasing the view ends the workers it made.
+    lifetime: Rc<Lifetime>,
+    /// Whether this view has already been told why it failed. The first report
+    /// wins, so one failure is one `StartupFailed` or one `ScriptRunError`. A
+    /// panic is not gated here — it has a latch of its own on the lifetime,
+    /// because a task that traps after a startup failure is still a fact the
+    /// embedder is owed.
+    reported: Cell<bool>,
     /// How many times the epilogue has run, for the tests that count the
     /// wakes a page answers.
     #[cfg(test)]
@@ -169,15 +178,14 @@ struct BootSources {
 }
 
 impl Page {
-    /// A loading page and the owner's end of the channel that says it is
-    /// over.
+    /// A loading page, over the token that ends it.
     fn new(
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
         ingredients: DocumentIngredients,
-    ) -> (Rc<Self>, mpsc::UnboundedReceiver<End>) {
-        let (end, ended) = mpsc::unbounded_channel();
-        let page = Self {
+        token: CancellationToken,
+    ) -> Rc<Self> {
+        Rc::new(Self {
             context,
             outbox,
             realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
@@ -185,41 +193,40 @@ impl Page {
             boot_reported: Cell::new(false),
             own_checkpoint: Cell::new(0),
             deadline: watch::channel(None).0,
-            tasks: RefCell::new(Vec::new()),
-            end,
-            ended: Cell::new(false),
+            lifetime: Lifetime::new(token),
+            reported: Cell::new(false),
             #[cfg(test)]
             epilogues: Cell::new(0),
-        };
-        (Rc::new(page), ended)
+        })
     }
 
-    /// Starts one more task of this view, keeping the handle so the owner can
-    /// reclaim it.
+    /// Starts one more task of this view.
     ///
     /// A panic anywhere in the task ends the view: the guard's `Drop` runs
-    /// during the unwind, before tokio's task harness catches it, so the
-    /// owner is already awake by the time the handle reports the panic.
+    /// during the unwind, before tokio's task harness catches it, so a sibling
+    /// task polled before the owner already finds [`Self::ended`] true — and
+    /// the acknowledgement and the withdrawn deadline that [`Self::end`] owes
+    /// have already happened. The report is the owner's, out of the payload
+    /// the lifetime hands it.
     fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
-        let page = Rc::clone(self);
-        let handle = task::spawn_local(async move {
-            let _guard = EndOnUnwind(page);
+        let guard = EndOnUnwind(Rc::clone(self));
+        self.lifetime.spawn(async move {
+            let _guard = guard;
             future.await;
         });
-        let mut tasks = self.tasks.borrow_mut();
-        // A task that has already returned holds nothing of this view any
-        // more, and a task that trapped has already ended the view above.
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(handle);
     }
 
     /// Ends this view, once. `true` for the call that did it.
     ///
-    /// Synchronous, because the flag is what makes an end immediate:
+    /// Synchronous, because the latch is what makes an end immediate:
     /// [`Self::enter`], [`Self::apply`] and every timer wake return at once
     /// when it is set, and the owner's abort only reclaims the tasks.
-    fn end(&self, reason: End) -> bool {
-        if self.ended.replace(true) {
+    ///
+    /// The owner calls it after its wait too, which is how a cancellation that
+    /// arrived from another thread reaches the latch: nothing but this thread
+    /// writes it.
+    fn end(&self) -> bool {
+        if !self.lifetime.end() {
             return false;
         }
         // A painter blocked in `wait_begin_frame` is released rather than
@@ -229,12 +236,11 @@ impl Page {
         }
         self.deadline
             .send_if_modified(|deadline| deadline.take().is_some());
-        let _ = self.end.send(reason);
         true
     }
 
     fn ended(&self) -> bool {
-        self.ended.get()
+        self.lifetime.ended()
     }
 
     /// Reports one fatal failure and ends the view, in that order and once.
@@ -243,9 +249,10 @@ impl Page {
     /// [`Self::enter`]: the epilogue that follows sees the end and does
     /// nothing, which is what keeps one failure one report.
     fn fail(&self, event: EngineEvent) {
-        if self.end(End::Failed) {
+        if !self.reported.replace(true) {
             self.outbox.engine_event(event);
         }
+        self.end();
     }
 
     fn is_live(&self) -> bool {
@@ -354,11 +361,21 @@ impl Page {
         self.own_checkpoint.set(js.checkpoint_generation());
     }
 
-    /// Reports a panic this thread caught as the failing view's, the same
-    /// wording the owner uses for a task that trapped.
+    /// Reports a panic as the failing view's, and ends the view.
+    ///
+    /// One report per view whichever path saw the panic first — this thread
+    /// catching one inside [`Self::enter`], or the owner reaping a task that
+    /// trapped — and it is not gated by [`Self::fail`]'s latch: a view that
+    /// already reported a startup failure and then traps still says so.
     fn trapped(&self, payload: &(dyn std::any::Any + Send)) {
-        let message = format!("the Lynx main thread panicked: {}", panic_message(payload));
-        self.fail(EngineEvent::ScriptRunError(platform_script_error(message)));
+        if self.lifetime.report_panic() {
+            self.outbox
+                .engine_event(EngineEvent::ScriptRunError(panicked(
+                    "the Lynx main thread panicked",
+                    payload,
+                )));
+        }
+        self.end();
     }
 
     /// Applies one burst of commands: one entry, one commit, one
@@ -369,13 +386,27 @@ impl Page {
     /// into the ingredients its document will be built from; a page that has
     /// ended drops the burst, `BeginFrame` included, because the end has
     /// already acknowledged the pending one.
+    ///
+    /// The burst loop checks the latch before each command. It cannot be
+    /// truncated from another thread — only this thread writes that latch — so
+    /// one entry is still one commit; what it stops is the rest of a burst
+    /// behind a command that ended the view.
     fn apply(self: &Rc<Self>, commands: impl Iterator<Item = ToMain>) {
         if self.ended() {
             return;
         }
+        // Taken before the entry below, and eagerly, because an iterator
+        // adapter would run it inside that entry: what the seam spawns has to
+        // trap the way any other task of this view does, rather than into the
+        // `catch_unwind` a live entry runs under.
+        #[cfg(test)]
+        let commands = self.take_test_seams(commands);
         if self.is_live() {
             self.enter(|runtime, js| {
                 for command in commands {
+                    if self.ended() {
+                        break;
+                    }
                     self.apply_command(runtime, js, command);
                 }
             });
@@ -422,6 +453,8 @@ impl Page {
             ToMain::ImageEvents(events) => runtime.apply_image_events(&events),
             #[cfg(test)]
             ToMain::Probe(probe) => runtime.with_document(probe),
+            #[cfg(test)]
+            ToMain::Trap(_) => unreachable!("the trap seam is taken before the entry"),
         }
     }
 
@@ -460,6 +493,8 @@ impl Page {
                     ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
                     #[cfg(test)]
                     ToMain::Probe(_) => {}
+                    #[cfg(test)]
+                    ToMain::Trap(_) => unreachable!("the trap seam is taken before the entry"),
                 }
             }
         }
@@ -557,7 +592,7 @@ impl Page {
             // Nobody is listening for this view any more, so there is nobody
             // to report to.
             None => {
-                self.end(End::Released);
+                self.end();
             }
             Some(Err(error)) => self.fail(EngineEvent::StartupFailed(error)),
             Some(Ok((worker_events, checkpoints))) => {
@@ -571,41 +606,22 @@ impl Page {
         }
     }
 
-    /// Reclaims every task of this view, reports a panic once, then releases
-    /// the realm.
+    /// This view's whole tail: wait, end, reclaim, release the realm.
     ///
-    /// The abort is what makes a parked task return; the end flag is what
-    /// already stopped it from doing anything. Awaiting each handle is what
-    /// makes this the last owner of the page: a task holds an `Rc` of it
-    /// until its future is dropped.
-    ///
-    /// The report does not depend on a handle still being here. A handle that
-    /// panicked carries the payload, which is the better message; a handle
-    /// [`Self::spawn`] pruned once it had finished carries nothing, and
-    /// [`End::Trapped`] is what is left of that panic. Either way the embedder
-    /// hears about it exactly once.
-    async fn reap(&self, reason: End) {
-        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
-        for task in &tasks {
-            task.abort();
-        }
-        let mut trapped: Option<String> = None;
-        for task in tasks {
-            let Err(error) = task.await else { continue };
-            if error.is_panic() && trapped.is_none() {
-                trapped = Some(format!(
-                    "the Lynx main thread panicked: {}",
-                    panic_message(error.into_panic().as_ref())
-                ));
-            }
-        }
-        let message = trapped.or_else(|| {
-            matches!(reason, End::Trapped).then(|| "the Lynx main thread panicked".to_owned())
-        });
-        if let Some(message) = message {
-            self.outbox
-                .engine_event(EngineEvent::ScriptRunError(platform_script_error(message)));
-        }
+    /// The wait is the lifetime's — the end, or the next task of the view to
+    /// finish. [`Self::end`] after it is what mirrors a cancellation that came
+    /// from another thread onto this thread's latch, and what acknowledges a
+    /// pending `BeginFrame` so a blocked painter is released. The reap is what
+    /// makes this the last owner of the page: a task holds an `Rc` of it until
+    /// its future is dropped.
+    async fn run_owner(self: &Rc<Self>) {
+        self.lifetime
+            .serve(&mut |payload| self.trapped(payload.as_ref()))
+            .await;
+        self.end();
+        self.lifetime
+            .reap(&mut |payload| self.trapped(payload.as_ref()))
+            .await;
         // JavaScript first, then the Rust object it named: `MainThreadRuntime`
         // drops its fields in declaration order, and this is where that
         // happens — after every task that could still have entered the realm
@@ -613,11 +629,37 @@ impl Page {
         *self.realm.borrow_mut() = Realm::Gone;
     }
 
+    /// Takes the one command that is not the realm's out of a burst.
+    ///
+    /// It spawns two tasks of this view — one that panics on its first poll,
+    /// and behind it one that records what [`Self::ended`] says when it is
+    /// next polled — which is the only way a test can watch a panic reach a
+    /// sibling before it reaches the owner.
+    #[cfg(test)]
+    fn take_test_seams(
+        self: &Rc<Self>,
+        commands: impl Iterator<Item = ToMain>,
+    ) -> std::vec::IntoIter<ToMain> {
+        let mut rest = Vec::new();
+        for command in commands {
+            let ToMain::Trap(recorder) = command else {
+                rest.push(command);
+                continue;
+            };
+            self.spawn(async { panic!("a task of the view trapped") });
+            let page = Rc::clone(self);
+            self.spawn(async move {
+                let _ = recorder.send(page.ended());
+            });
+        }
+        rest.into_iter()
+    }
+
     /// How many tasks this view still has, for a test that pins an end
     /// reaching every one of them.
     #[cfg(test)]
     pub(super) fn task_count(&self) -> usize {
-        self.tasks.borrow().len()
+        self.lifetime.task_count()
     }
 
     /// How many times the epilogue has run.
@@ -625,20 +667,35 @@ impl Page {
     pub(super) fn epilogue_count(&self) -> u64 {
         self.epilogues.get()
     }
+
+    /// Leaves a `BeginFrame` applied and unacknowledged, which is the state a
+    /// painter blocked on that sequence number leaves a view in.
+    #[cfg(test)]
+    pub(super) fn arm_begin_frame_for_test(&self, seq: u64) {
+        self.pending_begin_frame.set(Some(seq));
+    }
+
+    /// This view's earliest armed timer, for a test that pins the end
+    /// withdrawing it.
+    #[cfg(test)]
+    pub(super) fn armed_deadline(&self) -> Option<ClockInstant> {
+        *self.deadline.borrow()
+    }
 }
 
 /// Ends the view if the task it guards is unwinding.
 ///
-/// Its `Drop` runs during the unwind, before tokio's task harness catches it,
-/// so the owner is awake before the handle it will await reports the panic.
+/// The guard is the page's rather than the lifetime's because what an end owes
+/// is the page's: the `BeginFrame` acknowledgement and the withdrawn deadline
+/// run here, during the unwind, so a sibling polled before the owner sees a
+/// view that has already ended. The payload is not reachable from a `Drop`, so
+/// the report stays the owner's, out of the `JoinError` the lifetime yields.
 struct EndOnUnwind(Rc<Page>);
 
 impl Drop for EndOnUnwind {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            // The payload is not reachable from here, so the reason is all
-            // this can say; the owner turns it into the report.
-            self.0.end(End::Trapped);
+            self.0.end();
         }
     }
 }
@@ -649,16 +706,17 @@ impl Drop for EndOnUnwind {
 /// Task lifetime and nothing else. No command, no source, no timer and no
 /// frame is decided here.
 pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, outbox: ViewOutbox) {
-    // On every exit path, ordinary or trapped: a host still holding one of
-    // this view's source completions must see it cancelled without waiting
-    // for a turn of its own.
-    let _cancel = CancelOnExit(view.cancel.clone());
     let AttachedView {
         viewport,
         sources,
         commands,
-        ..
+        cancel,
     } = view;
+    // On every exit path, ordinary or trapped: a host still holding one of
+    // this view's source completions must see it cancelled without waiting
+    // for a turn of its own, and every worker this view created — each
+    // holding a child of this token — must wake and end.
+    let _cancel = cancel.clone().drop_guard();
     let MainSources {
         config,
         fonts,
@@ -686,7 +744,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         style_pool: context.style_pool.clone(),
         pending_image_events: Vec::new(),
     };
-    let (page, mut ended) = Page::new(context, outbox, ingredients);
+    let page = Page::new(context, outbox, ingredients, cancel);
     page.spawn(consume_commands(Rc::clone(&page), commands));
     page.spawn(boot_page(
         Rc::clone(&page),
@@ -698,13 +756,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
             global_props,
         },
     ));
-    // The owner's one wait. `None` cannot happen while the page holds the
-    // sending end, and every reason takes the same path from here: what
-    // differs is only what the view was already told, and a `Failed` end was
-    // reported before it was sent. `Trapped` is the one the owner still owes
-    // a report for, which is why the reason is read rather than dropped.
-    let reason = ended.recv().await.unwrap_or(End::Released);
-    page.reap(reason).await;
+    page.run_owner().await;
 }
 
 /// The one ordered consumer of this view's command stream.
@@ -713,15 +765,43 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
 /// with the first, so a host's whole round of input is one commit and one
 /// acknowledgement. Bounded by the snapshot the count was taken from, so a
 /// producer faster than this task cannot starve the epilogue.
+///
+/// **A burst queued behind the embedder's release is discarded.** The token is
+/// read once per burst, below, and a command whose wake is served after the
+/// release ends the view instead of being applied. Not because of wake order:
+/// a command already queued wakes this task *before* the release wakes the
+/// owner, so on that path this check is the only thing between the burst and
+/// the realm. It is a decision rather than an accident — the embedder released
+/// the view and can observe nothing of it afterwards. A fatal event's cancel
+/// in `LynxView::pump`, which leaves the channel open, takes the same path.
+///
+/// A painter that was watching is unaffected either way. On the release path
+/// the view's handle on the host's resource system goes with it, so
+/// `Painter::poll_link` can no longer upgrade it and does not adopt a commit
+/// whose pixels it is not already holding; on the fatal-`pump` path that
+/// handle is still alive, and this check is what keeps a frame from being
+/// published after the cancel at all.
+///
+/// What is left over is a burst that was already inside [`Page::apply`] when
+/// the cancel landed: it finishes, the way synchronous JavaScript already
+/// executing does. Only this thread writes the latch an entry reads.
 async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<ToMain>) {
     while let Some(first) = commands.recv().await {
+        // The embedder released the view between this command's send and this
+        // poll. The token is read here and never inside an entry: a wake
+        // boundary is not a synchronous stretch another thread could flip it
+        // in the middle of.
+        if page.outbox.is_cancelled() {
+            page.end();
+            return;
+        }
         let queued = commands.len();
         let rest = std::iter::from_fn(|| commands.try_recv().ok()).take(queued);
         page.apply(std::iter::once(first).chain(rest));
     }
     // The embedder released this view. Everything it owns goes with the
     // tasks the owner is about to reclaim.
-    page.end(End::Released);
+    page.end();
 }
 
 /// The page's boot future: every author sheet in cascade order, then the
@@ -741,7 +821,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
     } = sources;
     for url in style_sheets {
         if page.outbox.is_cancelled() {
-            page.end(End::Released);
+            page.end();
             return;
         }
         match request_source(&page.outbox, SourceRequest::StyleSheet(url)).await {
@@ -764,7 +844,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         }
     }
     if page.outbox.is_cancelled() {
-        page.end(End::Released);
+        page.end();
         return;
     }
     let (source, url) = match request_source(&page.outbox, SourceRequest::Entry(entry)).await {
@@ -782,7 +862,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         }
     };
     if page.outbox.is_cancelled() {
-        page.end(End::Released);
+        page.end();
         return;
     }
     page.open_realm(

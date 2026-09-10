@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio-util = { workspace = true }
 url = { workspace = true }
 
 # The engine threads wait out their own realms' timers on tokio's timer.

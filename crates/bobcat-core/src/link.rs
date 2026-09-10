@@ -1,5 +1,5 @@
 //! One view's link: the two directions it crosses, the state a painter
-//! observes without asking, and the flag that ends everything on it.
+//! observes without asking, and the token that ends everything on it.
 //!
 //! A view owns its channels end to end. Nothing here is addressed, because
 //! there is nobody else on the wire: the embedder's thread holds one sending
@@ -18,13 +18,13 @@ use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
 use dom::{CommittedFrame, NodeId, Vector2D};
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::clock::ClockInstant;
 #[cfg(test)]
@@ -64,6 +64,13 @@ pub(crate) enum ToMain {
     ImageEvents(Vec<dom::ImageEvent>),
     #[cfg(test)]
     Probe(Box<dyn FnOnce(&mut LynxDocument) + Send>),
+    /// The one command that is not the realm's: it spawns a task of the view
+    /// that panics on its first poll, and behind it one that answers this
+    /// channel with what the view's end latch said when it was next polled.
+    /// The page takes it before it enters the realm, so the panic reaches a
+    /// sibling and the owner the way any other task's does.
+    #[cfg(test)]
+    Trap(std::sync::mpsc::Sender<bool>),
 }
 
 /// The view's task → the embedder, drained by `LynxView::pump`.
@@ -106,39 +113,6 @@ impl Published {
     }
 }
 
-/// One view's "this is over", readable without waiting for anything.
-///
-/// The channels already say it — a closed command channel is a released view
-/// — but they say it *eventually*, on the receiving thread's next turn. A
-/// host that drops a view and immediately asks whether the load it is holding
-/// still matters needs the answer now, and a source completion is the one
-/// thing outside this engine that asks.
-///
-/// Cancellation is cooperative: an IO operation already running may finish,
-/// and synchronous JavaScript already executing runs to its end. What it
-/// guarantees is that no result crosses afterwards.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ViewCancel(Arc<AtomicBool>);
-
-impl ViewCancel {
-    pub(crate) fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
-/// Sets the flag on every exit from the scope it guards, including a panic.
-pub(crate) struct CancelOnExit(pub(crate) ViewCancel);
-
-impl Drop for CancelOnExit {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
-}
-
 /// The view task's sending end: what the runtime, the tree and the listener
 /// index publish through.
 ///
@@ -153,7 +127,12 @@ pub(crate) struct ViewOutbox {
     /// publishes holds a clone of this whole outbox.
     frames: Rc<watch::Sender<Published>>,
     requester: Arc<dyn EventRequester>,
-    cancel: ViewCancel,
+    /// This view's end signal, minted by `create_lynx_view` and cancelled by
+    /// the embedder's release, by a fatal lifecycle event, or by the view's
+    /// own owner as it exits. Every source completion this outbox hands out
+    /// carries a clone, which is what lets a host read cancellation without
+    /// waiting for a turn.
+    token: CancellationToken,
 }
 
 impl ViewOutbox {
@@ -161,14 +140,20 @@ impl ViewOutbox {
         notices: mpsc::UnboundedSender<ViewNotice>,
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
-        cancel: ViewCancel,
+        token: CancellationToken,
     ) -> Self {
         Self {
             notices,
             frames: Rc::new(frames),
             requester,
-            cancel,
+            token,
         }
+    }
+
+    /// This view's end signal, for the realm that mints a child of it per
+    /// worker it creates.
+    pub(crate) const fn token(&self) -> &CancellationToken {
+        &self.token
     }
 
     /// Announces one notice, then wakes the thread that paints.
@@ -191,7 +176,7 @@ impl ViewOutbox {
     /// goes to the task awaiting it, and a worker's rides to the worker
     /// thread inside its `Start`.
     pub(crate) fn request_source(&self, request: SourceRequest) -> SourceAnswer {
-        let (completion, answer) = SourceCompletion::new(self.cancel.clone());
+        let (completion, answer) = SourceCompletion::new(self.token.clone());
         self.notify(ViewNotice::RequestSource {
             request,
             completion,
@@ -206,7 +191,7 @@ impl ViewOutbox {
         &self,
         answer: oneshot::Sender<Result<LoadedSource, LynxViewError>>,
     ) -> SourceCompletion {
-        SourceCompletion::over(answer, self.cancel.clone())
+        SourceCompletion::over(answer, self.token.clone())
     }
 
     /// Publishes the newest committed frame.
@@ -242,8 +227,11 @@ impl ViewOutbox {
         self.requester.request_event();
     }
 
+    /// Whether this view is over. A mutex read on the token, so it is asked
+    /// where a turn would otherwise be waited for — never inside an entry,
+    /// which reads the thread-local latch instead.
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.token.is_cancelled()
     }
 }
 
@@ -329,31 +317,34 @@ pub(crate) struct DetachedView {
     )]
     pub(crate) notices: mpsc::UnboundedReceiver<ViewNotice>,
     pub(crate) published: ViewObserver,
+    /// The end signal every completion this view hands out carries. A caller
+    /// playing the host is the one that cancels it, since there is no
+    /// `LynxView` here to be dropped.
     #[cfg_attr(
         not(test),
         allow(
             dead_code,
-            reason = "the flag every completion carries; spelled by the crate's tests"
+            reason = "the token every completion carries; spelled by the crate's tests"
         )
     )]
-    pub(crate) cancel: ViewCancel,
+    pub(crate) token: CancellationToken,
 }
 
 /// One view's publishing end and the far end that reads it, with no thread
 /// between them.
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
-    let cancel = ViewCancel::default();
+    let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
     (
-        ViewOutbox::new(notices, frames, requester, cancel.clone()),
+        ViewOutbox::new(notices, frames, requester, token.clone()),
         DetachedView {
             notices: notice_receiver,
             published: ViewObserver {
                 frames: frame_receiver,
                 published: Published::default(),
             },
-            cancel,
+            token,
         },
     )
 }

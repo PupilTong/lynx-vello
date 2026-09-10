@@ -44,7 +44,9 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// Consume `completion` with the result, or retain it until the load finishes.
     /// Dropping it unanswered reports a failure unless the view has ended.
     /// Check [`SourceCompletion::is_cancelled`] before starting queued work and
-    /// after IO; a cancelled load no longer needs to decode or deliver a result.
+    /// after IO — it answers whether the view was cancelled by the embedder's
+    /// release or a fatal event, or ended on its own — since a cancelled load
+    /// no longer needs to decode or deliver a result.
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion);
 
     fn supports_capability(&self, capability: ResourceCapability) -> bool;
@@ -221,7 +223,7 @@ pub enum LoadedSource {
 #[must_use = "complete the source request or retain it until the load finishes"]
 pub struct SourceCompletion {
     answer: Option<tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>>,
-    cancel: crate::link::ViewCancel,
+    token: tokio_util::sync::CancellationToken,
 }
 
 impl std::fmt::Debug for SourceCompletion {
@@ -236,33 +238,39 @@ impl std::fmt::Debug for SourceCompletion {
 impl SourceCompletion {
     /// One request's two ends, for a caller that will await the answer itself.
     pub(crate) fn new(
-        cancel: crate::link::ViewCancel,
+        token: tokio_util::sync::CancellationToken,
     ) -> (
         Self,
         tokio::sync::oneshot::Receiver<Result<LoadedSource, crate::LynxViewError>>,
     ) {
         let (answer, receiver) = tokio::sync::oneshot::channel();
-        (Self::over(answer, cancel), receiver)
+        (Self::over(answer, token), receiver)
     }
 
     /// The right to answer a request whose receiving end has already been
     /// handed to whoever is waiting for it.
     pub(crate) fn over(
         answer: tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>,
-        cancel: crate::link::ViewCancel,
+        token: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
             answer: Some(answer),
-            cancel,
+            token,
         }
     }
 
     /// Whether the view has ended, or nobody is waiting for this source any
-    /// more. Cancellation is cooperative: an IO operation already running may
-    /// finish, but its result is discarded.
+    /// more.
+    ///
+    /// The view's end signal is a cancellation token every completion it hands
+    /// out carries a clone of, cancelled by the embedder's release or a fatal
+    /// event, or by the view's own end. Reading it takes a mutex, so it is
+    /// asked once per decision rather than per byte. Cancellation is
+    /// cooperative: an IO operation already running may finish, but its result
+    /// is discarded.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
+        self.token.is_cancelled()
             || self
                 .answer
                 .as_ref()
@@ -276,7 +284,7 @@ impl SourceCompletion {
 
     fn send(&mut self, source: Result<LoadedSource, crate::LynxViewError>) {
         if let Some(answer) = self.answer.take()
-            && !self.cancel.is_cancelled()
+            && !self.token.is_cancelled()
         {
             let _ = answer.send(source);
         }
@@ -533,18 +541,18 @@ pub enum RetryAdvice {
 #[cfg(test)]
 mod completion_tests {
     use tokio::sync::oneshot::error::TryRecvError;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::link::ViewCancel;
 
     fn completion() -> (
         SourceCompletion,
         tokio::sync::oneshot::Receiver<Result<LoadedSource, crate::LynxViewError>>,
-        ViewCancel,
+        CancellationToken,
     ) {
-        let cancel = ViewCancel::default();
-        let (completion, answer) = SourceCompletion::new(cancel.clone());
-        (completion, answer, cancel)
+        let token = CancellationToken::new();
+        let (completion, answer) = SourceCompletion::new(token.clone());
+        (completion, answer, token)
     }
 
     fn source() -> LoadedSource {
@@ -581,8 +589,8 @@ mod completion_tests {
     #[test]
     fn cancellation_discards_both_late_results_and_unanswered_drops() {
         for answer_it in [false, true] {
-            let (completion, mut answer, cancel) = completion();
-            cancel.cancel();
+            let (completion, mut answer, token) = completion();
+            token.cancel();
             assert!(completion.is_cancelled());
             if answer_it {
                 completion.complete(Ok(source()));

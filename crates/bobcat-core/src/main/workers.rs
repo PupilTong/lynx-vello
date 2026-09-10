@@ -6,6 +6,12 @@
 //! sends a `Terminate` on every one of them, which is how a view stops the
 //! workers it created. The channel closing behind that message ends a worker
 //! too, but it is the backstop rather than the protocol.
+//!
+//! What travels with a worker besides that channel is a cancellation token,
+//! minted here as a child of the view's own. It is the *signal* a worker's
+//! tasks wake on, where the `Terminate` is the message: a view released
+//! before its realm could say anything cancels its token on the embedder's
+//! thread, and every worker it created ends without this side taking a turn.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -165,9 +171,10 @@ impl Drop for WorkerOwner {
     /// once that realm's context has been freed and every worker it names is
     /// one this view will never hear from again.
     ///
-    /// The message is the protocol; the channel closing behind it — the
-    /// senders drained here go out of scope with this statement — is the
-    /// backstop, for a worker whose realm was gone before it could speak.
+    /// The message is the protocol. Two things behind it are the backstop,
+    /// for a worker whose realm was gone before it could speak: the senders
+    /// drained here going out of scope with this statement, and the view's
+    /// token, whose children every one of these workers holds.
     fn drop(&mut self) {
         for (_, messages) in self.live.borrow_mut().drain() {
             let _ = messages.send(WorkerMessage::Terminate);
@@ -178,6 +185,10 @@ impl Drop for WorkerOwner {
 impl WorkerOwner {
     /// Names one worker on `bobcat-workers` and hands back the right to
     /// answer its script.
+    ///
+    /// The token that rides with it is a child of this view's, so cancelling
+    /// the view's cancels every worker's — including the ones whose `Start`
+    /// has not been served yet.
     fn start(
         &self,
         key: WorkerKey,
@@ -193,6 +204,7 @@ impl WorkerOwner {
                 script: awaiting,
                 messages: incoming,
                 events: self.events.clone(),
+                token: self.outbox.token().child_token(),
             }))
             .map_err(|_| "the worker thread has ended".to_owned())?;
         self.live.borrow_mut().insert(key, messages);
