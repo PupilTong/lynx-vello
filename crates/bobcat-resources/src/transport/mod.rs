@@ -184,8 +184,10 @@ impl Transports {
         None
     }
 
-    /// Moves the bytes for `url`, blocking the calling thread — an IO
-    /// worker's, never the painter's.
+    /// Moves the bytes for `url`, blocking the calling thread: a
+    /// blocking-pool thread for a background job, and the painter's own for
+    /// the synchronous restore inside `FrameImages::read`, which has to
+    /// answer within the call and so cannot await anything.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fetch_blocking(
         &self,

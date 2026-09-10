@@ -11,15 +11,19 @@ publish = false
 [dependencies]
 bobcat-core = { workspace = true }
 bytes = { workspace = true }
-flume = { workspace = true }
 http = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# `rt` builds for wasm32 (bobcat-core already proves it) but only the native
+# executor uses it; `sync` carries the completion channel on both targets.
+tokio = { workspace = true }
 url = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading = { workspace = true }
+# The executor's stop signal. Native only: the browser has no runtime here.
+tokio-util = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { workspace = true }
@@ -40,8 +44,12 @@ web-sys = { workspace = true, features = [
 [dev-dependencies]
 bobcat-source = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
+flume = { workspace = true }
 png = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+pollster = { workspace = true }
+# `rt` and `sync` come from `[dependencies]`; every test is a default-flavour
+# `#[tokio::test]`, so only the attribute macro is missing.
+tokio = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true

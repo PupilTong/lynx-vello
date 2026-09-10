@@ -60,7 +60,7 @@ struct Job {
     /// writes into it directly.
     buffer: Option<Vec<u8>>,
     /// Where an asynchronous decode's result goes.
-    reply: Option<flume::Sender<Result<Bitmap, DecodeError>>>,
+    reply: Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>>,
 }
 
 /// The main thread's decoder and the jobs in flight on it.
@@ -122,9 +122,9 @@ impl ImageDecoder {
         media_type: &str,
         max: (u32, u32),
     ) -> Result<Bitmap, DecodeError> {
-        let (sender, receiver) = flume::bounded(1);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
         self.start(bytes, media_type, max, Some(sender))?;
-        receiver.recv_async().await.unwrap_or_else(|_| {
+        receiver.await.unwrap_or_else(|_| {
             Err(DecodeError::Unavailable(
                 "the image decoder went away before answering".to_owned(),
             ))
@@ -185,7 +185,7 @@ impl ImageDecoder {
         bytes: &[u8],
         media_type: &str,
         max: (u32, u32),
-        reply: Option<flume::Sender<Result<Bitmap, DecodeError>>>,
+        reply: Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>>,
     ) -> Result<u32, DecodeError> {
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1).max(1));
@@ -337,7 +337,10 @@ impl ImageDecoder {
         Some(bitmap)
     }
 
-    fn take_reply(&self, id: u32) -> Option<flume::Sender<Result<Bitmap, DecodeError>>> {
+    fn take_reply(
+        &self,
+        id: u32,
+    ) -> Option<tokio::sync::oneshot::Sender<Result<Bitmap, DecodeError>>> {
         self.jobs.borrow_mut().remove(&id).and_then(|job| job.reply)
     }
 

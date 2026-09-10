@@ -29,12 +29,15 @@
 //!
 //! # Shape
 //!
-//! [`Resources`] is the shared system: registry, caches, worker pool,
+//! [`Resources`] is the shared system: registry, caches, job executor,
 //! decoder. An embedder builds one, registers what it already holds, and
 //! hands [`Resources::builder`] to [`bobcat_core::LynxGroup::create_lynx_view`], which
 //! turns it into the per-view [`ViewResources`] that implements the
-//! protocol and carries that view's [`ImageReports`]. Loads complete on
-//! worker threads (or as browser tasks). Images wake the painter to service
+//! protocol and carries that view's [`ImageReports`]. The painter's thread
+//! asks for a load and services what came back; the load itself is one task
+//! on the crate's own tokio runtime, whose blocking pool runs the transport,
+//! the preprocessing and the platform decoder (in the browser, a local task
+//! on the Render Worker instead). Images wake the painter to service
 //! reports; source completions send directly to main through the concrete
 //! handle supplied with each request.
 
@@ -115,8 +118,22 @@ pub struct ResourcesConfig {
     pub max_response_bytes: usize,
     pub user_agent: String,
     pub max_redirects: u32,
-    /// IO and decode worker threads, natively.
+    /// How many blocking threads the fetcher's runtime may have, natively:
+    /// the cap on transport reads, preprocessing and decodes together. `0`
+    /// clamps to 1. Its sibling is [`Self::decode_parallelism`].
     pub worker_threads: usize,
+    /// How many decodes may be outstanding at once, natively; `None` is one
+    /// permit per blocking thread.
+    ///
+    /// A permit is taken before a decode closure is submitted and held until
+    /// it returns, so this bounds queued decodes as well as running ones. At
+    /// the default it rarely binds and never below what
+    /// [`Self::worker_threads`] threads could decode anyway, though a decode
+    /// can still wait behind another job's queued transport read. Lowering it
+    /// trades decode concurrency for a longer decode queue and never blocks a
+    /// transport read, because no blocking closure ever waits on a permit.
+    /// The pool's size stays [`Self::worker_threads`] either way.
+    pub decode_parallelism: Option<usize>,
     /// Whether image failures are also printed to standard error, natively.
     pub log_to_stderr: bool,
     /// This Worker's end of the channel whose other end the host's
@@ -140,6 +157,7 @@ impl Default for ResourcesConfig {
             max_redirects: 10,
             worker_threads: std::thread::available_parallelism()
                 .map_or(2, |count| count.get().clamp(1, 4)),
+            decode_parallelism: None,
             log_to_stderr: cfg!(not(target_arch = "wasm32")),
             #[cfg(target_arch = "wasm32")]
             image_port: None,
@@ -147,34 +165,124 @@ impl Default for ResourcesConfig {
     }
 }
 
-/// The handle jobs hold on [`Shared`]: atomic natively, where worker
-/// threads share it, and plain in the browser, where nothing does and the
-/// decoder it holds is thread-bound anyway.
+/// The handle jobs hold on [`Shared`]: atomic natively, where a job's task
+/// and its blocking closures share it across threads, and plain in the
+/// browser, where nothing does and the decoder it holds is thread-bound
+/// anyway.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type SharedHandle = Arc<Shared>;
 #[cfg(target_arch = "wasm32")]
 pub(crate) type SharedHandle = Rc<Shared>;
 
-/// The part of the system every job may touch.
+/// The part of the system every job may touch. It holds no piece of the
+/// [`executor::Executor`], so no job can keep the fetcher's runtime alive.
 pub(crate) struct Shared {
     transports: Transports,
     base_url: Mutex<Option<Url>>,
     initial_decode_bound: u32,
     downsample_ratio: f32,
-    #[cfg(not(target_arch = "wasm32"))]
-    executor: executor::Executor,
     #[cfg(target_arch = "wasm32")]
     decoder: Option<Rc<decode::browser::ImageDecoder>>,
-    completions: flume::Sender<Completion>,
+    completions: tokio::sync::mpsc::UnboundedSender<Completion>,
     wakeup: Wakeup,
     log_to_stderr: bool,
     notes: Mutex<Vec<String>>,
+    /// A test's seam into a background job's transport read, called on the
+    /// blocking thread that runs it, so a test can hold a job in flight or
+    /// make one panic. The painter's inline restore never consults it.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fetch_hook: Mutex<Option<FetchHook>>,
+    /// A test's stand-in for the platform decoder, consulted only by the
+    /// permit-holding decode of a background job — never by the painter's
+    /// inline restore, which is what keeps that decode uncounted.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    decode_hook: Mutex<Option<DecodeHook>>,
 }
+
+/// What a test runs on the blocking thread of a background transport read.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) type FetchHook = Arc<dyn Fn(&Url) + Send + Sync>;
+
+/// What a test puts in the place of the platform decoder.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) type DecodeHook = Arc<
+    dyn Fn(
+            &[u8],
+            mime::ImageFormat,
+            Option<image_header::ImageHeader>,
+            (u32, u32),
+        ) -> Result<decode::Bitmap, decode::DecodeError>
+        + Send
+        + Sync,
+>;
 
 impl Shared {
     fn complete(&self, completion: Completion) {
         let _ = self.completions.send(completion);
         (self.wakeup)();
+    }
+
+    /// The transport read a background job runs, on a blocking-pool thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fetch_job(
+        &self,
+        url: &Url,
+        policy: bobcat_core::resource::CachePolicy,
+        headers: &http::HeaderMap,
+    ) -> Result<Fetched, error::Failure> {
+        #[cfg(test)]
+        {
+            let hook = self
+                .fetch_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                hook(url);
+            }
+        }
+        self.transports.fetch_blocking(url, policy, headers)
+    }
+
+    /// The decode a background job runs while holding its permit.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn decode_job(
+        &self,
+        bytes: &[u8],
+        format: mime::ImageFormat,
+        header: Option<image_header::ImageHeader>,
+        max: (u32, u32),
+    ) -> Result<decode::Bitmap, decode::DecodeError> {
+        #[cfg(test)]
+        {
+            let hook = self
+                .decode_hook
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(hook) = hook {
+                return hook(bytes, format, header, max);
+            }
+        }
+        self.decode_bytes(bytes, format, header, max)
+    }
+
+    /// Puts `hook` in the place of the platform decoder for background jobs.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn set_decode_hook(&self, hook: DecodeHook) {
+        *self
+            .decode_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
+    }
+
+    /// Calls `hook` on the blocking thread of every background transport read.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn set_fetch_hook(&self, hook: FetchHook) {
+        *self
+            .fetch_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
     /// Decodes `bytes`, which preprocessing found to be a `format` image
@@ -228,14 +336,19 @@ impl Shared {
     }
 }
 
-/// The shared resource system: registry, caches, workers and decoder.
+/// The shared resource system: registry, caches, job executor and decoder.
 ///
 /// Cheap to clone — every clone is the same system — and bound to the
 /// thread that built it, which must be the thread that builds the views it
-/// serves (the painter's).
+/// serves (the painter's). It is also the only holder of the native
+/// executor: when the last clone of the last scope goes, the fetcher's
+/// runtime is shut down, on this thread.
 #[derive(Clone)]
 pub struct Resources {
     shared: SharedHandle,
+    /// Shared by every scope, held by nothing a job can reach.
+    #[cfg(not(target_arch = "wasm32"))]
+    executor: Arc<executor::Executor>,
     local: Rc<RefCell<ImageState>>,
 }
 
@@ -256,13 +369,26 @@ pub enum RegisterError {
 }
 
 impl Resources {
-    /// Builds the system. `wakeup` is called from a worker whenever a load
-    /// completes between painter turns — pass the same wakeup the view was
-    /// given, so the completion is answered by a turn.
+    /// Builds the system. `wakeup` is called whenever a load completes between
+    /// painter turns — natively from the executor's driver thread, in the
+    /// browser from the Render Worker's own task, there being no driver there.
+    /// Pass the same wakeup the view was given, so the completion is answered
+    /// by a turn.
     ///
-    /// Never fails: a disk cache that cannot be opened, or a decoder that
-    /// cannot be reached, is recorded in [`Resources::take_notes`] and the
-    /// system runs without it.
+    /// Natively that wakeup must not block, and must not take a lock the
+    /// thread dropping the last [`Resources`] can be holding: the drop joins
+    /// the driver, so it waits for a wakeup already running.
+    ///
+    /// Never fails on anything the embedder chose: a disk cache that cannot
+    /// be opened, or a decoder that cannot be reached, is recorded in
+    /// [`Resources::take_notes`] and the system runs without it.
+    ///
+    /// # Panics
+    ///
+    /// Natively, if the platform refuses the fetcher's runtime or its driver
+    /// thread. That is the one way this call can end the process, and it
+    /// asks the platform for nothing an embedder could have configured
+    /// differently.
     #[must_use]
     #[expect(
         clippy::needless_pass_by_value,
@@ -296,7 +422,7 @@ impl Resources {
             notes.push("images will not decode: no image decode port was configured".to_owned());
             None
         };
-        let (completions, receiver) = flume::unbounded();
+        let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         let shared = SharedHandle::new(Shared {
             transports: Transports {
                 registry: Registry::default(),
@@ -312,17 +438,24 @@ impl Resources {
             base_url: Mutex::new(config.base_url.clone()),
             initial_decode_bound: config.initial_decode_bound.max(1),
             downsample_ratio: config.downsample_ratio.max(1.0),
-            #[cfg(not(target_arch = "wasm32"))]
-            executor: executor::Executor::new(config.worker_threads),
             #[cfg(target_arch = "wasm32")]
             decoder,
             completions,
             wakeup: Arc::new(wakeup),
             log_to_stderr: config.log_to_stderr,
             notes: Mutex::new(notes),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            fetch_hook: Mutex::new(None),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            decode_hook: Mutex::new(None),
         });
         Self {
             shared,
+            #[cfg(not(target_arch = "wasm32"))]
+            executor: Arc::new(executor::Executor::new(
+                config.worker_threads,
+                config.decode_parallelism,
+            )),
             local: Rc::new(RefCell::new(ImageState::new(
                 config.memory_budget_bytes,
                 receiver,
@@ -330,13 +463,17 @@ impl Resources {
         }
     }
 
-    /// An independent page resource scope sharing only the IO workers,
-    /// platform decoder and disk cache. Registrations, relative URL base,
+    /// An independent page resource scope sharing only the executor, the
+    /// platform decoder and the disk cache. Registrations, relative URL base,
     /// decoded images and completion queues start empty. Late image results
     /// from a retired page cannot populate the replacement page's cache.
+    ///
+    /// The executor is shared rather than rebuilt, so a scope costs no
+    /// threads and the runtime lives until the last scope of the last clone
+    /// is dropped.
     #[must_use]
     pub fn new_scope(&self) -> Self {
-        let (completions, receiver) = flume::unbounded();
+        let (completions, receiver) = tokio::sync::mpsc::unbounded_channel();
         Self {
             shared: SharedHandle::new(Shared {
                 transports: Transports {
@@ -348,15 +485,19 @@ impl Resources {
                 base_url: Mutex::new(None),
                 initial_decode_bound: self.shared.initial_decode_bound,
                 downsample_ratio: self.shared.downsample_ratio,
-                #[cfg(not(target_arch = "wasm32"))]
-                executor: self.shared.executor.clone(),
                 #[cfg(target_arch = "wasm32")]
                 decoder: self.shared.decoder.clone(),
                 completions,
                 wakeup: self.shared.wakeup.clone(),
                 log_to_stderr: self.shared.log_to_stderr,
                 notes: Mutex::new(Vec::new()),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                fetch_hook: Mutex::new(None),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                decode_hook: Mutex::new(None),
             }),
+            #[cfg(not(target_arch = "wasm32"))]
+            executor: Arc::clone(&self.executor),
             local: Rc::new(RefCell::new(ImageState::new(
                 self.local.borrow().budget(),
                 receiver,
@@ -502,7 +643,11 @@ impl Resources {
             .push(message);
     }
 
-    /// Fetches and preprocesses `url` off the painter's thread.
+    /// Fetches and preprocesses `url` on the executor's blocking pool.
+    ///
+    /// The `JoinHandle` is the whole result path: it is a plain future, so
+    /// the caller awaits it on whatever executor it has and needs no ambient
+    /// runtime of its own.
     #[cfg(not(target_arch = "wasm32"))]
     async fn fetch(
         &self,
@@ -510,22 +655,22 @@ impl Resources {
         policy: bobcat_core::resource::CachePolicy,
         headers: http::HeaderMap,
     ) -> Result<(Fetched, preprocess::Preprocessed), error::Failure> {
-        let (sender, receiver) = flume::bounded(1);
         let shared = SharedHandle::clone(&self.shared);
-        self.shared.executor.run(move || {
-            let result = shared
-                .transports
-                .fetch_blocking(&url, policy, &headers)
-                .and_then(|fetched| preprocess_fetched(fetched, &url));
-            let _ = sender.send(result);
-        });
-        receiver.recv_async().await.unwrap_or_else(|_| {
-            Err(error::Failure::new(
-                bobcat_core::resource::ResourceErrorKind::Unavailable,
-                bobcat_core::resource::ResourceErrorPhase::Open,
-                "the resource worker went away before answering",
-            ))
-        })
+        self.executor
+            .blocking("fetch", move || {
+                shared
+                    .transports
+                    .fetch_blocking(&url, policy, &headers)
+                    .and_then(|fetched| preprocess_fetched(fetched, &url))
+            })
+            .await
+            .unwrap_or_else(|message| {
+                Err(error::Failure::new(
+                    bobcat_core::resource::ResourceErrorKind::Unavailable,
+                    bobcat_core::resource::ResourceErrorPhase::Open,
+                    message,
+                ))
+            })
     }
 
     /// Fetches and preprocesses `url` through the browser.

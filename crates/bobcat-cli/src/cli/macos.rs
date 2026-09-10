@@ -190,8 +190,9 @@ impl MacApplication {
         // built on this thread because `AppKit` allows it nowhere else — and
         // this is also the thread that will draw into it, for the same
         // reason.
-        // The resource system completes image loads on its own workers; each
-        // completion wakes the event loop the same way a commit does.
+        // The resource system completes image loads on its own runtime — a
+        // driver thread plus tokio's blocking pool; each completion wakes the
+        // event loop the same way a commit does.
         let resources = program.resources({
             let requester = Arc::clone(&self.event_requester);
             move || requester.request_event()

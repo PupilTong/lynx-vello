@@ -418,6 +418,85 @@ fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
     );
 }
 
+/// A file under the platform's temp directory, removed when it goes.
+struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    fn new(name: &str, bytes: &[u8]) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("bobcat-resources-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("write the temp file");
+        Self(path)
+    }
+
+    fn url(&self) -> url::Url {
+        url::Url::from_file_path(&self.0).expect("a file URL")
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A `file:`-backed image keeps no encoded bytes — the file is the tier that
+/// can hand them back — so an evicted one is re-fetched *and* re-decoded on
+/// the painter's thread, inside the read. This test's thread is inside
+/// another runtime's `block_on`, which the capture server's is too.
+#[tokio::test(flavor = "current_thread")]
+async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_inside_the_read() {
+    let file = TempFile::new("restore.png", &quadrant_png(64, 64));
+    let harness = Harness::new(Harness::quiet());
+    let source = file.url().to_string();
+    assert_eq!(harness.load(&source), (64, 64));
+    assert!(
+        harness.resources.memory_used_bytes() >= 64 * 64 * 4,
+        "the bitmap is resident"
+    );
+
+    // Nothing is pinned, so a zero budget evicts it; the file kept no bytes.
+    harness.view.retain(&[]);
+    harness.resources.set_memory_budget_bytes(0);
+    assert!(!harness.resources.is_resident(&source));
+    assert_eq!(
+        harness.resources.memory_used_bytes(),
+        0,
+        "a restorable image keeps no encoded bytes either"
+    );
+
+    let restored = harness
+        .view
+        .read(&source, ImageSizeHint::new(32, 32))
+        .expect("a reported load never misses");
+    assert_eq!((restored.width, restored.height), (32, 32));
+    assert_eq!(&restored.data.as_ref()[..4], &[255, 0, 0, 255]);
+    assert!(harness.resources.take_notes().is_empty());
+}
+
+/// The byte API's future is a `JoinHandle`: a plain future that needs no
+/// ambient runtime, so a caller with none of its own can drive it.
+#[test]
+fn the_byte_api_answers_under_pollster_on_a_thread_with_no_runtime() {
+    let file = TempFile::new("bytes.json", b"{\"ok\": true}");
+    let harness = Harness::new(ResourcesConfig {
+        request_timeout: Duration::from_secs(5),
+        ..Harness::quiet()
+    });
+
+    let response = pollster::block_on(fetch(&harness.view, file.url().as_str())).expect("fetch");
+    assert_eq!(&response.bytes[..], b"{\"ok\": true}");
+    assert_eq!(response.metadata.source, ResourceSource::FileSystem);
+
+    // A host nothing answers on: a failure, never a panic and never a hang.
+    let refused = pollster::block_on(fetch(&harness.view, "http://127.0.0.1:1/nothing"))
+        .expect_err("nothing listens on port 1");
+    assert!(
+        !refused.message.is_empty(),
+        "the failure says what went wrong: {refused:?}"
+    );
+}
+
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();

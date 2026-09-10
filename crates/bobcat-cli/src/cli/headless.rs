@@ -40,9 +40,9 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
     program.warn_about_compatibility_limits();
     let (sender, receiver) = flume::unbounded();
     let event_requester = std::sync::Arc::new(ChannelWakeup(sender.clone()));
-    // The resource system completes image loads on its own workers; each
-    // completion wakes this loop the same way a commit does, so the next turn
-    // reports it.
+    // The resource system completes image loads on its own runtime — a driver
+    // thread plus tokio's blocking pool; each completion wakes this loop the
+    // same way a commit does, so the next turn reports it.
     let resources = program.resources({
         let requester = std::sync::Arc::clone(&event_requester);
         move || requester.request_event()

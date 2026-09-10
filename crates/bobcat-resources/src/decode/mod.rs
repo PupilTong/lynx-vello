@@ -88,7 +88,9 @@ pub fn target_size(source_width: u32, source_height: u32, max: (u32, u32)) -> (u
 /// about the image, if it could be read — the size a decoder that scales
 /// during load needs before it has seen the pixels.
 ///
-/// Blocking; runs on an IO worker or, for a restore, on the painter.
+/// Blocking; runs on a thread of the fetcher's blocking pool, holding that
+/// job's decode permit, or — for a restore inside a read — on the painter's
+/// thread with no permit at all.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn decode(
     bytes: &[u8],
