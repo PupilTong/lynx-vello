@@ -1078,14 +1078,23 @@ useful signal for currently-compatible versions of those libraries.
 - `crates/bobcat-cli` (`server` feature) — the `bobcat-server` HTTP screenshot
   **embedder** in the same crate, not runtime
   infrastructure inside `bobcat-core`. It follows UI Judge's public capture
-  surface: `GET /health`, and `POST /screenshot` with required `url` and
-  `task`, camelCase fields plus the reference snake_case aliases, a 20 MiB +
-  64 KiB body bound, and raw `image/bmp` success output. Captures use a fixed
-  800×600 physical viewport at DPR 1 and uncompressed BMP output, source-over
-  composited onto white before encoding. Scoring-only fields are accepted and
-  ignored; non-empty `globalProps`, `initialData`, and interaction `steps` are
-  rejected with 422 instead of pretending the current opaque core has data
-  injection or DOM automation seams.
+  surface: `GET /health` and multipart `POST /screenshot/lynxml`,
+  `/screenshot/template`, `/screenshot/template/url`, `/screenshot/zip/upload`,
+  and `/screenshot/zip/url`. The old JSON `/screenshot` route is removed.
+  All routes require a safe `entry` path and route-specific `source`, `url`,
+  or `file` part. Viewports default to 800×600 at DPR 1, accept dimensions up
+  to 8192 with at most 2,621,440 pixels, and return raw `image/bmp` with
+  `Cache-Control: no-store`. BMP output matches UI Judge's top-down 32-bit
+  BITMAPV4HEADER/BI_BITFIELDS layout, preserving alpha without a second white
+  composite. Multipart fields share a 10 MiB bound plus 64 KiB framing and a
+  10-second upload deadline; remote URLs are bounded to 8 KiB.
+  `/screenshot/template` and `/screenshot/lynxml` accept `screenshotSettleMs`
+  (default 16) and `timeoutMs` (default 60000); the other routes use 500 ms
+  and 60000 ms and reject timing fields. JSON/query parameters, duplicate or
+  unknown fields, and old snake_case aliases are rejected. `initData` and
+  `globalProps` must be objects; `.lynxml` entries reject `globalProps` even
+  when empty. Non-empty page-data objects remain explicit 422 errors until
+  core delivers them to boot. See `crates/bobcat-cli/SERVER.md` for examples.
   Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
   jobs feeds one dedicated capture thread. That is the embedder thread for
   each job: it starts a fresh `LynxGroup`, constructs its non-`Send`
@@ -1101,21 +1110,21 @@ useful signal for currently-compatible versions of those libraries.
   BMP encoding then runs on Tokio's blocking pool after the view is gone, so
   it cannot retain the view or hold the GPU lane. Queue saturation and an
   unavailable worker are 503, input/render failures are 422, and encoding
-  failures are 500. A worker panic makes `/health` unavailable and initiates
+  failures are 500; capture/upload timeouts are 408. A worker panic makes `/health` unavailable and initiates
   graceful server shutdown.
-  The server loads the top-level `file://`, `http://`, or `https://` input,
-  delegates container mapping to `bobcat-source`, registers its extracted
-  scripts and stylesheet with a per-job `bobcat-resources` system, and lets
-  that system resolve, fetch, cache, and decode page subresources.
-  Source-based native bundles are accepted when they contain a `root` module;
-  real QuickJS/Lepus bytecode remains an explicit error.
-  It listens on all IPv4 and IPv6 interfaces like UI Judge and has no auth,
-  TLS, CORS, or URL sandbox, so its arbitrary file/network reads are suitable
-  only for a trusted environment, including only trusted page JavaScript:
-  `timeoutMs` cannot preempt synchronous QuickJS execution, a blocking GPU
-  driver call on the capture/embedder thread, or synchronous view teardown
-  while it joins the Lynx main thread. It must not move source fetching, HTTP
-  policy, BMP encoding, queueing, or server lifecycle into `bobcat-core`.
+  Remote template/ZIP downloads follow UI Judge's public HTTP(S), no-credentials,
+  no-redirect policy, pin DNS results, and enforce 10 MiB/10-second bounds.
+  XML bytes and downloaded templates enter `PageSource`; archives use the
+  shared `ZipSource`, registering members at `zip:///` URLs in each job's
+  resource system without filesystem extraction. ZIP validation errors are
+  400; unsupported source/rendering errors remain 422. Source-based native
+  bundles require a `root` module; real bytecode remains unsupported.
+  It listens on all IPv4 and IPv6 interfaces and has no auth, TLS, or CORS.
+  Captures still require trusted JavaScript: fresh groups on a capture thread
+  do not provide UI Judge's process isolation, and page subresources use the
+  ordinary resource transport. `timeoutMs` cannot preempt synchronous QuickJS
+  execution, GPU driver calls, or synchronous view teardown. Source fetching,
+  HTTP policy, BMP encoding, queueing, and server lifecycle stay outside core.
 - `crates/bobcat-wasm` — the pure-Rust `wasm-bindgen` browser embedder and npm
   facade, built for `wasm32-unknown-unknown` with shared memory. It exposes
   `loadTemplate` for binary web and source-based native bundles,

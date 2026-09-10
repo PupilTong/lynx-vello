@@ -6,25 +6,24 @@ use std::num::{NonZeroU16, ParseIntError};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde::Serialize;
+use serde_json::{Value, json};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use url::Url;
 
 use crate::server::capture::{
-    CaptureExecutor, CaptureFailure, CaptureQueueError, CaptureRequest, WorkerPanicked,
+    CaptureExecutor, CaptureFailure, CaptureInput, CaptureQueueError, CaptureRequest,
+    WorkerPanicked,
 };
 
-const DEFAULT_SCREENSHOT_SETTLE_MS: u64 = 16;
-const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_REQUEST_BYTES: usize = 20 * 1024 * 1024 + 64 * 1024;
 const TCP_BACKLOG: i32 = 1_024;
 
@@ -55,142 +54,21 @@ struct AppState {
     headless: Arc<CaptureExecutor>,
 }
 
-/// The UI Judge request shape is retained so an existing screenshot caller
-/// can target Bobcat. Scoring-only fields are parsed and ignored by this
-/// route; inputs that need runtime or `DevTools` support Bobcat does not yet
-/// expose are rejected explicitly rather than rendered with missing data.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HttpScreenshotRequest {
-    #[serde(default, alias = "global_props")]
-    global_props: Option<Value>,
-    #[serde(default, alias = "include_screenshot")]
-    include_screenshot: bool,
-    #[serde(default, alias = "initial_data")]
-    initial_data: Option<Value>,
-    #[serde(default, alias = "include_geqi")]
-    include_geqi: bool,
-    #[serde(default)]
-    reference: Option<String>,
-    #[serde(default, alias = "reference_image")]
-    reference_image: Option<String>,
-    #[serde(default, alias = "screenshot_settle_ms")]
-    screenshot_settle_ms: Option<u64>,
-    #[serde(default)]
-    steps: Vec<String>,
-    task: String,
-    #[serde(default, alias = "timeout_ms")]
-    timeout_ms: Option<u64>,
-    url: String,
-}
-
-impl HttpScreenshotRequest {
-    fn into_capture_request(self) -> Result<CaptureRequest, ApiError> {
-        let Self {
-            global_props,
-            include_screenshot,
-            initial_data,
-            include_geqi,
-            reference,
-            reference_image,
-            screenshot_settle_ms,
-            steps,
-            task,
-            timeout_ms,
-            url,
-        } = self;
-        drop((include_screenshot, include_geqi, reference, reference_image));
-
-        let timeout_ms = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
-        if timeout_ms == 0 {
-            return Err(ApiError::bad_request(
-                "timeoutMs must be greater than zero.",
-            ));
-        }
-
-        let global_props = page_data("globalProps", global_props)?;
-        let initial_data = page_data("initialData", initial_data)?;
-        if global_props.as_ref().is_some_and(|value| !value.is_empty()) {
-            return Err(ApiError::unprocessable(
-                "bobcat-server does not yet support non-empty globalProps.",
-            ));
-        }
-        if initial_data.as_ref().is_some_and(|value| !value.is_empty()) {
-            return Err(ApiError::unprocessable(
-                "bobcat-server does not yet support non-empty initialData.",
-            ));
-        }
-        if steps.iter().any(|step| !step.trim().is_empty()) {
-            return Err(ApiError::unprocessable(
-                "bobcat-server does not yet support screenshot interaction steps.",
-            ));
-        }
-
-        let url = url.trim();
-        if url.is_empty() {
-            return Err(ApiError::unprocessable(
-                "screenshot requires a non-empty URL.",
-            ));
-        }
-        if !["file://", "http://", "https://"]
-            .iter()
-            .any(|prefix| url.starts_with(prefix))
-        {
-            return Err(ApiError::unprocessable(
-                "screenshot URL must use file://, http://, or https://.",
-            ));
-        }
-        let url = Url::parse(url).map_err(|_| {
-            ApiError::unprocessable("screenshot URL must use file://, http://, or https://.")
-        })?;
-        if !matches!(url.scheme(), "file" | "http" | "https")
-            || (url.scheme() == "file" && url.to_file_path().is_err())
-        {
-            return Err(ApiError::unprocessable(
-                "screenshot URL must use file://, http://, or https://.",
-            ));
-        }
-        if task.trim().is_empty() {
-            return Err(ApiError::unprocessable(
-                "screenshot requires a non-empty task.",
-            ));
-        }
-
-        Ok(CaptureRequest {
-            screenshot_settle: Duration::from_millis(
-                screenshot_settle_ms.unwrap_or(DEFAULT_SCREENSHOT_SETTLE_MS),
-            ),
-            timeout: Duration::from_millis(timeout_ms),
-            url,
-        })
-    }
-}
-
-fn page_data(name: &str, value: Option<Value>) -> Result<Option<Map<String, Value>>, ApiError> {
-    match value {
-        Some(Value::Object(value)) => Ok(Some(value)),
-        Some(_) => Err(ApiError::bad_request(format!(
-            "{name} must be a JSON object."
-        ))),
-        None => Ok(None),
-    }
-}
-
 #[derive(Debug)]
-struct ApiError {
+pub(super) struct ApiError {
     message: String,
     status: StatusCode,
 }
 
 impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(super) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             status,
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(super) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
@@ -211,7 +89,16 @@ impl From<CaptureQueueError> for ApiError {
 
 impl From<CaptureFailure> for ApiError {
     fn from(error: CaptureFailure) -> Self {
-        Self::unprocessable(error.to_string())
+        let status = match &error {
+            CaptureFailure::Timeout { .. } => StatusCode::REQUEST_TIMEOUT,
+            CaptureFailure::Zip { source, .. }
+                if !matches!(source.as_ref(), bobcat_source::ZipSourceError::Page(_)) =>
+            {
+                StatusCode::BAD_REQUEST
+            }
+            _ => StatusCode::UNPROCESSABLE_ENTITY,
+        };
+        Self::new(status, error.to_string())
     }
 }
 
@@ -286,7 +173,11 @@ pub async fn serve(port: &str) -> Result<(), ServerError> {
 fn router(headless: Arc<CaptureExecutor>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/screenshot", post(screenshot))
+        .route("/screenshot/template", post(screenshot_template))
+        .route("/screenshot/lynxml", post(screenshot_lynxml))
+        .route("/screenshot/template/url", post(screenshot_template_url))
+        .route("/screenshot/zip/upload", post(screenshot_zip_upload))
+        .route("/screenshot/zip/url", post(screenshot_zip_url))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(AppState { headless })
 }
@@ -335,16 +226,140 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
     }
 }
 
-async fn screenshot(
+async fn screenshot_template(
     State(state): State<AppState>,
-    Json(request): Json<HttpScreenshotRequest>,
+    request: Request,
 ) -> Result<Response, ApiError> {
-    let request = request.into_capture_request()?;
+    screenshot_remote(state, request, true, false).await
+}
+
+async fn screenshot_template_url(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    screenshot_remote(state, request, false, false).await
+}
+
+async fn screenshot_zip_url(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    screenshot_remote(state, request, false, true).await
+}
+
+async fn screenshot_remote(
+    state: AppState,
+    request: Request,
+    page_options: bool,
+    zip: bool,
+) -> Result<Response, ApiError> {
+    let mut form = super::form::read(request, "url", page_options).await?;
+    if !zip && !form.entry.path.to_string_lossy().ends_with(".js") {
+        return Err(ApiError::bad_request(
+            "entry must identify a template.js file.",
+        ));
+    }
+    let url = std::str::from_utf8(&form.source)
+        .map_err(|_| ApiError::bad_request("The remote URL must be valid UTF-8."))?
+        .trim();
+    if url.is_empty() {
+        return Err(ApiError::bad_request("The remote URL must not be empty."));
+    }
+    form.source =
+        super::remote::fetch_http_resource(url, 10 * 1024 * 1024, Duration::from_secs(10))
+            .await
+            .map_err(|error| remote_fetch_api_error(&error))?
+            .bytes;
+    if !zip && form.source.is_empty() {
+        return Err(ApiError::unprocessable("The remote template is empty."));
+    }
+    capture_form(state, form, zip).await
+}
+
+async fn screenshot_lynxml(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let form = super::form::read(request, "source", true).await?;
+    if !form.entry.path.to_string_lossy().ends_with(".lynxml") {
+        return Err(ApiError::bad_request("entry must identify a .lynxml file."));
+    }
+    if form.source.is_empty() {
+        return Err(ApiError::bad_request("LynXML source must not be empty."));
+    }
+    if std::str::from_utf8(&form.source).is_err() {
+        return Err(ApiError::bad_request("LynXML source must be valid UTF-8."));
+    }
+    capture_form(state, form, false).await
+}
+
+async fn screenshot_zip_upload(
+    State(state): State<AppState>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let form = super::form::read(request, "file", false).await?;
+    capture_form(state, form, true).await
+}
+
+async fn capture_form(
+    state: AppState,
+    form: super::form::ScreenshotForm,
+    zip: bool,
+) -> Result<Response, ApiError> {
+    if zip && form.source.is_empty() {
+        return Err(ApiError::bad_request("ZIP upload must not be empty."));
+    }
+    // Core converts these values, but does not yet deliver them to page boot.
+    // Keep this limitation explicit until the runtime implements that seam.
+    for (name, value) in [
+        ("globalProps", &form.global_props),
+        ("initData", &form.init_data),
+    ] {
+        if value
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|object| !object.is_empty())
+        {
+            return Err(ApiError::unprocessable(format!(
+                "bobcat-server does not yet support non-empty {name}."
+            )));
+        }
+    }
+    let request = CaptureRequest {
+        url: Url::parse(&form.entry.url).expect("validated staged entry URL"),
+        width: u16::try_from(form.viewport.width).expect("viewport is bounded to 8192"),
+        height: u16::try_from(form.viewport.height).expect("viewport is bounded to 8192"),
+        screenshot_settle: form.screenshot_settle,
+        timeout: form.timeout,
+        input: if zip {
+            CaptureInput::Zip(form.source)
+        } else {
+            CaptureInput::Bytes(form.source)
+        },
+    };
     let screenshot = state.headless.capture(request).await??;
     let bmp = tokio::task::spawn_blocking(move || crate::server::bmp::encode(&screenshot))
         .await
         .map_err(|error| ApiError::internal(format!("BMP worker failed: {error}")))??;
-    Ok(([(CONTENT_TYPE, "image/bmp")], bmp).into_response())
+    Ok((
+        [(CONTENT_TYPE, "image/bmp"), (CACHE_CONTROL, "no-store")],
+        bmp,
+    )
+        .into_response())
+}
+
+fn remote_fetch_api_error(error: &super::remote::HttpFetchError) -> ApiError {
+    use super::remote::HttpFetchError;
+    let status = match error {
+        HttpFetchError::InvalidUrl | HttpFetchError::Credentials => StatusCode::BAD_REQUEST,
+        HttpFetchError::NonPublicAddress => StatusCode::FORBIDDEN,
+        HttpFetchError::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+        HttpFetchError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+        HttpFetchError::Resolution | HttpFetchError::Request | HttpFetchError::Status(_) => {
+            StatusCode::BAD_GATEWAY
+        }
+    };
+    ApiError::new(status, error.to_string())
 }
 
 async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
@@ -384,28 +399,12 @@ mod tests {
     use std::sync::{MutexGuard, PoisonError};
 
     use axum::body::{Body, to_bytes};
-    use axum::http::{Method, Request};
+    use axum::http::Method;
     use bobcat_core::{FrameSize, Screenshot};
     use tower::ServiceExt;
 
     use super::*;
     use crate::server::capture::CaptureJob;
-
-    fn http_request(url: &str) -> HttpScreenshotRequest {
-        HttpScreenshotRequest {
-            global_props: None,
-            include_screenshot: false,
-            initial_data: None,
-            include_geqi: false,
-            reference: None,
-            reference_image: None,
-            screenshot_settle_ms: None,
-            steps: Vec::new(),
-            task: "Render the page".to_owned(),
-            timeout_ms: None,
-            url: url.to_owned(),
-        }
-    }
 
     fn scripted_executor(screenshot: Screenshot) -> Arc<CaptureExecutor> {
         Arc::new(
@@ -424,192 +423,296 @@ mod tests {
         )
     }
 
-    #[test]
-    fn defaults_match_the_ui_judge_screenshot_contract() {
-        let request = http_request("file:///tmp/card.web.bundle")
-            .into_capture_request()
-            .expect("valid request");
-        assert_eq!(request.screenshot_settle, Duration::from_millis(16));
-        assert_eq!(request.timeout, Duration::from_mins(1));
-    }
-
-    #[test]
-    fn accepts_snake_case_aliases_and_empty_page_data() {
-        let request = serde_json::from_value::<HttpScreenshotRequest>(json!({
-            "global_props": {},
-            "initial_data": {},
-            "include_screenshot": true,
-            "include_geqi": true,
-            "reference_image": null,
-            "screenshot_settle_ms": 0,
-            "task": "Capture",
-            "timeout_ms": 1,
-            "url": "https://example.test/card.web.bundle"
-        }))
-        .expect("deserialize aliases")
-        .into_capture_request()
-        .expect("empty page data need no unsupported runtime feature");
-        assert!(request.screenshot_settle.is_zero());
-        assert_eq!(request.timeout, Duration::from_millis(1));
-    }
-
-    #[test]
-    fn rejects_unsupported_runtime_inputs_explicitly() {
-        let mut with_data = http_request("file:///tmp/card.web.bundle");
-        with_data.initial_data = Some(json!({ "message": "hello" }));
-        assert_eq!(
-            with_data
-                .into_capture_request()
-                .expect_err("initial data is not wired")
-                .status,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-
-        let mut with_steps = http_request("file:///tmp/card.web.bundle");
-        with_steps.steps = vec!["Tap Save".to_owned()];
-        assert_eq!(
-            with_steps
-                .into_capture_request()
-                .expect_err("DOM automation is not exposed")
-                .status,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_request_values_with_reference_statuses() {
-        let mut zero_timeout = http_request("file:///tmp/card.web.bundle");
-        zero_timeout.timeout_ms = Some(0);
-        assert_eq!(
-            zero_timeout
-                .into_capture_request()
-                .expect_err("zero timeout")
-                .status,
-            StatusCode::BAD_REQUEST
-        );
-
-        let mut invalid_data = http_request("file:///tmp/card.web.bundle");
-        invalid_data.global_props = Some(json!([]));
-        assert_eq!(
-            invalid_data
-                .into_capture_request()
-                .expect_err("page data must be an object")
-                .status,
-            StatusCode::BAD_REQUEST
-        );
-
-        let invalid_url = http_request("card.web.bundle");
-        assert_eq!(
-            invalid_url
-                .into_capture_request()
-                .expect_err("bare paths are rejected")
-                .status,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-
-        let uppercase_scheme = http_request("HTTP://example.test/card.web.bundle");
-        assert_eq!(
-            uppercase_scheme
-                .into_capture_request()
-                .expect_err("schemes are case-sensitive in UI Judge")
-                .status,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-    }
+    use crate::server::form::tests::multipart_request;
 
     #[tokio::test]
-    async fn screenshot_returns_raw_bmp() {
+    async fn screenshot_returns_bmp_bytes_and_reference_headers() {
         let frame = Screenshot {
             size: FrameSize {
-                width: 8,
-                height: 8,
+                width: 2,
+                height: 2,
             },
-            pixels: [20, 40, 60, 255].repeat(64),
+            pixels: [20, 40, 60, 128].repeat(4),
         };
-        let bmp = crate::server::bmp::encode(&frame).expect("encode expected BMP");
+        let expected = crate::server::bmp::encode(&frame).unwrap();
         let headless = scripted_executor(frame);
-        let response = router(Arc::clone(&headless))
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/screenshot")
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        json!({
-                            "task": "Render the page",
-                            "url": "file:///tmp/card.web.bundle"
-                        })
-                        .to_string(),
-                    ))
-                    .expect("valid HTTP request"),
-            )
-            .await
-            .expect("route screenshot response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CONTENT_TYPE], "image/bmp");
-        let body = to_bytes(response.into_body(), bmp.len() + 1)
-            .await
-            .expect("read response");
-        assert_eq!(body.as_ref(), bmp);
-        headless.shutdown().expect("stop worker");
+        for (path, source_name, entry, source) in [
+            (
+                "/screenshot/lynxml",
+                "source",
+                "pages/index.lynxml",
+                b"<lynx/>".as_slice(),
+            ),
+            (
+                "/screenshot/zip/upload",
+                "file",
+                "index.lynxml",
+                b"zip".as_slice(),
+            ),
+        ] {
+            let response = router(Arc::clone(&headless))
+                .oneshot(multipart_request(
+                    path,
+                    &[
+                        ("entry", entry.as_bytes()),
+                        (source_name, source),
+                        ("width", b"2"),
+                        ("height", b"2"),
+                    ],
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[CONTENT_TYPE], "image/bmp");
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            assert_eq!(
+                response.headers()[axum::http::header::CONTENT_LENGTH],
+                expected.len().to_string()
+            );
+            let body = to_bytes(response.into_body(), expected.len())
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), expected);
+        }
+        headless.shutdown().unwrap();
     }
 
     #[tokio::test]
-    async fn screenshot_keeps_axums_json_extractor_statuses() {
+    async fn multipart_options_and_owned_source_reach_the_capture_worker() {
+        let (observed, requests) = std::sync::mpsc::channel();
+        let headless = Arc::new(
+            CaptureExecutor::with_worker_main(move |jobs| {
+                loop {
+                    let job = jobs.lock().unwrap().recv();
+                    let Ok(job) = job else { return };
+                    observed.send(job.request.clone()).unwrap();
+                    let _ = job.response.send(Ok(Screenshot {
+                        size: FrameSize {
+                            width: 1,
+                            height: 1,
+                        },
+                        pixels: vec![1, 2, 3, 4],
+                    }));
+                }
+            })
+            .unwrap(),
+        );
+        let source = b"<lynx/>";
+        let response = router(Arc::clone(&headless))
+            .oneshot(multipart_request(
+                "/screenshot/lynxml",
+                &[
+                    ("source", source),
+                    ("timeoutMs", b"2345"),
+                    ("screenshotSettleMs", b"0"),
+                    ("entry", b"zip:///pages/index.lynxml"),
+                    ("width", b"375"),
+                    ("height", b"812"),
+                    ("initData", b"{}"),
+                ],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let request = requests.try_recv().unwrap();
+        assert_eq!(request.url.as_str(), "zip:///pages/index.lynxml");
+        assert_eq!((request.width, request.height), (375, 812));
+        assert_eq!(request.timeout, Duration::from_millis(2345));
+        assert!(request.screenshot_settle.is_zero());
+        assert!(matches!(request.input, CaptureInput::Bytes(bytes) if bytes == source));
+        headless.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn old_route_json_queries_and_invalid_sources_are_rejected() {
         let headless = scripted_executor(Screenshot {
             size: FrameSize {
                 width: 1,
                 height: 1,
             },
-            pixels: vec![0, 0, 0, 0],
+            pixels: vec![0; 4],
         });
         let app = router(Arc::clone(&headless));
-
-        let missing_content_type = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/screenshot")
-                    .body(Body::from(r#"{"task":"capture","url":"file:///tmp/card"}"#))
-                    .expect("valid HTTP request"),
-            )
-            .await
-            .expect("route response");
-        assert_eq!(
-            missing_content_type.status(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE
-        );
-
-        let malformed_json = app
+        let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/screenshot")
                     .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from("{"))
-                    .expect("valid HTTP request"),
+                    .body(Body::from(r#"{"url":"file:///tmp/card","task":"capture"}"#))
+                    .unwrap(),
             )
             .await
-            .expect("route response");
-        assert_eq!(malformed_json.status(), StatusCode::BAD_REQUEST);
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        for path in [
+            "/screenshot/lynxml",
+            "/screenshot/template",
+            "/screenshot/template/url",
+            "/screenshot/zip/upload",
+            "/screenshot/zip/url",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(path)
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{path}"
+            );
+        }
+        for (path, fields, status) in [
+            (
+                "/screenshot/lynxml?width=1",
+                vec![
+                    ("entry", b"index.lynxml".as_slice()),
+                    ("source", b"<lynx/>"),
+                ],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/screenshot/lynxml",
+                vec![("entry", b"index.js".as_slice()), ("source", b"<lynx/>")],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/screenshot/lynxml",
+                vec![("entry", b"index.lynxml".as_slice()), ("source", b"")],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/screenshot/lynxml",
+                vec![("entry", b"index.lynxml".as_slice()), ("source", b"\xff")],
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/screenshot/lynxml",
+                vec![
+                    ("entry", b"index.lynxml".as_slice()),
+                    ("source", b"<lynx/>"),
+                    ("initData", br#"{"ready":true}"#),
+                ],
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "/screenshot/zip/upload",
+                vec![("entry", b"index.lynxml".as_slice()), ("file", b"")],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(multipart_request(path, &fields))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{path}");
+            assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert!(error["error"]["message"].is_string());
+        }
+        headless.shutdown().unwrap();
+    }
 
-        let missing_field = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/screenshot")
-                    .header(CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"url":"file:///tmp/card"}"#))
-                    .expect("valid HTTP request"),
+    #[tokio::test]
+    async fn remote_routes_share_url_validation() {
+        let headless = scripted_executor(Screenshot {
+            size: FrameSize {
+                width: 1,
+                height: 1,
+            },
+            pixels: vec![0; 4],
+        });
+        for path in [
+            "/screenshot/template",
+            "/screenshot/template/url",
+            "/screenshot/zip/url",
+        ] {
+            for (url, status) in [
+                ("file:///tmp/private", StatusCode::BAD_REQUEST),
+                (
+                    "https://user:secret@example.com/private",
+                    StatusCode::BAD_REQUEST,
+                ),
+                ("http://127.0.0.1/private", StatusCode::FORBIDDEN),
+                ("HTTP://[::1]/private", StatusCode::FORBIDDEN),
+            ] {
+                let response = router(Arc::clone(&headless))
+                    .oneshot(multipart_request(
+                        path,
+                        &[("entry", b"template.js"), ("url", url.as_bytes())],
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status, "{path}: {url}");
+            }
+        }
+        headless.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_multipart_xml_and_zip_captures_use_the_requested_viewport() {
+        use std::io::{Cursor, Write};
+        let headless = Arc::new(CaptureExecutor::new().unwrap());
+        let xml = br#"<lynx engine-version="4.2">
+          <script thread="main">
+            globalThis.renderPage = function () {
+              const page = __CreatePage('0', 0);
+              const view = __CreateView(0);
+              __SetInlineStyles(view, 'width:100%;height:100%;background-color:#00ff00');
+              __AppendElement(page, view);
+              __FlushElementTree(page);
+            };
+          </script>
+        </lynx>"#;
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        archive
+            .start_file(
+                "pages/index.lynxml",
+                zip::write::SimpleFileOptions::default(),
             )
-            .await
-            .expect("route response");
-        assert_eq!(missing_field.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        headless.shutdown().expect("stop worker");
+            .unwrap();
+        archive.write_all(xml).unwrap();
+        let archive = archive.finish().unwrap().into_inner();
+        for (path, source_name, source) in [
+            ("/screenshot/lynxml", "source", xml.as_slice()),
+            ("/screenshot/zip/upload", "file", archive.as_slice()),
+        ] {
+            let response = router(Arc::clone(&headless))
+                .oneshot(multipart_request(
+                    path,
+                    &[
+                        ("entry", b"pages/index.lynxml"),
+                        (source_name, source),
+                        ("width", b"37"),
+                        ("height", b"23"),
+                    ],
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{path}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            assert_eq!(image.dimensions(), (37, 23));
+            assert_eq!(image.get_pixel(18, 11).0, [0, 255, 0, 255]);
+        }
+        headless.shutdown().unwrap();
     }
 
     #[tokio::test]

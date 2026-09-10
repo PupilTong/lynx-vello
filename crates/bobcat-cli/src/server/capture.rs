@@ -19,8 +19,7 @@ use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, Screenshot, StyleThreads,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use bobcat_source::PageSource;
-use reqwest::Client;
+use bobcat_source::{PageSource, ZipSource};
 use tokio::sync::oneshot;
 use url::Url;
 
@@ -35,12 +34,19 @@ impl EventRequester for CaptureWakeup {
 
 const MAX_QUEUED_CAPTURES: usize = 8;
 const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
-const VIEWPORT_WIDTH: f32 = 800.0;
-const VIEWPORT_HEIGHT: f32 = 600.0;
 const DEVICE_PIXEL_RATIO: f32 = 1.0;
 
 #[derive(Clone, Debug)]
+pub(crate) enum CaptureInput {
+    Bytes(Vec<u8>),
+    Zip(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct CaptureRequest {
+    pub(crate) input: CaptureInput,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
     pub(crate) screenshot_settle: Duration,
     pub(crate) timeout: Duration,
     pub(crate) url: Url,
@@ -53,28 +59,17 @@ pub(crate) enum CaptureFailure {
         operation: &'static str,
         timeout_ms: u128,
     },
-    #[error("could not read input `{url}`: {source}")]
-    ReadFile {
-        url: Url,
-        #[source]
-        source: io::Error,
-    },
-    #[error("could not fetch input `{url}`: {source}")]
-    Fetch {
-        url: Url,
-        #[source]
-        source: reqwest::Error,
-    },
-    #[error("could not fetch input `{url}`: HTTP {status}")]
-    HttpStatus {
-        url: Url,
-        status: reqwest::StatusCode,
-    },
     #[error("could not load input `{url}`: {source}")]
     Source {
         url: Url,
         #[source]
         source: Box<bobcat_source::SourceError>,
+    },
+    #[error("could not load ZIP input `{url}`: {source}")]
+    Zip {
+        url: Url,
+        #[source]
+        source: Box<bobcat_source::ZipSourceError>,
     },
     #[error("could not start input `{url}`: {source}")]
     StartView {
@@ -120,12 +115,6 @@ pub(crate) struct WorkerPanicked;
 pub(crate) struct CaptureJob {
     pub(crate) request: CaptureRequest,
     pub(crate) response: oneshot::Sender<Result<Screenshot, CaptureFailure>>,
-}
-
-#[derive(Debug)]
-struct LoadedInput {
-    bytes: Vec<u8>,
-    url: Url,
 }
 
 /// One owner thread behind a bounded FIFO. Bobcat itself has no native Lynx
@@ -301,7 +290,7 @@ fn run_capture_worker(jobs: &Mutex<Receiver<CaptureJob>>) {
         .enable_all()
         .build()
         .expect("the Bobcat capture runtime must initialize");
-    let client = Client::new();
+
     loop {
         let job = {
             let jobs = jobs.lock().unwrap_or_else(PoisonError::into_inner);
@@ -311,25 +300,41 @@ fn run_capture_worker(jobs: &Mutex<Receiver<CaptureJob>>) {
         if job.response.is_closed() {
             continue;
         }
-        let result = runtime.block_on(capture_page(&client, &job.request));
+        let result = runtime.block_on(capture_page(&job.request));
         let _ = job.response.send(result);
     }
 }
 
-async fn capture_page(
-    client: &Client,
+fn prepare_source(
     request: &CaptureRequest,
-) -> Result<Screenshot, CaptureFailure> {
-    let loaded = tokio::time::timeout(request.timeout, load_input(client, &request.url))
-        .await
-        .map_err(|_| CaptureFailure::timeout("input load", request.timeout))??;
-    let page = PageSource::from_bytes(&loaded.url, &loaded.bytes).map_err(|source| {
-        CaptureFailure::Source {
-            url: loaded.url.clone(),
-            source: Box::new(source),
+) -> Result<(PageSource, Option<ZipSource>), CaptureFailure> {
+    let mut archive = None;
+    let page = match &request.input {
+        CaptureInput::Bytes(bytes) => PageSource::from_bytes(&request.url, bytes),
+        CaptureInput::Zip(bytes) => {
+            let zip = ZipSource::from_bytes(bytes).map_err(|source| CaptureFailure::Zip {
+                url: request.url.clone(),
+                source: Box::new(source),
+            })?;
+            let page = zip
+                .page(&request.url)
+                .map_err(|source| CaptureFailure::Zip {
+                    url: request.url.clone(),
+                    source: Box::new(source),
+                })?;
+            archive = Some(zip);
+            Ok(page)
         }
+    }
+    .map_err(|source| CaptureFailure::Source {
+        url: request.url.clone(),
+        source: Box::new(source),
     })?;
-    drop(loaded.bytes);
+    Ok((page, archive))
+}
+
+async fn capture_page(request: &CaptureRequest) -> Result<Screenshot, CaptureFailure> {
+    let (page, archive) = prepare_source(request)?;
     for warning in page.compatibility_warnings() {
         eprintln!("bobcat-server: warning: {warning}");
     }
@@ -338,6 +343,14 @@ async fn capture_page(
         let wakeup = Arc::clone(&wakeup);
         move || wakeup.request_event()
     });
+    if let Some(archive) = archive {
+        archive
+            .register_with(&resources, &request.url)
+            .map_err(|source| CaptureFailure::Zip {
+                url: request.url.clone(),
+                source: Box::new(source),
+            })?;
+    }
     page.register_with(&resources);
     for note in resources.take_notes() {
         eprintln!("bobcat-server: warning: {note}");
@@ -351,16 +364,16 @@ async fn capture_page(
         // job's group alive until capture finishes and the view drops.
         let group = LynxGroup::new(Arc::clone(&wakeup), StyleThreads::Auto).await?;
         let view = group.create_lynx_view(
-            VIEWPORT_WIDTH,
-            VIEWPORT_HEIGHT,
+            f32::from(request.width),
+            f32::from(request.height),
             DEVICE_PIXEL_RATIO,
             resources.builder(),
             sources,
         )?;
         let mut painter = Painter::new(
             DrawTarget::Offscreen,
-            VIEWPORT_WIDTH,
-            VIEWPORT_HEIGHT,
+            f32::from(request.width),
+            f32::from(request.height),
             DEVICE_PIXEL_RATIO,
         )
         .await?;
@@ -418,58 +431,6 @@ fn resources_config(page: &PageSource, timeout: Duration) -> ResourcesConfig {
         base_url: Some(page.input_url().clone()),
         request_timeout: timeout,
         ..ResourcesConfig::default()
-    }
-}
-
-async fn load_input(client: &Client, url: &Url) -> Result<LoadedInput, CaptureFailure> {
-    match url.scheme() {
-        "file" => {
-            let path = url.to_file_path().map_err(|()| CaptureFailure::ReadFile {
-                url: url.clone(),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "invalid local file URL"),
-            })?;
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|source| CaptureFailure::ReadFile {
-                    url: url.clone(),
-                    source,
-                })?;
-            Ok(LoadedInput {
-                bytes,
-                url: url.clone(),
-            })
-        }
-        "http" | "https" => {
-            let response =
-                client
-                    .get(url.clone())
-                    .send()
-                    .await
-                    .map_err(|source| CaptureFailure::Fetch {
-                        url: url.clone(),
-                        source,
-                    })?;
-            let effective_url = response.url().clone();
-            if !response.status().is_success() {
-                return Err(CaptureFailure::HttpStatus {
-                    url: effective_url,
-                    status: response.status(),
-                });
-            }
-            let bytes = response
-                .bytes()
-                .await
-                .map(|bytes| bytes.to_vec())
-                .map_err(|source| CaptureFailure::Fetch {
-                    url: effective_url.clone(),
-                    source,
-                })?;
-            Ok(LoadedInput {
-                bytes,
-                url: effective_url,
-            })
-        }
-        _ => unreachable!("the HTTP boundary validates supported URL schemes"),
     }
 }
 
@@ -535,8 +496,6 @@ fn check_events(view: &mut LynxView<ViewResources>, url: &Url) -> Result<bool, C
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::path::Path;
     use std::sync::mpsc::Sender;
 
@@ -577,60 +536,13 @@ mod tests {
 
     fn request() -> CaptureRequest {
         CaptureRequest {
+            input: CaptureInput::Bytes(Vec::new()),
+            width: 800,
+            height: 600,
             screenshot_settle: Duration::ZERO,
             timeout: Duration::from_secs(1),
             url: Url::parse("file:///tmp/card.web.bundle").unwrap(),
         }
-    }
-
-    #[tokio::test]
-    async fn a_redirected_input_uses_its_final_url_as_the_resource_base() {
-        const PAGE: &[u8] =
-            b"<lynx engine-version=\"4.2\"><script thread=\"main\">export {};</script></lynx>";
-
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redirect fixture");
-        let address = listener.local_addr().expect("fixture address");
-        let server = thread::spawn(move || {
-            for (path, response) in [
-                (
-                    "/old/card.lynx.xml",
-                    "HTTP/1.1 302 Found\r\nLocation: /new/card.lynx.xml\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
-                ),
-                (
-                    "/new/card.lynx.xml",
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        PAGE.len(),
-                        std::str::from_utf8(PAGE).expect("ASCII page fixture")
-                    ),
-                ),
-            ] {
-                let (mut stream, _) = listener.accept().expect("accept fixture request");
-                let mut request = [0_u8; 2048];
-                let count = stream.read(&mut request).expect("read fixture request");
-                let request = std::str::from_utf8(&request[..count]).expect("HTTP is ASCII");
-                assert!(
-                    request.starts_with(&format!("GET {path} HTTP/1.1")),
-                    "unexpected request: {request}"
-                );
-                stream
-                    .write_all(response.as_bytes())
-                    .expect("write fixture response");
-            }
-        });
-
-        let original =
-            Url::parse(&format!("http://{address}/old/card.lynx.xml")).expect("fixture URL");
-        let loaded = load_input(&Client::new(), &original)
-            .await
-            .expect("follow redirect");
-        assert_eq!(loaded.url.path(), "/new/card.lynx.xml");
-        let page = PageSource::from_bytes(&loaded.url, &loaded.bytes).expect("decode final page");
-        assert_eq!(
-            resources_config(&page, Duration::from_secs(1)).base_url,
-            Some(loaded.url)
-        );
-        server.join().expect("redirect fixture stays healthy");
     }
 
     #[test]
@@ -689,6 +601,9 @@ mod tests {
         let executor = CaptureExecutor::new().expect("start capture owner thread");
         let result = executor
             .capture(CaptureRequest {
+                input: CaptureInput::Bytes(std::fs::read(&path).expect("read fixture")),
+                width: 800,
+                height: 600,
                 screenshot_settle: Duration::ZERO,
                 timeout: Duration::from_secs(30),
                 url,

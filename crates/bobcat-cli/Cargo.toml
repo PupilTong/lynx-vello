@@ -11,7 +11,7 @@ publish = false
 [features]
 default = ["cli", "server"]
 cli = ["dep:flume", "dep:png", "dep:pollster", "dep:winit"]
-server = ["dep:axum", "dep:image", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:socket2", "dep:tokio"]
+server = ["dep:axum", "dep:reqwest", "dep:serde", "dep:serde_json", "dep:socket2", "dep:tokio"]
 
 [[bin]]
 name = "bobcat"
@@ -36,8 +36,7 @@ url = { workspace = true }
 flume = { workspace = true, optional = true }
 png = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
-axum = { workspace = true, optional = true }
-image = { workspace = true, features = ["bmp"], optional = true }
+axum = { workspace = true, features = ["multipart"], optional = true }
 reqwest = { workspace = true, features = ["rustls"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -48,6 +47,8 @@ tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"
 winit = { workspace = true, optional = true }
 
 [dev-dependencies]
+image = { workspace = true, features = ["bmp"] }
+zip = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 rkyv = { workspace = true }
 tower = { workspace = true, features = ["util"] }
