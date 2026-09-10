@@ -19,7 +19,7 @@ use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
 use crate::link::{DetachedView, ViewNotice, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::runtime::install_shared_modules;
-use crate::main::tree::{PageConfig, Viewport, new_document};
+use crate::main::tree::PageConfig;
 use crate::resource::{SourceCompletion, SourceRequest};
 use crate::view::NoWakeup;
 
@@ -54,9 +54,8 @@ fn group() -> (Rc<GroupContext>, mpsc::UnboundedReceiver<WorkerCommand>) {
     (Rc::new(context), commands)
 }
 
-/// The document a page is built over, at the viewport the harness uses.
-fn document() -> LynxDocument {
-    new_document(Viewport::new(320.0, 240.0), PageConfig::default())
+fn ingredients() -> DocumentIngredients {
+    DocumentIngredients::for_test(Viewport::new(320.0, 240.0), PageConfig::default())
 }
 
 /// One view served by the real owner, with the test on the host's end of its
@@ -376,7 +375,7 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
     on_a_local_set(async {
         let (context, _workers) = group();
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
-        let (page, _ended) = Page::new(Rc::clone(&context), outbox, document());
+        let (page, _ended) = Page::new(Rc::clone(&context), outbox, ingredients());
         page.open_realm(ONE_BOX, "app:///main.js", None, None, None);
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
@@ -422,7 +421,7 @@ fn a_pages_own_entries_never_wake_its_checkpoint_follower() {
     on_a_local_set(async {
         let (context, _workers) = group();
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
-        let (page, _ended) = Page::new(Rc::clone(&context), outbox, document());
+        let (page, _ended) = Page::new(Rc::clone(&context), outbox, ingredients());
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
         page.open_realm(LISTENING_BOX, "app:///main.js", None, None, None);

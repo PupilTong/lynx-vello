@@ -74,15 +74,14 @@ use tokio::sync::{mpsc, watch};
 use tokio::task;
 
 use super::quickjs::ScriptRuntime;
-use super::runtime::MainThreadRuntime;
-use super::tree::LynxDocument;
-use super::{AttachedView, GroupContext, new_view_document};
+use super::runtime::{DocumentIngredients, MainThreadRuntime};
+use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 use crate::clock::ClockInstant;
 use crate::link::{CancelOnExit, SourceAnswer, ToMain, ViewOutbox};
-use crate::resource::{LoadedSource, SourceRequest, StyleSheetSource, unanswered_source};
+use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::{panic_message, platform_script_error};
-use crate::view::{EngineEvent, LynxViewError, MainSources};
+use crate::view::{EngineEvent, LynxViewError, MainSources, Viewport};
 
 /// What the page is, which is the only thing that decides what a command can
 /// do to it.
@@ -92,11 +91,10 @@ use crate::view::{EngineEvent, LynxViewError, MainSources};
 /// of its life, so carrying the larger of the two inline would cost every
 /// page the whole of the other.
 enum Realm {
-    /// The document this view will run on, built and being prepared: its
-    /// author sheets are mounted on it as they arrive, and the two commands
-    /// that describe a document apply to it while the rest have nowhere to
-    /// go.
-    Loading(Box<LynxDocument>),
+    /// No realm and no document yet: the boot module has not run, so the two
+    /// commands that describe a document write into the ingredients it will
+    /// be built from and the rest have nowhere to go.
+    Loading(Box<DocumentIngredients>),
     Live(Box<MainThreadRuntime>),
     /// The realm could not be opened, or the view is over and the owner has
     /// reclaimed it. A terminal state, so every entry point is total.
@@ -176,13 +174,13 @@ impl Page {
     fn new(
         context: Rc<GroupContext>,
         outbox: ViewOutbox,
-        document: LynxDocument,
+        ingredients: DocumentIngredients,
     ) -> (Rc<Self>, mpsc::UnboundedReceiver<End>) {
         let (end, ended) = mpsc::unbounded_channel();
         let page = Self {
             context,
             outbox,
-            realm: RefCell::new(Realm::Loading(Box::new(document))),
+            realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
             own_checkpoint: Cell::new(0),
@@ -367,10 +365,10 @@ impl Page {
     /// acknowledgement.
     ///
     /// Total over every state a page can be in. A live page takes the whole
-    /// burst inside one [`Self::enter`]; a loading one applies what it can to
-    /// the document it is preparing; a page that has ended drops the burst,
-    /// `BeginFrame` included, because the end has already acknowledged the
-    /// pending one.
+    /// burst inside one [`Self::enter`]; a loading one writes what it can
+    /// into the ingredients its document will be built from; a page that has
+    /// ended drops the burst, `BeginFrame` included, because the end has
+    /// already acknowledged the pending one.
     fn apply(self: &Rc<Self>, commands: impl Iterator<Item = ToMain>) {
         if self.ended() {
             return;
@@ -427,19 +425,19 @@ impl Page {
         }
     }
 
-    /// Serves a burst that arrived while the document was still being
-    /// prepared, before the realm opened.
+    /// Serves a burst that arrived before the boot module created a document.
     ///
     /// What a command can do here is narrow: the two that describe the
-    /// document apply to it, a `BeginFrame` is acknowledged at once so an
-    /// offscreen host is never blocked by a load, and nothing else has
-    /// anywhere to go — no realm exists to route a dispatch to, and nothing
-    /// that arrived now would still be true by the time one did.
+    /// document write into the ingredients it will be built from, a
+    /// `BeginFrame` is acknowledged at once so an offscreen host is never
+    /// blocked by a load, and nothing else has anywhere to go. Dropping a
+    /// `Probe` drops the sender it captured, which answers the probing test
+    /// `None` rather than leaving it to wait out its deadline.
     fn stage(&self, commands: impl Iterator<Item = ToMain>) {
         let mut acknowledged: Option<u64> = None;
         {
             let mut realm = self.realm.borrow_mut();
-            let Realm::Loading(document) = &mut *realm else {
+            let Realm::Loading(ingredients) = &mut *realm else {
                 return;
             };
             for command in commands {
@@ -449,16 +447,19 @@ impl Page {
                         height,
                         device_pixel_ratio,
                     } => {
-                        document.set_viewport(width, height);
-                        document.set_device_pixel_ratio(device_pixel_ratio);
+                        ingredients.viewport = Viewport::new(width, height)
+                            .with_device_pixel_ratio(device_pixel_ratio);
                     }
-                    ToMain::ImageEvents(events) => document.apply_image_events(&events),
+                    // Kept rather than applied: a report is about a source
+                    // some later frame will want, and the document that would
+                    // record it does not exist yet.
+                    ToMain::ImageEvents(events) => ingredients.pending_image_events.extend(events),
                     ToMain::BeginFrame { seq, .. } => {
                         acknowledged = Some(seq.max(acknowledged.unwrap_or(0)));
                     }
                     ToMain::DispatchEvent { .. } | ToMain::Refill { .. } => {}
                     #[cfg(test)]
-                    ToMain::Probe(probe) => probe(document),
+                    ToMain::Probe(_) => {}
                 }
             }
         }
@@ -467,20 +468,14 @@ impl Page {
         }
     }
 
-    /// Mounts one author sheet on the document being prepared, in cascade
-    /// order. `false` is a page that is no longer loading, which has already
-    /// ended.
-    fn mount_sheet(&self, sheet: StyleSheetSource) -> bool {
+    /// Stages one author sheet, in cascade order. `false` is a page that is
+    /// no longer loading, which has already ended.
+    fn stage_sheet(&self, sheet: crate::resource::StyleSheetSource) -> bool {
         let mut realm = self.realm.borrow_mut();
-        let Realm::Loading(document) = &mut *realm else {
+        let Realm::Loading(ingredients) = &mut *realm else {
             return false;
         };
-        match sheet {
-            StyleSheetSource::Preparsed(sheet) => {
-                crate::style::add_preparsed_style_sheet(document, &sheet);
-            }
-            StyleSheetSource::Text(css) => crate::style::add_style_sheet_text(document, &css),
-        }
+        ingredients.sheets.push(sheet);
         true
     }
 
@@ -503,8 +498,8 @@ impl Page {
         background_entry: Option<String>,
     ) {
         // A view that has already ended builds no realm and runs no entry:
-        // its tasks are about to be reclaimed, and the document it prepared
-        // goes with the page rather than into a realm nobody will ever see.
+        // its tasks are about to be reclaimed, and the ingredients go with the
+        // page rather than into a document nobody will ever see.
         if self.ended() {
             *self.realm.borrow_mut() = Realm::Gone;
             return;
@@ -513,12 +508,12 @@ impl Page {
             let js = &mut *self.context.js.borrow_mut();
             let mut realm = self.realm.borrow_mut();
             // Out of `Loading` before any failure path can report: the
-            // document is spent either way, and a page whose realm could not
-            // be opened is over.
-            let Realm::Loading(document) = std::mem::replace(&mut *realm, Realm::Gone) else {
+            // ingredients are spent either way, and a page whose realm could
+            // not be opened is over.
+            let Realm::Loading(ingredients) = std::mem::replace(&mut *realm, Realm::Gone) else {
                 return None;
             };
-            let mut runtime = match MainThreadRuntime::new(js, *document, self.outbox.clone()) {
+            let mut runtime = match MainThreadRuntime::new(js, *ingredients, self.outbox.clone()) {
                 Ok(runtime) => runtime,
                 Err(error) => return Some(Err(error.into_script_error().into())),
             };
@@ -674,23 +669,24 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         init_data,
         global_props,
     } = sources;
-    // The document first, because a view whose containers cannot serve the
-    // family it named will never render and there is nothing worth fetching
-    // for it.
-    let document = match new_view_document(
-        viewport,
-        config,
-        fonts,
-        default_font_family,
-        context.style_pool.as_ref(),
-    ) {
-        Ok(document) => document,
+    // The fonts first, because a view whose containers cannot serve the family
+    // it named will never render and there is nothing worth fetching for it.
+    let text_context = match super::stage_text_context(fonts, default_font_family.as_deref()) {
+        Ok(text_context) => text_context,
         Err(error) => {
             outbox.engine_event(EngineEvent::StartupFailed(error));
             return;
         }
     };
-    let (page, mut ended) = Page::new(context, outbox, document);
+    let ingredients = DocumentIngredients {
+        viewport,
+        config,
+        text_context,
+        sheets: Vec::with_capacity(style_sheets.len()),
+        style_pool: context.style_pool.clone(),
+        pending_image_events: Vec::new(),
+    };
+    let (page, mut ended) = Page::new(context, outbox, ingredients);
     page.spawn(consume_commands(Rc::clone(&page), commands));
     page.spawn(boot_page(
         Rc::clone(&page),
@@ -732,8 +728,9 @@ async fn consume_commands(page: Rc<Page>, mut commands: mpsc::UnboundedReceiver<
 /// entry, then the realm.
 ///
 /// A sheet that arrives after the entry has run would restyle a document the
-/// card has already built, so they are requested one at a time and in order,
-/// and each is mounted on the waiting document as it arrives.
+/// card has already built, so they are requested one at a time and in order.
+/// They are staged rather than mounted, because there is no document yet —
+/// `createDocument` mounts them in this order, and it runs before the entry.
 async fn boot_page(page: Rc<Page>, sources: BootSources) {
     let BootSources {
         style_sheets,
@@ -749,7 +746,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         }
         match request_source(&page.outbox, SourceRequest::StyleSheet(url)).await {
             Ok(LoadedSource::StyleSheet(sheet)) => {
-                if !page.mount_sheet(sheet) {
+                if !page.stage_sheet(sheet) {
                     return;
                 }
             }

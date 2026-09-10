@@ -4,6 +4,13 @@
  * commit; misuse crashes at this boundary instead of being validated.
  */
 interface BobcatNative {
+  /**
+   * Builds the realm's one document out of the ingredients the view staged
+   * before the realm opened: its metrics, its fonts, its author sheets in
+   * cascade order, and any image reports that arrived first. Throws when the
+   * realm already has one.
+   */
+  createDocument(): void;
   /** Marks the permanent page live and returns its `NodeId`. */
   createPage(): number;
   /** Creates a detached element and returns its `NodeId`. */
@@ -97,6 +104,7 @@ declare module "bobcat-internal:host" {
   export function createWorker(url: string, name: string): string;
   export function sendWorkerMessage(key: string, data: string): void;
   export function terminateWorker(key: string): void;
+  export const createDocument: BobcatNative["createDocument"];
   export const createPage: BobcatNative["createPage"];
   export const createElement: BobcatNative["createElement"];
   export const setAttribute: BobcatNative["setAttribute"];

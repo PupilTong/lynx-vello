@@ -2,6 +2,7 @@
 import {
   attributeNames,
   childElementIds,
+  createDocument,
   createElement,
   createPage,
   disableEventListener,
@@ -27,7 +28,9 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // Preloaded as the `bobcat:element` ESM inside the QuickJS main-thread realm;
 // its Rstest suite imports the same bytes. It reaches native code only through
 // named exports of the native `bobcat-internal:host` ESM. Named exports are
-// the MTS bindings; this module installs no Element-PAPI globals.
+// the MTS bindings, plus the one lifecycle export — the `Document` class the
+// boot module constructs — which is no PAPI member; this module installs no
+// Element-PAPI globals.
 //
 // # Element PAPI scope
 //
@@ -248,6 +251,16 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //   operation is ever chosen from this graph.
 // - No misuse is validated here: a foreign handle resolves to undefined
 //   and the call crashes at the native boundary.
+// - **The document is not on this schedule at all.** `class Document`'s
+//   constructor calls the native `createDocument`, which builds the document
+//   out of the ingredients the view staged before the realm opened; a realm
+//   gets exactly one, and a second construction is refused by the host
+//   whichever module asks. The boot module's first statement constructs it and
+//   an exported binding holds it for the realm's life, so nothing here
+//   releases it and there is no member that could: the document goes when the
+//   realm does, and the host frees it after the realm, not from a cleanup
+//   job. That is the opposite of the element path above, where cards genuinely
+//   unroot handles and a collection every 32 removals frees what they named.
 
 const nodeIdSymbol = Symbol("nodeId");
 
@@ -447,6 +460,26 @@ const registry = new FinalizationRegistry(
     dropElement(nodeId);
   },
 );
+
+/**
+ * The realm's document. Constructing one creates it, and it lives exactly as
+ * long as the realm: nothing here releases it, and no registry watches it.
+ *
+ * The boot module constructs exactly one, before it loads the card's entry,
+ * and its exported binding is what holds the object. A card can reach this
+ * class and construct a second one; the host refuses that, and the card's
+ * boot fails with the host's message.
+ */
+export class Document {
+  constructor() {
+    createDocument();
+  }
+
+  /** @returns {string} */
+  get [Symbol.toStringTag]() {
+    return "Document";
+  }
+}
 
 /** @type {object | undefined} */
 let pageHandle;

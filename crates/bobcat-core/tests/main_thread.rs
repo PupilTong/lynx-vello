@@ -95,6 +95,28 @@ async fn script_finished_waits_for_the_tla_entry_and_javascript_boot() {
     .expect("TLA entry boot");
 }
 
+/// The document belongs to the realm, and the class that creates it resolves
+/// from any module in one — a card can reach it. There is still exactly one
+/// document per realm, so a card that builds a second is refused by the host,
+/// which fails that card's boot rather than leaving two documents behind.
+#[tokio::test]
+async fn a_card_that_constructs_a_second_document_fails_its_boot() {
+    let error = run(
+        r#"
+        import { Document } from "bobcat:element";
+        new Document();
+        "#,
+        "app:///second-document.js",
+    )
+    .await
+    .expect_err("the boot module already created this realm's document");
+    let message = error.to_string();
+    assert!(
+        message.contains("the realm already created its document"),
+        "{message}"
+    );
+}
+
 #[tokio::test]
 async fn resolved_script_url_is_preserved_in_errors() {
     let error = run("const = 1", "app:///broken.js")

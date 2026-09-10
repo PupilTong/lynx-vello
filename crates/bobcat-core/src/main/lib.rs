@@ -45,7 +45,6 @@ use wasm_thread::Builder as ThreadBuilder;
 
 use self::quickjs::ScriptRuntime;
 use self::runtime::install_shared_modules;
-use self::tree::{LynxDocument, new_document};
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
 use crate::link::{ToMain, ViewCancel, ViewOutbox};
@@ -328,31 +327,35 @@ struct AttachedView {
     cancel: ViewCancel,
 }
 
-/// Builds the document every one of this view's sources will be mounted on.
+/// Registers a view's fonts and selects its default family, before any
+/// document exists and before anything has been fetched.
 ///
-/// `Err` is a source the document itself refuses — a default family neither
-/// the containers nor the platform has — which is a failure to build the view
-/// rather than to run it.
-fn new_view_document(
-    viewport: Viewport,
-    config: tree::PageConfig,
+/// Neither needs a document: fonts and the default family are a
+/// [`TextContext`](dom::TextContext)'s business, and a document only ever
+/// adopts a finished one. That is what keeps a family nothing provides a
+/// zero-fetch failure — the check happens here, ahead of the first source
+/// request, rather than inside the document that would have been built for it.
+///
+/// `None` is a view that named neither, which leaves the document's own lazy
+/// context alone. `Err` is a default family neither the containers nor the
+/// platform has, which is a failure to build the view rather than to run it.
+fn stage_text_context(
     fonts: Vec<dom::FontBlob>,
-    default_font_family: Option<String>,
-    style_pool: Option<&Rc<StylePool>>,
-) -> Result<LynxDocument, LynxViewError> {
-    let mut document = new_document(viewport, config);
-    if let Some(pool) = style_pool {
-        document.set_style_pool(Rc::clone(pool));
+    default_font_family: Option<&str>,
+) -> Result<Option<dom::TextContext>, LynxViewError> {
+    if fonts.is_empty() && default_font_family.is_none() {
+        return Ok(None);
     }
+    let mut text = dom::TextContext::new();
     for font in fonts {
-        document.register_fonts(font);
+        text.register_fonts(font);
     }
     if let Some(family) = default_font_family
-        && !document.set_default_font_family(&family)
+        && !text.set_default_font_family(family)
     {
-        return Err(EngineError::UnknownFontFamily(family).into());
+        return Err(EngineError::UnknownFontFamily(family.to_owned()).into());
     }
-    Ok(document)
+    Ok(Some(text))
 }
 
 #[cfg(all(target_arch = "wasm32", panic = "abort"))]

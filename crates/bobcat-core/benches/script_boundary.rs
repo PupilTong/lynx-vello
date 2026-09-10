@@ -61,6 +61,14 @@ fn snapshot_source(rows: usize) -> String {
 
 /// The first render: `ROWS` rows created, styled, attributed and appended,
 /// then committed through style and layout.
+///
+/// It now also includes building the document, because the boot module is what
+/// creates one: the harness stages the ingredients and opens the realm, and the
+/// `new Document()` in the boot this case runs is where the UA cascade, the
+/// style pool and the author sheets are taken on. That work used to sit in the
+/// harness's own setup, outside the timed region, so this case's baseline steps
+/// once at the commit that moved it — what it measures afterwards is the same
+/// first render plus a fixed per-boot cost.
 #[divan::bench]
 fn snapshot_first_render(bencher: divan::Bencher) {
     let source = snapshot_source(ROWS);

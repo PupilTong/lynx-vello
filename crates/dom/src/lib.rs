@@ -30,7 +30,7 @@ mod tree;
 mod visual;
 
 pub use euclid::default::{Point2D, Size2D, Vector2D};
-pub use hughie::text::FontBlob;
+pub use hughie::text::{FontBlob, TextContext};
 pub use stylo;
 pub use stylo_dom::ElementState;
 pub use vello;
