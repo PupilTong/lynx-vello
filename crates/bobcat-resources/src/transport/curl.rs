@@ -8,8 +8,11 @@
 //! compiles it — and a host without the library gets a precise
 //! [`TransportError::Unavailable`] instead of a load failure at startup.
 //!
-//! Only the "easy" interface is used, one blocking transfer per call, on
-//! whatever worker thread the fetcher runs IO on.
+//! Only the "easy" interface is used, one blocking transfer per call: on a
+//! thread of the fetcher's blocking pool for a background job, and on the
+//! painter's own thread for the synchronous restore inside
+//! `FrameImages::read`. The disk-cache lookup, the transfer and the cache
+//! write are one synchronous transaction on that thread.
 
 #![expect(
     unsafe_code,

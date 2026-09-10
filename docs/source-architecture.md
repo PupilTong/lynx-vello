@@ -127,8 +127,9 @@ archive directories are not accepted under this small-package contract.
 Registration lasts for the view's lifetime rather than just script boot,
 because images can be requested later. `Resources::new_scope` gives a replacement
 view separate registrations, base URL, images and completion queues while
-sharing IO workers, the platform decoder and disk cache. Hosts choose when to
-retire that scope; parsing never constructs a view or performs network/file IO.
+sharing the executor, the platform decoder and the disk cache. Hosts choose
+when to retire that scope; parsing never constructs a view or performs
+network/file IO.
 The browser only transports ZIP bytes to this API; it has no archive-specific
 CacheStorage or service-worker route.
 

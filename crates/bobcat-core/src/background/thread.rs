@@ -506,9 +506,13 @@ async fn boot_worker(
                 Some(WorkerMessage::Post(data)) => queued.push(data),
             },
             // The creating view was released while this script was in flight.
-            // Nothing will ever be posted to this worker and nobody is
-            // listening for it, so it ends before it boots — and returning
-            // here drops the script's receiving end, which cancels the fetch.
+            // This arm is a backstop: the owner registers on the same token
+            // first (`serve_worker` → `Lifetime::serve`) and normally ends
+            // this worker and aborts this task before the arm is polled. What
+            // it covers is the poll in which the token is already cancelled
+            // when this select is first reached — the worker ends before it
+            // boots, and returning here drops the script's receiving end,
+            // which cancels the fetch.
             () = worker.lifetime.token().cancelled() => {
                 worker.end();
                 return;

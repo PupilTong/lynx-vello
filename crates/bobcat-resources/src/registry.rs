@@ -31,9 +31,9 @@ pub enum Registered {
     StyleSheet(Arc<PreparsedStyleSheet>),
 }
 
-/// The registered contents, keyed by normalized URL. Shared with the IO
-/// workers, which serve image loads from it, so it locks rather than
-/// borrows.
+/// The registered contents, keyed by normalized URL. Read from the fetcher's
+/// blocking-pool threads, which serve image and source loads from it, so it
+/// locks rather than borrows.
 #[derive(Debug, Default)]
 pub struct Registry {
     entries: Mutex<FxHashMap<String, Registered>>,

@@ -107,7 +107,7 @@ impl Future for EventWait {
 }
 
 /// A complete browser embedder, permanently owned by the explicit Render
-/// Worker that constructs it. Its canvas, Wasm instance, IO workers and decoder
+/// Worker that constructs it. Its canvas, Wasm instance and image decoder
 /// outlive every page it shows; each document, element tree,
 /// `QuickJS` realm, engine, and set of Stylo workers stays behind one opaque
 /// `LynxView`, built by [`BobcatRenderer::load`] and replaced wholesale by
@@ -681,7 +681,7 @@ impl BobcatRenderer {
         }
         // The view retains this scope, including ZIP assets needed after boot.
         // The next submission stages sources in a fresh scope sharing the
-        // same image decoder and IO workers, but no cached image or URL.
+        // same image decoder, but no cached image or URL.
         let next_resources = self.resources.new_scope();
         let resources = mem::replace(&mut self.resources, next_resources);
         let group = LynxGroup::new(self.events.clone(), self.style_threads)

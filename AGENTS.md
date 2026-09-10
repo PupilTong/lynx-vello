@@ -976,21 +976,32 @@ useful signal for currently-compatible versions of those libraries.
   (loaded at runtime; `gdk_pixbuf_loader_set_size` from the header probe),
   and the main thread's `Image` element in the browser (the Render Worker
   fetches the bytes and hands them over as a Blob), each asked to downsample
-  during decode. Loads complete on the crate's own
-  worker threads (local tasks in the browser), are delivered through the
+  during decode. Natively a load is one task on the crate's own
+  `current_thread` tokio runtime — built by `Resources::new` and moved to a
+  `bobcat-resources-driver` thread that drives it and shuts it down — whose
+  blocking pool (`max_blocking_threads = worker_threads`) runs the transport
+  read, the preprocessing and the decode; a `Semaphore` sized by
+  `decode_parallelism` is acquired *before* a decode closure is submitted, so
+  a decode that has to wait holds no pool thread, and a panic inside a closure
+  becomes that image's or source's reported failure. In the browser a load is
+  a local task instead. Either way completions are delivered through the
   wakeup the embedder supplies, and are applied in the next `LynxView::pump`
   through the protocol's `service_images` hook. The frame reads each image
   with the size it draws it at: a resident bitmap far larger than its draw
   is re-decoded at the drawn size in the background and replaced, one that
   was evicted is restored inside the read from the retained bytes or the
-  disk tier, and one drawn larger than it was decoded is refined back up as
-  long as the image has more to give. In the browser that restore is the one
+  disk tier — on the embedder's own thread, synchronously and with no decode
+  permit, which is why the transport keeps a blocking entry point and
+  `tokio::fs` is not adopted — and one drawn larger than it was decoded is
+  refined back up as long as the image has more to give. In the browser that restore is the one
   place the Render Worker blocks: the main thread never waits, so a job's
   mailbox in shared Wasm memory and `Atomics.wait` are what let a read that
   must not miss wait for it (`crates/bobcat-wasm/image-decoder.js` is the
   main thread's half). Shape: `Resources` is the shared system (registry, caches,
-  workers, decoder; cheaply cloned, bound to the embedder's thread) and
-  `Resources::builder` yields the per-view `ViewResources` that
+  executor, decoder; cheaply cloned, bound to the embedder's thread) and the
+  only holder of the executor, so the runtime is shut down — without waiting
+  for work already picked up — when the last clone of the last scope drops on
+  that thread; `Resources::builder` yields the per-view `ViewResources` that
   `LynxGroup::create_lynx_view` takes and that carries that view's
   `ImageReports`.
   Recorded limits: only an image's first frame is decoded (no animated
@@ -1050,8 +1061,8 @@ useful signal for currently-compatible versions of those libraries.
   input's own `file://` URL is the base every relative `url(…)` resolves
   against, and a disk tier lives under the user's cache directory — so a
   page's images, beside the input, inline as `data:`, or on the network,
-  load and decode through the platform. A load completing on a worker wakes
-  the event loop exactly as a commit does.
+  load and decode through the platform. A load completing on the fetcher's
+  driver thread wakes the event loop exactly as a commit does.
   Headed mode uses a native winit window with display-backed
   vsync and tracks both logical viewport size and device-pixel ratio. Headless mode uses a
   configurable synthetic vsync rate, skips catch-up bursts after slow frames,
@@ -1124,7 +1135,8 @@ useful signal for currently-compatible versions of those libraries.
   base. The Pages Canvas tab passes local ZIP bytes and an entry URL through
   `loadZip` to `bobcat-source::ZipSource`. Each page gets a separate resource
   scope, retaining archive assets after boot and isolating image caches and
-  completion queues while sharing the platform decoder and IO workers.
+  completion queues while sharing the platform decoder. The browser has no
+  executor at all: each load there is a local task on the Render Worker.
   The service worker only provides cross-origin isolation headers;
   `loadLynxXml` retains its XML-only, host-configured contract.
   The browser UI thread is a JavaScript-only host coordinator: it creates one explicit
