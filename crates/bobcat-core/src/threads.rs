@@ -5,9 +5,9 @@
 //! `bobcat-workers`, which carries the same group's worker realms. Neither
 //! knows about the other, and both end the same way.
 //!
-//! Waiting is deliberately not here. Both park on a
-//! [`Mailbox`](crate::mailbox::Mailbox), whose timed receive is already
-//! written once for both targets.
+//! Waiting is deliberately not here. Each runs a tokio runtime of its own and
+//! parks in its scheduler, so what is left in common is only how a thread is
+//! joined and how one reports having trapped.
 
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 

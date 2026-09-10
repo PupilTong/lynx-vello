@@ -1,51 +1,27 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{Output, TestPainter};
-use crate::clock::ClockInstant;
+use super::{DetachedEnds, TestPainter, ToMain};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
-use crate::view::{
-    DetachedLink, EngineEvent, EventRequester, FrameSize, NoWakeup, ToMain, ToPainter,
-};
+use crate::test_support::TestViewSpec;
+use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup};
 
-/// A phone-shaped document, ready for a main thread to be started over it.
+/// A phone-shaped document, for the tests that publish a real frame.
 fn document() -> LynxDocument {
     new_document(Viewport::new(393.0, 727.0), PageConfig::default())
 }
 
-/// Starts a view over `document` and `entry`, the IO-free half of
-/// construction.
-fn view_over<R: EventRequester>(
-    events: Arc<R>,
-    build_document: impl FnOnce() -> LynxDocument + Send + 'static,
-    entry: &str,
-) -> TestPainter {
-    TestPainter::start(
-        build_document,
-        Viewport::new(393.0, 727.0),
-        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        events,
-        super::EntryModule {
-            source: entry.to_owned(),
-            url: "app:///main.js".to_owned(),
-        },
-        // Nowhere to draw: nothing here reads pixels, and a GPU device per
-        // test is a third of a second each.
-        Output::None,
-    )
-    .expect("the test view starts")
+/// A painter with every seam built but no view task: the other end of its
+/// link is handed back so a test can play that task's whole side of it.
+fn detached() -> (TestPainter, DetachedEnds) {
+    detached_waking(Arc::new(NoWakeup))
 }
 
-/// A painter with every seam built but no main thread: the other end of its
-/// link is handed back so a test can play the main thread's whole side of
-/// it. Probes answer `None` and `BeginFrame`s are withheld — nobody would
-/// ever service them.
-fn detached() -> (TestPainter, DetachedLink<NoWakeup>) {
-    TestPainter::with_link(
+fn detached_waking<R: EventRequester>(requester: Arc<R>) -> (TestPainter, DetachedEnds) {
+    TestPainter::detached(
         Viewport::new(393.0, 727.0),
         FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        Arc::new(NoWakeup),
-        Output::None,
+        requester,
     )
 }
 
@@ -61,31 +37,27 @@ fn frame_size_rejects_unbounded_targets() {
     assert!(error.to_string().contains("16384"));
 }
 
-/// One drain of the notification FIFO applies every kind of thing that
-/// rides it — a lifecycle event `pump` will hand back, a listener edge, a
-/// `BeginFrame` acknowledgement, and the redraw an announced frame asks
-/// for — and applies each of them exactly once.
+/// One drain applies every kind of thing that reaches the painting side — a
+/// lifecycle event `pump` will hand back, a listener edge, a `BeginFrame`
+/// acknowledgement, and the redraw a new frame asks for — and applies each
+/// of them exactly once.
 #[test]
 fn one_drain_applies_every_kind_of_notification() {
     let (mut view, main) = detached();
     assert!(!view.link.take_redraw(), "a fresh link owes no frame");
     assert!(view.pump().is_empty(), "and has nothing to report");
 
-    for notification in [
-        ToPainter::ListenerAvailable(Arc::from("tap")),
-        ToPainter::Engine(EngineEvent::ScriptFinished),
-        ToPainter::BeginFrameServiced(7),
-        ToPainter::FrameChanged,
-    ] {
-        main.notify.send(notification);
-    }
+    main.outbox.listener_edge(Arc::from("tap"), true);
+    main.outbox.engine_event(EngineEvent::ScriptFinished);
+    main.outbox.begin_frame_serviced(7);
+    main.outbox.publish_frame(document().commit());
 
     let events = view.pump();
     assert!(matches!(events.as_slice(), [EngineEvent::ScriptFinished]));
     assert!(view.link.has_listener("tap"));
     assert!(
         view.link.wait_begin_frame(7, Duration::ZERO),
-        "the acknowledgement rode the same drain, so the wait never blocks"
+        "the acknowledgement rode the same state, so the wait never blocks"
     );
     assert!(
         view.link.take_redraw(),
@@ -96,70 +68,11 @@ fn one_drain_applies_every_kind_of_notification() {
     assert!(!view.link.take_redraw(), "and a request is taken once");
 }
 
-#[test]
-fn an_announced_deadline_is_nudged_once_and_only_after_it_has_passed() {
-    let (mut view, main) = detached();
-    assert!(
-        view.next_wakeup().is_none(),
-        "a view whose realm armed nothing asks the host to wait for nothing"
-    );
-
-    main.notify.send(ToPainter::TimerDeadline(Some(
-        ClockInstant::now() + Duration::from_millis(20),
-    )));
-    assert!(view.pump().is_empty());
-    let wakeup = view
-        .next_wakeup()
-        .expect("the announced deadline is the host's wait");
-    assert!(
-        wakeup <= Duration::from_millis(20),
-        "and it is what is left of it, not the whole delay: {wakeup:?}"
-    );
-    assert!(
-        main.try_recv().is_err(),
-        "a deadline still ahead nudges nobody"
-    );
-
-    std::thread::sleep(Duration::from_millis(25));
-    assert_eq!(
-        view.next_wakeup(),
-        Some(Duration::ZERO),
-        "a deadline that has passed asks for the turn the host is in"
-    );
-    assert!(view.pump().is_empty());
-    assert!(
-        matches!(main.try_recv(), Ok(ToMain::TimersDue)),
-        "and that turn is what tells the main thread"
-    );
-    assert!(
-        view.next_wakeup().is_none(),
-        "the deadline is spent as it is sent"
-    );
-    assert!(view.pump().is_empty());
-    assert!(
-        main.try_recv().is_err(),
-        "so the next turn nudges nothing, however long the main thread takes"
-    );
-
-    main.notify.send(ToPainter::TimerDeadline(Some(
-        ClockInstant::now() + Duration::from_secs(30),
-    )));
-    assert!(view.pump().is_empty());
-    assert!(view.next_wakeup().is_some(), "the new deadline is held");
-    main.notify.send(ToPainter::TimerDeadline(None));
-    assert!(view.pump().is_empty());
-    assert!(
-        view.next_wakeup().is_none(),
-        "and an empty schedule takes it back"
-    );
-    assert!(main.try_recv().is_err(), "with nothing nudged for it");
-}
-
-/// Frames do not queue: the mailbox holds one slot, so a painting side
+/// Frames do not queue: the published state holds one, so a painting side
 /// that syncs after several commits sees the newest and never the ones it
-/// slept through — however many announcements arrived for them.
+/// slept through.
 #[test]
-fn the_frame_mailbox_keeps_only_the_newest_commit() {
+fn the_published_state_keeps_only_the_newest_commit() {
     let (mut view, main) = detached();
     let mut document = document();
     let first = document.commit();
@@ -167,8 +80,8 @@ fn the_frame_mailbox_keeps_only_the_newest_commit() {
     let second = document.commit();
     assert_ne!(first.commit_id(), second.commit_id());
 
-    main.notify.publish_frame(Arc::clone(&first));
-    main.notify.publish_frame(Arc::clone(&second));
+    main.outbox.publish_frame(Arc::clone(&first));
+    main.outbox.publish_frame(Arc::clone(&second));
     view.link.sync();
 
     let published = view.link.frame().expect("the sync adopted a frame");
@@ -179,6 +92,26 @@ fn the_frame_mailbox_keeps_only_the_newest_commit() {
     );
 }
 
+/// The last frame a view published is still the frame to draw once its task
+/// has ended: a closed channel is not an empty one.
+#[test]
+fn a_frame_published_before_the_task_ended_is_still_adopted() {
+    let (mut view, main) = detached();
+    let frame = document().commit();
+    main.outbox.publish_frame(Arc::clone(&frame));
+    drop(main);
+
+    view.link.sync();
+    assert_eq!(
+        view.link
+            .frame()
+            .expect("the last frame outlives its publisher")
+            .commit_id(),
+        frame.commit_id()
+    );
+    assert!(view.link.take_redraw(), "and it still asks to be drawn");
+}
+
 /// An emit decision costs one name-table lookup and stops there unless a
 /// listener exists; when it crosses, it crosses as plain data — the
 /// target id, not a path. Liveness is the main thread's to check at
@@ -187,7 +120,7 @@ fn the_frame_mailbox_keeps_only_the_newest_commit() {
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
-    let (mut view, main) = detached();
+    let (mut view, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
     let emit = |view: &mut TestPainter| {
@@ -202,36 +135,36 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
         assert!(decisions.is_empty(), "the queue is always drained");
     };
 
-    let publish = |notification| main.notify.send(notification);
-    let commands = &main;
-
     emit(&mut view);
     assert!(
-        commands.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "an empty listener set sends nothing"
     );
 
-    publish(ToPainter::ListenerAvailable(Arc::from("pointerup")));
+    main.outbox.listener_edge(Arc::from("pointerup"), true);
     view.link.sync();
     emit(&mut view);
     assert!(
-        commands.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "a listener on another name sends nothing"
     );
 
     // An update that has not been synced yet is not yet visible: the
-    // replica moves at pass boundaries, which is the one pass of
+    // snapshot moves at pass boundaries, which is the one pass of
     // staleness this design accepts in exchange for the lock.
-    publish(ToPainter::ListenerAvailable(Arc::from(TAP_EVENT)));
+    main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
     emit(&mut view);
     assert!(
-        commands.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "an unsynced registration does not open the name mid-pass"
     );
 
     view.link.sync();
     emit(&mut view);
-    let command = commands.try_recv().expect("the listened-for name crosses");
+    let command = main
+        .commands
+        .try_recv()
+        .expect("the listened-for name crosses");
     let ToMain::DispatchEvent {
         name, target: sent, ..
     } = command
@@ -243,11 +176,11 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 
     // And the edge closes the name again: the main thread publishes the
     // last removal, and from the next sync nothing crosses.
-    publish(ToPainter::ListenerUnavailable(Arc::from(TAP_EVENT)));
+    main.outbox.listener_edge(Arc::from(TAP_EVENT), false);
     view.link.sync();
     emit(&mut view);
     assert!(
-        commands.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "the closing edge stops the crossing"
     );
 }
@@ -257,7 +190,7 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
 ///
 /// The ordering matters because the two edges for one name are a pair:
 /// a name registered and unregistered between two passes must leave the
-/// replica closed, not open.
+/// snapshot closed, not open.
 #[test]
 fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
     let (mut view, main) = detached();
@@ -268,13 +201,9 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
         "nothing has been published yet"
     );
 
-    for edge in [
-        ToPainter::ListenerAvailable(Arc::from("tap")),
-        ToPainter::ListenerAvailable(Arc::from("scroll")),
-        ToPainter::ListenerUnavailable(Arc::from("tap")),
-    ] {
-        main.notify.send(edge);
-    }
+    main.outbox.listener_edge(Arc::from("tap"), true);
+    main.outbox.listener_edge(Arc::from("scroll"), true);
+    main.outbox.listener_edge(Arc::from("tap"), false);
     view.link.sync();
     assert!(
         !view.link.has_listener("tap"),
@@ -304,7 +233,7 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
 fn a_scroll_decision_sends_no_command() {
     use super::gesture::{InputDecision, InputDecisions};
 
-    let (mut view, main) = detached();
+    let (mut view, mut main) = detached();
     let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
     let mut decisions = InputDecisions::new();
     decisions.push(InputDecision::Scroll {
@@ -314,7 +243,7 @@ fn a_scroll_decision_sends_no_command() {
     });
     view.execute_decisions(&mut decisions, None);
     assert!(
-        main.try_recv().is_err(),
+        main.commands.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"
     );
     assert!(view.scroll_intents.offsets.is_empty());
@@ -360,12 +289,7 @@ fn a_view_that_presents_to_no_window_owes_no_frame() {
 #[test]
 fn a_self_directed_frame_request_wakes_nobody() {
     let (wake_sender, wakes) = flume::unbounded();
-    let (painter, main) = TestPainter::with_link(
-        Viewport::new(393.0, 727.0),
-        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        Arc::new(WakeSignal(wake_sender)),
-        Output::None,
-    );
+    let (painter, main) = detached_waking(Arc::new(WakeSignal(wake_sender)));
 
     painter.refresh();
     assert!(
@@ -374,7 +298,7 @@ fn a_self_directed_frame_request_wakes_nobody() {
     );
     assert!(painter.link.take_redraw(), "and the frame is still owed");
 
-    main.notify.publish_frame(document().commit());
+    main.outbox.publish_frame(document().commit());
     assert!(
         wakes.try_recv().is_ok(),
         "a commit from the other thread is the one thing that must wake"
@@ -383,18 +307,14 @@ fn a_self_directed_frame_request_wakes_nobody() {
 }
 
 /// Boot's final flush is a commit: by the time `ScriptFinished` is
-/// pumped, a frame is published and the document — owned by the main
-/// thread — answers probes.
+/// pumped, a frame is published and the document — owned by the view's own
+/// task — answers probes.
 #[test]
 fn a_booted_view_commits_and_publishes() {
-    use std::time::{Duration, Instant};
-
-    use crate::view::EngineEvent;
+    use std::time::Instant;
 
     let (wake_sender, wake_receiver) = flume::unbounded();
-    let mut view = view_over(
-        Arc::new(WakeSignal(wake_sender)),
-        document,
+    let mut view = TestViewSpec::new(
         r"
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
@@ -403,16 +323,17 @@ fn a_booted_view_commits_and_publishes() {
               __AppendElement(page, __CreateView(0));
             };
             ",
-    );
+    )
+    .create(Arc::new(WakeSignal(wake_sender)));
 
     // One wakeup carries either kind of engine work: the boot commit's
     // frame or a lifecycle event. The law under test is the ordering —
     // whichever wakeup carries the event, `pump` observes it right then,
     // with nothing polled for and nothing slept on.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let finished = loop {
         wake_receiver
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(30))
             .expect("script completion must wake the host event loop");
         if let Some(event) = view.pump().into_iter().find(|event| {
             matches!(
@@ -445,38 +366,34 @@ fn a_booted_view_commits_and_publishes() {
             let connected = views.iter().all(|&view| tree.is_connected(view));
             (views.len(), connected, tree.rounded_layout(page).is_some())
         })
-        .expect("the main thread answers probes");
+        .expect("the view's task answers probes");
     assert_eq!(views, 2, "the boot script appends two views");
     assert!(connected, "both views are attached");
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
-/// A terminal event cancels an outstanding completion before the host releases it.
+/// A terminal event cancels an outstanding completion before the host
+/// releases it.
 #[test]
 fn failure_during_pending_fetch_is_delivered_by_pump() {
     let (mut painter, main) = detached();
-    let completion = crate::resource::SourceCompletion::new(
-        painter.link.commands.clone(),
-        painter.link.view,
-        Arc::clone(&painter.link.control),
-        None,
-    );
+    let (completion, answer) =
+        crate::resource::SourceCompletion::new(painter.link.view_cancel().clone());
     assert!(!completion.is_cancelled());
-    main.notify
-        .send(ToPainter::Engine(EngineEvent::StartupFailed(
-            crate::view::EngineError::Thread {
-                name: "script",
-                message: "boot failed while a fetch was in flight".to_owned(),
-            }
-            .into(),
-        )));
+    main.outbox.engine_event(EngineEvent::StartupFailed(
+        crate::view::EngineError::Thread {
+            name: "script",
+            message: "boot failed while a fetch was in flight".to_owned(),
+        }
+        .into(),
+    ));
     let events = painter.pump();
     assert!(matches!(events.as_slice(), [EngineEvent::StartupFailed(_)]));
     assert!(completion.is_cancelled());
     drop(completion);
     assert!(
-        main.try_recv().is_err(),
-        "cancellation reports no second failure"
+        answer.blocking_recv().is_err(),
+        "a cancelled completion reports no second failure"
     );
     assert!(painter.pump().is_empty(), "failure is delivered once");
 }

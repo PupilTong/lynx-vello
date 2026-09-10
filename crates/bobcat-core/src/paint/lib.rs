@@ -32,27 +32,19 @@ use dom::scroll::ScrollAxes;
 use dom::vello::Scene;
 use dom::vello::peniko::Color;
 use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
+use tokio::sync::{mpsc, watch};
 
 use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::ClockInstant;
-use crate::mailbox::{Mailbox, Sender};
-#[cfg(test)]
-use crate::main::tree::LynxDocument;
+use crate::link::{Published, ToMain, ViewCancel, ViewNotice, ViewOutbox, block_on_deadline};
 use crate::main::tree::Viewport;
-#[cfg(test)]
-use crate::main::{EntryModule, GroupHome, spawn_test_main_thread};
 use crate::resource::{SourceCompletion, SourceRequest};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::view::Screenshot;
-use crate::view::{
-    ComposeKey, DrawTarget, EngineError, EngineEvent, FrameHub, FrameSize, ToMain, ToPainter,
-    ViewId, frame_slot,
-};
-#[cfg(test)]
-use crate::view::{DetachedLink, NoWakeup, detached_link};
+use crate::view::{ComposeKey, DrawTarget, EngineError, EngineEvent, FrameSize};
 
 const BEGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -124,165 +116,157 @@ mod clock_tests {
     }
 }
 
-/// The painting end of the view's one link — to the Lynx main thread —
-/// including the replicas it uses while routing and drawing without touching
-/// that thread.
+/// The painting end of the view's one link — to the task serving it on the
+/// Lynx main thread — including the snapshot it routes and draws against
+/// without touching that thread.
 pub(crate) struct PainterLink {
-    /// Which view on the group's thread these commands are for. Every view in
-    /// a group sends on one FIFO, so each command carries its own name.
-    view: ViewId,
-    commands: Sender<ToMain>,
-    notifications: Rc<Mailbox<ToPainter>>,
-    frames: Arc<FrameHub>,
-    frame: Option<Arc<CommittedFrame>>,
+    commands: mpsc::UnboundedSender<ToMain>,
+    notices: mpsc::UnboundedReceiver<ViewNotice>,
+    frames: watch::Receiver<Published>,
+    /// The last snapshot adopted from the watch. Everything routing and
+    /// drawing read comes from here, so one pass sees one state.
+    published: Published,
+    cancel: ViewCancel,
     events: Vec<EngineEvent>,
-    listener_names: FxHashSet<Arc<str>>,
     begin_frames_sent: u64,
-    begin_frames_serviced: u64,
     redraw_pending: Cell<bool>,
     /// Sources the document met and wants named. Buffered here because
     /// asking for them needs the host's resource system, which the painter
     /// owns rather than the link.
     image_requests: Vec<Arc<str>>,
-    source_requests: Vec<SourceRequest>,
-    worker_sources: Vec<(SourceRequest, SourceCompletion)>,
-    control: Arc<crate::main::StartupControl>,
-    /// Whether a drain has seen a frame announcement it has not adopted yet.
-    /// Coalesces announcements during a normal drain or offscreen frame wait.
-    pending_announce: bool,
-    timer_deadline: Option<ClockInstant>,
+    source_requests: Vec<(SourceRequest, SourceCompletion)>,
+    /// Whether a fatal lifecycle event has arrived. Nothing further is
+    /// dispatched to the host's resource system after one.
+    failed: bool,
 }
 
 impl PainterLink {
     pub(crate) fn new(
-        view: ViewId,
-        commands: Sender<ToMain>,
-        notifications: Rc<Mailbox<ToPainter>>,
-        frames: Arc<FrameHub>,
-        control: Arc<crate::main::StartupControl>,
+        commands: mpsc::UnboundedSender<ToMain>,
+        notices: mpsc::UnboundedReceiver<ViewNotice>,
+        frames: watch::Receiver<Published>,
+        cancel: ViewCancel,
     ) -> Self {
-        notifications.register(view);
         Self {
-            view,
             commands,
-            notifications,
+            notices,
             frames,
-            frame: None,
+            published: Published::default(),
+            cancel,
             events: Vec::new(),
-            listener_names: FxHashSet::default(),
             begin_frames_sent: 0,
-            begin_frames_serviced: 0,
             redraw_pending: Cell::new(false),
             image_requests: Vec::new(),
             source_requests: Vec::new(),
-            worker_sources: Vec::new(),
-            control,
-            pending_announce: false,
-            timer_deadline: None,
+            failed: false,
         }
     }
 
-    /// Adopts whatever the drains since the last settle announced.
-    fn settle(&mut self) {
-        let announced = std::mem::take(&mut self.pending_announce);
-        self.adopt_frame(announced);
-    }
-
-    /// Sends one command, naming the view it is for. A closed channel is a
-    /// main thread that has exited; the painter goes on showing what it last
-    /// published.
+    /// Sends one command. A closed channel is a view whose task has ended;
+    /// the painter goes on showing what it last published.
     pub(crate) fn send(&self, command: ToMain) {
-        let _ = self.commands.send((Some(self.view), command));
+        let _ = self.commands.send(command);
     }
 
-    /// Ends the whole group's thread, not just this view.
-    ///
-    /// Only the crate's own tests reach this: they own both ends of their
-    /// link, so the painter is what plays the group handle. An embedder's
-    /// group sends this from its own `Drop`, once every view is gone.
-    #[cfg(test)]
-    fn close_group(&self) {
-        let _ = self.commands.send((None, ToMain::Close));
-    }
-
-    /// Applies everything that has arrived. However many frames were
-    /// announced, the mailbox is read once.
+    /// Applies everything that has arrived, then adopts the newest published
+    /// state. However many frames were committed, the watch is read once.
     pub(crate) fn sync(&mut self) {
-        let notifications = Rc::clone(&self.notifications);
-        notifications.drain_view(self.view, |notification| self.apply(notification));
-        self.settle();
-        self.nudge_due_timers();
-    }
-
-    fn nudge_due_timers(&mut self) {
-        if self
-            .timer_deadline
-            .is_some_and(|deadline| deadline <= ClockInstant::now())
-        {
-            self.timer_deadline = None;
-            self.send(ToMain::TimersDue);
+        while let Ok(notice) = self.notices.try_recv() {
+            self.apply(notice);
         }
+        let _ = self.adopt();
     }
 
-    pub(crate) fn next_wakeup(&self) -> Option<Duration> {
-        self.timer_deadline
-            .map(|deadline| deadline.saturating_duration_since(ClockInstant::now()))
-    }
-
-    fn apply(&mut self, notification: ToPainter) {
-        match notification {
-            ToPainter::FrameChanged => self.pending_announce = true,
-            ToPainter::Engine(event) => {
+    fn apply(&mut self, notice: ViewNotice) {
+        match notice {
+            ViewNotice::Engine(event) => {
                 if matches!(
                     event,
                     EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
                 ) {
-                    self.control.cancel();
+                    self.failed = true;
+                    self.cancel.cancel();
                 }
                 self.events.push(event);
             }
-            ToPainter::ListenerAvailable(name) => {
-                self.listener_names.insert(name);
-            }
-            ToPainter::ListenerUnavailable(name) => {
-                self.listener_names.remove(&name);
-            }
-            ToPainter::BeginFrameServiced(seq) => {
-                self.begin_frames_serviced = self.begin_frames_serviced.max(seq);
-            }
-            ToPainter::TimerDeadline(deadline) => self.timer_deadline = deadline,
-            ToPainter::RequestImages(sources) => self.image_requests.extend(sources),
-            ToPainter::RequestSource(request) => self.source_requests.push(request),
-            ToPainter::RequestWorkerSource {
+            ViewNotice::RequestImages(sources) => self.image_requests.extend(sources),
+            ViewNotice::RequestSource {
                 request,
                 completion,
-            } => {
-                self.worker_sources.push((request, completion));
-            }
+            } => self.source_requests.push((request, completion)),
         }
+    }
+
+    /// Takes the newest published state, and says whether it had moved
+    /// since this link last looked.
+    ///
+    /// The snapshot is taken unconditionally rather than only when the watch
+    /// reports a change: a completed `changed()` has already marked the value
+    /// seen, so the flag alone would skip exactly the state an offscreen wait
+    /// was woken for.
+    ///
+    /// Never `Receiver::has_changed()` either: that reports an error once the
+    /// sender is gone, and the last frame a view published before its task
+    /// ended is still the frame this painter must draw.
+    fn adopt(&mut self) -> bool {
+        let latest = self.frames.borrow_and_update();
+        let changed = latest.has_changed();
+        let published = latest.clone();
+        drop(latest);
+        if published.commit() != self.published.commit() {
+            self.redraw_pending.set(true);
+        }
+        self.published = published;
+        changed
     }
 
     fn take_image_requests(&mut self) -> Vec<Arc<str>> {
         std::mem::take(&mut self.image_requests)
     }
 
-    fn adopt_frame(&mut self, announced: bool) {
-        if announced {
-            self.frame.clone_from(&frame_slot(&self.frames));
-            self.redraw_pending.set(true);
-        }
-    }
-
     pub(crate) fn frame(&self) -> Option<&Arc<CommittedFrame>> {
-        self.frame.as_ref()
+        self.published.frame.as_ref()
     }
 
     pub(crate) fn has_listener(&self, name: &str) -> bool {
-        self.listener_names.contains(name)
+        self.published.listeners.contains(name)
     }
 
     pub(crate) fn take_events(&mut self) -> Vec<EngineEvent> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Cancels this view: no source completion still in a host's hands may
+    /// answer after this.
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn view_cancel(&self) -> &ViewCancel {
+        &self.cancel
+    }
+
+    /// Every listener name the view has published, for a test that asserts
+    /// the whole set rather than one membership.
+    #[cfg(test)]
+    pub(crate) fn listener_names(&self) -> Vec<Arc<str>> {
+        self.published.listeners.iter().cloned().collect()
+    }
+
+    /// The next notice the view sent, for a test that plays the host itself
+    /// rather than draining through a painter turn.
+    #[cfg(test)]
+    pub(crate) fn take_notice(&mut self) -> Option<ViewNotice> {
+        self.notices.try_recv().ok()
+    }
+
+    /// Whether the published state moved since this was last asked, which
+    /// for a test driving the listener index alone is whether an edge
+    /// crossed.
+    #[cfg(test)]
+    pub(crate) fn take_published_edge(&mut self) -> bool {
+        self.adopt()
     }
 
     /// Marks a redraw the painter owes itself. It wakes nobody: every caller
@@ -304,56 +288,94 @@ impl PainterLink {
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
         self.commands
-            .send((Some(self.view), ToMain::BeginFrame { now, seq }))
+            .send(ToMain::BeginFrame { now, seq })
             .ok()
             .map(|()| seq)
     }
 
-    /// Waits for a particular main-thread animation round while applying all
-    /// notifications that precede its acknowledgement.
+    /// Waits for a particular main-thread animation round while applying
+    /// everything that precedes its acknowledgement.
     ///
     /// The one blocking wait a host's own thread makes on `bobcat-main`, and
-    /// `tick` — offscreen only — is the one call that reaches it. The mailbox
-    /// uses the same deadline wait as main's timer-driven command loop.
+    /// `tick` — offscreen only — is the one call that reaches it. It ends
+    /// early on a fatal event, because nothing will service the round after
+    /// one, and on a task that has gone, because nothing will service it at
+    /// all.
     pub(crate) fn wait_begin_frame(&mut self, seq: u64, timeout: Duration) -> bool {
         let deadline = ClockInstant::now() + timeout;
         self.sync();
-        while self.begin_frames_serviced < seq
-            && !self.control.is_cancelled()
+        while self.published.begin_frame_serviced < seq
+            && !self.failed
+            && !self.commands.is_closed()
             && ClockInstant::now() < deadline
         {
-            if !self.notifications.wait_view(deadline) {
-                break;
+            // Destructured so the two halves can be borrowed at once inside
+            // one future.
+            let Self {
+                frames, notices, ..
+            } = self;
+            let woken = block_on_deadline(
+                async {
+                    tokio::select! {
+                        published = frames.changed() => Wake::Published(published.is_ok()),
+                        notice = notices.recv() => Wake::Notice(notice),
+                    }
+                },
+                deadline,
+            );
+            match woken {
+                // The deadline passed, or the far end is gone.
+                None | Some(Wake::Notice(None) | Wake::Published(false)) => break,
+                // Applied rather than left on the channel: a notice consumed
+                // here is one this view will never see again.
+                Some(Wake::Notice(Some(notice))) => self.apply(notice),
+                Some(Wake::Published(true)) => {}
             }
             self.sync();
         }
-        self.settle();
-        self.begin_frames_serviced >= seq
-    }
-
-    #[cfg(test)]
-    pub(crate) fn drain(&mut self) -> Vec<ToPainter> {
-        let mut messages = Vec::new();
-        self.notifications
-            .drain_view(self.view, |message| messages.push(message));
-        messages
+        // Once more on the way out, for the exits that leave the loop without
+        // one: the deadline passing, and a far end that has gone. Either can
+        // land in the same instant as the acknowledgement this was waiting
+        // for, and a view that published one before its task ended has still
+        // serviced the round.
+        self.sync();
+        self.published.begin_frame_serviced >= seq
     }
 }
 
-impl Drop for PainterLink {
-    fn drop(&mut self) {
-        self.notifications.remove(self.view);
-    }
+/// What ended one turn of an offscreen frame wait.
+enum Wake {
+    /// The published state moved; `false` if its sender is gone.
+    Published(bool),
+    /// One notice, or the end of the channel.
+    Notice(Option<ViewNotice>),
 }
 
 impl fmt::Debug for PainterLink {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PainterLink")
-            .field("listener_names", &self.listener_names.len())
+            .field("listener_names", &self.published.listeners.len())
             .field("begin_frames_sent", &self.begin_frames_sent)
             .finish_non_exhaustive()
     }
+}
+
+/// Both ends of one view's link, for a caller that is itself the far end: the
+/// crate's benchmarks, and the tests that drive a document in place rather
+/// than over a group's thread.
+pub(crate) fn detached_link(
+    requester: Arc<dyn crate::view::EventRequester>,
+) -> (PainterLink, ViewOutbox, mpsc::UnboundedReceiver<ToMain>) {
+    let cancel = ViewCancel::default();
+    let (commands, command_receiver) = mpsc::unbounded_channel();
+    let (notices, notice_receiver) = mpsc::unbounded_channel();
+    let (frames, frame_receiver) = watch::channel(Published::default());
+    (
+        PainterLink::new(commands, notice_receiver, frame_receiver, cancel.clone()),
+        ViewOutbox::new(notices, frames, requester, cancel),
+        command_receiver,
+    )
 }
 
 /// Where a view's pixels go: a window's presentation stack, or a texture the
@@ -388,6 +410,8 @@ impl Output {
                 WindowGraphics::new(target, frame_size).await?,
             ))),
             DrawTarget::Offscreen => Self::offscreen(),
+            #[cfg(test)]
+            DrawTarget::None => Ok(Self::None),
         }
     }
 
@@ -416,20 +440,17 @@ impl Output {
 /// Kept on that thread by construction — the `Rc` marker makes the whole
 /// struct `!Send`, and [`crate::LynxView`] owns one by value, so the thread
 /// that built the view is the only one that can ever draw for it.
-/// The painter every in-crate test builds: no test here is about the host's
-/// resource system, so they all share the one that answers nothing.
+/// The painter the in-crate tests that play the far end of a link build: no
+/// test here is about the host's resource system, so they all share the one
+/// that answers nothing.
 #[cfg(test)]
 pub(crate) type TestPainter = Painter<crate::resource::NeverAnswers>;
 
 pub(crate) struct Painter<F> {
     // Keep first: dropping the link closes the sole command sender, which
-    // wakes the Lynx main thread before any state it may still refer to is
+    // ends this view's task before any state it may still refer to is
     // released.
     pub(super) link: PainterLink,
-    #[cfg(test)]
-    main: Option<GroupHome>,
-    #[cfg(test)]
-    pub(super) detached: bool,
     viewport: Viewport,
     frame_size: FrameSize,
     output: Output,
@@ -456,20 +477,6 @@ impl<F> std::fmt::Debug for Painter<F> {
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-impl<F> Drop for Painter<F> {
-    fn drop(&mut self) {
-        if let Some(main) = self.main.as_mut() {
-            // The view first and the group second, in the order an embedder
-            // releases them: `bobcat-main` drops this view's document, then
-            // returns from the round that closed the group.
-            self.link.send(ToMain::Shutdown);
-            self.link.close_group();
-            main.join();
-        }
     }
 }
 
@@ -727,75 +734,58 @@ fn route_published(
 }
 
 impl<F> Painter<F> {
-    /// Tells the Lynx main thread to stop. Its command loop returns on this
-    /// message, which is why it is sent explicitly rather than left to the
-    /// FIFO closing when the painter is released.
+    /// Ends this view. Cancellation first, so a host still holding one of its
+    /// source completions sees it before anything is released; the goodbye
+    /// itself is the command sender dropping with this painter.
     ///
     /// Teardown knows nothing about the store, so it stays reachable for any
     /// `F` — which is what lets `Drop` run without the trait bound.
     pub(super) fn shutdown(&self) {
+        self.link.cancel();
         // Close the sink before the store drops: a loader still in flight
         // must find it detached rather than queue into a dead view.
-        self.link.control.cancel();
         self.images.detach();
-        self.link.send(ToMain::Shutdown);
+    }
+
+    /// One command, for the seams outside this module that have one to send.
+    #[cfg(test)]
+    pub(crate) fn send(&self, command: ToMain) {
+        self.link.send(command);
+    }
+
+    /// This view's cancellation flag, for a test that holds a source
+    /// completion of its own.
+    #[cfg(test)]
+    pub(crate) const fn view_cancel(&self) -> &ViewCancel {
+        self.link.view_cancel()
     }
 }
 
-/// The test constructors pin the fetcher: no in-crate test is about the
-/// host's resource system, so they all build over the one that answers
-/// nothing.
+/// The far end of a link, for the tests that play the main thread's whole
+/// side of one.
+#[cfg(test)]
+pub(crate) struct DetachedEnds {
+    pub(crate) outbox: ViewOutbox,
+    pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
+}
+
+/// The test constructor pins the fetcher: no test that plays the far end of a
+/// link is about the host's resource system, so they all build over the one
+/// that answers nothing.
 #[cfg(test)]
 impl TestPainter {
-    pub(super) fn start<R: crate::view::EventRequester>(
-        build_document: impl FnOnce() -> LynxDocument + Send + 'static,
+    /// A painter with every seam built but no view task: the other end of its
+    /// link is handed back so a test can play that task's whole side of it.
+    pub(super) fn detached(
         viewport: Viewport,
         frame_size: FrameSize,
-        event_requester: Arc<R>,
-        entry: EntryModule,
-        output: Output,
-    ) -> Result<Self, EngineError> {
-        let (mut painter, main) = Self::with_link(viewport, frame_size, event_requester, output);
-        painter.main = Some(spawn_test_main_thread(build_document, entry, main)?);
-        painter.detached = false;
-        Ok(painter)
-    }
-
-    pub(crate) fn probe_document<T: Send + 'static>(
-        &mut self,
-        probe: impl FnOnce(&mut LynxDocument) -> T + Send + 'static,
-    ) -> Option<T> {
-        if self.detached {
-            return None;
-        }
-        let (sender, receiver) = flume::unbounded();
-        self.link.send(ToMain::Probe(Box::new(move |document| {
-            let _ = sender.send(probe(document));
-        })));
-        receiver.recv_timeout(Duration::from_secs(10)).ok()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
-        self.sync();
-        self.link.frame().cloned()
-    }
-
-    /// The painter and the other end of its link, with no Lynx main thread
-    /// started over it yet — the seam `start` spawns through, and the one a
-    /// test plays the main thread's half of.
-    #[cfg(test)]
-    pub(super) fn with_link<R: crate::view::EventRequester>(
-        viewport: Viewport,
-        frame_size: FrameSize,
-        event_requester: Arc<R>,
-        output: Output,
-    ) -> (Self, DetachedLink<R>) {
-        let (link, main) = detached_link(event_requester);
-        let painter = Self::with_output(viewport, frame_size, link, output, |_reports| {
+        requester: Arc<dyn crate::view::EventRequester>,
+    ) -> (Self, DetachedEnds) {
+        let (link, outbox, commands) = detached_link(requester);
+        let painter = Self::with_output(viewport, frame_size, link, Output::None, |_reports| {
             crate::resource::NeverAnswers
         });
-        (painter, main)
+        (painter, DetachedEnds { outbox, commands })
     }
 }
 
@@ -812,10 +802,6 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
     {
         Self {
             link,
-            #[cfg(test)]
-            main: None,
-            #[cfg(test)]
-            detached: true,
             viewport,
             frame_size,
             output,
@@ -845,29 +831,11 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
     /// unasked, and the frame that needed those images would never arrive.
     fn sync(&mut self) {
         self.link.sync();
-        if self.link.control.is_cancelled() || self.link.notifications.is_disconnected() {
-            self.link.control.cancel();
-            self.link.source_requests.clear();
-            self.link.worker_sources.clear();
-        } else {
-            for request in std::mem::take(&mut self.link.source_requests) {
-                let module = match &request {
-                    SourceRequest::Module(url) => Some(url.clone()),
-                    _ => None,
-                };
-                self.images.store().request_source(
-                    request,
-                    SourceCompletion::new(
-                        self.link.commands.clone(),
-                        self.link.view,
-                        Arc::clone(&self.link.control),
-                        module,
-                    ),
-                );
-            }
-        }
-        for (request, completion) in self.link.worker_sources.drain(..) {
-            if !completion.is_cancelled() {
+        // A view that failed or was released asks its host for nothing more:
+        // every completion still queued here is dropped, which is what tells
+        // whoever was awaiting it that no source is coming.
+        for (request, completion) in std::mem::take(&mut self.link.source_requests) {
+            if !self.link.failed && !completion.is_cancelled() {
                 self.images.store().request_source(request, completion);
             }
         }
@@ -1042,10 +1010,6 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
     }
 
     pub(super) fn begin_frame(&mut self, now: f64, always: bool) -> Option<u64> {
-        #[cfg(test)]
-        if self.detached {
-            return None;
-        }
         let main_ticks_due = self
             .link
             .frame()
@@ -1241,8 +1205,12 @@ impl<F: crate::resource::ResourceFetcher> Painter<F> {
         self.is_animating() || self.link.redraw_owed()
     }
 
-    pub(super) fn next_wakeup(&self) -> Option<Duration> {
-        self.link.next_wakeup()
+    /// The newest committed frame, for the seams outside this module that
+    /// read one.
+    #[cfg(test)]
+    pub(crate) fn published_frame(&mut self) -> Option<Arc<CommittedFrame>> {
+        self.sync();
+        self.link.frame().cloned()
     }
 
     /// Advances an offscreen view by one frame.

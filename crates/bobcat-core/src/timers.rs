@@ -5,20 +5,23 @@
 //! `setTimeout`, both clamp nesting the same way, and neither owns any of
 //! this, so it lives beside [`crate::clock`] where both can reach it.
 //!
-//! Waiting is not here either. `bobcat-main` hands a view's deadline to that
-//! view's painter and the host waits it out; `bobcat-workers` has no painter
-//! to hand one to and waits out its own. What is common is only *when* a
-//! timer is due, which is what [`TimerSchedule::next_deadline`] answers.
+//! Waiting is not here either. Each realm has a task of its own that waits
+//! its deadlines out — a view's on `bobcat-main`, a worker's on
+//! `bobcat-workers` — through [`crate::clock::sleep_until`], and no deadline
+//! crosses a thread or reaches a host at all. Nor is firing: when a deadline
+//! passes, that realm's epilogue is what runs what came due. What is common
+//! here is only *when* a timer is due, which is what
+//! [`TimerSchedule::next_deadline`] answers.
 //!
 //! `setTimeout` and `setInterval` split across the one boundary the realm
 //! has. The callback stays in the realm, because no host value could hold
-//! one; the schedule stays here, because the thread that waits is the thread
+//! one; the schedule stays here, because the task that waits is the task
 //! that owns the clock. What crosses is an id, and — when a timer comes due —
 //! one call back into the realm module that filed the callback under it.
 //!
 //! Nothing here runs a callback or touches the document. It answers two
 //! questions and only those: when the earliest arming comes due, and which
-//! ids a round found due.
+//! ids have come due now.
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
@@ -35,7 +38,7 @@ use crate::esm::{HOST_MODULE_SPECIFIER, TIMER_MODULE_SPECIFIER};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 
-/// Timers that come due in one round without touching the heap. A card with
+/// Timers that come due together without touching the heap. A card with
 /// more than this many deadlines inside one millisecond is unusual.
 const INLINE_DUE_TIMERS: usize = 4;
 

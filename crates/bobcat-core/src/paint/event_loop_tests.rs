@@ -1,59 +1,26 @@
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dom::Point2D;
 use dom::input::{InputEvent, PointerKind, PointerPhase};
 
-use super::TestPainter;
+use crate::test_support::{TestView, TestViewSpec};
 
 /// The handle a packed id names, the way script spells one.
 fn node_id(bits: u64) -> dom::NodeId {
     dom::NodeId::from_bits(bits).expect("a well-formed packed handle")
 }
 
-/// Boots a script and waits for it to finish, leaving the main thread
-/// parked on its command channel with the boot's frame published.
-fn booted(source: &str) -> TestPainter {
-    let mut engine = TestPainter::start(
-        || {
-            crate::main::tree::new_document(
-                crate::main::tree::Viewport::new(393.0, 727.0),
-                crate::main::tree::PageConfig::default(),
-            )
-        },
-        crate::main::tree::Viewport::new(393.0, 727.0),
-        crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
-            .expect("the test viewport is valid"),
-        Arc::new(super::NoWakeup),
-        super::EntryModule {
-            source: source.to_owned(),
-            url: "app:///main.js".to_owned(),
-        },
-        // This suite reads the document and the decisions, never pixels.
-        super::Output::None,
-    )
-    .expect("the test view starts");
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if engine
-            .pump()
-            .into_iter()
-            .any(|event| matches!(event, crate::EngineEvent::ScriptFinished))
-        {
-            assert!(
-                engine.published_frame().is_some(),
-                "boot's flush publishes before ScriptFinished is pumped"
-            );
-            return engine;
-        }
-        assert!(Instant::now() < deadline, "the entry module did not finish");
-        std::thread::yield_now();
-    }
+/// Boots a script and waits for it to finish, leaving the view's task parked
+/// on its channels with the boot's frame published.
+///
+/// This suite reads the document and the decisions, never pixels, so the view
+/// it builds has nowhere to draw.
+fn booted(source: &str) -> TestView {
+    TestViewSpec::new(source).boot()
 }
 
-/// One attribute of one node, read on the main thread through a probe.
-fn attribute_of(engine: &mut TestPainter, node: u64, name: &'static str) -> Option<String> {
+/// One attribute of one node, read on the view's own thread through a probe.
+fn attribute_of(engine: &mut TestView, node: u64, name: &'static str) -> Option<String> {
     engine
         .probe_document(move |tree| {
             tree.get(node_id(node))
@@ -245,7 +212,7 @@ fn touch(id: u32, phase: PointerPhase, x: f32) -> InputEvent {
 /// the wait by showing up in the actual value. The deadline is generous
 /// because the whole suite's realm boots share the machine with this
 /// spin.
-fn wait_for_log(engine: &mut TestPainter, expected: &str) {
+fn wait_for_log(engine: &mut TestView, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let log = attribute_of(engine, 3, "log");
@@ -291,7 +258,7 @@ fn travel_beyond_the_tap_slop_suppresses_the_tap() {
 fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.clock.pin(0.6);
+    engine.painter().clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
     wait_for_log(&mut engine, "longpress:10");
 
@@ -308,7 +275,7 @@ fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
 fn a_long_hold_without_longpress_listener_still_taps() {
     let mut engine = booted(&gesture_page(false));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.clock.pin(0.6);
+    engine.painter().clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     wait_for_log(&mut engine, "tap:10");
 }
@@ -320,7 +287,7 @@ fn a_long_hold_without_longpress_listener_still_taps() {
 fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.clock.pin(0.6);
+    engine.painter().clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
@@ -349,10 +316,10 @@ const SCROLLING_GESTURE_PAGE: &str = r"
         };
         ";
 
-fn scroll_offset_of(engine: &mut TestPainter, node: u64) -> dom::Vector2D<f32> {
+fn scroll_offset_of(engine: &mut TestView, node: u64) -> dom::Vector2D<f32> {
     engine
         .probe_document(move |tree| tree.scroll_offset(node_id(node)))
-        .expect("the main thread answers probes")
+        .expect("the view's task answers probes")
 }
 
 /// A drag the user-agent scroll consumed is the claim that suppresses
@@ -391,6 +358,7 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     // travel minus the 8px drag slop moved the scroller 22px. The
     // document never hears about a windowed scroll.
     let offset = engine
+        .painter()
         .scroll_intents
         .offset_for(node_id(3))
         .expect("the drag scrolled the view");
@@ -424,6 +392,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     ));
     wait_for_log(&mut engine, "wheel:30");
     let offset = engine
+        .painter()
         .scroll_intents
         .offset_for(node_id(3))
         .expect("the wheel scrolled the view");
@@ -442,16 +411,16 @@ fn a_stationary_hold_longpresses_on_the_frame_clock() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
     assert!(
-        engine.gesture.needs_frame(),
+        engine.painter().gesture.needs_frame(),
         "the down arms a deadline, which is what keeps frames coming"
     );
 
-    engine.clock.pin(0.6);
-    let now = engine.clock.now_seconds();
-    engine.service_gesture_clock(now);
+    engine.painter().clock.pin(0.6);
+    let now = engine.painter().clock.now_seconds();
+    engine.painter().service_gesture_clock(now);
     wait_for_log(&mut engine, "longpress:10");
     assert!(
-        !engine.gesture.needs_frame(),
+        !engine.painter().gesture.needs_frame(),
         "a resolved deadline stops asking for frames"
     );
 }
@@ -507,8 +476,8 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
         dom::Vector2D::zero(),
         "a windowed scroll leaves the document untouched"
     );
-    // The probe round-tripped the main thread, so its round's
-    // commit-if-dirty has already run — and found nothing.
+    // The probe round-tripped the main thread, so the epilogue of that entry
+    // has already run its commit-if-dirty — and found nothing.
     assert_eq!(
         engine
             .published_frame()
@@ -519,7 +488,7 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     );
     let scroller = node_id(3);
     assert_eq!(
-        engine.scroll_intents.offset_for(scroller),
+        engine.painter().scroll_intents.offset_for(scroller),
         Some(dom::Vector2D::new(0.0, 30.0)),
         "the intent carries the offset composition draws at"
     );
@@ -602,57 +571,37 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
 
 /// Boots a card whose one view runs `animation_css`, waiting for the
 /// boot flush like [`booted`] does.
-fn booted_animated(animation_css: &str) -> TestPainter {
-    // The builder runs on `bobcat-main`, so it owns its sheet text rather
-    // than borrowing the caller's.
-    let animation_css = animation_css.to_owned();
-    let mut engine = TestPainter::start(
-        move || {
-            let mut document = crate::main::tree::new_document(
-                crate::main::tree::Viewport::new(393.0, 727.0),
-                crate::main::tree::PageConfig::default(),
-            );
-            crate::style::add_style_sheet_text(&mut document, &animation_css);
-            document
-        },
-        crate::main::tree::Viewport::new(393.0, 727.0),
-        crate::view::FrameSize::for_viewport(393.0, 727.0, 1.0)
-            .expect("the test viewport is valid"),
-        Arc::new(super::NoWakeup),
-        super::EntryModule {
-            source: r"
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const view = __CreateView(0);
-                  __AppendElement(page, view);
-                  globalThis.held = [page, view];
-                  __FlushElementTree();
-                };
-                "
-            .to_owned(),
-            url: "app:///animated.js".to_owned(),
-        },
-        super::Output::None,
+///
+/// The sheet is an author stylesheet like any other now: the host answers it
+/// before the entry, which is the order every view mounts one in.
+fn booted_animated(animation_css: &str) -> TestView {
+    TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          const page = __CreatePage('card', 0);
+          const view = __CreateView(0);
+          __AppendElement(page, view);
+          globalThis.held = [page, view];
+          __FlushElementTree();
+        };
+        ",
     )
-    .expect("the test view starts");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !engine
-        .pump()
-        .into_iter()
-        .any(|event| matches!(event, crate::EngineEvent::ScriptFinished))
-    {
-        assert!(Instant::now() < deadline, "the entry module did not finish");
-        std::thread::yield_now();
-    }
-    engine
+    .with_style_sheet(animation_css)
+    .boot()
 }
 
-/// Sends one `BeginFrame` and waits for its round's commit to publish.
-fn synchronized_tick(engine: &mut TestPainter, now: f64) {
-    let seq = engine.begin_frame(now, true).expect("a tick crosses");
+/// Sends one `BeginFrame` and waits for the commit it implies to publish.
+fn synchronized_tick(engine: &mut TestView, now: f64) {
+    let seq = engine
+        .painter()
+        .begin_frame(now, true)
+        .expect("a tick crosses");
     assert!(
-        engine.link.wait_begin_frame(seq, Duration::from_secs(5)),
-        "the main thread services the tick"
+        engine
+            .painter()
+            .link
+            .wait_begin_frame(seq, Duration::from_secs(30)),
+        "the view's task services the tick"
     );
 }
 
@@ -682,7 +631,7 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
         "an exported curve frees the main thread"
     );
     assert!(
-        engine.begin_frame(0.5, false).is_none(),
+        engine.painter().begin_frame(0.5, false).is_none(),
         "no BeginFrame crosses while the curve covers the animation"
     );
 }
@@ -701,14 +650,20 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     let frame = engine.published_frame().expect("the promotion committed");
     assert!(frame.has_live_curves());
     assert!(
-        engine.begin_frame(0.1, false).is_none(),
+        engine.painter().begin_frame(0.1, false).is_none(),
         "inside the curve's domain nothing crosses"
     );
 
     let seq = engine
+        .painter()
         .begin_frame(0.3, false)
         .expect("the passed boundary sends the finish tick");
-    assert!(engine.link.wait_begin_frame(seq, Duration::from_secs(5)));
+    assert!(
+        engine
+            .painter()
+            .link
+            .wait_begin_frame(seq, Duration::from_secs(30))
+    );
     let finished = engine.published_frame().expect("the finish committed");
     assert!(
         !finished.animations_active(),
@@ -738,8 +693,11 @@ fn independent_views_can_own_live_script_threads_in_one_process() {
     }
 }
 
+/// A timer still ahead is the engine's own to wait out. Nothing here drives
+/// it — no pump, no command, no deadline handed to the host — and its
+/// callback's commit is already published by the first turn that looks.
 #[test]
-fn a_timer_still_ahead_runs_on_the_turn_the_host_says_it_came_due() {
+fn a_timer_still_ahead_fires_on_the_engines_own_clock() {
     let mut engine = booted(
         r"
             globalThis.renderPage = function () {
@@ -756,63 +714,39 @@ fn a_timer_still_ahead_runs_on_the_turn_the_host_says_it_came_due() {
         .published_frame()
         .expect("boot published a frame")
         .commit_id();
-
-    let bound = Instant::now() + Duration::from_secs(1);
-    let wakeup = loop {
-        if let Some(wakeup) = engine.next_wakeup() {
-            break wakeup;
-        }
-        assert!(
-            Instant::now() < bound,
-            "the deadline the entry armed was never announced to the host"
-        );
-        let _ = engine.pump();
-        std::thread::yield_now();
-    };
-    assert!(
-        wakeup <= Duration::from_millis(200),
-        "and what is announced is what is left of the delay: {wakeup:?}"
-    );
-
     assert_eq!(
         attribute_of(&mut engine, 3, "ticked"),
         None,
         "a command must not stand in for the deadline"
     );
 
-    std::thread::sleep(Duration::from_millis(250));
-    assert_eq!(
-        engine.next_wakeup(),
-        Some(Duration::ZERO),
-        "the wait the host was given is over"
-    );
-    let _ = engine.pump();
-    assert!(
-        engine.next_wakeup().is_none(),
-        "and that turn spent the deadline nudging the main thread"
-    );
-
-    let bound = Instant::now() + Duration::from_secs(1);
+    // `published_frame` reads what has been published and sends nothing, so
+    // nothing in this loop can be what ran the callback.
+    let bound = Instant::now() + Duration::from_secs(10);
     loop {
-        if attribute_of(&mut engine, 3, "ticked").as_deref() == Some("yes") {
+        let commit = engine
+            .published_frame()
+            .expect("a frame stays published")
+            .commit_id();
+        if commit != booted_commit {
             break;
         }
         assert!(
             Instant::now() < bound,
-            "the nudge is what runs the callback, and it never ran"
+            "the timer never came due on the engine's own clock"
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(5));
     }
-    assert_ne!(
-        engine
-            .published_frame()
-            .expect("a frame is published")
-            .commit_id(),
-        booted_commit,
-        "and the round the timer ran in committed and published its mutation"
+    assert_eq!(
+        attribute_of(&mut engine, 3, "ticked").as_deref(),
+        Some("yes"),
+        "and the entry the timer ran in committed its mutation"
     );
 }
 
+/// A deadline already behind the engine needs no wait at all: the entry that
+/// armed it is the entry whose epilogue fires it, and the commit that
+/// epilogue publishes is already the callback's.
 #[test]
 fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
     let mut engine = booted(
@@ -822,29 +756,41 @@ fn a_timer_that_is_already_due_runs_without_a_nudge_from_the_painter() {
               const view = __CreateView(0);
               __AppendElement(page, view);
               globalThis.held = [page, view];
-              setTimeout(() => __SetAttribute(view, 'ticked', 'now'), 0);
+              setTimeout(() => {
+                __SetAttribute(view, 'ticked', 'now');
+                __FlushElementTree();
+              }, 0);
               __FlushElementTree();
             };
             ",
     );
+    // Read without sending anything: boot is over, so this is the frame the
+    // engine published on its own.
+    let booted_commit = engine
+        .published_frame()
+        .expect("boot published a frame")
+        .commit_id();
 
-    let bound = Instant::now() + Duration::from_secs(1);
-    loop {
-        for notification in engine.link.drain() {
-            assert!(
-                !matches!(notification, crate::view::ToPainter::TimerDeadline(Some(_))),
-                "a deadline the main thread is already past is never announced"
-            );
-        }
-        if attribute_of(&mut engine, 3, "ticked").as_deref() == Some("now") {
-            break;
-        }
-        assert!(
-            Instant::now() < bound,
-            "a zero-delay callback must not wait on the host"
-        );
-        std::thread::yield_now();
-    }
+    // One probe, and one only. A probe is a command, and a command is exactly
+    // the nudge this test says a due timer does not need — but it is applied
+    // before the epilogue that runs timers, so an engine that waited for a
+    // host turn would answer this first one with nothing.
+    assert_eq!(
+        attribute_of(&mut engine, 3, "ticked").as_deref(),
+        Some("now"),
+        "a zero-delay callback must not wait on the host"
+    );
+    // And nothing was published after boot's frame, so the commit the
+    // callback's own flush produced is that very frame: the timer ran inside
+    // boot's own epilogue rather than in an entry of its own.
+    assert_eq!(
+        engine
+            .published_frame()
+            .expect("a frame stays published")
+            .commit_id(),
+        booted_commit,
+        "the epilogue that ran the callback is the one that committed it"
+    );
 }
 
 /// A timer that throws has an event listener's standing, not a script

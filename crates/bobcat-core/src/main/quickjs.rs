@@ -108,6 +108,14 @@ pub(crate) struct ScriptRuntime {
     runtime: quickjs::Runtime,
     config: QuickJsConfig,
     checkpoint_incomplete: bool,
+    /// Bumped by every checkpoint any realm on this runtime runs.
+    ///
+    /// The job queue is the runtime's: one view's checkpoint runs another's
+    /// promise jobs, so an import a sibling was waiting on can finish inside
+    /// an entry that has nothing to do with it. The sibling learns that here
+    /// rather than by being told, which is what makes it impossible to enter
+    /// JavaScript and forget to say so.
+    checkpoint: tokio::sync::watch::Sender<u64>,
 }
 
 impl ScriptRuntime {
@@ -121,7 +129,32 @@ impl ScriptRuntime {
             runtime: quickjs::Runtime::with_options(config.runtime_options)?,
             config,
             checkpoint_incomplete: false,
+            checkpoint: tokio::sync::watch::channel(0).0,
         })
+    }
+
+    /// The checkpoint generation, for a task that must settle what its own
+    /// realm owes again whenever any realm on this runtime has entered
+    /// JavaScript.
+    pub(crate) fn checkpoints(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.checkpoint.subscribe()
+    }
+
+    /// The generation as it stands right now.
+    ///
+    /// A page records this at the end of every entry of its own, so the
+    /// follower watching [`Self::checkpoints`] can tell a sibling's bump —
+    /// which may have finished this realm's imports — from the one this
+    /// realm just ran up itself.
+    pub(crate) fn checkpoint_generation(&self) -> u64 {
+        *self.checkpoint.borrow()
+    }
+
+    /// Announces a checkpoint nobody ran: a task ended part-way through, so
+    /// whatever it left behind is now a sibling's to finish.
+    pub(crate) fn mark_checkpoint(&self) {
+        self.checkpoint
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     /// Opens one realm on this runtime. Every view in a group gets its own.
@@ -232,10 +265,14 @@ impl ScriptEngine {
         phase: ScriptErrorPhase,
     ) -> Result<usize, ScriptError> {
         let budget = runtime.config.max_jobs_per_checkpoint.get();
-        let drain = match runtime
+        let drained = runtime
             .runtime
-            .drain_pending_jobs_up_to(&self.realm, budget)
-        {
+            .drain_pending_jobs_up_to(&self.realm, budget);
+        // Structurally, on both outcomes: this realm entered the shared job
+        // queue, and every sibling has to settle what its own realm owes
+        // whether or not the drain got through it.
+        runtime.mark_checkpoint();
+        let drain = match drained {
             Ok(drain) => drain,
             Err(error) => {
                 runtime.checkpoint_incomplete = true;

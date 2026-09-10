@@ -1,180 +1,140 @@
-//! Routing and lifetime invariants for the group's shared return FIFO.
+//! What one view's link is, now that it is one view's: no addressing, no
+//! sibling buffering, and a goodbye that is the channels themselves.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
+use crate::paint::{DetachedEnds, TestPainter};
+use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
+use crate::test_support::TestViewSpec;
 
-struct Links {
-    first: PainterLink,
-    second: PainterLink,
-    notify_first: ToPainterSender<NoWakeup>,
-    notify_second: ToPainterSender<NoWakeup>,
-    commands: Mailbox<ToMain>,
+fn viewport() -> Viewport {
+    Viewport::new(393.0, 727.0)
 }
 
-fn links() -> Links {
-    let (commands, receiver) = Mailbox::channel();
-    let (notifications, inbox) = Mailbox::channel();
-    let inbox = Rc::new(inbox);
-    let requester = Arc::new(NoWakeup);
-    let link = |id| {
-        let view = ViewId(id);
-        let (painter, frames) = view_link(
-            view,
-            &commands,
-            Rc::clone(&inbox),
-            Arc::new(StartupControl::default()),
-        );
-        let notify =
-            ToPainterSender::new(view, notifications.clone(), frames, Arc::clone(&requester));
-        (painter, notify)
-    };
-    let (first, notify_first) = link(0);
-    let (second, notify_second) = link(1);
-    Links {
-        first,
-        second,
-        notify_first,
-        notify_second,
-        commands: receiver,
-    }
+fn frame_size() -> FrameSize {
+    FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid")
 }
 
+/// Two views, each with its own link and nothing between them.
+fn two_views() -> [(TestPainter, DetachedEnds); 2] {
+    [
+        TestPainter::detached(viewport(), frame_size(), Arc::new(NoWakeup)),
+        TestPainter::detached(viewport(), frame_size(), Arc::new(NoWakeup)),
+    ]
+}
+
+/// The property the old addressed FIFO had to buy with a per-view buffer:
+/// one view's turn neither consumes nor delays anything belonging to
+/// another, whatever order the two published in.
 #[test]
-fn a_turn_preserves_other_views_messages_and_their_order() {
-    let mut links = links();
-    links
-        .notify_second
-        .send(ToPainter::ListenerAvailable(Arc::from("tap")));
-    links
-        .notify_first
-        .send(ToPainter::Engine(EngineEvent::ScriptFinished));
-    links
-        .notify_second
-        .send(ToPainter::ListenerUnavailable(Arc::from("tap")));
-    links
-        .notify_second
-        .send(ToPainter::RequestImages(vec![Arc::from("photo.png")]));
-    links
-        .notify_first
-        .send(ToPainter::RequestSource(SourceRequest::Entry(
-            "entry.js".into(),
-        )));
-    links
-        .notify_second
-        .send(ToPainter::Engine(EngineEvent::ScriptFinished));
+fn a_views_notices_and_frames_are_independent_of_a_siblings() {
+    let [(mut first, first_end), (mut second, second_end)] = two_views();
 
-    assert!(matches!(links.first.drain().as_slice(), [
-        ToPainter::Engine(EngineEvent::ScriptFinished),
-        ToPainter::RequestSource(SourceRequest::Entry(url)),
-    ] if url == "entry.js"));
-    // New arrivals follow the sibling's buffered batch, even after the last
-    // sender disconnects.
-    links
-        .notify_second
-        .send(ToPainter::ListenerAvailable(Arc::from("longpress")));
-    drop(links.notify_first);
-    drop(links.notify_second);
-    assert!(matches!(links.second.drain().as_slice(), [
-        ToPainter::ListenerAvailable(available),
-        ToPainter::ListenerUnavailable(unavailable),
-        ToPainter::RequestImages(images),
-        ToPainter::Engine(EngineEvent::ScriptFinished),
-        ToPainter::ListenerAvailable(last),
-    ] if &**available == "tap" && &**unavailable == "tap" && &*images[0] == "photo.png" && &**last == "longpress"));
-    assert!(links.first.drain().is_empty());
-    assert!(links.second.drain().is_empty());
-}
+    second_end.outbox.listener_edge(Arc::from("tap"), true);
+    first_end.outbox.engine_event(EngineEvent::ScriptFinished);
+    let _asked = second_end
+        .outbox
+        .request_source(SourceRequest::Entry("second.js".into()));
+    second_end.outbox.engine_event(EngineEvent::ScriptFinished);
 
-#[test]
-fn dropping_a_view_releases_buffered_and_late_notifications() {
-    let mut links = links();
-    let buffered: Arc<str> = Arc::from("buffered");
-    let buffered_weak = Arc::downgrade(&buffered);
-    links
-        .notify_second
-        .send(ToPainter::ListenerAvailable(buffered));
-    links.first.sync();
-    assert!(
-        buffered_weak.upgrade().is_some(),
-        "the other view has not taken its turn"
-    );
-    drop(links.second);
-    assert!(
-        buffered_weak.upgrade().is_none(),
-        "removing the view drops its buffer"
-    );
-
-    let late: Arc<str> = Arc::from("late");
-    let late_weak = Arc::downgrade(&late);
-    links.notify_second.send(ToPainter::ListenerAvailable(late));
-    links
-        .notify_first
-        .send(ToPainter::Engine(EngineEvent::ScriptFinished));
-    links.first.sync();
-    assert!(
-        late_weak.upgrade().is_none(),
-        "late messages cannot recreate a dead view"
-    );
+    // The first view's turn sees exactly its own one event, and takes it
+    // once.
     assert!(matches!(
-        links.first.take_events().as_slice(),
+        first.pump().as_slice(),
         [EngineEvent::ScriptFinished]
     ));
-}
+    assert!(first.pump().is_empty());
+    assert!(!first.link.has_listener("tap"), "and none of the sibling's");
 
-#[test]
-fn an_offscreen_wait_routes_sibling_messages_without_accepting_their_ack() {
-    let mut links = links();
-    let seq = links
-        .first
-        .begin_frame(0.0)
-        .expect("the group accepts a frame");
-    // A sibling's acknowledgement cannot satisfy this view's frame.
-    links.notify_second.send(ToPainter::BeginFrameServiced(seq));
-    assert!(!links.first.wait_begin_frame(seq, Duration::ZERO));
-
-    let sender = std::thread::spawn(move || {
-        assert!(matches!(
-            links.commands.recv(None).unwrap(),
-            (Some(_), ToMain::BeginFrame { .. })
-        ));
-        links
-            .notify_second
-            .send(ToPainter::Engine(EngineEvent::ScriptFinished));
-        links.notify_first.send(ToPainter::BeginFrameServiced(seq));
-    });
-    assert!(links.first.wait_begin_frame(seq, Duration::from_secs(10)));
-    links.second.sync();
+    // The sibling's is still there afterwards, in the order it was
+    // published, and still there after the last sender is gone.
+    drop(first_end);
+    drop(second_end);
     assert!(matches!(
-        links.second.take_events().as_slice(),
+        second.pump().as_slice(),
         [EngineEvent::ScriptFinished]
     ));
-    sender.join().unwrap();
+    assert!(second.link.has_listener("tap"));
+    assert!(second.pump().is_empty());
 }
 
+/// The goodbye is structural: nothing sends it, and nothing can forget to.
+///
+/// That this test returns at all is half the assertion. Dropping the last
+/// view drops the last handle on its group, which joins `bobcat-main`, and
+/// that thread cannot return while a view task is still serving.
 #[test]
-fn a_failure_ends_an_offscreen_wait_while_the_group_stays_connected() {
-    let mut links = links();
-    let seq = links
-        .first
+fn dropping_the_last_embedder_sender_ends_the_view_and_cancels_its_sources() {
+    let view = TestViewSpec::new(
+        r"
+        globalThis.renderPage = function () {
+          __CreatePage('card', 0);
+        };
+        ",
+    )
+    .create(Arc::new(NoWakeup));
+    // A source the host is still holding when the view goes.
+    let (completion, answer) = SourceCompletion::new(view.cancel().clone());
+    drop(view);
+    assert!(
+        completion.is_cancelled(),
+        "the flag is set before the painter releases the host's fetcher"
+    );
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "throw new Error('a cancelled source must not run')".into(),
+        url: "app:///late.js".into(),
+    }));
+    assert!(
+        answer.blocking_recv().is_err(),
+        "and a late answer reaches nobody"
+    );
+}
+
+/// An offscreen wait is this view's own: nothing another view acknowledges
+/// can satisfy it, and a fatal event ends it rather than letting it wait out
+/// its whole deadline.
+#[test]
+fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_on_a_failure() {
+    let [(mut first, first_end), (_second, second_end)] = two_views();
+    let mut first_end = first_end;
+    let seq = first
+        .link
         .begin_frame(0.0)
-        .expect("the group accepts a frame");
-    links
-        .notify_first
-        .send(ToPainter::Engine(EngineEvent::StartupFailed(
-            EngineError::UnknownFontFamily("missing".into()).into(),
-        )));
-    assert!(!links.first.wait_begin_frame(seq, Duration::from_secs(10)));
+        .expect("the view's task is listening");
     assert!(matches!(
-        links.first.take_events().as_slice(),
+        first_end.commands.blocking_recv(),
+        Some(ToMain::BeginFrame { .. })
+    ));
+
+    second_end.outbox.begin_frame_serviced(seq);
+    assert!(
+        !first.link.wait_begin_frame(seq, Duration::ZERO),
+        "a sibling's acknowledgement is not this view's"
+    );
+
+    first_end.outbox.engine_event(EngineEvent::StartupFailed(
+        EngineError::UnknownFontFamily("missing".into()).into(),
+    ));
+    let started = Instant::now();
+    assert!(
+        !first.link.wait_begin_frame(seq, Duration::from_secs(10)),
+        "and a failure ends the wait rather than outlasting it"
+    );
+    // Ended by the event rather than by the deadline: nothing will service
+    // the round after a fatal one, so waiting the ten seconds out would be
+    // ten seconds of a host's own thread.
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the wait outlasted the failure that ended it"
+    );
+    assert!(matches!(
+        first.pump().as_slice(),
         [EngineEvent::StartupFailed(_)]
     ));
-    links
-        .notify_second
-        .send(ToPainter::Engine(EngineEvent::ScriptFinished));
-    links.second.sync();
-    assert!(matches!(
-        links.second.take_events().as_slice(),
-        [EngineEvent::ScriptFinished]
-    ));
+
+    // The acknowledgement it was owed does arrive, and satisfies the next
+    // wait: the failure ended the wait, not the link.
+    first_end.outbox.begin_frame_serviced(seq);
+    assert!(first.link.wait_begin_frame(seq, Duration::ZERO));
 }

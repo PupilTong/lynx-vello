@@ -20,7 +20,8 @@ use crate::style::PreparsedStyleSheet;
 ///
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
-/// [`SourceCompletion`] to answer main directly. It owns any executor its IO
+/// [`SourceCompletion`] to answer whoever asked, without naming them. It owns
+/// any executor its IO
 /// needs; core retains and polls no resource future. Images are reported through
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
@@ -214,83 +215,63 @@ pub enum LoadedSource {
 
 /// The concrete, transferable right to answer one source request.
 ///
-/// This is neither a closure nor a trait object. It sends directly to the
-/// requesting runtime's FIFO, without another painter or main-thread turn. It cannot
-/// be cloned; consuming it permits at most one result. An unanswered drop
-/// reports failure so a lost worker cannot leave startup waiting forever.
+/// This is neither a closure nor a trait object, and it names no destination:
+/// it holds one end of the one-shot channel that was minted with the request,
+/// and whoever awaits the other end is where the source goes. That is what
+/// lets a worker's script skip `bobcat-main` entirely while a stylesheet's
+/// reaches the task that asked for it, with one type and no routing.
+///
+/// It cannot be cloned; consuming it permits at most one result. An unanswered
+/// drop reports failure, so a lost worker cannot leave startup waiting forever.
 #[must_use = "complete the source request or retain it until the load finishes"]
 pub struct SourceCompletion {
-    destination: Option<SourceDestination>,
-    view: crate::view::ViewId,
-    module: Option<String>,
-    control: Arc<crate::main::StartupControl>,
-}
-
-enum SourceDestination {
-    Main(crate::mailbox::Sender<crate::view::ToMain>),
-    Worker {
-        commands: flume::WeakSender<(
-            Option<crate::view::ViewId>,
-            crate::background::WorkerCommand,
-        )>,
-        key: crate::background::WorkerKey,
-    },
+    answer: Option<tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>>,
+    cancel: crate::link::ViewCancel,
 }
 
 impl std::fmt::Debug for SourceCompletion {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SourceCompletion")
-            .field("view", &self.view)
             .field("cancelled", &self.is_cancelled())
             .finish_non_exhaustive()
     }
 }
 
 impl SourceCompletion {
+    /// One request's two ends, for a caller that will await the answer itself.
     pub(crate) fn new(
-        commands: crate::mailbox::Sender<crate::view::ToMain>,
-        view: crate::view::ViewId,
-        control: Arc<crate::main::StartupControl>,
-        module: Option<String>,
+        cancel: crate::link::ViewCancel,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<Result<LoadedSource, crate::LynxViewError>>,
+    ) {
+        let (answer, receiver) = tokio::sync::oneshot::channel();
+        (Self::over(answer, cancel), receiver)
+    }
+
+    /// The right to answer a request whose receiving end has already been
+    /// handed to whoever is waiting for it.
+    pub(crate) fn over(
+        answer: tokio::sync::oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>,
+        cancel: crate::link::ViewCancel,
     ) -> Self {
         Self {
-            destination: Some(SourceDestination::Main(commands)),
-            view,
-            module,
-            control,
+            answer: Some(answer),
+            cancel,
         }
     }
 
-    pub(crate) fn worker(
-        commands: flume::WeakSender<(
-            Option<crate::view::ViewId>,
-            crate::background::WorkerCommand,
-        )>,
-        key: crate::background::WorkerKey,
-        view: crate::view::ViewId,
-        control: Arc<crate::main::StartupControl>,
-    ) -> Self {
-        Self {
-            destination: Some(SourceDestination::Worker { commands, key }),
-            view,
-            module: None,
-            control,
-        }
-    }
-
-    /// Whether the view or its group has ended. Cancellation is cooperative:
-    /// an IO operation already running may finish, but its result is discarded.
+    /// Whether the view has ended, or nobody is waiting for this source any
+    /// more. Cancellation is cooperative: an IO operation already running may
+    /// finish, but its result is discarded.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.control.is_cancelled()
-            || match self.destination.as_ref() {
-                None => true,
-                Some(SourceDestination::Main(commands)) => commands.is_disconnected(),
-                Some(SourceDestination::Worker { commands, .. }) => commands
-                    .upgrade()
-                    .is_none_or(|sender| sender.is_disconnected()),
-            }
+        self.cancel.is_cancelled()
+            || self
+                .answer
+                .as_ref()
+                .is_none_or(tokio::sync::oneshot::Sender::is_closed)
     }
 
     /// Sends the result once. A result for a cancelled view is discarded.
@@ -299,37 +280,10 @@ impl SourceCompletion {
     }
 
     fn send(&mut self, source: Result<LoadedSource, crate::LynxViewError>) {
-        if let Some(destination) = self.destination.take()
-            && !self.control.is_cancelled()
+        if let Some(answer) = self.answer.take()
+            && !self.cancel.is_cancelled()
         {
-            match destination {
-                SourceDestination::Main(commands) => {
-                    let _ = commands.send((
-                        Some(self.view),
-                        crate::view::ToMain::SourceLoaded {
-                            module: self.module.take(),
-                            source,
-                        },
-                    ));
-                }
-                SourceDestination::Worker { commands, key } => {
-                    let script = match source {
-                        Ok(LoadedSource::Entry { source, url }) => {
-                            Ok(crate::background::WorkerScript { source, url })
-                        }
-                        Ok(LoadedSource::StyleSheet(_)) => {
-                            Err("the fetcher returned a stylesheet for a worker".to_owned())
-                        }
-                        Err(error) => Err(error.to_string()),
-                    };
-                    if let Some(commands) = commands.upgrade() {
-                        let _ = commands.send((
-                            None,
-                            crate::background::WorkerCommand::Script { key, script },
-                        ));
-                    }
-                }
-            }
+            let _ = answer.send(source);
         }
     }
 }
@@ -337,17 +291,23 @@ impl SourceCompletion {
 impl Drop for SourceCompletion {
     fn drop(&mut self) {
         if !self.is_cancelled() {
-            self.send(Err(ResourceError {
-                request_id: None,
-                kind: ResourceErrorKind::Unavailable,
-                phase: ResourceErrorPhase::ReadBody,
-                locator: None,
-                status: None,
-                message: "the fetcher dropped a source request without completing it".into(),
-                retry: RetryAdvice::Never,
-            }
-            .into()));
+            self.send(Err(unanswered_source().into()));
         }
+    }
+}
+
+/// What a source that nobody answered failed with — reported by a dropped
+/// completion, and by the awaiting side when the completion never reached a
+/// drop of its own.
+pub(crate) fn unanswered_source() -> ResourceError {
+    ResourceError {
+        request_id: None,
+        kind: ResourceErrorKind::Unavailable,
+        phase: ResourceErrorPhase::ReadBody,
+        locator: None,
+        status: None,
+        message: "the fetcher dropped a source request without completing it".into(),
+        retry: RetryAdvice::Never,
     }
 }
 
@@ -619,19 +579,19 @@ impl ResourceFetcher for NeverAnswers {
 
 #[cfg(test)]
 mod completion_tests {
-    use super::*;
-    use crate::mailbox::Mailbox;
-    use crate::main::StartupControl;
-    use crate::view::{DETACHED_VIEW, ToMain};
+    use tokio::sync::oneshot::error::TryRecvError;
 
-    fn completion() -> (SourceCompletion, Mailbox<ToMain>, Arc<StartupControl>) {
-        let (sender, receiver) = Mailbox::channel();
-        let control = Arc::new(StartupControl::default());
-        (
-            SourceCompletion::new(sender, DETACHED_VIEW, Arc::clone(&control), None),
-            receiver,
-            control,
-        )
+    use super::*;
+    use crate::link::ViewCancel;
+
+    fn completion() -> (
+        SourceCompletion,
+        tokio::sync::oneshot::Receiver<Result<LoadedSource, crate::LynxViewError>>,
+        ViewCancel,
+    ) {
+        let cancel = ViewCancel::default();
+        let (completion, answer) = SourceCompletion::new(cancel.clone());
+        (completion, answer, cancel)
     }
 
     fn source() -> LoadedSource {
@@ -642,63 +602,48 @@ mod completion_tests {
     }
 
     #[test]
-    fn worker_completion_sends_exactly_one_addressed_result() {
-        let (completion, receiver, _) = completion();
+    fn a_completion_sends_exactly_one_result_from_wherever_the_load_finished() {
+        let (completion, mut answer, _) = completion();
         std::thread::spawn(move || completion.complete(Ok(source())))
             .join()
             .unwrap();
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok((
-                Some(DETACHED_VIEW),
-                ToMain::SourceLoaded {
-                    module: None,
-                    source: Ok(_)
-                }
-            ))
-        ));
-        assert!(receiver.try_recv().is_err());
+        assert!(matches!(answer.try_recv(), Ok(Ok(_))));
+        assert!(matches!(answer.try_recv(), Err(TryRecvError::Closed)));
     }
 
     #[test]
     fn an_unanswered_drop_reports_failure() {
-        let (completion, receiver, _) = completion();
+        let (completion, mut answer, _) = completion();
         drop(completion);
         assert!(matches!(
-            receiver.try_recv(),
-            Ok((
-                _,
-                ToMain::SourceLoaded {
-                    module: None,
-                    source: Err(crate::LynxViewError::Resource(ResourceError {
-                        kind: ResourceErrorKind::Unavailable,
-                        ..
-                    }))
-                }
-            ))
+            answer.try_recv(),
+            Ok(Err(crate::LynxViewError::Resource(ResourceError {
+                kind: ResourceErrorKind::Unavailable,
+                ..
+            })))
         ));
-        assert!(receiver.try_recv().is_err());
+        assert!(matches!(answer.try_recv(), Err(TryRecvError::Closed)));
     }
 
     #[test]
     fn cancellation_discards_both_late_results_and_unanswered_drops() {
-        for answer in [false, true] {
-            let (completion, receiver, control) = completion();
-            control.cancel();
+        for answer_it in [false, true] {
+            let (completion, mut answer, cancel) = completion();
+            cancel.cancel();
             assert!(completion.is_cancelled());
-            if answer {
+            if answer_it {
                 completion.complete(Ok(source()));
             } else {
                 drop(completion);
             }
-            assert!(receiver.try_recv().is_err());
+            assert!(matches!(answer.try_recv(), Err(TryRecvError::Closed)));
         }
     }
 
     #[test]
-    fn a_disconnected_main_cancels_the_source() {
-        let (completion, receiver, _) = completion();
-        drop(receiver);
+    fn a_destination_that_stopped_waiting_cancels_the_source() {
+        let (completion, answer, _) = completion();
+        drop(answer);
         assert!(completion.is_cancelled());
     }
 }
