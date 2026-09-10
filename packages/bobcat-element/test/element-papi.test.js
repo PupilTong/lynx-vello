@@ -17,6 +17,7 @@ rstest.mockRequire("bobcat-internal:host", () => {
     throw new Error("the Element PAPI test native host is not installed");
   }
   return {
+    createDocument: native.createDocument,
     createPage: native.createPage,
     createElement: native.createElement,
     setAttribute: native.setAttribute,
@@ -54,6 +55,13 @@ rstest.mockRequire("bobcat:runtime", () => ({
     native.calls.push(["publishEvent", componentId, handlerName, event]);
   },
 }));
+
+/**
+ * What the mock's second `createDocument` throws, so a test can assert that
+ * the host's refusal reaches the caller by identity — the native member
+ * refuses a second document, and this file adds no check of its own.
+ */
+const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
 /**
  * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
@@ -139,10 +147,24 @@ function createMockBobcat(issuedIds) {
   const attributes = new Map();
   /** @type {Map<number, string>} */
   const tags = new Map([[2, "page"]]);
+  // One document per realm for the life of the realm, as the native slot
+  // enforces it: the ingredients a construction spends are never restored.
+  let documentSpent = false;
+
   /** @type {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }} */
   const host = {
     calls,
     named,
+    // Arguments are recorded rather than ignored: the member takes none, and
+    // a test that says so has to be able to see one that arrived.
+    /** @param {unknown[]} args */
+    createDocument: (...args) => {
+      calls.push(["createDocument", ...args]);
+      if (documentSpent) {
+        throw DOCUMENT_REFUSAL;
+      }
+      documentSpent = true;
+    },
     createPage: () => {
       calls.push(["createPage"]);
       return 2;
@@ -456,9 +478,42 @@ describe("installation", () => {
       expect(/** @type {Function} */ (papi).length, name).toBe(arity);
     }
     expect(Object.keys(elementModule).sort()).toEqual(
-      [...arities.map(([name]) => name), "__BobcatDispatchEvent"].sort(),
+      [
+        ...arities.map(([name]) => name),
+        "__BobcatDispatchEvent",
+        // Not a PAPI member: the lifecycle export the boot module
+        // constructs, which no entry preamble imports.
+        "Document",
+      ].sort(),
     );
     expect(elementModule.__BobcatDispatchEvent).toHaveLength(7);
+  });
+
+  it("creates the realm's document once, with no arguments", () => {
+    void new elementModule.Document();
+    expect(mock.named("createDocument")).toEqual([["createDocument"]]);
+  });
+
+  it("tags a document the way the standard's own exotic objects are tagged", () => {
+    expect(Object.prototype.toString.call(new elementModule.Document())).toBe(
+      "[object Document]",
+    );
+  });
+
+  it("lets the host refuse a second document rather than refusing it here", () => {
+    const first = new elementModule.Document();
+    /** @type {unknown} */
+    let thrown;
+    try {
+      void new elementModule.Document();
+    } catch (error) {
+      thrown = error;
+    }
+    // By identity: the refusal is the host's, carried out of the constructor
+    // untouched rather than re-thrown or replaced by a check of this file's.
+    expect(thrown).toBe(DOCUMENT_REFUSAL);
+    expect(mock.named("createDocument")).toHaveLength(2);
+    expect(first).toBeInstanceOf(elementModule.Document);
   });
 
   it("does not install __DropElement: collection is the only release path", () => {

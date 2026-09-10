@@ -344,6 +344,85 @@ async fn dropping_loading_view_cancels_resource_and_reaps_main_body() {
     drop(painter);
 }
 
+/// Metrics that arrive while the entry fetch is outstanding have no document
+/// to write into — the boot module has not created one yet — so the view's
+/// task writes them into the ingredients instead, and the document the boot
+/// module then creates is the resized one.
+///
+/// Asserted through the pixels, because the document is what an integration
+/// test cannot name: the UA sheet gives `page` `width: 100%; height: 100%`, so
+/// a document created at the resized viewport and device-pixel ratio paints
+/// the painter's whole target, while one still carrying the metrics the view
+/// was built at would cover a 32x24 corner of it.
+#[tokio::test]
+async fn metrics_that_arrive_before_the_document_are_what_it_is_created_at() {
+    hang_budget(async {
+        let (started_sender, mut started) = tokio::sync::oneshot::channel();
+        let fetcher = Rc::new(PendingFetcher {
+            base: FetcherDouble::new(Vec::new()),
+            started: Mutex::new(Some(started_sender)),
+            dropped: Mutex::new(None),
+            pending: Mutex::new(None),
+        });
+        let (mut view, mut painter) = solo_view(
+            Arc::new(NoWakeup),
+            32.0,
+            24.0,
+            1.0,
+            DrawTarget::Offscreen,
+            |_| Rc::clone(&fetcher),
+            ViewSources::new("main.js"),
+        )
+        .await
+        .expect("creation returns a loading view");
+        loop {
+            assert!(view.pump().is_empty());
+            if started.try_recv().is_ok() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // The painter owns device metrics, and this one is resized while the
+        // view it is attached to is still loading.
+        painter
+            .resize(400.0, 800.0, 2.0)
+            .expect("resize while loading");
+        // A `BeginFrame` behind it, waited out: commands are a FIFO and the
+        // loading task acknowledges this one itself, so the acknowledgement is
+        // proof that the resize ahead of it has already been staged — which is
+        // what lets the entry arrive afterwards rather than racing it.
+        painter.tick(false).expect("tick while loading");
+        let completion = fetcher
+            .pending
+            .lock()
+            .expect("pending completion")
+            .take()
+            .expect("the entry fetch is outstanding");
+        completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
+            source: "globalThis.renderPage = function () {
+               __SetInlineStyles(__CreatePage('card', 0), 'background-color:rgb(255,0,0)');
+             };"
+            .into(),
+            url: "app:///main.js".into(),
+        }));
+        wait_for_script(&mut view).expect("the entry boots once its source arrives");
+
+        let shot = painter.capture().expect("capture the committed page");
+        assert_eq!((shot.size.width, shot.size.height), (800, 1600));
+        let at = |x: u32, y: u32| {
+            let start = ((y * shot.size.width + x) * 4) as usize;
+            <[u8; 4]>::try_from(&shot.pixels[start..start + 4]).expect("an RGBA frame")
+        };
+        assert_eq!(
+            at(shot.size.width - 8, shot.size.height - 8),
+            [255, 0, 0, 255],
+            "the document the boot module created covers the resized viewport"
+        );
+    })
+    .await;
+}
+
 /// Configuration errors are lifecycle events even when no source was requested.
 #[tokio::test]
 async fn an_unknown_font_family_reports_failure_without_fetching() {

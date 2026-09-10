@@ -1,10 +1,36 @@
 //! The Lynx main-thread runtime over its owned `QuickJS` realm.
+//!
+//! # Who owns the document
+//!
+//! The realm does, and it says so: the boot module's first statement is
+//! `export const document = new Document();`, and that constructor is what
+//! builds the document — out of the [`DocumentIngredients`] the view task
+//! staged before this realm was opened. No JavaScript in this realm runs
+//! ahead of that statement, so every host member that follows has a document
+//! to work on.
+//!
+//! The exported binding holds it for the realm's life. Nothing in the realm
+//! releases it: there is no release member, no registry, and no answer a tree
+//! member gives without a document. Because `bobcat-internal:host` resolves
+//! from any module in the realm a card can reach `createDocument` too, and
+//! the one refusal left in this area is what it gets: the ingredients are
+//! spent, so a second construction fails that card's boot.
+//!
+//! Release is the view's task ending. Dropping the `LynxView` closes the
+//! command channel, the task returns, and [`MainThreadRuntime`]'s fields drop
+//! in declaration order — [`RealmHandles`] first, which is everything that
+//! holds a handle of this realm and so is what frees it, and with it the host
+//! functions it held and their clones of this realm's [`DocumentSlot`]; then
+//! the runtime's own `slot` handle, which is when the `LynxDocument` drops.
+//! JavaScript goes first, then the Rust object it named.
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use dom::StylePool;
 use quickjs_rust_bridge::{HostArgument, HostValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -17,9 +43,11 @@ use crate::esm::{
     TIMER_MODULE_SPECIFIER,
 };
 use crate::link::{ViewNotice, ViewOutbox};
-use crate::main::tree::{LynxDocument, apply_attribute_style};
+use crate::main::tree::{LynxDocument, PageConfig, apply_attribute_style, new_document};
+use crate::resource::StyleSheetSource;
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members, run_due_timers};
+use crate::view::Viewport;
 
 const BOOT_MODULE_SPECIFIER: &str = "bobcat:boot";
 const ELEMENT_MODULE_SPECIFIER: &str = "bobcat:element";
@@ -144,26 +172,143 @@ impl std::error::Error for MainThreadError {}
 /// knob, not a measurement.
 const REMOVALS_PER_COLLECTION: u32 = 32;
 
-/// The main thread's outright ownership of the document, plus the publish
-/// seam its commits leave through.
-struct TreeHandle {
-    document: LynxDocument,
+/// Everything a document is built out of, staged by the view task before the
+/// realm opens.
+///
+/// Nothing on the Rust side creates the document any more: the boot module
+/// does, by constructing a `Document`, and the host member behind that
+/// constructor builds one out of this. The view task's boot phase therefore
+/// fetches sources without a document to mount them on, and stages them here
+/// instead.
+pub(crate) struct DocumentIngredients {
+    /// The metrics the document is created at. A `Resize` that arrives
+    /// before the document does updates this rather than a document.
+    pub(crate) viewport: Viewport,
+    pub(crate) config: PageConfig,
+    /// The fonts and the default family, already validated against a context
+    /// of their own — see
+    /// [`adopt_text_context`](dom::Document::adopt_text_context). `None` is a
+    /// view that named neither, which leaves the document's own lazy context
+    /// alone.
+    pub(crate) text_context: Option<dom::TextContext>,
+    /// Every author sheet this view listed, fetched and in cascade order.
+    pub(crate) sheets: Vec<StyleSheetSource>,
+    pub(crate) style_pool: Option<Rc<StylePool>>,
+    /// Image reports that arrived while there was no document to apply them
+    /// to, replayed in order once there is one.
+    pub(crate) pending_image_events: Vec<dom::ImageEvent>,
+}
+
+#[cfg(test)]
+impl DocumentIngredients {
+    /// The ingredients of a view that lists no sheets, fonts or pool — what
+    /// a test stages when the document itself is not what it is about.
+    pub(crate) fn for_test(viewport: Viewport, config: PageConfig) -> Self {
+        Self {
+            viewport,
+            config,
+            text_context: None,
+            sheets: Vec::new(),
+            style_pool: None,
+            pending_image_events: Vec::new(),
+        }
+    }
+}
+
+/// The realm's document and the ingredients it is built out of, plus the
+/// publish seam its commits leave through.
+///
+/// Filling it is the realm's doing: `createDocument` builds the document out
+/// of the staged ingredients when the boot module constructs its `Document`.
+/// Nothing empties it again — the slot drops with the view's task, after the
+/// realm that named the document has been freed.
+struct DocumentSlot {
+    /// What a `createDocument` builds from, taken by the first one that runs.
+    ingredients: Option<DocumentIngredients>,
+    document: Option<LynxDocument>,
     /// Removals since the last collection; see [`REMOVALS_PER_COLLECTION`].
     removals: u32,
     /// Where committed frames leave for the painting side.
     outbox: ViewOutbox,
 }
 
-impl TreeHandle {
+/// What every caller of [`DocumentSlot::document_mut`] relies on, stated at
+/// the one place that could observe it failing.
+const DOCUMENT_EXISTS: &str = "the boot module creates the document before any card runs";
+
+impl DocumentSlot {
+    /// The realm's document.
+    ///
+    /// Panicking is what a missing document deserves here rather than an
+    /// error every member would have to carry: no JavaScript runs in this
+    /// realm before the boot module's first statement creates the document,
+    /// and nothing empties the slot until the realm itself is freed.
+    fn document_mut(&mut self) -> &mut LynxDocument {
+        self.document.as_mut().expect(DOCUMENT_EXISTS)
+    }
+
+    /// Builds the realm's one document out of the staged ingredients.
+    ///
+    /// The ingredients are spent by the first call, which is the whole of the
+    /// refusal a second one gets: a construction that fails rejects the boot
+    /// module's `new Document()`, which fails the boot and ends the view, so
+    /// nothing asks again.
+    ///
+    /// Every phase is caught, because a panic that crosses the bridge is
+    /// erased into "the host function panicked" and this is the one host
+    /// member that runs the whole document pipeline — the UA cascade, the
+    /// author sheets, the early image reports — behind a single call.
+    fn create_document(&mut self) -> Result<(), String> {
+        let Some(ingredients) = self.ingredients.take() else {
+            return Err("the realm already created its document".to_owned());
+        };
+        let DocumentIngredients {
+            viewport,
+            config,
+            text_context,
+            sheets,
+            style_pool,
+            pending_image_events,
+        } = ingredients;
+        let mut document = construction_phase("building the page", || {
+            let mut document = new_document(viewport, config);
+            if let Some(pool) = style_pool {
+                document.set_style_pool(pool);
+            }
+            if let Some(context) = text_context {
+                document.adopt_text_context(context);
+            }
+            document
+        })?;
+        construction_phase("mounting the author stylesheets", || {
+            for sheet in sheets {
+                match sheet {
+                    StyleSheetSource::Preparsed(sheet) => {
+                        crate::style::add_preparsed_style_sheet(&mut document, &sheet);
+                    }
+                    StyleSheetSource::Text(css) => {
+                        crate::style::add_style_sheet_text(&mut document, &css);
+                    }
+                }
+            }
+        })?;
+        construction_phase("replaying the image reports that arrived first", || {
+            document.apply_image_events(&pending_image_events);
+        })?;
+        self.document = Some(document);
+        Ok(())
+    }
+
     /// Runs the whole pipeline and publishes the committed frame — the
     /// native half of `__FlushElementTree`, and the only place frames leave
     /// this thread.
     fn flush(&mut self) {
-        self.outbox.publish_frame(self.document.commit());
+        let frame = self.document_mut().commit();
+        self.outbox.publish_frame(frame);
         // The walk that just ran is the one place that knows which image
         // sources this frame needs; ask the painter to name them. Empty on
         // every commit that met no new image, which is almost all of them.
-        let wanted = self.document.take_wanted_images();
+        let wanted = self.document_mut().take_wanted_images();
         if !wanted.is_empty() {
             self.outbox.notify(ViewNotice::RequestImages(wanted));
         }
@@ -173,7 +318,7 @@ impl TreeHandle {
     /// every entry into the realm, which is what makes "we do not guarantee
     /// the tree is not flushed outside `__FlushElementTree`" true.
     fn commit_if_dirty(&mut self) {
-        if self.document.needs_render() {
+        if self.document_mut().needs_render() {
             self.flush();
         }
     }
@@ -192,6 +337,20 @@ impl TreeHandle {
         self.removals = 0;
         true
     }
+}
+
+/// Runs one phase of document construction, naming it if it panics.
+///
+/// Without this the realm is told "the host function panicked", which is the
+/// bridge's answer for every host member and says nothing about which of the
+/// document's several pipelines gave way.
+fn construction_phase<T>(phase: &str, work: impl FnOnce() -> T) -> Result<T, String> {
+    catch_unwind(AssertUnwindSafe(work)).map_err(|payload| {
+        format!(
+            "creating the document panicked while {phase}: {}",
+            crate::threads::panic_message(payload.as_ref())
+        )
+    })
 }
 
 /// The nodes a walk should visit for one event name: `(node, is capture pass)`.
@@ -329,13 +488,26 @@ impl EventState {
     }
 }
 
-/// The private main-thread runtime used by the engine pipeline.
-pub(crate) struct MainThreadRuntime {
+/// Everything that holds a handle of this realm; dropping it frees the realm.
+///
+/// One field rather than three because the rule the runtime's field order
+/// carries is about the *last* of them: a `Value` holds an `Rc` of the context
+/// it came from, so the realm is freed when `init_data` and `global_props` go
+/// as well as the engine, not when the engine alone does. Grouped, that is a
+/// rule a single declaration order states.
+struct RealmHandles {
     engine: ScriptEngine,
-    // Retained in this realm for the subsequent boot/lynx integration.
-    // None until startup prepares them; omitted host inputs become JS undefined.
+    /// Retained in this realm for the subsequent boot/lynx integration.
+    /// Written by [`MainThreadRuntime::prepare_initial_data`] and read by
+    /// nothing yet. `None` until startup prepares them; an omitted host input
+    /// becomes JavaScript `undefined`.
     init_data: Option<quickjs_rust_bridge::Value>,
     global_props: Option<quickjs_rust_bridge::Value>,
+}
+
+/// The private main-thread runtime used by the engine pipeline.
+pub(crate) struct MainThreadRuntime {
+    realm: RealmHandles,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them. `None` until `install_workers` runs.
     ///
@@ -345,7 +517,12 @@ pub(crate) struct MainThreadRuntime {
     /// still have named a worker is gone.
     workers: Option<Rc<super::workers::WorkerOwner>>,
     outbox: ViewOutbox,
-    tree: Rc<RefCell<TreeHandle>>,
+    /// Declared after `realm`, and it must stay there: fields drop in
+    /// declaration order, so freeing the realm — and with it the host
+    /// functions holding their own clones of this `Rc` — happens before this
+    /// handle goes, which is what makes the `LynxDocument` outlive every
+    /// piece of JavaScript that could name it.
+    slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
     /// Names one dispatch, so the realm can keep one event object alive across
@@ -366,7 +543,7 @@ impl fmt::Debug for MainThreadRuntime {
 impl MainThreadRuntime {
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
-        document: LynxDocument,
+        ingredients: DocumentIngredients,
         outbox: ViewOutbox,
     ) -> Result<Self, MainThreadError> {
         let mut engine = js_runtime
@@ -375,21 +552,23 @@ impl MainThreadRuntime {
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
-        let tree = install_bobcat(
+        let slot = install_bobcat(
             &mut engine,
             js_runtime,
-            document,
+            ingredients,
             outbox.clone(),
             &events,
             &timers,
         )?;
         Ok(Self {
-            engine,
-            init_data: None,
-            global_props: None,
+            realm: RealmHandles {
+                engine,
+                init_data: None,
+                global_props: None,
+            },
             workers: None,
             outbox,
-            tree,
+            slot,
             events,
             timers,
             next_event_id: 0,
@@ -401,15 +580,16 @@ impl MainThreadRuntime {
         init_data: Option<&serde_json::Value>,
         global_props: Option<&serde_json::Value>,
     ) -> Result<(), MainThreadError> {
-        let init_data = self
+        let realm = &mut self.realm;
+        let init_data = realm
             .engine
             .json_value(init_data)
             .map_err(|error| MainThreadError::from_engine("converting initial page data", error))?;
-        let global_props = self.engine.json_value(global_props).map_err(|error| {
+        let global_props = realm.engine.json_value(global_props).map_err(|error| {
             MainThreadError::from_engine("converting initial global properties", error)
         })?;
-        self.init_data = Some(init_data);
-        self.global_props = Some(global_props);
+        realm.init_data = Some(init_data);
+        realm.global_props = Some(global_props);
         Ok(())
     }
 
@@ -426,7 +606,7 @@ impl MainThreadRuntime {
     {
         let (owner, incoming) = workers
             .install(
-                &mut self.engine,
+                &mut self.realm.engine,
                 js_runtime,
                 outbox,
                 base_url,
@@ -482,6 +662,7 @@ impl MainThreadRuntime {
         };
         let key = key.get().to_string();
         let called = self
+            .realm
             .engine
             .call_module_export(
                 js_runtime,
@@ -501,13 +682,17 @@ impl MainThreadRuntime {
     /// Commits and publishes when anything is stale. Called by the page's
     /// epilogue, after every entry into the realm.
     pub(crate) fn commit_if_dirty(&mut self) {
-        self.tree.borrow_mut().commit_if_dirty();
+        self.slot.borrow_mut().commit_if_dirty();
     }
 
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
-        let _ = self.tree.borrow_mut().document.advance_animations(now);
+        let _ = self
+            .slot
+            .borrow_mut()
+            .document_mut()
+            .advance_animations(now);
     }
 
     /// Writes the painting side's scroll offsets into the document and
@@ -516,8 +701,8 @@ impl MainThreadRuntime {
     /// document — between refills the offsets live on the painting side
     /// alone.
     pub(crate) fn refill_scroll_windows(&mut self, offsets: &[(dom::NodeId, dom::Vector2D<f32>)]) {
-        let mut handle = self.tree.borrow_mut();
-        let document = &mut handle.document;
+        let mut slot = self.slot.borrow_mut();
+        let document = slot.document_mut();
         for (node, offset) in offsets {
             document.scroll_to(*node, *offset);
         }
@@ -525,9 +710,13 @@ impl MainThreadRuntime {
     }
 
     /// Applies new device metrics.
+    ///
+    /// The document is where they belong once it exists; before that the
+    /// view task holds them in the ingredients instead, so the document is
+    /// created at the size the painter last named.
     pub(crate) fn apply_resize(&mut self, width: f32, height: f32, device_pixel_ratio: f32) {
-        let mut handle = self.tree.borrow_mut();
-        let document = &mut handle.document;
+        let mut slot = self.slot.borrow_mut();
+        let document = slot.document_mut();
         let viewport = document.viewport_size();
         if viewport.width.to_bits() != width.to_bits()
             || viewport.height.to_bits() != height.to_bits()
@@ -540,13 +729,17 @@ impl MainThreadRuntime {
     }
 
     pub(crate) fn apply_image_events(&mut self, events: &[dom::ImageEvent]) {
-        self.tree.borrow_mut().document.apply_image_events(events);
+        self.slot
+            .borrow_mut()
+            .document_mut()
+            .apply_image_events(events);
     }
 
-    /// Runs `probe` against the owned document — the observation seam for
+    /// Runs `probe` against the realm's document — the observation seam for
     /// everything outside this thread.
     pub(crate) fn with_document<T>(&mut self, probe: impl FnOnce(&mut LynxDocument) -> T) -> T {
-        probe(&mut self.tree.borrow_mut().document)
+        let mut slot = self.slot.borrow_mut();
+        probe(slot.document_mut())
     }
 
     /// Delivers one routed event the painting side decided: the type and
@@ -577,8 +770,8 @@ impl MainThreadRuntime {
             return Ok(false);
         };
         let steps = {
-            let handle = self.tree.borrow();
-            let document = &handle.document;
+            let mut slot = self.slot.borrow_mut();
+            let document = slot.document_mut();
             if document.get(target).is_none() {
                 return Ok(false);
             }
@@ -622,7 +815,7 @@ impl MainThreadRuntime {
                 HostArgument::Number(f64::from(event_id)),
                 HostArgument::Boolean(index == last),
             ];
-            let called = self.engine.call_module_export(
+            let called = self.realm.engine.call_module_export(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
@@ -653,7 +846,8 @@ impl MainThreadRuntime {
     /// one that throws neither stops the ones behind it nor ends the realm —
     /// the same standing an event listener that throws already has.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
-        let Some(mut failures) = run_due_timers(&mut self.engine, js_runtime, &self.timers) else {
+        let Some(mut failures) = run_due_timers(&mut self.realm.engine, js_runtime, &self.timers)
+        else {
             return Vec::new();
         };
         // Callbacks remove elements like any other realm entry point; the
@@ -671,7 +865,8 @@ impl MainThreadRuntime {
         source_name: &str,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
-        self.engine
+        self.realm
+            .engine
             .register_module_source(source_name, source_name, &entry_source)
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
@@ -680,10 +875,15 @@ impl MainThreadRuntime {
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground }} from "{RUNTIME_MODULE_SPECIFIER}";
-import {{ __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
 import "{TIMER_MODULE_SPECIFIER}";
+
+// The realm's document, created by this module's first statement and held by
+// this exported binding for the realm's life. Nothing in the realm releases
+// it: it goes when the realm does.
+export const document = new Document();
 
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
@@ -711,11 +911,12 @@ __FlushElementTree();
 
     /// The next module an import in this realm is waiting for, if any.
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
-        self.engine.take_module_request()
+        self.realm.engine.take_module_request()
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
-        self.engine
+        self.realm
+            .engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
     }
@@ -734,7 +935,8 @@ __FlushElementTree();
             }
             Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
         };
-        self.engine
+        self.realm
+            .engine
             .complete_module(
                 js_runtime,
                 name,
@@ -747,8 +949,9 @@ __FlushElementTree();
     }
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
-        self.tree.borrow_mut().removals = 0;
-        self.engine
+        self.slot.borrow_mut().removals = 0;
+        self.realm
+            .engine
             .collect_garbage(js_runtime)
             .map_err(|error| MainThreadError::from_engine("collecting garbage", error))
     }
@@ -761,7 +964,7 @@ __FlushElementTree();
         js_runtime: &mut ScriptRuntime,
         succeeded: bool,
     ) -> Result<(), MainThreadError> {
-        let due = succeeded && self.tree.borrow_mut().take_collection_due();
+        let due = succeeded && self.slot.borrow_mut().take_collection_due();
         if due {
             self.collect_garbage(js_runtime)
         } else {
@@ -777,6 +980,7 @@ __FlushElementTree();
         phase: &'static str,
     ) -> Result<(), MainThreadError> {
         let result = self
+            .realm
             .engine
             .start_module(js_runtime, source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));
@@ -822,13 +1026,14 @@ pub(crate) fn install_shared_modules(
 fn install_bobcat(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    document: LynxDocument,
+    ingredients: DocumentIngredients,
     outbox: ViewOutbox,
     events: &Rc<EventState>,
     timers: &Rc<TimerState>,
-) -> Result<Rc<RefCell<TreeHandle>>, MainThreadError> {
-    let handle = Rc::new(RefCell::new(TreeHandle {
-        document,
+) -> Result<Rc<RefCell<DocumentSlot>>, MainThreadError> {
+    let handle = Rc::new(RefCell::new(DocumentSlot {
+        ingredients: Some(ingredients),
+        document: None,
         removals: 0,
         outbox,
     }));
@@ -860,9 +1065,11 @@ fn install(
 }
 
 /// Installs native host-module exports that parse their arguments, borrow the
-/// tree, and run against the private document. Each `$parser` is one of the
+/// slot, and run against the realm's document. Each `$parser` is one of the
 /// argument helpers below, applied at the argument's position; `NAME` is the
 /// diagnostic prefix every helper and validator stitches into its error.
+///
+/// The document is taken unconditionally: see [`DocumentSlot::document_mut`].
 macro_rules! tree_members {
     ($engine:ident, $js_runtime:ident, $handle:ident; $(
         fn $name:ident($($arg:ident: $parser:ident),*) |$document:ident| $body:block
@@ -878,8 +1085,8 @@ macro_rules! tree_members {
                 index += 1;
             )*
             let _ = (arguments, index);
-            let mut handle = borrow_tree(NAME, &tree)?;
-            let $document = &mut handle.document;
+            let mut handle = borrow_slot(NAME, &tree)?;
+            let $document = handle.document_mut();
             $body
         })?;
     })*};
@@ -888,7 +1095,7 @@ macro_rules! tree_members {
 fn install_host_module(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    handle: &Rc<RefCell<TreeHandle>>,
+    handle: &Rc<RefCell<DocumentSlot>>,
     events: &Rc<EventState>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
@@ -925,8 +1132,8 @@ fn install_host_module(
     install(engine, js_runtime, "removeElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.removeElement";
         let child = node_id_argument(NAME, arguments, 0)?;
-        let mut handle = borrow_tree(NAME, &tree)?;
-        let document = &mut handle.document;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        let document = handle.document_mut();
         validate_removable(document, NAME, child)?;
         document.remove_element(child);
         handle.note_removal();
@@ -938,8 +1145,8 @@ fn install_host_module(
         const NAME: &str = "bobcat-internal:host.replaceElement";
         let new_element = node_id_argument(NAME, arguments, 0)?;
         let old_element = node_id_argument(NAME, arguments, 1)?;
-        let mut handle = borrow_tree(NAME, &tree)?;
-        let document = &mut handle.document;
+        let mut handle = borrow_slot(NAME, &tree)?;
+        let document = handle.document_mut();
         validate_removable(document, NAME, old_element)?;
         validate_live_element(document, NAME, new_element)?;
         if let Some(parent) = document.get(old_element).and_then(dom::Node::parent_id) {
@@ -951,6 +1158,7 @@ fn install_host_module(
         Ok(HostValue::Undefined)
     })?;
 
+    install_document_members(engine, js_runtime, handle)?;
     install_attribute_members(engine, js_runtime, handle)?;
 
     let tree = Rc::clone(handle);
@@ -965,8 +1173,8 @@ fn install_host_module(
     install(engine, js_runtime, "dropElement", 1, move |arguments| {
         const NAME: &str = "bobcat-internal:host.dropElement";
         let node = node_id_argument(NAME, arguments, 0)?;
-        let mut tree = borrow_tree(NAME, &tree)?;
-        let document = &mut tree.document;
+        let mut tree = borrow_slot(NAME, &tree)?;
+        let document = tree.document_mut();
         validate_removable(document, NAME, node)?;
         // A connected element's handle is held by its parent's, up to the
         // permanent page handle, so a connected element can never be the
@@ -979,7 +1187,9 @@ fn install_host_module(
             ));
         }
         // Before the drop, so an id that somehow fails to free still leaves
-        // the painter's listener index naming nothing.
+        // the painter's listener index naming nothing — and after the two
+        // checks above, so a refused drop leaves a live element with its
+        // registrations intact.
         state.forget_node(node);
         document.drop_element(node);
         Ok(HostValue::Undefined)
@@ -992,10 +1202,35 @@ fn install_host_module(
         "flushElementTree",
         0,
         move |_arguments| {
-            borrow_tree("bobcat-internal:host.flushElementTree", &tree)?.flush();
+            borrow_slot("bobcat-internal:host.flushElementTree", &tree)?.flush();
             Ok(HostValue::Undefined)
         },
     )?;
+
+    Ok(())
+}
+
+/// Installs the one member that begins the document's life.
+///
+/// It is the realm's, not the host's: `bobcat:element`'s `Document`
+/// constructor calls it, and it resolves from any module in the realm —
+/// `bobcat-internal:host` is realm-wide, as it is for `dropElement` — so a
+/// card can reach it and be refused. There is no member at the other end:
+/// nothing in the realm releases the document, which goes when the realm
+/// does.
+fn install_document_members(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    handle: &Rc<RefCell<DocumentSlot>>,
+) -> Result<(), MainThreadError> {
+    let tree = Rc::clone(handle);
+    install(engine, js_runtime, "createDocument", 0, move |_arguments| {
+        // The page id is not this member's answer: `createPage` is still what
+        // hands the realm the permanent root, and it now has a document to
+        // read it from.
+        borrow_slot("bobcat-internal:host.createDocument", &tree)?.create_document()?;
+        Ok(HostValue::Undefined)
+    })?;
 
     Ok(())
 }
@@ -1069,7 +1304,7 @@ fn install_event_members(
 fn install_attribute_members(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
-    handle: &Rc<RefCell<TreeHandle>>,
+    handle: &Rc<RefCell<DocumentSlot>>,
 ) -> Result<(), MainThreadError> {
     tree_members! { engine, js_runtime, handle;
         fn setAttribute(
@@ -1198,10 +1433,10 @@ fn write_record_field(record: &mut String, text: &str) {
     record.push_str(text);
 }
 
-fn borrow_tree<'a>(
+fn borrow_slot<'a>(
     function: &str,
-    tree: &'a Rc<RefCell<TreeHandle>>,
-) -> Result<RefMut<'a, TreeHandle>, String> {
+    tree: &'a Rc<RefCell<DocumentSlot>>,
+) -> Result<RefMut<'a, DocumentSlot>, String> {
     tree.try_borrow_mut()
         .map_err(|_| format!("{function} cannot re-enter the element tree"))
 }

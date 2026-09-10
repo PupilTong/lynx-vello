@@ -52,11 +52,11 @@ impl Pair {
         let cancel = view.cancel.clone();
         let mut js = ScriptRuntime::new().unwrap();
         install_shared_modules(&mut js).unwrap();
-        let document = crate::main::tree::new_document(
+        let ingredients = DocumentIngredients::for_test(
             crate::view::Viewport::new(32.0, 24.0),
             crate::main::tree::PageConfig::default(),
         );
-        let mut runtime = MainThreadRuntime::new(&mut js, document, outbox.clone()).unwrap();
+        let mut runtime = MainThreadRuntime::new(&mut js, ingredients, outbox.clone()).unwrap();
         let events = runtime
             .install_workers(
                 &mut js,

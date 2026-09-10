@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use super::*;
 use crate::background::{WorkerCommand, WorkerEvent};
 use crate::link::{DetachedView, ViewObserver, detached_outbox};
-use crate::main::tree::{PageConfig, Viewport, new_document};
+use crate::main::tree::{PageConfig, Viewport};
 use crate::main::workers::WorkerFactory;
 use crate::view::NoWakeup;
 
@@ -25,33 +25,43 @@ fn no_detail() -> Arc<str> {
     Arc::from("")
 }
 
+/// The ingredients a test stages when the document is not what it is about.
+fn ingredients() -> DocumentIngredients {
+    DocumentIngredients::for_test(Viewport::new(393.0, 727.0), PageConfig::default())
+}
+
 fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    runtime_over(new_document(
-        Viewport::new(393.0, 727.0),
-        PageConfig::default(),
-    ))
+    runtime_over(ingredients())
 }
 
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
+///
+/// The fonts are staged rather than registered, because the document does
+/// not exist until the boot module creates it — and staging is what a view
+/// with fonts does now.
 fn text_runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     const AHEM: &[u8] = include_bytes!("../../../../hughie/tests/fixtures/Ahem.ttf");
 
-    let mut document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-    assert_eq!(document.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
-    runtime_over(document)
+    let mut text = dom::TextContext::new();
+    assert_eq!(text.register_fonts(dom::FontBlob::from_static(AHEM)), 1);
+    runtime_over(DocumentIngredients {
+        text_context: Some(text),
+        ..ingredients()
+    })
 }
 
-fn runtime_over(document: LynxDocument) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
-    let (js_runtime, runtime, elements, _) = runtime_over_watching_names(document);
+fn runtime_over(
+    ingredients: DocumentIngredients,
+) -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
+    let (js_runtime, runtime, elements, _) = runtime_over_watching_names(ingredients);
     (js_runtime, runtime, elements)
 }
 
-/// A same-thread window onto the runtime-owned document, so a test can
-/// observe what script built without going through the runtime's own
-/// methods.
+/// A same-thread window onto the realm's document, so a test can observe
+/// what script built without going through the runtime's own methods.
 struct DocumentProbe {
-    tree: Rc<RefCell<TreeHandle>>,
+    slot: Rc<RefCell<DocumentSlot>>,
     // These tests exercise only MTS. Keep the far ends open so the realm's
     // sends succeed; worker_tests executes both sides against a real worker
     // runtime.
@@ -60,8 +70,13 @@ struct DocumentProbe {
 }
 
 impl DocumentProbe {
+    /// The document the realm's boot module created. Booting is what makes
+    /// one exist, so a test that asks before it has booted is asking about
+    /// something that is not there yet.
     fn tree(&self) -> RefMut<'_, LynxDocument> {
-        RefMut::map(self.tree.borrow_mut(), |handle| &mut handle.document)
+        RefMut::filter_map(self.slot.borrow_mut(), |slot| slot.document.as_mut())
+            .ok()
+            .expect("the realm has created its document")
     }
 }
 
@@ -80,7 +95,7 @@ impl PublishedNames {
 /// The same runtime, plus the painting end of its link — so a test can
 /// ask what the realm published.
 fn runtime_over_watching_names(
-    document: LynxDocument,
+    ingredients: DocumentIngredients,
 ) -> (
     ScriptRuntime,
     MainThreadRuntime,
@@ -90,7 +105,7 @@ fn runtime_over_watching_names(
     let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
+    let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients, outbox.clone())
         .expect("main-thread runtime");
     let (workers, inbox) = mpsc::unbounded_channel();
     let worker_events = runtime
@@ -103,7 +118,7 @@ fn runtime_over_watching_names(
         )
         .unwrap();
     let probe = DocumentProbe {
-        tree: Rc::clone(&runtime.tree),
+        slot: Rc::clone(&runtime.slot),
         _workers: inbox,
         _worker_events: worker_events,
     };
@@ -127,8 +142,7 @@ fn two_view_group() -> (
     let workers = WorkerFactory::new(workers);
     for _ in 0..2 {
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
-        let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients(), outbox.clone())
             .expect("main-thread runtime");
         let worker_events = runtime
             .install_workers(&mut js_runtime, &workers, outbox, "app:///main.js", None)
@@ -162,18 +176,27 @@ fn initial_values_stay_with_their_view_without_changing_boot() {
     second
         .prepare_initial_data(None, Some(&serde_json::Value::Null))
         .unwrap();
-    first.engine.collect_garbage(&mut js).unwrap();
-    assert_eq!(first.init_data.as_ref().unwrap().as_number(), Some(42.0));
+    first.realm.engine.collect_garbage(&mut js).unwrap();
     assert_eq!(
-        first.global_props.as_ref().unwrap().to_utf16().unwrap(),
+        first.realm.init_data.as_ref().unwrap().as_number(),
+        Some(42.0)
+    );
+    assert_eq!(
+        first
+            .realm
+            .global_props
+            .as_ref()
+            .unwrap()
+            .to_utf16()
+            .unwrap(),
         "中文".encode_utf16().collect::<Vec<_>>()
     );
     assert_eq!(
-        second.init_data.as_ref().unwrap().kind(),
+        second.realm.init_data.as_ref().unwrap().kind(),
         quickjs_rust_bridge::ValueKind::Undefined
     );
     assert_eq!(
-        second.global_props.as_ref().unwrap().kind(),
+        second.realm.global_props.as_ref().unwrap().kind(),
         quickjs_rust_bridge::ValueKind::Null
     );
     first
@@ -576,22 +599,25 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
         "a swept handle drops its element through the finalization registry"
     );
 
+    // A second module rather than a second boot: a realm boots once, because
+    // its boot module is what creates its one document.
     runtime
-        .run_main_thread_script(
+        .evaluate_module(
             &mut js_runtime,
             r"
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const replacement = __CreateView(0);
-                  __AppendElement(page, replacement);
-                  if (__GetElementUniqueID(replacement) === 3) {
-                    throw new Error('a retired unique id was handed to a new element');
-                  }
-                };
+                import { __AppendElement, __CreatePage, __CreateView, __GetElementUniqueID }
+                  from 'bobcat:element';
+                const page = __CreatePage('card', 0);
+                const replacement = __CreateView(0);
+                __AppendElement(page, replacement);
+                if (__GetElementUniqueID(replacement) === 3) {
+                  throw new Error('a retired unique id was handed to a new element');
+                }
                 ",
-            "app:///replacement.js",
+            "app:///replacement.mjs",
+            "replacing",
         )
-        .expect("main-thread script");
+        .expect("the replacement module runs");
     assert!(
         elements.tree().get(node_id(3)).is_none(),
         "and the retired id keeps naming nothing"
@@ -985,9 +1011,8 @@ fn the_listener_indexes_and_the_published_edges_stay_in_step() {
 /// registration has to reach it as the realm makes it.
 #[test]
 fn registering_a_listener_publishes_its_name_to_the_painting_side() {
-    let (mut js_runtime, mut runtime, _elements, mut names) = runtime_over_watching_names(
-        new_document(Viewport::new(393.0, 727.0), PageConfig::default()),
-    );
+    let (mut js_runtime, mut runtime, _elements, mut names) =
+        runtime_over_watching_names(ingredients());
     runtime
         .run_main_thread_script(
             &mut js_runtime,
@@ -2213,7 +2238,7 @@ fn enough_removals_end_a_batch_with_a_collection() {
     // own allocation pressure at any point, which frees cells too, but
     // only the paced collection resets the count.
     assert_eq!(
-        runtime.tree.borrow().removals,
+        runtime.slot.borrow().removals,
         below,
         "below the count, no paced collection has run"
     );
@@ -2227,7 +2252,7 @@ fn enough_removals_end_a_batch_with_a_collection() {
         )
         .expect("churn");
     assert_eq!(
-        runtime.tree.borrow().removals,
+        runtime.slot.borrow().removals,
         0,
         "crossing the count ran the collection and reset it"
     );

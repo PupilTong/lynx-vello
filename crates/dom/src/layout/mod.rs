@@ -173,6 +173,21 @@ impl<T> Document<T> {
         self.invalidate_layout(id);
     }
 
+    /// Takes over a text context an embedder built before this document
+    /// existed.
+    ///
+    /// The alternative to [`Self::register_fonts`] and
+    /// [`Self::set_default_font_family`], for a caller that has to know
+    /// whether the fonts and the default family are usable *before* it is
+    /// willing to build a document at all: it validates them against a
+    /// context of its own and hands the result over here. Replaces whatever
+    /// context this document had, so a document that has already laid
+    /// anything out has to be invalidated whole.
+    pub fn adopt_text_context(&mut self, context: TextContext) {
+        self.layout_state_mut().text_context = Some(Box::new(context));
+        self.invalidate_layout_all();
+    }
+
     /// Registers an owned font resource without copying its byte payload.
     pub fn register_fonts(&mut self, data: FontBlob) -> usize {
         let context = self

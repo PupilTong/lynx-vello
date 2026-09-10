@@ -19,8 +19,10 @@ use crate::background::{WorkerCommand, WorkerEvent};
 use crate::link::{DetachedView, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
-use crate::main::runtime::{MainThreadRuntime, entry_module_source, install_shared_modules};
-use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::main::runtime::{
+    DocumentIngredients, MainThreadRuntime, entry_module_source, install_shared_modules,
+};
+use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
 
 /// A booted Element PAPI realm over a private Lynx document.
@@ -52,7 +54,9 @@ impl std::fmt::Debug for ScriptHarness {
 }
 
 impl ScriptHarness {
-    /// Boots a realm over a fresh document at a phone-shaped viewport.
+    /// Opens a realm over the ingredients of a document at a phone-shaped
+    /// viewport. The document itself arrives with [`Self::boot`], which is
+    /// what runs the boot module that creates it.
     ///
     /// # Panics
     ///
@@ -60,11 +64,18 @@ impl ScriptHarness {
     /// only useful response.
     #[must_use]
     pub fn new() -> Self {
-        let document = new_document(Viewport::new(393.0, 727.0), PageConfig::default());
+        let ingredients = DocumentIngredients {
+            viewport: Viewport::new(393.0, 727.0),
+            config: PageConfig::default(),
+            text_context: None,
+            sheets: Vec::new(),
+            style_pool: None,
+            pending_image_events: Vec::new(),
+        };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, document, outbox.clone())
+        let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients, outbox.clone())
             .expect("the benchmark realm boots");
         let (workers, inbox) = mpsc::unbounded_channel();
         let worker_events = runtime
@@ -86,7 +97,10 @@ impl ScriptHarness {
     }
 
     /// Runs a main-thread script and its global-function or engine-event boot,
-    /// as the engine does for a card's entry script.
+    /// as the engine does for a card's entry script. The boot module creates
+    /// the realm's document on the way through, so this is also what makes
+    /// every document-reading member below answerable — once per harness,
+    /// because a realm gets one document.
     ///
     /// # Panics
     ///
@@ -129,8 +143,7 @@ impl ScriptHarness {
     #[must_use]
     pub fn event_path(&mut self, target: u64) -> EventSteps {
         let target = dom::NodeId::from_bits(target).expect("a well-formed packed handle");
-        self.runtime
-            .with_document(|document| document.event_steps(target, true, true))
+        self.with_document(|document| document.event_steps(target, true, true))
     }
 
     /// Delivers one routed event to `target`, reporting whether anything ran.
