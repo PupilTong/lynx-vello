@@ -12,7 +12,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use tokio::task;
 use tokio::task::LocalSet;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::background::{WorkerCommand, WorkerMessage, WorkerStart};
@@ -88,7 +90,7 @@ impl Harness {
                 global_props: None,
             },
             commands: incoming,
-            cancel: view.cancel.clone(),
+            cancel: view.token.clone(),
         };
         let owner = task::spawn_local(serve_view(context, attached, outbox));
         Self {
@@ -181,6 +183,66 @@ impl Harness {
     }
 }
 
+/// One page over the token that ends it, with the test holding the owner's
+/// tail rather than a task running it.
+///
+/// The pins below that use this are about the owner's own steps — the end it
+/// runs after its wait — and nothing is queued for another task in either of
+/// them, so the cancel is the only wake there is and running that tail inline
+/// is running it where it would have run anyway. A pin about which task the
+/// scheduler picks belongs on [`Harness`] instead.
+struct OwnedPage {
+    page: Rc<Page>,
+    view: DetachedView,
+    /// The view's end signal, which here the test is the embedder of.
+    token: CancellationToken,
+    /// Held, not sent on: the command consumer this page spawned is parked on
+    /// the other end, and dropping this would close the channel and end the
+    /// view by a path neither pin here is about.
+    _commands: mpsc::UnboundedSender<ToMain>,
+}
+
+impl OwnedPage {
+    fn new(context: Rc<GroupContext>) -> Self {
+        let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
+        let token = view.token.clone();
+        let (commands, incoming) = mpsc::unbounded_channel();
+        let page = Page::new(context, outbox, ingredients(), token.clone());
+        page.spawn(consume_commands(Rc::clone(&page), incoming));
+        Self {
+            page,
+            view,
+            token,
+            _commands: commands,
+        }
+    }
+
+    /// Opens the realm over `entry` and turns until its first frame is
+    /// published.
+    async fn boot(&mut self, entry: &str) -> u64 {
+        self.page
+            .open_realm(entry, "app:///main.js", None, None, None);
+        for _ in 0..TURNS {
+            if self.view.published.commit().is_some() {
+                break;
+            }
+            task::yield_now().await;
+        }
+        self.view.published.commit().expect("the page booted")
+    }
+
+    /// Every lifecycle event this page has published so far.
+    fn events(&mut self) -> Vec<EngineEvent> {
+        let mut events = Vec::new();
+        while let Ok(notice) = self.view.notices.try_recv() {
+            if let ViewNotice::Engine(event) = notice {
+                events.push(event);
+            }
+        }
+        events
+    }
+}
+
 /// A page that renders one box, which is enough for a resize to have
 /// something to lay out again.
 const ONE_BOX: &str = r"
@@ -189,6 +251,17 @@ globalThis.renderPage = function () {
   const box = __CreateView(0);
   __AppendElement(page, box);
   globalThis.box = box;
+};
+";
+
+/// The same page, with a timer far enough out that nothing will ever fire it,
+/// so the deadline a live realm publishes is there to be withdrawn.
+const ONE_BOX_WITH_TIMER: &str = r"
+globalThis.renderPage = function () {
+  const page = __CreatePage('card', 0);
+  const box = __CreateView(0);
+  __AppendElement(page, box);
+  setTimeout(() => {}, 3600000);
 };
 ";
 
@@ -375,7 +448,12 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
     on_a_local_set(async {
         let (context, _workers) = group();
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
-        let (page, _ended) = Page::new(Rc::clone(&context), outbox, ingredients());
+        let page = Page::new(
+            Rc::clone(&context),
+            outbox,
+            ingredients(),
+            view.token.clone(),
+        );
         page.open_realm(ONE_BOX, "app:///main.js", None, None, None);
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
@@ -421,7 +499,12 @@ fn a_pages_own_entries_never_wake_its_checkpoint_follower() {
     on_a_local_set(async {
         let (context, _workers) = group();
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
-        let (page, _ended) = Page::new(Rc::clone(&context), outbox, ingredients());
+        let page = Page::new(
+            Rc::clone(&context),
+            outbox,
+            ingredients(),
+            view.token.clone(),
+        );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
         page.open_realm(LISTENING_BOX, "app:///main.js", None, None, None);
@@ -467,6 +550,189 @@ fn a_pages_own_entries_never_wake_its_checkpoint_follower() {
             page.epilogue_count(),
             settled + 1,
             "the entry ran one epilogue, and its own checkpoint woke nothing"
+        );
+    });
+}
+
+/// A panic in one task of a view ends the view during the unwind, before any
+/// other task of it runs: the guard the page wraps every task in is what does
+/// it, and the owner — which is woken by the same cancellation and therefore
+/// polled behind the sibling — is what reports the payload.
+///
+/// The seam spawns the panicking task first and the recorder behind it, so
+/// what the recorder saw is what a sibling polled between the unwind and the
+/// owner's turn would have seen.
+#[test]
+fn a_task_that_traps_ends_the_view_before_a_sibling_runs() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness.boot(ONE_BOX).await;
+
+        let (latch, seen) = std::sync::mpsc::channel();
+        harness
+            .commands
+            .send(ToMain::Trap(latch))
+            .expect("the view is still serving");
+        harness
+            .until("the view's owner never returned", |harness| {
+                harness.commands.is_closed()
+            })
+            .await;
+        harness.turn().await;
+
+        assert_eq!(
+            seen.try_recv(),
+            Ok(true),
+            "the sibling polled during the unwind found a view that had already ended"
+        );
+        let reports: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports.len(), 1, "one panic is reported once: {reports:?}");
+        assert!(
+            reports[0].contains("the Lynx main thread panicked")
+                && reports[0].contains("a task of the view trapped"),
+            "the report carries the payload: {}",
+            reports[0]
+        );
+    });
+}
+
+/// The end acknowledges whatever `BeginFrame` was applied and not yet
+/// answered, and withdraws the deadline the realm had armed — both of them on
+/// the owner's own turn, because a release cancels the token from another
+/// thread and nothing on this one has run since.
+///
+/// A painter blocked on that sequence number is waiting for a frame that will
+/// never come, so releasing it is the last thing the view owes it.
+#[test]
+fn the_end_acknowledges_the_begin_frame_a_painter_is_blocked_on() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        owned.boot(ONE_BOX_WITH_TIMER).await;
+        assert!(
+            owned.page.armed_deadline().is_some(),
+            "the booted realm armed a timer"
+        );
+        owned.page.arm_begin_frame_for_test(11);
+
+        // The embedder's release, with nothing else touched: the command
+        // channel stays open, so the owner's wait is the token alone.
+        owned.token.cancel();
+        owned.page.run_owner().await;
+
+        assert_eq!(
+            owned.view.published.begin_frame_serviced(),
+            11,
+            "the end acknowledged the pending BeginFrame"
+        );
+        assert!(
+            owned.page.armed_deadline().is_none(),
+            "and withdrew the deadline the realm had armed"
+        );
+    });
+}
+
+/// A burst queued behind the embedder's release is discarded rather than
+/// applied: the consumer reads the token once per burst, at the wake
+/// boundary, and a token already cancelled there ends the view instead of
+/// serving what is queued.
+///
+/// The order this pins is the order production has, which is why it runs over
+/// the real [`serve_view`] rather than the owner's tail alone: the command is
+/// sent first, so it wakes the consumer, and the cancel that follows wakes the
+/// owner *behind* it. The consumer is what runs first, so nothing here can
+/// rest on the owner being woken first.
+///
+/// The channel is left open, which is also the shape a fatal event's cancel in
+/// `LynxView::pump` leaves.
+#[test]
+fn a_burst_queued_behind_a_release_is_never_applied() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        let booted = harness.boot(ONE_BOX).await;
+
+        // Genuinely dirtying: the same command applied on its own is what the
+        // burst pin above counts a commit for.
+        harness
+            .commands
+            .send(ToMain::Resize {
+                width: 200.0,
+                height: 100.0,
+                device_pixel_ratio: 1.0,
+            })
+            .expect("the view is still serving");
+        harness.view.token.cancel();
+        harness
+            .until("the view never ended", |harness| {
+                harness.owner.is_finished()
+            })
+            .await;
+
+        assert_eq!(
+            harness.view.published.commit(),
+            Some(booted),
+            "the queued command never reached the realm"
+        );
+    });
+}
+
+/// A panic is reported whatever the view was told before it. The report-once
+/// latch a startup failure spends is not the one a panic goes through: the
+/// lifetime holds a latch of its own for the payload-bearing report, so a view
+/// that failed and then trapped says both.
+#[test]
+fn a_view_that_already_failed_still_reports_a_task_that_traps() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        owned
+            .page
+            .fail(EngineEvent::StartupFailed(unanswered_source().into()));
+        owned
+            .page
+            .spawn(async { panic!("a task of the view trapped") });
+        // Let the panicking task run: the owner aborts what has not been
+        // polled, so a task that never ran is a task that never trapped.
+        for _ in 0..8 {
+            task::yield_now().await;
+        }
+
+        owned.page.run_owner().await;
+
+        let events = owned.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::StartupFailed(_)))
+                .count(),
+            1,
+            "the startup failure is reported once"
+        );
+        let reports: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ScriptRunError(error) => Some(error.message.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reports.len(),
+            1,
+            "and the panic behind it is reported once too: {reports:?}"
+        );
+        assert!(
+            reports[0].contains("a task of the view trapped"),
+            "carrying the payload: {}",
+            reports[0]
         );
     });
 }

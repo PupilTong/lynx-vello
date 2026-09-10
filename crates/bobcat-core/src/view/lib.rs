@@ -21,10 +21,11 @@ use std::sync::Arc;
 
 use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::background::WorkerHome;
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, ViewCancel, ViewNotice};
+use crate::link::{Published, ToMain, ViewNotice};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
@@ -530,8 +531,9 @@ impl LynxGroup {
     /// completion is [`EngineEvent::ScriptFinished`], and loading, configuration,
     /// or boot failure is [`EngineEvent::StartupFailed`].
     ///
-    /// Dropping a loading view marks its source work cancelled and prevents boot
-    /// from entering `QuickJS`. An IO operation or synchronous JavaScript already
+    /// Dropping a loading view cancels this view's own cancellation token,
+    /// which marks its source work cancelled and prevents boot from entering
+    /// `QuickJS`. An IO operation or synchronous JavaScript already
     /// executing may finish; late source results are discarded. Other views continue.
     /// The fetcher needs neither `Send` nor `Sync`; only the concrete source
     /// completion and the fetcher's own job inputs leave this thread.
@@ -568,9 +570,12 @@ impl LynxGroup {
             init_data,
             global_props,
         } = sources;
-        // One view, one set of channels: nothing here is shared with a
-        // sibling, so nothing has to be addressed or deferred.
-        let cancel = ViewCancel::default();
+        // One view, one set of channels and one end signal: nothing here is
+        // shared with a sibling, so nothing has to be addressed or deferred.
+        // The token is minted here because the embedder's own thread is where
+        // a release happens, and it is the parent of every token the view's
+        // realm mints for a worker.
+        let cancel = CancellationToken::new();
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
@@ -638,10 +643,12 @@ impl LynxGroup {
 /// it drew, and dropping the painter leaves the view running with nothing
 /// watching it.
 pub struct LynxView<F> {
-    /// Set the instant this view is released, before anything else is, so a
-    /// host still holding one of its source completions sees it cancelled
-    /// without waiting for a turn of its own.
-    cancel: ViewCancel,
+    /// This view's end signal, cancelled the instant it is released, before
+    /// anything else is, so a host still holding one of its source completions
+    /// sees it cancelled without waiting for a turn of its own. The view's
+    /// task holds a clone, and every worker its realm creates holds a child of
+    /// it.
+    cancel: CancellationToken,
     /// The goodbye. Dropping this closes the view's task's inbox, which is
     /// what ends it — so it drops before the fetcher whose completions that
     /// task may still be holding.
@@ -693,8 +700,12 @@ impl<F> Drop for LynxView<F> {
     fn drop(&mut self) {
         // Cancellation first: a host still holding one of this view's source
         // completions must see it before the fetcher that holds it is
-        // released. It is this view's flag alone — the group's other views go
-        // on booting.
+        // released. It is this view's token alone — the group's other views go
+        // on booting. Cancelling before the command sender below drops is also
+        // what gets a burst queued behind this release discarded: such a
+        // command wakes the view's command consumer ahead of this cancel
+        // waking its owner, and the consumer reads the token at that wake, so
+        // what it finds there has to already say released.
         self.cancel.cancel();
         // Then the sink, before the store it reports into drops: a loader
         // still in flight must find it detached rather than queue into a
@@ -724,6 +735,10 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         while let Ok(notice) = self.notices.try_recv() {
             match notice {
                 ViewNotice::Engine(event) => {
+                    // A fatal event ends the view the same way its release
+                    // does, and by the same signal: the token this view was
+                    // built with, which its own task is waiting on and every
+                    // worker its realm created holds a child of.
                     if matches!(
                         event,
                         EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
@@ -834,9 +849,9 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
 /// none of them is a second way to drive a view.
 #[cfg(test)]
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// This view's cancellation flag, which is what a source completion the
-    /// host still holds is answered against.
-    pub(crate) const fn cancel(&self) -> &ViewCancel {
+    /// This view's end signal, which is what a source completion the host
+    /// still holds is answered against.
+    pub(crate) const fn cancel(&self) -> &CancellationToken {
         &self.cancel
     }
 
@@ -880,7 +895,9 @@ pub(crate) struct ViewAttachment {
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,
-    pub(crate) cancel: ViewCancel,
+    /// The view's end signal, minted on the embedder's thread. The task that
+    /// serves this view ends on it, and cancels it again on every exit.
+    pub(crate) cancel: CancellationToken,
 }
 
 #[cfg(test)]

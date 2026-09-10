@@ -37,8 +37,18 @@
 //!               ──── Post / Terminate ──▶ the worker's own task
 //!               ◀─────── WorkerEvent ────
 //!
+//!   the view's token ─── cancel ────────▶ the worker's own token (its child)
+//!
 //!   host        ──── the script ────────▶ the worker's own task
 //! ```
+//!
+//! The token is the one thing on that picture that needs no turn anywhere: a
+//! worker's is a child of the token its creating view was built with, so a
+//! released view ends every worker it created by cancelling one thing on the
+//! embedder's own thread. The `Terminate` above stays the protocol — it is
+//! what `terminate()` and a released realm say, and it is what discards what
+//! was queued behind it — and the token is the signal a worker's tasks wake
+//! on, and the backstop for a realm that was gone before it could speak.
 //!
 //! A worker's *answer* deliberately skips `bobcat-main`: the thread that owns
 //! a view's [`ResourceFetcher`](crate::resource::ResourceFetcher) is its
@@ -66,6 +76,7 @@ mod thread;
 use std::thread::Builder as ThreadBuilder;
 
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
 use wasm_thread::Builder as ThreadBuilder;
 
@@ -113,6 +124,12 @@ pub(crate) struct WorkerStart {
     pub(crate) messages: mpsc::UnboundedReceiver<WorkerMessage>,
     /// Where this worker reports, which is the creating view's own channel.
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
+    /// This worker's end signal: a child of the token its creating view was
+    /// built with, minted by the realm that constructed it. So a released view
+    /// ends every worker it created without a message reaching each of them
+    /// first, and a worker whose realm was gone before it could speak still
+    /// wakes.
+    pub(crate) token: CancellationToken,
 }
 
 /// Everything the worker thread is ever told.

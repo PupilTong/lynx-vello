@@ -38,6 +38,7 @@ mod background;
 pub mod bench_support;
 mod clock;
 mod esm;
+mod lifetime;
 mod link;
 #[path = "main/lib.rs"]
 mod main;

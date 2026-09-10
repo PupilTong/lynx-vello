@@ -44,6 +44,16 @@ pub(crate) fn platform_script_error(message: String) -> ScriptError {
     }
 }
 
+/// One panic, worded once, for every place that reports one on.
+///
+/// `prefix` names the thread it happened on — a view's tasks and a worker's
+/// tasks are the only two that report a panic as a script failure — and the
+/// wording is here rather than at each site so a panic a view's owner reaps
+/// reads the same as one its group's thread reaps.
+pub(crate) fn panicked(prefix: &'static str, payload: &(dyn std::any::Any + Send)) -> ScriptError {
+    platform_script_error(format!("{prefix}: {}", panic_message(payload)))
+}
+
 /// What a panic said, for the two threads that catch one and report it on.
 pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
     if let Some(message) = payload.downcast_ref::<String>() {

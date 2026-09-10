@@ -240,10 +240,21 @@ useful signal for currently-compatible versions of those libraries.
   of its own last entry is what keeps a page's own bumps from waking it.
   Constructor errors cover metrics and attachment only.
   Dropping a loading view marks source work cancelled and stops that view before
-  QuickJS begins — one `ViewCancel` flag per view, set synchronously on the
-  embedder's thread by the view's drop and by a fatal lifecycle event, and by a
-  guard on every exit from the view's owner, so a host still holding a
-  `SourceCompletion` reads cancellation without waiting for a turn.
+  QuickJS begins — one `tokio_util::sync::CancellationToken` per view, minted on
+  the embedder's thread and cancelled there by the view's drop and by a fatal
+  lifecycle event, and by a guard on every exit from the view's owner, so a host
+  still holding a `SourceCompletion` reads cancellation without waiting for a
+  turn. It is the view's whole end signal: the owner waits on it, every task of
+  the view is reclaimed behind it, and every worker that view's realm creates
+  carries a child of it, so releasing a view ends those workers too. A burst of
+  commands queued behind that release is discarded rather than applied: the
+  view's one command consumer reads the token at each wake, before it applies
+  anything, so a command sent before the release ends the view instead of
+  reaching it — the embedder released the view and can observe nothing of it.
+  A burst already inside an entry when the cancel lands finishes. An attached
+  painter loses nothing to the discard: the view's handle on the host resource
+  system goes with the release, so past one a painter adopts no commit whose
+  pixels it is not already holding.
   Fetchers skip cancelled queued work; IO or synchronous JavaScript
   already executing may finish, and late source results are discarded. The group
   and other views keep running.
@@ -484,14 +495,16 @@ useful signal for currently-compatible versions of those libraries.
   than a heap, at the price of the group's workers taking turns. **One task
   per live worker, and a worker's whole state is that task**: a `WorkerStart`
   carries its key, its name, the one-shot its script will arrive on, the
-  receiving end of its message channel, and the sender its events go back on —
+  receiving end of its message channel, the sender its events go back on —
   which is the creating view's own `WorkerEvent` channel, so a released view
   drops its workers' news by dropping the receiver, and stops each worker it
-  created with a `Terminate` on that worker's own channel; the senders dropping
-  behind those messages is the backstop, for a worker whose realm was gone
-  before it could speak. The script wait is a `biased`
-  select over the message channel, so a `terminate` that lands in the same
-  instant as the script wins and a worker told to stop never boots. The timer
+  created with a `Terminate` on that worker's own channel — and a child of the
+  creating view's cancellation token; the senders dropping behind those
+  messages, and that token being cancelled with the view, are the backstop, for
+  a worker whose realm was gone before it could speak. The script wait is a
+  `biased` select over the message channel first and that token behind it, so a
+  `terminate` that lands in the same instant as the script wins and a worker
+  told to stop never boots. The timer
   machinery both kinds of realm run on — the schedule, the two host members,
   the firing loop — is `crate::timers` beside `crate::clock`, owned by neither
   thread, and both kinds of task wait their own deadlines out the same way. So
@@ -635,7 +648,7 @@ useful signal for currently-compatible versions of those libraries.
   `cap-insets`, `blur-radius`, `load`/`error` events).
   `LynxDocument`, `Viewport`, `DocumentIngredients`, `DocumentSlot`,
   `new_document`, `MainThreadRuntime`, the view's link (`ToMain`, `ViewNotice`,
-  `Published`, `ViewCancel`) and the concrete QuickJS adapter are all
+  `Published`) and the concrete QuickJS adapter are all
   crate-private. `Painter` is not: it is public, and `LynxDocument` is what an
   embedder still cannot name.
   The private `MainThreadRuntime`

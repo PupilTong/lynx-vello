@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use super::{
     WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
@@ -44,12 +45,15 @@ fn wire(data: &str) -> String {
     format!("[\"{data}\"]")
 }
 
-/// One realm's whole side of its workers, which is one channel each plus the
-/// one they all report on.
+/// One realm's whole side of its workers, which is one channel each, the one
+/// they all report on, and the token every one of them holds a child of.
 struct View {
     messages: FxHashMap<WorkerKey, mpsc::UnboundedSender<WorkerMessage>>,
     events: mpsc::UnboundedSender<WorkerEvent>,
     incoming: mpsc::UnboundedReceiver<WorkerEvent>,
+    /// This view's end signal, standing in for the one `create_lynx_view`
+    /// mints on the embedder's thread.
+    token: CancellationToken,
 }
 
 impl View {
@@ -59,6 +63,7 @@ impl View {
             messages: FxHashMap::default(),
             events,
             incoming,
+            token: CancellationToken::new(),
         }
     }
 
@@ -123,6 +128,7 @@ impl Group {
             script: awaiting,
             messages: incoming,
             events: self.views[view].events.clone(),
+            token: self.views[view].token.child_token(),
         }));
         self.views[view].messages.insert(key, messages);
         self.scripts.insert(key, script);
@@ -182,6 +188,27 @@ impl Group {
     /// A view is gone, and with it every sender it held.
     fn release(&mut self, view: usize) {
         self.views[view].messages.clear();
+    }
+
+    /// The embedder released a view, and nothing else has happened yet: the
+    /// token is cancelled while every message sender is still open and
+    /// unsent-to, which is the order `LynxView::drop` does it in.
+    fn cancel(&mut self, view: usize) {
+        self.views[view].token.cancel();
+    }
+
+    /// Waits for the released view's worker tasks to have ended, which is the
+    /// count of that view's event senders falling back to the test's own.
+    ///
+    /// The task and the thread's own reporter table are what hold the other
+    /// clones, so the count is the observation; silence alone could not say
+    /// it.
+    fn wait_for_workers_to_end(&self, view: usize, patience: Duration, what: &str) {
+        let deadline = ClockInstant::now() + patience;
+        while self.views[view].events.strong_count() > 1 {
+            assert!(ClockInstant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     fn next(&mut self, view: usize) -> WorkerEvent {
@@ -340,18 +367,7 @@ fn releasing_a_view_ends_the_workers_it_created() {
 
     group.release(0);
 
-    // The released view's worker task is what holds the other clones of that
-    // view's event sender — one in the task, one in the thread's own
-    // reporter table — so the count falling back to the test's own is the
-    // task having ended and been reaped. Silence alone could not say that.
-    let deadline = ClockInstant::now() + PATIENCE;
-    while group.views[0].events.strong_count() > 1 {
-        assert!(
-            ClockInstant::now() < deadline,
-            "the released view's worker task never ended"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    group.wait_for_workers_to_end(0, PATIENCE, "the released view's worker task never ended");
 
     // Another view's worker still answers, which is what makes the silence
     // above a release rather than a stopped thread.
@@ -359,6 +375,35 @@ fn releasing_a_view_ends_the_workers_it_created() {
     group.answer(survivor, "app:///other.js", "postMessage(\"alive\");");
     let event = group.next(1);
     assert_eq!(event.key, survivor);
+}
+
+/// A released view ends the workers it created without a message reaching any
+/// of them: each holds a child of that view's token, so cancelling the one on
+/// the embedder's thread is what wakes a worker still waiting for its script.
+///
+/// The message sender stays open and unused throughout, so what ends this
+/// worker cannot be a `Terminate` or a closed channel — and it ends silently,
+/// which is the other half of the same claim: every other way out reports
+/// something on the view's event channel first.
+#[test]
+fn cancelling_a_view_ends_a_worker_whose_script_never_arrived() {
+    let mut group = Group::new();
+    let _parked = group.construct(0, "");
+
+    group.cancel(0);
+
+    // A second or two rather than PATIENCE: nothing here waits for IO, and a
+    // worker that has to be told is a worker this never wakes at all.
+    group.wait_for_workers_to_end(
+        0,
+        Duration::from_secs(2),
+        "a cancelled view's parked worker never ended",
+    );
+    assert!(
+        group.views[0].incoming.try_recv().is_err(),
+        "and it ended without saying anything: a worker that took the failure path or found \
+         its channel closed would have reported one of those first"
+    );
 }
 
 #[test]

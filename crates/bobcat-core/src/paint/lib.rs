@@ -662,7 +662,9 @@ impl Painter {
                     notices,
                     frames,
                     requester,
-                    crate::link::ViewCancel::default(),
+                    // A token of its own: this far end plays the view, and
+                    // nothing here is ever released.
+                    tokio_util::sync::CancellationToken::new(),
                 ),
                 notices: notice_receiver,
                 images,

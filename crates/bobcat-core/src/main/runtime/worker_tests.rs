@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
-use crate::link::{DetachedView, ViewCancel, ViewNotice, block_on_deadline, detached_outbox};
+use crate::link::{DetachedView, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::NoWakeup;
@@ -23,10 +23,11 @@ struct Pair {
     /// The host's end of the view's link: the test plays the embedder, so it
     /// is what answers every source request.
     view: DetachedView,
-    /// This view's cancellation flag, the one every completion it hands out
-    /// was built with. The test plays the embedder, so releasing a view is
-    /// something it has to spell.
-    cancel: ViewCancel,
+    /// This view's end signal, the one every completion it hands out was
+    /// built with and the parent of every worker token its realm mints. The
+    /// test plays the embedder, so releasing a view is something it has to
+    /// spell.
+    cancel: tokio_util::sync::CancellationToken,
     home: WorkerHome,
 }
 
@@ -49,7 +50,7 @@ impl Pair {
             None => WorkerHome::start().unwrap(),
         };
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
-        let cancel = view.cancel.clone();
+        let cancel = view.token.clone();
         let mut js = ScriptRuntime::new().unwrap();
         install_shared_modules(&mut js).unwrap();
         let ingredients = DocumentIngredients::for_test(
@@ -578,9 +579,12 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
         completion.is_cancelled(),
         "cancellation precedes releasing the fetcher"
     );
-    // Releasing the realm drops the one sender its worker was listening on,
-    // which is what ends that worker's task — and this must finish even
-    // though the host is still holding the completion.
+    // The cancel above already ended that worker's task: it is parked on its
+    // script, and the token it holds is a child of the one just cancelled.
+    // Releasing the realm drops the one sender it was listening on, which is
+    // the backstop for a worker whose realm was gone before it could speak —
+    // and this must finish even though the host is still holding the
+    // completion.
     drop(pair.runtime.take());
     pair.home.join();
     assert!(
