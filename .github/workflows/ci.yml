@@ -119,11 +119,16 @@ jobs:
         # type-checked, by CI. This job already carries the LLVM 22 toolchain
         # the target needs.
         #
-        # `--lib` rather than `--all-targets`: bobcat-core dev-depends on
-        # tokio's `rt-multi-thread`, which refuses to compile for wasm32, and
-        # feature unification would drag it into any build that includes dev
-        # targets. The packages are named rather than `--workspace` because
-        # bobcat-cli is a native embedder crate that does not target wasm32.
+        # `--lib` rather than `--all-targets`. bobcat-core's own tokio
+        # dependency builds here: its features are target-gated to `rt`,
+        # `sync` and `macros`, with `time` enabled only off wasm32, because
+        # tokio's timer reads `std::time::Instant` and that target uses
+        # `src/alarm.rs` instead. The dev dependency is what `--lib` avoids —
+        # it asks for `rt-multi-thread`, which does not compile for wasm32 at
+        # all, and feature unification would drag it into any build that
+        # includes dev targets. The packages are named rather than
+        # `--workspace` because bobcat-cli is a native embedder crate that
+        # does not target wasm32.
         run: >-
           cargo clippy --target wasm32-unknown-unknown --lib
           -p bobcat-wasm

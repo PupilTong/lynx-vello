@@ -82,9 +82,15 @@ Scope note: this is the primary spec for `.claude/agents/lynx-js-runtime-bridge.
 ## Bobcat Worker construction (2026-09-09)
 
 The engine now exposes `import { Worker } from "bobcat-internal"` on the main
-realm. It creates one context per object on the existing group worker runtime,
-loads through the view's fetcher, queues early messages, and supports parent
-message/error listeners and termination. This is the worker transport needed
+realm. Construction sends one `WorkerStart` from the view's task on
+`bobcat-main` to `bobcat-workers`, which spawns **one task per worker realm**;
+that message carries everything the worker will ever be given — its key, its
+name, a one-shot for its script, the receiving end of its message channel, and
+the sender its events go back on, which is the creating view's own channel.
+The script is loaded through the view's fetcher and answers that one-shot
+directly, without a main-thread turn. Early messages queue in the worker's own
+task until its scope exists, a terminate that arrives before the script wins
+over it, and parent message/error listeners and termination are supported. This is the worker transport needed
 under the BTS integration above; it does not yet install the ReactLynx BTS
 bootstrap or RPC ports. The Context MVP below builds on it. Its event/lifetime model follows
 the [HTML Worker interface](https://html.spec.whatwg.org/multipage/workers.html#dedicated-workers-and-the-worker-interface),
@@ -93,8 +99,10 @@ recorded in `../runtime-architecture.md`.
 
 ## Bobcat BTS Context MVP (2026-09-09)
 
-After `await import(entry_url)`, boot creates a BTS Worker on the existing
-group worker thread with `new Worker("bobcat:bts")`. Every worker uses the
+After `await import(entry_url)`, boot creates a BTS Worker on the group's
+existing `bobcat-workers` thread with `new Worker("bobcat:bts")`; that one's
+script is answered by `bobcat-main` itself, on the same one-shot, because the
+bootstrap is the engine's own source and no host has bytes for it. Every worker uses the
 same scope; BTS bindings belong to that JavaScript entry, with no worker kind
 in the protocol. `ViewSources.background_entry` selects an optional raw
 module; native/browser XML adapters supply the background section's URL.
@@ -116,7 +124,7 @@ This is a Lynx-only protocol, despite the `dispatchEvent` name:
 - Context `postMessage` does not send: web-core leaves it unimplemented.
 - Before MTS connects its Worker, queued events retain references; after
   connection, the existing JSON Worker transport snapshots each send.
-- Worker source loading queues incoming events until BTS entry evaluation
+- A worker's own task queues incoming events until its BTS entry evaluation
   finishes, preserving the opportunity to install listeners first.
 
 Evidence: `lynx-stack/packages/web-platform/web-core/ts/client/LynxCrossThreadContext.ts:35-59`;
