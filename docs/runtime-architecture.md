@@ -1,9 +1,11 @@
 # Runtime architecture
 
-Bobcat exposes one runtime object to an embedder: `bobcat_core::LynxView`.
-The document, Element-PAPI tree, script realm, renderer scheduler, and the
-commit/publish protocol are implementation state. An embedder supplies only
-capabilities and OS facts:
+Bobcat exposes two runtime objects to an embedder: `bobcat_core::LynxView`,
+which is a page, and `bobcat_core::Painter`, which is where a page's pixels
+go. They are built separately on the same embedder thread and joined at
+runtime by `Painter::attach`. The document, Element-PAPI tree, script realm,
+and the commit/publish protocol are implementation state. An embedder supplies
+only capabilities and OS facts:
 
 - a `ViewSources` — page config, owned font bytes, an optional default font
   family, author stylesheet URLs in cascade order, and the one entry MTS
@@ -18,43 +20,60 @@ capabilities and OS facts:
   call. One serves a whole group: its views paint on the thread that created
   it, and so wake one event loop. `NoWakeup` is the implementation for a host
   with no event loop to wake;
-- a `DrawTarget`, at construction: `DrawTarget::window(...)` over anything
+- a `DrawTarget`, at `Painter::new`: `DrawTarget::window(...)` over anything
   convertible into a `WindowTarget` — a `'static` surface target, so a shared
   window handle rather than a borrow — or `DrawTarget::Offscreen` for a
-  windowless GPU target. There is no attaching one later;
-- viewport/device metrics and normalized input events;
+  windowless GPU target. A painter names it once and keeps it for its whole
+  life; a view never has one at all;
+- viewport/device metrics and normalized input events, both to the painter,
+  which is the side that owns the surface;
 - platform initialization, worker bootstrap, and file/network IO.
 
-No clock is among them: the animation timeline is engine-owned.
+No clock is among them. The animation timeline is engine-owned, and so are the
+realms' own timer deadlines: nothing about waiting is a host protocol.
 
-The source tree mirrors the two runtime owners:
+The source tree mirrors the runtime's owners:
 
 ```text
 crates/bobcat-core/src/
-  view/lib.rs          LynxView, ViewSources, the startup guard, and the
-                       shared values, messages, and link construction
-  paint/lib.rs         Painter, frame clock, and painter-owned link replicas
-  mailbox.rs           addressed FIFO and deadline waiting for both directions
+  view/lib.rs          LynxGroup, LynxView, ViewSources, DrawTarget, and the
+                       vocabulary of the one thread boundary they cross
+  link.rs              one view's link: ToMain, ViewNotice, Published,
+                       ViewCancel, and the outbox the main side publishes on
+  clock.rs             the one clock realm timers are armed against, and
+                       `sleep_until`, which picks a waiter by target
+  alarm.rs             wasm32 only: the bobcat-alarm thread that serves those
+                       waits where tokio's timer cannot
+  paint/lib.rs         Painter: attach/detach, the frame clock, routing,
+                       composition, and the adopted snapshot
+  paint/images.rs      one commit's resolved pixels, in draw order
   paint/gesture.rs     input arbitration
   paint/graphics.rs    window GPU state
-  main/lib.rs          document creation, loaded-source mounting, startup,
-                       and inbox
+  main/lib.rs          bobcat-main: the thread, the group task, and the style
+                       pool and script runtime a group shares
+  main/page.rs         one view's page: its tasks — boot, commands, module
+                       loads, worker events, timers, checkpoints — and the one
+                       boundary they enter JavaScript through
   main/quickjs.rs      owner-thread-bound QuickJS adapter
-  main/runtime/lib.rs  realm/DOM integration
+  main/runtime/lib.rs  realm/DOM integration, the document slot, the one member
+                       that creates it and the tree members that drive it
   main/workers.rs      main-thread Worker construction and commands
   main/tree/lib.rs     Lynx document and UA component policy
   background/lib.rs    the group's worker realms: keys, commands, and the
                        one sender everything that names a worker holds
   background/thread.rs bobcat-workers and its second QuickJS runtime
   background/scope.rs  what one worker realm is made of
+  test_support.rs      the in-crate doubles a test drives a view with
   threads.rs           how a thread of this engine is joined, and how it
                        reports having trapped
 ```
 
-Shared command, event, viewport, and link vocabulary stays in `view` beside
-the public handle that owns one end of it; a stateful type whose owner is
-fixed lives under `paint` or `main`. Construction splits `ViewSources` once:
-document inputs and source specifiers move into the main-owned startup state.
+Shared viewport and source vocabulary stays in `view` beside the public
+handles; the link one view speaks over is `link.rs`, owned by neither side;
+a stateful type whose owner is fixed lives under `paint` or `main`.
+Construction splits `ViewSources` once: document inputs and source specifiers
+cross to the view's task on `bobcat-main`, which stages them as the
+ingredients the realm's own `Document` will be built from.
 
 `ViewSources::init_data` and `global_props` are optional `serde_json::Value`
 inputs. They travel with that state and are converted before entry boot using
@@ -67,9 +86,10 @@ failure follows the existing `StartupFailed` path. Passing these values to
 `processData`/`renderPage`, installing them on `lynx`, and background-thread
 delivery are deferred; the current boot behavior is unchanged.
 
-Main requests loads from the embedder-owned painter and its
-`ResourceFetcher`. Fetched source bytes cross to `main`; the fetcher, caches,
-and decoded images never do.
+Main asks for loads through the view's own `ViewNotice` channel, and
+`LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
+Fetched source bytes cross to `main`; the fetcher, caches, and decoded images
+never do.
 
 The dependency graph is:
 
@@ -91,8 +111,11 @@ bobcat-source ──────────────────────
 
 QuickJS preloaded ESM graph — bobcat-main's runtime
   bobcat:boot
-    ├──▶ bobcat:element (flush binding)
+    ├──▶ bobcat:element (Document class + flush binding)
     ├──▶ bobcat:timers (timer-global installation)
+    ├──  export const document = new Document()   the realm's first statement
+    │      └──▶ bobcat-internal:host.createDocument
+    │            └──▶ DocumentIngredients ──▶ private dom::Document<()> tree
     └──▶ await import(resolved entry MTS URL)
           ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
           │     ├── named compatibility exports + engine EventTarget
@@ -103,7 +126,7 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
           │     └──▶ bobcat-internal:host (createWorker, sendWorkerMessage, terminateWorker)
           └──▶ bobcat:element (packages/bobcat-element/src/element-papi.mjs)
                 └──▶ bobcat-internal:host (native named function exports)
-                      └──▶ private dom::Document<()> tree
+                      └──▶ the document created above
 
 QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
   bobcat:worker-boot (one per live worker, evaluated, never registered)
@@ -132,10 +155,14 @@ bobcat-server ──▶ axum + reqwest + image/bmp
 The engine owns it. `crate::paint::FrameClock` is private to `bobcat-core`,
 concrete, and constructed with the `Painter`: there is no trait, no type
 parameter, and no constructor that takes one. It reads the platform's monotonic
-clock — `std::time::Instant` natively and `web_time::Instant` on Wasm, the same
-split `quickjs-rust-bridge` already uses — with the epoch at view construction.
-A host that arranges nothing gets running animations, because arranging nothing
-is the only option.
+clock through `crate::clock::ClockInstant` — `std::time::Instant` natively and
+`web_time::Instant` on Wasm, the same split `quickjs-rust-bridge` already uses.
+Its epoch is a *view's* construction rather than the painter's: `attach`
+rebases it onto the view's timeline epoch, so a painter that changes views does
+not restart the new one's animations at whatever the painter's own age happens
+to be, and a painter attached to a fresh view reads exactly what it would have
+before. A host that arranges nothing gets running animations, because arranging
+nothing is the only option.
 
 No host has a better reading to offer. Presentation runs on
 `PresentMode::AutoVsync`, so the swap chain paces frames, and the engine
@@ -169,11 +196,14 @@ and samples immediately.
 the instant, not the document.
 
 Advancing an animation runs where the document is — the Lynx main thread,
-its only home. The painting side sends one `BeginFrame { now }` command per
+its only home. The painter sends one `BeginFrame { now, seq }` command per
 frame while the latest committed frame reports an active animation, and the
-main thread's recv loop advances the timeline — a Stylo animation-only
+view's command consumer advances the timeline — a Stylo animation-only
 traversal of just the animating elements, no JavaScript involved — and
-commits what changed. The published frame's
+commits what changed. The `seq` is what an offscreen `tick` waits on: the
+epilogue publishes the newest serviced sequence number on the view's watch
+after the commit it implies, so a host blocked on that number is woken by the
+frame rather than by the acknowledgement. The published frame's
 `animations_active` flag is what keeps the loop sustained: `owes_frame` keeps
 answering yes, the embedder keeps taking a turn per display frame, and each
 one sends `BeginFrame` until a commit reports the timeline idle. Starting and cancelling animations belong to the style
@@ -204,19 +234,22 @@ and execution:
    stylesheet on the pre-parsed arm or an XML `<style>` body on the CSS-text
    arm; that resource system also owns every later file/network fetch, cache,
    and image decode;
-4. the embedder starts a `LynxGroup` for that page, then awaits one
-   `create_lynx_view`, passing `DrawTarget`, the `bobcat-resources` per-view
-   builder, and the resulting `ViewSources`.
+4. the embedder starts a `LynxGroup` for that page and calls
+   `create_lynx_view` with the `bobcat-resources` per-view builder and the
+   resulting `ViewSources`, then builds a `Painter` over its draw target and
+   attaches it to that view.
 
 All embedders use the complete source crate without feature flags. Binary
 page inputs require a `root` module; native bytecode remains unsupported.
 
 `bobcat-server` keeps HTTP handling concurrent but sends accepted captures
 through a bounded FIFO to one dedicated capture thread. For each job that
-thread is the embedder owner: it creates a fresh `LynxGroup` for that job and
-constructs its non-`Send` `LynxView` with an 800×600 DPR-1
-`DrawTarget::Offscreen`, owns the view's `Painter` and all GPU
-work, settles the page, captures tightly packed RGBA8, and destroys the view.
+thread is the embedder owner: it creates a fresh `LynxGroup` for that job,
+constructs its non-`Send` `LynxView`, builds an 800×600 DPR-1
+`DrawTarget::Offscreen` `Painter` beside it and attaches the two, owns all GPU
+work, settles the page on a plain frame interval — `view.pump()` and then
+`painter.tick(false)` per step — captures tightly packed RGBA8, and destroys
+both.
 The group owns the Lynx main thread, QuickJS runtime, and Stylo pool, all
 released with that job's view; no runtime is shared across capture jobs and
 the server adds no separate rendering owner. The HTTP side then encodes the
@@ -238,40 +271,56 @@ ResourceFetcher is deferred, so an entry not preloaded in QuickJS reports an
 import error. Compiled bundle manifests also need the Lynx Core module/init shell.
 
 `LynxGroup::new` awaits the shared script runtime and style pool.
-`create_lynx_view` validates metrics, attaches the document inputs and source URLs
-on main, and builds the painter and draw target on the calling thread. It then
-returns a loading view. Only metrics, attachment and target failures are returned
-by construction.
+`create_lynx_view` validates metrics, sends the view's half of its link to the
+group's thread, and builds the host's fetcher on the calling thread. It is
+synchronous — nothing it builds can block — and returns a loading view. Only
+metrics and attachment failures are returned by construction.
 
-Main registers fonts, requests each author stylesheet in cascade order, mounts
-its response, and finally requests the entry. In an ordinary `pump` turn the
-painter calls `ResourceFetcher::request_source` with a concrete `SourceCompletion`.
+The view's own task on `bobcat-main` runs boot as a straight-line async
+function. Fonts and the default family come first, validated against a
+`dom::TextContext` of their own: they are a text context's business, no
+document exists yet, and an unknown default family therefore stays a
+zero-fetch `EngineError::UnknownFontFamily`. Then each author stylesheet in
+cascade order, then the entry. Each ask leaves as a `ViewNotice::RequestSource`
+carrying the request and the right to answer it; `LynxView::pump` is what hands
+that to `ResourceFetcher::request_source`.
 The fetcher resolves the URL, fetches bytes and validates UTF-8, or supplies a
-pre-parsed stylesheet. Completion consumes the handle and sends directly into the
-existing `Mailbox<ToMain>`, waking main without another painter turn. The handle
-contains a concrete sender, `ViewId`, an optional imported-module name and the existing cancellation flag: no erased
-callback, retained resource Future, `SourceLoads` or `EventWaker` is needed. The
+pre-parsed stylesheet. Completion consumes the handle and answers the one-shot
+minted with the request, which wakes whichever task was awaiting that source —
+a stylesheet or entry on `bobcat-main`, a worker script on `bobcat-workers` —
+without a turn anywhere else. The handle contains that sender and the view's
+cancellation flag: no erased callback, retained resource Future, `SourceLoads`
+or `EventWaker` is needed. The
 fetcher itself is owned by value and needs neither `Send`, `Sync` nor `'static`.
 The reference fetcher queues a concrete source job on its native pool, or starts
-a browser task on Wasm. Main awaits no IO, so another view can boot or handle
-events while this view loads.
+a browser task on Wasm. A view's task awaits no IO on any other view's behalf,
+so a sibling can boot or handle events while this view loads.
+
+Sheets and the entry are **staged, not mounted**: there is no document to mount
+them on until the realm's boot module creates one. What the task assembles is
+`DocumentIngredients` — the viewport, the `PageConfig`, the validated text
+context, the fetched sheets in cascade order, the group's style pool, and any
+image reports that arrived first — and `MainThreadRuntime::new` opens the realm
+holding them in its `DocumentSlot`.
 
 The response carries a loaded source or error. Main owns the boot outcome:
 `ScriptFinished` reports success; `StartupFailed(LynxViewError)` reports resource,
-encoding, font, realm or boot failure exactly once through `pump`. Main requests
-no further sources after failure. Its resolved entry URL is the module specifier.
+encoding, font, realm or boot failure exactly once through `LynxView::pump`.
+A failed view asks its host for nothing more, sources and images alike.
+Its resolved entry URL is the module specifier.
 `ScriptRunError` reports fatal runtime failure; listener and timer failures stay
 non-fatal. Every main notification requests a host turn through `EventRequester`.
-There is no separate startup inbox consumer or await on the painter link.
 
-Dropping an unresolved constructor releases its attachment and target. Dropping
-a loading view marks its source work cancelled before releasing the fetcher and
-prevents boot before QuickJS begins. A fetcher checks the completion handle before
+Dropping a loading view sets its `ViewCancel` flag, detaches its image inbox,
+and then closes its command channel, which ends its task; boot never enters
+QuickJS after the flag is set. The flag is set synchronously on the embedder's
+thread, so a host still holding a completion reads cancellation without waiting
+for a turn. A fetcher checks the completion handle before
 queued IO and after IO, skipping unnecessary decoding. IO and JavaScript already
 executing may finish; cancelled completions are discarded. Dropping an unanswered
 completion for a live view reports a resource failure, including when a worker
 exits before answering. Other views and their group remain alive; the last
-group/view handle joins main.
+group/view handle joins the group's threads.
 
 Source requests select an entry or stylesheet payload and carry a specifier;
 the fetcher owns base URL and transport policy. Embedders can still use the
@@ -279,45 +328,77 @@ lower-level `resolve_locator`, `fetch_resource` and `fetch_style_sheet` API;
 core startup no longer calls it. A `ResourceRequest` carries no response-size
 limit; each fetcher owns the bound for the response it materializes.
 
-Each group owns `Mailbox<ToMain>` and `Mailbox<ToPainter>`, two instances of
-one addressed FIFO implementation. Both carry `(Option<ViewId>, M)`, with
-`None` reserved for the group. Main receives the whole stream, including
-`ToMain::Attach` and `ToMain::Close`. The host consumes a selected view's
-messages directly and buffers siblings until their painter turns. Buffered messages
-retain their per-view order. Dropping a link removes its buffer, and late messages
-for that id are discarded. No notification channel is created when a view attaches.
+A view is a set of tasks on the group's `LocalSet`, one per thing it can wait
+for, and tokio owns the polling, parking and waking. `serve_view` is the owner
+and has exactly one wait of its own — the view's end; `boot_page` requests the
+sheets in cascade order, then the entry, then opens the realm; `consume_commands`
+is the one ordered consumer of the command channel; `consume_worker_events` is
+the one ordered consumer of this view's workers; one `load_module` future runs
+per resource load an import produced; `wait_timers` owns the realm's one pinned
+sleep; `follow_checkpoints` watches the runtime-wide checkpoint generation.
+Nothing is spawned per input: an ordered stream stays serial because one
+consumer reads it with `while let Some(x) = rx.recv().await`.
 
-Main's timer loop and offscreen `tick` share `Mailbox::recv` and its deadline
-handling. The offscreen wait defers sibling messages until it receives its own
-`BeginFrameServiced`. A fatal event ends the wait even if the group's
-other views keep the FIFO open. Each view retains its own latest-frame mailbox;
-consolidating notifications does not queue or retain intermediate committed frames.
+Every one of them reaches the realm through `Page::enter`, the one JavaScript
+execution boundary. It runs one synchronous operation under the borrows of the
+shared runtime and the realm, and then the epilogue, in this order — due timers
+first, because whatever just ran may have armed or cleared one and its mutation
+should ride the same frame; the commit next, so the frame exists before
+anything implying it; then the boot report, the `BeginFrame` acknowledgement,
+the module requests that entry produced, the next timer deadline republished
+only when it moved, and finally the checkpoint generation as of this entry.
+`Page::settle` is the epilogue alone, for a wake that carries no operation of
+its own. `Page::open_realm` is the one documented exception, because the realm
+it would enter does not exist until it returns. A command opens a burst: the
+rest of what is already queued goes with it, bounded by the length the count
+was taken from, so a host's whole round of input is one entry, one commit and
+one acknowledgement rather than one of each per command.
+
+That checkpoint watch is a runtime-wide `u64` bumped inside
+`ScriptEngine::checkpoint`. The promise-job queue belongs to the runtime rather
+than to any realm, so a view whose import finished inside a *sibling's* entry
+into JavaScript has to settle what its own realm owes; `follow_checkpoints` is
+how it learns to, and comparing the generation against the one the epilogue
+recorded is what keeps a page's own entries from waking it.
+
+An end is a flag rather than a message anything has to race. `Page::end` — the
+command channel closing, a cancelled load, a fatal failure, a panic in any task
+— sets it synchronously, acknowledges whatever `BeginFrame` was pending so a
+blocked painter is released, publishes no deadline, and tells the owner. Every
+entry point returns at once when it is set; the owner then aborts and awaits
+every task of the view, which is what makes it the last owner of the page, and
+drops the realm.
 
 ## Public and private boundaries
 
-The public facade is `LynxView`. It applies input, resize, occlusion,
-offscreen ticks, capture and image loads, and its `pump` is the
-view's turn: it draws the frame the view owes and drains the lifecycle events
-that turn produced. It exposes no tree getter, document getter, renderer
+The public facade is two handles. `LynxView` is the page: it owns the host's
+resource system, and its `pump` is the only call that advances the resource
+protocol — hand out the source asks, give the fetcher its `service_images`
+moment, name the sources the last walk discovered, write the completed loads
+back, and return the lifecycle events the turn produced. `Painter` is where
+pixels go: input, resize, occlusion, refresh, offscreen ticks, capture, and a
+`pump` that draws the frame it owes. Neither exposes a tree getter, document
 getter, script-realm handle, decomposition method, or way to mount a
 stylesheet or start a second entry module. `LynxView<F>` carries only the
-painter-owned `ResourceFetcher` type. The embedder's event-loop wakeup is a
-separate constructor generic held by `bobcat-main`, not another owner or
-thread represented in the view type.
+view-owned `ResourceFetcher` type. The embedder's event-loop wakeup is a
+separate group constructor generic held by `bobcat-main`, not another owner or
+thread represented in either handle.
 
 The following types are private to `bobcat-core`:
 
-- the `Painter` — everything the view draws with, owned by the view;
-- the link — `ToMain`, `ToPainter`, and the frame mailbox
-  behind them;
-- `MainThreadRuntime` and its Element-PAPI host implementation;
+- the link — `ToMain`, `ViewNotice`, `Published`, and `ViewCancel`;
+- `MainThreadRuntime`, its `DocumentSlot` and `DocumentIngredients`, and its
+  Element-PAPI host implementation;
 - `LynxDocument`, `Viewport`, and `new_document`;
 - the concrete QuickJS realm adapter.
 
 This prevents an embedder from bypassing commit ordering, mutating the tree
 beside JavaScript, reaching the main-thread document at all, submitting a
-scene independently of the view, or evaluating code directly in the view's
-realm.
+scene independently of the painter, or evaluating code directly in the view's
+realm. A `Painter` is public, but everything it holds of a view is
+non-owning — a `watch` receiver, a weak command sender, a weak handle on the
+host's resource system — so it is a second *observer* rather than a second way
+to drive a view.
 
 ## The core-owned JavaScript engine
 
@@ -330,8 +411,13 @@ outside the crate.
 A group has two runtimes, on two threads. `bobcat-main` carries one realm per
 view: same heap, same atom table, same job queue, no value crossing between
 them, and each with its own global object and native modules.
-`bobcat-workers` — owned by the group, started beside `bobcat-main` and joined
-right after it — carries the other, with one realm per live worker. Separating
+`bobcat-workers` — owned by the group, started by `LynxGroup::new` beside
+`bobcat-main` and joined by the group handle's drop after it — carries the
+other, with one task and one realm per live worker. It is an independent
+runtime environment rather than something `bobcat-main` offloads work to:
+`bobcat-main` holds one sender on it, sends three messages (start a context
+with its script, post to a context, stop a context) and receives events back,
+and nothing else crosses. Separating
 them is the whole point of a worker: script that must not stop the thread that
 owns the document. Because `QuickJS` binds a runtime to one thread, that
 separation is also what makes "a worker cannot touch the document" structural
@@ -360,29 +446,45 @@ BigInt throw, and typed arrays do not preserve their type.
 
 ```text
 main realm: new Worker(url)
-  ├── Start(key, view, name) ────────────────▶ worker FIFO
-  └── RequestWorkerSource ──▶ painter ──▶ ResourceFetcher::request_source
-                                           │ SourceRequest::Worker {specifier, base_url}
-                                           └── SourceCompletion ──▶ worker FIFO: Script(key)
-main realm: postMessage / terminate ───────────────▶ worker FIFO
-main realm: Worker message/error handler ◀── ToMain::Worker(view, key)
+  ├── WorkerStart { key, name, script: oneshot receiver,
+  │                 messages: mpsc receiver, events: this view's sender }
+  │        ────────────────────────────────▶ bobcat-workers: one task per worker
+  └── ViewNotice::RequestSource ──▶ LynxView::pump ──▶ request_source
+                                     │ SourceRequest::Worker {specifier, base_url}
+                                     └── SourceCompletion answers the oneshot
+                                         that already rode inside the Start
+main realm: postMessage / terminate ───────────────▶ that worker's own task
+main realm: Worker message/error handler ◀── WorkerEvent { key, payload }
 ```
 
 The base URL is the creating view's resolved entry URL; resolution, fetching
 and UTF-8 validation remain fetcher policy. Multiple worker requests are
-buffered without coalescing. `Start` is sent before the painter is asked to
-fetch, so messages posted during loading queue against an existing key. The
-completion sends directly to workers: it needs no main-thread turn and cannot
-be held behind a long main-thread script. It holds a weak sender so outstanding
-host IO cannot prolong the group's join.
+preserved without coalescing. The `WorkerStart` is sent before the host is
+asked to fetch, so messages posted during loading queue against an existing
+key — the worker's task holds them until its scope exists, which is what HTML
+does. The completion answers the worker's task directly: it needs no
+main-thread turn and cannot be held behind a long main-thread script. A worker
+told to terminate before its script arrives never boots, because that wait is
+a `biased` select with the message channel first.
 
-Worker keys are allocated once per group on main and never reused. The main
+Worker keys are allocated once per group on main and never reused. A worker's
+whole state is its own task; `bobcat-main` keeps nothing per worker but the
+sending end of its message channel, and only while that worker runs — a worker
+that closed itself or failed is forgotten where the realm learns of it, when
+that event is dispatched. A released realm sends a terminate on
+every sender it still holds, which is how a view stops the workers it created.
+A closed
+channel ends a worker too, but that is the backstop — for a realm that was
+gone before it could say anything — rather than the protocol. The main
 realm retains Worker objects until termination, close, or load failure.
-`terminate()` immediately removes the receiving handle and asks workers to
-end its context between tasks; it does not interrupt synchronous JavaScript.
+`terminate()` immediately removes the sending handle and asks that worker to
+end its context between tasks, discarding whatever was queued behind it; it
+does not interrupt synchronous JavaScript.
 Late source results and messages cannot restart or reach a terminated context.
-Releasing the view, including failed entry boot, cancels source work and sends
-`ReleaseView` as its native callbacks are dropped. Worker errors reach the
+Releasing the view, including after failed entry boot, cancels its source work
+and stops its workers — one terminate each, sent as the realm goes. The senders
+they were reachable through drop behind those messages; that is the backstop,
+not the protocol. Worker errors reach the
 parent's `error` handler and the embedder as nonfatal `WorkerFailed`; a parent
 handler that throws reports `ListenerFailed` and leaves the view serving.
 
@@ -394,8 +496,9 @@ is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
 `import { lynx } from "bobcat:bts-runtime"`, matching MTS's named import from
 `bobcat:runtime`. The application therefore imports its bindings without
 creating a dependency back to the bootstrap awaiting it.
-Main sends the built-in `bobcat:bts` source
-directly to the ordinary Worker FIFO. When `ViewSources.background_entry` is
+Main answers the built-in `bobcat:bts` source itself, on the one-shot that
+rode to `bobcat-workers` inside the `Start`, rather than asking a host that has
+no bytes for it. When `ViewSources.background_entry` is
 configured, the bootstrap appends `await import(entry)`, matching MTS boot's
 import structure. XML takes exactly this path; no application source is
 prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
@@ -421,9 +524,9 @@ operation. This differs from Worker `postMessage`, which carries the events.
 The MTS Context exists during entry evaluation. Until the Worker is connected,
 it queues event references in FIFO order, matching web-core's pre-port RPC
 queue; connection sends them through Worker's JSON transport. Once connected,
-that transport snapshots each event at dispatch time. The worker's existing
-source queue delays delivery until the BTS entry finishes, so its listeners
-can be registered first. No new mailbox or RPC registry is needed. Worker
+that transport snapshots each event at dispatch time. The worker's own task
+queues what is posted to it until its script has been evaluated, so its
+listeners can be registered first. No new queue or RPC registry is needed. Worker
 release, source cancellation and nonfatal `WorkerFailed` reporting apply to
 BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
 loading or execution.
@@ -472,14 +575,24 @@ Its script surface covers:
 The callback boundary carries only `quickjs-rust-bridge`'s primitive
 `HostValue`/`HostArgument`. Objects, symbols,
 functions, raw VM values, and DOM handles cannot cross it. Bobcat registers its
-private callbacks as named exports of the native `bobcat-internal:host` ESM,
-then preloads three kinds of ESM source: the core-owned `bobcat:runtime` named
-compatibility exports, the embedded `bobcat:element` named Element-PAPI
-exports, and the fetched entry under its resolved URL. `bobcat:element`
+private callbacks as named exports of the native `bobcat-internal:host` ESM —
+the document member `createDocument`, the tree and attribute
+members, the three event members, the two timer members, and the three worker
+members — then preloads three kinds of ESM source: the core-owned
+`bobcat:runtime` named compatibility exports, the embedded `bobcat:element`
+named Element-PAPI exports, and the fetched entry under its resolved URL.
+`bobcat:element`
 imports its native operations directly; nothing is installed as
 `globalThis.bobcat`. Before registering the entry, core prepends its runtime
 and Element-PAPI import declarations. Event delivery travels back through the
 loaded `bobcat:element` namespace's `__BobcatDispatchEvent` export.
+
+Because `bobcat-internal:host` resolves from any module in the realm, a card
+can reach `createDocument` too. Constructing a second `Document` is refused,
+which fails that card's boot, and that refusal is the only one in this area:
+every tree and attribute member takes the realm's document unconditionally,
+because no JavaScript runs in the realm before the boot module's first
+statement creates it and nothing releases it while the realm lives.
 
 Ordinary ECMAScript `import(specifier)` loads JavaScript ESM asynchronously,
 including computed specifiers, static dependencies, re-exports, cycles and
@@ -490,13 +603,14 @@ are outside this JavaScript-module path.
 
 The bridge keeps built-in sources on the shared runtime and entry/imported
 sources on each realm. A missing module creates one `SourceRequest::Module` per
-normalized URL in that realm. The painter forwards every queued request through
-`ResourceFetcher::request_source`; its `SourceCompletion` retains the requested
-module name even on failure. IO never blocks the script thread. Completion
-returns to the owning view's main-thread inbox, registers the source or cached
+normalized URL in that realm. The boundary's epilogue spawns one task per
+queued request, and `LynxView::pump` forwards each through
+`ResourceFetcher::request_source`. IO never blocks the script thread. The
+answer resolves that task, whose completion registers the source or the cached
 load error, resumes import continuations, and drains promise jobs. Repeated
 imports share the same module namespace and evaluation within a realm; sibling
-views can load the same URL independently.
+views can load the same URL independently, and a sibling's checkpoint is what
+tells a view its own import may have finished inside it.
 
 The QuickJS fork adds unlinked compilation and a module-load deferrer. Before
 linking or evaluating an import, it walks the static graph with an attempt-local
@@ -507,17 +621,26 @@ when another dependency arrives. Fetch/encoding errors reject with `TypeError`;
 parse and evaluation failures preserve their JavaScript exception. A handled
 rejection leaves the realm usable.
 
-Boot stays pending while top-level await needs resources or timers; ordinary
-host pumping and `next_wakeup` keep both progressing. `ScriptFinished` is sent
+Boot stays pending while top-level await needs resources or timers. A host
+`LynxView::pump` keeps the resources moving; the timers need nothing from a
+host, because the view's task waits its own realm's deadlines out.
+`ScriptFinished` is sent
 only after the boot promise fulfills. Its rejection sends `StartupFailed`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx` and the flush binding from the
-two built-ins; the transformed entry itself statically imports both built-ins.
-Boot then runs:
+The final `bobcat:boot` module imports `lynx` and `__BobcatConnectBackground`
+from `bobcat:runtime` and `Document` and `__FlushElementTree` from
+`bobcat:element`, and imports `bobcat:timers` for its effect; the transformed
+entry itself statically imports both of the first two built-ins. Boot then
+runs:
 
 ```js
+// The realm's document, created by this module's first statement and held by
+// this exported binding for the realm's life. Nothing in the realm releases
+// it: it goes when the realm does.
+export const document = new Document();
+
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
@@ -557,9 +680,53 @@ and tests.
 
 ## Document and rendering ownership
 
+The document belongs to a *realm*, and the realm creates it. `bobcat:element`
+exports `class Document`; the boot module's first statement constructs one and
+exports the binding; and that constructor calls the host member
+`createDocument`, which builds a `LynxDocument` out of the
+`DocumentIngredients` the view's task staged before the realm opened — the
+viewport, the `PageConfig`, the validated `dom::TextContext`, the author sheets
+in cascade order, the group's `StylePool`, and any image reports that arrived
+first. It adopts the text context, mounts the sheets in order, and replays the
+reports, each phase under its own catch because the bridge erases a panic into
+"the host function panicked" and this is the one member that runs the whole
+document pipeline. The ingredients are spent by the first call, so a second
+`Document` is refused whichever module asks for it — and a construction that
+fails rejects the boot module's own `new Document()`, which fails the boot and
+ends the view, so nothing asks again.
+
+The document then lives exactly as long as the realm. The boot module's
+exported binding holds the object, nothing in the realm releases it, and there
+is no release member, no registry over the `Document`, and no answer a host
+member gives without a document. That is deliberately not the path elements
+take: cards genuinely unroot handles, and a collection every 32 removals frees
+what they named.
+
+Release is the view's task ending. Dropping the `LynxView` closes its command
+channel; the task returns and drops the `MainThreadRuntime`, whose fields drop
+in declaration order — the `realm` field first, which groups the `ScriptEngine`
+with the two retained initial-data `Value`s because each of them holds an `Rc`
+of the context, so the realm is freed when the last of the three goes and not
+when the engine alone does; freeing it takes the host functions the realm held
+and their clones of the
+`Rc<RefCell<DocumentSlot>>` with it, and the runtime's own `slot` handle drops
+after that, which is when the `LynxDocument` drops. JavaScript goes first, then the Rust
+object it named; the field order and its comment are the whole mechanism, and
+no `Drop` impl stands behind them. The task drops the workers it started and
+the frames watch with the same return; a painter attached to the view keeps
+showing the last frame it drew.
+
+There is one window where a view has no document, and the task serves through
+it: the load, before the boot module constructs its `Document`. In it, `Resize`
+writes the staged viewport; `ImageEvents` are buffered and replayed once there
+is a document; `BeginFrame` is still acknowledged, so an offscreen host is
+never blocked by a load; `DispatchEvent` and `Refill` are dropped, because
+there is no committed tree to route them against and nothing arriving now would
+still be true by the time there was.
+
 `dom::Document<T>` privately owns its style/layout state, retained commit
 builder and Vello scene; that DOM-side painter is distinct from the
-embedder-thread `bobcat_core::paint::Painter` that composes a published frame.
+embedder-thread `bobcat_core::Painter` that composes a published frame.
 In Bobcat the payload is `()` and the core adds
 the permanent `page` root plus Lynx UA defaults from `PageConfig`.
 
@@ -601,28 +768,43 @@ private Document<()>
 ```
 
 A commit — style flush, layout, paint-order build, scene encode — runs where
-the document is and ends by publishing one immutable `Arc<CommittedFrame>`.
+the document is and ends by publishing one immutable `Arc<CommittedFrame>` on
+the view's `watch<Published>`.
 The painter is a compositor over the published frame: it routes input and
 recognizes gestures against the frame's tables, uploads the scene, submits,
 presents, and captures. The public `EventRequester` trait describes the host
-wakeup — implemented by the platform and named at `new`, never boxed — and it
+wakeup — implemented by the platform and named at `LynxGroup::new`, one per
+group — and it
 does not expose the engine that consumes it. There is no frame-scheduling
 capability: a commit records that it wants a frame and wakes the embedder,
-whose next `pump` draws it — no OS frame callback is asked for or waited on.
+whose next `Painter::pump` draws it — no OS frame callback is asked for or
+waited on.
 
 Images are the host's `ResourceFetcher` and nothing else; no container
 sniffing, codec, cache, byte budget or eviction policy exists in `bobcat-core`
-or `dom`. The paint walk names each source it meets; the painter asks the
-fetcher for it (`request_image`), the fetcher answers through the view's
+or `dom`. The paint walk names each source it meets; the view reports those
+names to the host on its own turn and asks for each
+(`request_image`), the fetcher answers through the view's
 `ImageReports` with the intrinsic size, and the document records the load and
 recommits. A frame that names a source not yet loaded paints nothing for it,
-the same not-yet-loaded state a browser shows. Each painter turn gives the
+the same not-yet-loaded state a browser shows. Each `LynxView::pump` gives the
 fetcher a moment of its own (`service_images`) to forward loads that completed
-elsewhere. Composition then reads the frame's images once per commit through
-`FrameImages::read`, synchronously and off the swap-chain window, each with the
+elsewhere, before the sources that turn discovered are named. A painter asks
+the host for nothing at all; it only *reads*, through a `Weak<dyn FrameImages>`
+on the store its view owns.
+Adopting a commit is that read: the painter resolves the frame's images once
+per commit through `FrameImages::read`, synchronously and off the swap-chain
+window, each with the
 `ImageSizeHint` of its largest draw in the frame — the size a host decodes to.
+A commit whose pixels cannot be read in the same step is not adopted, because
+a frame indexes its store's bitmaps by draw order and a frame over another
+commit's table would draw the wrong images; that is also why a released view's
+last frame stays drawable only if the painter read it while the view was still
+there.
 That read may block, because after a reported load it must not miss: a store
-that evicted a bitmap restores it inside the call. `crates/bobcat-resources`
+that evicted a bitmap restores it inside the call. It happens in `poll_link`,
+which every painter entry point runs first and always before the drawing path
+acquires a swap-chain image, so a restore cannot stall the chain under vsync. `crates/bobcat-resources`
 is the reference implementation of all of this, and `LynxView::prefetch_images`
 warms sources ahead of the walk that would discover them. A Lynx `<image>`
 rides the same rails: its `src` binds a source, which is what asks the host
@@ -630,16 +812,38 @@ for it.
 
 ## Commit, publish, and visibility
 
-The document has one owner for its whole life: the engine-owned Lynx main
-thread, which creates the document itself from the view's `PageConfig` and
-device metrics. That thread is the only committer.
+The document has one owner for its whole life: the realm on the engine-owned
+Lynx main thread, whose boot module created it out of the ingredients that
+thread staged. That thread is the only committer.
 
 A view spans two threads and one link. The embedder's own thread — whichever
 one created the view's `LynxGroup` — owns the window, captures input, creates
-the surface (the one call macOS allows nowhere else), and owns everything that
-draws. The Lynx main thread owns the document and the realm. The link is an
-ordered FIFO per direction plus a one-slot mailbox for the frames themselves,
-and one typed wakeup back to the embedder.
+the surface (the one call macOS allows nowhere else), owns the host's whole
+resource system, and owns everything that
+draws. The Lynx main thread owns the realm, and through the realm the document.
+
+The link is three `tokio::sync` channels, none of them addressed, because
+there is nobody else on the wire: the embedder's thread holds one sending end
+and two receiving ends, and the task serving that view holds the others. A
+sibling's traffic is not on this path at all, so no message names its view and
+no receiver has to defer one.
+
+- `ToMain`, an mpsc FIFO in: `DispatchEvent`, `Resize`, `BeginFrame { now, seq }`,
+  `Refill { offsets }`, `ImageEvents`. A FIFO because the order two commands
+  arrive in is what they mean. `LynxView` holds the one strong sender; an
+  attached `Painter` holds a weak one, so a painter can never keep a released
+  view's task alive.
+- `ViewNotice`, an mpsc FIFO back, drained by `LynxView::pump`: `Engine(event)`,
+  `RequestImages(sources)`, and `RequestSource { request, completion }`. Only
+  what a host must *act* on rides here.
+- `watch<Published>`, read by any observer and by the painter in particular:
+  the newest committed frame, the listener-name set, and the newest serviced
+  `BeginFrame`. Observed state rather than history — a painter wants the latest
+  and never the ones it slept through.
+
+One typed wakeup goes back to the embedder alongside them, and a view's worker
+realms report on a fourth channel that belongs to the view rather than to the
+link.
 
 That main thread belongs to the `LynxGroup`, not to any one view. A group owns
 it along with the one QuickJS runtime every view's realm is opened on and the
@@ -649,8 +853,12 @@ which thread it runs on. One group per thread and one thread per group: the
 handle is `!Send` and `!Sync`, so the thread that creates a group is the
 thread every view in it paints on.
 
-Views in a group take turns rather than run at once — the thread serves one
-command round for one view at a time — so a second view costs no second heap,
+Views in a group take turns rather than run at once. Each has a set of tasks
+of its own on that thread's `LocalSet`, one per thing it can wait for, so a
+view waiting for its entry parks on its own channels and nothing it waits for
+holds up a sibling — but every entry into a realm is one synchronous stretch
+inside `Page::enter`, and only one task is inside the shared runtime at a
+time. A second view therefore costs no second heap,
 no second module graph and no second set of Stylo workers, at the price of
 the two never restyling in parallel. The assumption that buys is that a
 person drives one view at a time. A host that needs two pages genuinely
@@ -659,70 +867,92 @@ parallel gives them a group each, on a thread each. The pool in particular
 over as index zero of the first pool built on it and refuses a second one
 there forever, so one thread can only ever build one pool.
 
-Dropping a view sends its goodbye and returns; the group's thread releases
-that view's document and realm and goes on serving its siblings. The thread
-is joined when the group handle and the last view built from it are both
-gone — a view holds its group alive, so the embedder may drop them in either
-order.
+Dropping a view cancels its source work, detaches its image inbox, and closes
+its command channel, which is the goodbye its task ends on; that task releases
+the view's realm — and with it the document and every worker the realm created
+— and the thread goes on serving its siblings. The group's two threads
+are joined when the group handle and the last view built from it are both
+gone — a view holds its group alive as its last field, so the embedder may
+drop them in either order.
 
 ```text
 the thread that created the LynxGroup (AppKit main, or a Render Worker)
   window lifecycle, input capture, surface creation
-  LynxView, owning the Painter — everything below runs inside the
+  LynxView — the host's resource system, and the only turn that services it
+  Painter — attached to that view; everything below runs inside the
   embedder's own calls:
-    input routing + gesture recognition (against the published frame)
+    input routing + gesture recognition (against the adopted frame)
     scroll/dispatch/resize/BeginFrame
     compose: upload scene, acquire, present
     capture, offscreen ticks
-  ── Mailbox<ToMain> (ViewId) ──▶     ◀── Mailbox<ToPainter> (ViewId) ──
-                                           ◀── Arc<CommittedFrame> mailbox ──
-                                           ◀── EventRequester wakeup ──
+  ── ToMain mpsc ──▶                  ◀── ViewNotice mpsc ──
+                                      ◀── watch<Published> ──
+                                          (frame, listener names,
+                                           newest serviced BeginFrame)
+                                      ◀── EventRequester wakeup ──
       Lynx main thread — the group's, shared by every view in it
-                    (owns each document + realm; one runtime, one style pool)
+                    (one task per wait; one runtime, one style pool)
+                    the realm owns its document
                     PAPI mutations: plain &mut
                     __FlushElementTree: commit
                       style → layout → build → encode
 ```
 
-The surface is built on that thread, during construction, and stays there:
+The surface is built on that thread and stays there:
 `create_surface` from a window handle panics off the macOS main thread, and
-the same thread is the one that will acquire, render and present into it. A
-view is therefore never in a state where it has run but has nowhere to put a
-frame — the target is an argument to `new`, and there is no attaching one
-afterwards. A frame's
-vsync wait therefore lands inside the embedder's own turn, which is why the
+the same thread is the one that will acquire, render and present into it. That
+is why the target is an argument to `Painter::new` rather than something
+attached later, and why a `Painter` is `!Send`. A view may run with no painter
+at all — it commits, and nothing draws — and a painter may outlive the view it
+was watching, going on showing and capturing the last frame it drew. A frame's
+vsync wait lands inside the embedder's own turn, which is why the
 embedder draws where a wait for the display is acceptable rather than inside
 every input relay. Nothing about this differs by platform any more: the
 browser, where `wgpu`'s handles are not `Send` under shared memory and an
 `OffscreenCanvas` cannot be transferred on again, always had exactly this
-shape, and the Render Worker is simply the thread that constructs the view.
+shape, and the Render Worker is simply the thread that constructs both.
 
-A commit writes its frame into the mailbox, over whatever the painting side
-has not read, and announces it as one `ToPainter::FrameChanged`; lifecycle
-events, listener-name edges, and `BeginFrame` acknowledgements ride the same
-FIFO in order. Frames stay out of it deliberately: a queue of them would
-retain every intermediate scene, while a mailbox bounds the frames in flight
-at one however far the main thread runs ahead. The painting side drains the
-FIFO once per pass, reads the mailbox at most once per drain, and keeps the
-name replica, the pending-redraw bit, and the newest frame locally — so
-composing, hit-testing, and refilling take no lock at all. Every send from the
+A commit writes its frame into the watch, over whatever the painting side has
+not read; the listener-name set and the newest serviced `BeginFrame` sit in
+the same `Published` value, while lifecycle events and resource asks ride the
+`ViewNotice` FIFO in order. Frames stay off that FIFO deliberately: a queue of
+them would retain every intermediate scene, while a watch bounds the frames in
+flight at one however far the main thread runs ahead. The painter adopts one
+snapshot per pass — `poll_link`, run first by every entry point — and reads the
+name replica, the pending-redraw bit, and the frame out of it for the rest of
+that pass, so composing, hit-testing, and refilling take no lock at all. The
+snapshot is *taken* rather than only read when the watch reports a change: a
+completed `changed()` has already marked the value seen, so a flag alone would
+skip exactly the state an offscreen wait was woken for. `Receiver::has_changed`
+is never used either — it errors once the sender is gone, and the last frame a
+view published before its task ended is still the frame the painter must draw.
+Every publication from the
 main thread wakes the embedder through its `EventRequester`, always after the
-state it announces is in place, and the `pump` that answers is the turn that
-draws it. A frame the painter asks of *itself* wakes nothing — it is asked
+state it announces is in place, and the `Painter::pump` that answers is the
+turn that draws it. A listener-name edge is the one exception that wakes
+nobody: the painter reads the set at the start of its next routing pass, which
+is a turn the host was taking anyway.
+A frame the painter asks of *itself* wakes nothing either — it is asked
 inside one of the embedder's own calls, and the turn that embedder is already
 in is the turn that answers it. Nothing announces the main thread's exit:
-dropping its end of the link closes the FIFO, which is the same fact. The view
-announces its own, explicitly, because the main thread's command loop returns
-on that message and a `Drop` that only released the FIFO would race it.
+dropping its end of the link closes the channels, which is the same fact, and
+the painter notices a view that has gone on its next poll and detaches itself.
+The view's own goodbye is its command channel closing, which is what its
+command consumer ends the view on.
 
-Every command round the main thread serves — input dispatches, scrolls,
-resizes, resource updates, `BeginFrame` ticks — ends with a commit when
-anything went stale, which is what makes the recorded contract true: script
-must flush after mutating, and nothing guarantees the tree is *not* flushed
-at other times. A half-applied JavaScript turn is still unobservable, because
-the main thread only serves commands between evaluations. The painting
-side never blocks and never skips a frame: it always has the latest published
-frame to compose and hit-test, however busy the main thread is.
+Every entry into a realm — input dispatches, scrolls, resizes, resource
+updates, `BeginFrame` ticks, a module completion, a timer coming due, a
+sibling's checkpoint — ends with a commit when anything went stale, which is
+what makes the recorded contract true: script must flush after mutating, and
+nothing guarantees the tree is *not* flushed at other times. A half-applied
+JavaScript turn is still unobservable, because the epilogue runs after the
+operation rather than inside it. A windowed painter
+never waits on the main thread and never skips a frame: it always has the
+latest adopted frame to compose and hit-test, however busy that thread is.
+`Painter::tick` is the one call that does wait on it, and only an offscreen
+painter has one — a host with no display to pace against asks for a frame and
+waits out the `BeginFrame` acknowledgement, with a deadline, and ends early if
+the view's task has gone.
 
 ## Scroll composes; a refill recommits
 
@@ -802,32 +1032,52 @@ lands on at the same instant — handoffs are seamless in both directions.
 
 ## Native and Wasm spawning
 
-`LynxGroup::new` always delegates VM creation to an engine-owned task, and
-`create_lynx_view` delegates each view's realm and module boot to the same
-one. The core selects the thread builder at compile time:
+`LynxGroup::new` starts the group's two engine threads, and `create_lynx_view`
+hands each view to a task on the first of them. The core selects the thread
+builder at compile time:
 
 ```text
 not wasm32  -> std::thread::Builder
 wasm32      -> wasm_thread::Builder
 ```
 
+Both engine threads run a tokio `current_thread` runtime under a `LocalSet`,
+and both need to wait out their realms' timer deadlines. Natively they enable
+tokio's time driver. On wasm32 that driver reads `std::time::Instant`, which
+panics there, so `crate::clock::sleep_until` is served instead by `alarm.rs`:
+one process-wide `bobcat-alarm` `wasm_thread` Worker holding a heap of
+deadlines and the wakers waiting on them, parked with `park_timeout`, which
+needs no clock the platform does not have. It is started by the first group's
+`bobcat-main` for the same reason a group starts its own two threads eagerly —
+a card's first `setTimeout` must wait out its own delay rather than a Worker's
+cold start. The tokio feature set follows: `rt`, `sync` and `macros`
+everywhere, `time` only under `cfg(not(target_arch = "wasm32"))`.
+
 On Wasm, `configure_wasm_workers(worker_script_url)` is the OS bootstrap
 seam. It configures the default `wasm_thread` worker script and nothing else;
 the core then uses that same target-specific spawn path for each group's Lynx
-main Worker and for that group's Stylo Rayon Workers. Stylo pool creation
+main Worker, its worker-realm Worker, the alarm Worker, and that group's Stylo
+Rayon Workers. Stylo pool creation
 belongs to the core, not the browser facade — the facade only says how many
 workers a group should get, as the `StyleThreads` argument to
 `LynxGroup::new`.
 
 Wasm and native follow the same ownership model: every `LynxGroup` spawns and
-owns one Lynx-main Worker — the Render Worker is the thread that created the
-group, so it is where the painting happens — and dropping a view shuts it down
-after that Worker has released its document and realm, while dropping the last
-of the group's handles is what joins the Worker itself. Independent groups are
+owns one Lynx-main Worker and one worker-realm Worker — the Render Worker is
+the thread that created the group, so it is where the painting happens — and
+dropping a view ends its task, which releases that view's realm, document and
+workers, while dropping the last of the group's handles is what joins the
+Lynx-main Worker and then, once its senders are gone with it, the worker-realm
+one.
+Independent groups are
 not a process-global singleton. The npm facade keeps at most one live view,
-in one group, per `BobcatRenderer`: `create` builds neither, and each `load`
-replaces both the view and its group, retaining the Render Worker, transferred
-canvas, Wasm instance, and wrapper state. A page gets a group of its own
+in one group, per `BobcatRenderer`, and **one `Painter` for the canvas across
+all of them**: `create` builds no group and no view, and each `load` detaches
+the painter, replaces both the view and its group, and re-attaches. The
+painter, Render Worker, transferred
+canvas, Wasm instance, and wrapper state are retained; the canvas is not
+resized on a load, so the previous page's last frame stays up while the next
+one boots. A page gets a group of its own
 because the script runtime is the group's, so a page loaded twice would
 otherwise register its entry module a second time under a name the previous
 load already took. Replacement construction therefore cannot overlap the old
@@ -847,7 +1097,7 @@ per-view: the root closure runs inline on the script owner, and the managed
 members take over only where a level is wider than the traversal's work unit.
 The takeover is permanent — rayon leaks about 25 KB per pool and refuses a
 second pool on the same thread forever — which is affordable only because the
-Lynx-main Worker is created for one view and dies with it. Disjoint pools are
+Lynx-main Worker is created for one group and dies with it. Disjoint pools are
 what let two views on two threads restyle at once; the process-wide traversal
 mutex that serialized them is gone. `dom::MAX_STYLE_THREADS` (six) is a hard
 ceiling, not a preference: Stylo indexes its per-traversal thread-local
@@ -856,44 +1106,55 @@ the same way.
 
 The browser UI thread is a JavaScript coordinator only. It creates an
 embedder/Render Worker and transfers an `OffscreenCanvas`. That Worker owns
-the Wasm `LynxView`, Vello/wgpu objects, and resource provider; core creates
-its owner-thread-bound realm inside the nested Lynx main Worker. No direct
+the Wasm `LynxView`, its `Painter`, the Vello/wgpu objects, and the resource
+provider; core creates
+its owner-thread-bound realm inside the nested Lynx main Worker, and the
+realm's own boot module creates the document there. No direct
 create/append/drop/flush DOM API is exposed to JavaScript.
 
 ## Frame walkthrough
 
-1. `LynxGroup::new` starts `bobcat-main` and waits for its runtime and pool.
-   `create_lynx_view` validates the metrics, creates the view's link, attaches
-   the view to that thread, and builds the painter — including the
-   `DrawTarget` the embedder named and the per-view `ResourceFetcher` — on
-   the calling thread, then returns a loading view.
-2. `bobcat-main` creates the private document from `PageConfig` and the device
-   metrics, gives it a handle on the group's style pool, and registers fonts.
-   It requests each stylesheet in cascade order, then the entry MTS source.
-   Ordinary painter turns service the requests and return sources or errors.
-3. Main mounts sheets and, on entry arrival, opens the realm, installs callbacks,
-   and evaluates `bobcat:boot`. `ScriptFinished` or `StartupFailed` reports the
-   outcome through the same lifecycle event path. Dropping the view cancels its
-   pending resource work and attachment; other views continue.
+1. `LynxGroup::new` starts both of the group's threads — `bobcat-workers`
+   first, then `bobcat-main`, which is handed one sender on it — and waits for
+   `bobcat-main`'s report that the group's QuickJS runtime and Stylo pool are
+   built. `create_lynx_view` validates the metrics, creates the view's link,
+   sends the far half of it to that thread, builds the per-view
+   `ResourceFetcher` on the calling thread, and returns a loading view
+   synchronously. The embedder then builds a `Painter` over the `DrawTarget` it
+   named and attaches it, which imposes the painter's metrics on the view.
+2. The view's task validates the fonts and default family into a
+   `dom::TextContext`, then requests each stylesheet in cascade order and the
+   entry MTS source, staging each answer in `DocumentIngredients`. Ordinary
+   `LynxView::pump` turns hand those requests to the fetcher and its
+   completions answer the tasks awaiting them.
+3. On entry arrival the task opens the realm, installs the host members, and
+   evaluates `bobcat:boot`. Boot's first statement constructs the realm's
+   `Document`, which is what builds the private document out of the staged
+   ingredients — style pool, text context, sheets in cascade order, buffered
+   image reports — before the entry loads. `ScriptFinished` or `StartupFailed`
+   reports the outcome through the lifecycle event path. Dropping the view
+   cancels its pending resource work; other views continue.
 4. `__FlushElementTree` commits — style flush, layout, paint-order build,
-   scene encode — writes the `Arc<CommittedFrame>` into the mailbox, announces
-   it on the `ToPainter` FIFO, and wakes the embedder through its
-   `EventRequester`.
-5. The `pump` that answers that wakeup takes the pending frame and produces
-   it: the `FrameClock` is sampled once, gesture deadlines resolve against it,
-   the latest published scene is uploaded if it is new, and the frame
-   presents. While the latest frame reports an active animation each turn
+   scene encode — publishes the `Arc<CommittedFrame>` on the view's
+   `watch<Published>`, and wakes the embedder through its `EventRequester`.
+5. The host answers with two turns. `Painter::pump` adopts the newest
+   `Published` together with the pixels it draws and produces the frame: the
+   `FrameClock` is sampled once, gesture deadlines resolve against it, the
+   adopted scene is uploaded if it is new, and the frame
+   presents. `LynxView::pump` then services the host's resource system and
+   hands back the lifecycle events. While the latest frame reports an active
+   animation each painter turn
    sends the main thread one `BeginFrame` carrying that reading, and the loop
    sustains without any JavaScript and without waking anyone: `owes_frame`
    answers yes, and the embedder takes the next turn at its own display frame
    — a `CVDisplayLink` on the window's monitor natively, `requestAnimationFrame`
    in a Worker. The engine names no interval, and an offscreen host, which has
-   no display to pace against, reads `LynxView::is_animating` instead.
+   no display to pace against, reads `Painter::is_animating` instead.
 6. The successful boot notification remains queued behind the same wakeup;
-   the awakened host observes it through `pump`, which hands it back with
-   whatever else the turn produced. A draw that fails arrives the same way,
-   once, as `EngineEvent::RenderFailed`. No realm or tree object crosses the
-   boundary.
+   the awakened host observes it through `LynxView::pump`, which hands it back
+   with whatever else the turn produced. A draw that fails is the return value
+   of `Painter::pump`, `tick` or `capture`, reported once and never again. No
+   realm or tree object crosses the boundary.
 
 ## Validation matrix
 
@@ -906,3 +1167,10 @@ cargo check -p bobcat-cli --no-default-features --features server
 cargo check -p bobcat-wasm --target wasm32-unknown-unknown
 cargo check --workspace --all-targets
 ```
+
+The two wasm32 lines take no `--all-targets`, and CI's `browser` job lints
+that target with `--lib` for the same reason: `bobcat-core`'s library builds
+there — its tokio features are target-gated, with `time` enabled only off
+wasm32 — while its *dev* dependency asks for `rt-multi-thread`, which does not
+compile for wasm32 at all and which feature unification would drag into any
+build that includes dev targets.

@@ -118,7 +118,7 @@ CSS supplied as text.
 | Layer | Owns | Must not own |
 | --- | --- | --- |
 | `dom` | `Document<T>` and its aligned arenas; DOM topology and attributes; private style context and damage harvest; invalidation-carrying mutation; inline parsing; matching, cascade, media evaluation, computed values; the concrete `hughie` host; private visual order, `Painter`, and retained Vello scene; the `ImageStore` contract the embedder implements | Pluggable renderer policy, Lynx tags or Element-PAPI opcodes, JS handle lifetime, payload semantics, `<page>` policy, bundle decoding/`StyleInfo` lowering, Lynx UA defaults, view metrics, GPU surface/window policy |
-| `bobcat-core` | Opaque `LynxView`; injected resource, image-store, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
+| `bobcat-core` | Opaque `LynxView` and `Painter`; injected resource, image-store, draw-target, and OS-input contracts; private Lynx page policy (`page` root, device construction, UA stylesheet); private engine/tree/runtime; the crate-owned QuickJS realm; the native `bobcat-internal:host` ESM and embedded Element PAPI runtime | Re-exporting `dom`, exposing engine/tree/document/realm handles, bundle decoding or config parsing, an element-host trait, matcher/cascade/layout/paint algorithms, public `PaintOrder`, or the PAPI member surface itself (that is `packages/bobcat-element`'s) |
 | `dom::render` (the DOM-free floor) | The `ImageStore` trait an embedder implements; Vello version/re-export boundary; headed/headless GPU submission and readback helpers | `Document`, `NodeId`, computed styles, layout, paint order, Lynx runtime vocabulary, or DOM mutation policy |
 | `vendor/stylo` | CSS grammar, selector/rule-tree/cascade primitives, and the maintained Lynx CSS extension grammar behind the `lynx` feature | Runtime protocol, document ownership, bundle ingestion, or host policy |
 | `packages/bobcat-element` (the script half) | The `__*` Element-PAPI members and their arities; Lynx tag vocabulary; handle identity (one plain object per element, carrying its DOM `NodeId` under a realm-local symbol — web-core's `uniqueIdSymbol` shape); Snapshot property/query policy; realm-local event registration; direct named imports from `bobcat-internal:host`; the element ownership graph (a strong per-handle child set, so a connected element's handle is reachable from the permanent page handle) and the `FinalizationRegistry` drop path (cleanup calls the imported `dropElement` at host job checkpoints, which frees that node alone) | Native-ID validation, style/layout/paint behavior, direct DOM access, event-path construction, or any state the native side must gate presentation on |
@@ -126,8 +126,10 @@ CSS supplied as text.
 
 ## Style lifecycle
 
-1. Private `bobcat_core::tree::new_document` constructs a Stylo `Device` and creates
-   `dom::Document<()>` through `Document::new`. Device construction is deliberately outside the
+1. The realm's boot module constructs a `Document`, whose host member builds
+   the page: private `bobcat_core::tree::new_document` constructs a Stylo `Device` and creates
+   `dom::Document<()>` through `Document::new`, out of the ingredients the
+   view's task staged before the realm opened. Device construction is deliberately outside the
    generic DOM because viewport, pointer, color, font-metric, and `rpx` policy
    belong to the runtime environment.
 2. The document creates its private stylist, stylesheet set, `about:blank`
@@ -163,9 +165,12 @@ Private `bobcat_core::tree` composes the native operations over
 `Document<()>`, and the embedded `packages/bobcat-element` runtime exposes
 the Lynx Element PAPI over them as the preloaded `bobcat:element` ESM.
 `LynxGroup::create_lynx_view` transfers that view's `ViewSources` to the
-group's `bobcat-main` and awaits startup. That thread creates the document on
-the group's style pool, mounts the stylesheets its painter pushes, and only
-then opens the view's realm on the group's QuickJS runtime. The boot module awaits that resolved entry URL before calling
+group's `bobcat-main` and returns at once. The task serving that view there
+validates its fonts, fetches its sheets in cascade order and then its entry,
+stages all of it, and opens the view's realm on the group's QuickJS runtime.
+The boot module's first statement constructs the realm's `Document`, which is
+what creates the page on the group's style pool and mounts those stylesheets
+in order; it then awaits that resolved entry URL before calling
 a present `globalThis.renderPage` or the
 `__RenderPage` fallback on `lynx.getEngine()`, then flushes this composition.
 What that covers, and what it does not:
@@ -216,9 +221,9 @@ What that covers, and what it does not:
 
 - `.web.bundle` `StyleInfo` ingestion: a host lowers decoded CSS into
   `bobcat_core::style::PreparsedStyleSheet` and names its URL among
-  `ViewSources::style_sheets`, in cascade order; `bobcat-main` mounts each as
-  author-origin rules built directly before startup completes — no stylesheet
-  text, no re-tokenizing. The
+  `ViewSources::style_sheets`, in cascade order; the realm's `createDocument`
+  mounts each as author-origin rules built directly, before the entry module
+  loads — no stylesheet text, no re-tokenizing. The
   CSS parser still owns one selector-list parse per rule and one value parse
   per declaration, because the wire format keeps attribute selectors and
   functional pseudo-classes as text and stylo builds specified values only

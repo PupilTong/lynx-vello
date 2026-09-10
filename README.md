@@ -6,13 +6,13 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 
 | Component | Purpose |
 | --- | --- |
-| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining resource/script/view protocols with the QuickJS-backed preloaded ESM graph and main-thread host callbacks. It does not expose a renderer façade or re-export DOM/GPU internals. |
-| [`crates/bobcat-resources`](crates/bobcat-resources) | Cross-platform reference `ResourceFetcher`: registered and transported bytes, preprocessing, tiered caches, platform image decoding, and per-view image reports remain owned by each embedder's painter thread. |
+| [`crates/bobcat-core`](crates/bobcat-core) | Native runtime core combining resource/script/view protocols with the QuickJS-backed preloaded ESM graph and main-thread host callbacks. A page is a `LynxView`, built from a `LynxGroup`; where its pixels go is a separate `Painter`, built over one draw target and attached to a view. Neither re-exports DOM/GPU internals or hands out a document, tree or realm handle. |
+| [`crates/bobcat-resources`](crates/bobcat-resources) | Cross-platform reference `ResourceFetcher`: registered and transported bytes, preprocessing, tiered caches, platform image decoding, and per-view image reports, all owned by the `LynxView` on the embedder's own thread. |
 | [`crates/bobcat-cli`](crates/bobcat-cli) | Native embedders with independent `cli` and `server` features (both enabled by default): the `bobcat` window/headless CLI with PNG screenshots, and the `bobcat-server` HTTP screenshot service with white-backed BMP output. Both use the complete shared source/resource implementations. |
-| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas`; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The URL facade loads JavaScript, CSS, or a complete Lynx XML source card while the UI remains a JavaScript-only asynchronous host boundary. |
+| [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas` — with one `Painter` over that canvas kept across page loads; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The URL facade loads JavaScript, CSS, or a complete Lynx XML source card while the UI remains a JavaScript-only asynchronous host boundary. |
 | [`crates/bobcat-source`](crates/bobcat-source) | Unified Lynx XML, web-bundle and source-based native external-bundle parsing; shared source registration for embedders. [Architecture and API](docs/source-architecture.md). |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
-| [`packages/bobcat-element`](packages/bobcat-element) | The colocated `bobcat:runtime` compatibility ESM and `bobcat:element` PAPI ESM embedded into `bobcat-core` with `include_str!`. The latter's named `__*` exports own the Element PAPI, Lynx tag vocabulary, native `NodeId` handles, and `WeakRef`/`FinalizationRegistry` lifecycle. |
+| [`packages/bobcat-element`](packages/bobcat-element) | The colocated JavaScript ESMs embedded into `bobcat-core` with `include_str!` — `bobcat:runtime`, the `bobcat:element` PAPI, timers, `EventTarget`, the cross-thread Context, the `Worker` class, and the worker/BTS scopes. The PAPI module's named `__*` exports own the Element PAPI, Lynx tag vocabulary, native `NodeId` handles, and `FinalizationRegistry` lifecycle, and its `Document` class is what the boot script creates the page with. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
 | [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, synchronous source/native-module loading, module namespaces, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
 | [`crates/flashbulb`](crates/flashbulb) | Screenshot testing infrastructure: RGBA images, a `pixelmatch` port matching Playwright's tolerances, and golden-file management. This is to lynx-vello's render tests what Playwright is to lynx-stack's `web-core-e2e` and `web-elements`. |
@@ -25,7 +25,9 @@ and private scene construction. `bobcat-core`'s `tree` module is the native
 element layer directly over `dom`, exposed to the Element PAPI as named
 functions in the native `bobcat-internal:host` ESM. QuickJS preloads
 `bobcat:runtime`, `bobcat:element`, and the resolved entry MTS URL. The
-`bobcat:boot` ESM uses top-level await to import that URL,
+`bobcat:boot` ESM creates the realm's document with
+`export const document = new Document()`, uses top-level await to import that
+URL,
 then calls `processData`, invokes a present `globalThis.renderPage` or
 dispatches `__RenderPage` on `lynx.getEngine()`, and finally calls
 `__FlushElementTree` inside JavaScript before reporting startup completion.

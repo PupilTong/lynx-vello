@@ -16,15 +16,33 @@ browser UI thread
 
 Render Worker
   initializes shared Wasm
-  owns opaque LynxView + resource registry — and, because it is the thread
-  that constructed the view, it is the thread the view paints on
+  owns one Painter over the transferred canvas, for its whole life
+  owns the opaque LynxView of the current page + the resource registry
   owns Vello/wgpu/OffscreenCanvas
-  └── core wasm_thread spawn -> Lynx main/VM Worker
-                               ├── owner-thread-bound QuickJS realm
-                               ├── Element PAPI + private document batches
-                               └── index 0 of its own Stylo pool, whose other
-                                   members it wasm_thread-spawns
+  └── core wasm_thread spawn, two Workers per LynxGroup
+      ├── Lynx main/VM Worker (bobcat-main)
+      │   ├── owner-thread-bound QuickJS realm per view
+      │   ├── the realm's own document + Element PAPI
+      │   ├── index 0 of its group's Stylo pool, whose
+      │   │   other members it wasm_thread-spawns
+      │   └── one message sender on the worker-realm Worker
+      └── worker-realm Worker (bobcat-workers)
+          └── its own QuickJS runtime: one realm and one task
+              per live Worker of any view in the group
 ```
+
+**The painter outlives the pages.** `BobcatRenderer` builds one `Painter` over
+the transferred canvas at `create` and keeps it across loads, rebuilding it
+only when it is missing or its draw target has failed. A `load` is
+`painter.detach()` → drop the previous view → drop its group, which ends that
+group's Lynx-main Worker and then its worker-realm one → build the new group
+and view → `painter.attach(&view)`. The
+canvas is deliberately *not* resized along the way: it already carries the
+right resolution, and setting a canvas's size clears its bitmap, which would
+blank the outgoing page's last frame while the next one boots. Detaching
+leaves that frame on screen and still capturable; attaching imposes the
+painter's metrics on the new view, so a page built at the wrapper's size lays
+out at the canvas's.
 
 The UI thread never instantiates Wasm and never owns an engine, document,
 tree, scene, GPU object, or Rust session registry. Its public operations are
@@ -32,29 +50,30 @@ limited to canvas creation with `PageConfig`, URL-based page loads, font and
 default-family registration, resize, error observation, disposal, and
 automatic pointer forwarding from the attached HTML canvas.
 
-The Render Worker calls `configure_wasm_workers` once, then on each `load`
-sizes its `OffscreenCanvas` to `FrameSize::for_viewport` and builds a
-`LynxView` over it — the canvas is a construction argument, because the view
-builds its surface before it exists. That core API configures the worker
-bootstrap used by both the engine-owned Lynx main task and the private Stylo
+The Render Worker calls `configure_wasm_workers` once, then sizes its
+`OffscreenCanvas` to `FrameSize::for_viewport` before building its `Painter`
+over it — a host that owns the surface's backing store has to size it before
+it hands the target over. That core API configures the worker
+bootstrap used by the engine-owned Lynx main Worker, the group's worker-realm
+Worker, the wasm32 alarm Worker, and the group's Stylo
 Rayon pool. The Wasm embedder does not take a document owner or initialize
-Stylo itself. One Wasm instance owns one `BobcatRenderer` and one configured
-pool; that renderer owns a sequence of non-overlapping native views, none
-until the first load, each later load dropping the current view. Core
-explicitly stops and joins the per-view Lynx-main Worker after it drops its
-document and thread-bound realm; only then can replacement construction
-begin. The
-process-wide pool adopts the persistent Render Worker as index zero and
-remains valid across loads. The configured count covers that owner plus at
-least one managed Stylo Worker; each live view's Lynx-main Worker is separate.
+Stylo itself. One Wasm instance owns one `BobcatRenderer`, one painter, and a
+sequence of non-overlapping groups and views — none
+until the first load, each later load dropping the current pair. Dropping the
+view ends its task, which releases the realm, the document that realm created,
+and every worker it made; dropping the group ends the Lynx-main Worker and,
+after it, the worker-realm Worker whose only remaining sender the group holds,
+and only then does replacement construction begin. Ending is all it is here:
+under this target's `panic=abort` a trapped Worker never signals its join
+handle, so wasm teardown says the goodbye and does not wait.
 The public facade still creates one fresh Render Worker and Wasm instance per
 `BobcatCanvas`, not per load.
 
-The transient Lynx-main Worker invokes Stylo from outside its Rayon pool, so
-Stylo transfers that traversal's root closure onto a managed worker. The Render
-Worker enters from its stable index-zero slot. This keeps view lifetime
-independent from the shared pool without requiring an idle script Worker to
-service style work.
+The Render Worker is not a member of any style pool. Each group's Lynx-main
+Worker is index zero of the pool it builds, taken over in place by rayon's
+`use_current_thread`, and the count `BobcatRenderer::create` is given includes
+it — so the facade asks for the machine's threads less the Render Worker. A
+pool retires with the group that built it.
 
 ## Resource and script boundaries
 
@@ -79,10 +98,13 @@ beside `facade.js`, which the facade connects to the Render Worker over a
 main thread turns them into a Blob URL, decodes and resizes them through a 2D
 canvas, and copies the RGBA pixels straight into a buffer the Render Worker
 allocated in the shared Wasm memory, where each decode job has a small
-mailbox. An ordinary load completes on the event loop and wakes the page loop
+mailbox of eight `Int32` words. An ordinary load completes on the event loop
+and wakes the page loop
 through the engine signal; a restore after eviction is the one call that
-blocks the Render Worker, with `Atomics.wait` on the mailbox, because a read
-after a reported load must not miss. The main thread never waits, which is
+blocks the Render Worker, with `Atomics.wait` on that job mailbox, because a
+read after a reported load must not miss. That read happens where the painter
+adopts a commit, which every painter entry point runs before the drawing path
+acquires a swap-chain image, so a restore cannot stall the chain. The main thread never waits, which is
 what keeps the two from deadlocking, and its only cost per image is the pixel
 read-back. The resource system's diagnostics — an image that failed, a missing
 decoder — reach `console.warn`.
@@ -126,17 +148,25 @@ primitive-only host callbacks. Raw QuickJS values, realm handles, numeric DOM
 ids, and host callbacks are not surfaced by the npm facade.
 
 Startup is an asynchronous host boundary whose owned work runs on the Lynx
-main Worker. It creates the document, requests sources through the painter, mounts the
-stylesheets, then creates a QuickJS realm and preloads `bobcat:runtime`,
-`bobcat:element`, and the resolved entry URL;
-the `bobcat:boot` module uses top-level await to import the entry before it
+main Worker. The view's task there validates fonts, requests its sources
+through the view's own channel, and stages what arrives; it then creates a
+QuickJS realm, preloads `bobcat:runtime`, `bobcat:element`, the timer and
+event-target modules, and the resolved entry URL, and evaluates
+`bobcat:boot`. That module's first statement constructs its `Document`, which
+is what builds the page out of the staged ingredients — the author sheets
+mounted in cascade order among them. It then uses top-level await to import
+the entry before it
 calls a present `globalThis.renderPage` or dispatches `__RenderPage` on the
-realm-local EventTarget returned by `lynx.getEngine()`. It then flushes the
+realm-local EventTarget returned by `lynx.getEngine()`, and finally flushes the
 element tree. QuickJS drains its owned pending-job queue at each turn.
 Dynamic imports request JavaScript modules through the same asynchronous
 resource completions; unresolved imports and top-level await retain the boot
-promise while the Worker continues servicing resources and timer deadlines. `LynxGroup::create_lynx_view` returns a loading
-view once its draw target is ready. Normal `pump()` turns report `ScriptFinished`
+promise while the Render Worker goes on pumping the view. A timer deadline is
+not the Worker's to wait out — the view's own task waits it out, through the
+`bobcat-alarm` Worker on this target, and the commit that follows arms the
+engine signal like any other publication. `LynxGroup::create_lynx_view` is
+synchronous and returns a loading view. Normal `LynxView::pump` turns report
+`ScriptFinished`
 after boot succeeds or `StartupFailed` on resource, font, realm, or boot failure;
 the browser load promise waits for that lifecycle outcome. No
 browser microtask checkpoint or timer interception participates in completion;
@@ -164,8 +194,8 @@ the pre-parsed arm. Source retrieval and adaptation remain embedder work,
 with core receiving only `ViewSources` and its resource-fetcher contract.
 
 `request_source` launches a browser task that resolves, fetches and validates
-the requested source, then uses its concrete completion handle to send directly
-to main. Painter turns do not poll source IO. Each page owns an independent
+the requested source, then uses its concrete completion handle to answer the
+task awaiting it directly. Neither turn polls source IO. Each page owns an independent
 resource scope: boot scripts and styles remain registered until its startup
 outcome arrives; ZIP images and other assets remain available for later frames.
 Sources staged for the next page belong to a separate scope and are not cleared
@@ -191,7 +221,7 @@ the Wasm wrapper while an asynchronous view replacement owns it and a pointer
 following resize is interpreted in the metrics installed before it.
 
 No timestamp crosses the seam. `BobcatRenderer::dispatchPointer` constructs
-core's `InputEvent` and calls the opaque `LynxView::dispatch_input`, which
+core's `InputEvent` and calls the canvas painter's `dispatch_input`, which
 stamps the event's arrival from the engine's own clock — the same clock its
 frames read — so a press after a long idle period cannot derive its `longpress`
 deadline from the last rendered frame, and nothing has to agree on a time
@@ -200,24 +230,33 @@ stops input before terminating the Worker. Wheel input is not connected yet.
 
 ## Synchronization and rendering
 
-The private document lives on the Lynx main Worker outright; commits publish
+The private document lives on the Lynx main Worker outright, owned by the
+realm that created it; commits publish
 an immutable frame the Render Worker composes, and changes travel the other
 way as ordered commands. A JavaScript turn therefore cannot expose partial
 mutation or stall the last published frame. One lost-wake-safe event signal
 carries everything back from the Lynx main Worker: it wakes a Promise whenever
 core queues an engine event *or* wants a frame drawn, and the Render Worker's
-loop answers each wakeup with one `pump` — draw the pending frame, drain the
-events. The same signal is what this Worker arms for *itself*, because the
-view paints here and wakes nobody on its own: a pointer or a resize that
+loop answers each wakeup with one `BobcatRenderer::pump`. That stays one
+method and takes both turns in order — `Painter::pump` draws the frame the
+canvas painter owes, then `LynxView::pump` services the host's resources and
+hands back the lifecycle events. The painter goes first deliberately: the
+pixels a fatal script error left behind reach the canvas on the turn that
+reports it, with nobody left to ask for another frame.
+The same signal is what this Worker arms for *itself*, because the
+painter draws here and wakes nobody on its own: a pointer or a resize that
 arrives while the loop is parked applies immediately and then arms the signal
 so the turn it owes actually happens. A frame the turn leaves owed is not
 armed at all — `owesFrame()` says so, and the loop takes it at the next
 display frame instead, which is `requestAnimationFrame` where a Worker is
 given one. No frame clock stands between a commit and the canvas. The clock is
-the continuation's alone: while `isAnimating` reports that the engine owes the
-timeline another frame, the loop waits for the next display frame instead —
+the continuation's alone: while `owesFrame()` reports that the painter still
+has a frame to put on the canvas, the loop waits for the next display frame
+instead of the engine signal —
 `requestAnimationFrame` where a Worker is given one, a frame-interval timer
-where it is not — because drawing faster than the compositor shows is waste.
+where it is not — because drawing faster than the compositor shows is waste. A
+realm timer is not this loop's to wait out either: the engine waits its own
+out and arms this signal when the entry it ran commits.
 An animation therefore crosses nothing. `pump` takes no argument: the animation
 timeline is core's own `web_time` clock, read once per frame on the Render
 Worker after the canvas surface hands over an image. `requestAnimationFrame`'s
