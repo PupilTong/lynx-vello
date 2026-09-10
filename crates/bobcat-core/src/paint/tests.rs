@@ -1,8 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::{DetachedEnds, TestPainter, ToMain};
+use super::{FarEnd, Painter, ToMain};
 use crate::main::tree::{LynxDocument, PageConfig, Viewport, new_document};
+use crate::resource::SourceRequest;
 use crate::test_support::TestViewSpec;
 use crate::view::{EngineEvent, EventRequester, FrameSize, NoWakeup};
 
@@ -11,18 +12,14 @@ fn document() -> LynxDocument {
     new_document(Viewport::new(393.0, 727.0), PageConfig::default())
 }
 
-/// A painter with every seam built but no view task: the other end of its
-/// link is handed back so a test can play that task's whole side of it.
-fn detached() -> (TestPainter, DetachedEnds) {
+/// A painter with every seam built but no view task: the view's whole side of
+/// its link is handed back so a test can play it.
+fn detached() -> (Painter, FarEnd) {
     detached_waking(Arc::new(NoWakeup))
 }
 
-fn detached_waking<R: EventRequester>(requester: Arc<R>) -> (TestPainter, DetachedEnds) {
-    TestPainter::detached(
-        Viewport::new(393.0, 727.0),
-        FrameSize::for_viewport(393.0, 727.0, 1.0).expect("the test viewport is valid"),
-        requester,
-    )
+fn detached_waking<R: EventRequester>(requester: Arc<R>) -> (Painter, FarEnd) {
+    Painter::detached(393.0, 727.0, requester)
 }
 
 #[test]
@@ -37,43 +34,34 @@ fn frame_size_rejects_unbounded_targets() {
     assert!(error.to_string().contains("16384"));
 }
 
-/// One drain applies every kind of thing that reaches the painting side — a
-/// lifecycle event `pump` will hand back, a listener edge, a `BeginFrame`
-/// acknowledgement, and the redraw a new frame asks for — and applies each
-/// of them exactly once.
+/// One poll applies every kind of thing that reaches the painting side — a
+/// listener edge, a `BeginFrame` acknowledgement, and the redraw a new frame
+/// asks for — and applies each of them exactly once.
 #[test]
-fn one_drain_applies_every_kind_of_notification() {
-    let (mut view, main) = detached();
-    assert!(!view.link.take_redraw(), "a fresh link owes no frame");
-    assert!(view.pump().is_empty(), "and has nothing to report");
+fn one_poll_adopts_every_kind_of_published_state() {
+    let (mut painter, main) = detached();
+    assert!(!painter.take_redraw(), "a fresh painter owes no frame");
 
     main.outbox.listener_edge(Arc::from("tap"), true);
-    main.outbox.engine_event(EngineEvent::ScriptFinished);
     main.outbox.begin_frame_serviced(7);
     main.outbox.publish_frame(document().commit());
 
-    let events = view.pump();
-    assert!(matches!(events.as_slice(), [EngineEvent::ScriptFinished]));
-    assert!(view.link.has_listener("tap"));
+    painter.poll_link();
+    assert!(painter.published.listeners.contains("tap"));
     assert!(
-        view.link.wait_begin_frame(7, Duration::ZERO),
+        painter.wait_begin_frame(7, Duration::ZERO),
         "the acknowledgement rode the same state, so the wait never blocks"
     );
-    assert!(
-        view.link.take_redraw(),
-        "an announced frame asks for a draw"
-    );
-
-    assert!(view.pump().is_empty(), "an event is handed back once");
-    assert!(!view.link.take_redraw(), "and a request is taken once");
+    assert!(painter.take_redraw(), "an announced frame asks for a draw");
+    assert!(!painter.take_redraw(), "and the request is taken once");
 }
 
-/// Frames do not queue: the published state holds one, so a painting side
-/// that syncs after several commits sees the newest and never the ones it
-/// slept through.
+/// Frames do not queue: the published state holds one, so a painter that
+/// polls after several commits sees the newest and never the ones it slept
+/// through.
 #[test]
 fn the_published_state_keeps_only_the_newest_commit() {
-    let (mut view, main) = detached();
+    let (mut painter, main) = detached();
     let mut document = document();
     let first = document.commit();
     document.set_viewport(320.0, 640.0);
@@ -82,9 +70,9 @@ fn the_published_state_keeps_only_the_newest_commit() {
 
     main.outbox.publish_frame(Arc::clone(&first));
     main.outbox.publish_frame(Arc::clone(&second));
-    view.link.sync();
+    painter.poll_link();
 
-    let published = view.link.frame().expect("the sync adopted a frame");
+    let published = painter.frame().expect("the poll adopted a frame");
     assert_eq!(
         published.commit_id(),
         second.commit_id(),
@@ -94,22 +82,76 @@ fn the_published_state_keeps_only_the_newest_commit() {
 
 /// The last frame a view published is still the frame to draw once its task
 /// has ended: a closed channel is not an empty one.
+///
+/// What the painter had to have done first is read that commit's pixels,
+/// which is what adopting one is — the poll below the publish. Afterwards
+/// nothing of the view is needed: the frame, its bitmaps and everything
+/// composed from them are the painter's.
 #[test]
 fn a_frame_published_before_the_task_ended_is_still_adopted() {
-    let (mut view, main) = detached();
+    let (mut painter, main) = detached();
     let frame = document().commit();
     main.outbox.publish_frame(Arc::clone(&frame));
+    painter.poll_link();
     drop(main);
 
-    view.link.sync();
+    painter.poll_link();
     assert_eq!(
-        view.link
+        painter
             .frame()
             .expect("the last frame outlives its publisher")
             .commit_id(),
         frame.commit_id()
     );
-    assert!(view.link.take_redraw(), "and it still asks to be drawn");
+    assert!(painter.take_redraw(), "and it still asks to be drawn");
+    assert!(
+        !painter.is_attached(),
+        "the released view detached the painter on that same poll"
+    );
+}
+
+/// A commit and the pixels it draws are adopted together, so a commit whose
+/// pixels can no longer be read is not adopted at all.
+///
+/// The store is the view's and goes when the view does. A frame indexes that
+/// store's bitmaps by draw order, so taking the newer frame over the older
+/// one's table would draw the older commit's images — the painter keeps the
+/// last commit it did read, whole, instead.
+#[test]
+fn a_commit_whose_pixels_can_no_longer_be_read_is_not_adopted() {
+    let (mut painter, main) = detached();
+    let mut document = document();
+    let first = document.commit();
+    document.set_viewport(320.0, 640.0);
+    let second = document.commit();
+
+    main.outbox.publish_frame(Arc::clone(&first));
+    painter.poll_link();
+    assert_eq!(
+        painter
+            .frame()
+            .expect("the first commit is adopted with its pixels")
+            .commit_id(),
+        first.commit_id()
+    );
+
+    // Published, and then the view released before the painter took a turn:
+    // the frame is still on the watch, but nothing can answer for its images.
+    main.outbox.publish_frame(Arc::clone(&second));
+    drop(main);
+    painter.poll_link();
+    assert_eq!(
+        painter
+            .frame()
+            .expect("the painter still has the commit it read")
+            .commit_id(),
+        first.commit_id(),
+        "the newer commit's store went with the view, so it was left behind"
+    );
+    assert!(
+        !painter.is_attached(),
+        "and the released view detached the painter on that same poll"
+    );
 }
 
 /// An emit decision costs one name-table lookup and stops there unless a
@@ -120,10 +162,10 @@ fn a_frame_published_before_the_task_ended_is_still_adopted() {
 fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     use super::gesture::{EmitEvent, InputDecision, InputDecisions, TAP_EVENT};
 
-    let (mut view, mut main) = detached();
+    let (mut painter, mut main) = detached();
     // The permanent page element's packed handle, as script would name it.
     let target = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
-    let emit = |view: &mut TestPainter| {
+    let emit = |painter: &mut Painter| {
         let mut decisions = InputDecisions::new();
         decisions.push(InputDecision::Emit(EmitEvent {
             name: TAP_EVENT,
@@ -131,36 +173,36 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
             position: dom::Point2D::new(1.0, 1.0),
             wheel: None,
         }));
-        view.execute_decisions(&mut decisions, None);
+        painter.execute_decisions(&mut decisions, None);
         assert!(decisions.is_empty(), "the queue is always drained");
     };
 
-    emit(&mut view);
+    emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
         "an empty listener set sends nothing"
     );
 
     main.outbox.listener_edge(Arc::from("pointerup"), true);
-    view.link.sync();
-    emit(&mut view);
+    painter.poll_link();
+    emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
         "a listener on another name sends nothing"
     );
 
-    // An update that has not been synced yet is not yet visible: the
+    // An update that has not been polled for yet is not yet visible: the
     // snapshot moves at pass boundaries, which is the one pass of
     // staleness this design accepts in exchange for the lock.
     main.outbox.listener_edge(Arc::from(TAP_EVENT), true);
-    emit(&mut view);
+    emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
-        "an unsynced registration does not open the name mid-pass"
+        "an unadopted registration does not open the name mid-pass"
     );
 
-    view.link.sync();
-    emit(&mut view);
+    painter.poll_link();
+    emit(&mut painter);
     let command = main
         .commands
         .try_recv()
@@ -175,51 +217,51 @@ fn an_emit_decision_crosses_only_when_a_listener_wants_it() {
     assert_eq!(sent, target);
 
     // And the edge closes the name again: the main thread publishes the
-    // last removal, and from the next sync nothing crosses.
+    // last removal, and from the next poll nothing crosses.
     main.outbox.listener_edge(Arc::from(TAP_EVENT), false);
-    view.link.sync();
-    emit(&mut view);
+    painter.poll_link();
+    emit(&mut painter);
     assert!(
         main.commands.try_recv().is_err(),
         "the closing edge stops the crossing"
     );
 }
 
-/// A sync applies whatever arrived, in order, and stops at the last of
+/// A poll adopts whatever arrived, in order, and stops at the last of
 /// it — never blocking on a main thread that may be mid-registration.
 ///
 /// The ordering matters because the two edges for one name are a pair:
 /// a name registered and unregistered between two passes must leave the
 /// snapshot closed, not open.
 #[test]
-fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
-    let (mut view, main) = detached();
+fn a_poll_adopts_arrived_edges_in_order_and_does_not_block() {
+    let (mut painter, main) = detached();
 
-    view.link.sync();
+    painter.poll_link();
     assert!(
-        !view.link.has_listener("tap"),
+        !painter.published.listeners.contains("tap"),
         "nothing has been published yet"
     );
 
     main.outbox.listener_edge(Arc::from("tap"), true);
     main.outbox.listener_edge(Arc::from("scroll"), true);
     main.outbox.listener_edge(Arc::from("tap"), false);
-    view.link.sync();
+    painter.poll_link();
     assert!(
-        !view.link.has_listener("tap"),
+        !painter.published.listeners.contains("tap"),
         "the closing edge follows the opening one and wins"
     );
     assert!(
-        view.link.has_listener("scroll"),
+        painter.published.listeners.contains("scroll"),
         "the other name stays open"
     );
 
     // The main thread going away is not an unregistration: what it
     // published last is still the last true answer.
     drop(main);
-    view.link.sync();
+    painter.poll_link();
     assert!(
-        view.link.has_listener("scroll"),
+        painter.published.listeners.contains("scroll"),
         "a closed channel leaves the snapshot standing"
     );
 }
@@ -233,7 +275,7 @@ fn a_sync_applies_arrived_edges_in_order_and_does_not_block() {
 fn a_scroll_decision_sends_no_command() {
     use super::gesture::{InputDecision, InputDecisions};
 
-    let (mut view, mut main) = detached();
+    let (mut painter, mut main) = detached();
     let node = dom::NodeId::from_bits(2).expect("a well-formed packed handle");
     let mut decisions = InputDecisions::new();
     decisions.push(InputDecision::Scroll {
@@ -241,12 +283,12 @@ fn a_scroll_decision_sends_no_command() {
         from: node,
         delta: dom::Vector2D::new(0.0, 5.0),
     });
-    view.execute_decisions(&mut decisions, None);
+    painter.execute_decisions(&mut decisions, None);
     assert!(
         main.commands.try_recv().is_err(),
         "a windowed scroll never crosses the command channel"
     );
-    assert!(view.scroll_intents.offsets.is_empty());
+    assert!(painter.scroll_intents.offsets.is_empty());
 }
 
 /// A requester that records every wake, so a test can wait on the host
@@ -259,18 +301,18 @@ impl EventRequester for WakeSignal {
     }
 }
 
-/// A view with nowhere to present owes the display nothing, whatever else
+/// A painter with nowhere to present owes the display nothing, whatever else
 /// is true of it.
 ///
 /// The rule that keeps a host from waiting on a frame clock for a view that
-/// has no display to keep up with: an offscreen view's frames are asked for
-/// through `tick`, and a painter with no target at all has none to give.
+/// has no display to keep up with: an offscreen painter's frames are asked
+/// for through `tick`, and one with no target at all has none to give.
 #[test]
-fn a_view_that_presents_to_no_window_owes_no_frame() {
+fn a_painter_that_presents_to_no_window_owes_no_frame() {
     let (painter, _main) = detached();
     painter.refresh();
     assert!(
-        painter.link.redraw_owed(),
+        painter.redraw_pending.get(),
         "the refresh did leave a frame owed"
     );
     assert!(
@@ -296,7 +338,7 @@ fn a_self_directed_frame_request_wakes_nobody() {
         wakes.try_recv().is_err(),
         "a painter-local request is answered by the turn it was made in"
     );
-    assert!(painter.link.take_redraw(), "and the frame is still owed");
+    assert!(painter.take_redraw(), "and the frame is still owed");
 
     main.outbox.publish_frame(document().commit());
     assert!(
@@ -311,10 +353,8 @@ fn a_self_directed_frame_request_wakes_nobody() {
 /// task — answers probes.
 #[test]
 fn a_booted_view_commits_and_publishes() {
-    use std::time::Instant;
-
     let (wake_sender, wake_receiver) = flume::unbounded();
-    let mut view = TestViewSpec::new(
+    let mut engine = TestViewSpec::new(
         r"
             globalThis.renderPage = function () {
               const page = __CreatePage('card', 0);
@@ -335,7 +375,7 @@ fn a_booted_view_commits_and_publishes() {
         wake_receiver
             .recv_timeout(Duration::from_secs(30))
             .expect("script completion must wake the host event loop");
-        if let Some(event) = view.pump().into_iter().find(|event| {
+        if let Some(event) = engine.pump().into_iter().find(|event| {
             matches!(
                 event,
                 EngineEvent::ScriptFinished | EngineEvent::ScriptRunError(_)
@@ -350,12 +390,12 @@ fn a_booted_view_commits_and_publishes() {
     };
     assert!(matches!(finished, EngineEvent::ScriptFinished));
 
-    let frame = view
+    let frame = engine
         .published_frame()
         .expect("the boot's flush published a committed frame");
     assert!(frame.commit_id() > 0);
 
-    let (views, connected, laid_out) = view
+    let (views, connected, laid_out) = engine
         .probe_document(|tree| {
             let page = tree.document_element().id();
             let views = tree
@@ -372,28 +412,81 @@ fn a_booted_view_commits_and_publishes() {
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
-/// A terminal event cancels an outstanding completion before the host
-/// releases it.
+/// Two painters, each observing a view of its own and nothing between them.
+fn two_painters() -> [(Painter, FarEnd); 2] {
+    [detached(), detached()]
+}
+
+/// The property the old addressed FIFO had to buy with a per-view buffer:
+/// one view's turn neither consumes nor delays anything belonging to
+/// another, whatever order the two published in.
 #[test]
-fn failure_during_pending_fetch_is_delivered_by_pump() {
-    let (mut painter, main) = detached();
-    let (completion, answer) =
-        crate::resource::SourceCompletion::new(painter.link.view_cancel().clone());
-    assert!(!completion.is_cancelled());
-    main.outbox.engine_event(EngineEvent::StartupFailed(
-        crate::view::EngineError::Thread {
-            name: "script",
-            message: "boot failed while a fetch was in flight".to_owned(),
-        }
-        .into(),
-    ));
-    let events = painter.pump();
-    assert!(matches!(events.as_slice(), [EngineEvent::StartupFailed(_)]));
-    assert!(completion.is_cancelled());
-    drop(completion);
+fn a_views_published_state_is_independent_of_a_siblings() {
+    let [(mut first, first_end), (mut second, second_end)] = two_painters();
+
+    second_end.outbox.listener_edge(Arc::from("tap"), true);
+    let _asked = second_end
+        .outbox
+        .request_source(SourceRequest::Entry("second.js".into()));
+    first_end.outbox.publish_frame(document().commit());
+
+    // The first painter's poll sees exactly its own view's frame, and none of
+    // the sibling's listener names.
+    first.poll_link();
+    assert!(first.published_frame().is_some());
+    assert!(!first.published.listeners.contains("tap"));
+
+    // The sibling's is still there afterwards, and still there once the last
+    // sender on its side is gone.
+    drop(first_end);
+    drop(second_end);
+    second.poll_link();
+    assert!(second.published.listeners.contains("tap"));
     assert!(
-        answer.blocking_recv().is_err(),
-        "a cancelled completion reports no second failure"
+        second.published_frame().is_none(),
+        "and no frame reached it, because none was published to it"
     );
-    assert!(painter.pump().is_empty(), "failure is delivered once");
+}
+
+/// An offscreen wait is this painter's own: nothing another view acknowledges
+/// can satisfy it, and a view that has gone ends it rather than letting it
+/// wait out its whole deadline.
+#[test]
+fn an_offscreen_wait_takes_only_its_own_acknowledgement_and_ends_with_its_view() {
+    let [(mut first, first_end), (_second, second_end)] = two_painters();
+    let mut first_end = first_end;
+    let seq = first
+        .begin_frame(0.0, true)
+        .expect("the view's task is listening");
+    assert!(matches!(
+        first_end.commands.blocking_recv(),
+        Some(ToMain::BeginFrame { .. })
+    ));
+
+    second_end.outbox.begin_frame_serviced(seq);
+    assert!(
+        !first.wait_begin_frame(seq, Duration::ZERO),
+        "a sibling's acknowledgement is not this view's"
+    );
+
+    first_end.outbox.begin_frame_serviced(seq);
+    assert!(
+        first.wait_begin_frame(seq, Duration::ZERO),
+        "and its own satisfies it without blocking"
+    );
+
+    // A `BeginFrame` nobody will service: the view is gone, so nothing will
+    // acknowledge it, and waiting the ten seconds out would be ten seconds of
+    // a host's own thread.
+    drop(first_end);
+    let started = Instant::now();
+    assert!(!first.wait_begin_frame(seq + 1, Duration::from_secs(10)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the wait outlasted the view that ended it"
+    );
+    assert!(
+        !first.is_attached(),
+        "and the released view detached the painter"
+    );
 }

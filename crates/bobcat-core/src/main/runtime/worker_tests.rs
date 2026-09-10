@@ -1,14 +1,13 @@
 //! Real `QuickJS` on both sides, with the test acting as the resource-owning
-//! painter. No GPU is needed to verify contexts, transport and teardown.
+//! embedder. No GPU is needed to verify contexts, transport and teardown.
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 
 use super::*;
 use crate::background::{WorkerEvent, WorkerHome, WorkerPayload};
-use crate::link::{ViewCancel, ViewNotice, block_on_deadline};
+use crate::link::{DetachedView, ViewCancel, ViewNotice, block_on_deadline, detached_outbox};
 use crate::main::workers::WorkerFactory;
-use crate::paint::{PainterLink, detached_link};
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::NoWakeup;
 
@@ -21,11 +20,11 @@ struct Pair {
     /// What this view's workers said, which is where every worker event
     /// arrives now — one channel per view rather than one per group.
     events: mpsc::UnboundedReceiver<WorkerEvent>,
-    /// The host's end of the view's link: the test plays the painter, so it
+    /// The host's end of the view's link: the test plays the embedder, so it
     /// is what answers every source request.
-    notices: PainterLink,
+    view: DetachedView,
     /// This view's cancellation flag, the one every completion it hands out
-    /// was built with. The test plays the painter, so releasing a view is
+    /// was built with. The test plays the embedder, so releasing a view is
     /// something it has to spell.
     cancel: ViewCancel,
     home: WorkerHome,
@@ -49,8 +48,8 @@ impl Pair {
             }
             None => WorkerHome::start().unwrap(),
         };
-        let (notices, outbox, _commands) = detached_link(Arc::new(NoWakeup));
-        let cancel = notices.view_cancel().clone();
+        let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
+        let cancel = view.cancel.clone();
         let mut js = ScriptRuntime::new().unwrap();
         install_shared_modules(&mut js).unwrap();
         let document = crate::main::tree::new_document(
@@ -71,7 +70,7 @@ impl Pair {
             runtime: Some(runtime),
             js,
             events,
-            notices,
+            view,
             cancel,
             home,
         }
@@ -89,7 +88,7 @@ impl Pair {
     /// always a worker script.
     fn source(&mut self) -> SourceCompletion {
         loop {
-            let notice = self.notices.take_notice().expect("source requested");
+            let notice = self.view.notices.try_recv().expect("source requested");
             if let ViewNotice::RequestSource {
                 request,
                 completion,
@@ -134,7 +133,7 @@ impl Pair {
     /// Everything the realm has said to its host so far.
     fn notices(&mut self) -> Vec<ViewNotice> {
         let mut notices = Vec::new();
-        while let Some(notice) = self.notices.take_notice() {
+        while let Ok(notice) = self.view.notices.try_recv() {
             notices.push(notice);
         }
         notices

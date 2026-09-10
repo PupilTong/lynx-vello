@@ -2,11 +2,12 @@
 //!
 //! This file owns the embedder's share: the winit event loop, the window,
 //! device metrics, input translation, the command prompt, PNG output — and,
-//! because this is the thread that built the view, the frames themselves. An
-//! OS fact goes in (`dispatch_input`, `resize`, `set_occluded`), and the turn
-//! it opened ends in [`MacApplication::about_to_wait`], which runs the view's
-//! own turn: `pump` draws the frame the view owes and hands back what the
-//! realm had to say.
+//! because this is the thread that built both halves, the frames themselves.
+//! An OS fact goes to the painter (`dispatch_input`, `resize`,
+//! `set_occluded`), and the turn it opened ends in
+//! [`MacApplication::about_to_wait`], which takes both turns in order: the
+//! painter draws the frame it owes, then the view services its host's
+//! resources and hands back what the realm had to say.
 //!
 //! The turn ends there and nowhere else. A frame asks `bobcat-main` for the
 //! commit behind the next one, and `bobcat-main` answers through this very
@@ -15,19 +16,22 @@
 //! to `AppKit`. Winit's `RedrawRequested` is not relayed either.
 //!
 //! The loop always waits. What wakes it for a *frame* is this window's own
-//! display: while [`bobcat_core::LynxView::owes_frame`] holds, a
+//! display: while [`bobcat_core::Painter::owes_frame`] holds, a
 //! [`crate::cli::vsync::DisplayLink`] on the monitor the window is on posts one
-//! wakeup per refresh, and stops the moment nothing is owed. The engine names
-//! no interval for that — an animation runs at the rate the display actually
-//! scans out, and a swap chain that had no image to give is asked again one
-//! refresh later rather than on a guess.
+//! wakeup per refresh, and stops the moment nothing is owed. A realm timer is
+//! not this loop's to wait out — the engine waits its own out and wakes this
+//! thread like any other publication. The engine names no interval for a
+//! frame either: an animation runs at the rate the display actually scans
+//! out, and a swap chain that had no image to give is asked again one refresh
+//! later rather than on a guess.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use bobcat_core::input::{InputEvent, Point2D, PointerKind, PointerPhase};
-use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, StyleThreads};
+use bobcat_core::{
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, StyleThreads,
+};
 use bobcat_resources::ViewResources;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -94,16 +98,20 @@ struct MacApplication {
     input: String,
     initial_width: f32,
     initial_height: f32,
-    /// Declared before the window it draws into: the view owns the surface
-    /// built from that window, so dropping the view first releases the
+    /// This window's display clock, running only while a frame is owed.
+    /// Declared before both of the two below so it is stopped — and its
+    /// callback proven finished — before what it wakes goes away.
+    vsync: Option<DisplayLink>,
+    /// The painter, declared before the window it draws into: it owns the
+    /// surface built from that window, so dropping it first releases the
     /// surface before the last handle to the window goes — and the window
     /// itself is destroyed on this thread, which is the only one allowed to
     /// destroy it.
+    painter: Option<Painter>,
+    /// The view, declared after the painter that observes it: the painter
+    /// holds nothing of it but weak handles, so either order is safe, and
+    /// this one keeps the surface's release first.
     view: Option<LynxView<ViewResources>>,
-    /// This window's display clock, running only while a frame is owed.
-    /// Declared before the view so it is stopped — and its callback proven
-    /// finished — before the view it wakes goes away.
-    vsync: Option<DisplayLink>,
     event_requester: Arc<ProxyWakeup>,
     window: Option<Arc<Window>>,
     console: Console,
@@ -136,8 +144,9 @@ impl MacApplication {
             program: Some(program),
             initial_width: options.viewport_width,
             initial_height: options.viewport_height,
-            view: None,
             vsync: None,
+            painter: None,
+            view: None,
             event_requester,
             window: None,
             console,
@@ -176,12 +185,11 @@ impl MacApplication {
             .expect("the program is consumed by the first window only");
         program.warn_about_compatibility_limits();
 
-        // One construction: the window this view draws into, the input's
-        // author CSS, and its entry MTS module are all arguments, so what
-        // comes back is a view whose first commit is already styled and whose
-        // surface already exists. The surface is built on this thread because
-        // `AppKit` allows it nowhere else — and this is also the thread that
-        // will draw into it, for the same reason.
+        // Two constructions: the view, which is the page and its resources,
+        // and the painter, which is this window's surface. The surface is
+        // built on this thread because `AppKit` allows it nowhere else — and
+        // this is also the thread that will draw into it, for the same
+        // reason.
         // The resource system completes image loads on its own workers; each
         // completion wakes the event loop the same way a commit does.
         let resources = program.resources({
@@ -198,19 +206,28 @@ impl MacApplication {
             input: program.input.clone(),
             source,
         })?;
-        let view = pollster::block_on(group.create_lynx_view(
+        let view = group
+            .create_lynx_view(
+                css_width,
+                css_height,
+                scale_factor,
+                resources.builder(),
+                program.sources(),
+            )
+            .map_err(|source| CliError::StartView {
+                input: program.input.clone(),
+                source,
+            })?;
+        let mut painter = pollster::block_on(Painter::new(
+            DrawTarget::window(Arc::clone(window)),
             css_width,
             css_height,
             scale_factor,
-            DrawTarget::window(Arc::clone(window)),
-            resources.builder(),
-            program.sources(),
         ))
-        .map_err(|source| CliError::StartView {
-            input: program.input,
-            source,
-        })?;
+        .map_err(CliError::Engine)?;
+        painter.attach(&view).map_err(CliError::Engine)?;
 
+        self.painter = Some(painter);
         self.view = Some(view);
         // The display this window is on is the clock its frames run at. A
         // monitor winit cannot name, or a link CoreVideo will not open,
@@ -235,9 +252,9 @@ impl MacApplication {
             .expect("resize events arrive only after window creation");
         let (css_width, css_height, scale_factor) =
             viewport_metrics(physical_size, window.scale_factor());
-        self.view
+        self.painter
             .as_mut()
-            .expect("the view is installed with the window")
+            .expect("the painter is installed with the window")
             .resize(css_width, css_height, scale_factor)?;
         Ok(())
     }
@@ -246,16 +263,16 @@ impl MacApplication {
         match command {
             Command::Continue => {
                 println!("Continuing with display vsync.");
-                if let Some(view) = &self.view {
-                    view.refresh();
+                if let Some(painter) = &self.painter {
+                    painter.refresh();
                 }
             }
             Command::Pause => {
                 println!("The window repaints only on new frames; nothing to pause.");
             }
             Command::Frame => {
-                if let Some(view) = &self.view {
-                    view.refresh();
+                if let Some(painter) = &self.painter {
+                    painter.refresh();
                 }
                 println!("Rendering one frame.");
             }
@@ -275,11 +292,11 @@ impl MacApplication {
     }
 
     fn screenshot(&mut self, path: &Path) {
-        let Some(view) = self.view.as_mut() else {
+        let Some(painter) = self.painter.as_mut() else {
             eprintln!("bobcat: no window yet to capture");
             return;
         };
-        let saved = view
+        let saved = painter
             .capture()
             .map_err(CliError::Engine)
             .and_then(|shot| save_screenshot(path, shot.size, &shot.pixels));
@@ -289,8 +306,8 @@ impl MacApplication {
     }
 
     fn dispatch(&mut self, event: InputEvent) {
-        if let Some(view) = self.view.as_mut() {
-            view.dispatch_input(event);
+        if let Some(painter) = self.painter.as_mut() {
+            painter.dispatch_input(event);
         }
     }
 
@@ -356,14 +373,28 @@ impl MacApplication {
         event_loop.exit();
     }
 
-    /// Runs the view's turn: it draws the frame the view owes — which is
-    /// where this thread waits for the display — and hands back the
-    /// lifecycle events that turn produced.
+    /// Runs both turns: the painter draws the frame it owes — which is where
+    /// this thread waits for the display — and then the view services its
+    /// host's resources and hands back the lifecycle events it produced.
+    ///
+    /// The painter first, deliberately. The pixels a fatal script error left
+    /// behind reach the screen on the turn that reports it, with nobody left
+    /// to ask for another frame.
     fn serve(&mut self, event_loop: &ActiveEventLoop) {
+        let mut fatal = None;
+        // A draw target that failed cannot be reached again, so the window
+        // has nothing left to show.
+        if let Some(painter) = self.painter.as_mut()
+            && let Err(error) = painter.pump()
+        {
+            fatal = Some(CliError::Engine(error));
+        }
         let Some(view) = self.view.as_mut() else {
+            if let Some(error) = fatal {
+                self.fail(event_loop, error);
+            }
             return;
         };
-        let mut fatal = None;
         for event in view.pump() {
             match event {
                 EngineEvent::StartupFailed(source) if fatal.is_none() => {
@@ -377,11 +408,6 @@ impl MacApplication {
                         input: self.input.clone(),
                         source,
                     });
-                }
-                // The view cannot reach the screen again, so the window has
-                // nothing left to show.
-                EngineEvent::RenderFailed(error) if fatal.is_none() => {
-                    fatal = Some(CliError::Engine(error));
                 }
                 // Not fatal — the realm survives it and later events are
                 // still delivered — so it is reported and the window stays up.
@@ -434,8 +460,8 @@ impl ApplicationHandler<UserEvent> for MacApplication {
                 self.resize(size)
             }
             WindowEvent::Occluded(occluded) => {
-                if let Some(view) = self.view.as_mut() {
-                    view.set_occluded(occluded);
+                if let Some(painter) = self.painter.as_mut() {
+                    painter.set_occluded(occluded);
                 }
                 Ok(())
             }
@@ -496,9 +522,11 @@ impl ApplicationHandler<UserEvent> for MacApplication {
     /// from inside that drain the run loop would never return to `AppKit`,
     /// while a wakeup posted from here simply opens the next turn.
     ///
-    /// The loop then waits: while the view owes a frame, the display link
-    /// posts a wakeup per refresh, and the turn that finds nothing owed stops
-    /// the link. A realm timer sets this loop's own deadline instead.
+    /// The loop then waits, and always plainly: while the view owes a frame,
+    /// the display link posts a wakeup per refresh, and the turn that finds
+    /// nothing owed stops the link. A realm timer is not this loop's to time
+    /// out for — the engine waits its own deadlines out and wakes this thread
+    /// through the `EventRequester` when one fires.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // A turn that quit opened draws nothing: this thread is the one
         // taking the window down, and a frame presented into a surface being
@@ -509,18 +537,14 @@ impl ApplicationHandler<UserEvent> for MacApplication {
             return;
         }
         self.serve(event_loop);
-        let owed = self.view.as_ref().is_some_and(LynxView::owes_frame);
+        let owed = self.painter.as_ref().is_some_and(Painter::owes_frame);
         if let Some(vsync) = self.vsync.as_mut() {
             vsync.set_running(owed);
         }
-        let control_flow = self
-            .view
-            .as_ref()
-            .and_then(LynxView::next_wakeup)
-            .map_or(ControlFlow::Wait, |wakeup| {
-                ControlFlow::WaitUntil(Instant::now() + wakeup)
-            });
-        event_loop.set_control_flow(control_flow);
+        // Always a plain wait. Nothing the engine owes itself is this loop's
+        // to time out for: a realm timer comes due on `bobcat-main`, commits
+        // there, and wakes this thread through the `EventRequester`.
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 

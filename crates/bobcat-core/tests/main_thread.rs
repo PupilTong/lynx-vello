@@ -10,7 +10,7 @@ use support::{FetcherDouble, solo_view, wait_for_script};
 async fn view(
     source: &[u8],
     resolved_url: &str,
-) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
+) -> Result<(LynxView<Rc<FetcherDouble>>, bobcat_core::Painter), LynxViewError> {
     let fetcher = Rc::new(FetcherDouble::new(source.to_vec()).resolving_to(resolved_url));
     solo_view(
         Arc::new(NoWakeup),
@@ -25,7 +25,7 @@ async fn view(
 }
 
 async fn run(source: &str, resolved_url: &str) -> Result<(), LynxViewError> {
-    let mut view = view(source.as_bytes(), resolved_url).await?;
+    let (mut view, _painter) = view(source.as_bytes(), resolved_url).await?;
     wait_for_script(&mut view)
 }
 
@@ -109,7 +109,7 @@ async fn resolved_script_url_is_preserved_in_errors() {
 /// Invalid UTF-8 is a startup failure event, before the entry reaches the VM.
 #[tokio::test]
 async fn script_bytes_are_strict_utf8_at_the_view_boundary() {
-    let mut view = view(&[0xff, 0xfe], "app:///invalid.js")
+    let (mut view, _painter) = view(&[0xff, 0xfe], "app:///invalid.js")
         .await
         .expect("loading view");
     let error = wait_for_script(&mut view).expect_err("invalid UTF-8 must not reach the VM");

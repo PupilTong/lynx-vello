@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use crate::style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
-use crate::test_support::{TestView, TestViewSpec};
+use crate::test_support::{TestEngine, TestViewSpec};
 
 /// One 8x8 red square, animated by an author `@keyframes` rule.
 const SLIDER_SCRIPT: &str = r"
@@ -63,7 +63,7 @@ fn slider_sheet() -> PreparsedStyleSheet {
 }
 
 /// A 32x24 offscreen view with the sheet mounted and the page built.
-fn booted() -> TestView {
+fn booted() -> TestEngine {
     TestViewSpec::new(SLIDER_SCRIPT)
         .with_preparsed_style_sheet(slider_sheet())
         .offscreen(32.0, 24.0)
@@ -71,7 +71,7 @@ fn booted() -> TestView {
 }
 
 /// The x of the leftmost red pixel in the committed frame.
-fn red_left_edge(engine: &mut TestView) -> usize {
+fn red_left_edge(engine: &mut TestEngine) -> usize {
     let shot = engine.capture().expect("capture the committed frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     shot.pixels
@@ -87,11 +87,11 @@ fn red_left_edge(engine: &mut TestView) -> usize {
 fn a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock() {
     let mut engine = booted();
 
-    engine.painter().clock.pin(0.0);
+    engine.painter.clock.pin(0.0);
     engine.tick(true).expect("render the first frame");
     let start = red_left_edge(&mut engine);
 
-    engine.painter().clock.pin(0.5);
+    engine.painter.clock.pin(0.5);
     engine.tick(true).expect("render the half-way frame");
     let middle = red_left_edge(&mut engine);
 
@@ -113,11 +113,11 @@ fn a_keyframes_animation_moves_the_committed_frame_on_the_frame_clock() {
 fn animation_frames_need_no_script_thread_work() {
     let mut engine = booted();
 
-    engine.painter().clock.pin(0.0);
+    engine.painter.clock.pin(0.0);
     engine.tick(true).expect("first frame");
     let mut edges = vec![red_left_edge(&mut engine)];
     for step in 1..=3 {
-        engine.painter().clock.pin(f64::from(step) * 0.25);
+        engine.painter.clock.pin(f64::from(step) * 0.25);
         engine.tick(true).expect("animated frame");
         edges.push(red_left_edge(&mut engine));
     }
@@ -139,7 +139,7 @@ fn animation_frames_need_no_script_thread_work() {
 fn one_reading_places_every_animation_in_a_frame() {
     let mut engine = booted();
 
-    engine.painter().clock.pin(0.5);
+    engine.painter.clock.pin(0.5);
     engine.tick(true).expect("frame on the pinned instant");
     let held = red_left_edge(&mut engine);
 

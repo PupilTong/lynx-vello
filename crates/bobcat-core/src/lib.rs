@@ -1,16 +1,16 @@
 //! Native Lynx runtime core for lynx-vello.
 //!
-//! Hosts inject resources, normalized OS input, and draw-target capabilities
-//! into an opaque [`LynxView`]. The script engine is not one of them: the core
-//! owns the `QuickJS` runtime, the realms opened on it, the preloaded ESM
-//! graph and the main-thread runtime outright, and the engine, document, and Element-PAPI tree
-//! hand-off remain private runtime implementation.
+//! Hosts inject resources into an opaque [`LynxView`], and normalized OS
+//! input and a draw target into a [`Painter`]. The script engine is not one
+//! of them: the core owns the `QuickJS` runtime, the realms opened on it, the
+//! preloaded ESM graph and the main-thread runtime outright, and the engine,
+//! document, and Element-PAPI tree hand-off remain private runtime
+//! implementation.
 //!
 //! A view is two threads: the embedder's own — whichever one created the
-//! [`LynxGroup`] it belongs to, which is where every draw happens — and the
-//! Lynx main thread that group owns. Views in one group share that thread,
-//! and with it one `QuickJS` runtime and one Stylo pool; views in different
-//! groups share nothing.
+//! [`LynxGroup`] it belongs to — and the Lynx main thread that group owns.
+//! Views in one group share that thread, and with it one `QuickJS` runtime
+//! and one Stylo pool; views in different groups share nothing.
 //!
 //! A view boots once, at construction: [`ViewSources`] carries everything it
 //! runs on and [`LynxGroup::create_lynx_view`] does the rest. Decoded images are one of
@@ -19,6 +19,12 @@
 //! which is the one resource system a view has, for them by source string:
 //! named through `request_image`, answered through [`ImageReports`], and read
 //! back synchronously while the frame composes.
+//!
+//! Where the pixels go is a separate object. A [`Painter`] is built over one
+//! [`DrawTarget`], on the thread that will draw into it, and observes a view
+//! for as long as it is attached to one — at most one painter per view. A
+//! view can run with none, and a painter goes on showing its last frame after
+//! the view it was watching is gone.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
@@ -59,6 +65,7 @@ pub use dom::{
     MAX_RENDERABLE_DIMENSION, MAX_STYLE_THREADS, NoImages, is_renderable, vello,
 };
 pub use main::tree::PageConfig;
+pub use paint::Painter;
 pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, PreparsedStyleSheet};
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;

@@ -254,7 +254,7 @@ fn an_evicted_bitmap_is_restored_inside_the_read() {
     assert!(used >= 2 * 32 * 32 * 4, "both bitmaps are resident: {used}");
 
     // A budget for one bitmap, with `b` as the working set: `a` is evicted.
-    harness.view.retain_images(&[Arc::from("app:///b.png")]);
+    harness.view.retain(&[Arc::from("app:///b.png")]);
     harness.resources.set_memory_budget_bytes(32 * 32 * 4 + 16);
     assert!(!harness.resources.is_resident("app:///a.png"));
     assert!(harness.resources.is_resident("app:///b.png"));

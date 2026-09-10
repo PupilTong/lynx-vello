@@ -714,10 +714,6 @@ impl ResourceFetcher for ViewResources {
         images::request(&self.resources, source, &self.reports);
     }
 
-    fn retain_images(&self, frame: &[Arc<str>]) {
-        images::retain(&self.resources, frame);
-    }
-
     fn service_images(&self) {
         images::service(&self.resources);
     }
@@ -726,6 +722,10 @@ impl ResourceFetcher for ViewResources {
 impl FrameImages for ViewResources {
     fn read(&self, source: &str, hint: ImageSizeHint) -> Option<ImageData> {
         images::read(&self.resources, source, hint)
+    }
+
+    fn retain(&self, frame: &[Arc<str>]) {
+        images::retain(&self.resources, frame);
     }
 }
 

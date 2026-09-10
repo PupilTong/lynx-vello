@@ -147,6 +147,18 @@ impl WindowGraphics {
         self.rendered.is_some_and(|(_, rendered)| rendered == size)
     }
 
+    /// Forgets what this surface last rendered, so the next frame is painted
+    /// whatever key it carries.
+    ///
+    /// For a target that changes documents: commit ids restart at one per
+    /// document, so a retained key from the previous page would make the new
+    /// page's first frame look already drawn, and its retained planes would
+    /// be reused for it. The textures themselves are kept and re-baked.
+    pub(super) fn forget(&mut self) {
+        self.planes.forget();
+        self.rendered = None;
+    }
+
     /// Whether the retained target is stale for this compose key at this
     /// size.
     pub(super) fn needs_paint(&self, key: ComposeKey, size: FrameSize) -> bool {

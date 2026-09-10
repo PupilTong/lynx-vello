@@ -249,17 +249,16 @@ impl ViewOutbox {
 
 /// What a view publishes, as a reader that is not a painter sees it.
 ///
-/// One adopted snapshot plus the watch it came from. The crate's tests stand
-/// in for the far end of a view's link and hold one; a painter keeps the two
-/// halves apart instead, because its snapshot has to outlive the view it is
-/// drawing for.
-#[cfg(test)]
+/// One adopted snapshot plus the watch it came from, which is exactly what
+/// the listener index is read through. The crate's benchmarks and the tests
+/// that drive a document in place hold one; a painter keeps the two halves
+/// apart instead, because its snapshot has to outlive the view it detached
+/// from.
 pub(crate) struct ViewObserver {
     frames: watch::Receiver<Published>,
     published: Published,
 }
 
-#[cfg(test)]
 impl ViewObserver {
     /// Adopts the newest published state, and says whether it had moved.
     ///
@@ -279,14 +278,35 @@ impl ViewObserver {
         let _ = self.adopt();
     }
 
+    pub(crate) fn has_listener(&self, name: &str) -> bool {
+        self.published.listeners.contains(name)
+    }
+
+    /// Every listener name the view has published, for a test that asserts
+    /// the whole set rather than one membership.
+    #[cfg(test)]
+    pub(crate) fn listener_names(&self) -> Vec<Arc<str>> {
+        self.published.listeners.iter().cloned().collect()
+    }
+
+    /// Whether the published state moved since this was last asked, which
+    /// for a test driving the listener index alone is whether an edge
+    /// crossed.
+    #[cfg(test)]
+    pub(crate) fn take_published_edge(&mut self) -> bool {
+        self.adopt()
+    }
+
     /// The commit the newest published frame came from, for a test that is
     /// itself the far end of the view it is watching.
+    #[cfg(test)]
     pub(crate) fn commit(&mut self) -> Option<u64> {
         self.sync();
         self.published.commit()
     }
 
     /// The newest `BeginFrame` the view has acknowledged.
+    #[cfg(test)]
     pub(crate) fn begin_frame_serviced(&mut self) -> u64 {
         self.sync();
         self.published.begin_frame_serviced
@@ -294,20 +314,33 @@ impl ViewObserver {
 }
 
 /// The far end of one view's link, for a caller that is itself that end: the
-/// tests that drive a view in place rather than over a group's thread.
-#[cfg(test)]
+/// crate's benchmarks, and the tests that drive a document in place rather
+/// than over a group's thread.
 pub(crate) struct DetachedView {
     /// Held even where nothing reads it: a closed notice channel would make
     /// the outbox's sends fail, which is not the shape a caller playing the
     /// host is standing in for.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "held open for the outbox; read by the crate's tests"
+        )
+    )]
     pub(crate) notices: mpsc::UnboundedReceiver<ViewNotice>,
     pub(crate) published: ViewObserver,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the flag every completion carries; spelled by the crate's tests"
+        )
+    )]
     pub(crate) cancel: ViewCancel,
 }
 
 /// One view's publishing end and the far end that reads it, with no thread
 /// between them.
-#[cfg(test)]
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
     let cancel = ViewCancel::default();
     let (notices, notice_receiver) = mpsc::unbounded_channel();

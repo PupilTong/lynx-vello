@@ -1,18 +1,20 @@
 //! The headless embedder: a synthetic vsync clock and a command prompt over
-//! the view's offscreen output.
+//! one offscreen painter.
 //!
 //! The clock is this embedder's substitute for an OS display loop — it
-//! relays ticks; whether a tick becomes GPU work is the view's decision
+//! relays ticks; whether a tick becomes GPU work is the painter's decision
 //! (`tick` renders only when the document changed). Screenshots come back as
-//! pixels, and writing the PNG is this side's IO. The view paints on this
-//! thread, the one that built it, so every one of those calls is the work
+//! pixels, and writing the PNG is this side's IO. Both halves live on this
+//! thread, the one that built them, so every one of those calls is the work
 //! itself rather than a request for it.
 
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
-use bobcat_core::{DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, StyleThreads};
+use bobcat_core::{
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, Painter, StyleThreads,
+};
 use bobcat_resources::ViewResources;
 use flume::RecvTimeoutError;
 
@@ -54,24 +56,29 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             source,
         },
     )?;
-    // One construction: the windowless GPU target this view renders into,
-    // the input's author CSS, and its entry MTS module are all arguments, so
-    // what comes back is a view whose first commit is already styled and
-    // whose target already exists.
-    let mut view = pollster::block_on(group.create_lynx_view(
+    // Two constructions: the view, which is the page and its resources, and
+    // the painter over the windowless GPU target it renders into.
+    let mut view = group
+        .create_lynx_view(
+            options.viewport_width,
+            options.viewport_height,
+            options.device_pixel_ratio,
+            resources.builder(),
+            program.sources(),
+        )
+        .map_err(|source| CliError::StartView {
+            input: program.input.clone(),
+            source,
+        })?;
+    let mut painter = pollster::block_on(Painter::new(
+        DrawTarget::Offscreen,
         options.viewport_width,
         options.viewport_height,
         options.device_pixel_ratio,
-        DrawTarget::Offscreen,
-        resources.builder(),
-        program.sources(),
-    ))
-    .map_err(|source| CliError::StartView {
-        input: program.input.clone(),
-        source,
-    })?;
+    ))?;
+    painter.attach(&view)?;
 
-    view.tick(true)?;
+    painter.tick(true)?;
     let console = Console::start(move |command| sender.send(HostEvent::Command(command)).is_ok())
         .map_err(CliError::Console)?;
     let mut clock = FrameClock::new(options.vsync_hz);
@@ -87,11 +94,10 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
         let command = if let Some(command) = script.next_ready() {
             Some(command)
         } else if running {
-            let until_tick = clock.time_until_tick();
-            let wait = view
-                .next_wakeup()
-                .map_or(until_tick, |wakeup| wakeup.min(until_tick));
-            match receiver.recv_timeout(wait) {
+            // The frame clock is the only deadline this loop has. A realm
+            // timer is not one: the engine waits its own out and wakes this
+            // loop through the requester like any other publication.
+            match receiver.recv_timeout(clock.time_until_tick()) {
                 Ok(HostEvent::Command(command)) => Some(command),
                 Ok(HostEvent::Pump) => {
                     if check_script(&mut view, &program.input)? {
@@ -102,7 +108,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
                     // commit would otherwise walk the frame clock forward
                     // without ever letting it fire.
                     if clock.time_until_tick().is_zero() {
-                        view.tick(false)?;
+                        painter.tick(false)?;
                         clock.advance();
                     }
                     None
@@ -112,7 +118,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
                         script.finish();
                     }
                     if clock.time_until_tick().is_zero() {
-                        view.tick(false)?;
+                        painter.tick(false)?;
                         clock.advance();
                     }
                     None
@@ -120,19 +126,15 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
                 Err(RecvTimeoutError::Disconnected) => return Ok(()),
             }
         } else {
-            let arrival = match view.next_wakeup() {
-                Some(wakeup) => receiver.recv_timeout(wakeup),
-                None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match arrival {
+            match receiver.recv() {
                 Ok(HostEvent::Command(command)) => Some(command),
-                Ok(HostEvent::Pump) | Err(RecvTimeoutError::Timeout) => {
+                Ok(HostEvent::Pump) => {
                     if check_script(&mut view, &program.input)? {
                         script.finish();
                     }
                     None
                 }
-                Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(_) => return Ok(()),
             }
         };
 
@@ -147,7 +149,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
             console.prompt();
             continue;
         };
-        if execute_command(command, &mut view, &mut clock, &mut running)? {
+        if execute_command(command, &mut painter, &mut clock, &mut running)? {
             return Ok(());
         }
         console.prompt();
@@ -157,7 +159,7 @@ pub(crate) fn run(program: &Program, options: &Options) -> Result<(), CliError> 
 /// Executes one command and reports whether the render loop should exit.
 fn execute_command(
     command: Command,
-    view: &mut LynxView<ViewResources>,
+    painter: &mut Painter,
     clock: &mut FrameClock,
     running: &mut bool,
 ) -> Result<bool, CliError> {
@@ -172,12 +174,12 @@ fn execute_command(
             println!("Frame clock paused.");
         }
         Command::Frame => {
-            view.tick(true)?;
+            painter.tick(true)?;
             clock.restart();
             println!("Rendered one frame.");
         }
         Command::Screenshot(path) => {
-            let result = view
+            let result = painter
                 .capture()
                 .map_err(CliError::Engine)
                 .and_then(|shot| save_screenshot(&path, shot.size, &shot.pixels));
@@ -235,7 +237,6 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
             EngineEvent::TimerFailed(error) => {
                 eprintln!("timer callback failed: {error}");
             }
-            EngineEvent::RenderFailed(error) => return Err(CliError::Engine(error)),
             _ => {}
         }
     }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use dom::Point2D;
 use dom::input::{InputEvent, PointerKind, PointerPhase};
 
-use crate::test_support::{TestView, TestViewSpec};
+use crate::test_support::{TestEngine, TestViewSpec};
 
 /// The handle a packed id names, the way script spells one.
 fn node_id(bits: u64) -> dom::NodeId {
@@ -15,12 +15,12 @@ fn node_id(bits: u64) -> dom::NodeId {
 ///
 /// This suite reads the document and the decisions, never pixels, so the view
 /// it builds has nowhere to draw.
-fn booted(source: &str) -> TestView {
+fn booted(source: &str) -> TestEngine {
     TestViewSpec::new(source).boot()
 }
 
 /// One attribute of one node, read on the view's own thread through a probe.
-fn attribute_of(engine: &mut TestView, node: u64, name: &'static str) -> Option<String> {
+fn attribute_of(engine: &mut TestEngine, node: u64, name: &'static str) -> Option<String> {
     engine
         .probe_document(move |tree| {
             tree.get(node_id(node))
@@ -212,7 +212,7 @@ fn touch(id: u32, phase: PointerPhase, x: f32) -> InputEvent {
 /// the wait by showing up in the actual value. The deadline is generous
 /// because the whole suite's realm boots share the machine with this
 /// spin.
-fn wait_for_log(engine: &mut TestView, expected: &str) {
+fn wait_for_log(engine: &mut TestEngine, expected: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let log = attribute_of(engine, 3, "log");
@@ -258,7 +258,7 @@ fn travel_beyond_the_tap_slop_suppresses_the_tap() {
 fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter().clock.pin(0.6);
+    engine.painter.clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Move, 10.0));
     wait_for_log(&mut engine, "longpress:10");
 
@@ -275,7 +275,7 @@ fn a_held_pointer_delivers_longpress_and_suppresses_the_tap() {
 fn a_long_hold_without_longpress_listener_still_taps() {
     let mut engine = booted(&gesture_page(false));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter().clock.pin(0.6);
+    engine.painter.clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     wait_for_log(&mut engine, "tap:10");
 }
@@ -287,7 +287,7 @@ fn a_long_hold_without_longpress_listener_still_taps() {
 fn a_release_after_the_deadline_delivers_longpress_before_the_release() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
-    engine.painter().clock.pin(0.6);
+    engine.painter.clock.pin(0.6);
     engine.dispatch_input(touch(1, PointerPhase::Up, 10.0));
     engine.dispatch_input(touch(1, PointerPhase::Down, 30.0));
     engine.dispatch_input(touch(1, PointerPhase::Up, 30.0));
@@ -316,7 +316,7 @@ const SCROLLING_GESTURE_PAGE: &str = r"
         };
         ";
 
-fn scroll_offset_of(engine: &mut TestView, node: u64) -> dom::Vector2D<f32> {
+fn scroll_offset_of(engine: &mut TestEngine, node: u64) -> dom::Vector2D<f32> {
     engine
         .probe_document(move |tree| tree.scroll_offset(node_id(node)))
         .expect("the view's task answers probes")
@@ -358,7 +358,7 @@ fn a_scroll_consuming_drag_suppresses_the_tap() {
     // travel minus the 8px drag slop moved the scroller 22px. The
     // document never hears about a windowed scroll.
     let offset = engine
-        .painter()
+        .painter
         .scroll_intents
         .offset_for(node_id(3))
         .expect("the drag scrolled the view");
@@ -392,7 +392,7 @@ fn a_wheel_scrolls_and_reaches_a_wheel_listener() {
     ));
     wait_for_log(&mut engine, "wheel:30");
     let offset = engine
-        .painter()
+        .painter
         .scroll_intents
         .offset_for(node_id(3))
         .expect("the wheel scrolled the view");
@@ -411,16 +411,16 @@ fn a_stationary_hold_longpresses_on_the_frame_clock() {
     let mut engine = booted(&gesture_page(true));
     engine.dispatch_input(touch(1, PointerPhase::Down, 10.0));
     assert!(
-        engine.painter().gesture.needs_frame(),
+        engine.painter.gesture.needs_frame(),
         "the down arms a deadline, which is what keeps frames coming"
     );
 
-    engine.painter().clock.pin(0.6);
-    let now = engine.painter().clock.now_seconds();
-    engine.painter().service_gesture_clock(now);
+    engine.painter.clock.pin(0.6);
+    let now = engine.painter.clock.now_seconds();
+    engine.painter.service_gesture_clock(now);
     wait_for_log(&mut engine, "longpress:10");
     assert!(
-        !engine.painter().gesture.needs_frame(),
+        !engine.painter.gesture.needs_frame(),
         "a resolved deadline stops asking for frames"
     );
 }
@@ -488,7 +488,7 @@ fn a_windowed_scroll_recommits_nothing_and_hits_route_at_the_intent_offsets() {
     );
     let scroller = node_id(3);
     assert_eq!(
-        engine.painter().scroll_intents.offset_for(scroller),
+        engine.painter.scroll_intents.offset_for(scroller),
         Some(dom::Vector2D::new(0.0, 30.0)),
         "the intent carries the offset composition draws at"
     );
@@ -574,7 +574,7 @@ fn a_scroll_past_half_the_encode_window_requests_a_refill_commit() {
 ///
 /// The sheet is an author stylesheet like any other now: the host answers it
 /// before the entry, which is the order every view mounts one in.
-fn booted_animated(animation_css: &str) -> TestView {
+fn booted_animated(animation_css: &str) -> TestEngine {
     TestViewSpec::new(
         r"
         globalThis.renderPage = function () {
@@ -591,15 +591,14 @@ fn booted_animated(animation_css: &str) -> TestView {
 }
 
 /// Sends one `BeginFrame` and waits for the commit it implies to publish.
-fn synchronized_tick(engine: &mut TestView, now: f64) {
+fn synchronized_tick(engine: &mut TestEngine, now: f64) {
     let seq = engine
-        .painter()
+        .painter
         .begin_frame(now, true)
         .expect("a tick crosses");
     assert!(
         engine
-            .painter()
-            .link
+            .painter
             .wait_begin_frame(seq, Duration::from_secs(30)),
         "the view's task services the tick"
     );
@@ -631,7 +630,7 @@ fn an_exported_curve_stops_asking_for_main_thread_ticks() {
         "an exported curve frees the main thread"
     );
     assert!(
-        engine.painter().begin_frame(0.5, false).is_none(),
+        engine.painter.begin_frame(0.5, false).is_none(),
         "no BeginFrame crosses while the curve covers the animation"
     );
 }
@@ -650,18 +649,17 @@ fn a_finished_curve_hands_the_animation_back_to_the_main_thread() {
     let frame = engine.published_frame().expect("the promotion committed");
     assert!(frame.has_live_curves());
     assert!(
-        engine.painter().begin_frame(0.1, false).is_none(),
+        engine.painter.begin_frame(0.1, false).is_none(),
         "inside the curve's domain nothing crosses"
     );
 
     let seq = engine
-        .painter()
+        .painter
         .begin_frame(0.3, false)
         .expect("the passed boundary sends the finish tick");
     assert!(
         engine
-            .painter()
-            .link
+            .painter
             .wait_begin_frame(seq, Duration::from_secs(30))
     );
     let finished = engine.published_frame().expect("the finish committed");

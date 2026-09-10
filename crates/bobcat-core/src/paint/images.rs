@@ -1,47 +1,38 @@
-//! The painter's end of the image system: the store it owns, the inbox it
-//! takes reports from, and the pixels one commit draws.
+//! The painter's per-commit pixels: what one committed frame draws, read out
+//! of the view's own resource system once per commit.
 //!
-//! The whole image resource system lives on this thread. The Lynx main thread
-//! holds names and load states; it never sees a store, a buffer or a
-//! `peniko::ImageData`, and no channel between the two can carry one.
-//!
-//! The concrete store is owned by value.
-//! It never leaves this thread and needs neither `Send` nor `Sync` —
-//! which is what lets a wasm store hold browser objects directly. Nor does the
-//! handle it reports through: every type on this path is a concrete,
-//! thread-bound value, and the only thing here that crosses a thread is the
-//! batch of [`ImageEvent`]s the painter forwards to the Lynx main thread once
-//! it has drained them.
+//! The whole image resource system lives on this thread, owned by the
+//! [`LynxView`](crate::LynxView) and serviced in its `pump`. The Lynx main
+//! thread holds names and load states; it never sees a store, a buffer or a
+//! `peniko::ImageData`, and no channel between the two can carry one. A
+//! painter observing a view reads pixels out of that store through
+//! [`FrameImages`](dom::FrameImages) and asks it for nothing else — which is
+//! why what it holds is a table of resolved bitmaps rather than a store.
 //!
 //! A host that decodes off-thread synchronises that itself. It already drives
-//! the painter's turns, so it has somewhere to do it; putting the machinery
+//! the view's turns, so it has somewhere to do it; putting the machinery
 //! here would charge every host for a capability the browser — the one host
 //! that will actually load images — does not use, since its decode callbacks
-//! land on the painter's own event loop.
+//! land on the embedder's own event loop.
 
 use std::sync::Arc;
 
+use dom::FrameImages;
 use dom::vello::peniko::ImageData;
-use dom::{ImageEvent, ImageInbox, ImageReports};
 
-use crate::resource::ResourceFetcher;
-
-/// The painter's image state: the host's resource system, and the pixels the
-/// current commit draws.
+/// The pixels the current commit draws, in draw order.
 ///
-/// The resolved table is deliberately **not** a second cache. It is one
-/// commit's pixels in draw order, rebuilt whenever the commit moves,
-/// applying no policy of its own and holding shallow
-/// `ImageData` clones — the same `Blob`, so one entry costs a reference count
-/// rather than a bitmap. Every decision about what stays in memory belongs to
-/// the host.
+/// The resolved table is deliberately **not** a cache. It is one commit's
+/// pixels in draw order, rebuilt whenever the commit moves, applying no
+/// policy of its own and holding shallow `ImageData` clones — the same
+/// `Blob`, so one entry costs a reference count rather than a bitmap. Every
+/// decision about what stays in memory belongs to the host.
 ///
 /// It is indexed rather than keyed: composition replays the program on every
 /// frame that scrolls, and a slice index costs nothing where a URL hash would
 /// have cost a lookup per draw per frame.
-pub(crate) struct PainterImages<F> {
-    store: F,
-    inbox: ImageInbox,
+#[derive(Debug, Default)]
+pub(crate) struct PainterImages {
     /// The commit the table was built for.
     key: Option<u64>,
     /// One entry per image draw of that commit, in draw order.
@@ -51,74 +42,13 @@ pub(crate) struct PainterImages<F> {
     sources: Vec<Arc<str>>,
 }
 
-impl<F> std::fmt::Debug for PainterImages<F> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PainterImages")
-            .field("resolved", &self.resolved.len())
-            .finish_non_exhaustive()
-    }
-}
-
-impl<F: ResourceFetcher> PainterImages<F> {
-    /// Mints this view's sink and builds the host's resource system from it.
-    ///
-    /// The sink comes first, and the store is built *from* it, so a store
-    /// that exists without its report channel is unrepresentable and the two
-    /// are paired by construction. That pairing is per view: a host whose
-    /// registry outlives the view returns a per-view value holding a shared
-    /// handle on it, and that value — not the registry — is what carries the
-    /// sink. A load in flight when a view is replaced therefore reports to
-    /// the queue it was started for, which teardown has already detached,
-    /// rather than into its successor's document.
-    ///
-    /// A builder rather than a built value for one more reason: it runs only
-    /// once every fallible step of construction has succeeded, so a host pays
-    /// for a resource system only for a view that will exist.
-    pub(crate) fn new<B>(build: B) -> Self
-    where
-        B: FnOnce(ImageReports) -> F,
-    {
-        let (reports, inbox) = ImageInbox::new();
-        let store = build(reports);
-        Self {
-            store,
-            inbox,
-            key: None,
-            resolved: Vec::new(),
-            sources: Vec::new(),
-        }
+impl PainterImages {
+    /// Whether the table already holds this commit's pixels.
+    pub(crate) fn holds(&self, commit: u64) -> bool {
+        self.key == Some(commit)
     }
 
-    /// The host's resource system, for the startup loads that need it.
-    pub(crate) fn store(&self) -> &F {
-        &self.store
-    }
-
-    /// Names every source the document asked about, starting whatever load
-    /// each needs.
-    ///
-    /// Non-blocking, and there is nothing to send back: an answer arrives
-    /// later through the sink, keyed by the same source string.
-    pub(crate) fn request(&self, sources: Vec<Arc<str>>) {
-        for source in sources {
-            self.store.request_image(source.as_ref());
-        }
-    }
-
-    /// Gives the store its moment in the turn: loads that completed off this
-    /// thread since the last turn are forwarded into the sink here.
-    pub(crate) fn service(&self) {
-        self.store.service_images();
-    }
-
-    /// Takes the reports the store has queued. Empty when a wakeup raced
-    /// another drain.
-    pub(crate) fn take_reports(&mut self) -> Vec<ImageEvent> {
-        self.inbox.drain()
-    }
-
-    /// Reads every image `frame` draws, once per commit.
+    /// Reads every image `frame` draws out of `images`, once per commit.
     ///
     /// The commit is the whole key. A report that changes what a frame draws
     /// dirties the document, and every rebuild takes a new commit id, so a
@@ -126,29 +56,30 @@ impl<F: ResourceFetcher> PainterImages<F> {
     ///
     /// **May block.** A store is allowed — required, in fact — to restore a
     /// bitmap it evicted, and doing so inside this call is the whole point of
-    /// the synchronous read. It therefore runs before a swap-chain image is
-    /// acquired, never while one is held.
-    pub(crate) fn resolve(&mut self, frame: &dom::CommittedFrame) {
-        let key = frame.commit_id();
-        if self.key == Some(key) {
-            return;
-        }
-        frame.resolve_images(&self.store, &mut self.resolved, &mut self.sources);
-        self.store.retain_images(&self.sources);
-        self.key = Some(key);
+    /// the synchronous read. When it is safe to pay that is the painter's own
+    /// `poll_link` to say: adopting a commit is the only thing that calls
+    /// this, and it is what runs before a swap-chain image is acquired.
+    pub(crate) fn resolve(&mut self, frame: &dom::CommittedFrame, images: &dyn FrameImages) {
+        frame.resolve_images(images, &mut self.resolved, &mut self.sources);
+        images.retain(&self.sources);
+        self.key = Some(frame.commit_id());
     }
 
     /// This commit's pixels, in draw order.
     pub(crate) fn resolved(&self) -> &[Option<ImageData>] {
         &self.resolved
     }
-}
 
-impl<F> PainterImages<F> {
-    /// Stops accepting reports. Called once, at teardown, before the store
-    /// drops with the painter.
-    pub(crate) fn detach(&self) {
-        self.inbox.detach();
+    /// Drops the table, so the next commit resolves from scratch.
+    ///
+    /// What a painter does when it stops observing a view: the bitmaps came
+    /// out of that view's store, and commit ids restart at one per document,
+    /// so a table still keyed by the old page's commit would be handed to the
+    /// next one.
+    pub(crate) fn forget(&mut self) {
+        self.key = None;
+        self.resolved.clear();
+        self.sources.clear();
     }
 }
 

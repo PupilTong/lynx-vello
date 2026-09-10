@@ -71,7 +71,7 @@ fn sources(style_sheets: &[&str]) -> ViewSources {
 async fn view_with(
     resources: impl FnOnce(bobcat_core::ImageReports) -> Rc<FetcherDouble>,
     sources: ViewSources,
-) -> Result<LynxView<Rc<FetcherDouble>>, LynxViewError> {
+) -> Result<(LynxView<Rc<FetcherDouble>>, bobcat_core::Painter), LynxViewError> {
     solo_view(
         Arc::new(NoWakeup),
         393.0,
@@ -96,7 +96,7 @@ async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
         "a decoding host advertises the pre-parsed arm"
     );
 
-    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let (mut view, _painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the pre-parsed arm mounts");
     wait_for_script(&mut view).expect("script execution");
@@ -112,7 +112,7 @@ async fn a_css_text_sheet_mounts_through_the_same_entry_point() {
             .resolving_to(SCRIPT_URL),
     );
 
-    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let (mut view, _painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("loading view");
     wait_for_script(&mut view).expect("the text arm mounts");
@@ -131,7 +131,7 @@ async fn a_byte_order_mark_prefixed_sheet_mounts() {
             .resolving_to(SCRIPT_URL),
     );
 
-    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let (mut view, _painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("loading view");
     wait_for_script(&mut view).expect("a BOM-prefixed sheet mounts");
@@ -146,7 +146,7 @@ async fn a_stylesheet_that_is_not_utf8_is_a_precise_error() {
             .resolving_to(SCRIPT_URL),
     );
 
-    let mut view = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let (mut view, _painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("loading view");
     let error = wait_for_script(&mut view)
@@ -173,7 +173,7 @@ async fn every_listed_sheet_issues_its_own_stylesheet_request() {
             .resolving_to(SCRIPT_URL),
     );
 
-    let mut view = view_with(|_sink| fetcher.clone(), sources(&[SHEET_URL, SHEET_URL]))
+    let (mut view, _painter) = view_with(|_sink| fetcher.clone(), sources(&[SHEET_URL, SHEET_URL]))
         .await
         .expect("both sheets mount");
     wait_for_script(&mut view).expect("script execution");

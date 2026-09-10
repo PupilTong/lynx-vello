@@ -13,10 +13,15 @@ use crate::style::PreparsedStyleSheet;
 
 /// The host's whole resource system: bytes, stylesheets and images.
 ///
-/// Owned by the painter, which is the thread that constructed the view, and
-/// never reachable from `bobcat-main` — every resource the document needs is
-/// asked for by message. It is therefore free to be neither `Send` nor `Sync`
-/// and to hold `Rc`, `RefCell` or browser objects directly.
+/// Owned by the [`LynxView`](crate::LynxView), on the thread that constructed
+/// it, and never reachable from `bobcat-main` — every resource the document
+/// needs is asked for by message. It is therefore free to be neither `Send`
+/// nor `Sync` and to hold `Rc`, `RefCell` or browser objects directly.
+///
+/// The view services it in [`LynxView::pump`](crate::LynxView::pump) and
+/// nowhere else. A painter observing that view reads pixels out of it through
+/// [`FrameImages`](dom::FrameImages) while it composes, and asks it for
+/// nothing.
 ///
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
@@ -32,7 +37,7 @@ use crate::style::PreparsedStyleSheet;
     reason = "embedder byte operations may be thread-bound"
 )]
 pub trait ResourceFetcher: dom::FrameImages {
-    /// Begins one source load without blocking the painter. Main requests each
+    /// Begins one source load without blocking the view's turn. Main requests each
     /// stylesheet in cascade order, then the entry, with one outstanding startup
     /// source. Worker scripts can be requested concurrently after entry begins.
     ///
@@ -86,32 +91,26 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// wants: a source is asked for once and then never drawn.
     fn request_image(&self, _source: &str) {}
 
-    /// The sources the frame just encoded, deduplicated in paint order.
-    ///
-    /// Advisory: it informs residency and nothing else, and a host that
-    /// ignores it is still correct. Called once per resolve pass.
-    fn retain_images(&self, _frame: &[Arc<str>]) {}
-
-    /// The host's own moment in every painter turn, on this thread, before
-    /// the turn reads the reports queued so far.
+    /// The host's own moment in every [`LynxView::pump`](crate::LynxView::pump),
+    /// on this thread, before the turn reads the reports queued so far.
     ///
     /// A host whose loads finish somewhere else — a decode thread, a
     /// browser worker — forwards each completion into its
     /// [`ImageReports`](dom::ImageReports) here, so a load that completed
     /// between turns is reported in the next one whether or not that turn
-    /// requested or resolved anything. Waking the painter for that turn is
-    /// still the host's, through the wakeup it gave the view. A host that
-    /// reports inline has nothing to do, and the default does nothing.
+    /// requested or resolved anything. Asking for that turn is still the
+    /// host's, through the wakeup it gave the view. A host that reports
+    /// inline has nothing to do, and the default does nothing.
     fn service_images(&self) {}
 }
 
 /// A shared handle serves whatever it points at.
 ///
-/// The painter owns its resource system by value; an embedder whose registry
-/// outlives the view hands in an [`Rc`] of it instead. This is what joins the
-/// two without a per-embedder forwarding wrapper. `Rc` rather than `Arc`
-/// because nothing on this path crosses a thread — an atomic count here would
-/// be paid on every clone and never used.
+/// The view owns its resource system; an embedder whose registry outlives the
+/// view hands in an [`Rc`] of it instead. This is what joins the two without a
+/// per-embedder forwarding wrapper. `Rc` rather than `Arc` because nothing on
+/// this path crosses a thread — an atomic count here would be paid on every
+/// clone and never used.
 ///
 /// It is the right handle for a registry that answers reads and fetches, and
 /// the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
@@ -151,10 +150,6 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
 
     fn request_image(&self, source: &str) {
         (**self).request_image(source);
-    }
-
-    fn retain_images(&self, frame: &[Arc<str>]) {
-        (**self).retain_images(frame);
     }
 
     fn service_images(&self) {
@@ -533,48 +528,6 @@ pub enum RetryAdvice {
     Never,
     Immediate,
     After(Duration),
-}
-
-/// A test host with no sources or readable images.
-///
-/// The painter owns a resource system unconditionally, so a test that is not
-/// about resources still needs one to name.
-#[cfg(test)]
-#[derive(Debug, Default)]
-pub(crate) struct NeverAnswers;
-
-#[cfg(test)]
-impl dom::FrameImages for NeverAnswers {
-    fn read(
-        &self,
-        _source: &str,
-        _hint: dom::ImageSizeHint,
-    ) -> Option<dom::vello::peniko::ImageData> {
-        None
-    }
-}
-
-#[cfg(test)]
-impl ResourceFetcher for NeverAnswers {
-    fn request_source(&self, _request: SourceRequest, _completion: SourceCompletion) {}
-
-    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
-        false
-    }
-
-    async fn resolve_locator(
-        &self,
-        _request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        std::future::pending().await
-    }
-
-    async fn fetch_resource(
-        &self,
-        _request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        std::future::pending().await
-    }
 }
 
 #[cfg(test)]

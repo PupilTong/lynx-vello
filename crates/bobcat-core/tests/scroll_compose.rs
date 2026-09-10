@@ -15,7 +15,7 @@ mod support;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bobcat_core::{DrawTarget, LynxView, NoWakeup, ViewSources};
+use bobcat_core::{DrawTarget, LynxView, NoWakeup, Painter, ViewSources};
 use dom::Point2D;
 use dom::input::InputEvent;
 use support::{FetcherDouble, solo_view, wait_for_script};
@@ -45,10 +45,10 @@ globalThis.renderPage = function renderPage() {
 };
 ";
 
-async fn booted() -> LynxView<Rc<FetcherDouble>> {
+async fn booted() -> (LynxView<Rc<FetcherDouble>>, Painter) {
     let fetcher =
         Rc::new(FetcherDouble::new(TWO_ROW_SCRIPT.as_bytes().to_vec()).resolving_to(SCRIPT_URL));
-    let mut view = solo_view(
+    let (mut view, painter) = solo_view(
         Arc::new(NoWakeup),
         100.0,
         100.0,
@@ -60,12 +60,15 @@ async fn booted() -> LynxView<Rc<FetcherDouble>> {
     .await
     .expect("view construction fetches and boots the entry script");
     wait_for_script(&mut view).expect("script execution");
-    view
+    // The page needs no further sources, so the rest of this test is the
+    // painter's alone — but the view is what keeps its task alive, so it is
+    // handed back rather than dropped.
+    (view, painter)
 }
 
 /// The captured pixel at `(x, y)`, as RGBA.
-fn pixel_at(view: &mut LynxView<Rc<FetcherDouble>>, x: usize, y: usize) -> [u8; 4] {
-    let shot = view.capture().expect("capture the frame");
+fn pixel_at(painter: &mut Painter, x: usize, y: usize) -> [u8; 4] {
+    let shot = painter.capture().expect("capture the frame");
     let width = usize::try_from(shot.size.width).expect("the frame is addressable");
     let start = (y * width + x) * 4;
     shot.pixels[start..start + 4]
@@ -76,8 +79,8 @@ fn pixel_at(view: &mut LynxView<Rc<FetcherDouble>>, x: usize, y: usize) -> [u8; 
 const RED: [u8; 4] = [255, 0, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
-fn wheel(view: &mut LynxView<Rc<FetcherDouble>>, delta_y: f32) {
-    view.dispatch_input(InputEvent::wheel(
+fn wheel(painter: &mut Painter, delta_y: f32) {
+    painter.dispatch_input(InputEvent::wheel(
         Point2D::new(50.0, 50.0),
         dom::Vector2D::new(0.0, delta_y),
     ));
@@ -85,25 +88,29 @@ fn wheel(view: &mut LynxView<Rc<FetcherDouble>>, delta_y: f32) {
 
 #[tokio::test]
 async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
-    let mut view = booted().await;
-    view.tick(true).expect("the boot frame renders");
-    assert_eq!(pixel_at(&mut view, 50, 50), RED, "unscrolled, the red row");
-    assert_eq!(pixel_at(&mut view, 50, 85), RED, "still the red row");
+    let (_view, mut painter) = booted().await;
+    painter.tick(true).expect("the boot frame renders");
+    assert_eq!(
+        pixel_at(&mut painter, 50, 50),
+        RED,
+        "unscrolled, the red row"
+    );
+    assert_eq!(pixel_at(&mut painter, 50, 85), RED, "still the red row");
 
     // 30px: inside half the window's headroom, so this frame is the boot
     // commit recomposed at the intent offset — nothing recommitted.
-    wheel(&mut view, 30.0);
+    wheel(&mut painter, 30.0);
     assert!(
-        view.tick(false).expect("the scrolled frame renders"),
+        painter.tick(false).expect("the scrolled frame renders"),
         "a scroll must change the compose key even with no new commit"
     );
     assert_eq!(
-        pixel_at(&mut view, 50, 60),
+        pixel_at(&mut painter, 50, 60),
         RED,
         "content y=90 is still the red row"
     );
     assert_eq!(
-        pixel_at(&mut view, 50, 85),
+        pixel_at(&mut painter, 50, 85),
         BLUE,
         "content y=115 is the blue row: composition applied the offset"
     );
@@ -112,15 +119,15 @@ async fn a_wheel_scroll_moves_the_pixels_through_both_compose_paths() {
     // requested, and the synchronizing tick waits for the round that
     // applies it — this capture is the recommitted frame at its published
     // offsets.
-    wheel(&mut view, 40.0);
-    assert!(view.tick(false).expect("the refilled frame renders"));
+    wheel(&mut painter, 40.0);
+    assert!(painter.tick(false).expect("the refilled frame renders"));
     assert_eq!(
-        pixel_at(&mut view, 50, 20),
+        pixel_at(&mut painter, 50, 20),
         RED,
         "content y=90 is still the red row"
     );
     assert_eq!(
-        pixel_at(&mut view, 50, 45),
+        pixel_at(&mut painter, 50, 45),
         BLUE,
         "content y=115 is the blue row, now through the refill commit"
     );

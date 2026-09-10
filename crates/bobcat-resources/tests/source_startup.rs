@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bobcat_core::{
-    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError,
+    DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError, Painter,
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
@@ -33,22 +33,21 @@ async fn setup() -> (LynxGroup, Resources, flume::Receiver<()>) {
     (group, resources, receiver)
 }
 
+/// One view and the painter that captures it. A painter is per view — there
+/// is at most one — so a test that captures two pages builds two.
 async fn view(
     group: &LynxGroup,
     resources: &Resources,
     sources: ViewSources,
-) -> LynxView<ViewResources> {
-    group
-        .create_lynx_view(
-            32.0,
-            24.0,
-            1.0,
-            DrawTarget::Offscreen,
-            resources.builder(),
-            sources,
-        )
+) -> (LynxView<ViewResources>, Painter) {
+    let view = group
+        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), sources)
+        .unwrap();
+    let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
         .await
-        .unwrap()
+        .unwrap();
+    painter.attach(&view).unwrap();
+    (view, painter)
 }
 
 fn boot(
@@ -56,12 +55,11 @@ fn boot(
     receiver: &flume::Receiver<()>,
 ) -> Result<(), LynxViewError> {
     loop {
-        let deadline = view.next_wakeup();
-        match receiver.recv_timeout(deadline.unwrap_or(Duration::from_secs(20))) {
-            Ok(()) => {}
-            Err(flume::RecvTimeoutError::Timeout) if deadline.is_some() => {}
-            Err(error) => panic!("startup did not wake the host: {error}"),
-        }
+        // The engine waits its own realm timers out, so the only reason to
+        // stop waiting here is a wakeup — or the generous hang budget.
+        receiver
+            .recv_timeout(Duration::from_secs(20))
+            .expect("startup wakes the host");
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => return Ok(()),
@@ -111,7 +109,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
             },
         )
         .unwrap();
-    let mut view = view(
+    let (mut view, mut painter) = view(
         &group,
         &resources,
         ViewSources {
@@ -121,7 +119,7 @@ async fn text_and_preparsed_sheets_keep_cascade_order_before_entry() {
     )
     .await;
     boot(&mut view, &receiver).unwrap();
-    let screenshot = view.capture().unwrap();
+    let screenshot = painter.capture().unwrap();
     let offset = (12 * screenshot.size.width as usize + 16) * 4;
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
@@ -145,7 +143,7 @@ async fn source_utf8_errors_keep_the_resolved_url() {
         } else {
             ViewSources::new("invalid.bin")
         };
-        let mut view = view(&group, &resources, sources).await;
+        let (mut view, _painter) = view(&group, &resources, sources).await;
         let error = boot(&mut view, &receiver).unwrap_err();
         match (stylesheet, error) {
             (true, LynxViewError::InvalidStyleSheetEncoding { url, .. })
@@ -161,7 +159,8 @@ async fn source_utf8_errors_keep_the_resolved_url() {
 #[tokio::test]
 async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
-    let mut failed = view(&group, &resources, ViewSources::new("missing.js")).await;
+    let (mut failed, _failed_painter) =
+        view(&group, &resources, ViewSources::new("missing.js")).await;
     assert!(matches!(
         boot(&mut failed, &receiver),
         Err(LynxViewError::Resource(_))
@@ -169,9 +168,10 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     resources
         .register("app:///main.js", "", Some("text/javascript"))
         .unwrap();
-    let mut sibling = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut sibling, mut sibling_painter) =
+        view(&group, &resources, ViewSources::new("main.js")).await;
     boot(&mut sibling, &receiver).unwrap();
-    sibling.tick(true).unwrap();
+    sibling_painter.tick(true).unwrap();
     assert!(failed.pump().is_empty());
 }
 
@@ -220,13 +220,13 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
             )
             .unwrap();
     }
-    let mut first = view(
+    let (mut first, mut first_painter) = view(
         &group,
         &first_resources,
         ViewSources::new("nested/first.js"),
     )
     .await;
-    let mut second = view(
+    let (mut second, mut second_painter) = view(
         &group,
         &second_resources,
         ViewSources::new("nested/second.js"),
@@ -237,9 +237,9 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         let mut ready = true;
-        for (view, color) in [
-            (&mut first, [0, 0, 255, 255]),
-            (&mut second, [255, 0, 0, 255]),
+        for (view, painter, color) in [
+            (&mut first, &mut first_painter, [0, 0, 255, 255]),
+            (&mut second, &mut second_painter, [255, 0, 0, 255]),
         ] {
             for event in view.pump() {
                 match event {
@@ -247,11 +247,10 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
                     EngineEvent::WorkerFailed(error)
                     | EngineEvent::ListenerFailed(error)
                     | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
-                    EngineEvent::RenderFailed(error) => panic!("render: {error}"),
                     _ => {}
                 }
             }
-            let screenshot = view.capture().unwrap();
+            let screenshot = painter.capture().unwrap();
             let offset = (12 * screenshot.size.width as usize + 16) * 4;
             ready &= screenshot.pixels[offset..offset + 4] == color;
         }
@@ -287,7 +286,7 @@ async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading
     page.register_with(&resources);
     let sources = page.view_sources();
     let background_url = sources.background_entry.clone().unwrap();
-    let mut view = view(&group, &resources, sources).await;
+    let (mut view, _painter) = view(&group, &resources, sources).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut script_finished = false;
     let mut import_failed = false;
@@ -307,7 +306,6 @@ async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading
                 EngineEvent::ListenerFailed(error) | EngineEvent::ScriptRunError(error) => {
                     panic!("script: {error}")
                 }
-                EngineEvent::RenderFailed(error) => panic!("render: {error}"),
                 _ => {}
             }
         }
@@ -354,9 +352,9 @@ async fn dynamic_import_loads_relative_static_dependencies_and_waits_for_top_lev
             .register(url, source, Some("text/javascript"))
             .unwrap();
     }
-    let mut view = view(&group, &resources, ViewSources::new("page/main.js")).await;
+    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("page/main.js")).await;
     boot(&mut view, &receiver).unwrap();
-    let screenshot = view.capture().unwrap();
+    let screenshot = painter.capture().unwrap();
     let offset = (12 * screenshot.size.width as usize + 16) * 4;
     assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
@@ -391,7 +389,7 @@ async fn import_failures_reject_promises_and_only_uncaught_startup_failures_end_
                 Some("text/javascript"),
             )
             .unwrap();
-        let mut view = view(&group, &resources, ViewSources::new("main.js")).await;
+        let (mut view, _painter) = view(&group, &resources, ViewSources::new("main.js")).await;
         let outcome = boot(&mut view, &receiver);
         if caught {
             outcome.unwrap();
@@ -425,8 +423,8 @@ async fn sibling_views_can_import_the_same_urls_with_independent_module_instance
             Some("text/javascript"),
         )
         .unwrap();
-    let mut first = view(&group, &resources, ViewSources::new("main.js")).await;
-    let mut second = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut first, _first_painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut second, _second_painter) = view(&group, &resources, ViewSources::new("main.js")).await;
     let mut finished = 0;
     while finished < 2 {
         receiver
@@ -471,11 +469,11 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
             Some("text/javascript"),
         )
         .unwrap();
-    let mut view = view(&group, &resources, ViewSources::new("main.js")).await;
+    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("main.js")).await;
     boot(&mut view, &receiver).unwrap();
     let stop = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let screenshot = view.capture().unwrap();
+        let screenshot = painter.capture().unwrap();
         let offset = (12 * screenshot.size.width as usize + 16) * 4;
         if screenshot.pixels[offset..offset + 4] == [0, 0, 255, 255] {
             break;
@@ -484,8 +482,9 @@ async fn imports_started_after_boot_can_commit_a_later_frame() {
             std::time::Instant::now() < stop,
             "import never committed its frame"
         );
-        let wait = view.next_wakeup().unwrap_or(Duration::from_millis(100));
-        let _ = receiver.recv_timeout(wait);
+        // The engine waits its own timers out; this is a poll interval for a
+        // wakeup that has no deadline of its own to name.
+        let _ = receiver.recv_timeout(Duration::from_millis(100));
         for event in view.pump() {
             assert!(
                 !matches!(
