@@ -7,6 +7,8 @@
 
 mod bmp;
 mod capture;
+mod form;
 mod http;
+mod remote;
 
 pub use http::{ServerError, serve};

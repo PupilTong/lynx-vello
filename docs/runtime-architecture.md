@@ -147,7 +147,7 @@ QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
 
 bobcat-cli ──▶ bobcat-source + winit
 bobcat-wasm ──▶ bobcat-source + wasm-bindgen + wasm_thread
-bobcat-server ──▶ axum + reqwest + image/bmp
+bobcat-server ──▶ axum multipart + reqwest + bobcat-source + BMP V4 encoding
 ```
 
 ## Animation timeline
