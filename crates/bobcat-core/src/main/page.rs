@@ -167,8 +167,9 @@ struct BootSources {
     style_sheets: Vec<String>,
     entry: String,
     background_entry: Option<String>,
-    init_data: Option<serde_json::Value>,
-    global_props: Option<serde_json::Value>,
+    /// The host's page data, as JSON text only the realm reads.
+    init_data: Option<String>,
+    global_props: Option<String>,
 }
 
 impl Page {
@@ -512,8 +513,8 @@ impl Page {
         self: &Rc<Self>,
         source: &str,
         url: &str,
-        init_data: Option<&serde_json::Value>,
-        global_props: Option<&serde_json::Value>,
+        init_data: Option<&str>,
+        global_props: Option<&str>,
         background_entry: Option<String>,
     ) {
         // A view that has already ended builds no realm and runs no entry:
@@ -548,13 +549,9 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            if let Err(error) = runtime.prepare_initial_data(init_data, global_props) {
-                return Some(Err(error.into_script_error().into()));
-            }
-            if self.outbox.is_cancelled() {
-                return None;
-            }
-            if let Err(error) = runtime.run_main_thread_script(js, source, url) {
+            if let Err(error) =
+                runtime.run_main_thread_script(js, source, url, init_data, global_props)
+            {
                 if self.outbox.is_cancelled() {
                     return None;
                 }
@@ -850,8 +847,8 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
     page.open_realm(
         &source,
         &url,
-        init_data.as_ref(),
-        global_props.as_ref(),
+        init_data.as_deref(),
+        global_props.as_deref(),
         background_entry,
     );
 }

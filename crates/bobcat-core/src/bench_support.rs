@@ -105,7 +105,7 @@ impl ScriptHarness {
     /// Panics if the script fails.
     pub fn boot(&mut self, source: &str) {
         self.runtime
-            .run_main_thread_script(&mut self.js_runtime, source, "bench:///main.js")
+            .run_main_thread_script(&mut self.js_runtime, source, "bench:///main.js", None, None)
             .expect("the benchmark script boots");
     }
 

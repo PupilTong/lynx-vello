@@ -163,8 +163,37 @@ const runtimePerformance = {
 };
 
 export const SystemInfo = Object.freeze({});
-const initData = {};
-export const __globalProps = {};
+/** @type {unknown} */
+export let __globalProps = {};
+
+/**
+ * Called by boot before the entry loads, with the host's page data as the
+ * JSON text the view was given: installs the global props and returns the
+ * init data boot hands to `processData`.
+ * @param {string} initData
+ * @param {string} globalProps
+ */
+export function __BobcatReceivePageData(initData, globalProps) {
+  const data = parsePageData("initData", initData);
+  __globalProps = parsePageData("globalProps", globalProps);
+  lynx.__globalProps = __globalProps;
+  return data;
+}
+
+/**
+ * Nothing native reads page data, so this is where malformed JSON is first
+ * met. `JSON.parse`'s own error places the fault in an anonymous `<input>`;
+ * this one names which input it was.
+ * @param {string} name
+ * @param {string} json
+ */
+function parsePageData(name, json) {
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    throw new SyntaxError(`${name} is not valid JSON: ${/** @type {Error} */ (error).message}`);
+  }
+}
 
 export function _AddEventListener() {
   return undefined;
@@ -187,7 +216,7 @@ export const NativeModules = undefined;
 
 export const lynx = {
   SystemInfo,
-  __initData: initData,
+  __initData: {},
   __globalProps,
   performance: runtimePerformance,
   getCoreContext: function () {

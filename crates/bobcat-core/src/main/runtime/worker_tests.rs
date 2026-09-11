@@ -88,6 +88,8 @@ impl Pair {
             &mut self.js,
             script,
             "app:///nested/main.js",
+            None,
+            None,
         )
     }
 

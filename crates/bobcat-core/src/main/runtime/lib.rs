@@ -129,6 +129,16 @@ pub(crate) fn entry_module_source(source: &str) -> String {
     module
 }
 
+/// `text` as a JavaScript string literal, for the boot module's source.
+///
+/// Since ES2019 every JSON string is also a JavaScript string literal, so
+/// JSON's escaping is all it takes, and none of `text` is interpreted: JSON
+/// text crosses as a string holding it, not as the value it spells.
+fn string_literal(text: &str) -> String {
+    serde_json::to_string(text)
+        .expect("serializing a Rust string as a JavaScript string cannot fail")
+}
+
 /// Why constructing or running the engine-owned main-thread runtime failed.
 #[derive(Debug)]
 pub(crate) struct MainThreadError {
@@ -496,9 +506,7 @@ impl EventState {
 /// Everything that holds an `Rc` of this realm's JavaScript context is declared
 /// before `slot`, so the realm is freed — and with it every host function and
 /// its own clone of that `Rc` — before the `LynxDocument` those functions could
-/// name. JavaScript first, then the Rust object it named. A `Value` holds a
-/// context handle as much as the engine does, which is why `init_data` and
-/// `global_props` are part of that rule rather than incidental to it.
+/// name. JavaScript first, then the Rust object it named.
 ///
 /// `workers` is declared after all of those handles for a different reason: the
 /// last clone of it going is what sends each live worker its `Terminate`, and
@@ -506,12 +514,6 @@ impl EventState {
 /// worker is gone.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
-    /// Retained in this realm for the subsequent boot/lynx integration.
-    /// Written by [`Self::prepare_initial_data`] and read by nothing yet.
-    /// `None` until startup prepares them; an omitted host input becomes
-    /// JavaScript `undefined`.
-    init_data: Option<quickjs_rust_bridge::Value>,
-    global_props: Option<quickjs_rust_bridge::Value>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -579,8 +581,6 @@ impl MainThreadRuntime {
         Ok((
             Self {
                 engine,
-                init_data: None,
-                global_props: None,
                 workers,
                 slot,
                 events,
@@ -589,23 +589,6 @@ impl MainThreadRuntime {
             },
             incoming,
         ))
-    }
-
-    pub(super) fn prepare_initial_data(
-        &mut self,
-        init_data: Option<&serde_json::Value>,
-        global_props: Option<&serde_json::Value>,
-    ) -> Result<(), MainThreadError> {
-        let init_data = self
-            .engine
-            .json_value(init_data)
-            .map_err(|error| MainThreadError::from_engine("converting initial page data", error))?;
-        let global_props = self.engine.json_value(global_props).map_err(|error| {
-            MainThreadError::from_engine("converting initial global properties", error)
-        })?;
-        self.init_data = Some(init_data);
-        self.global_props = Some(global_props);
-        Ok(())
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -842,11 +825,19 @@ impl MainThreadRuntime {
         failures
     }
 
+    /// Registers the MTS entry and starts the boot module that loads it.
+    ///
+    /// `init_data` and `global_props` are the host's page data as the JSON
+    /// text the view was given, `None` standing for `{}`. Nothing here reads
+    /// them: they cross into the boot module as string literals, and
+    /// `bobcat:runtime` parses them before the entry loads.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
+        init_data: Option<&str>,
+        global_props: Option<&str>,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
         self.engine
@@ -854,10 +845,11 @@ impl MainThreadRuntime {
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
             })?;
-        let entry_specifier = serde_json::to_string(source_name)
-            .expect("serializing a Rust string as a JavaScript string cannot fail");
+        let entry_specifier = string_literal(source_name);
+        let init_data = string_literal(init_data.unwrap_or("{}"));
+        let global_props = string_literal(global_props.unwrap_or("{}"));
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatReceivePageData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -868,11 +860,15 @@ import "{TIMER_MODULE_SPECIFIER}";
 // it: it goes when the realm does.
 export const document = new Document();
 
+// Before the entry loads, because the entry reads `__globalProps` as it
+// evaluates.
+const initData = __BobcatReceivePageData({init_data}, {global_props});
+
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
-let data = undefined;
+let data = initData;
 if (typeof globalThis.processData === "function") {{
   data = globalThis.processData(data);
 }}

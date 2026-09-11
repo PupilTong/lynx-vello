@@ -309,8 +309,8 @@ async fn capture_form(
     if zip && form.source.is_empty() {
         return Err(ApiError::bad_request("ZIP upload must not be empty."));
     }
-    // Core converts these values, but does not yet deliver them to page boot.
-    // Keep this limitation explicit until the runtime implements that seam.
+    // Nothing here forwards page data to the view yet, so a non-empty value
+    // is refused rather than silently dropped.
     for (name, value) in [
         ("globalProps", &form.global_props),
         ("initData", &form.init_data),

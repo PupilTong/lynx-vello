@@ -81,10 +81,10 @@ again over white. The Bobcat renderer's existing white canvas remains its
 rendering policy.
 
 The request surface does not widen Bobcat's runtime support. Non-empty
-`initData` and `globalProps` still return `422`: core can convert these values
-but does not yet deliver them to page boot. Empty supported objects are
-accepted. `task`, interaction `steps`, and scoring fields no longer belong to
-the screenshot contract. This embedder does not provide UI Judge's `/compare`.
+`initData` and `globalProps` still return `422`: the server does not forward
+them to the view yet. Empty supported objects are accepted. `task`, interaction
+`steps`, and scoring fields no longer belong to the screenshot contract. This
+embedder does not provide UI Judge's `/compare`.
 
 Source loading uses the shared `bobcat-source` adapters for web bundles, raw
 Lynx XML, source-based native bundles, and bounded ZIP archives. A template

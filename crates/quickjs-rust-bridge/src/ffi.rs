@@ -109,11 +109,6 @@ unsafe extern "C" {
 
     pub(crate) fn qjs_new_undefined(context: *mut QjsContext) -> *mut QjsValue;
     pub(crate) fn qjs_new_null(context: *mut QjsContext) -> *mut QjsValue;
-    pub(crate) fn qjs_parse_json(
-        context: *mut QjsContext,
-        json: *const c_char,
-        length: usize,
-    ) -> *mut QjsValue;
     pub(crate) fn qjs_new_boolean(context: *mut QjsContext, value: c_int) -> *mut QjsValue;
     pub(crate) fn qjs_new_number(context: *mut QjsContext, value: c_double) -> *mut QjsValue;
     pub(crate) fn qjs_new_big_int64(context: *mut QjsContext, value: i64) -> *mut QjsValue;

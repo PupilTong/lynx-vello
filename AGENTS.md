@@ -167,7 +167,8 @@ useful signal for currently-compatible versions of those libraries.
   embedder sees is the sanitized `script::ScriptError` a failure is reported
   with. A view is built from one `ViewSources` — `PageConfig`, owned font
   containers, an optional default font family, author stylesheet URLs in
-  cascade order, and the one entry MTS module URL — plus a builder that turns
+  cascade order, the one entry MTS module URL, and optional `init_data` and
+  `global_props` JSON text that only the realm parses — plus a builder that turns
   the view's `ImageReports` into its concrete `ResourceFetcher`. Both are
   passed to `LynxGroup::create_lynx_view` with device metrics.
   **A view is built from a group, never on its own**:
@@ -336,9 +337,7 @@ useful signal for currently-compatible versions of those libraries.
   Release is the view's task ending: dropping the `LynxView` closes its command
   channel, the task returns, and `MainThreadRuntime`'s fields drop in
   declaration order — everything that names this realm first (the
-  `ScriptEngine` and the two retained `Value`s, each of which carries an `Rc` of
-  the context, so the realm is freed when the last of the three goes rather than
-  when the engine alone does), and so is what frees
+  `ScriptEngine`, which carries the context's `Rc`), which is what frees
   the realm together
   with the host functions it held and their clones of the slot, and the
   runtime's own `slot` handle after it, which is when the `LynxDocument` drops.
@@ -699,19 +698,23 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx` and `__BobcatConnectBackground` from `bobcat:runtime`, `Document` and
-  `__FlushElementTree` from
+  `lynx`, `__BobcatConnectBackground` and `__BobcatReceivePageData` from
+  `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads. Its first statement after
   those imports is `export const document = new Document();`, which is what
-  creates the realm's document and holds it for the realm's life. It then uses
+  creates the realm's document and holds it for the realm's life. It then
+  hands `__BobcatReceivePageData` the view's `init_data` and `global_props` —
+  JSON text Rust never reads, carried in as string literals and `{}` when not
+  given — which parses both, naming the input when one is not JSON, installs
+  the global props, and returns the init data. It then uses
   top-level await on
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
-  `processData` → (`globalThis.renderPage` when present, otherwise the
-  `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
+  `processData(initData)` → (`globalThis.renderPage` when present, otherwise
+  the `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
   JavaScript; the global function is a compatibility path, not a boot
   requirement. The runtime module directly exports a `lynx` object, an empty
-  `SystemInfo` snapshot, init/global props, the JS Context and other context sinks, the native-module
+  `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
   performance/error hooks, and
   `__OnLifecycleEvent`; transformed entries receive every binding through the
@@ -1113,8 +1116,9 @@ useful signal for currently-compatible versions of those libraries.
   and 60000 ms and reject timing fields. JSON/query parameters, duplicate or
   unknown fields, and old snake_case aliases are rejected. `initData` and
   `globalProps` must be objects; `.lynxml` entries reject `globalProps` even
-  when empty. Non-empty page-data objects remain explicit 422 errors until
-  core delivers them to boot. See `crates/bobcat-cli/SERVER.md` for examples.
+  when empty. Non-empty page-data objects remain explicit 422 errors: the
+  server does not forward them to its views yet, though `ViewSources` takes
+  both as JSON text. See `crates/bobcat-cli/SERVER.md` for examples.
   Axum accepts HTTP requests concurrently, but a bounded FIFO of eight waiting
   jobs feeds one dedicated capture thread. That is the embedder thread for
   each job: it starts a fresh `LynxGroup`, constructs its non-`Send`

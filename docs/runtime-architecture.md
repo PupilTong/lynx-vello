@@ -9,7 +9,7 @@ only capabilities and OS facts:
 
 - a `ViewSources` — page config, owned font bytes, an optional default font
   family, author stylesheet URLs in cascade order, and the one entry MTS
-  module URL, plus optional `init_data` and `global_props` JSON values — and,
+  module URL, plus optional `init_data` and `global_props` JSON text — and,
   as a separate argument, the builder of the view's
   `ResourceFetcher`, which is also its `FrameImages` and owns every byte and
   pixel the view ever loads (`crates/bobcat-resources` is the reference
@@ -77,16 +77,14 @@ Construction splits `ViewSources` once: document inputs and source specifiers
 cross to the view's task on `bobcat-main`, which stages them as the
 ingredients the realm's own `Document` will be built from.
 
-`ViewSources::init_data` and `global_props` are optional `serde_json::Value`
-inputs. They travel with that state and are converted before entry boot using
-the bridge's `Context::parse_json`, then retained as values in the view's own
-realm. Omission becomes JavaScript `undefined`; explicit JSON `null` stays
-`null`, and JSON numbers become JavaScript Numbers (large integers can round).
-Conversion currently serializes JSON once and lets QuickJS parse it, without
-evaluating it as source or calling the mutable `JSON.parse` global. Conversion
-failure follows the existing `StartupFailed` path. Passing these values to
-`processData`/`renderPage`, installing them on `lynx`, and background-thread
-delivery are deferred; the current boot behavior is unchanged.
+`ViewSources::init_data` and `global_props` are optional JSON text, and Rust
+never reads it. It travels with that state into the view's boot module as two
+string literals, and `bobcat:runtime`'s `__BobcatReceivePageData` parses them
+before the entry loads: the global props become `lynx.__globalProps` and the
+entry's `__globalProps`, and boot hands the init data to `processData`. A value
+that was not given is `{}`, as in web-core. Text that is not JSON fails boot
+with `StartupFailed`, naming the input, before the entry runs. The background
+thread does not receive either value yet.
 
 Main asks for loads through the view's own `ViewNotice` channel, and
 `LynxView::pump` is what hands each ask to the host's `ResourceFetcher`.
@@ -650,11 +648,11 @@ only after the boot promise fulfills. Its rejection sends `StartupFailed`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx` and `__BobcatConnectBackground`
-from `bobcat:runtime` and `Document` and `__FlushElementTree` from
-`bobcat:element`, and imports `bobcat:timers` for its effect; the transformed
-entry itself statically imports both of the first two built-ins. Boot then
-runs:
+The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground` and
+`__BobcatReceivePageData` from `bobcat:runtime` and `Document` and
+`__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
+effect; the transformed entry itself statically imports both of the first two
+built-ins. Boot then runs:
 
 ```js
 // The realm's document, created by this module's first statement and held by
@@ -662,10 +660,16 @@ runs:
 // it: it goes when the realm does.
 export const document = new Document();
 
+// Before the entry loads, because the entry reads `__globalProps` as it
+// evaluates.
+const initData = __BobcatReceivePageData(initDataJson, globalPropsJson);
+
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-const data = globalThis.processData?.(undefined);
+const data = typeof globalThis.processData === "function"
+  ? globalThis.processData(initData)
+  : initData;
 if (typeof globalThis.renderPage === "function") {
   globalThis.renderPage(data);
 } else {
@@ -725,11 +729,9 @@ what they named.
 
 Release is the view's task ending. Dropping the `LynxView` closes its command
 channel; the task returns and drops the `MainThreadRuntime`, whose fields drop
-in declaration order — the `realm` field first, which groups the `ScriptEngine`
-with the two retained initial-data `Value`s because each of them holds an `Rc`
-of the context, so the realm is freed when the last of the three goes and not
-when the engine alone does; freeing it takes the host functions the realm held
-and their clones of the
+in declaration order — the `engine` field first, which holds the context's
+`Rc`, so the realm is freed with it; freeing it takes the host functions the
+realm held and their clones of the
 `Rc<RefCell<DocumentSlot>>` with it, and the runtime's own `slot` handle drops
 after that, which is when the `LynxDocument` drops. JavaScript goes first, then the Rust
 object it named; the field order and its comment are the whole mechanism, and

@@ -358,13 +358,15 @@ pub struct ViewSources {
     /// The view always starts a BTS context; without this it runs only the
     /// built-in environment. Application module loading is not implemented yet.
     pub background_entry: Option<String>,
-    /// Initial page data. `None` becomes JavaScript `undefined`; JSON `null`
-    /// remains `null`. Converted in the view's realm, but not yet passed to boot.
-    /// Numbers use JavaScript `Number` semantics, so large integers can round.
-    pub init_data: Option<serde_json::Value>,
-    /// Initial global properties, converted like [`Self::init_data`].
-    /// Installing these on `lynx` is not yet wired.
-    pub global_props: Option<serde_json::Value>,
+    /// Initial page data, as JSON text. The engine hands it to the view's
+    /// realm unread; boot parses it and passes it to `processData`. `None` is
+    /// `{}`, which is what web-core gives a page that was handed none, and
+    /// text that is not JSON fails boot with [`EngineEvent::StartupFailed`].
+    pub init_data: Option<String>,
+    /// Initial global properties, as JSON text handed over like
+    /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
+    /// the entry's `__globalProps` before the entry loads.
+    pub global_props: Option<String>,
 }
 
 /// The document half of [`ViewSources`]: what crosses to `bobcat-main` for
@@ -377,8 +379,8 @@ pub(crate) struct MainSources {
     pub(crate) style_sheets: Vec<String>,
     pub(crate) entry: String,
     pub(crate) background_entry: Option<String>,
-    pub(crate) init_data: Option<serde_json::Value>,
-    pub(crate) global_props: Option<serde_json::Value>,
+    pub(crate) init_data: Option<String>,
+    pub(crate) global_props: Option<String>,
 }
 
 impl ViewSources {
