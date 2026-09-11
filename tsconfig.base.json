@@ -1,0 +1,45 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The one set of compiler options every TypeScript program in the workspace
+  // extends. A project adds its environment — `lib`, `types`, and for Node
+  // programs `module: nodenext` — and, only where something consumes its
+  // output, emit. It never relaxes a check.
+  "compilerOptions": {
+    // Every check the compiler has: `strict`, and each one `strict` leaves off.
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    // ES modules a type stripper can run: Node executes the scripts as
+    // written, `bobcat-core` strips the QuickJS runtime at build time, and
+    // `tsc` emits the browser facade. So no syntax may need type information
+    // to lower — no enums, no namespaces, no parameter properties — and a
+    // type-only import says so, because nothing downstream can work it out.
+    // Relative imports name the `.ts` file, which is the file Node loads;
+    // emit rewrites them to `.js`.
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": [],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "noEmit": true,
+    "incremental": true,
+    "skipLibCheck": true
+  }
+}

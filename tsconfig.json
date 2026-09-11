@@ -1,19 +1,32 @@
 {
-  "extends": ["@tsconfig/strictest", "@tsconfig/node22"],
-  "compilerOptions": {
-    "incremental": true,
-    "useDefineForClassFields": true,
-    "allowJs": false,
-    "checkJs": false,
-    "declaration": true,
-    "sourceMap": true,
-    "stripInternal": true,
-    "verbatimModuleSyntax": true,
-    "isolatedDeclarations": true,
-    "esModuleInterop": true,
-    "forceConsistentCasingInFileNames": true,
-    "strict": true,
-    "skipLibCheck": true
-  },
-  "include": []
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // Every TypeScript program in the workspace, checked by `pnpm test:type`
+  // (`tsc -b`) with the compiler at the root. Options live in
+  // `tsconfig.base.json`; this file only names the programs.
+  //
+  // One program is missing on purpose: the bobcat-wasm Workers
+  // (`crates/bobcat-wasm/js/tsconfig.worker.json`) are typed against the
+  // wasm-bindgen glue a `wasm-pack` build generates, so that package's own
+  // build checks them once the glue exists.
+  "files": [],
+  "references": [
+    { "path": "packages/bobcat-element" },
+    { "path": "crates/bobcat-wasm" },
+    { "path": "packages/github-pages" },
+    { "path": "examples/gesture" },
+    { "path": "examples/motion" },
+    { "path": "examples/react" },
+    { "path": "examples/react-compiler" },
+    { "path": "examples/react-debug-metadata" },
+    { "path": "examples/react-debug-metadata/error-remapping" },
+    { "path": "examples/react-element" },
+    { "path": "examples/react-externals" },
+    { "path": "examples/react-externals-web" },
+    { "path": "examples/react-keyboard" },
+    { "path": "examples/react-lazy-bundle" },
+    { "path": "examples/react-lazy-bundle-standalone" },
+    { "path": "examples/react-main-thread-function" },
+    { "path": "examples/react-ui-sourcemap" },
+    { "path": "examples/tailwindcss" }
+  ]
 }
