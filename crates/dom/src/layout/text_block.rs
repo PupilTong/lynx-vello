@@ -184,7 +184,7 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
     collected
 }
 
-/// The supported generated-content subset is in-flow inline text. Other
+/// The supported generated-content subset is an in-flow Lynx text scope. Other
 /// content types and boxes remain deferred; never turn them into partial text.
 fn collect_before<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collected>) {
     let node = tree.at(slot);
@@ -194,7 +194,7 @@ fn collect_before<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collect
     let Some(style) = node.before_style() else {
         return;
     };
-    if style.clone_display() != Display::Inline
+    if style.clone_display() != Display::LynxText
         || style.get_box().position != stylo::computed_values::position::T::Static
     {
         return;
@@ -229,8 +229,8 @@ fn collect_before<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collect
 /// Whether a run keeps the literal newlines in its source.
 ///
 /// The one place Lynx preserves one: a carrier's UA rule sets
-/// `white-space-collapse: preserve-breaks`, which inherits into the reflected
-/// text node. Read from computed style, so no tag is named.
+/// `white-space-collapse: preserve-breaks`, which inherits into text runs.
+/// Read from computed style, so no tag is named.
 fn preserves_newlines<T>(node: &Node<T>) -> bool {
     style_preserves_newlines(inline_style_of(node))
 }
@@ -664,6 +664,28 @@ mod generated_content_tests {
         doc.layout();
         assert_eq!(contents(&doc, text), "[A]DEFC");
         width(&doc, text, 140.0);
+    }
+
+    #[test]
+    fn generated_content_uses_lynx_text_display() {
+        let (mut doc, text) = document(
+            "text::before { content: 'AB'; } text.box::before { display: flex; } text.explicit::before { display: -lynx-text; }",
+        );
+        for (class, expected) in [("", 40.0), ("box", 0.0), ("explicit", 40.0)] {
+            doc.set_classes(text, class);
+            doc.layout();
+            width(&doc, text, expected);
+            if class != "box" {
+                assert_eq!(
+                    doc.get(text)
+                        .unwrap()
+                        .before_style()
+                        .unwrap()
+                        .clone_display(),
+                    Display::LynxText,
+                );
+            }
+        }
     }
 
     #[test]

@@ -55,9 +55,9 @@ the semantics are stylo's.** Everything below refines that sentence.
    unnamespaced `attr()` (including string fallback) generate runs before the
    contents of a `display: -lynx-text` paragraph or a nested text/contents scope.
    Stylo owns matching, cascade and pseudo styles. The DOM's base UA rule gives
-   `::before` inline display while ordinary elements retain the Lynx flex
-   default. The fork exposes `content` and the `inline` display keyword for
-   this path; general inline/block box layout is still unsupported.
+   `::before` the existing `display: -lynx-text` mode while ordinary elements
+   retain the Lynx flex default. The fork only exposes the `content` property;
+   its display grammar is unchanged and still excludes `inline` and `block`.
 
    Generated runs use the pseudo's text style, share the enclosing paragraph's
    wrapping/truncation, and never enter DOM children, selector structure or
@@ -68,7 +68,7 @@ the semantics are stylo's.** Everything below refines that sentence.
 
    The scope remains text-only: no `::after`, counters, quotes, image content,
    namespaced/typed attributes, generated boxes or pseudo animations. Only
-   static inline pseudo content is collected; unsupported content lists and
+   static `display: -lynx-text` pseudo content is collected; unsupported content lists and
    box displays produce no generated run. Independent pseudo backgrounds,
    borders, effects and positioning remain deferred until generated-box
    support. Native Lynx has no generated content; this is an explicit extension

@@ -118,9 +118,9 @@ impl StyleEngine {
             lock: StdArc::new(SharedRwLock::new()),
             url_data,
         };
-        // The Lynx fork defaults elements to flex. Generated text instead has
-        // the CSS inline default; author rules still participate in the cascade.
-        engine.add_stylesheet("::before { display: inline; }", Origin::UserAgent);
+        // Generated text uses the same paragraph mode as text elements.
+        // Author rules still participate in the cascade.
+        engine.add_stylesheet("::before { display: -lynx-text; }", Origin::UserAgent);
         engine
     }
 
