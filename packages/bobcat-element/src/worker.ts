@@ -1,4 +1,3 @@
-// @ts-check
 import { EventTarget, installEventHandler } from "bobcat:event-target";
 import {
   createWorker,
@@ -9,19 +8,42 @@ import {
 // Main-thread-only `bobcat-internal` exports. Each object owns a context on
 // the group's existing worker thread. Transport currently uses the worker
 // scope's JSON encoding; structured clone and transfer lists are pending.
-/** @type {Map<string, Worker>} */
-const workers = new Map();
+const workers: Map<string, Worker> = new Map();
 
+/** A message the worker's script posted, as its `Worker` dispatches it. */
+interface WorkerMessageEvent {
+  type: "message";
+  data: unknown;
+  target: Worker;
+}
+
+/**
+ * An error the host reported for the worker — an exception its script threw,
+ * or its script or realm failing — with the fields of the host's report.
+ */
+interface WorkerErrorEvent {
+  type: "error";
+  message: string;
+  filename: string;
+  lineno: number;
+  colno: number;
+  target: Worker;
+}
+
+/** Main-thread-only Worker context constructor. */
 export class Worker extends EventTarget {
-  #key;
+  #key: string;
+  declare onmessage: ((event: WorkerMessageEvent) => void) | null;
+  declare onerror: ((event: WorkerErrorEvent) => void) | null;
 
   /**
    * Scripts run as modules, including when options are omitted. Only built-in
    * imports are available on the worker runtime today.
-   * @param {unknown} scriptURL
-   * @param {{ name?: unknown, type?: string } | null} [options]
    */
-  constructor(scriptURL, options = {}) {
+  constructor(
+    scriptURL: unknown,
+    options: { name?: unknown; type?: string } | null = {},
+  ) {
     super();
     if (arguments.length === 0) {
       throw new TypeError("Worker requires a script URL");
@@ -35,17 +57,14 @@ export class Worker extends EventTarget {
     }
     const name = options?.name === undefined ? "" : String(options.name);
     this.#key = createWorker(url, name);
-    /** @type {((event: any) => void) | null} */
     this.onmessage = null;
-    /** @type {((event: any) => void) | null} */
     this.onerror = null;
     installEventHandler(this, "message");
     installEventHandler(this, "error");
     workers.set(this.#key, this);
   }
 
-  /** @param {unknown} message @param {unknown} [transfer] */
-  postMessage(message, transfer) {
+  postMessage(message: unknown, transfer?: unknown) {
     if (transfer !== undefined) {
       throw new TypeError("Bobcat's postMessage has no transfer list");
     }
@@ -61,7 +80,7 @@ export class Worker extends EventTarget {
     }
   }
 
-  get [Symbol.toStringTag]() {
+  override get [Symbol.toStringTag]() {
     return "Worker";
   }
 }
@@ -69,11 +88,12 @@ export class Worker extends EventTarget {
 /**
  * A worker event already routed to its owning view. Ended workers discard
  * late events, including ones queued before terminate() on the other thread.
- * @param {string} key
- * @param {string} kind
- * @param {string} data
  */
-export function __BobcatDispatchWorkerEvent(key, kind, data) {
+export function __BobcatDispatchWorkerEvent(
+  key: string,
+  kind: string,
+  data: string,
+) {
   const worker = workers.get(key);
   if (worker === undefined) return;
   if (kind === "closed" || kind === "failed") workers.delete(key);

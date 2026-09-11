@@ -1,14 +1,12 @@
-// @ts-check
-
 import { beforeAll, describe, expect, it, rstest } from "@rstest/core";
-import * as eventTarget from "../src/event-target.mjs";
+import * as eventTarget from "../src/event-target.ts";
+import type * as contextModule from "../src/cross-thread-context.ts";
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 
-/** @type {typeof import("../src/cross-thread-context.mjs").createCrossThreadContext} */
-let createCrossThreadContext;
+let createCrossThreadContext: typeof contextModule.createCrossThreadContext;
 beforeAll(async () => {
-  ({ createCrossThreadContext } = await import("../src/cross-thread-context.mjs"));
+  ({ createCrossThreadContext } = await import("../src/cross-thread-context.ts"));
 });
 
 describe("Lynx cross-thread context", () => {
@@ -30,8 +28,7 @@ describe("Lynx cross-thread context", () => {
 
   it("retains queued event references until the Worker transport snapshots them", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const sent = [];
+    const sent: unknown[] = [];
     const first = { type: "first", data: { value: 1 } };
     const second = { type: "second", data: { value: 2 } };
 
@@ -55,12 +52,10 @@ describe("Lynx cross-thread context", () => {
 
   it("sends typed events without local echo and returns the ContextProxy result", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const sent = [];
-    /** @type {unknown[]} */
-    const received = [];
+    const sent: unknown[] = [];
+    const received: unknown[] = [];
     context.connect((event) => sent.push(event));
-    context.addEventListener("update", /** @param {unknown} event */ (event) => {
+    context.addEventListener("update", (event: unknown) => {
       received.push(event);
     });
 
@@ -76,9 +71,8 @@ describe("Lynx cross-thread context", () => {
 
   it("receives by type and defaults only nullish data to an empty object", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const received = [];
-    context.addEventListener("update", /** @param {unknown} event */ (event) => {
+    const received: unknown[] = [];
+    context.addEventListener("update", (event: unknown) => {
       received.push(event);
     });
 
@@ -100,10 +94,9 @@ describe("Lynx cross-thread context", () => {
 
   it("does not retain incoming events for listeners registered later", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const received = [];
+    const received: unknown[] = [];
     context.receive({ type: "update", data: "early" });
-    context.addEventListener("update", /** @param {unknown} event */ (event) => {
+    context.addEventListener("update", (event: unknown) => {
       received.push(event);
     });
     context.receive({ type: "update", data: "now" });
@@ -112,10 +105,8 @@ describe("Lynx cross-thread context", () => {
 
   it("keeps callback identity, capture and once semantics with the context as this", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const receivers = [];
-    /** @this {unknown} */
-    function listener() {
+    const receivers: unknown[] = [];
+    function listener(this: unknown) {
       receivers.push(this);
     }
     context.addEventListener("update", listener, { once: true });
@@ -133,8 +124,7 @@ describe("Lynx cross-thread context", () => {
 
   it("honors listener removals during receive and defers additions to the next event", () => {
     const context = createCrossThreadContext();
-    /** @type {string[]} */
-    const calls = [];
+    const calls: string[] = [];
     const removed = () => calls.push("removed");
     const added = () => calls.push("added");
     context.addEventListener("update", () => {
@@ -152,8 +142,7 @@ describe("Lynx cross-thread context", () => {
 
   it("leaves postMessage unimplemented without sending or local delivery", () => {
     const context = createCrossThreadContext();
-    /** @type {unknown[]} */
-    const sent = [];
+    const sent: unknown[] = [];
     context.connect((event) => sent.push(event));
     expect(context.postMessage({ type: "update", data: 1 })).toBeUndefined();
     expect(sent).toEqual([]);

@@ -1,7 +1,6 @@
-// @ts-check
 // Behavior tests for the Element PAPI runtime over a recording native mock.
 //
-// These pin the semantics that live in element-papi.mjs: the PAPI surface and
+// These pin the semantics that live in element-papi.ts: the PAPI surface and
 // arities, tag vocabulary, handle-to-NodeId mapping, return identity, and
 // drop bookkeeping. The mock mirrors the real boundary's shape: it returns
 // sequential node ids and rejects non-number ids the way the native number
@@ -10,6 +9,7 @@
 // crates/bobcat-core/tests/main_thread.rs.
 
 import { beforeEach, describe, expect, it, rstest } from "@rstest/core";
+import type * as elementPapi from "../src/element-papi.ts";
 
 rstest.mockRequire("bobcat-internal:host", () => {
   const native = globalThis.__bobcatTestHost;
@@ -43,15 +43,13 @@ rstest.mockRequire("bobcat-internal:host", () => {
 });
 
 rstest.mockRequire("bobcat:runtime", () => ({
-  /**
-   * @param {string | undefined} componentId
-   * @param {string} handlerName
-   * @param {Record<string, unknown>} event
-   */
-  __BobcatPublishEvent(componentId, handlerName, event) {
-    const native = /** @type {ReturnType<typeof createMockBobcat>} */ (
-      globalThis.__bobcatTestHost
-    );
+  __BobcatPublishEvent(
+    componentId: string | undefined,
+    handlerName: string,
+    event: Record<string, unknown>,
+  ) {
+    const native =
+      globalThis.__bobcatTestHost as ReturnType<typeof createMockBobcat>;
     native.calls.push(["publishEvent", componentId, handlerName, event]);
   },
 }));
@@ -63,24 +61,22 @@ rstest.mockRequire("bobcat:runtime", () => ({
  */
 const DOCUMENT_REFUSAL = new Error("the realm already created its document");
 
+/** Every native member, plus the recorded calls and a filter over them. */
+type MockBobcat = BobcatNative & {
+  calls: unknown[][];
+  named: (name: string) => unknown[][];
+};
+
 /**
- * @param {number[]} [issuedIds] Ids the native half hands out, in call order.
+ * @param issuedIds Ids the native half hands out, in call order.
  *   Defaults to the real boundary's shape (2, 3, 4, ...); a test that needs to
  *   prove the runtime carries native's number through rather than numbering
  *   handles itself passes a sequence no counter would produce.
- * @returns {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }}
  */
-function createMockBobcat(issuedIds) {
-  /** @type {unknown[][]} */
-  const calls = [];
-  /** @param {string} name */
-  const named = (name) => calls.filter((call) => call[0] === name);
-  /**
-   * @param {string} name
-   * @param {unknown} value
-   * @returns {number}
-   */
-  const nodeId = (name, value) => {
+function createMockBobcat(issuedIds?: number[]): MockBobcat {
+  const calls: unknown[][] = [];
+  const named = (name: string) => calls.filter((call) => call[0] === name);
+  const nodeId = (name: string, value: unknown): number => {
     if (typeof value !== "number") {
       throw new TypeError(`${name} expects a number`);
     }
@@ -90,8 +86,7 @@ function createMockBobcat(issuedIds) {
   // document node, and hands the page 2, so the first created element is 3.
   let nextNodeId = 3;
   let issued = 0;
-  /** @returns {number} */
-  const issueNodeId = () => {
+  const issueNodeId = (): number => {
     if (issuedIds !== undefined) {
       const id = issuedIds[issued];
       issued += 1;
@@ -104,18 +99,12 @@ function createMockBobcat(issuedIds) {
     nextNodeId += 1;
     return id;
   };
-  /** @type {Map<number, number>} */
-  const parents = new Map();
+  const parents: Map<number, number> = new Map();
   // The real boundary keeps its own child order and reports element children
   // in it, so a mock that only knew parent links could not stand in for the
   // one member whose whole contract is that order.
-  /** @type {Map<number, number[]>} */
-  const childOrder = new Map();
-  /**
-   * @param {number} parent
-   * @returns {number[]}
-   */
-  const siblingsOf = (parent) => {
+  const childOrder: Map<number, number[]> = new Map();
+  const siblingsOf = (parent: number): number[] => {
     let list = childOrder.get(parent);
     if (list === undefined) {
       list = [];
@@ -123,8 +112,7 @@ function createMockBobcat(issuedIds) {
     }
     return list;
   };
-  /** @param {number} child */
-  const unlink = (child) => {
+  const unlink = (child: number) => {
     const parent = parents.get(child);
     if (parent === undefined) {
       return;
@@ -135,30 +123,22 @@ function createMockBobcat(issuedIds) {
       list.splice(at, 1);
     }
   };
-  /**
-   * @param {number} node
-   * @returns {number}
-   */
-  const positionOf = (node) => {
+  const positionOf = (node: number): number => {
     const parent = parents.get(node);
     return parent === undefined ? -1 : siblingsOf(parent).indexOf(node);
   };
-  /** @type {Map<number, Map<string, string>>} */
-  const attributes = new Map();
-  /** @type {Map<number, string>} */
-  const tags = new Map([[2, "page"]]);
+  const attributes: Map<number, Map<string, string>> = new Map();
+  const tags: Map<number, string> = new Map([[2, "page"]]);
   // One document per realm for the life of the realm, as the native slot
   // enforces it: the ingredients a construction spends are never restored.
   let documentSpent = false;
 
-  /** @type {BobcatNative & { calls: unknown[][], named: (name: string) => unknown[][] }} */
-  const host = {
+  const host: MockBobcat = {
     calls,
     named,
     // Arguments are recorded rather than ignored: the member takes none, and
     // a test that says so has to be able to see one that arrived.
-    /** @param {unknown[]} args */
-    createDocument: (...args) => {
+    createDocument: (...args: unknown[]) => {
       calls.push(["createDocument", ...args]);
       if (documentSpent) {
         throw DOCUMENT_REFUSAL;
@@ -169,19 +149,13 @@ function createMockBobcat(issuedIds) {
       calls.push(["createPage"]);
       return 2;
     },
-    /** @param {string} tag */
-    createElement: (tag) => {
+    createElement: (tag: string) => {
       const node = issueNodeId();
       tags.set(node, tag);
       calls.push(["createElement", tag]);
       return node;
     },
-    /**
-     * @param {unknown} node
-     * @param {string} name
-     * @param {string} value
-     */
-    setAttribute: (node, name, value) => {
+    setAttribute: (node: unknown, name: string, value: string) => {
       const id = nodeId("setAttribute", node);
       if (typeof value !== "string") {
         throw new TypeError("setAttribute expects a string for argument 2");
@@ -198,19 +172,14 @@ function createMockBobcat(issuedIds) {
      * Decodes the record payload the way the native side does, so the
      * expectations below read as declarations rather than as wire text — and
      * so a length that disagreed with its field would surface here.
-     *
-     * @param {unknown} node
-     * @param {string} record
      */
-    setInlineStyles: (node, record) => {
+    setInlineStyles: (node: unknown, record: string) => {
       const id = nodeId("setInlineStyles", node);
       if (typeof record !== "string") {
         throw new TypeError("setInlineStyles expects a string record");
       }
-      /** @type {[string, string][]} */
-      const declarations = [];
-      /** @type {string[]} */
-      let fields = [];
+      const declarations: [string, string][] = [];
+      let fields: string[] = [];
       let rest = record;
       while (rest.length > 0) {
         const separator = rest.indexOf(":");
@@ -238,26 +207,17 @@ function createMockBobcat(issuedIds) {
       }
       calls.push(["setInlineStyles", id, declarations]);
     },
-    /**
-     * @param {unknown} node
-     * @param {string} name
-     */
-    removeAttribute: (node, name) => {
+    removeAttribute: (node: unknown, name: string) => {
       const id = nodeId("removeAttribute", node);
       attributes.get(id)?.delete(name);
       calls.push(["removeAttribute", id, name]);
     },
-    /**
-     * @param {unknown} node
-     * @param {string} name
-     */
-    getAttribute: (node, name) => {
+    getAttribute: (node: unknown, name: string) => {
       const id = nodeId("getAttribute", node);
       calls.push(["getAttribute", id, name]);
       return attributes.get(id)?.get(name) ?? null;
     },
-    /** @param {unknown} node */
-    tagName: (node) => {
+    tagName: (node: unknown) => {
       const id = nodeId("tagName", node);
       calls.push(["tagName", id]);
       const tag = tags.get(id);
@@ -266,8 +226,7 @@ function createMockBobcat(issuedIds) {
       }
       return tag;
     },
-    /** @param {unknown} node */
-    attributeNames: (node) => {
+    attributeNames: (node: unknown) => {
       const id = nodeId("attributeNames", node);
       calls.push(["attributeNames", id]);
       let record = "";
@@ -276,8 +235,7 @@ function createMockBobcat(issuedIds) {
       }
       return record;
     },
-    /** @param {unknown} node */
-    childElementIds: (node) => {
+    childElementIds: (node: unknown) => {
       const id = nodeId("childElementIds", node);
       calls.push(["childElementIds", id]);
       // No filtering: this mock has no node kind but the element, which is
@@ -285,18 +243,12 @@ function createMockBobcat(issuedIds) {
       // here — crates/bobcat-core/tests/main_thread.rs covers that.
       return (childOrder.get(id) ?? []).join(",");
     },
-    /** @param {unknown} node */
-    parentNode: (node) => {
+    parentNode: (node: unknown) => {
       const id = nodeId("parentNode", node);
       calls.push(["parentNode", id]);
       return parents.get(id) ?? null;
     },
-    /**
-     * @param {unknown} parent
-     * @param {unknown} child
-     * @param {unknown} reference
-     */
-    insertBefore: (parent, child, reference) => {
+    insertBefore: (parent: unknown, child: unknown, reference: unknown) => {
       const parentId = nodeId("insertBefore", parent);
       const childId = nodeId("insertBefore", child);
       unlink(childId);
@@ -317,18 +269,13 @@ function createMockBobcat(issuedIds) {
         reference === null ? null : nodeId("insertBefore", reference),
       ]);
     },
-    /** @param {unknown} child */
-    removeElement: (child) => {
+    removeElement: (child: unknown) => {
       const childId = nodeId("removeElement", child);
       unlink(childId);
       parents.delete(childId);
       calls.push(["removeElement", childId]);
     },
-    /**
-     * @param {unknown} newElement
-     * @param {unknown} oldElement
-     */
-    replaceElement: (newElement, oldElement) => {
+    replaceElement: (newElement: unknown, oldElement: unknown) => {
       const newId = nodeId("replaceElement", newElement);
       const oldId = nodeId("replaceElement", oldElement);
       const parent = parents.get(oldId);
@@ -342,11 +289,7 @@ function createMockBobcat(issuedIds) {
       }
       calls.push(["replaceElement", newId, oldId]);
     },
-    /**
-     * @param {unknown} childA
-     * @param {unknown} childB
-     */
-    swapElement: (childA, childB) => {
+    swapElement: (childA: unknown, childB: unknown) => {
       const a = nodeId("swapElement", childA);
       const b = nodeId("swapElement", childB);
       const parentA = parents.get(a);
@@ -367,27 +310,24 @@ function createMockBobcat(issuedIds) {
       }
       calls.push(["swapElement", a, b]);
     },
-    /** @param {unknown} node */
-    dropElement: (node) => {
+    dropElement: (node: unknown) => {
       calls.push(["dropElement", nodeId("dropElement", node)]);
     },
     flushElementTree: () => {
       calls.push(["flushElementTree"]);
     },
-    /**
-     * @param {unknown} node
-     * @param {unknown} phase
-     * @param {unknown} eventName
-     */
-    enableEventListener: (node, phase, eventName) => {
+    enableEventListener: (
+      node: unknown,
+      phase: unknown,
+      eventName: unknown,
+    ) => {
       calls.push(["enableEventListener", node, phase, eventName]);
     },
-    /**
-     * @param {unknown} node
-     * @param {unknown} phase
-     * @param {unknown} eventName
-     */
-    disableEventListener: (node, phase, eventName) => {
+    disableEventListener: (
+      node: unknown,
+      phase: unknown,
+      eventName: unknown,
+    ) => {
       calls.push(["disableEventListener", node, phase, eventName]);
     },
     stopPropagation: () => {
@@ -395,16 +335,11 @@ function createMockBobcat(issuedIds) {
     },
     // The Element PAPI reaches none of these; they are here because the
     // mock stands in for the whole native module, not part of it.
-    /**
-     * @param {number} delayMilliseconds
-     * @param {boolean} repeats
-     */
-    setTimer: (delayMilliseconds, repeats) => {
+    setTimer: (delayMilliseconds: number, repeats: boolean) => {
       calls.push(["setTimer", delayMilliseconds, repeats]);
       return 1;
     },
-    /** @param {number} id */
-    clearTimer: (id) => {
+    clearTimer: (id: number) => {
       calls.push(["clearTimer", id]);
     },
     initData: () => undefined,
@@ -413,10 +348,8 @@ function createMockBobcat(issuedIds) {
   return host;
 }
 
-/** @type {ReturnType<typeof createMockBobcat>} */
-let mock;
-/** @type {typeof import("../src/element-papi.mjs")} */
-let elementModule;
+let mock: ReturnType<typeof createMockBobcat>;
+let elementModule: typeof elementPapi;
 
 beforeEach(async () => {
   rstest.resetModules();
@@ -426,7 +359,7 @@ beforeEach(async () => {
   // Installed by a card's own worklet runtime, never by this file; a test
   // that wants one puts it here itself.
   globalThis.runWorklet = undefined;
-  elementModule = await import("../src/element-papi.mjs");
+  elementModule = await import("../src/element-papi.ts");
   // The rest of this legacy-shaped behavior suite calls PAPI names directly;
   // expose this test instance without making global installation a module
   // responsibility.
@@ -435,8 +368,7 @@ beforeEach(async () => {
 
 describe("installation", () => {
   it("exports every PAPI binding with the arity its reference declares", () => {
-    /** @type {[string, number][]} */
-    const arities = [
+    const arities: [string, number][] = [
       ["__CreatePage", 2],
       ["__CreateElement", 2],
       ["__CreateWrapperElement", 1],
@@ -475,9 +407,9 @@ describe("installation", () => {
       ["__FlushElementTree", 0],
     ];
     for (const [name, arity] of arities) {
-      const papi = /** @type {Record<string, unknown>} */ (elementModule)[name];
+      const papi = (elementModule as Record<string, unknown>)[name];
       expect(papi, name).toBeTypeOf("function");
-      expect(/** @type {Function} */ (papi).length, name).toBe(arity);
+      expect((papi as Function).length, name).toBe(arity);
     }
     expect(Object.keys(elementModule).sort()).toEqual(
       [
@@ -504,8 +436,7 @@ describe("installation", () => {
 
   it("lets the host refuse a second document rather than refusing it here", () => {
     const first = new elementModule.Document();
-    /** @type {unknown} */
-    let thrown;
+    let thrown: unknown;
     try {
       void new elementModule.Document();
     } catch (error) {
@@ -983,7 +914,7 @@ describe("__GetElementUniqueID", () => {
     const issued = [41, 7, 900];
     rstest.resetModules();
     globalThis.__bobcatTestHost = createMockBobcat(issued);
-    const isolatedModule = await import("../src/element-papi.mjs");
+    const isolatedModule = await import("../src/element-papi.ts");
 
     const created = [
       isolatedModule.__CreateView(0),
@@ -1182,11 +1113,11 @@ let nextEventId = 0;
 
 /** Delivers one node's turn as the only call of its own dispatch. */
 function deliver(
-  /** @type {object} */ node,
-  /** @type {object} */ target,
-  /** @type {number} */ phase,
-  /** @type {string} */ name,
-  /** @type {string} */ detailJson = "",
+  node: object,
+  target: object,
+  phase: number,
+  name: string,
+  detailJson: string = "",
 ) {
   walk([{ node, target, phase }], name, detailJson);
 }
@@ -1196,9 +1127,9 @@ function deliver(
  * for the walk, `isLastCall` only on the final step.
  */
 function walk(
-  /** @type {{ node: object, target: object, phase: number }[]} */ steps,
-  /** @type {string} */ name,
-  /** @type {string} */ detailJson = "",
+  steps: { node: object; target: object; phase: number }[],
+  name: string,
+  detailJson: string = "",
 ) {
   const eventId = nextEventId;
   nextEventId += 1;
@@ -1217,6 +1148,30 @@ function walk(
 
 const BUBBLE = 0;
 const CAPTURE = 1;
+
+/** The identity half of an event's `target` and `currentTarget`. */
+interface TargetInfo {
+  id: string | null;
+  uid: number;
+  elementRefptr: object;
+}
+
+/**
+ * The event object as a listener sees it during delivery, typed as these
+ * tests read and write it: the fields the runtime sets, the `marker` a test
+ * writes to see one object serve a whole walk, and the `detail` fields the
+ * tests send.
+ */
+interface ListenerEvent {
+  type: string;
+  eventPhase: number;
+  target: TargetInfo;
+  currentTarget: TargetInfo;
+  detail: { x: number; nested: { value: string } };
+  marker?: string;
+  stopPropagation(): void;
+  stopImmediatePropagation(): void;
+}
 
 describe("event listeners", () => {
   it("tells the host the first listener arrived, and only the first", () => {
@@ -1271,8 +1226,7 @@ describe("event listeners", () => {
 
   it("runs the pass's own listeners in registration order", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     __AddEventListener(inner, "tap", () => order.push("bubble-1"), {});
     __AddEventListener(inner, "tap", () => order.push("bubble-2"), {});
     __AddEventListener(inner, "tap", () => order.push("capture"), {
@@ -1340,11 +1294,9 @@ describe("event listeners", () => {
     const { outer, inner } = tree();
     __SetID(inner, "target-id");
     __SetID(outer, "current-id");
-    /** @type {any} */
-    let received;
-    /** @type {any} */
-    let currentTarget;
-    __AddEventListener(outer, "tap", (/** @type {any} */ event) => {
+    let received!: ListenerEvent;
+    let currentTarget!: TargetInfo;
+    __AddEventListener(outer, "tap", (event: ListenerEvent) => {
       received = event;
       // Read here rather than after: the standard clears `currentTarget` when
       // the dispatch ends, so inside the listener is the only place it means
@@ -1364,9 +1316,8 @@ describe("event listeners", () => {
 
   it("reports the standard's at-target phase where the passes meet", () => {
     const { outer, inner } = tree();
-    /** @type {number[]} */
-    const phases = [];
-    const record = (/** @type {any} */ event) => phases.push(event.eventPhase);
+    const phases: number[] = [];
+    const record = (event: ListenerEvent) => phases.push(event.eventPhase);
     __AddEventListener(inner, "tap", record, {});
     __AddEventListener(inner, "tap", record, { capture: true });
     __AddEventListener(outer, "tap", record, { capture: true });
@@ -1381,16 +1332,15 @@ describe("event listeners", () => {
 
   it("one event object serves the whole walk, so a listener can write to it", () => {
     const { page, outer, inner } = tree();
-    /** @type {unknown[]} */
-    const seen = [];
-    __AddEventListener(page, "tap", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    __AddEventListener(page, "tap", (event: ListenerEvent) => {
       event.marker = "from page";
       seen.push(event);
     }, { capture: true });
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event, event.marker);
     }, {});
-    __AddEventListener(outer, "tap", (/** @type {any} */ event) => {
+    __AddEventListener(outer, "tap", (event: ListenerEvent) => {
       seen.push(event);
     }, {});
 
@@ -1408,9 +1358,8 @@ describe("event listeners", () => {
 
   it("drops the event on the last call, so the next walk starts clean", () => {
     const { inner } = tree();
-    /** @type {unknown[]} */
-    const seen = [];
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event, event.marker);
       event.marker = "written";
     }, {});
@@ -1429,10 +1378,9 @@ describe("event listeners", () => {
 
   it("drops the event when a listener throws, since the host ends the walk", () => {
     const { inner } = tree();
-    /** @type {unknown[]} */
-    const seen = [];
+    const seen: unknown[] = [];
     let shouldThrow = true;
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event.marker);
       event.marker = "written";
       if (shouldThrow) {
@@ -1454,9 +1402,8 @@ describe("event listeners", () => {
 
   it("refuses a target no handle names instead of dropping the walk", () => {
     const { inner } = tree();
-    /** @type {unknown[]} */
-    const seen = [];
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event.target.uid);
     }, {});
     const uid = __GetElementUniqueID(inner);
@@ -1476,9 +1423,8 @@ describe("event listeners", () => {
 
   it("drops the event when a listener stops propagation mid-walk", () => {
     const { inner } = tree();
-    /** @type {unknown[]} */
-    const seen = [];
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       seen.push(event.marker);
       event.marker = "written";
       event.stopPropagation();
@@ -1493,9 +1439,8 @@ describe("event listeners", () => {
 
   it("leaves a retained event reporting no current target once the walk ends", () => {
     const { page, inner } = tree();
-    /** @type {any} */
-    let retained;
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    let retained!: ListenerEvent;
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       retained = event;
     }, {});
     __AddEventListener(page, "tap", () => {}, {});
@@ -1515,10 +1460,9 @@ describe("event listeners", () => {
 
   it("keeps one target object across a walk, and swaps it only on retargeting", () => {
     const { page, outer, inner } = tree();
-    /** @type {unknown[]} */
-    const targets = [];
+    const targets: unknown[] = [];
     for (const node of [inner, outer, page]) {
-      __AddEventListener(node, "tap", (/** @type {any} */ event) => {
+      __AddEventListener(node, "tap", (event: ListenerEvent) => {
         targets.push(event.target);
       }, {});
     }
@@ -1533,14 +1477,14 @@ describe("event listeners", () => {
 
     expect(targets[1]).toBe(targets[0]);
     expect(targets[2]).not.toBe(targets[0]);
-    expect(/** @type {any} */ (targets[2]).uid).toBe(
+    expect((targets[2] as TargetInfo).uid).toBe(
       __GetElementUniqueID(outer),
     );
   });
 
   it("ends the walk through the host when a listener stops propagation", () => {
     const { inner } = tree();
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => event.stopPropagation(), {});
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => event.stopPropagation(), {});
 
     deliver(inner, inner, BUBBLE, "tap");
 
@@ -1549,9 +1493,8 @@ describe("event listeners", () => {
 
   it("keeps stopImmediatePropagation inside this node, and still ends the walk", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    const order: string[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       order.push("first");
       __StopImmediatePropagation(event);
     }, {});
@@ -1565,9 +1508,8 @@ describe("event listeners", () => {
 
   it("__StopPropagation does not skip the rest of this node", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    const order: string[] = [];
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       order.push("first");
       __StopPropagation(event);
     }, {});
@@ -1580,8 +1522,7 @@ describe("event listeners", () => {
 
   it("a listener added during dispatch does not run for this event", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     __AddEventListener(inner, "tap", () => {
       order.push("first");
       __AddEventListener(inner, "tap", () => order.push("late"), {});
@@ -1596,9 +1537,8 @@ describe("event listeners", () => {
 
   it("reports the standard's phase numbers, not the pass it was told", () => {
     const { outer, inner } = tree();
-    /** @type {number[]} */
-    const phases = [];
-    const record = (/** @type {any} */ event) => phases.push(event.eventPhase);
+    const phases: number[] = [];
+    const record = (event: ListenerEvent) => phases.push(event.eventPhase);
     __AddEventListener(outer, "tap", record, { capture: true });
     __AddEventListener(inner, "tap", record, { capture: true });
     __AddEventListener(inner, "tap", record, {});
@@ -1616,8 +1556,7 @@ describe("event listeners", () => {
 
   it("does not run a listener an earlier one removed", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     const second = () => order.push("second");
     __AddEventListener(inner, "tap", () => {
       order.push("first");
@@ -1656,12 +1595,10 @@ describe("__AddEvent", () => {
    * A worklet handler over a plain callback, plus the `runWorklet` a card's
    * own worklet runtime would have installed to invoke it. This is the only
    * handler kind that runs in this realm.
-   *
-   * @param {(event: any) => void} body
    */
-  function worklet(body) {
+  function worklet(body: (event: ListenerEvent) => void) {
     globalThis.runWorklet = (value, params) => {
-      /** @type {any} */ (value).body(params[0]);
+      (value as { body: (event: unknown) => void }).body(params[0]);
     };
     return { type: "worklet", value: { body } };
   }
@@ -1774,13 +1711,12 @@ describe("__AddEvent", () => {
 
   it("runs a worklet handler through the realm's own runWorklet", () => {
     const { inner } = tree();
-    /** @type {unknown[]} */
-    const runs = [];
+    const runs: unknown[] = [];
     const value = { _wkltId: "abc" };
     // Read inside the call: the walk resets `currentTarget` when it ends, so
     // an event kept past it no longer names the node it was delivered to.
     globalThis.runWorklet = (worklet, params) => {
-      const event = /** @type {any} */ (params[0]);
+      const event = params[0] as ListenerEvent;
       runs.push(worklet, event.type, event.detail.x, event.currentTarget.uid);
     };
     __AddEvent(inner, "bindEvent", "tap", { type: "worklet", value });
@@ -1844,9 +1780,8 @@ describe("__AddEvent", () => {
     __SetAttribute(outer, "data-section", "actions");
     __AddEvent(inner, "bindEvent", "tap", "inner:tap");
     __AddEvent(outer, "bindEvent", "tap", "outer:tap");
-    /** @type {any} */
-    let retained;
-    __AddEventListener(inner, "tap", (/** @type {any} */ event) => {
+    let retained!: ListenerEvent;
+    __AddEventListener(inner, "tap", (event: ListenerEvent) => {
       retained = event;
       event.detail.nested.value = "after";
       __SetAttribute(inner, "data-item-name", "after");
@@ -1908,8 +1843,7 @@ describe("__AddEvent", () => {
 
   it("ends the walk for a catch form after its handler ran", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     __AddEvent(inner, "capture-catch", "tap", worklet(() => order.push("handler")));
 
     deliver(inner, inner, CAPTURE, "tap");
@@ -1920,8 +1854,7 @@ describe("__AddEvent", () => {
 
   it("runs before the __AddEventListener closures on the same node", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     __AddEventListener(inner, "tap", () => order.push("closure"), {});
     __AddEvent(inner, "bindEvent", "tap", worklet(() => order.push("handler")));
 
@@ -1932,14 +1865,13 @@ describe("__AddEvent", () => {
 
   it("skips the closures when the handler stops immediate propagation", () => {
     const { inner } = tree();
-    /** @type {string[]} */
-    const order = [];
+    const order: string[] = [];
     __AddEventListener(inner, "tap", () => order.push("closure"), {});
     __AddEvent(
       inner,
       "bindEvent",
       "tap",
-      worklet((/** @type {any} */ event) => {
+      worklet((event: ListenerEvent) => {
         order.push("handler");
         event.stopImmediatePropagation();
       }),

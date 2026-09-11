@@ -1,5 +1,3 @@
-// @ts-check
-
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
@@ -16,7 +14,7 @@
 // the view was given, and is parsed here as this module evaluates.
 //
 // This is not an Element PAPI implementation. Every `__*` element member,
-// including the scoped-style sink `__SetCSSId`, belongs to element-papi.mjs.
+// including the scoped-style sink `__SetCSSId`, belongs to element-papi.ts.
 // Background-thread-only bindings such as `lynxCoreInject` also do not belong
 // in this realm.
 //
@@ -25,8 +23,36 @@
 // is shared as a module and each runtime compiles its own copy.
 
 import { EventTarget } from "bobcat:event-target";
-import { createCrossThreadContext } from "bobcat:cross-thread-context";
+import {
+  type ContextEvent,
+  createCrossThreadContext,
+} from "bobcat:cross-thread-context";
 import { globalProps, initData } from "bobcat-internal:host";
+import type { Worker } from "bobcat-internal";
+
+/**
+ * What this realm sends its BTS Worker: a Context event, or a runtime call,
+ * which its `bobcat` tag tells apart. A runtime call's `method` names what
+ * the background runtime runs, and its other fields are that method's.
+ */
+type ToBackground =
+  | ContextEvent
+  | { bobcat: "runtime"; method: string; [field: string]: unknown };
+
+/** The one runtime call the BTS Worker makes of this realm. */
+type LepusMethodCall = {
+  bobcat: "runtime";
+  method: "callLepusMethod";
+  name: string;
+  data?: unknown;
+  id?: number;
+};
+
+/**
+ * What the BTS Worker sends this realm: that call, or a Context event's
+ * public fields, which carry no `bobcat` tag.
+ */
+type FromBackground = LepusMethodCall | (ContextEvent & { bobcat?: never });
 
 function noop() {
   return undefined;
@@ -48,15 +74,16 @@ const coreContext = createContextSink();
 const jsContext = createCrossThreadContext();
 const nativeContext = createContextSink();
 const engineContext = new EventTarget();
-/** @type {any} */
-const scope = globalThis;
-/** @type {import("./worker.mjs").Worker | undefined} */
-let backgroundWorker;
-/** @type {{message: any, isContext: boolean}[]} */
-let pendingBackgroundMessages = [];
+// The realm's global object, where a card installs the methods
+// `callLepusMethod` looks up by name.
+const scope = globalThis as Record<string, unknown>;
+let backgroundWorker: Worker | undefined;
+let pendingBackgroundMessages: {
+  message: ToBackground;
+  isContext: boolean;
+}[] = [];
 
-/** @param {any} message @param {boolean} [isContext] */
-function sendToBackground(message, isContext = false) {
+function sendToBackground(message: ToBackground, isContext = false) {
   if (backgroundWorker === undefined) {
     pendingBackgroundMessages.push({ message, isContext });
   } else {
@@ -73,8 +100,7 @@ function sendToBackground(message, isContext = false) {
 // postMessage performs the existing JSON snapshot.
 jsContext.connect((event) => sendToBackground(event, true));
 
-/** @param {any} message */
-async function callLepusMethod(message) {
+async function callLepusMethod(message: LepusMethodCall) {
   try {
     const method = scope[message.name];
     const result = typeof method === "function"
@@ -103,10 +129,9 @@ async function callLepusMethod(message) {
  * Called by boot only after the MTS entry finishes importing. Entry-level
  * listeners already exist; events it sent before Worker construction are
  * flushed in order through the same Worker transport as later events.
- * @param {import("./worker.mjs").Worker} worker
  */
-export function __BobcatConnectBackground(worker) {
-  worker.addEventListener("message", (/** @type {{ data: any }} */ event) => {
+export function __BobcatConnectBackground(worker: Worker) {
+  worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
     if (message?.bobcat === "runtime") {
       if (message.method === "callLepusMethod") {
@@ -124,12 +149,11 @@ export function __BobcatConnectBackground(worker) {
   }
 }
 
-/**
- * @param {unknown} componentId
- * @param {string} handlerName
- * @param {unknown} event
- */
-export function __BobcatPublishEvent(componentId, handlerName, event) {
+export function __BobcatPublishEvent(
+  componentId: unknown,
+  handlerName: string,
+  event: unknown,
+) {
   sendToBackground({
     bobcat: "runtime",
     method: componentId ? "publicComponentEvent" : "publishEvent",
@@ -174,17 +198,15 @@ export const SystemInfo = Object.freeze({});
  * here, as in web-core. So this is where malformed JSON is first met, and the
  * error names which input it was: `JSON.parse`'s own error places the fault
  * in an anonymous `<input>`.
- * @param {string} name
- * @param {string | undefined} json
  */
-function parsePageData(name, json) {
+function parsePageData(name: string, json: string | undefined): unknown {
   if (json === undefined) {
     return {};
   }
   try {
     return JSON.parse(json);
   } catch (error) {
-    throw new SyntaxError(`${name} is not valid JSON: ${/** @type {Error} */ (error).message}`);
+    throw new SyntaxError(`${name} is not valid JSON: ${(error as Error).message}`);
   }
 }
 
@@ -204,8 +226,7 @@ export function _SetSourceMapRelease() {
   return undefined;
 }
 
-/** @param {unknown} data */
-export function __OnLifecycleEvent(data) {
+export function __OnLifecycleEvent(data: unknown) {
   jsContext.dispatchEvent({ type: "__OnLifecycleEvent", data });
 }
 
@@ -228,10 +249,7 @@ export const lynx = {
   getEngine: function () {
     return engineContext;
   },
-  /**
-   * @param {unknown} name
-   */
-  getJSModule: function (name) {
+  getJSModule: function (name: unknown) {
     return name === "GlobalEventEmitter" ? globalEventEmitter : undefined;
   },
   registerDataProcessors: noop,

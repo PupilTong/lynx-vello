@@ -1,8 +1,9 @@
-// @ts-check
-
 import { afterAll, beforeAll, describe, expect, it, rstest } from "@rstest/core";
-import * as eventTarget from "../src/event-target.mjs";
-import * as crossThreadContext from "../src/cross-thread-context.mjs";
+import * as eventTarget from "../src/event-target.ts";
+import * as crossThreadContext from "../src/cross-thread-context.ts";
+import type * as btsRuntime from "../src/background-thread-runtime.ts";
+import type * as mtsRuntime from "../src/main-thread-runtime.ts";
+import type { Worker } from "../src/worker.ts";
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
@@ -13,36 +14,52 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   globalProps: () => undefined,
 }));
 
-/** @type {any} */
-const scope = globalThis;
+/**
+ * The members of the realm global the two runtimes reach, as this suite
+ * installs them on Node's `globalThis`, plus the Lepus methods a test files
+ * there for `callLepusMethod` to find.
+ */
+interface TestScope {
+  postMessage(message: unknown): void;
+  addEventListener(
+    name: string,
+    callback: (event: { data: unknown }) => void,
+  ): void;
+  failedLepusMethod?: (data: unknown) => unknown;
+  inspectLepusData?: (data: unknown) => unknown;
+  bigIntLepusMethod?: (data: unknown) => unknown;
+}
+
+/** A message for the background realm, as the transport's JSON copy of it. */
+interface Recorded {
+  type?: unknown;
+  method?: unknown;
+  [field: string]: unknown;
+}
+
+const scope = globalThis as unknown as TestScope;
 const originalPostMessage = scope.postMessage;
 const originalAddEventListener = scope.addEventListener;
-/** @type {typeof import("../src/main-thread-runtime.mjs")} */
-let mts;
-/** @type {typeof import("../src/background-thread-runtime.mjs").lynx} */
-let bts;
-/** @type {(event: {data: any}) => void} */
-let receiveInBackground;
-/** @type {any[]} */
-const toBackground = [];
-/** @type {any[]} */
-const toMain = [];
+let mts: typeof mtsRuntime;
+let bts: typeof btsRuntime.lynx;
+let receiveInBackground: (event: { data: unknown }) => void;
+const toBackground: Recorded[] = [];
+const toMain: unknown[] = [];
 const worker = Object.assign(new eventTarget.EventTarget(), {
-  /** @param {any} message */
-  postMessage(message) {
+  postMessage(message: unknown) {
     toBackground.push(JSON.parse(JSON.stringify([message]))[0]);
   },
 });
 
 beforeAll(async () => {
-  mts = await import("../src/main-thread-runtime.mjs");
-  scope.postMessage = (/** @type {any} */ message) => {
+  mts = await import("../src/main-thread-runtime.ts");
+  scope.postMessage = (message: unknown) => {
     toMain.push(JSON.parse(JSON.stringify([message]))[0]);
   };
-  scope.addEventListener = (/** @type {string} */ name, /** @type {any} */ callback) => {
+  scope.addEventListener = (name: string, callback) => {
     if (name === "message") receiveInBackground = callback;
   };
-  ({ lynx: bts } = await import("../src/background-thread-runtime.mjs"));
+  ({ lynx: bts } = await import("../src/background-thread-runtime.ts"));
 });
 
 afterAll(() => {
@@ -63,9 +80,8 @@ async function deliverToMain() {
 
 describe("MTS/BTS lifecycle runtime", () => {
   it("queues Context and publish calls together, then replays each late publish hook", () => {
-    /** @type {unknown[]} */
-    const seen = [];
-    bts.getCoreContext().addEventListener("custom", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    bts.getCoreContext().addEventListener("custom", (event: { data: unknown }) => {
       seen.push(["context", event.data]);
     });
     const contextEvent = {
@@ -75,9 +91,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     mts.lynx.getJSContext().dispatchEvent(contextEvent);
     mts.__BobcatPublishEvent("component", "second", { value: 3 });
     contextEvent.data = 2;
-    mts.__BobcatConnectBackground(
-      /** @type {import("../src/worker.mjs").Worker} */ (/** @type {unknown} */ (worker)),
-    );
+    mts.__BobcatConnectBackground(worker as unknown as Worker);
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
@@ -107,12 +121,11 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
   it("keeps extra Context properties separate from runtime messages in both directions", async () => {
-    /** @type {unknown[]} */
-    const seen = [];
-    mts.lynx.getJSContext().addEventListener("protocol-like", (/** @type {any} */ event) => {
+    const seen: unknown[] = [];
+    mts.lynx.getJSContext().addEventListener("protocol-like", (event: unknown) => {
       seen.push(["MTS", event]);
     });
-    bts.getCoreContext().addEventListener("protocol-like", (/** @type {any} */ event) => {
+    bts.getCoreContext().addEventListener("protocol-like", (event: unknown) => {
       seen.push(["BTS", event]);
     });
     const event = {
@@ -161,9 +174,8 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
   it("keeps missing method data distinct from explicit null through JSON transport", async () => {
-    /** @type {unknown[]} */
-    const seen = [];
-    scope.inspectLepusData = (/** @type {unknown} */ data) => {
+    const seen: unknown[] = [];
+    scope.inspectLepusData = (data: unknown) => {
       seen.push(data);
       return data;
     };
@@ -185,9 +197,8 @@ describe("MTS/BTS lifecycle runtime", () => {
   it("cleans callbacks when request encoding fails and reports result encoding failures", async () => {
     const callback = rstest.fn();
     const postMessage = scope.postMessage;
-    /** @type {number | undefined} */
-    let failedId;
-    scope.postMessage = (/** @type {any} */ message) => {
+    let failedId: number | undefined;
+    scope.postMessage = (message: { id?: number }) => {
       failedId = message.id;
       postMessage(message);
     };
@@ -230,7 +241,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith(undefined);
 
-    const replacement = rstest.fn(/** @this {typeof app} */ function (...args) {
+    const replacement = rstest.fn(function (this: typeof app, ...args: unknown[]) {
       expect(this).toBe(app);
       expect(args).toEqual([]);
     });

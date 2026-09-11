@@ -1,5 +1,3 @@
-// @ts-check
-
 // The realm-local `EventTarget` both preloaded runtimes build on, registered
 // as the `bobcat:event-target` ESM.
 //
@@ -15,49 +13,39 @@
 
 const eventTargetListeners = Symbol("eventTargetListeners");
 
-/**
- * @typedef {object} RuntimeEventListener
- * @property {Function | object} callback
- * @property {boolean} capture
- * @property {boolean} once
- */
+interface RuntimeEventListener {
+  callback: Function | object;
+  capture: boolean;
+  once: boolean;
+}
 
 /**
  * Reads one object-shaped listener option without widening the public input.
- *
- * @param {unknown} options
- * @param {string} name
- * @returns {unknown}
  */
-function listenerOption(options, name) {
+function listenerOption(options: unknown, name: string): unknown {
   return options && typeof options === "object"
     ? Reflect.get(options, name)
     : undefined;
 }
 
-/**
- * @param {unknown} options
- * @returns {boolean}
- */
-function captureOf(options) {
+function captureOf(options: unknown): boolean {
   return typeof options === "boolean"
     ? options
     : Boolean(listenerOption(options, "capture"));
 }
 
 export class EventTarget {
+  declare [eventTargetListeners]: Map<string, RuntimeEventListener[]>;
+
   constructor() {
-    /** @type {Map<string, RuntimeEventListener[]>} */
     this[eventTargetListeners] = new Map();
   }
 
-  /**
-   * @param {unknown} eventName
-   * @param {unknown} callback
-   * @param {unknown} options
-   * @returns {undefined}
-   */
-  addEventListener(eventName, callback, options) {
+  addEventListener(
+    eventName: unknown,
+    callback: unknown,
+    options?: unknown,
+  ): undefined {
     if (callback === null || callback === undefined) {
       return undefined;
     }
@@ -88,13 +76,11 @@ export class EventTarget {
     return undefined;
   }
 
-  /**
-   * @param {unknown} eventName
-   * @param {unknown} callback
-   * @param {unknown} options
-   * @returns {undefined}
-   */
-  removeEventListener(eventName, callback, options) {
+  removeEventListener(
+    eventName: unknown,
+    callback: unknown,
+    options?: unknown,
+  ): undefined {
     if (callback === null || callback === undefined) {
       return undefined;
     }
@@ -117,11 +103,7 @@ export class EventTarget {
     return undefined;
   }
 
-  /**
-   * @param {unknown} event
-   * @returns {boolean}
-   */
-  dispatchEvent(event) {
+  dispatchEvent(event: unknown): boolean {
     if (
       event === null ||
       (typeof event !== "object" && typeof event !== "function")
@@ -172,11 +154,8 @@ export class EventTarget {
  * (`globalThis` → `EventTarget.prototype` → `Object.prototype`), so the
  * global answers `instanceof EventTarget` and carries the real methods rather
  * than three copies bolted onto it.
- *
- * @param {object} target
- * @returns {undefined}
  */
-export function installEventTarget(target) {
+export function installEventTarget(target: object): undefined {
   Object.setPrototypeOf(target, EventTarget.prototype);
   Reflect.set(target, eventTargetListeners, new Map());
   return undefined;
@@ -196,16 +175,10 @@ export function installEventTarget(target) {
  * The wrapper is registered once, on the first assignment, and stays. So the
  * handler keeps its place in the listener order across reassignment, and
  * assigning `null` silences it without moving it — again as the DOM does.
- *
- * @param {object} target
- * @param {string} name
- * @returns {undefined}
  */
-export function installEventHandler(target, name) {
-  /** @type {{ current: Function | null }} */
-  const handler = { current: null };
-  /** @this {object} @param {unknown} event */
-  function invoke(event) {
+export function installEventHandler(target: object, name: string): undefined {
+  const handler: { current: Function | null } = { current: null };
+  function invoke(this: object, event: unknown) {
     if (typeof handler.current === "function") {
       handler.current.call(this, event);
     }
@@ -217,8 +190,7 @@ export function installEventHandler(target, name) {
     get() {
       return handler.current;
     },
-    /** @param {unknown} value */
-    set(value) {
+    set(value: unknown) {
       handler.current = typeof value === "function" ? value : null;
       if (!registered) {
         this.addEventListener(name, invoke, false);

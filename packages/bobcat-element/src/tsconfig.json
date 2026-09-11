@@ -1,0 +1,23 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The modules `bobcat-core` strips and preloads into its QuickJS realms:
+  // ES2023 with no DOM, no `console` and no Node globals. `paths` resolves
+  // each specifier core registers to the file it registers under it; the two
+  // native modules have no source and are declared in `native.d.ts`.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "types": [],
+    "paths": {
+      "bobcat:element": ["./element-papi.ts"],
+      "bobcat:runtime": ["./main-thread-runtime.ts"],
+      "bobcat:timers": ["./timers.ts"],
+      "bobcat:event-target": ["./event-target.ts"],
+      "bobcat:cross-thread-context": ["./cross-thread-context.ts"],
+      "bobcat-internal": ["./worker.ts"],
+      "bobcat:worker": ["./worker-runtime.ts"],
+      "bobcat:bts-runtime": ["./background-thread-runtime.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}

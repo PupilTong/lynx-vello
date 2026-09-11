@@ -1,5 +1,8 @@
-// @ts-check
-import { installEventHandler, installEventTarget } from "bobcat:event-target";
+import {
+  type EventTarget,
+  installEventHandler,
+  installEventTarget,
+} from "bobcat:event-target";
 import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 
 // The `bobcat:worker` ESM: one worker realm's global scope, preloaded on the
@@ -24,12 +27,20 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 // another thread.
 
 /**
+ * The worker realm's global scope once this module has run: an `EventTarget`
+ * whose own members include `self`, `postMessage` and `close`.
+ */
+export interface WorkerGlobalScope extends EventTarget {
+  self: WorkerGlobalScope;
+  postMessage(message: unknown, transfer?: unknown): undefined;
+  close(): undefined;
+}
+
+/**
  * The global scope object. `self` and `globalThis` are the same object, as
  * they are in a browser worker.
- *
- * @type {any}
  */
-const scope = globalThis;
+const scope = globalThis as unknown as WorkerGlobalScope;
 
 installEventTarget(scope);
 installEventHandler(scope, "message");
@@ -45,7 +56,7 @@ for (const method of [
   "addEventListener",
   "removeEventListener",
   "dispatchEvent",
-]) {
+] as const) {
   Object.defineProperty(scope, method, {
     configurable: true,
     writable: true,
@@ -53,21 +64,14 @@ for (const method of [
   });
 }
 
-/**
- * @param {unknown} data
- * @returns {string}
- */
-function encodeMessage(data) {
+function encodeMessage(data: unknown): string {
   return JSON.stringify([data]);
 }
 
 /**
  * Delivers one message the host took off this worker's queue.
- *
- * @param {string} data
- * @returns {undefined}
  */
-export function __BobcatDeliverWorkerMessage(data) {
+export function __BobcatDeliverWorkerMessage(data: string): undefined {
   scope.dispatchEvent({ type: "message", data: JSON.parse(data)[0] });
   return undefined;
 }
@@ -80,12 +84,7 @@ Object.defineProperty(scope, "self", {
 });
 
 Object.assign(scope, {
-  /**
-   * @param {unknown} message
-   * @param {unknown} transfer
-   * @returns {undefined}
-   */
-  postMessage(message, transfer) {
+  postMessage(message: unknown, transfer?: unknown): undefined {
     if (transfer !== undefined) {
       throw new TypeError("Bobcat's postMessage has no transfer list");
     }
@@ -99,10 +98,8 @@ Object.assign(scope, {
    * drops the realm only once that task returns — and nothing queued behind
    * it ever does: messages and armed timers are discarded from the moment
    * this is called, as HTML's closing flag requires.
-   *
-   * @returns {undefined}
    */
-  close() {
+  close(): undefined {
     closeWorker();
     return undefined;
   },

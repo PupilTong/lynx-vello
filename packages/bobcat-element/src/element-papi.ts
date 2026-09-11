@@ -1,4 +1,3 @@
-// @ts-check
 import {
   attributeNames,
   childElementIds,
@@ -262,6 +261,17 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 //   job. That is the opposite of the element path above, where cards genuinely
 //   unroot handles and a collection every 32 removals frees what they named.
 
+declare global {
+  /**
+   * Installed on this realm by the card's own bundled worklet runtime, and only
+   * once a card actually compiles a main-thread function. `__AddEvent` reads it
+   * per delivery rather than capturing it, because this file runs first.
+   */
+  var runWorklet:
+    | ((worklet: unknown, params: unknown[]) => void)
+    | undefined;
+}
+
 const nodeIdSymbol = Symbol("nodeId");
 
 /**
@@ -291,11 +301,14 @@ const BUBBLING_PHASE = 3;
  * On the handle, not in a map keyed by it — see the header's note on
  * QuickJS's `WeakMap` — so a registration can never be what keeps its
  * element alive: it dies with the handle, and nothing else reaches it.
- *
- * @typedef {{ callback: Function, once: boolean, removed: boolean }} Registration
- * @typedef {Map<string, [Registration[], Registration[]]>} ListenerLists
  */
 const listenersSymbol = Symbol("listeners");
+interface Registration {
+  callback: Function;
+  once: boolean;
+  removed: boolean;
+}
+type ListenerLists = Map<string, [Registration[], Registration[]]>;
 
 /**
  * The `type` strings `__AddEvent` has to recognize, lowercased the way
@@ -322,11 +335,14 @@ const GLOBAL = 1;
 /**
  * Where a handle files its `__AddEvent` handlers: at most one per name in
  * each map. On the handle, for the reason the listener lists are.
- *
- * @typedef {{ type: string, name: string, handler: unknown }} FiledHandler
- * @typedef {[Map<string, FiledHandler>, Map<string, FiledHandler>]} HandlerMaps
  */
 const handlersSymbol = Symbol("handlers");
+interface FiledHandler {
+  type: string;
+  name: string;
+  handler: unknown;
+}
+type HandlerMaps = [Map<string, FiledHandler>, Map<string, FiledHandler>];
 
 /**
  * What this file has last told the host about a (handle, name, pass).
@@ -337,10 +353,9 @@ const handlersSymbol = Symbol("handlers");
  * one index, `__AddEventListener` closures and one `__AddEvent` handler, so
  * the decision belongs here, taken from both, with only the transitions
  * crossing the boundary. Filed on the handle, like the rest.
- *
- * @typedef {Map<string, [boolean, boolean]>} IndexedPasses
  */
 const indexedSymbol = Symbol("indexed");
+type IndexedPasses = Map<string, [boolean, boolean]>;
 
 /**
  * The list callbacks `__CreateList` and `__UpdateListCallbacks` file.
@@ -351,14 +366,13 @@ const indexedSymbol = Symbol("indexed");
  * are retained rather than dropped because a callback dropped at
  * `__CreateList` time cannot be recovered later — the card hands each over
  * exactly once.
- *
- * @typedef {{
- *   componentAtIndex: unknown,
- *   enqueueComponent: unknown,
- *   componentAtIndexes: unknown,
- * }} ListCallbacks
  */
 const listCallbacksSymbol = Symbol("listCallbacks");
+interface ListCallbacks {
+  componentAtIndex: unknown;
+  enqueueComponent: unknown;
+  componentAtIndexes: unknown;
+}
 
 /**
  * The handles of a handle's children: an unordered strong set, which is what
@@ -369,10 +383,9 @@ const listCallbacksSymbol = Symbol("listCallbacks");
  * answer to a question the host already answers, and the two could disagree.
  *
  * Created on first use, because most elements are leaves.
- *
- * @typedef {Set<object>} OwnedChildren
  */
 const ownedChildrenSymbol = Symbol("ownedChildren");
+type OwnedChildren = Set<Handle>;
 
 /**
  * The node id of the handle whose [`ownedChildren`] holds this one.
@@ -389,46 +402,27 @@ const ownerSymbol = Symbol("owner");
 /**
  * A handle as this file sees it: the node id, plus whatever it has filed
  * on the handle under its own symbols.
- *
- * @typedef {{ [key: symbol]: unknown }} Handle
  */
-
-/**
- * @param {object} handle
- * @returns {Handle}
- */
-function slotsOf(handle) {
-  return /** @type {Handle} */ (handle);
+interface Handle {
+  readonly [nodeIdSymbol]: number;
+  [listenersSymbol]?: ListenerLists;
+  [handlersSymbol]?: HandlerMaps;
+  [indexedSymbol]?: IndexedPasses;
+  [listCallbacksSymbol]?: ListCallbacks;
+  [ownedChildrenSymbol]?: OwnedChildren;
+  [ownerSymbol]?: number | undefined;
 }
 
-/**
- * @param {object} handle
- * @returns {ListenerLists | undefined}
- */
-function listenersOf(handle) {
-  return /** @type {ListenerLists | undefined} */ (
-    slotsOf(handle)[listenersSymbol]
-  );
+function listenersOf(handle: Handle): ListenerLists | undefined {
+  return handle[listenersSymbol];
 }
 
-/**
- * @param {object} handle
- * @returns {HandlerMaps | undefined}
- */
-function handlersOf(handle) {
-  return /** @type {HandlerMaps | undefined} */ (
-    slotsOf(handle)[handlersSymbol]
-  );
+function handlersOf(handle: Handle): HandlerMaps | undefined {
+  return handle[handlersSymbol];
 }
 
-/**
- * @param {object} handle
- * @returns {IndexedPasses | undefined}
- */
-function indexedOf(handle) {
-  return /** @type {IndexedPasses | undefined} */ (
-    slotsOf(handle)[indexedSymbol]
-  );
+function indexedOf(handle: Handle): IndexedPasses | undefined {
+  return handle[indexedSymbol];
 }
 
 /**
@@ -440,10 +434,8 @@ function indexedOf(handle) {
  * it an element — alive. The per-handle stores keep the same rule by living
  * on the handle, and for the same reason: collection stays the only way a
  * handle lets go.
- *
- * @type {Map<number, WeakRef<object>>}
  */
-const handlesByNodeId = new Map();
+const handlesByNodeId: Map<number, WeakRef<Handle>> = new Map();
 
 /**
  * Frees the element of a handle that is gone.
@@ -455,7 +447,7 @@ const handlesByNodeId = new Map();
  * parent's, up to the permanent page handle.
  */
 const registry = new FinalizationRegistry(
-  (/** @type {number} */ nodeId) => {
+  (nodeId: number) => {
     handlesByNodeId.delete(nodeId);
     dropElement(nodeId);
   },
@@ -475,20 +467,14 @@ export class Document {
     createDocument();
   }
 
-  /** @returns {string} */
-  get [Symbol.toStringTag]() {
+  get [Symbol.toStringTag](): string {
     return "Document";
   }
 }
 
-/** @type {object | undefined} */
-let pageHandle;
+let pageHandle: Handle | undefined;
 
-/**
- * @param {number} nodeId
- * @returns {object}
- */
-function createHandle(nodeId) {
+function createHandle(nodeId: number): Handle {
   const handle = { [nodeIdSymbol]: nodeId };
   handlesByNodeId.set(nodeId, new WeakRef(handle));
   registry.register(handle, nodeId, handle);
@@ -510,11 +496,8 @@ function createHandle(nodeId) {
  * answer. No second handle is ever minted for a node whose first has died,
  * so those must throw: the alternative is the host holding a node no handle
  * names.
- *
- * @param {number} nodeId
- * @returns {object | undefined}
  */
-function handleOf(nodeId) {
+function handleOf(nodeId: number): Handle | undefined {
   const reference = handlesByNodeId.get(nodeId);
   if (reference === undefined) {
     return undefined;
@@ -526,14 +509,8 @@ function handleOf(nodeId) {
   return handle;
 }
 
-/**
- * @param {unknown} handle
- * @returns {number}
- */
-function nodeIdOf(handle) {
-  return /** @type {number} */ (
-    /** @type {Record<symbol, unknown>} */ (handle)[nodeIdSymbol]
-  );
+function nodeIdOf(handle: unknown): number {
+  return (handle as Handle)[nodeIdSymbol];
 }
 
 /**
@@ -544,39 +521,31 @@ function nodeIdOf(handle) {
  * second is subtle, and what it means is that the owner is unreachable from
  * script and cannot be connected, so nothing this file files under it would
  * ever be read again.
- *
- * @param {unknown} handle
- * @returns {object | undefined}
  */
-function ownerOf(handle) {
-  const owner = slotsOf(/** @type {object} */ (handle))[ownerSymbol];
+function ownerOf(handle: unknown): Handle | undefined {
+  const owner = (handle as Handle)[ownerSymbol];
   if (owner === undefined) {
     return undefined;
   }
-  return handleOf(/** @type {number} */ (owner));
+  return handleOf(owner);
 }
 
 /**
  * Takes `handle` out of its owner's child set, if it has one.
- *
- * @param {unknown} handle
- * @returns {undefined}
  */
-function disown(handle) {
-  const slots = slotsOf(/** @type {object} */ (handle));
+function disown(handle: unknown): undefined {
+  const slots = handle as Handle;
   const owner = slots[ownerSymbol];
   if (owner === undefined) {
     return undefined;
   }
   slots[ownerSymbol] = undefined;
-  const parent = handleOf(/** @type {number} */ (owner));
+  const parent = handleOf(owner);
   if (parent === undefined) {
     // Its handle is already gone, and its child set with it.
     return undefined;
   }
-  /** @type {OwnedChildren | undefined} */ (
-    slotsOf(parent)[ownedChildrenSymbol]
-  )?.delete(/** @type {object} */ (handle));
+  parent[ownedChildrenSymbol]?.delete(slots);
   return undefined;
 }
 
@@ -584,23 +553,17 @@ function disown(handle) {
  * Files `child` in `parent`'s child set, taking it out of whichever set held
  * it before. Called after the native mutation, so a call the host refuses
  * leaves this side exactly as the tree it failed to change.
- *
- * @param {unknown} parent
- * @param {unknown} child
- * @returns {undefined}
  */
-function adopt(parent, child) {
+function adopt(parent: unknown, child: unknown): undefined {
   disown(child);
-  const slots = slotsOf(/** @type {object} */ (parent));
-  let owned = /** @type {OwnedChildren | undefined} */ (
-    slots[ownedChildrenSymbol]
-  );
+  const slots = parent as Handle;
+  let owned = slots[ownedChildrenSymbol];
   if (owned === undefined) {
     owned = new Set();
     slots[ownedChildrenSymbol] = owned;
   }
-  owned.add(/** @type {object} */ (child));
-  slotsOf(/** @type {object} */ (child))[ownerSymbol] = nodeIdOf(parent);
+  owned.add(child as Handle);
+  (child as Handle)[ownerSymbol] = nodeIdOf(parent);
   return undefined;
 }
 
@@ -611,12 +574,8 @@ function adopt(parent, child) {
  * A parent with no live handle is one script has let go of, which cannot be
  * connected, and whose pending `dropElement` will unlink the child anyway:
  * there is no set to file it in and nothing is lost by not having one.
- *
- * @param {number} parentNodeId
- * @param {unknown} child
- * @returns {undefined}
  */
-function adoptUnder(parentNodeId, child) {
+function adoptUnder(parentNodeId: number, child: unknown): undefined {
   const parent = handleOf(parentNodeId);
   if (parent === undefined) {
     disown(child);
@@ -626,12 +585,10 @@ function adoptUnder(parentNodeId, child) {
   return undefined;
 }
 
-/**
- * @param {unknown} componentID
- * @param {unknown} componentCSSID
- * @returns {object}
- */
-export function __CreatePage(componentID, componentCSSID) {
+export function __CreatePage(
+  componentID?: unknown,
+  componentCSSID?: unknown,
+): object {
   void componentID;
   void componentCSSID;
   const nodeId = createPage();
@@ -645,62 +602,46 @@ export function __CreatePage(componentID, componentCSSID) {
   return pageHandle;
 }
 
-/**
- * @param {unknown} tag
- * @param {unknown} parentComponentUniqueID
- * @returns {object}
- */
-export function __CreateElement(tag, parentComponentUniqueID) {
+export function __CreateElement(
+  tag: unknown,
+  parentComponentUniqueID: unknown,
+): object {
   void parentComponentUniqueID;
-  return createHandle(createElement(/** @type {string} */ (tag)));
+  return createHandle(createElement(tag as string));
 }
 
-/**
- * @param {string} tag
- * @param {unknown} parentComponentUniqueID
- * @returns {object}
- */
-function createTag(tag, parentComponentUniqueID) {
+function createTag(tag: string, parentComponentUniqueID: unknown): object {
   void parentComponentUniqueID;
   return createHandle(createElement(tag));
 }
 
-/** @param {unknown} parentComponentUniqueID */
-export function __CreateWrapperElement(parentComponentUniqueID) {
+export function __CreateWrapperElement(parentComponentUniqueID: unknown) {
   return createTag("wrapper", parentComponentUniqueID);
 }
 
-/** @param {unknown} parentComponentUniqueID */
-export function __CreateText(parentComponentUniqueID) {
+export function __CreateText(parentComponentUniqueID: unknown) {
   return createTag("text", parentComponentUniqueID);
 }
 
-/** @param {unknown} parentComponentUniqueID */
-export function __CreateImage(parentComponentUniqueID) {
+export function __CreateImage(parentComponentUniqueID: unknown) {
   return createTag("image", parentComponentUniqueID);
 }
 
-/** @param {unknown} parentComponentUniqueID */
-export function __CreateView(parentComponentUniqueID) {
+export function __CreateView(parentComponentUniqueID: unknown) {
   return createTag("view", parentComponentUniqueID);
 }
 
-/** @param {unknown} parentComponentUniqueID */
-export function __CreateScrollView(parentComponentUniqueID) {
+export function __CreateScrollView(parentComponentUniqueID: unknown) {
   return createTag("scroll-view", parentComponentUniqueID);
 }
 
-/**
- * @param {unknown} text
- * @returns {object}
- */
-export function __CreateRawText(text) {
+export function __CreateRawText(text: unknown): object {
   // The handle first, then the attribute. Nothing but a handle holds an
   // element, so a host call that throws in between would leave a node no
   // one could ever name or free — and `setAttribute` does throw, for a
   // value that is not a string.
   const handle = createHandle(createElement("raw-text"));
-  setAttribute(nodeIdOf(handle), "text", /** @type {string} */ (text));
+  setAttribute(nodeIdOf(handle), "text", text as string);
   return handle;
 }
 
@@ -714,48 +655,37 @@ export function __CreateRawText(text) {
  * ReactLynx passes here and not only through `__UpdateListCallbacks`. It
  * stays a rest parameter so the reported arity remains web-core's three.
  *
- * @param {unknown} parentComponentUniqueID
- * @param {unknown} componentAtIndex
- * @param {unknown} enqueueComponent
- * @param {unknown[]} rest `[info, componentAtIndexes]`
- * @returns {object}
+ * @param rest `[info, componentAtIndexes]`
  */
 export function __CreateList(
-  parentComponentUniqueID,
-  componentAtIndex,
-  enqueueComponent,
-  ...rest
-) {
+  parentComponentUniqueID: unknown,
+  componentAtIndex: unknown,
+  enqueueComponent: unknown,
+  ...rest: unknown[]
+): object {
   void parentComponentUniqueID;
   const handle = createHandle(createElement("list"));
-  slotsOf(handle)[listCallbacksSymbol] = /** @type {ListCallbacks} */ ({
+  handle[listCallbacksSymbol] = {
     componentAtIndex,
     enqueueComponent,
     componentAtIndexes: rest[1],
-  });
+  };
   return handle;
 }
 
-/**
- * @param {unknown} parent
- * @param {unknown} child
- * @returns {object}
- */
-export function __AppendElement(parent, child) {
+export function __AppendElement(parent: unknown, child: unknown): object {
   insertBefore(nodeIdOf(parent), nodeIdOf(child), null);
   adopt(parent, child);
-  return /** @type {object} */ (child);
+  return child as object;
 }
 
-/**
- * @param {unknown} parent
- * @param {unknown} child
- * @param {unknown} reference
- * @returns {object}
- */
-export function __InsertElementBefore(parent, child, reference) {
+export function __InsertElementBefore(
+  parent: unknown,
+  child: unknown,
+  reference?: unknown,
+): object {
   if (reference === child) {
-    return /** @type {object} */ (child);
+    return child as object;
   }
   insertBefore(
     nodeIdOf(parent),
@@ -765,19 +695,14 @@ export function __InsertElementBefore(parent, child, reference) {
       : nodeIdOf(reference),
   );
   adopt(parent, child);
-  return /** @type {object} */ (child);
+  return child as object;
 }
 
-/**
- * @param {unknown} parent
- * @param {unknown} child
- * @returns {object}
- */
-export function __RemoveElement(parent, child) {
+export function __RemoveElement(parent: unknown, child: unknown): object {
   void parent;
   removeElement(nodeIdOf(child));
   disown(child);
-  return /** @type {object} */ (child);
+  return child as object;
 }
 
 /**
@@ -791,13 +716,12 @@ export function __RemoveElement(parent, child) {
  * element is still there and still a parent (see the header) — and choosing
  * a *different native operation* on that reading is how an element with a
  * live handle under a let-go parent would get treated as detached.
- *
- * @param {unknown} parent
- * @param {unknown} newChildren
- * @param {unknown} oldChildren
- * @returns {undefined}
  */
-export function __ReplaceElements(parent, newChildren, oldChildren) {
+export function __ReplaceElements(
+  parent: unknown,
+  newChildren: unknown,
+  oldChildren?: unknown,
+): undefined {
   const news = Array.isArray(newChildren) ? newChildren : [newChildren];
   if (!oldChildren || (Array.isArray(oldChildren) && oldChildren.length === 0)) {
     const parentNodeId = nodeIdOf(parent);
@@ -832,12 +756,8 @@ export function __ReplaceElements(parent, newChildren, oldChildren) {
  * composed here: a self-swap does nothing, a detached operand takes the
  * attached one's place and detaches it, two detached operands are left
  * alone.
- *
- * @param {unknown} childA
- * @param {unknown} childB
- * @returns {undefined}
  */
-export function __SwapElement(childA, childB) {
+export function __SwapElement(childA: unknown, childB: unknown): undefined {
   const a = nodeIdOf(childA);
   const b = nodeIdOf(childB);
   if (a === b) {
@@ -864,12 +784,10 @@ export function __SwapElement(childA, childB) {
   return undefined;
 }
 
-/**
- * @param {unknown} newElement
- * @param {unknown} oldElement
- * @returns {undefined}
- */
-export function __ReplaceElement(newElement, oldElement) {
+export function __ReplaceElement(
+  newElement: unknown,
+  oldElement: unknown,
+): undefined {
   if (newElement === oldElement) {
     return undefined;
   }
@@ -892,11 +810,8 @@ export function __ReplaceElement(newElement, oldElement) {
  * `-` plus its lowercase form, so `backgroundColor` reaches CSS as
  * `background-color`. Custom-property names are case-sensitive CSS idents,
  * so an authored `--accentColor` must pass through unchanged.
- *
- * @param {string} name
- * @returns {string}
  */
-function hyphenate(name) {
+function hyphenate(name: string): string {
   if (name.startsWith("--")) {
     return name;
   }
@@ -909,12 +824,11 @@ function hyphenate(name) {
 /**
  * web-core's truthiness test, not a null check: an empty class list removes
  * the attribute, which is how ReactLynx clears one.
- *
- * @param {unknown} element
- * @param {unknown} classNames
- * @returns {undefined}
  */
-export function __SetClasses(element, classNames) {
+export function __SetClasses(
+  element: unknown,
+  classNames: unknown,
+): undefined {
   const nodeId = nodeIdOf(element);
   if (classNames) {
     setAttribute(nodeId, "class", String(classNames));
@@ -924,12 +838,7 @@ export function __SetClasses(element, classNames) {
   return undefined;
 }
 
-/**
- * @param {unknown} element
- * @param {unknown} id
- * @returns {undefined}
- */
-export function __SetID(element, id) {
+export function __SetID(element: unknown, id: unknown): undefined {
   const nodeId = nodeIdOf(element);
   if (id) {
     setAttribute(nodeId, "id", String(id));
@@ -939,11 +848,7 @@ export function __SetID(element, id) {
   return undefined;
 }
 
-/**
- * @param {unknown} element
- * @returns {string | null}
- */
-export function __GetID(element) {
+export function __GetID(element: unknown): string | null {
   return getAttribute(nodeIdOf(element), "id");
 }
 
@@ -951,11 +856,8 @@ export function __GetID(element) {
  * The element's Lynx tag. web-core maps its HTML stand-in back
  * (`x-view` -> `view`); this runtime creates elements under the Lynx tag
  * itself, so the DOM's own local name is already the answer.
- *
- * @param {unknown} element
- * @returns {string}
  */
-export function __GetTag(element) {
+export function __GetTag(element: unknown): string {
   return tagName(nodeIdOf(element));
 }
 
@@ -964,12 +866,11 @@ export function __GetTag(element) {
  *
  * `__GetID` is this member with the name fixed, and both read the same
  * native export: an id is an attribute here, not a field beside them.
- *
- * @param {unknown} element
- * @param {unknown} name
- * @returns {string | null}
  */
-export function __GetAttributeByName(element, name) {
+export function __GetAttributeByName(
+  element: unknown,
+  name: unknown,
+): string | null {
   return getAttribute(nodeIdOf(element), String(name));
 }
 
@@ -981,11 +882,8 @@ export function __GetAttributeByName(element, name) {
  * their own — a class list, an id atom, a parsed declaration block — but each
  * of those paths also writes the attribute itself, so the list this reads is
  * the whole list rather than the leftovers.
- *
- * @param {unknown} element
- * @returns {string[]}
  */
-export function __GetAttributeNames(element) {
+export function __GetAttributeNames(element: unknown): string[] {
   return splitRecord(attributeNames(nodeIdOf(element)));
 }
 
@@ -1003,11 +901,8 @@ export function __GetAttributeNames(element) {
  * about the invariant, not a case a card can reach — and it is a throw rather
  * than a hole because minting a second handle for a node whose first has died
  * would leave the host holding a node no handle names.
- *
- * @param {unknown} element
- * @returns {object[]}
  */
-export function __GetChildren(element) {
+export function __GetChildren(element: unknown): object[] {
   const record = childElementIds(nodeIdOf(element));
   if (record === "") {
     return [];
@@ -1033,11 +928,8 @@ export function __GetChildren(element) {
  * element reports `-1` rather than throwing, which is the contract its
  * callers read. `-1` is safe as the sentinel precisely because real ids
  * are issued from zero upward and never recycled.
- *
- * @param {unknown} element
- * @returns {number}
  */
-export function __GetElementUniqueID(element) {
+export function __GetElementUniqueID(element: unknown): number {
   if (!element) {
     return -1;
   }
@@ -1054,13 +946,9 @@ export function __GetElementUniqueID(element) {
  * Nothing here validates the payload. The writer is Bobcat, not a card: a
  * malformed record would be an engine bug, and reporting it as a JavaScript
  * error would only move it further from where it happened.
- *
- * @param {string} record
- * @returns {string[]}
  */
-function splitRecord(record) {
-  /** @type {string[]} */
-  const fields = [];
+function splitRecord(record: string): string[] {
+  const fields: string[] = [];
   let rest = record;
   while (rest !== "") {
     const separator = rest.indexOf(":");
@@ -1081,11 +969,8 @@ function splitRecord(record) {
  * lets a value contain any character at all — a semicolon, a quote, a NUL
  * — without a delimiter having to be escaped or a declaration boundary
  * having to be guessed.
- *
- * @param {string} text
- * @returns {string}
  */
-function styleField(text) {
+function styleField(text: string): string {
   return `${text.length}:${text}`;
 }
 
@@ -1105,12 +990,8 @@ function styleField(text) {
  * A falsy value removes the attribute. The `rpx`/`vw`/`vh`/`rem` token
  * rewriting web-core performs on the way through has no owner here yet, so
  * declarations reach stylo as authored.
- *
- * @param {unknown} element
- * @param {unknown} value
- * @returns {undefined}
  */
-export function __SetInlineStyles(element, value) {
+export function __SetInlineStyles(element: unknown, value: unknown): undefined {
   const nodeId = nodeIdOf(element);
   if (!value) {
     removeAttribute(nodeId, "style");
@@ -1151,13 +1032,12 @@ export function __SetInlineStyles(element, value) {
  * while installing its snapshot runtime, and a card whose styles are all
  * global has nothing to gain from failing at the missing global. The scoped
  * behavior lands with the ingestion side that reads it.
- *
- * @param {unknown} elements
- * @param {unknown} cssId
- * @param {unknown} entryName
- * @returns {undefined}
  */
-export function __SetCSSId(elements, cssId, entryName) {
+export function __SetCSSId(
+  elements: unknown,
+  cssId: unknown,
+  entryName?: unknown,
+): undefined {
   void elements;
   void cssId;
   void entryName;
@@ -1175,13 +1055,12 @@ export function __SetCSSId(elements, cssId, entryName) {
  * writing a stringified command object onto the element. The callbacks it
  * would drive are filed (see [`listCallbacks`]); what is missing is the
  * child at an index, which the native boundary cannot answer.
- *
- * @param {unknown} element
- * @param {unknown} name
- * @param {unknown} value
- * @returns {undefined}
  */
-export function __SetAttribute(element, name, value) {
+export function __SetAttribute(
+  element: unknown,
+  name: unknown,
+  value: unknown,
+): undefined {
   if (name === "update-list-info") {
     throw new Error(
       "__SetAttribute(update-list-info) needs indexed child access, which the native boundary does not have",
@@ -1201,11 +1080,8 @@ export function __SetAttribute(element, name, value) {
  * forms collapse onto the two passes the host walks: the `capture-` pair is
  * the capture pass, `bindEvent`/`catchEvent` the bubble pass.
  * `global-bindEvent` is not one of them and never reaches this.
- *
- * @param {string} type
- * @returns {0 | 1}
  */
-function phaseOfType(type) {
+function phaseOfType(type: string): 0 | 1 {
   return type === CAPTURE_BIND || type === CAPTURE_CATCH ? CAPTURE : BUBBLE;
 }
 
@@ -1214,25 +1090,19 @@ function phaseOfType(type) {
  * they do it because of what they are: native Lynx decides from the
  * registration's existence, not from what its handler did or whether one
  * ran at all.
- *
- * @param {string} type
- * @returns {boolean}
  */
-function isCatchType(type) {
+function isCatchType(type: string): boolean {
   return type === CATCH_EVENT || type === CAPTURE_CATCH;
 }
 
 /**
  * One element's two handler maps, created on demand.
- *
- * @param {object} handle
- * @returns {HandlerMaps}
  */
-function handlersFor(handle) {
+function handlersFor(handle: Handle): HandlerMaps {
   let maps = handlersOf(handle);
   if (maps === undefined) {
     maps = [new Map(), new Map()];
-    slotsOf(handle)[handlersSymbol] = maps;
+    handle[handlersSymbol] = maps;
   }
   return maps;
 }
@@ -1240,14 +1110,13 @@ function handlersFor(handle) {
 /**
  * Tells the host about one (element, name, pass), but only when the answer
  * changed. Records what was said, so the next reconciliation knows.
- *
- * @param {object} handle
- * @param {string} name
- * @param {0 | 1} phase
- * @param {boolean} wanted
- * @returns {undefined}
  */
-function syncPass(handle, name, phase, wanted) {
+function syncPass(
+  handle: Handle,
+  name: string,
+  phase: 0 | 1,
+  wanted: boolean,
+): undefined {
   let byName = indexedOf(handle);
   const state = byName?.get(name);
   if (wanted === (state?.[phase] ?? false)) {
@@ -1267,9 +1136,9 @@ function syncPass(handle, name, phase, wanted) {
   }
   if (byName === undefined) {
     byName = new Map();
-    slotsOf(handle)[indexedSymbol] = byName;
+    handle[indexedSymbol] = byName;
   }
-  const created = /** @type {[boolean, boolean]} */ ([false, false]);
+  const created: [boolean, boolean] = [false, false];
   created[phase] = wanted;
   byName.set(name, created);
   return undefined;
@@ -1278,12 +1147,8 @@ function syncPass(handle, name, phase, wanted) {
 /**
  * Reconciles both passes of the host's index for one (element, name)
  * against everything registered here now.
- *
- * @param {object} handle
- * @param {string} name
- * @returns {undefined}
  */
-function syncIndex(handle, name) {
+function syncIndex(handle: Handle, name: string): undefined {
   const lists = listenersOf(handle)?.get(name);
   const filed = handlersOf(handle)?.[STATIC].get(name);
   const filedPhase = filed === undefined ? undefined : phaseOfType(filed.type);
@@ -1306,16 +1171,15 @@ function syncIndex(handle, name) {
 
 /**
  * The listener lists for one element and event name, created on demand.
- *
- * @param {object} handle
- * @param {string} name
- * @returns {[Registration[], Registration[]]}
  */
-function listsFor(handle, name) {
+function listsFor(
+  handle: Handle,
+  name: string,
+): [Registration[], Registration[]] {
   let byName = listenersOf(handle);
   if (byName === undefined) {
     byName = new Map();
-    slotsOf(handle)[listenersSymbol] = byName;
+    handle[listenersSymbol] = byName;
   }
   let lists = byName.get(name);
   if (lists === undefined) {
@@ -1336,23 +1200,21 @@ function listsFor(handle, name) {
  * and no cross-boundary call happens at all. The telling goes through
  * `syncIndex`, because an `__AddEvent` handler files into the same host
  * index and neither kind may switch the other off.
- *
- * @param {object} handle
- * @param {unknown} eventName
- * @param {unknown} callback
- * @param {unknown} options
- * @returns {undefined}
  */
-function addListener(handle, eventName, callback, options) {
+function addListener(
+  handle: Handle,
+  eventName: unknown,
+  callback: unknown,
+  options: unknown,
+): undefined {
   if (typeof callback !== "function") {
     // web-core ignores a non-callable under the default closure type; a
     // string handler is a background-thread name, supported by __AddEvent.
     return undefined;
   }
   const name = String(eventName).toLowerCase();
-  const settings = /** @type {Record<string, unknown> | undefined} */ (
-    options ?? undefined
-  );
+  const settings =
+    (options ?? undefined) as Record<string, unknown> | undefined;
   const phase = settings?.["capture"] ? CAPTURE : BUBBLE;
   const list = listsFor(handle, name)[phase];
   if (list.some((registration) => registration.callback === callback)) {
@@ -1370,23 +1232,21 @@ function addListener(handle, eventName, callback, options) {
 /**
  * `removeEventListener`. Capture is part of the identity, so a bubble-phase
  * removal leaves a capture registration of the same callback alone.
- *
- * @param {object} handle
- * @param {unknown} eventName
- * @param {unknown} callback
- * @param {unknown} options
- * @returns {undefined}
  */
-function removeListener(handle, eventName, callback, options) {
+function removeListener(
+  handle: Handle,
+  eventName: unknown,
+  callback: unknown,
+  options: unknown,
+): undefined {
   const name = String(eventName).toLowerCase();
   const byName = listenersOf(handle);
   const lists = byName?.get(name);
   if (lists === undefined) {
     return undefined;
   }
-  const settings = /** @type {Record<string, unknown> | undefined} */ (
-    options ?? undefined
-  );
+  const settings =
+    (options ?? undefined) as Record<string, unknown> | undefined;
   const phase = settings?.["capture"] ? CAPTURE : BUBBLE;
   const list = lists[phase];
   const index = list.findIndex(
@@ -1417,14 +1277,13 @@ function removeListener(handle, eventName, callback, options) {
  *
  * A nullish handler is the removal, matching `FiberAddEvent`'s
  * empty-callback branch.
- *
- * @param {object} handle
- * @param {unknown} eventType
- * @param {unknown} eventName
- * @param {unknown} handler
- * @returns {undefined}
  */
-function addEvent(handle, eventType, eventName, handler) {
+function addEvent(
+  handle: Handle,
+  eventType: unknown,
+  eventName: unknown,
+  handler: unknown,
+): undefined {
   const type = String(eventType).toLowerCase();
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
@@ -1466,20 +1325,14 @@ function addEvent(handle, eventType, eventName, handler) {
  * ever be reached when its element happened to be on that path. Delivering
  * that subset would be a behavior neither native Lynx nor web-core has.
  * The pass that gives it meaning is the host's to add.
- *
- * @param {unknown} element
- * @param {unknown} eventType
- * @param {unknown} eventName
- * @param {unknown} handler
- * @returns {undefined}
  */
-export function __AddEvent(element, eventType, eventName, handler) {
-  return addEvent(
-    /** @type {object} */ (element),
-    eventType,
-    eventName,
-    handler,
-  );
+export function __AddEvent(
+  element: unknown,
+  eventType: unknown,
+  eventName: unknown,
+  handler: unknown,
+): undefined {
+  return addEvent(element as Handle, eventType, eventName, handler);
 }
 
 /**
@@ -1489,18 +1342,16 @@ export function __AddEvent(element, eventType, eventName, handler) {
  *
  * The arguments are (name, type), the reverse of `__AddEvent`'s
  * (type, name). Both native Lynx and web-core order them this way.
- *
- * @param {unknown} element
- * @param {unknown} eventName
- * @param {unknown} eventType
- * @returns {unknown}
  */
-export function __GetEvent(element, eventName, eventType) {
+export function __GetEvent(
+  element: unknown,
+  eventName: unknown,
+  eventType: unknown,
+): unknown {
   const type = String(eventType).toLowerCase();
   const name = String(eventName).toLowerCase();
   const slot = type === GLOBAL_BIND ? GLOBAL : STATIC;
-  const filed = handlersOf(/** @type {object} */ (element))
-    ?.[slot].get(name);
+  const filed = handlersOf(element as Handle)?.[slot].get(name);
   if (filed === undefined || filed.type !== type) {
     return undefined;
   }
@@ -1516,17 +1367,15 @@ export function __GetEvent(element, eventName, eventType) {
  * says `{ type, name, function }[]`. The declared shape wins here, because
  * it is the only one that makes `__SetEvents(e, __GetEvents(e))` a faithful
  * round trip — the one property any caller could rely on.
- *
- * @param {unknown} element
- * @returns {{ type: string, name: string, function: unknown }[]}
  */
-export function __GetEvents(element) {
-  const maps = handlersOf(/** @type {object} */ (element));
+export function __GetEvents(
+  element: unknown,
+): { type: string; name: string; function: unknown }[] {
+  const maps = handlersOf(element as Handle);
   if (maps === undefined) {
     return [];
   }
-  /** @type {{ type: string, name: string, function: unknown }[]} */
-  const events = [];
+  const events: { type: string; name: string; function: unknown }[] = [];
   for (const map of maps) {
     for (const filed of map.values()) {
       events.push({
@@ -1550,13 +1399,9 @@ export function __GetEvents(element) {
  *
  * An entry whose `name` or `type` is not a string is skipped, as native
  * does, and a non-array clears and stops.
- *
- * @param {unknown} element
- * @param {unknown} events
- * @returns {undefined}
  */
-export function __SetEvents(element, events) {
-  const handle = /** @type {object} */ (element);
+export function __SetEvents(element: unknown, events: unknown): undefined {
+  const handle = element as Handle;
   const maps = handlersOf(handle);
   if (maps !== undefined) {
     const names = [...maps[STATIC].keys(), ...maps[GLOBAL].keys()];
@@ -1570,7 +1415,7 @@ export function __SetEvents(element, events) {
     return undefined;
   }
   for (const event of events) {
-    const record = /** @type {Record<string, unknown>} */ (event);
+    const record = event as Record<string, unknown>;
     if (
       typeof record?.["name"] !== "string" ||
       typeof record["type"] !== "string"
@@ -1588,25 +1433,18 @@ export function __SetEvents(element, events) {
  * three when it tears a list down.
  *
  * Storage only: see [`listCallbacks`] for why nothing reads them yet.
- *
- * @param {unknown} list
- * @param {unknown} componentAtIndex
- * @param {unknown} enqueueComponent
- * @param {unknown} componentAtIndexes
- * @returns {undefined}
  */
 export function __UpdateListCallbacks(
-  list,
-  componentAtIndex,
-  enqueueComponent,
-  componentAtIndexes,
-) {
-  slotsOf(/** @type {object} */ (list))[listCallbacksSymbol] =
-    /** @type {ListCallbacks} */ ({
-      componentAtIndex,
-      enqueueComponent,
-      componentAtIndexes,
-    });
+  list: unknown,
+  componentAtIndex: unknown,
+  enqueueComponent: unknown,
+  componentAtIndexes: unknown,
+): undefined {
+  (list as Handle)[listCallbacksSymbol] = {
+    componentAtIndex,
+    enqueueComponent,
+    componentAtIndexes,
+  };
   return undefined;
 }
 
@@ -1628,11 +1466,10 @@ export function __UpdateListCallbacks(
  * today; the first one with hit-testable chrome owes the host a retarget to
  * its host element before the path is built, which is also what a browser
  * reports as the target.
- *
- * @param {number} nodeId
- * @returns {{id: string | null, uid: number, elementRefptr: object}}
  */
-function targetInfo(nodeId) {
+function targetInfo(
+  nodeId: number,
+): { id: string | null; uid: number; elementRefptr: object } {
   const handle = handleOf(nodeId);
   if (handle === undefined) {
     throw new Error(
@@ -1655,43 +1492,42 @@ function targetInfo(nodeId) {
  * cannot nest dispatches, so this holds at most one entry at a time; it is a
  * `Map` rather than a single slot only because the id is what identifies an
  * entry, and dropping the wrong one would be silent.
- *
- * @typedef {{
- *   type: string,
- *   eventPhase: number,
- *   target: ReturnType<typeof targetInfo>,
- *   currentTarget: ReturnType<typeof targetInfo> | null,
- *   detail: unknown,
- *   stopPropagation: () => void,
- *   stopImmediatePropagation: () => void,
- * }} DispatchedEvent
- *
- * @typedef {{
- *   event: DispatchedEvent,
- *   targetNodeId: number,
- *   immediate: boolean,
- *   stopped: boolean,
- * }} Dispatch
- *
- * @type {Map<number, Dispatch>}
  */
-const dispatches = new Map();
+const dispatches: Map<number, Dispatch> = new Map();
+interface DispatchedEvent {
+  type: string;
+  eventPhase: number;
+  target: ReturnType<typeof targetInfo>;
+  currentTarget: ReturnType<typeof targetInfo> | null;
+  detail: unknown;
+  stopPropagation: () => void;
+  stopImmediatePropagation: () => void;
+}
+interface Dispatch {
+  event: DispatchedEvent;
+  targetNodeId: number;
+  immediate: boolean;
+  stopped: boolean;
+}
 
 /**
  * The background event target has values, never a realm-local element handle.
  * Dataset names follow DOMStringMap's data-* to camelCase conversion.
- *
- * @param {ReturnType<typeof targetInfo> | null} target
- * @returns {{dataset: Record<string, string | null>, id: string | null, uid: number} | null}
  */
-function backgroundTargetInfo(target) {
+function backgroundTargetInfo(
+  target: ReturnType<typeof targetInfo> | null,
+): {
+  dataset: Record<string, string | null>;
+  id: string | null;
+  uid: number;
+} | null {
   if (target === null) {
     return null;
   }
   const dataset = Object.fromEntries(
     splitRecord(attributeNames(target.uid))
       .filter((name) => name.startsWith("data-") && !/[A-Z]/.test(name))
-      .map((name) => [
+      .map((name): [string, string | null] => [
         name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()),
         getAttribute(target.uid, name),
       ]),
@@ -1702,11 +1538,8 @@ function backgroundTargetInfo(target) {
 /**
  * Snapshot before publication: the Context can queue before BTS is connected,
  * and the local walk reuses and eventually clears the event's currentTarget.
- *
- * @param {DispatchedEvent} event
- * @returns {Record<string, unknown>}
  */
-function backgroundEvent(event) {
+function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
   return JSON.parse(JSON.stringify({
     ...event,
     target: backgroundTargetInfo(event.target),
@@ -1722,23 +1555,22 @@ function backgroundEvent(event) {
  * `detail` is parsed once here rather than once per node, and the two stop
  * methods close over the entry, so they keep working from a later delivery
  * of the same event.
- *
- * @param {number} eventId
- * @param {string} name
- * @param {number} targetNodeId
- * @param {unknown} detailJson
- * @returns {Dispatch}
  */
-function dispatchEntry(eventId, name, targetNodeId, detailJson) {
+function dispatchEntry(
+  eventId: number,
+  name: string,
+  targetNodeId: number,
+  detailJson: unknown,
+): Dispatch {
   const existing = dispatches.get(eventId);
   if (existing !== undefined) {
     return existing;
   }
-  const entry = /** @type {Dispatch} */ ({
+  const entry = {
     targetNodeId,
     immediate: false,
     stopped: false,
-  });
+  } as Dispatch;
   entry.event = {
     type: name,
     eventPhase: NONE,
@@ -1766,13 +1598,8 @@ function dispatchEntry(eventId, name, targetNodeId, detailJson) {
  * sets the target to the node it crossed to, and nothing else makes the two
  * equal — and both passes visit it. Every other step takes its phase from
  * the pass it belongs to.
- *
- * @param {number} node
- * @param {unknown} target
- * @param {number} phase
- * @returns {number}
  */
-function eventPhaseOf(node, target, phase) {
+function eventPhaseOf(node: number, target: unknown, phase: number): number {
   if (node === target) {
     return AT_TARGET;
   }
@@ -1794,31 +1621,27 @@ function eventPhaseOf(node, target, phase) {
  * skipping of this node's remaining listeners — because one delivery covers
  * the whole node and the host has no finer step to withhold.
  *
- * @param {unknown} nodeId
- * @param {unknown} targetNodeId
- * @param {unknown} phaseId `CAPTURE` or `BUBBLE`, the pass being run
- * @param {unknown} eventName
- * @param {unknown} detailJson the event's device facts, or an empty string
- * @param {unknown} eventId names this dispatch, the same for all its calls
- * @param {unknown} isLastCall whether the host will call again for this id
- * @returns {undefined}
+ * @param phaseId `CAPTURE` or `BUBBLE`, the pass being run
+ * @param detailJson the event's device facts, or an empty string
+ * @param eventId names this dispatch, the same for all its calls
+ * @param isLastCall whether the host will call again for this id
  */
 function eventListenerCallback(
-  nodeId,
-  targetNodeId,
-  phaseId,
-  eventName,
-  detailJson,
-  eventId,
-  isLastCall,
-) {
+  nodeId: unknown,
+  targetNodeId: unknown,
+  phaseId: unknown,
+  eventName: unknown,
+  detailJson: unknown,
+  eventId: unknown,
+  isLastCall: unknown,
+): undefined {
   const id = Number(eventId);
-  let entry;
+  let entry: Dispatch | undefined;
   try {
     entry = deliverEvent(
       id,
-      /** @type {number} */ (nodeId),
-      /** @type {number} */ (targetNodeId),
+      nodeId as number,
+      targetNodeId as number,
       phaseId === CAPTURE ? CAPTURE : BUBBLE,
       String(eventName).toLowerCase(),
       detailJson,
@@ -1844,11 +1667,8 @@ function eventListenerCallback(
  * over it, an author stashing it — and without this the object it kept would
  * still name whichever node the walk happened to stop on. Only `target`
  * survives, as the standard leaves it.
- *
- * @param {number} id
- * @returns {undefined}
  */
-function endDispatch(id) {
+function endDispatch(id: number): undefined {
   const entry = dispatches.get(id);
   if (entry !== undefined) {
     entry.event.eventPhase = NONE;
@@ -1866,12 +1686,8 @@ function endDispatch(id) {
  * it belongs to the card's own bundled worklet runtime, which installs it
  * long after this file runs, and a card with no main-thread handler never
  * installs it at all.
- *
- * @param {unknown} handler
- * @param {DispatchedEvent} event
- * @returns {undefined}
  */
-function runEventHandler(handler, event) {
+function runEventHandler(handler: unknown, event: DispatchedEvent): undefined {
   if (typeof handler === "string") {
     // No component PAPI creates a non-page component_id yet. The accepted
     // parentComponentUniqueID creation argument is an element unique_id,
@@ -1882,7 +1698,7 @@ function runEventHandler(handler, event) {
   if (typeof handler !== "object" || handler === null) {
     return undefined;
   }
-  const worklet = /** @type {Record<string, unknown>} */ (handler);
+  const worklet = handler as Record<string, unknown>;
   if (worklet["type"] !== "worklet") {
     return undefined;
   }
@@ -1898,16 +1714,15 @@ function runEventHandler(handler, event) {
  *
  * Returns the dispatch's entry, or `undefined` when this node contributed
  * nothing and none was needed.
- *
- * @param {number} id
- * @param {number} node
- * @param {number} targetNodeId
- * @param {number} phase
- * @param {string} name
- * @param {unknown} detailJson
- * @returns {Dispatch | undefined}
  */
-function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
+function deliverEvent(
+  id: number,
+  node: number,
+  targetNodeId: number,
+  phase: number,
+  name: string,
+  detailJson: unknown,
+): Dispatch | undefined {
   // No handle, no listeners: they lived on the handle and went with it. The
   // host's index is maintained from here and forgets a node when its element
   // is dropped, so this is the window between a handle becoming unreachable
@@ -1977,63 +1792,41 @@ function deliverEvent(id, node, targetNodeId, phase, name, detailJson) {
   return entry;
 }
 
-/**
- * @param {unknown} element
- * @param {unknown} eventName
- * @param {unknown} callback
- * @param {unknown} options
- * @returns {undefined}
- */
-export function __AddEventListener(element, eventName, callback, options) {
-  return addListener(
-    /** @type {object} */ (element),
-    eventName,
-    callback,
-    options,
-  );
+export function __AddEventListener(
+  element: unknown,
+  eventName: unknown,
+  callback: unknown,
+  options?: unknown,
+): undefined {
+  return addListener(element as Handle, eventName, callback, options);
 }
 
-/**
- * @param {unknown} element
- * @param {unknown} eventName
- * @param {unknown} callback
- * @param {unknown} options
- * @returns {undefined}
- */
-export function __RemoveEventListener(element, eventName, callback, options) {
-  return removeListener(
-    /** @type {object} */ (element),
-    eventName,
-    callback,
-    options,
-  );
+export function __RemoveEventListener(
+  element: unknown,
+  eventName: unknown,
+  callback: unknown,
+  options?: unknown,
+): undefined {
+  return removeListener(element as Handle, eventName, callback, options);
 }
 
 /**
  * Native Lynx takes the event object here, and so does this: the object is
  * minted per delivery and carries the methods, so the PAPI form is the same
  * call by another name.
- *
- * @param {unknown} event
- * @returns {undefined}
  */
-export function __StopPropagation(event) {
-  /** @type {{ stopPropagation?: () => void }} */ (event)?.stopPropagation?.();
+export function __StopPropagation(event: unknown): undefined {
+  (event as { stopPropagation?: () => void })?.stopPropagation?.();
   return undefined;
 }
 
-/**
- * @param {unknown} event
- * @returns {undefined}
- */
-export function __StopImmediatePropagation(event) {
-  /** @type {{ stopImmediatePropagation?: () => void }} */ (event)
+export function __StopImmediatePropagation(event: unknown): undefined {
+  (event as { stopImmediatePropagation?: () => void })
     ?.stopImmediatePropagation?.();
   return undefined;
 }
 
-/** @returns {undefined} */
-export function __FlushElementTree() {
+export function __FlushElementTree(): undefined {
   flushElementTree();
   return undefined;
 }

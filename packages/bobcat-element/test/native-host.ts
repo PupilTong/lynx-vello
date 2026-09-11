@@ -3,8 +3,8 @@
 // directly from Rust.
 //
 // This file is the build-time resolution target of every `bobcat-internal:host`
-// import in the suite, element-papi.mjs's included: rstest.config.ts points a
-// `NormalModuleReplacementPlugin` at it. At run time element-papi.test.js's
+// import in the suite, element-papi.ts's included: rstest.config.ts points a
+// `NormalModuleReplacementPlugin` at it. At run time element-papi.test.ts's
 // `rstest.mockRequire` shadows these exports with its own recording mock, so
 // what the tests observe is that mock — but the module still has to exist and
 // still has to carry every export the runtime imports, or resolution fails

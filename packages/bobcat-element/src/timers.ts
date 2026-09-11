@@ -1,4 +1,3 @@
-// @ts-check
 import { clearTimer, setTimer } from "bobcat-internal:host";
 
 // The realm's half of `setTimeout`, `setInterval`, `clearTimeout`, and
@@ -30,12 +29,14 @@ import { clearTimer, setTimer } from "bobcat-internal:host";
 // embedder and leaves the realm usable, which is what the standard's
 // "report the exception" step amounts to here.
 
-/**
- * @typedef {object} ScheduledTimer
- * @property {unknown} handler The realm value to call when the timer fires.
- * @property {unknown[]} args The arguments the call forwards.
- * @property {boolean} repeats Whether firing it leaves it armed.
- */
+interface ScheduledTimer {
+  /** The realm value to call when the timer fires. */
+  handler: unknown;
+  /** The arguments the call forwards. */
+  args: unknown[];
+  /** Whether firing it leaves it armed. */
+  repeats: boolean;
+}
 
 /**
  * Every timer the realm has started and not cleared, by host id.
@@ -43,19 +44,15 @@ import { clearTimer, setTimer } from "bobcat-internal:host";
  * It is also the authority on whether a timer still exists: the host takes a
  * whole batch of due timers at once, and a callback early in that batch can
  * clear one later in it, which the standard says must then not run.
- *
- * @type {Map<number, ScheduledTimer>}
  */
-const scheduled = new Map();
+const scheduled: Map<number, ScheduledTimer> = new Map();
 
-/**
- * @param {unknown} handler
- * @param {unknown} delay
- * @param {unknown[]} args
- * @param {boolean} repeats
- * @returns {number}
- */
-function start(handler, delay, args, repeats) {
+function start(
+  handler: unknown,
+  delay: unknown,
+  args: unknown[],
+  repeats: boolean,
+): number {
   // A delay that is not a number is not rejected here: the host puts every
   // one through the standard's `long` conversion, so there is one place that
   // decides what `undefined`, a negative, and a huge value mean.
@@ -64,11 +61,7 @@ function start(handler, delay, args, repeats) {
   return id;
 }
 
-/**
- * @param {unknown} id
- * @returns {undefined}
- */
-function stop(id) {
+function stop(id: unknown): undefined {
   const key = Number(id);
   if (scheduled.delete(key)) {
     clearTimer(key);
@@ -78,11 +71,8 @@ function stop(id) {
 
 /**
  * Runs the timer the host has taken from its schedule.
- *
- * @param {number} id
- * @returns {undefined}
  */
-export function __BobcatRunTimer(id) {
+export function __BobcatRunTimer(id: number): undefined {
   const timer = scheduled.get(id);
   if (timer === undefined) {
     return undefined;
@@ -93,41 +83,21 @@ export function __BobcatRunTimer(id) {
   if (!timer.repeats) {
     scheduled.delete(id);
   }
-  Reflect.apply(/** @type {Function} */ (timer.handler), undefined, timer.args);
+  Reflect.apply(timer.handler as Function, undefined, timer.args);
   return undefined;
 }
 
 Object.assign(globalThis, {
-  /**
-   * @param {unknown} handler
-   * @param {unknown} delay
-   * @param {...unknown} args
-   * @returns {number}
-   */
-  setTimeout(handler, delay, ...args) {
+  setTimeout(handler: unknown, delay: unknown, ...args: unknown[]): number {
     return start(handler, delay, args, false);
   },
-  /**
-   * @param {unknown} handler
-   * @param {unknown} delay
-   * @param {...unknown} args
-   * @returns {number}
-   */
-  setInterval(handler, delay, ...args) {
+  setInterval(handler: unknown, delay: unknown, ...args: unknown[]): number {
     return start(handler, delay, args, true);
   },
-  /**
-   * @param {unknown} id
-   * @returns {undefined}
-   */
-  clearTimeout(id) {
+  clearTimeout(id: unknown): undefined {
     return stop(id);
   },
-  /**
-   * @param {unknown} id
-   * @returns {undefined}
-   */
-  clearInterval(id) {
+  clearInterval(id: unknown): undefined {
     return stop(id);
   },
 });

@@ -1,17 +1,7 @@
 {
-  "extends": "../../tsconfig.json",
-  "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
-    "module": "ESNext",
-    "moduleDetection": "force",
-    "moduleResolution": "Bundler",
-    "types": ["node"],
-    "allowJs": true,
-    "checkJs": true,
-    "noEmit": true,
-    "declaration": false,
-    "isolatedDeclarations": false
-  },
-  "include": ["src", "test", "rstest.config.ts"]
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The QuickJS sources and the Rstest program that runs them on Node: two
+  // environments, so two programs.
+  "files": [],
+  "references": [{ "path": "src" }, { "path": "test" }]
 }
