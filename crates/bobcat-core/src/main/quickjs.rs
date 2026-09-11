@@ -142,8 +142,8 @@ impl ScriptRuntime {
 
     /// The generation as it stands right now.
     ///
-    /// A page records this at the end of every entry of its own, so the
-    /// follower watching [`Self::checkpoints`] can tell a sibling's bump —
+    /// A page records this at the end of every entry of its own, so the clock
+    /// task watching [`Self::checkpoints`] can tell a sibling's bump —
     /// which may have finished this realm's imports — from the one this
     /// realm just ran up itself.
     pub(crate) fn checkpoint_generation(&self) -> u64 {

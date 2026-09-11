@@ -75,18 +75,16 @@ impl ScriptHarness {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let mut js_runtime = ScriptRuntime::new().expect("the benchmark runtime starts");
         install_shared_modules(&mut js_runtime).expect("the shared modules register");
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients, outbox.clone())
-            .expect("the benchmark realm boots");
         let (workers, inbox) = mpsc::unbounded_channel();
-        let worker_events = runtime
-            .install_workers(
-                &mut js_runtime,
-                &WorkerFactory::new(workers),
-                outbox,
-                "bench:///main.js",
-                None,
-            )
-            .expect("the benchmark Worker bindings install");
+        let (runtime, worker_events) = MainThreadRuntime::new(
+            &mut js_runtime,
+            ingredients,
+            outbox,
+            &WorkerFactory::new(workers),
+            "bench:///main.js",
+            None,
+        )
+        .expect("the benchmark realm boots");
         Self {
             js_runtime,
             runtime,

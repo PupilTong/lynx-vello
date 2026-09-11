@@ -28,7 +28,14 @@ struct Pair {
     /// test plays the embedder, so releasing a view is something it has to
     /// spell.
     cancel: tokio_util::sync::CancellationToken,
-    home: WorkerHome,
+    /// The group's worker thread. `Option` only so a test can drop it in the
+    /// middle of its body: that is what waits for the thread, and two pins here
+    /// ask what the realm's channels hold once it has returned.
+    ///
+    /// **Last field, and it must stay last.** Fields drop in declaration order,
+    /// so the realm — whose `WorkerOwner` holds a sender on that thread — goes
+    /// before the home whose drop closes the last one and waits.
+    home: Option<WorkerHome>,
 }
 
 impl Pair {
@@ -57,23 +64,22 @@ impl Pair {
             crate::view::Viewport::new(32.0, 24.0),
             crate::main::tree::PageConfig::default(),
         );
-        let mut runtime = MainThreadRuntime::new(&mut js, ingredients, outbox.clone()).unwrap();
-        let events = runtime
-            .install_workers(
-                &mut js,
-                &WorkerFactory::new(home.commands()),
-                outbox,
-                "app:///nested/main.js",
-                background_source.map(|_| "test:bts-entry".to_owned()),
-            )
-            .unwrap();
+        let (runtime, events) = MainThreadRuntime::new(
+            &mut js,
+            ingredients,
+            outbox,
+            &WorkerFactory::new(home.commands()),
+            "app:///nested/main.js",
+            background_source.map(|_| "test:bts-entry".to_owned()),
+        )
+        .unwrap();
         Self {
             runtime: Some(runtime),
             js,
             events,
             view,
             cancel,
-            home,
+            home: Some(home),
         }
     }
 
@@ -151,13 +157,6 @@ impl Pair {
                 "asserting Worker behavior",
             )
             .unwrap();
-    }
-}
-
-impl Drop for Pair {
-    fn drop(&mut self) {
-        drop(self.runtime.take());
-        self.home.join();
     }
 }
 
@@ -586,7 +585,7 @@ fn dropping_the_view_cancels_io_without_keeping_the_worker_thread_alive() {
     // and this must finish even though the host is still holding the
     // completion.
     drop(pair.runtime.take());
-    pair.home.join();
+    drop(pair.home.take());
     assert!(
         completion.is_cancelled(),
         "nobody is waiting for this script any more"
@@ -938,6 +937,6 @@ fn a_rejected_main_entry_never_starts_its_background_context() {
     assert!(error.to_string().contains("main entry rejected"));
     assert!(!asked_for_a_worker(&pair.notices()));
     drop(pair.runtime.take());
-    pair.home.join();
+    drop(pair.home.take());
     assert!(pair.events.try_recv().is_err());
 }

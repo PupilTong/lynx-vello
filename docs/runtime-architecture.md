@@ -341,8 +341,8 @@ and has exactly one wait of its own — the view's end; `boot_page` requests the
 sheets in cascade order, then the entry, then opens the realm; `consume_commands`
 is the one ordered consumer of the command channel; `consume_worker_events` is
 the one ordered consumer of this view's workers; one `load_module` future runs
-per resource load an import produced; `wait_timers` owns the realm's one pinned
-sleep; `follow_checkpoints` watches the runtime-wide checkpoint generation.
+per resource load an import produced; `serve_clock` owns the realm's one pinned
+sleep and watches the runtime-wide checkpoint generation.
 Nothing is spawned per input: an ordered stream stays serial because one
 consumer reads it with `while let Some(x) = rx.recv().await`.
 
@@ -364,24 +364,26 @@ one acknowledgement rather than one of each per command.
 That checkpoint watch is a runtime-wide `u64` bumped inside
 `ScriptEngine::checkpoint`. The promise-job queue belongs to the runtime rather
 than to any realm, so a view whose import finished inside a *sibling's* entry
-into JavaScript has to settle what its own realm owes; `follow_checkpoints` is
-how it learns to, and comparing the generation against the one the epilogue
-recorded is what keeps a page's own entries from waking it.
+into JavaScript has to settle what its own realm owes; the checkpoint arm of
+`serve_clock` is how it learns to, and comparing the generation against the one
+the epilogue recorded is what keeps a page's own entries from waking it.
 
 An end is one signal rather than a message anything has to race. A view and a
 worker are both built from `lifetime.rs`'s `Lifetime`: the `JoinSet` holding
-that object's tasks, the `CancellationToken` that ends them, and a thread-local
-latch. `Page::end` — the command channel closing, a cancelled load, a fatal
-failure, a panic in any task — sets the latch synchronously, cancels the token,
-acknowledges whatever `BeginFrame` was pending so a blocked painter is released,
-and publishes no deadline. Every entry point returns at once when the latch is
-set; the owner, whose one wait is the token versus the next task to finish, then
-mirrors a cancellation that came from another thread onto that latch, aborts and
-awaits every task of the view — which is what makes it the last owner of the
-page — and drops the realm. Why a view ended is recorded nowhere: what the
-embedder was told is whatever was reported before the end, and a release is the
-token having been cancelled from outside. A panic is the one end that still owes
-a report, and the payload rides the `JoinError` the set yields.
+that object's tasks, the `CancellationToken` that ends them, a thread-local
+latch, and the deadline and checkpoint generation that object's one
+`serve_clock` task reads. `Page::end` — the command channel closing, a cancelled
+load, a fatal failure, a panic in any task — sets the latch synchronously,
+cancels the token, withdraws the armed deadline, and acknowledges whatever
+`BeginFrame` was pending so a blocked painter is released. Every entry point
+returns at once when the latch is set; the owner, whose one wait is the token
+versus the next task to finish, then mirrors a cancellation that came from
+another thread onto that latch, aborts and awaits every task of the view — which
+is what makes it the last owner of the page — and drops the realm. Why a view
+ended is recorded nowhere: what the embedder was told is whatever was reported
+before the end, and a release is the token having been cancelled from outside. A
+panic is the one end that still owes a report, and the payload rides the
+`JoinError` the set yields.
 
 ## Public and private boundaries
 

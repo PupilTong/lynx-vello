@@ -226,6 +226,18 @@ impl WorkerOwner {
         }
     }
 
+    /// Tells the embedder that one of this realm's workers threw or could not
+    /// be started.
+    ///
+    /// Reported from here because this is the realm's side of its workers: a
+    /// `WorkerFailed` is the only lifecycle event a worker produces, and the
+    /// outbox it goes out on is the one this side already holds for asking the
+    /// host to fetch a worker's script.
+    pub(super) fn report_failure(&self, error: ScriptError) {
+        self.outbox
+            .engine_event(crate::EngineEvent::WorkerFailed(error));
+    }
+
     /// Drops what this side kept of a worker that ended on its own — it
     /// called `close()`, or its script or realm failed — so `live` goes on
     /// naming only the workers still running and the `Drop` above sends no

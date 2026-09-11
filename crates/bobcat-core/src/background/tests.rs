@@ -30,8 +30,8 @@ impl WorkerHome {
             .spawn(move || super::thread::run_with_entry(receiver, entry))
             .unwrap();
         Self {
-            commands: Some(commands),
-            thread: Some(thread),
+            commands,
+            thread: crate::threads::ThreadJoin::new(thread),
         }
     }
 }
@@ -87,6 +87,10 @@ impl View {
 
 /// One group's worker thread, with the test on both of its ends.
 struct Group {
+    /// The thread itself, waited for by its own drop — which is reached with
+    /// the goodbye already said, because [`Drop for Group`](Group::drop) drops
+    /// the test's own sender and every view before any field drops.
+    #[expect(dead_code, reason = "held to end and wait for the worker thread")]
     home: WorkerHome,
     commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
     views: Vec<View>,
@@ -235,10 +239,11 @@ impl Group {
 impl Drop for Group {
     fn drop(&mut self) {
         // The group's own goodbye, which a test has no reason to spell: every
-        // realm is gone, so every worker's own channel is too.
+        // realm is gone, so every worker's own channel is too. The home's own
+        // sender is the last one, and it closes — and the thread is waited for
+        // — as this struct's fields drop behind this body.
         self.views.clear();
         drop(self.commands.take());
-        self.home.join();
     }
 }
 

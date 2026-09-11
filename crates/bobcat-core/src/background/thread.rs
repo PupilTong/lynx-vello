@@ -7,14 +7,14 @@
 //! each thing it can wait for is a task of its own, and tokio is what polls,
 //! parks and wakes them. An owner ([`serve_worker`]) waits only for the end;
 //! [`boot_worker`] waits for the script; [`consume_messages`] is the one
-//! ordered consumer of what is posted; [`wait_timers`] owns this realm's one
-//! pinned sleep; [`follow_checkpoints`] watches the runtime-wide checkpoint
-//! generation, because the job queue every worker realm here drains is the
-//! runtime's and a sibling's entry can finish this realm's jobs. Every one of
-//! them reaches the realm through [`Worker::enter`], which runs one
-//! synchronous operation and then settles what it left owing: the timers that
-//! came due, a `close()` it may have called, the next deadline, and the
-//! checkpoint generation as of that entry.
+//! ordered consumer of what is posted; [`serve_clock`] owns this realm's one
+//! pinned sleep and watches the runtime-wide checkpoint generation, because the
+//! job queue every worker realm here drains is the runtime's and a sibling's
+//! entry can finish this realm's jobs. Every one of them reaches the realm
+//! through [`Worker::enter`], which runs one synchronous operation and then
+//! settles what it left owing: the timers that came due, a `close()` it may
+//! have called, the next deadline, and the checkpoint generation as of that
+//! entry.
 //!
 //! A worker's tasks, the token that ends them and the latch this thread reads
 //! are one [`Lifetime`], the same helper a view on `bobcat-main` is built
@@ -29,8 +29,9 @@
 //! versus the next task of that worker to finish. Each [`boot_worker`] has a
 //! pre-boot wait of its own, on the script versus a `Terminate` that must win
 //! or a parent view that was released, which is one task's three-source wait
-//! rather than a scheduler. Each live worker realm has one [`wait_timers`],
-//! waiting on its deadline versus the re-arm that moves it.
+//! rather than a scheduler. Each live worker realm has one [`serve_clock`],
+//! waiting on its deadline, the re-arm that moves it, and a sibling's
+//! checkpoint.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -47,8 +48,7 @@ use super::scope::{
     worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
-use crate::clock::ClockInstant;
-use crate::lifetime::Lifetime;
+use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::resource::LoadedSource;
 use crate::script::ScriptError;
@@ -185,15 +185,12 @@ struct Worker {
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
     state: RefCell<WorkerState>,
-    /// This realm's earliest armed timer, for [`wait_timers`].
-    deadline: watch::Sender<Option<ClockInstant>>,
-    /// The runtime-wide checkpoint generation as of this worker's own last
-    /// entry, which is what lets [`follow_checkpoints`] ignore its own bumps.
-    own_checkpoint: Cell<u64>,
-    /// Every task of this worker, the token that ends them, and the latch this
-    /// thread reads. The token is a child of the creating view's, so a
-    /// released view is what ends this worker when nothing said so.
-    lifetime: Rc<Lifetime>,
+    /// Every task of this worker, the token that ends them, the latch this
+    /// thread reads, and the two numbers this realm's clock task waits on — the
+    /// deadline it armed and the generation its own last entry recorded. The
+    /// token is a child of the creating view's, so a released view is what ends
+    /// this worker when nothing said so.
+    lifetime: Lifetime,
     /// Whether this worker has already been told why it is over. The first
     /// report wins, so a `Failed` and a `Closed` cannot both arrive. A panic
     /// has a latch of its own on the lifetime.
@@ -216,8 +213,6 @@ impl Worker {
             key,
             events,
             state: RefCell::new(WorkerState::Loading),
-            deadline: watch::channel(None).0,
-            own_checkpoint: Cell::new(0),
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             #[cfg(test)]
@@ -227,12 +222,12 @@ impl Worker {
 
     /// Starts one more task of this worker.
     ///
-    /// A panic anywhere in it ends the worker during the unwind — the guard is
-    /// this worker's rather than the lifetime's because the deadline the end
-    /// withdraws is this worker's — and the owner turns the payload the
-    /// lifetime hands it into the `Failed` the creating view hears.
+    /// A panic anywhere in it ends the worker during the unwind — the guard
+    /// holds this worker, so a sibling polled before the owner already finds it
+    /// ended — and the owner turns the payload the lifetime hands it into the
+    /// `Failed` the creating view hears.
     fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
-        let guard = EndOnUnwind(Rc::clone(self));
+        let guard = EndOnUnwind::new(self);
         self.lifetime.spawn(async move {
             let _guard = guard;
             future.await;
@@ -242,14 +237,11 @@ impl Worker {
     /// Ends this worker, once. `true` for the call that did it.
     ///
     /// The owner calls it after its wait too, which is how a cancellation from
-    /// the creating view's thread reaches this thread's latch.
+    /// the creating view's thread reaches this thread's latch. A worker owes an
+    /// end nothing a view does not, so this is the lifetime's own end — the
+    /// deadline it had armed is withdrawn there.
     fn end(&self) -> bool {
-        if !self.lifetime.end() {
-            return false;
-        }
-        self.deadline
-            .send_if_modified(|deadline| deadline.take().is_some());
-        true
+        self.lifetime.end()
     }
 
     fn ended(&self) -> bool {
@@ -336,21 +328,14 @@ impl Worker {
             self.end();
             return;
         }
-        let deadline = realm.timers.next_deadline();
-        self.deadline.send_if_modified(|armed| {
-            if *armed == deadline {
-                return false;
-            }
-            *armed = deadline;
-            true
-        });
+        self.lifetime.arm_deadline(realm.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
         // one it started from.
-        self.own_checkpoint.set(js.checkpoint_generation());
+        self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
 
     /// Builds this worker's realm and runs its script in it, and answers with
-    /// the checkpoint receiver its follower will watch. `None` is what leaves
+    /// the checkpoint receiver its clock task will watch. `None` is what leaves
     /// no worker at all — a runtime that never came up, a realm that could not
     /// be created or furnished, or a worker that ended before it booted.
     ///
@@ -385,11 +370,11 @@ impl Worker {
                         report(&self.events, self.key, "running the worker's script", error);
                     }
                     // Both under the borrow the script ran under, so a
-                    // sibling's bump between this boot and the follower's
+                    // sibling's bump between this boot and the clock task's
                     // first poll is neither lost nor mistaken for this
                     // worker's own.
                     let checkpoints = js.checkpoints();
-                    self.own_checkpoint.set(js.checkpoint_generation());
+                    self.lifetime.record_checkpoint(js.checkpoint_generation());
                     (realm, checkpoints)
                 }),
             }
@@ -437,18 +422,18 @@ impl Worker {
     }
 }
 
-/// Ends the worker if the task it guards is unwinding.
-///
-/// The payload is not reachable from a `Drop`, so the report stays the
-/// owner's, out of the `JoinError` the lifetime yields; what runs here is the
-/// end itself, so a sibling polled before the owner already finds it.
-struct EndOnUnwind(Rc<Worker>);
+/// What this worker's clock task and its unwind guard reach it through.
+impl Settles for Worker {
+    fn lifetime(&self) -> &Lifetime {
+        &self.lifetime
+    }
 
-impl Drop for EndOnUnwind {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.end();
-        }
+    fn settle(owner: &Rc<Self>) {
+        owner.settle();
+    }
+
+    fn end(owner: &Rc<Self>) {
+        owner.end();
     }
 }
 
@@ -545,8 +530,11 @@ async fn boot_worker(
         return;
     }
     worker.spawn(consume_messages(Rc::clone(&worker), messages));
-    worker.spawn(wait_timers(Rc::clone(&worker), worker.deadline.subscribe()));
-    worker.spawn(follow_checkpoints(Rc::clone(&worker), checkpoints));
+    worker.spawn(serve_clock(
+        Rc::clone(&worker),
+        worker.lifetime.deadlines(),
+        checkpoints,
+    ));
 }
 
 /// The one ordered consumer of what is posted to this worker.
@@ -565,70 +553,6 @@ async fn consume_messages(
         }
     }
     worker.end();
-}
-
-/// This realm's one wait on its own clock.
-///
-/// The `select!` is this task's own wait — a deadline, or the re-arm that
-/// moves it — and dispatches nothing: the worker's epilogue is what fires the
-/// timers a passed deadline named. One `Sleep` for the whole task, re-armed
-/// only when the deadline moved, because a `Sleep` registers with the
-/// platform's timer on its first poll.
-async fn wait_timers(worker: Rc<Worker>, mut deadlines: watch::Receiver<Option<ClockInstant>>) {
-    let mut armed: Option<ClockInstant> = None;
-    let mut sleep = std::pin::pin!(crate::clock::sleep_until(ClockInstant::now()));
-    loop {
-        if worker.ended() {
-            return;
-        }
-        let deadline = *deadlines.borrow_and_update();
-        if deadline != armed {
-            if let Some(deadline) = deadline {
-                sleep.set(crate::clock::sleep_until(deadline));
-            }
-            armed = deadline;
-        }
-        match armed {
-            None => {
-                if deadlines.changed().await.is_err() {
-                    return;
-                }
-            }
-            Some(_) => {
-                tokio::select! {
-                    () = &mut sleep => {
-                        // Consumed: the next turn arms a wait of its own
-                        // rather than polling this one again.
-                        armed = None;
-                        worker.settle();
-                    }
-                    changed = deadlines.changed() => if changed.is_err() { return },
-                }
-            }
-        }
-    }
-}
-
-/// Watches the runtime-wide checkpoint generation for a sibling worker's entry
-/// into JavaScript.
-///
-/// Every worker realm on this thread shares one runtime, so it shares one
-/// promise-job queue: a sibling's checkpoint drains this realm's jobs too, and
-/// a continuation of this worker's can therefore run inside an entry that had
-/// nothing to do with it. What that continuation arms is a deadline only this
-/// worker's epilogue publishes, so without this task the sleep in
-/// [`wait_timers`] would never be told to move. Equality with this worker's own
-/// generation is what keeps its own entries from waking it.
-async fn follow_checkpoints(worker: Rc<Worker>, mut checkpoints: watch::Receiver<u64>) {
-    while checkpoints.changed().await.is_ok() {
-        if worker.ended() {
-            return;
-        }
-        if *checkpoints.borrow_and_update() == worker.own_checkpoint.get() {
-            continue;
-        }
-        worker.settle();
-    }
 }
 
 /// The script and the URL it is named by, or why there is neither.
@@ -798,8 +722,8 @@ mod tests {
 
     /// A sibling worker's entry drains the promise-job queue every realm on
     /// this runtime shares, so this worker has to settle what its own realm
-    /// owes. Its follower is what tells it to: without one, the only thing
-    /// that could is an entry of its own.
+    /// owes. Its clock task's checkpoint arm is what tells it to: without that
+    /// arm, the only thing that could is an entry of its own.
     #[test]
     fn a_sibling_workers_entry_settles_this_worker() {
         let runtime = tokio::runtime::Builder::new_current_thread()

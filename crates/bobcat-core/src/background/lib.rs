@@ -82,7 +82,7 @@ use wasm_thread::Builder as ThreadBuilder;
 
 use crate::resource::LoadedSource;
 use crate::script::ScriptError;
-use crate::threads::{self, JoinHandle};
+use crate::threads::ThreadJoin;
 use crate::view::{EngineError, LynxViewError};
 
 /// Names one `Worker` for the life of its group.
@@ -177,11 +177,15 @@ pub(crate) enum WorkerPayload {
 /// them is `bobcat-main`'s, which is the whole of what that thread has of this
 /// one: there is no shared state to guard, so there is no lock, no atomic and
 /// no handle to pass around.
+///
+/// **The field order is the teardown, and it must stay in this order.** Fields
+/// drop in declaration order, so the goodbye — this side's last sender closing
+/// the thread's inbox — is said before the join below waits for the thread to
+/// answer it. A wait reached with a sender still alive would never return.
 pub(crate) struct WorkerHome {
-    /// `None` once the goodbye has been said, which is what dropping the last
-    /// sender is.
-    commands: Option<mpsc::UnboundedSender<WorkerCommand>>,
-    thread: Option<JoinHandle>,
+    commands: mpsc::UnboundedSender<WorkerCommand>,
+    #[expect(dead_code, reason = "held to wait for the worker thread on drop")]
+    thread: ThreadJoin,
 }
 
 impl WorkerHome {
@@ -207,41 +211,13 @@ impl WorkerHome {
                 message: error.to_string(),
             })?;
         Ok(Self {
-            commands: Some(commands),
-            thread: Some(thread),
+            commands,
+            thread: ThreadJoin::new(thread),
         })
     }
 
     /// The sending end, for anything that names a worker.
     pub(crate) fn commands(&self) -> mpsc::UnboundedSender<WorkerCommand> {
-        self.commands
-            .clone()
-            .expect("a group hands out senders until it is dropped")
-    }
-
-    /// Ends the thread and waits for it.
-    ///
-    /// The goodbye *is* dropping the last sender, so it is taken here rather
-    /// than left to the field's own drop: a wait reachable with the sender
-    /// still alive would never return. This one is the last only once
-    /// `bobcat-main` has returned and taken its own with it, which is why the
-    /// group joins that thread first.
-    pub(crate) fn join(&mut self) {
-        drop(self.commands.take());
-        if let Some(thread) = self.thread.take() {
-            threads::join(thread);
-        }
-    }
-}
-
-impl Drop for WorkerHome {
-    /// The join is idempotent, and this is what makes it unconditional: a
-    /// group that fails between starting this thread and serving its first
-    /// view — a `bobcat-main` that would not spawn, or an embedder that
-    /// dropped the handle before the startup answer reached it — still ends
-    /// `bobcat-workers` and waits for it, rather than leaving a thread parked
-    /// on a channel nobody holds.
-    fn drop(&mut self) {
-        self.join();
+        self.commands.clone()
     }
 }

@@ -181,13 +181,13 @@ useful signal for currently-compatible versions of those libraries.
   engine only decides which page operation a ready task calls. A view's tasks
   are its owner (`serve_view`, whose one wait is the view's end), its boot
   future, one ordered consumer of the command channel, one ordered consumer of
-  its workers' events, one future per resource load an import produced, one
-  waiter on its realm's next timer deadline, and one follower of the
-  runtime-wide checkpoint generation; a `Worker` realm on `bobcat-workers`
-  has the same shape minus the document. Nothing is spawned per input: an
-  ordered stream stays serial because one consumer reads it with `while let
-  Some(x) = rx.recv().await`. Every one of those tasks reaches the realm
-  through one boundary, `main/page.rs`'s `Page::enter`, which runs one
+  its workers' events, one future per resource load an import produced, and one
+  clock task (`lifetime.rs`'s `serve_clock`) waiting on its realm's next timer
+  deadline and on the runtime-wide checkpoint generation; a `Worker` realm on
+  `bobcat-workers` has the same shape minus the document. Nothing is spawned
+  per input: an ordered stream stays serial because one consumer reads it with
+  `while let Some(x) = rx.recv().await`. Every one of those tasks reaches the
+  realm through one boundary, `main/page.rs`'s `Page::enter`, which runs one
   synchronous operation under the borrows of the shared runtime and the realm
   and then the epilogue that operation left owing, in this order: the timers
   that came due, the commit, the boot report once, the `BeginFrame`
@@ -332,10 +332,10 @@ useful signal for currently-compatible versions of those libraries.
   collection every `REMOVALS_PER_COLLECTION` removals frees what they named.
   Release is the view's task ending: dropping the `LynxView` closes its command
   channel, the task returns, and `MainThreadRuntime`'s fields drop in
-  declaration order — its one `realm` field first, which holds everything that
-  names this realm (the `ScriptEngine` and the two retained `Value`s, each of
-  which carries an `Rc` of the context, so the realm is freed when the last of
-  the three goes rather than when the engine alone does) and so is what frees
+  declaration order — everything that names this realm first (the
+  `ScriptEngine` and the two retained `Value`s, each of which carries an `Rc` of
+  the context, so the realm is freed when the last of the three goes rather than
+  when the engine alone does), and so is what frees
   the realm together
   with the host functions it held and their clones of the slot, and the
   runtime's own `slot` handle after it, which is when the `LynxDocument` drops.
@@ -429,7 +429,7 @@ useful signal for currently-compatible versions of those libraries.
   is the narrower fact, answered for any target, that an offscreen host with
   no display to pace against asks instead. **A realm timer is not the host's
   to wait out**: every live realm — a view's and a worker's alike — has a
-  `wait_timers` task of its own holding one pinned sleep on that realm's next
+  `serve_clock` task of its own holding one pinned sleep on that realm's next
   deadline, re-armed only when the deadline moves and fed by the watch that
   realm's epilogue publishes, and
   the commit its firing produces wakes the host like any other publication.

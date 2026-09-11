@@ -105,18 +105,16 @@ fn runtime_over_watching_names(
     let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
-    let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients, outbox.clone())
-        .expect("main-thread runtime");
     let (workers, inbox) = mpsc::unbounded_channel();
-    let worker_events = runtime
-        .install_workers(
-            &mut js_runtime,
-            &WorkerFactory::new(workers),
-            outbox,
-            "app:///main.js",
-            None,
-        )
-        .unwrap();
+    let (runtime, worker_events) = MainThreadRuntime::new(
+        &mut js_runtime,
+        ingredients,
+        outbox,
+        &WorkerFactory::new(workers),
+        "app:///main.js",
+        None,
+    )
+    .expect("main-thread runtime");
     let probe = DocumentProbe {
         slot: Rc::clone(&runtime.slot),
         _workers: inbox,
@@ -142,11 +140,15 @@ fn two_view_group() -> (
     let workers = WorkerFactory::new(workers);
     for _ in 0..2 {
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
-        let mut runtime = MainThreadRuntime::new(&mut js_runtime, ingredients(), outbox.clone())
-            .expect("main-thread runtime");
-        let worker_events = runtime
-            .install_workers(&mut js_runtime, &workers, outbox, "app:///main.js", None)
-            .unwrap();
+        let (runtime, worker_events) = MainThreadRuntime::new(
+            &mut js_runtime,
+            ingredients(),
+            outbox,
+            &workers,
+            "app:///main.js",
+            None,
+        )
+        .expect("main-thread runtime");
         ends.views.push(far_end);
         ends.worker_events.push(worker_events);
         views.push(runtime);
@@ -176,27 +178,18 @@ fn initial_values_stay_with_their_view_without_changing_boot() {
     second
         .prepare_initial_data(None, Some(&serde_json::Value::Null))
         .unwrap();
-    first.realm.engine.collect_garbage(&mut js).unwrap();
+    first.engine.collect_garbage(&mut js).unwrap();
+    assert_eq!(first.init_data.as_ref().unwrap().as_number(), Some(42.0));
     assert_eq!(
-        first.realm.init_data.as_ref().unwrap().as_number(),
-        Some(42.0)
-    );
-    assert_eq!(
-        first
-            .realm
-            .global_props
-            .as_ref()
-            .unwrap()
-            .to_utf16()
-            .unwrap(),
+        first.global_props.as_ref().unwrap().to_utf16().unwrap(),
         "中文".encode_utf16().collect::<Vec<_>>()
     );
     assert_eq!(
-        second.realm.init_data.as_ref().unwrap().kind(),
+        second.init_data.as_ref().unwrap().kind(),
         quickjs_rust_bridge::ValueKind::Undefined
     );
     assert_eq!(
-        second.realm.global_props.as_ref().unwrap().kind(),
+        second.global_props.as_ref().unwrap().kind(),
         quickjs_rust_bridge::ValueKind::Null
     );
     first
