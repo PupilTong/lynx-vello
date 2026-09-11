@@ -215,6 +215,16 @@ impl DocumentIngredients {
     }
 }
 
+/// The host's page data, as the JSON text the view was given.
+///
+/// Nothing on this side reads it. The realm takes each piece through a host
+/// member of its own, and `bobcat:runtime` parses it there.
+#[derive(Default)]
+pub(crate) struct PageData {
+    pub(crate) init_data: Option<String>,
+    pub(crate) global_props: Option<String>,
+}
+
 /// The realm's document and the ingredients it is built out of, plus the
 /// publish seam its commits leave through.
 ///
@@ -496,9 +506,7 @@ impl EventState {
 /// Everything that holds an `Rc` of this realm's JavaScript context is declared
 /// before `slot`, so the realm is freed — and with it every host function and
 /// its own clone of that `Rc` — before the `LynxDocument` those functions could
-/// name. JavaScript first, then the Rust object it named. A `Value` holds a
-/// context handle as much as the engine does, which is why `init_data` and
-/// `global_props` are part of that rule rather than incidental to it.
+/// name. JavaScript first, then the Rust object it named.
 ///
 /// `workers` is declared after all of those handles for a different reason: the
 /// last clone of it going is what sends each live worker its `Terminate`, and
@@ -506,12 +514,6 @@ impl EventState {
 /// worker is gone.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
-    /// Retained in this realm for the subsequent boot/lynx integration.
-    /// Written by [`Self::prepare_initial_data`] and read by nothing yet.
-    /// `None` until startup prepares them; an omitted host input becomes
-    /// JavaScript `undefined`.
-    init_data: Option<quickjs_rust_bridge::Value>,
-    global_props: Option<quickjs_rust_bridge::Value>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -552,6 +554,7 @@ impl MainThreadRuntime {
         workers: &super::workers::WorkerFactory,
         base_url: &str,
         background_entry: Option<String>,
+        page_data: PageData,
     ) -> Result<
         (
             Self,
@@ -573,14 +576,13 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
+        install_page_data(&mut engine, js_runtime, page_data)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
-                init_data: None,
-                global_props: None,
                 workers,
                 slot,
                 events,
@@ -589,23 +591,6 @@ impl MainThreadRuntime {
             },
             incoming,
         ))
-    }
-
-    pub(super) fn prepare_initial_data(
-        &mut self,
-        init_data: Option<&serde_json::Value>,
-        global_props: Option<&serde_json::Value>,
-    ) -> Result<(), MainThreadError> {
-        let init_data = self
-            .engine
-            .json_value(init_data)
-            .map_err(|error| MainThreadError::from_engine("converting initial page data", error))?;
-        let global_props = self.engine.json_value(global_props).map_err(|error| {
-            MainThreadError::from_engine("converting initial global properties", error)
-        })?;
-        self.init_data = Some(init_data);
-        self.global_props = Some(global_props);
-        Ok(())
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -857,7 +842,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -872,7 +857,7 @@ await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
-let data = undefined;
+let data = __BobcatInitData;
 if (typeof globalThis.processData === "function") {{
   data = globalThis.processData(data);
 }}
@@ -1211,6 +1196,29 @@ fn install_document_members(
         Ok(HostValue::Undefined)
     })?;
 
+    Ok(())
+}
+
+/// Installs `initData` and `globalProps`, which hand the realm the host's page
+/// data as the strings the view was given — `undefined` for one it was not.
+///
+/// Each hands its string over once and keeps nothing: the one call is
+/// `bobcat:runtime` evaluating, which parses both. Neither touches the
+/// document, so both answer before `createDocument` has run.
+fn install_page_data(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    page_data: PageData,
+) -> Result<(), MainThreadError> {
+    let PageData {
+        init_data,
+        global_props,
+    } = page_data;
+    for (name, mut json) in [("initData", init_data), ("globalProps", global_props)] {
+        install(engine, js_runtime, name, 0, move |_arguments| {
+            Ok(json.take().map_or(HostValue::Undefined, HostValue::String))
+        })?;
+    }
     Ok(())
 }
 

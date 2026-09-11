@@ -344,9 +344,9 @@ impl StyleThreads {
 /// It carries no resource system either, and has no field that could hold
 /// one: the host's fetcher belongs to the view, is passed to
 /// [`LynxGroup::create_lynx_view`] separately, and stays on that thread.
-/// Construction splits this in two — the document inputs cross to
-/// `bobcat-main`, including the specifiers it requests from the view's
-/// resource fetcher as startup proceeds.
+/// So every field here crosses to `bobcat-main`, and construction sends the
+/// whole value: the view's task there stages the document inputs and requests
+/// the specifiers from the view's resource fetcher as startup proceeds.
 #[derive(Debug)]
 pub struct ViewSources {
     pub config: PageConfig,
@@ -358,27 +358,16 @@ pub struct ViewSources {
     /// The view always starts a BTS context; without this it runs only the
     /// built-in environment. Application module loading is not implemented yet.
     pub background_entry: Option<String>,
-    /// Initial page data. `None` becomes JavaScript `undefined`; JSON `null`
-    /// remains `null`. Converted in the view's realm, but not yet passed to boot.
-    /// Numbers use JavaScript `Number` semantics, so large integers can round.
-    pub init_data: Option<serde_json::Value>,
-    /// Initial global properties, converted like [`Self::init_data`].
-    /// Installing these on `lynx` is not yet wired.
-    pub global_props: Option<serde_json::Value>,
-}
-
-/// The document half of [`ViewSources`]: what crosses to `bobcat-main` for
-/// this view in particular, as opposed to the group's script runtime and
-/// style pool, which every document on that thread shares.
-pub(crate) struct MainSources {
-    pub(crate) config: PageConfig,
-    pub(crate) fonts: Vec<FontBlob>,
-    pub(crate) default_font_family: Option<String>,
-    pub(crate) style_sheets: Vec<String>,
-    pub(crate) entry: String,
-    pub(crate) background_entry: Option<String>,
-    pub(crate) init_data: Option<serde_json::Value>,
-    pub(crate) global_props: Option<serde_json::Value>,
+    /// Initial page data, as JSON text. The engine hands it to the view's
+    /// realm unread, as a plain string; `bobcat:runtime` parses it there and
+    /// boot passes it to `processData`. `None` is `{}`, which is what web-core
+    /// gives a page that was handed none, and text that is not JSON fails boot
+    /// with [`EngineEvent::StartupFailed`].
+    pub init_data: Option<String>,
+    /// Initial global properties, as JSON text handed over like
+    /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
+    /// the entry's `__globalProps` before the entry loads.
+    pub global_props: Option<String>,
 }
 
 impl ViewSources {
@@ -548,17 +537,6 @@ impl LynxGroup {
         // attaches imposes its own.
         FrameSize::for_viewport(width, height, device_pixel_ratio)?;
         let viewport = Viewport::new(width, height).with_device_pixel_ratio(device_pixel_ratio);
-        // Main owns source ordering; the view owns the fetcher.
-        let ViewSources {
-            config,
-            fonts,
-            default_font_family,
-            style_sheets,
-            entry,
-            background_entry,
-            init_data,
-            global_props,
-        } = sources;
         // One view, one set of channels and one end signal: nothing here is
         // shared with a sibling, so nothing has to be addressed or deferred.
         // The token is minted here because the embedder's own thread is where
@@ -572,16 +550,8 @@ impl LynxGroup {
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
-                sources: MainSources {
-                    config,
-                    fonts,
-                    default_font_family,
-                    style_sheets,
-                    entry,
-                    background_entry,
-                    init_data,
-                    global_props,
-                },
+                // Main owns source ordering; the view owns the fetcher.
+                sources,
                 commands: command_receiver,
                 notices,
                 frames,
@@ -881,7 +851,7 @@ pub(crate) enum GroupCommand {
 /// group, and so wakes one event loop.
 pub(crate) struct ViewAttachment {
     pub(crate) viewport: Viewport,
-    pub(crate) sources: MainSources,
+    pub(crate) sources: ViewSources,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
     pub(crate) notices: mpsc::UnboundedSender<ViewNotice>,
     pub(crate) frames: watch::Sender<Published>,

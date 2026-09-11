@@ -20,7 +20,7 @@ use crate::link::{DetachedView, detached_outbox};
 use crate::main::WorkerFactory;
 use crate::main::quickjs::ScriptRuntime;
 use crate::main::runtime::{
-    DocumentIngredients, MainThreadRuntime, entry_module_source, install_shared_modules,
+    DocumentIngredients, MainThreadRuntime, PageData, entry_module_source, install_shared_modules,
 };
 use crate::main::tree::{LynxDocument, PageConfig, Viewport};
 use crate::view::NoWakeup;
@@ -83,6 +83,7 @@ impl ScriptHarness {
             &WorkerFactory::new(workers),
             "bench:///main.js",
             None,
+            PageData::default(),
         )
         .expect("the benchmark realm boots");
         Self {

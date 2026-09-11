@@ -95,7 +95,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
-use super::runtime::{DocumentIngredients, MainThreadRuntime};
+use super::runtime::{DocumentIngredients, MainThreadRuntime, PageData};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
@@ -104,7 +104,7 @@ use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
-use crate::view::{EngineEvent, LynxViewError, MainSources, Viewport};
+use crate::view::{EngineEvent, LynxViewError, ViewSources, Viewport};
 
 /// What the page is, which is the only thing that decides what a command can
 /// do to it.
@@ -167,8 +167,9 @@ struct BootSources {
     style_sheets: Vec<String>,
     entry: String,
     background_entry: Option<String>,
-    init_data: Option<serde_json::Value>,
-    global_props: Option<serde_json::Value>,
+    /// The host's page data, as JSON text only the realm reads.
+    init_data: Option<String>,
+    global_props: Option<String>,
 }
 
 impl Page {
@@ -512,8 +513,8 @@ impl Page {
         self: &Rc<Self>,
         source: &str,
         url: &str,
-        init_data: Option<&serde_json::Value>,
-        global_props: Option<&serde_json::Value>,
+        init_data: Option<String>,
+        global_props: Option<String>,
         background_entry: Option<String>,
     ) {
         // A view that has already ended builds no realm and runs no entry:
@@ -539,18 +540,16 @@ impl Page {
                 &self.context.workers,
                 url,
                 background_entry,
+                PageData {
+                    init_data,
+                    global_props,
+                },
             ) {
                 Ok(opened) => opened,
                 Err(error) => return Some(Err(error.into_script_error().into())),
             };
             // The flag is written from the embedder's own thread, so it can
             // change between two statements of this stretch.
-            if self.outbox.is_cancelled() {
-                return None;
-            }
-            if let Err(error) = runtime.prepare_initial_data(init_data, global_props) {
-                return Some(Err(error.into_script_error().into()));
-            }
             if self.outbox.is_cancelled() {
                 return None;
             }
@@ -699,7 +698,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // for a turn of its own, and every worker this view created — each
     // holding a child of this token — must wake and end.
     let _cancel = cancel.clone().drop_guard();
-    let MainSources {
+    let ViewSources {
         config,
         fonts,
         default_font_family,
@@ -847,13 +846,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         page.end();
         return;
     }
-    page.open_realm(
-        &source,
-        &url,
-        init_data.as_ref(),
-        global_props.as_ref(),
-        background_entry,
-    );
+    page.open_realm(&source, &url, init_data, global_props, background_entry);
 }
 
 /// One resource load an import produced.

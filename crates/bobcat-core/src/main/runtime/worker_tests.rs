@@ -71,6 +71,7 @@ impl Pair {
             &WorkerFactory::new(home.commands()),
             "app:///nested/main.js",
             background_source.map(|_| "test:bts-entry".to_owned()),
+            PageData::default(),
         )
         .unwrap();
         Self {

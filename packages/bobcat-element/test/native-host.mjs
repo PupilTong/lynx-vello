@@ -38,3 +38,5 @@ export const disableEventListener = native.disableEventListener;
 export const stopPropagation = native.stopPropagation;
 export const setTimer = native.setTimer;
 export const clearTimer = native.clearTimer;
+export const initData = native.initData;
+export const globalProps = native.globalProps;

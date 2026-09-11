@@ -113,6 +113,7 @@ fn runtime_over_watching_names(
         &WorkerFactory::new(workers),
         "app:///main.js",
         None,
+        PageData::default(),
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -131,6 +132,18 @@ fn two_view_group() -> (
     MainThreadRuntime,
     GroupFarEnds,
 ) {
+    two_view_group_with([PageData::default(), PageData::default()])
+}
+
+/// The same group, each view given its own page data.
+fn two_view_group_with(
+    pages: [PageData; 2],
+) -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    MainThreadRuntime,
+    GroupFarEnds,
+) {
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut views = Vec::new();
@@ -138,7 +151,7 @@ fn two_view_group() -> (
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
-    for _ in 0..2 {
+    for page_data in pages {
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
@@ -147,6 +160,7 @@ fn two_view_group() -> (
             &workers,
             "app:///main.js",
             None,
+            page_data,
         )
         .expect("main-thread runtime");
         ends.views.push(far_end);
@@ -166,46 +180,87 @@ struct GroupFarEnds {
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
 }
 
+/// The host's page data reaches the realm it was given to as plain strings,
+/// and `bobcat:runtime` parses them there: the entry sees the global props as
+/// it loads, and `processData` gets the init data. A view given none sees
+/// `{}` for both, never its sibling's.
 #[test]
-fn initial_values_stay_with_their_view_without_changing_boot() {
-    let (mut js, mut first, mut second, _workers) = two_view_group();
-    first
-        .prepare_initial_data(
-            Some(&serde_json::json!(42)),
-            Some(&serde_json::json!("中文")),
-        )
-        .unwrap();
-    second
-        .prepare_initial_data(None, Some(&serde_json::Value::Null))
-        .unwrap();
-    first.engine.collect_garbage(&mut js).unwrap();
-    assert_eq!(first.init_data.as_ref().unwrap().as_number(), Some(42.0));
-    assert_eq!(
-        first.global_props.as_ref().unwrap().to_utf16().unwrap(),
-        "中文".encode_utf16().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        second.init_data.as_ref().unwrap().kind(),
-        quickjs_rust_bridge::ValueKind::Undefined
-    );
-    assert_eq!(
-        second.global_props.as_ref().unwrap().kind(),
-        quickjs_rust_bridge::ValueKind::Null
-    );
+fn page_data_is_parsed_by_the_realm_it_was_given_to() {
+    let (mut js, mut first, mut second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some(r#"{"count": 2, "text": "中文 🦀"}"#.to_owned()),
+            global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
+        },
+        PageData::default(),
+    ]);
     first
         .run_main_thread_script(
             &mut js,
             r"
-        globalThis.processData = data => {
-            if (data !== undefined) throw new Error('init data was wired into boot');
-        };
-        if (Object.keys(lynx.__globalProps).length !== 0) {
-            throw new Error('global properties were wired into lynx');
-        }
-    ",
-            "app:///initial-values.js",
+            if (__globalProps.theme !== 'dark' || lynx.__globalProps !== __globalProps) {
+              throw new Error('global props: ' + JSON.stringify(__globalProps));
+            }
+            globalThis.processData = function (data) {
+              if (data.count !== 2 || data.text !== '中文 🦀') {
+                throw new Error('init data: ' + JSON.stringify(data));
+              }
+              return data.count;
+            };
+            globalThis.renderPage = function (processed) {
+              if (processed !== 2) throw new Error('renderPage got ' + processed);
+            };
+            ",
+            "app:///first.js",
         )
-        .unwrap();
+        .expect("the first view boots over its page data");
+    second
+        .run_main_thread_script(
+            &mut js,
+            r"
+            if (JSON.stringify(__globalProps) !== '{}' || lynx.__globalProps !== __globalProps) {
+              throw new Error('global props: ' + JSON.stringify(__globalProps));
+            }
+            globalThis.renderPage = function (data) {
+              if (JSON.stringify(data) !== '{}') throw new Error('init data: ' + JSON.stringify(data));
+            };
+            ",
+            "app:///second.js",
+        )
+        .expect("a view given no page data boots over empty objects");
+}
+
+/// Nothing native reads page data, so text that is not JSON is first met in
+/// the realm, as `bobcat:runtime` evaluates: that view's boot fails naming the
+/// input, before the entry loads.
+#[test]
+fn malformed_page_data_fails_boot_before_the_entry_runs() {
+    let (mut js, first, second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some("{".to_owned()),
+            global_props: None,
+        },
+        PageData {
+            init_data: None,
+            global_props: Some("[1,".to_owned()),
+        },
+    ]);
+    for (mut runtime, named) in [
+        (first, "initData is not valid JSON"),
+        (second, "globalProps is not valid JSON"),
+    ] {
+        let failure = runtime
+            .run_main_thread_script(&mut js, "globalThis.entered = true;", "app:///main.js")
+            .expect_err("page data that is not JSON fails boot");
+        assert!(failure.to_string().contains(named), "{failure}");
+        runtime
+            .evaluate_module(
+                &mut js,
+                "if (globalThis.entered) throw new Error('the entry ran');",
+                "app:///verify.js",
+                "verifying",
+            )
+            .expect("the entry never loaded");
+    }
 }
 
 /// One view's entry failing must not fail the view beside it.

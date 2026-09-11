@@ -82,32 +82,50 @@ Compiled BTS bundles still require the pending Lynx Core module/init shell.
 
 ## Running the screenshot server
 
-`bobcat-server` implements the UI Judge screenshot request shape over Bobcat's
-offscreen embedder:
+`bobcat-server` serves UI Judge's multipart screenshot routes over Bobcat's
+offscreen embedder. Start it with:
 
 ```sh
 LYNX_USE_PORT=8080 cargo run -p bobcat-cli --no-default-features --features server --bin bobcat-server
-curl --fail-with-body \
-  --output screenshot.bmp \
-  --header 'content-type: application/json' \
-  --data '{"url":"file:///absolute/path/to/card.web.bundle","task":"capture"}' \
-  http://127.0.0.1:8080/screenshot
 ```
 
-`GET /health` returns readiness JSON. `POST /screenshot` accepts `file://`,
-`http://`, and `https://` web bundles or raw Lynx XML and returns a raw
-800×600, DPR-1 BMP after compositing alpha over white. Non-empty
-`globalProps`, `initialData`, or interaction `steps` are rejected explicitly
-because the current core exposes no faithful injection or automation seam.
-Source-based native `.lynx.bundle` inputs are also supported when they contain
-a `root` module; real QuickJS/Lepus bytecode still returns `422`.
+`GET /health` reports readiness. Every screenshot route takes
+`multipart/form-data` with an `entry` part naming the page and one source part:
+`POST /screenshot/lynxml` takes the LynXML `source`, `/screenshot/template`
+and `/screenshot/template/url` a compiled template's HTTP(S) `url`, and
+`/screenshot/zip/upload` and `/screenshot/zip/url` a ZIP `file` or its HTTP(S)
+`url`. A capture comes back as raw `image/bmp`, 800×600 at DPR 1 unless
+`width` and `height` say otherwise:
 
-Like UI Judge, the server listens on all IPv4 and IPv6 interfaces and permits
-arbitrary file and HTTP(S) input URLs. It has no authentication or TLS, so run
-it only in a trusted environment with access to files and networks that callers
-are allowed to read, and only with trusted page code. `timeoutMs` bounds the
-asynchronous waits it covers, but cannot preempt synchronous JavaScript, GPU
-driver work, or teardown already running inside the engine.
+```sh
+curl --request POST http://127.0.0.1:8080/screenshot/lynxml \
+  --form-string 'entry=pages/index.lynxml' \
+  --form-string 'width=375' \
+  --form-string 'height=812' \
+  --form 'source=@/absolute/path/to/index.lynxml' \
+  --output screenshot.bmp
+
+curl --request POST http://127.0.0.1:8080/screenshot/template \
+  --form-string 'entry=template.js' \
+  --form-string 'url=https://cdn.example.com/card.web.bundle' \
+  --output screenshot.bmp
+```
+
+Non-empty `initData` and `globalProps` parts return `422`: the server does not
+forward them to the view yet, although core's `ViewSources` accepts both as
+JSON text. See [`crates/bobcat-cli/SERVER.md`](crates/bobcat-cli/SERVER.md)
+for the full contract: every field and limit, entry rules, supported source
+formats, error statuses, and the BMP layout.
+
+Like UI Judge, the server listens on all IPv4 and IPv6 interfaces. Remote
+template and ZIP downloads follow UI Judge's public HTTP(S) policy, but a
+page's own subresources load through Bobcat's ordinary resource transport,
+which reads `file:` URLs and fetches HTTP(S) without that policy. It has no
+authentication, TLS, or CORS, so run it only in a trusted environment with
+access to files and networks that callers are allowed to read, and only with
+trusted page code. `timeoutMs` bounds the asynchronous waits it covers, but
+cannot preempt synchronous JavaScript, GPU driver work, or teardown already
+running inside the engine.
 
 ## Running the browser embedder
 

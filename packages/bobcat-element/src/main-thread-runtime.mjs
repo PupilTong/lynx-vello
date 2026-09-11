@@ -12,6 +12,9 @@
 // None of these bindings is installed on `globalThis`; the entry receives them
 // only through the import declarations Bobcat prepends to its source.
 //
+// The host's page data arrives through `bobcat-internal:host` as the strings
+// the view was given, and is parsed here as this module evaluates.
+//
 // This is not an Element PAPI implementation. Every `__*` element member,
 // including the scoped-style sink `__SetCSSId`, belongs to element-papi.mjs.
 // Background-thread-only bindings such as `lynxCoreInject` also do not belong
@@ -23,6 +26,7 @@
 
 import { EventTarget } from "bobcat:event-target";
 import { createCrossThreadContext } from "bobcat:cross-thread-context";
+import { globalProps, initData } from "bobcat-internal:host";
 
 function noop() {
   return undefined;
@@ -163,8 +167,30 @@ const runtimePerformance = {
 };
 
 export const SystemInfo = Object.freeze({});
-const initData = {};
-export const __globalProps = {};
+
+/**
+ * Parses one piece of the host's page data: the string the view was given,
+ * which nothing native reads, or `undefined` when it was given none — `{}`
+ * here, as in web-core. So this is where malformed JSON is first met, and the
+ * error names which input it was: `JSON.parse`'s own error places the fault
+ * in an anonymous `<input>`.
+ * @param {string} name
+ * @param {string | undefined} json
+ */
+function parsePageData(name, json) {
+  if (json === undefined) {
+    return {};
+  }
+  try {
+    return JSON.parse(json);
+  } catch (error) {
+    throw new SyntaxError(`${name} is not valid JSON: ${/** @type {Error} */ (error).message}`);
+  }
+}
+
+/** The host's init data, which boot hands to `processData`. */
+export const __BobcatInitData = parsePageData("initData", initData());
+export const __globalProps = parsePageData("globalProps", globalProps());
 
 export function _AddEventListener() {
   return undefined;
@@ -187,7 +213,7 @@ export const NativeModules = undefined;
 
 export const lynx = {
   SystemInfo,
-  __initData: initData,
+  __initData: {},
   __globalProps,
   performance: runtimePerformance,
   getCoreContext: function () {

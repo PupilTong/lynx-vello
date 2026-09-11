@@ -75,20 +75,19 @@ struct Harness {
 
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
+        Self::serving(context, workers, ViewSources::new("app:///main.js"))
+    }
+
+    fn serving(
+        context: Rc<GroupContext>,
+        workers: mpsc::UnboundedReceiver<WorkerCommand>,
+        sources: ViewSources,
+    ) -> Self {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let (commands, incoming) = mpsc::unbounded_channel();
         let attached = AttachedView {
             viewport: Viewport::new(320.0, 240.0),
-            sources: MainSources {
-                config: PageConfig::default(),
-                fonts: Vec::new(),
-                default_font_family: None,
-                style_sheets: Vec::new(),
-                entry: "app:///main.js".to_owned(),
-                background_entry: None,
-                init_data: None,
-                global_props: None,
-            },
+            sources,
             commands: incoming,
             cancel: view.token.clone(),
         };
@@ -275,6 +274,37 @@ globalThis.renderPage = function () {
   __AddEventListener(box, 'tap', () => {});
 };
 ";
+
+/// The host's page data rides from the view's sources to its realm as the
+/// text it was given, and is parsed there before the entry loads: the entry
+/// sees the global props as it evaluates, and `processData` gets the init
+/// data. Each side checks its own, so a swap anywhere on the way fails boot.
+#[test]
+fn page_data_reaches_the_realm_it_was_given_to() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::serving(
+            context,
+            workers,
+            ViewSources {
+                init_data: Some(r#"{"boxes": 2}"#.to_owned()),
+                global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
+                ..ViewSources::new("app:///main.js")
+            },
+        );
+        harness
+            .boot(
+                r"
+                if (__globalProps.theme !== 'dark') throw new Error('global props');
+                globalThis.processData = function (data) {
+                  if (data.boxes !== 2) throw new Error('init data');
+                  return data;
+                };
+                ",
+            )
+            .await;
+    });
+}
 
 /// A host's whole round of input is one entry into the realm, so it is one
 /// commit and one acknowledgement — not one of each per command.

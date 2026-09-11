@@ -7,6 +7,11 @@ import * as crossThreadContext from "../src/cross-thread-context.mjs";
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
+// The runtime reads the view's page data as it evaluates; this view has none.
+rstest.mockRequire("bobcat-internal:host", () => ({
+  initData: () => undefined,
+  globalProps: () => undefined,
+}));
 
 /** @type {any} */
 const scope = globalThis;

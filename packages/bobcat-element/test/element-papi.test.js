@@ -393,7 +393,7 @@ function createMockBobcat(issuedIds) {
     stopPropagation: () => {
       calls.push(["stopPropagation"]);
     },
-    // The Element PAPI reaches neither of these; they are here because the
+    // The Element PAPI reaches none of these; they are here because the
     // mock stands in for the whole native module, not part of it.
     /**
      * @param {number} delayMilliseconds
@@ -407,6 +407,8 @@ function createMockBobcat(issuedIds) {
     clearTimer: (id) => {
       calls.push(["clearTimer", id]);
     },
+    initData: () => undefined,
+    globalProps: () => undefined,
   };
   return host;
 }
