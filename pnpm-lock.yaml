@@ -578,9 +578,6 @@ importers:
 
   packages/bobcat-element:
     devDependencies:
-      '@rspack/core':
-        specifier: 2.1.4
-        version: 2.1.4(@swc/helpers@0.5.23)
       '@rstest/core':
         specifier: 0.11.8
         version: 0.11.8

@@ -10,7 +10,6 @@
     "test:type": "tsc -b"
   },
   "devDependencies": {
-    "@rspack/core": "catalog:rspack",
     "@rstest/core": "0.11.8",
     "@types/node": "catalog:",
     "typescript": "catalog:"
