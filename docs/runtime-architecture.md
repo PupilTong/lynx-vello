@@ -73,18 +73,21 @@ crates/bobcat-core/src/
 Shared viewport and source vocabulary stays in `view` beside the public
 handles; the link one view speaks over is `link.rs`, owned by neither side;
 a stateful type whose owner is fixed lives under `paint` or `main`.
-Construction sends `ViewSources` whole to the view's task on `bobcat-main`:
-every field is a document input or a source specifier, and the task stages
-what they name as the ingredients the realm's own `Document` will be built
-from.
+Construction sends `ViewSources` whole to the view's task on `bobcat-main`,
+since nothing in it belongs on the embedder's thread. The task stages the
+document inputs, and what the source specifiers fetch, as the ingredients the
+realm's own `Document` will be built from, and hands the page data to the
+realm.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
-never reads it. It crosses with the rest of `ViewSources` and reaches the
-view's boot module as two string literals, and `bobcat:runtime`'s `__BobcatReceivePageData` parses them
-before the entry loads: the global props become `lynx.__globalProps` and the
-entry's `__globalProps`, and boot hands the init data to `processData`. A value
-that was not given is `{}`, as in web-core. Text that is not JSON fails boot
-with `StartupFailed`, naming the input, before the entry runs. The background
+never reads it. `MainThreadRuntime::new` puts each behind a
+`bobcat-internal:host` member of its own, `initData` and `globalProps`, which
+hands the string over once, as a plain string. `bobcat:runtime` calls both as
+it evaluates and parses them: the global props become `__globalProps` and
+`lynx.__globalProps`, and the init data becomes `__BobcatInitData`, which boot
+hands to `processData`. A value that was not given arrives as `undefined` and
+is `{}` there, as in web-core. Text that is not JSON fails boot with
+`StartupFailed`, naming the input, before the entry runs. The background
 thread does not receive either value yet.
 
 Main asks for loads through the view's own `ViewNotice` channel, and
@@ -650,10 +653,11 @@ Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
 The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground` and
-`__BobcatReceivePageData` from `bobcat:runtime` and `Document` and
+`__BobcatInitData` from `bobcat:runtime` and `Document` and
 `__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
 effect; the transformed entry itself statically imports both of the first two
-built-ins. Boot then runs:
+built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
+so it is ready before either module's own code runs. Boot then runs:
 
 ```js
 // The realm's document, created by this module's first statement and held by
@@ -661,16 +665,12 @@ built-ins. Boot then runs:
 // it: it goes when the realm does.
 export const document = new Document();
 
-// Before the entry loads, because the entry reads `__globalProps` as it
-// evaluates.
-const initData = __BobcatReceivePageData(initDataJson, globalPropsJson);
-
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
 const data = typeof globalThis.processData === "function"
-  ? globalThis.processData(initData)
-  : initData;
+  ? globalThis.processData(__BobcatInitData)
+  : __BobcatInitData;
 if (typeof globalThis.renderPage === "function") {
   globalThis.renderPage(data);
 } else {

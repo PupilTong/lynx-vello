@@ -129,16 +129,6 @@ pub(crate) fn entry_module_source(source: &str) -> String {
     module
 }
 
-/// `text` as a JavaScript string literal, for the boot module's source.
-///
-/// Since ES2019 every JSON string is also a JavaScript string literal, so
-/// JSON's escaping is all it takes, and none of `text` is interpreted: JSON
-/// text crosses as a string holding it, not as the value it spells.
-fn string_literal(text: &str) -> String {
-    serde_json::to_string(text)
-        .expect("serializing a Rust string as a JavaScript string cannot fail")
-}
-
 /// Why constructing or running the engine-owned main-thread runtime failed.
 #[derive(Debug)]
 pub(crate) struct MainThreadError {
@@ -223,6 +213,16 @@ impl DocumentIngredients {
             pending_image_events: Vec::new(),
         }
     }
+}
+
+/// The host's page data, as the JSON text the view was given.
+///
+/// Nothing on this side reads it. The realm takes each piece through a host
+/// member of its own, and `bobcat:runtime` parses it there.
+#[derive(Default)]
+pub(crate) struct PageData {
+    pub(crate) init_data: Option<String>,
+    pub(crate) global_props: Option<String>,
 }
 
 /// The realm's document and the ingredients it is built out of, plus the
@@ -554,6 +554,7 @@ impl MainThreadRuntime {
         workers: &super::workers::WorkerFactory,
         base_url: &str,
         background_entry: Option<String>,
+        page_data: PageData,
     ) -> Result<
         (
             Self,
@@ -575,6 +576,7 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
+        install_page_data(&mut engine, js_runtime, page_data)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
@@ -825,19 +827,11 @@ impl MainThreadRuntime {
         failures
     }
 
-    /// Registers the MTS entry and starts the boot module that loads it.
-    ///
-    /// `init_data` and `global_props` are the host's page data as the JSON
-    /// text the view was given, `None` standing for `{}`. Nothing here reads
-    /// them: they cross into the boot module as string literals, and
-    /// `bobcat:runtime` parses them before the entry loads.
     pub(crate) fn run_main_thread_script(
         &mut self,
         js_runtime: &mut ScriptRuntime,
         source: &str,
         source_name: &str,
-        init_data: Option<&str>,
-        global_props: Option<&str>,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
         self.engine
@@ -845,11 +839,10 @@ impl MainThreadRuntime {
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
             })?;
-        let entry_specifier = string_literal(source_name);
-        let init_data = string_literal(init_data.unwrap_or("{}"));
-        let global_props = string_literal(global_props.unwrap_or("{}"));
+        let entry_specifier = serde_json::to_string(source_name)
+            .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatReceivePageData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -860,15 +853,11 @@ import "{TIMER_MODULE_SPECIFIER}";
 // it: it goes when the realm does.
 export const document = new Document();
 
-// Before the entry loads, because the entry reads `__globalProps` as it
-// evaluates.
-const initData = __BobcatReceivePageData({init_data}, {global_props});
-
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
-let data = initData;
+let data = __BobcatInitData;
 if (typeof globalThis.processData === "function") {{
   data = globalThis.processData(data);
 }}
@@ -1207,6 +1196,29 @@ fn install_document_members(
         Ok(HostValue::Undefined)
     })?;
 
+    Ok(())
+}
+
+/// Installs `initData` and `globalProps`, which hand the realm the host's page
+/// data as the strings the view was given — `undefined` for one it was not.
+///
+/// Each hands its string over once and keeps nothing: the one call is
+/// `bobcat:runtime` evaluating, which parses both. Neither touches the
+/// document, so both answer before `createDocument` has run.
+fn install_page_data(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    page_data: PageData,
+) -> Result<(), MainThreadError> {
+    let PageData {
+        init_data,
+        global_props,
+    } = page_data;
+    for (name, mut json) in [("initData", init_data), ("globalProps", global_props)] {
+        install(engine, js_runtime, name, 0, move |_arguments| {
+            Ok(json.take().map_or(HostValue::Undefined, HostValue::String))
+        })?;
+    }
     Ok(())
 }
 

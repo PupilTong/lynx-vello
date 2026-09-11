@@ -83,6 +83,14 @@ interface BobcatNative {
   setTimer(delayMilliseconds: number, repeats: boolean): number;
   /** Disarms a timer, whether or not one is armed under that id. */
   clearTimer(id: number): void;
+  /**
+   * The init data the view was given, as the string the host passed in —
+   * unread and unparsed — or `undefined` when it was given none. Answers
+   * once: the string is handed over, not kept.
+   */
+  initData(): string | undefined;
+  /** The view's global props, handed over like `initData`. */
+  globalProps(): string | undefined;
 }
 
 /**
@@ -126,6 +134,8 @@ declare module "bobcat-internal:host" {
   export const stopPropagation: BobcatNative["stopPropagation"];
   export const setTimer: BobcatNative["setTimer"];
   export const clearTimer: BobcatNative["clearTimer"];
+  export const initData: BobcatNative["initData"];
+  export const globalProps: BobcatNative["globalProps"];
 }
 
 declare module "bobcat-internal:worker" {

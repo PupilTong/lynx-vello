@@ -359,9 +359,10 @@ pub struct ViewSources {
     /// built-in environment. Application module loading is not implemented yet.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
-    /// realm unread; boot parses it and passes it to `processData`. `None` is
-    /// `{}`, which is what web-core gives a page that was handed none, and
-    /// text that is not JSON fails boot with [`EngineEvent::StartupFailed`].
+    /// realm unread, as a plain string; `bobcat:runtime` parses it there and
+    /// boot passes it to `processData`. `None` is `{}`, which is what web-core
+    /// gives a page that was handed none, and text that is not JSON fails boot
+    /// with [`EngineEvent::StartupFailed`].
     pub init_data: Option<String>,
     /// Initial global properties, as JSON text handed over like
     /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and

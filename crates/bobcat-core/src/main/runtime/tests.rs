@@ -113,6 +113,7 @@ fn runtime_over_watching_names(
         &WorkerFactory::new(workers),
         "app:///main.js",
         None,
+        PageData::default(),
     )
     .expect("main-thread runtime");
     let probe = DocumentProbe {
@@ -131,6 +132,18 @@ fn two_view_group() -> (
     MainThreadRuntime,
     GroupFarEnds,
 ) {
+    two_view_group_with([PageData::default(), PageData::default()])
+}
+
+/// The same group, each view given its own page data.
+fn two_view_group_with(
+    pages: [PageData; 2],
+) -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    MainThreadRuntime,
+    GroupFarEnds,
+) {
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let mut views = Vec::new();
@@ -138,7 +151,7 @@ fn two_view_group() -> (
     let (workers, inbox) = mpsc::unbounded_channel();
     ends.workers = Some(inbox);
     let workers = WorkerFactory::new(workers);
-    for _ in 0..2 {
+    for page_data in pages {
         let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
         let (runtime, worker_events) = MainThreadRuntime::new(
             &mut js_runtime,
@@ -147,6 +160,7 @@ fn two_view_group() -> (
             &workers,
             "app:///main.js",
             None,
+            page_data,
         )
         .expect("main-thread runtime");
         ends.views.push(far_end);
@@ -166,37 +180,28 @@ struct GroupFarEnds {
     worker_events: Vec<mpsc::UnboundedReceiver<WorkerEvent>>,
 }
 
-impl MainThreadRuntime {
-    /// Boots `source` as the entry with no page data, which is what every
-    /// test here but the page-data ones means.
-    fn boot(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        source: &str,
-        source_name: &str,
-    ) -> Result<(), MainThreadError> {
-        self.run_main_thread_script(js_runtime, source, source_name, None, None)
-    }
-}
-
-/// The host's page data crosses as the JSON text it was handed over in and is
-/// parsed by the realm it was given to: the entry sees the global props as it
-/// loads, and `processData` gets the init data. What the boot module's string
-/// literal has to carry intact — quotes, backslashes, line breaks, a raw
-/// U+2028, a JSON escape — arrives as written, and a view given nothing sees
-/// `{}` rather than its sibling's.
+/// The host's page data reaches the realm it was given to as plain strings,
+/// and `bobcat:runtime` parses them there: the entry sees the global props as
+/// it loads, and `processData` gets the init data. A view given none sees
+/// `{}` for both, never its sibling's.
 #[test]
 fn page_data_is_parsed_by_the_realm_it_was_given_to() {
-    let (mut js, mut first, mut second, _workers) = two_view_group();
+    let (mut js, mut first, mut second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some(r#"{"count": 2, "text": "中文 🦀"}"#.to_owned()),
+            global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
+        },
+        PageData::default(),
+    ]);
     first
         .run_main_thread_script(
             &mut js,
-            r#"
+            r"
             if (__globalProps.theme !== 'dark' || lynx.__globalProps !== __globalProps) {
               throw new Error('global props: ' + JSON.stringify(__globalProps));
             }
             globalThis.processData = function (data) {
-              if (data.count !== 2 || data.text !== '"quoted" \\ \u2028\u0000') {
+              if (data.count !== 2 || data.text !== '中文 🦀') {
                 throw new Error('init data: ' + JSON.stringify(data));
               }
               return data.count;
@@ -204,14 +209,12 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
             globalThis.renderPage = function (processed) {
               if (processed !== 2) throw new Error('renderPage got ' + processed);
             };
-            "#,
+            ",
             "app:///first.js",
-            Some("{\n  \"count\": 2,\n  \"text\": \"\\\"quoted\\\" \\\\ \u{2028}\\u0000\"\n}"),
-            Some(r#"{"theme": "dark"}"#),
         )
         .expect("the first view boots over its page data");
     second
-        .boot(
+        .run_main_thread_script(
             &mut js,
             r"
             if (JSON.stringify(__globalProps) !== '{}' || lynx.__globalProps !== __globalProps) {
@@ -227,28 +230,31 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
 }
 
 /// Nothing native reads page data, so text that is not JSON is first met in
-/// the realm — before the entry loads, failing boot with an error that names
-/// which input it was.
+/// the realm, as `bobcat:runtime` evaluates: that view's boot fails naming the
+/// input, before the entry loads.
 #[test]
 fn malformed_page_data_fails_boot_before_the_entry_runs() {
-    for (init_data, global_props, named) in [
-        ("{", "{}", "initData is not valid JSON"),
-        ("{}", "[1,", "globalProps is not valid JSON"),
+    let (mut js, first, second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some("{".to_owned()),
+            global_props: None,
+        },
+        PageData {
+            init_data: None,
+            global_props: Some("[1,".to_owned()),
+        },
+    ]);
+    for (mut runtime, named) in [
+        (first, "initData is not valid JSON"),
+        (second, "globalProps is not valid JSON"),
     ] {
-        let (mut js_runtime, mut runtime, _elements) = runtime();
         let failure = runtime
-            .run_main_thread_script(
-                &mut js_runtime,
-                "globalThis.entered = true;",
-                "app:///main.js",
-                Some(init_data),
-                Some(global_props),
-            )
+            .run_main_thread_script(&mut js, "globalThis.entered = true;", "app:///main.js")
             .expect_err("page data that is not JSON fails boot");
         assert!(failure.to_string().contains(named), "{failure}");
         runtime
             .evaluate_module(
-                &mut js_runtime,
+                &mut js,
                 "if (globalThis.entered) throw new Error('the entry ran');",
                 "app:///verify.js",
                 "verifying",
@@ -270,7 +276,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
     let (mut js_runtime, mut first, mut second, _workers) = two_view_group();
 
     let failure = first
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 Promise.reject(new Error('first view: floating'));
@@ -285,7 +291,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
     );
 
     second
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -325,7 +331,7 @@ fn a_failed_boot_leaves_the_group_s_other_view_alone() {
 fn element_papi_boot_builds_the_private_tree() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -344,7 +350,7 @@ fn element_papi_boot_builds_the_private_tree() {
 fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 const engine = lynx.getEngine();
@@ -370,7 +376,7 @@ fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
 fn boot_allows_an_entry_with_neither_render_path() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             "if ('renderPage' in globalThis) throw new Error('unexpected global');",
             "app:///no-render.js",
@@ -387,7 +393,7 @@ fn boot_allows_an_entry_with_neither_render_path() {
 fn boot_awaits_the_esm_entry_before_rendering_once() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 import { __CreateView as createView } from 'bobcat:element';
@@ -419,7 +425,7 @@ fn boot_awaits_the_esm_entry_before_rendering_once() {
 fn imported_runtime_bindings_supply_bridges_without_globals() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 if (lynx.SystemInfo !== SystemInfo || !Object.isFrozen(SystemInfo)) {
@@ -511,7 +517,7 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
 fn get_engine_returns_one_event_target_with_standard_listener_identity() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 const engine = lynx.getEngine();
@@ -564,7 +570,7 @@ fn get_engine_returns_one_event_target_with_standard_listener_identity() {
 fn bundle_url_reaches_script_error_location() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     let error = runtime
-        .boot(&mut js_runtime, "const = 1", "app:///broken.js")
+        .run_main_thread_script(&mut js_runtime, "const = 1", "app:///broken.js")
         .expect_err("syntax error");
 
     assert!(
@@ -581,7 +587,7 @@ fn bundle_url_reaches_script_error_location() {
 fn stale_element_ids_become_script_errors_without_losing_the_tree() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     let error = runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 import { removeElement } from 'bobcat-internal:host';
@@ -609,7 +615,7 @@ fn stale_element_ids_become_script_errors_without_losing_the_tree() {
 fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -670,7 +676,7 @@ fn a_collected_element_retires_its_unique_id_instead_of_lending_it_out() {
 fn classes_attributes_and_identity_queries_reach_the_private_document() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -707,7 +713,7 @@ fn classes_attributes_and_identity_queries_reach_the_private_document() {
 fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -740,7 +746,7 @@ fn clearing_a_class_id_or_attribute_removes_it_from_the_private_document() {
 fn inline_styles_reach_computed_style_and_layout() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -774,7 +780,7 @@ fn inline_styles_reach_computed_style_and_layout() {
 fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -816,7 +822,7 @@ fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
 fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -852,7 +858,7 @@ fn a_style_record_value_carries_delimiters_and_non_bmp_text_intact() {
 fn a_style_record_value_cannot_inject_a_second_declaration() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -907,7 +913,7 @@ fn a_style_record_splits_on_lengths_rather_than_delimiters() {
 fn a_later_inline_style_record_replaces_the_complete_declaration_block() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -938,7 +944,7 @@ fn a_later_inline_style_record_replaces_the_complete_declaration_block() {
 fn clearing_inline_styles_removes_the_attribute_and_layout_effect() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1056,7 +1062,7 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
     let (mut js_runtime, mut runtime, _elements, mut names) =
         runtime_over_watching_names(ingredients());
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1097,7 +1103,7 @@ fn registering_a_listener_publishes_its_name_to_the_painting_side() {
 fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1151,7 +1157,7 @@ fn a_dispatch_reaches_only_the_nodes_that_registered_a_listener() {
 fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1211,7 +1217,7 @@ fn add_event_registers_against_the_real_index_and_a_catch_form_ends_the_walk() {
 fn a_replaced_add_event_handler_moves_its_node_between_passes() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1278,7 +1284,7 @@ fn a_replaced_add_event_handler_moves_its_node_between_passes() {
 fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1351,7 +1357,7 @@ fn one_id_names_a_whole_walk_and_only_its_last_delivery_is_flagged() {
 fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1388,7 +1394,7 @@ fn a_listener_may_mutate_the_tree_it_was_dispatched_on() {
 fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1437,7 +1443,7 @@ fn an_unrelated_element_being_collected_does_not_truncate_the_walk() {
 fn stopping_propagation_ends_the_walk() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.seen = [];
@@ -1475,7 +1481,7 @@ fn stopping_propagation_ends_the_walk() {
 fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1499,7 +1505,7 @@ fn a_document_whose_script_registered_nothing_never_enters_the_realm() {
 fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1546,7 +1552,7 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
 fn text_maxline_from_element_papi_limits_the_paragraph_and_its_box() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1597,7 +1603,7 @@ fn text_limits_from_papi_relayout_after_an_earlier_flush() {
     for (attribute, width) in [("text-maxline", 40.0), ("text-maxlength", 20.0)] {
         let (mut js_runtime, mut runtime, elements) = text_runtime();
         runtime
-            .boot(
+            .run_main_thread_script(
                 &mut js_runtime,
                 &format!(
                     r"
@@ -1633,7 +1639,7 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
     for (attribute, width) in [("text-maxline", 40.0), ("text-maxlength", 20.0)] {
         let (mut js_runtime, mut runtime, elements) = text_runtime();
         runtime
-            .boot(
+            .run_main_thread_script(
                 &mut js_runtime,
                 &format!(
                     r"
@@ -1675,7 +1681,7 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
 fn rewriting_the_text_attribute_relays_out_the_same_run() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1715,7 +1721,7 @@ fn rewriting_the_text_attribute_relays_out_the_same_run() {
 fn a_collected_raw_text_takes_its_run_with_it() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1763,7 +1769,7 @@ fn a_collected_raw_text_takes_its_run_with_it() {
 fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1842,7 +1848,7 @@ fn an_attached_element_s_handle_is_kept_by_its_parent_s() {
 fn every_connected_element_survives_a_collection_script_holds_nothing_through() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1900,7 +1906,7 @@ fn every_connected_element_survives_a_collection_script_holds_nothing_through() 
 fn dropping_a_connected_element_is_refused() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     let error = runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 import { dropElement } from 'bobcat-internal:host';
@@ -1932,7 +1938,7 @@ fn dropping_a_connected_element_is_refused() {
 fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -1977,7 +1983,7 @@ fn a_child_of_a_let_go_parent_is_still_attached_for_the_host() {
 fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2035,7 +2041,7 @@ fn dropping_a_detached_ancestor_leaves_a_still_named_descendant_a_root() {
 fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2082,7 +2088,7 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
 fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2154,7 +2160,7 @@ fn a_replaced_element_lives_as_long_as_the_handle_that_names_it() {
 fn a_drop_frees_the_element_at_once_and_retires_its_id() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 import { dropElement, tagName } from 'bobcat-internal:host';
@@ -2209,7 +2215,7 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
     ] {
         let (mut js_runtime, mut runtime, elements) = runtime();
         runtime
-            .boot(
+            .run_main_thread_script(
                 &mut js_runtime,
                 &format!(
                     r"
@@ -2248,7 +2254,7 @@ fn a_listener_capturing_its_own_element_does_not_keep_it_alive() {
 fn enough_removals_end_a_batch_with_a_collection() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2326,7 +2332,7 @@ fn enough_removals_end_a_batch_with_a_collection() {
 fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2359,7 +2365,7 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
 fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     let error = runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2384,7 +2390,7 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
 fn a_timeout_runs_once_with_the_arguments_it_was_given() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.fired = [];
@@ -2420,7 +2426,7 @@ fn a_timeout_runs_once_with_the_arguments_it_was_given() {
 fn a_cleared_timeout_never_runs() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.fired = [];
@@ -2450,7 +2456,7 @@ fn a_cleared_timeout_never_runs() {
 fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.ticks = 0;
@@ -2490,7 +2496,7 @@ fn an_interval_runs_every_round_until_its_own_callback_clears_it() {
 fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.fired = [];
@@ -2523,7 +2529,7 @@ fn a_timer_cleared_by_an_earlier_one_in_the_same_round_does_not_run() {
 fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.fired = [];
@@ -2555,7 +2561,7 @@ fn a_timer_that_throws_is_reported_and_the_next_one_still_runs() {
 fn a_timer_callback_mutates_the_document_the_realm_shares() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.renderPage = function () {
@@ -2589,7 +2595,7 @@ fn a_timer_callback_mutates_the_document_the_realm_shares() {
 fn a_chain_of_zero_delay_timers_starts_waiting_once_it_nests_deeply() {
     let (mut js_runtime, mut runtime, _elements) = runtime();
     runtime
-        .boot(
+        .run_main_thread_script(
             &mut js_runtime,
             r"
                 globalThis.depth = 0;

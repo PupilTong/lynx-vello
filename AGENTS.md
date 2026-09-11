@@ -668,7 +668,9 @@ useful signal for currently-compatible versions of those libraries.
   `insertBefore`, `removeElement`, `replaceElement`,
   `swapElement`, `dropElement`, `flushElementTree`, `enableEventListener`,
   `disableEventListener`, `stopPropagation`, `setTimer`, `clearTimer`,
-  `createWorker`, `sendWorkerMessage`, and `terminateWorker` — the tree and
+  `createWorker`, `sendWorkerMessage`, `terminateWorker`, and the page-data
+  pair `initData` and `globalProps`, which hand over the view's JSON text once
+  as plain strings, unread — the tree and
   attribute members speaking DOM vocabulary
   over numeric `NodeId`s; the two that answer with a list encode it in the
   return string, since the boundary's value type carries no array —
@@ -698,20 +700,21 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx`, `__BobcatConnectBackground` and `__BobcatReceivePageData` from
+  `lynx`, `__BobcatConnectBackground` and `__BobcatInitData` from
   `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
-  the timer globals exist before the entry loads. Its first statement after
-  those imports is `export const document = new Document();`, which is what
-  creates the realm's document and holds it for the realm's life. It then
-  hands `__BobcatReceivePageData` the view's `init_data` and `global_props` —
-  JSON text Rust never reads, carried in as string literals and `{}` when not
-  given — which parses both, naming the input when one is not JSON, installs
-  the global props, and returns the init data. It then uses
+  the timer globals exist before the entry loads. Evaluating `bobcat:runtime`
+  reads the view's `init_data` and `global_props` through `initData` and
+  `globalProps` and parses both with `JSON.parse` — a missing value is `{}`,
+  and one that is not JSON fails boot naming the input — into `__globalProps`
+  (also `lynx.__globalProps`) and `__BobcatInitData`. Boot's first statement
+  after those imports is `export const document = new Document();`, which is what
+  creates the realm's document and holds it for the realm's life. It then uses
   top-level await on
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
-  `processData(initData)` → (`globalThis.renderPage` when present, otherwise
-  the `__RenderPage` event on `lynx.getEngine()`) → `__FlushElementTree` inside
+  `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
+  otherwise the `__RenderPage` event on `lynx.getEngine()`) →
+  `__FlushElementTree` inside
   JavaScript; the global function is a compatibility path, not a boot
   requirement. The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module

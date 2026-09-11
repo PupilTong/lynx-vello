@@ -95,7 +95,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
-use super::runtime::{DocumentIngredients, MainThreadRuntime};
+use super::runtime::{DocumentIngredients, MainThreadRuntime, PageData};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
 #[cfg(test)]
@@ -513,8 +513,8 @@ impl Page {
         self: &Rc<Self>,
         source: &str,
         url: &str,
-        init_data: Option<&str>,
-        global_props: Option<&str>,
+        init_data: Option<String>,
+        global_props: Option<String>,
         background_entry: Option<String>,
     ) {
         // A view that has already ended builds no realm and runs no entry:
@@ -540,6 +540,10 @@ impl Page {
                 &self.context.workers,
                 url,
                 background_entry,
+                PageData {
+                    init_data,
+                    global_props,
+                },
             ) {
                 Ok(opened) => opened,
                 Err(error) => return Some(Err(error.into_script_error().into())),
@@ -549,9 +553,7 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            if let Err(error) =
-                runtime.run_main_thread_script(js, source, url, init_data, global_props)
-            {
+            if let Err(error) = runtime.run_main_thread_script(js, source, url) {
                 if self.outbox.is_cancelled() {
                     return None;
                 }
@@ -844,13 +846,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         page.end();
         return;
     }
-    page.open_realm(
-        &source,
-        &url,
-        init_data.as_deref(),
-        global_props.as_deref(),
-        background_entry,
-    );
+    page.open_realm(&source, &url, init_data, global_props, background_entry);
 }
 
 /// One resource load an import produced.
