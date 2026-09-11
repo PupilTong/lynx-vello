@@ -1,10 +1,14 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import {
+  execFileSync,
+  spawnSync,
+  type SpawnSyncReturns,
+} from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { cargoClangTargetFeatureFlags } from './wasm-target-features.mjs'
+import { cargoClangTargetFeatureFlags } from './wasm-target-features.ts'
 
 const packageDirectory = fileURLToPath(new URL('..', import.meta.url))
 const wasmTarget = 'wasm32-unknown-unknown'
@@ -16,23 +20,37 @@ const wasmOptExecutable = resolve(
   wasmOptBinDirectory,
   process.platform === 'win32' ? 'wasm-opt.cmd' : 'wasm-opt',
 )
+// The package's own TypeScript compiler, installed beside `wasm-opt`.
+const tscExecutable = resolve(
+  wasmOptBinDirectory,
+  process.platform === 'win32' ? 'tsc.cmd' : 'tsc',
+)
 const wasmClangTargetFeatureFlags = cargoClangTargetFeatureFlags({
-  cargo: process.env.CARGO ?? 'cargo',
+  cargo: process.env['CARGO'] ?? 'cargo',
   cwd: packageDirectory,
   target: wasmTarget,
 })
 
-function unique(values) {
-  return [...new Set(values.filter(Boolean))]
+function unique(values: (string | undefined)[]): string[] {
+  // `filter(Boolean)` drops the absent and empty candidates, which its
+  // declared type does not narrow away.
+  return [...new Set(values.filter(Boolean))] as string[]
 }
 
-function executableCandidates(explicit, defaults) {
+function executableCandidates(
+  explicit: string | undefined,
+  defaults: (string | undefined)[],
+): string[] {
   // An explicit target-specific cc-rs setting is a contract: report that
   // command's failure instead of silently compiling with a different tool.
   return explicit ? [explicit] : unique(defaults)
 }
 
-function run(executable, args, options = {}) {
+function run(
+  executable: string,
+  args: string[],
+  options: { input?: string } = {},
+): SpawnSyncReturns<string> {
   return spawnSync(executable, args, {
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -40,12 +58,12 @@ function run(executable, args, options = {}) {
   })
 }
 
-function formatFailure(result) {
+function formatFailure(result: SpawnSyncReturns<string>): string {
   if (result.error) return result.error.message
   return (result.stderr || result.stdout || `exit status ${result.status}`).trim()
 }
 
-function verifyWasmOpt() {
+function verifyWasmOpt(): string {
   const result = run(wasmOptExecutable, ['--version'])
   if (result.status !== 0) {
     throw new Error(
@@ -66,8 +84,8 @@ function verifyWasmOpt() {
   return version
 }
 
-function clangCandidates() {
-  const llvmBin = process.env.BOBCAT_WASM_LLVM_BIN
+function clangCandidates(): string[] {
+  const llvmBin = process.env['BOBCAT_WASM_LLVM_BIN']
   return executableCandidates(process.env[ccEnvironmentName], [
     llvmBin && resolve(llvmBin, 'clang'),
     // Homebrew deliberately keeps LLVM keg-only so Apple clang stays first
@@ -79,9 +97,9 @@ function clangCandidates() {
   ])
 }
 
-function arCandidates(clang) {
+function arCandidates(clang: string): string[] {
   const explicit = process.env[arEnvironmentName]
-  const llvmBin = process.env.BOBCAT_WASM_LLVM_BIN
+  const llvmBin = process.env['BOBCAT_WASM_LLVM_BIN']
   const clangName = basename(clang)
   const versionSuffix = /^clang(-[0-9]+)$/.exec(clangName)?.[1] ?? ''
   const clangSibling =
@@ -97,11 +115,11 @@ function arCandidates(clang) {
   ])
 }
 
-function selectWasmCToolchain() {
+function selectWasmCToolchain(): { clang: string; llvmAr: string } {
   const probeDirectory = mkdtempSync(join(tmpdir(), 'bobcat-wasm-llvm-'))
   const objectPath = join(probeDirectory, 'probe.o')
   const archivePath = join(probeDirectory, 'probe.a')
-  const clangFailures = []
+  const clangFailures: string[] = []
 
   try {
     for (const clang of clangCandidates()) {
@@ -124,7 +142,7 @@ function selectWasmCToolchain() {
         continue
       }
 
-      const arFailures = []
+      const arFailures: string[] = []
       for (const llvmAr of arCandidates(clang)) {
         rmSync(archivePath, { force: true })
         const archive = run(llvmAr, ['crs', archivePath, objectPath])
@@ -164,6 +182,9 @@ const { clang, llvmAr } = selectWasmCToolchain()
 console.log(`QuickJS Wasm C toolchain: ${clang} + ${llvmAr}`)
 
 rmSync(new URL('../pkg/', import.meta.url), { force: true, recursive: true })
+// `dist/` also holds the compiler's build info, so clearing it makes the
+// TypeScript emit below a full one.
+rmSync(new URL('../dist/', import.meta.url), { force: true, recursive: true })
 execFileSync(
   'wasm-pack',
   [
@@ -185,7 +206,7 @@ execFileSync(
     cwd: packageDirectory,
     env: {
       ...process.env,
-      PATH: [wasmOptBinDirectory, process.env.PATH].filter(Boolean).join(delimiter),
+      PATH: [wasmOptBinDirectory, process.env['PATH']].filter(Boolean).join(delimiter),
       [ccEnvironmentName]: clang,
       [arEnvironmentName]: llvmAr,
     },
@@ -193,4 +214,12 @@ execFileSync(
   },
 )
 
-await import('./prepare-pkg.mjs')
+await import('./prepare-pkg.ts')
+
+// The browser sources emit last: the Worker program is typed against the
+// `pkg/bobcat_wasm.d.ts` wasm-pack has just generated.
+execFileSync(
+  tscExecutable,
+  ['-b', 'js/tsconfig.json', 'js/tsconfig.worker.json'],
+  { cwd: packageDirectory, stdio: 'inherit' },
+)

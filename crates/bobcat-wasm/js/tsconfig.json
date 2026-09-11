@@ -1,0 +1,16 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The main-thread program: the facade and the image decoder it owns,
+  // emitted to `dist/` with the declarations the package exports.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2023", "dom"],
+    "composite": true,
+    "declaration": true,
+    "isolatedDeclarations": true,
+    "noEmit": false,
+    "rootDir": ".",
+    "outDir": "../dist"
+  },
+  "files": ["facade.ts", "image-decoder.ts", "protocol.d.ts"]
+}

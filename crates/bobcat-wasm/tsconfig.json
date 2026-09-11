@@ -1,0 +1,8 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // Every program of the package that type-checks without a `wasm-pack`
+  // build. The Worker program (`js/tsconfig.worker.json`) is typed against
+  // the generated `pkg/`, so `scripts/build.ts` builds it after `wasm-pack`.
+  "files": [],
+  "references": [{ "path": "js" }, { "path": "scripts" }]
+}

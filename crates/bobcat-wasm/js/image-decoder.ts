@@ -17,11 +17,67 @@
 // stores, notifies, and echoes a message over the port, and a Render Worker
 // blocked in Atomics.wait and one parked on its event loop are both woken.
 
+// The messages on the port, as `decode/browser.rs` posts and reads them.
+
+/** The Render Worker's Wasm memory, sent once before any job. */
+interface InitMessage {
+  type: 'init'
+  memory: WebAssembly.Memory
+}
+
+/**
+ * A job: the image's bytes, whose buffer is transferred, the address of its
+ * mailbox, and the size to stay within.
+ */
+interface DecodeMessage {
+  type: 'decode'
+  id: number
+  mailbox: number
+  bytes: Uint8Array<ArrayBuffer>
+  mediaType: string
+  maxWidth: number
+  maxHeight: number
+}
+
+/** The job's mailbox now holds the pixel buffer's pointer and length. */
+interface BufferMessage {
+  type: 'buffer'
+  id: number
+}
+
+type WorkerMessage = InitMessage | DecodeMessage | BufferMessage
+
+/** The echo this thread posts after each store to a job's mailbox. */
+type EchoMessage =
+  | {
+      type: 'dims'
+      id: number
+    }
+  | {
+      type: 'done'
+      id: number
+    }
+  | {
+      type: 'error'
+      id: number
+      message: string
+    }
+
+interface Job {
+  data: Uint8ClampedArray
+  mailbox: number
+}
+
 const STATE_SIZE_READY = 1
 const STATE_DONE = 3
 const STATE_FAILED = -1
 
-function fit(width, height, maxWidth, maxHeight) {
+function fit(
+  width: number,
+  height: number,
+  maxWidth: number,
+  maxHeight: number,
+): [number, number] {
   if (width <= maxWidth && height <= maxHeight) {
     return [Math.max(1, width), Math.max(1, height)]
   }
@@ -34,31 +90,33 @@ function fit(width, height, maxWidth, maxHeight) {
 
 /** The decoder for one Render Worker, reached over one end of a MessageChannel. */
 export class ImageDecoder {
-  #canvas
-  #context
-  #jobs = new Map()
-  #memory
-  #port
+  #canvas: HTMLCanvasElement | undefined
+  #context: CanvasRenderingContext2D | null | undefined
+  #jobs = new Map<number, Job>()
+  #memory: WebAssembly.Memory | undefined
+  #port: MessagePort
 
-  constructor(port) {
+  constructor(port: MessagePort) {
     this.#port = port
-    port.onmessage = (event) => this.#onMessage(event.data)
+    port.onmessage = (event) => this.#onMessage(event.data as WorkerMessage)
   }
 
-  close() {
+  close(): void {
     this.#port.onmessage = null
     this.#port.close()
     this.#jobs.clear()
     this.#memory = undefined
   }
 
-  #words(mailbox) {
+  #words(mailbox: number): Int32Array {
     // Shared memory may have grown since the last job, so the view is taken
     // from the current buffer every time.
-    return new Int32Array(this.#memory.buffer, mailbox, 8)
+    // Before `init` and after `close` there is no memory, and reading its
+    // buffer throws; `#fail` and `#decode` catch that.
+    return new Int32Array(this.#memory!.buffer, mailbox, 8)
   }
 
-  #fail(id, mailbox, error) {
+  #fail(id: number, mailbox: number, error: unknown): void {
     this.#jobs.delete(id)
     try {
       const mail = this.#words(mailbox)
@@ -70,11 +128,13 @@ export class ImageDecoder {
     this.#port.postMessage({
       type: 'error',
       id,
-      message: String(error && error.message ? error.message : error),
-    })
+      message: String(
+        error && (error as Error).message ? (error as Error).message : error,
+      ),
+    } satisfies EchoMessage)
   }
 
-  async #decode(message) {
+  async #decode(message: DecodeMessage): Promise<void> {
     const { id, mailbox, bytes, maxWidth, maxHeight, mediaType } = message
     // The type matters for SVG, which an Image only renders when told what
     // it is; every raster container is sniffed from its bytes regardless.
@@ -103,7 +163,7 @@ export class ImageDecoder {
       mail[4] = sourceHeight
       Atomics.store(mail, 0, STATE_SIZE_READY)
       Atomics.notify(mail, 0)
-      this.#port.postMessage({ type: 'dims', id })
+      this.#port.postMessage({ type: 'dims', id } satisfies EchoMessage)
     } catch (error) {
       this.#fail(id, mailbox, error)
     } finally {
@@ -113,19 +173,21 @@ export class ImageDecoder {
 
   // One canvas serves every job. Resizing it clears it and resets its state,
   // so the smoothing quality is chosen again each time.
-  #contextFor(width, height) {
+  // `#context` is created with `#canvas`, and a new canvas's 2D context is
+  // never null.
+  #contextFor(width: number, height: number): CanvasRenderingContext2D {
     if (this.#canvas === undefined) {
       this.#canvas = document.createElement('canvas')
       this.#context = this.#canvas.getContext('2d', { willReadFrequently: true })
     }
     this.#canvas.width = width
     this.#canvas.height = height
-    this.#context.imageSmoothingEnabled = true
-    this.#context.imageSmoothingQuality = 'high'
-    return this.#context
+    this.#context!.imageSmoothingEnabled = true
+    this.#context!.imageSmoothingQuality = 'high'
+    return this.#context!
   }
 
-  #copyOut(id) {
+  #copyOut(id: number): void {
     const job = this.#jobs.get(id)
     if (job === undefined) {
       return
@@ -138,13 +200,13 @@ export class ImageDecoder {
       this.#fail(id, job.mailbox, new Error('the pixel buffer does not match the decoded size'))
       return
     }
-    new Uint8Array(this.#memory.buffer, pointer, length).set(job.data)
+    new Uint8Array(this.#memory!.buffer, pointer, length).set(job.data)
     Atomics.store(mail, 0, STATE_DONE)
     Atomics.notify(mail, 0)
-    this.#port.postMessage({ type: 'done', id })
+    this.#port.postMessage({ type: 'done', id } satisfies EchoMessage)
   }
 
-  #onMessage(message) {
+  #onMessage(message: WorkerMessage): void {
     if (message?.type === 'init') {
       this.#memory = message.memory
     } else if (message?.type === 'decode') {

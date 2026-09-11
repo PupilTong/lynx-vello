@@ -1,36 +1,69 @@
-import initWasm, { BobcatRenderer } from './pkg/bobcat_wasm.js'
+import initWasm, { BobcatRenderer } from '../pkg/bobcat_wasm.js'
+import type {
+  FacadeMessage,
+  InitMessage,
+  RenderWorkerMessage,
+  RequestMessage,
+} from './protocol.d.ts'
 
-let renderer
+declare const self: DedicatedWorkerGlobalScope
+
+// Set by `initialize` and cleared by the `dispose` request. The page loop
+// and the callbacks inside a request run only while it is set; TypeScript
+// does not carry a check on a module variable into another function, so
+// they read it with `!`.
+let renderer: BobcatRenderer | undefined
 let running = false
 let initialized = false
-let scriptCompletion
+let scriptCompletion: Promise<void> | undefined
 let engineEventGeneration = 0
-let requestQueue = Promise.resolve()
+let requestQueue: Promise<void> = Promise.resolve()
 
 const MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 const MAX_STYLE_SHEET_BYTES = 16 * 1024 * 1024
 const MAX_LYNX_XML_BYTES = 16 * 1024 * 1024
 
-function errorMessage(error) {
+interface FetchedSource {
+  bytes: Uint8Array
+  url: string
+}
+
+// `BobcatRenderer.registerLynxXml` returns an untyped array; its Rust
+// documentation names the slots.
+type LynxXmlRegistration = [
+  mainThreadScriptUrl: string,
+  styleSheetUrl: string | null,
+  backgroundThreadScriptUrl: string | null,
+  compatibilityWarnings: string[],
+]
+
+function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function postResponse(request, ok, error) {
+function postResponse(request: number, ok: boolean, error?: unknown): void {
   if (ok) {
-    self.postMessage({ type: 'bobcat-response', ok, request })
+    self.postMessage({
+      type: 'bobcat-response',
+      ok,
+      request,
+    } satisfies RenderWorkerMessage)
   } else {
     self.postMessage({
       type: 'bobcat-response',
       error: errorMessage(error),
       ok,
       request,
-    })
+    } satisfies RenderWorkerMessage)
   }
 }
 
-function reportFatal(error) {
+function reportFatal(error: unknown): void {
   running = false
-  self.postMessage({ type: 'bobcat-error', message: errorMessage(error) })
+  self.postMessage({
+    type: 'bobcat-error',
+    message: errorMessage(error),
+  } satisfies RenderWorkerMessage)
 }
 
 // The Worker's frame clock, and the only one: while the engine owes the
@@ -40,7 +73,7 @@ function reportFatal(error) {
 // is not.
 const FRAME_INTERVAL_MS = 16
 
-function nextDisplayFrame() {
+function nextDisplayFrame(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof self.requestAnimationFrame === 'function') {
       self.requestAnimationFrame(() => resolve())
@@ -58,15 +91,15 @@ function nextDisplayFrame() {
 // display's rate, and the engine names no interval for it. A realm timer is
 // not this loop's to wait out either: the engine waits its own out and arms
 // this signal when the round it ran commits.
-async function nextEngineWakeup() {
-  if (renderer.owesFrame()) {
+async function nextEngineWakeup(): Promise<void> {
+  if (renderer!.owesFrame()) {
     await nextDisplayFrame()
   } else {
-    await renderer.waitForEngineEvent()
+    await renderer!.waitForEngineEvent()
   }
 }
 
-async function initialize(message) {
+async function initialize(message: InitMessage): Promise<void> {
   if (initialized) {
     throw new Error('Bobcat Render Worker was initialized more than once')
   }
@@ -85,10 +118,10 @@ async function initialize(message) {
     message.config.enableCSSSelector,
   )
   running = true
-  self.postMessage({ type: 'bobcat-ready' })
+  self.postMessage({ type: 'bobcat-ready' } satisfies RenderWorkerMessage)
 }
 
-function absoluteUrl(input) {
+function absoluteUrl(input: string): string {
   // The UI facade resolves relative URLs against document.baseURI. A Worker
   // cannot reconstruct that base and must reject accidental relative input.
   return new URL(String(input)).href
@@ -97,7 +130,11 @@ function absoluteUrl(input) {
 // The Render Worker applies the browser's URL, fetch, CORS, cache and
 // credentials policy; registration is the caller's, so a page's bytes reach
 // the engine's registry only once every one of its sources has arrived.
-async function fetchSource(kind, url, limit) {
+async function fetchSource(
+  kind: string,
+  url: string,
+  limit: number,
+): Promise<FetchedSource> {
   const response = await fetch(absoluteUrl(url))
   if (!response.ok) {
     throw new Error(
@@ -114,7 +151,9 @@ async function fetchSource(kind, url, limit) {
 // UTF-8 with replacement for malformed byte sequences, matching web-core's
 // raw Lynx XML loader. Shared parsing and section mapping remain in Rust's
 // bobcat-source adapter.
-async function fetchLynxXml(url) {
+async function fetchLynxXml(
+  url: string,
+): Promise<{ source: string; url: string }> {
   const requestedUrl = absoluteUrl(url)
   const response = await fetch(requestedUrl)
   if (response.status !== 200) {
@@ -129,7 +168,10 @@ async function fetchLynxXml(url) {
   }
 }
 
-async function readBoundedBytes(response, limit) {
+async function readBoundedBytes(
+  response: Response,
+  limit: number,
+): Promise<Uint8Array> {
   const declaredLength = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredLength) && declaredLength > limit) {
     throw new Error(`Response exceeds the ${String(limit)} byte limit`)
@@ -144,7 +186,7 @@ async function readBoundedBytes(response, limit) {
   }
 
   const reader = response.body.getReader()
-  const chunks = []
+  const chunks: Uint8Array[] = []
   let length = 0
   try {
     while (true) {
@@ -172,7 +214,7 @@ async function readBoundedBytes(response, limit) {
   return bytes
 }
 
-async function waitForScriptCompletion() {
+async function waitForScriptCompletion(): Promise<void> {
   while (running && renderer !== undefined && !renderer.pump()) {
     await nextEngineWakeup()
   }
@@ -183,24 +225,24 @@ async function waitForScriptCompletion() {
 
 // The page's whole life after boot: every wakeup drains the engine's events
 // and draws the frame it asked for.
-async function servePage(generation) {
+async function servePage(generation: number): Promise<void> {
   const isCurrent = () =>
     running && renderer !== undefined && generation === engineEventGeneration
   while (isCurrent()) {
     await nextEngineWakeup()
     if (isCurrent()) {
-      renderer.pump()
+      renderer!.pump()
     }
   }
 }
 
-function trackScriptCompletion(request) {
+function trackScriptCompletion(request: number): void {
   const generation = engineEventGeneration
   const completion = waitForScriptCompletion()
   scriptCompletion = completion
   void completion.then(
     () => postResponse(request, true),
-    (error) => postResponse(request, false, error),
+    (error: unknown) => postResponse(request, false, error),
   )
   // Construction returns a loading view. Normal pump turns service its
   // resource requests and deliver either ScriptFinished or StartupFailed.
@@ -215,7 +257,10 @@ function trackScriptCompletion(request) {
 // builds a fresh native view and drops the previous one. Sources are fetched
 // and registered before that happens, so a load that cannot fetch leaves the
 // running page untouched.
-async function replaceNativeView(request, load) {
+async function replaceNativeView(
+  request: number,
+  load: () => Promise<void>,
+): Promise<void> {
   if (scriptCompletion !== undefined) {
     try {
       await scriptCompletion
@@ -238,7 +283,7 @@ async function replaceNativeView(request, load) {
   trackScriptCompletion(request)
 }
 
-async function dispatchRequest(message) {
+async function dispatchRequest(message: RequestMessage): Promise<void> {
   if (renderer === undefined) {
     throw new Error('Bobcat Render Worker is not initialized')
   }
@@ -246,16 +291,16 @@ async function dispatchRequest(message) {
   const { operation, request } = message
   switch (operation) {
     case 'loadZip': {
-      await replaceNativeView(request, () => renderer.loadZip(message.url, message.bytes))
+      await replaceNativeView(request, () => renderer!.loadZip(message.url, message.bytes))
       break
     }
     case 'loadTemplate': {
       const entry = await fetchSource('template', message.url, MAX_SCRIPT_BYTES)
-      await replaceNativeView(request, () => renderer.loadTemplate(entry.url, entry.bytes))
+      await replaceNativeView(request, () => renderer!.loadTemplate(entry.url, entry.bytes))
       break
     }
     case 'load': {
-      const sheets = []
+      const sheets: FetchedSource[] = []
       for (const url of message.styleSheetUrls) {
         sheets.push(await fetchSource('stylesheet', url, MAX_STYLE_SHEET_BYTES))
       }
@@ -263,10 +308,10 @@ async function dispatchRequest(message) {
       // Raw script loads register CSS text; loadTemplate delegates bundled
       // StyleInfo registration to the shared source adapter instead.
       const styleSheetUrls = sheets.map((sheet) =>
-        renderer.registerStyleSheet(sheet.url, sheet.bytes),
+        renderer!.registerStyleSheet(sheet.url, sheet.bytes),
       )
       const entryUrl = renderer.registerScript(entry.url, entry.bytes)
-      await replaceNativeView(request, () => renderer.load(entryUrl, styleSheetUrls))
+      await replaceNativeView(request, () => renderer!.load(entryUrl, styleSheetUrls))
       break
     }
     case 'loadLynxXml': {
@@ -276,13 +321,13 @@ async function dispatchRequest(message) {
         styleSheetUrl,
         backgroundThreadScriptUrl,
         compatibilityWarnings,
-      ] = renderer.registerLynxXml(url, source)
+      ] = renderer.registerLynxXml(url, source) as LynxXmlRegistration
       for (const warning of compatibilityWarnings) {
         console.warn(`Bobcat source warning: ${warning}`)
       }
       await replaceNativeView(
         request,
-        () => renderer.load(
+        () => renderer!.load(
           mainThreadScriptUrl,
           styleSheetUrl === null ? [] : [styleSheetUrl],
           backgroundThreadScriptUrl,
@@ -320,7 +365,7 @@ async function dispatchRequest(message) {
 }
 
 self.addEventListener('message', (event) => {
-  const message = event.data
+  const message = event.data as FacadeMessage
   if (message?.type === 'bobcat-init') {
     void (async () => {
       try {

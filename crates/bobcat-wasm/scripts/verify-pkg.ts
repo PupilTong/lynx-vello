@@ -4,110 +4,42 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// The part of `npm pack --dry-run --json` read below.
+interface PackResult {
+  entryCount: number
+  files: { path: string }[]
+}
+
 const packageDirectory = fileURLToPath(new URL('..', import.meta.url))
 const gluePath = path.join(packageDirectory, 'pkg/bobcat_wasm.js')
 const wasmDeclarationsPath = path.join(packageDirectory, 'pkg/bobcat_wasm.d.ts')
 const wasmPath = path.join(packageDirectory, 'pkg/bobcat_wasm_bg.wasm')
 
-for (const script of [
-  path.join(packageDirectory, 'dom-worker.js'),
-  path.join(packageDirectory, 'facade.js'),
-  path.join(packageDirectory, 'image-decoder.js'),
-  path.join(packageDirectory, 'render-worker.js'),
-  gluePath,
-]) {
-  execFileSync(process.execPath, ['--check', script], { stdio: 'inherit' })
-}
+const forbiddenDomApis = [
+  'addAuthorStylesheet',
+  'appendElement',
+  'createPage',
+  'createView',
+  'dropElement',
+  'flushElementTree',
+]
 
-const glue = await readFile(gluePath, 'utf8')
-const wasmDeclarations = await readFile(wasmDeclarationsPath, 'utf8')
-if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
-  throw new Error('generated glue does not construct shared WebAssembly memory')
-}
-for (const requiredExport of [
-  'export class BobcatRenderer',
-  'export function wasm_thread_entry_point',
-]) {
-  if (!glue.includes(requiredExport)) {
-    throw new Error(`generated glue is missing ${requiredExport}`)
-  }
-}
-for (const requiredMethod of [
-  'dispatchPointer(',
-  'registerScript(',
-  'registerStyleSheet(',
-  'registerLynxXml(',
-  'loadTemplate(',
-  'loadZip(',
-  'bobcatrenderer_load(',
-  'pump(',
-  'registerFonts(',
-  'setDefaultFontFamily(',
-  'waitForEngineEvent(',
-]) {
-  if (!glue.includes(requiredMethod)) {
-    throw new Error(`generated renderer is missing ${requiredMethod}`)
-  }
-}
-if (
-  !wasmDeclarations.includes(
-    'registerLynxXml(source_url: string, source: string): Array<any>;',
-  )
-) {
-  throw new Error('generated renderer changed the registerLynxXml Worker ABI')
-}
-if (!glue.includes('passArray8ToWasm0(bytes')) {
-  throw new Error('generated script registry must accept raw Uint8Array bytes')
-}
-for (const removedExport of [
-  'createBrowserSession',
-  'finishBrowserScriptCheckpoint',
-  'initThreadPool',
-  'parallelChecksum',
-  'pollDomCommand',
-  'pollResponse',
-  'bobcatrenderer_executeScript',
-  'bobcatrenderer_loadStyleSheet',
-  'bobcatrenderer_reset',
-  'scriptStarted',
-  'waitForResponse',
-  'wasmMemory',
-]) {
-  if (glue.includes(removedExport)) {
-    throw new Error(`generated glue still exposes removed ${removedExport}`)
-  }
-}
-
+// The TypeScript sources come first: every check down to the build artifacts
+// reads `js/` alone, so it runs without a build.
 const facade = await readFile(
-  path.join(packageDirectory, 'facade.js'),
+  path.join(packageDirectory, 'js/facade.ts'),
   'utf8',
 )
-const declarations = await readFile(
-  path.join(packageDirectory, 'facade.d.ts'),
-  'utf8',
-)
-if (facade.includes('./pkg/bobcat_wasm.js')) {
+if (facade.includes('pkg/bobcat_wasm.js')) {
   throw new Error('browser UI facade must not instantiate the Wasm module')
 }
 // Images decode on the main thread: the facade owns the decoder and hands
 // the Render Worker its end of the channel at init.
 if (
-  !facade.includes("from './image-decoder.js'") ||
+  !facade.includes("from './image-decoder.ts'") ||
   !facade.includes('imagePort: images.port2')
 ) {
   throw new Error('browser facade must connect the main-thread image decoder')
-}
-for (const requiredDeclaration of [
-  'pageConfig: PageConfig',
-  'LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>',
-  'load(url: string | URL, styleSheetUrls?: readonly (string | URL)[])',
-  'loadLynxXml(url: string | URL)',
-  'registerFonts(data: ArrayBuffer | Uint8Array)',
-  'setDefaultFontFamily(family: string)',
-]) {
-  if (!declarations.includes(requiredDeclaration)) {
-    throw new Error(`browser declarations are missing ${requiredDeclaration}`)
-  }
 }
 const lynxXmlConfigStart = facade.indexOf('export const LYNX_XML_PAGE_CONFIG')
 // Bounded by the declaration's own terminator, not by whatever happens to be
@@ -131,7 +63,7 @@ for (const requiredConfigValue of [
   }
 }
 if (
-  !facade.includes('async loadLynxXml(url)') ||
+  !facade.includes('async loadLynxXml(url: string | URL)') ||
   !facade.includes("this.#request('loadLynxXml'")
 ) {
   throw new Error('browser facade does not dispatch loadLynxXml')
@@ -151,17 +83,21 @@ for (const requiredPointerStep of [
     )
   }
 }
-if (declarations.includes('dispatchPointer')) {
-  throw new Error('browser declarations expose the private pointer bridge')
-}
 for (const [operation, method, message] of [
-  ['load', 'async load(url, styleSheetUrls = [])', 'a page load'],
+  [
+    'load',
+    'async load(\n' +
+      '    url: string | URL,\n' +
+      '    styleSheetUrls: readonly (string | URL)[] = [],\n' +
+      '  ): Promise<void>',
+    'a page load',
+  ],
   [
     'setDefaultFontFamily',
-    'async setDefaultFontFamily(family)',
+    'async setDefaultFontFamily(family: string)',
     'setDefaultFontFamily',
   ],
-]) {
+] as const) {
   if (
     !facade.includes(method) ||
     !facade.includes(`this.#request('${operation}'`)
@@ -171,11 +107,11 @@ for (const [operation, method, message] of [
 }
 
 const renderWorker = await readFile(
-  path.join(packageDirectory, 'render-worker.js'),
+  path.join(packageDirectory, 'js/render-worker.ts'),
   'utf8',
 )
 const domWorker = await readFile(
-  path.join(packageDirectory, 'dom-worker.js'),
+  path.join(packageDirectory, 'js/dom-worker.ts'),
   'utf8',
 )
 const engineConstruction = renderWorker.indexOf('await BobcatRenderer.create(')
@@ -205,9 +141,9 @@ if (loadDispatch === '') {
 for (const requiredLoadStep of [
   "await fetchSource('stylesheet', url, MAX_STYLE_SHEET_BYTES)",
   "await fetchSource('script', message.url, MAX_SCRIPT_BYTES)",
-  'renderer.registerStyleSheet(sheet.url, sheet.bytes)',
+  'renderer!.registerStyleSheet(sheet.url, sheet.bytes)',
   'renderer.registerScript(entry.url, entry.bytes)',
-  'await replaceNativeView(request, () => renderer.load(entryUrl, styleSheetUrls))',
+  'await replaceNativeView(request, () => renderer!.load(entryUrl, styleSheetUrls))',
 ]) {
   if (!loadDispatch.includes(requiredLoadStep)) {
     throw new Error(`Render Worker page load is missing ${requiredLoadStep}`)
@@ -217,7 +153,7 @@ for (const requiredLoadStep of [
 // complete before the first one.
 if (
   loadDispatch.indexOf("await fetchSource('script'") >
-  loadDispatch.indexOf('renderer.registerStyleSheet(')
+  loadDispatch.indexOf('renderer!.registerStyleSheet(')
 ) {
   throw new Error('Render Worker must fetch every page source before registering any')
 }
@@ -309,7 +245,7 @@ for (const requiredPointerStep of [
 if (renderWorker.includes('setTimeout(resolve, 1)')) {
   throw new Error('Render Worker still polls script completion on a timer')
 }
-if (!renderWorker.includes('await renderer.waitForEngineEvent()')) {
+if (!renderWorker.includes('await renderer!.waitForEngineEvent()')) {
   throw new Error('Render Worker must await core engine events')
 }
 for (const requiredServeStep of [
@@ -327,7 +263,7 @@ if (renderWorker.includes('renderIfRequested')) {
 }
 // The frame clock is the continuation's alone: a commit must reach the canvas
 // through the engine wakeup, never by waiting for a display frame.
-if (!/if \(renderer\.owesFrame\(\)\) \{\s*await nextDisplayFrame\(\)/.test(renderWorker)) {
+if (!/if \(renderer!\.owesFrame\(\)\) \{\s*await nextDisplayFrame\(\)/.test(renderWorker)) {
   throw new Error(
     'Render Worker must wait for a display frame only while the view owes one',
   )
@@ -370,19 +306,104 @@ if (
 ) {
   throw new Error('Render Worker must preserve raw script bytes for core UTF-8 validation')
 }
-for (const forbiddenDomApi of [
-  'addAuthorStylesheet',
-  'appendElement',
-  'createPage',
-  'createView',
-  'dropElement',
-  'flushElementTree',
+for (const forbiddenDomApi of forbiddenDomApis) {
+  if (facade.includes(forbiddenDomApi) || renderWorker.includes(forbiddenDomApi)) {
+    throw new Error(`browser facade still exposes direct DOM API ${forbiddenDomApi}`)
+  }
+}
+
+// The build artifacts: the TypeScript emit in `dist/` and the wasm-pack
+// output in `pkg/`.
+for (const script of [
+  path.join(packageDirectory, 'dist/dom-worker.js'),
+  path.join(packageDirectory, 'dist/facade.js'),
+  path.join(packageDirectory, 'dist/image-decoder.js'),
+  path.join(packageDirectory, 'dist/render-worker.js'),
+  gluePath,
 ]) {
-  if (
-    facade.includes(forbiddenDomApi) ||
-    declarations.includes(forbiddenDomApi) ||
-    renderWorker.includes(forbiddenDomApi)
-  ) {
+  execFileSync(process.execPath, ['--check', script], { stdio: 'inherit' })
+}
+
+const glue = await readFile(gluePath, 'utf8')
+const wasmDeclarations = await readFile(wasmDeclarationsPath, 'utf8')
+if (!/new WebAssembly\.Memory\(\{[^}]*shared:\s*true/.test(glue)) {
+  throw new Error('generated glue does not construct shared WebAssembly memory')
+}
+for (const requiredExport of [
+  'export class BobcatRenderer',
+  'export function wasm_thread_entry_point',
+]) {
+  if (!glue.includes(requiredExport)) {
+    throw new Error(`generated glue is missing ${requiredExport}`)
+  }
+}
+for (const requiredMethod of [
+  'dispatchPointer(',
+  'registerScript(',
+  'registerStyleSheet(',
+  'registerLynxXml(',
+  'loadTemplate(',
+  'loadZip(',
+  'bobcatrenderer_load(',
+  'pump(',
+  'registerFonts(',
+  'setDefaultFontFamily(',
+  'waitForEngineEvent(',
+]) {
+  if (!glue.includes(requiredMethod)) {
+    throw new Error(`generated renderer is missing ${requiredMethod}`)
+  }
+}
+if (
+  !wasmDeclarations.includes(
+    'registerLynxXml(source_url: string, source: string): Array<any>;',
+  )
+) {
+  throw new Error('generated renderer changed the registerLynxXml Worker ABI')
+}
+if (!glue.includes('passArray8ToWasm0(bytes')) {
+  throw new Error('generated script registry must accept raw Uint8Array bytes')
+}
+for (const removedExport of [
+  'createBrowserSession',
+  'finishBrowserScriptCheckpoint',
+  'initThreadPool',
+  'parallelChecksum',
+  'pollDomCommand',
+  'pollResponse',
+  'bobcatrenderer_executeScript',
+  'bobcatrenderer_loadStyleSheet',
+  'bobcatrenderer_reset',
+  'scriptStarted',
+  'waitForResponse',
+  'wasmMemory',
+]) {
+  if (glue.includes(removedExport)) {
+    throw new Error(`generated glue still exposes removed ${removedExport}`)
+  }
+}
+
+const declarations = await readFile(
+  path.join(packageDirectory, 'dist/facade.d.ts'),
+  'utf8',
+)
+for (const requiredDeclaration of [
+  'pageConfig: PageConfig',
+  'LYNX_XML_PAGE_CONFIG: Readonly<PageConfig>',
+  'load(url: string | URL, styleSheetUrls?: readonly (string | URL)[])',
+  'loadLynxXml(url: string | URL)',
+  'registerFonts(data: ArrayBuffer | Uint8Array)',
+  'setDefaultFontFamily(family: string)',
+]) {
+  if (!declarations.includes(requiredDeclaration)) {
+    throw new Error(`browser declarations are missing ${requiredDeclaration}`)
+  }
+}
+if (declarations.includes('dispatchPointer')) {
+  throw new Error('browser declarations expose the private pointer bridge')
+}
+for (const forbiddenDomApi of forbiddenDomApis) {
+  if (declarations.includes(forbiddenDomApi)) {
     throw new Error(`browser facade still exposes direct DOM API ${forbiddenDomApi}`)
   }
 }
@@ -445,7 +466,7 @@ if (forbiddenImports.length !== 0) {
   )
 }
 
-const pack = JSON.parse(
+const pack: PackResult = JSON.parse(
   execFileSync('npm', ['pack', '--dry-run', '--json'], {
     cwd: packageDirectory,
     encoding: 'utf8',
@@ -457,13 +478,13 @@ const pack = JSON.parse(
 )[0]
 const packed = new Set(pack.files.map(({ path: packedPath }) => packedPath))
 const required = [
-  'dom-worker.js',
-  'facade.d.ts',
-  'facade.js',
-  'image-decoder.js',
+  'dist/dom-worker.js',
+  'dist/facade.d.ts',
+  'dist/facade.js',
+  'dist/image-decoder.js',
+  'dist/render-worker.js',
   'pkg/bobcat_wasm.js',
   'pkg/bobcat_wasm_bg.wasm',
-  'render-worker.js',
 ]
 for (const requiredPath of required) {
   if (!packed.has(requiredPath)) {

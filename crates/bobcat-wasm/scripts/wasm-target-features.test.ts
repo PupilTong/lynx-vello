@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import {
   cargoClangTargetFeatureFlags,
   clangTargetFeatureFlags,
-} from './wasm-target-features.mjs'
+} from './wasm-target-features.ts'
 
 test('translates split and joined Rust codegen options', () => {
   assert.deepEqual(
@@ -29,7 +29,7 @@ test('rejects absent and malformed target features', () => {
 test('loads the canonical Wasm features from Cargo configuration', () => {
   const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   const flags = cargoClangTargetFeatureFlags({
-    cargo: process.env.CARGO ?? 'cargo',
+    cargo: process.env['CARGO'] ?? 'cargo',
     cwd: packageDirectory,
     target: 'wasm32-unknown-unknown',
   })

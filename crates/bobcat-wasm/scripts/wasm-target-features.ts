@@ -1,14 +1,19 @@
 import { execFileSync } from 'node:child_process'
 
-export function clangTargetFeatureFlags(rustflags) {
+// The part of `cargo config get --format json` read below.
+interface CargoConfig {
+  target?: Record<string, { rustflags?: unknown } | undefined>
+}
+
+export function clangTargetFeatureFlags(rustflags: unknown): string[] {
   if (!Array.isArray(rustflags) || !rustflags.every((flag) => typeof flag === 'string')) {
     throw new TypeError('Cargo target rustflags must be an array of strings')
   }
 
-  const clangFlags = []
+  const clangFlags: string[] = []
   for (let index = 0; index < rustflags.length; index += 1) {
-    const rustflag = rustflags[index]
-    let codegenOption
+    const rustflag = rustflags[index]!
+    let codegenOption: string | undefined
     if (rustflag === '-C') {
       index += 1
       codegenOption = rustflags[index]
@@ -40,9 +45,17 @@ export function clangTargetFeatureFlags(rustflags) {
   return clangFlags
 }
 
-export function cargoClangTargetFeatureFlags({ cargo = 'cargo', cwd, target }) {
+export function cargoClangTargetFeatureFlags({
+  cargo = 'cargo',
+  cwd,
+  target,
+}: {
+  cargo?: string
+  cwd: string
+  target: string
+}): string[] {
   const key = `target.${target}.rustflags`
-  let output
+  let output: string
   try {
     output = execFileSync(
       cargo,
@@ -50,11 +63,14 @@ export function cargoClangTargetFeatureFlags({ cargo = 'cargo', cwd, target }) {
       { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     )
   } catch (error) {
-    const detail = error.stderr?.trim() || error.message
+    // `execFileSync` throws an Error carrying the child's output once the
+    // child has run.
+    const detail =
+      (error as { stderr?: string }).stderr?.trim() || (error as Error).message
     throw new Error(`Could not read ${key} through Cargo: ${detail}`, { cause: error })
   }
 
-  let config
+  let config: CargoConfig | null
   try {
     config = JSON.parse(output)
   } catch (error) {

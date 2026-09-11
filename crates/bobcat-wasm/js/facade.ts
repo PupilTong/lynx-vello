@@ -1,4 +1,14 @@
-import { ImageDecoder } from './image-decoder.js'
+import { ImageDecoder } from './image-decoder.ts'
+import type {
+  InitMessage,
+  Operation,
+  PointerDevice,
+  PointerFields,
+  PointerMessage,
+  PointerPhase,
+  RenderWorkerMessage,
+  RequestFields,
+} from './protocol.d.ts'
 
 const MAX_RENDER_DIMENSION = 16_384
 const RENDER_WORKER_URL = new URL('./render-worker.js', import.meta.url)
@@ -12,10 +22,16 @@ const POINTER_PHASE_MOVE = 1
 const POINTER_PHASE_UP = 2
 const POINTER_PHASE_CANCEL = 3
 
-let initialization
+let initialization: Promise<void> | undefined
+
+export interface PageConfig {
+  defaultDisplayLinear: boolean
+  defaultOverflowVisible: boolean
+  enableCSSSelector: boolean
+}
 
 /** web-core raw-loader defaults; callers may spread this object to override. */
-export const LYNX_XML_PAGE_CONFIG = Object.freeze({
+export const LYNX_XML_PAGE_CONFIG: Readonly<PageConfig> = Object.freeze({
   defaultDisplayLinear: false,
   defaultOverflowVisible: false,
   enableCSSSelector: true,
@@ -24,23 +40,23 @@ export const LYNX_XML_PAGE_CONFIG = Object.freeze({
 // The machine's parallelism, raw. Core turns it into a pool with the same
 // heuristic and the same cap a native view gets, so this side does no
 // arithmetic of its own, and the cap is not restated here.
-function hardwareConcurrency() {
+function hardwareConcurrency(): number {
   return Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 1)
 }
 
-function asError(error) {
+function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error))
 }
 
-function errorMessage(error) {
+function errorMessage(error: unknown): string {
   return asError(error).message
 }
 
-function documentUrl(input) {
+function documentUrl(input: string | URL): string {
   return new URL(String(input), document.baseURI).href
 }
 
-function fontBytes(data) {
+function fontBytes(data: ArrayBuffer | Uint8Array): Uint8Array {
   if (data instanceof ArrayBuffer) {
     return new Uint8Array(data)
   }
@@ -50,7 +66,11 @@ function fontBytes(data) {
   throw new TypeError('BobcatCanvas.registerFonts requires an ArrayBuffer or Uint8Array')
 }
 
-function validateMetrics(width, height, devicePixelRatio) {
+function validateMetrics(
+  width: number,
+  height: number,
+  devicePixelRatio: number,
+): void {
   const physicalWidth = width * devicePixelRatio
   const physicalHeight = height * devicePixelRatio
   if (
@@ -70,7 +90,7 @@ function validateMetrics(width, height, devicePixelRatio) {
   )
 }
 
-function pointerDevice(pointerType) {
+function pointerDevice(pointerType: string): PointerDevice {
   switch (pointerType) {
     case 'touch':
       return POINTER_DEVICE_TOUCH
@@ -85,17 +105,28 @@ function pointerDevice(pointerType) {
   }
 }
 
+interface ActivePointer {
+  device: PointerDevice
+  x: number
+  y: number
+}
+
 /** Owns the DOM EventTarget half of the browser input bridge. */
 class CanvasPointerInput {
-  #active = new Map()
-  #canvas
+  #active = new Map<number, ActivePointer>()
+  #canvas: HTMLCanvasElement
   #disposed = false
-  #height
-  #previousTouchAction
-  #send
-  #width
+  #height: number
+  #previousTouchAction: string
+  #send: (values: PointerFields) => void
+  #width: number
 
-  constructor(canvas, width, height, send) {
+  constructor(
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    send: (values: PointerFields) => void,
+  ) {
     this.#canvas = canvas
     this.#height = height
     this.#previousTouchAction = canvas.style.touchAction
@@ -112,13 +143,13 @@ class CanvasPointerInput {
     canvas.addEventListener('lostpointercapture', this.#onLostPointerCapture)
   }
 
-  resize(width, height) {
+  resize(width: number, height: number): void {
     this.#width = width
     this.#height = height
   }
 
   /** Ends every live sequence, so a page that survives keeps no stale one. */
-  reset() {
+  reset(): void {
     for (const [pointerId, active] of this.#active) {
       this.#releaseCapture(pointerId)
       if (!this.#disposed) {
@@ -135,7 +166,7 @@ class CanvasPointerInput {
     this.#active.clear()
   }
 
-  dispose() {
+  dispose(): void {
     if (this.#disposed) {
       return
     }
@@ -152,7 +183,7 @@ class CanvasPointerInput {
     this.#canvas.style.touchAction = this.#previousTouchAction
   }
 
-  #onPointerDown = (event) => {
+  #onPointerDown = (event: PointerEvent) => {
     if (
       this.#disposed ||
       !this.#validPointerId(event.pointerId) ||
@@ -182,7 +213,7 @@ class CanvasPointerInput {
     this.#send(message)
   }
 
-  #onPointerMove = (event) => {
+  #onPointerMove = (event: PointerEvent) => {
     const active = this.#active.get(event.pointerId)
     if (this.#disposed || active === undefined) {
       return
@@ -201,15 +232,15 @@ class CanvasPointerInput {
     this.#send(message)
   }
 
-  #onPointerUp = (event) => {
+  #onPointerUp = (event: PointerEvent) => {
     this.#finish(event, POINTER_PHASE_UP)
   }
 
-  #onPointerCancel = (event) => {
+  #onPointerCancel = (event: PointerEvent) => {
     this.#finish(event, POINTER_PHASE_CANCEL)
   }
 
-  #onLostPointerCapture = (event) => {
+  #onLostPointerCapture = (event: PointerEvent) => {
     const active = this.#active.get(event.pointerId)
     if (this.#disposed || active === undefined) {
       return
@@ -226,7 +257,7 @@ class CanvasPointerInput {
     }
   }
 
-  #finish(event, phase) {
+  #finish(event: PointerEvent, phase: PointerPhase): void {
     const active = this.#active.get(event.pointerId)
     if (this.#disposed || active === undefined) {
       return
@@ -239,10 +270,15 @@ class CanvasPointerInput {
     }
   }
 
-  #message(event, device, phase, fallback) {
+  #message(
+    event: PointerEvent,
+    device: PointerDevice,
+    phase: PointerPhase,
+    fallback?: ActivePointer,
+  ): PointerFields | undefined {
     const bounds = this.#canvas.getBoundingClientRect()
-    let x
-    let y
+    let x: number
+    let y: number
     if (
       Number.isFinite(event.clientX) &&
       Number.isFinite(event.clientY) &&
@@ -274,7 +310,7 @@ class CanvasPointerInput {
     }
   }
 
-  #releaseCapture(pointerId) {
+  #releaseCapture(pointerId: number): void {
     try {
       if (
         typeof this.#canvas.hasPointerCapture !== 'function' ||
@@ -288,7 +324,7 @@ class CanvasPointerInput {
     }
   }
 
-  #validPointerId(pointerId) {
+  #validPointerId(pointerId: number): boolean {
     return (
       Number.isInteger(pointerId) &&
       pointerId >= 0 &&
@@ -297,18 +333,23 @@ class CanvasPointerInput {
   }
 }
 
-class RenderWorkerClient {
-  #fatalError
-  #fatalListeners = new Set()
-  #nextRequest = 1
-  #pending = new Map()
-  #ready
-  #rejectReady
-  #resolveReady
-  #readySettled = false
-  #worker
+interface PendingRequest {
+  reject: (reason: unknown) => void
+  resolve: () => void
+}
 
-  constructor(worker) {
+class RenderWorkerClient {
+  #fatalError: Error | undefined
+  #fatalListeners = new Set<(error: Error) => void>()
+  #nextRequest = 1
+  #pending = new Map<number, PendingRequest>()
+  #ready: Promise<void>
+  #rejectReady!: (error: Error) => void
+  #resolveReady!: () => void
+  #readySettled = false
+  #worker: Worker
+
+  constructor(worker: Worker) {
     this.#worker = worker
     this.#ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve
@@ -320,15 +361,15 @@ class RenderWorkerClient {
     worker.addEventListener('error', this.#onError)
   }
 
-  get error() {
+  get error(): Error | undefined {
     return this.#fatalError
   }
 
-  get ready() {
+  get ready(): Promise<void> {
     return this.#ready
   }
 
-  #fail(error) {
+  #fail(error: unknown): void {
     if (this.#fatalError !== undefined) {
       return
     }
@@ -347,7 +388,7 @@ class RenderWorkerClient {
     }
   }
 
-  #onError = (event) => {
+  #onError = (event: ErrorEvent) => {
     this.#fail(event.error ?? new Error(event.message))
   }
 
@@ -355,8 +396,8 @@ class RenderWorkerClient {
     this.#fail(new Error('Bobcat Render Worker sent an unreadable message'))
   }
 
-  #onMessage = (event) => {
-    const message = event.data
+  #onMessage = (event: MessageEvent) => {
+    const message = event.data as RenderWorkerMessage
     if (message?.type === 'bobcat-ready') {
       if (!this.#readySettled) {
         this.#readySettled = true
@@ -384,13 +425,22 @@ class RenderWorkerClient {
     }
   }
 
-  request(operation, values = {}) {
+  // `dispose` is the one operation without fields, so it alone may omit them.
+  request(operation: 'dispose'): Promise<void>
+  request<O extends Operation>(
+    operation: O,
+    values: RequestFields[O],
+  ): Promise<void>
+  request(
+    operation: Operation,
+    values: RequestFields[Operation] = {},
+  ): Promise<void> {
     if (this.#fatalError !== undefined) {
       return Promise.reject(this.#fatalError)
     }
     const request = this.#nextRequest
     this.#nextRequest = request === 0xffff_ffff ? 1 : request + 1
-    const result = new Promise((resolve, reject) => {
+    const result = new Promise<void>((resolve, reject) => {
       this.#pending.set(request, { reject, resolve })
     })
     try {
@@ -401,25 +451,29 @@ class RenderWorkerClient {
         ...values,
       })
     } catch (error) {
-      const pending = this.#pending.get(request)
+      // The Promise executor above stored this entry synchronously.
+      const pending = this.#pending.get(request)!
       this.#pending.delete(request)
       pending.reject(error)
     }
     return result
   }
 
-  dispatchPointer(values) {
+  dispatchPointer(values: PointerFields): void {
     if (this.#fatalError !== undefined) {
       return
     }
     try {
-      this.#worker.postMessage({ type: 'bobcat-pointer', ...values })
+      this.#worker.postMessage({
+        type: 'bobcat-pointer',
+        ...values,
+      } satisfies PointerMessage)
     } catch (error) {
       this.#fail(error)
     }
   }
 
-  subscribeFatal(listener) {
+  subscribeFatal(listener: (error: Error) => void): () => boolean {
     this.#fatalListeners.add(listener)
     if (this.#fatalError !== undefined) {
       listener(this.#fatalError)
@@ -427,7 +481,7 @@ class RenderWorkerClient {
     return () => this.#fatalListeners.delete(listener)
   }
 
-  close() {
+  close(): void {
     const closed = new Error('Bobcat Render Worker was closed')
     for (const pending of this.#pending.values()) {
       pending.reject(closed)
@@ -440,7 +494,7 @@ class RenderWorkerClient {
   }
 }
 
-export default function init() {
+export default function init(): Promise<void> {
   initialization ??= Promise.resolve().then(() => {
     if (!globalThis.crossOriginIsolated) {
       throw new Error(
@@ -454,18 +508,30 @@ export default function init() {
   return initialization
 }
 
-/** A Worker-owned Bobcat view with automatic canvas pointer forwarding. */
+/**
+ * A Worker-owned Bobcat view with automatic canvas pointer forwarding.
+ *
+ * A Worker-owned Bobcat view attached to one HTML canvas. Active
+ * `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences on the
+ * canvas are captured and forwarded to the native input router automatically.
+ */
 export class BobcatCanvas {
-  #client
-  #decoder
+  #client: RenderWorkerClient
+  #decoder: ImageDecoder
   #disposed = false
-  #fatalError
-  #pointerInput
-  #unsubscribeFatal
+  #fatalError: Error | undefined
+  #pointerInput: CanvasPointerInput
+  #unsubscribeFatal: () => void
 
-  onerror = null
+  onerror: ((error: Error) => void) | null = null
 
-  constructor(client, canvas, width, height, decoder) {
+  private constructor(
+    client: RenderWorkerClient,
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    decoder: ImageDecoder,
+  ) {
     this.#client = client
     this.#decoder = decoder
     this.#pointerInput = new CanvasPointerInput(
@@ -485,12 +551,12 @@ export class BobcatCanvas {
   }
 
   static async create(
-    canvas,
-    width,
-    height,
-    devicePixelRatio,
-    pageConfig,
-  ) {
+    canvas: HTMLCanvasElement,
+    width: number,
+    height: number,
+    devicePixelRatio: number,
+    pageConfig: PageConfig,
+  ): Promise<BobcatCanvas> {
     await init()
     if (
       typeof globalThis.HTMLCanvasElement !== 'function' ||
@@ -521,8 +587,8 @@ export class BobcatCanvas {
     // them, over a channel of their own.
     const images = new MessageChannel()
     const decoder = new ImageDecoder(images.port1)
-    let client
-    let worker
+    let client: RenderWorkerClient | undefined
+    let worker: Worker | undefined
     try {
       worker = new Worker(RENDER_WORKER_URL, {
         name: 'bobcat-render',
@@ -540,7 +606,7 @@ export class BobcatCanvas {
           hardwareConcurrency: hardwareConcurrency(),
           workerUrl: THREAD_WORKER_URL,
           width,
-        },
+        } satisfies InitMessage,
         [offscreen, images.port2],
       )
       await client.ready
@@ -556,11 +622,14 @@ export class BobcatCanvas {
     return new BobcatCanvas(client, canvas, width, height, decoder)
   }
 
-  get error() {
+  get error(): Error | undefined {
     return this.#fatalError
   }
 
-  #request(operation, values) {
+  #request<O extends Operation>(
+    operation: O,
+    values: RequestFields[O],
+  ): Promise<void> {
     if (this.#disposed) {
       return Promise.reject(new Error('This BobcatCanvas has been disposed'))
     }
@@ -581,7 +650,10 @@ export class BobcatCanvas {
    * previous page running if the fetch was what failed. Relative URLs resolve
    * against this document's base URL. Nothing here imposes a deadline.
    */
-  async load(url, styleSheetUrls = []) {
+  async load(
+    url: string | URL,
+    styleSheetUrls: readonly (string | URL)[] = [],
+  ): Promise<void> {
     if (!Array.isArray(styleSheetUrls)) {
       throw new TypeError('BobcatCanvas.load styleSheetUrls must be an array')
     }
@@ -594,25 +666,41 @@ export class BobcatCanvas {
 
   /**
    * Fetch, parse, and show a single-file Lynx XML source envelope: the same
-   * load as `load()`, with the envelope's sections as the sources. A
-   * background-thread section is recognized and reported by a console warning,
-   * but neither retained nor executed. Page configuration remains the host's
-   * `BobcatCanvas.create` choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's
-   * raw-loader defaults.
+   * load as `load()`, with the envelope's sections as the sources. Its
+   * optional background script runs as a module in the page's BTS worker
+   * after the main-thread entry loads, with `lynx.getCoreContext()`
+   * available. Page configuration remains the host's `BobcatCanvas.create`
+   * choice; `LYNX_XML_PAGE_CONFIG` supplies web-core's raw-loader defaults.
    */
-  async loadLynxXml(url) {
+  async loadLynxXml(url: string | URL): Promise<void> {
     this.#pointerInput.reset()
     await this.#request('loadLynxXml', { url: documentUrl(url) })
   }
 
-  /** Fetch and show a binary web or source-based native template container. */
-  async loadTemplate(url) {
+  /**
+   * Fetch and show a binary web or source-based native template container.
+   *
+   * Fetch and decode a binary web or source-based native bundle (root entry).
+   * Uses the container's page configuration and resolves relative resources
+   * against its response URL. Native bytecode is rejected by the shared parser.
+   */
+  async loadTemplate(url: string | URL): Promise<void> {
     this.#pointerInput.reset()
     await this.#request('loadTemplate', { url: documentUrl(url) })
   }
 
-  /** Decode local ZIP bytes with bobcat-source and load the selected entry. */
-  async loadZip(data, entryUrl) {
+  /**
+   * Decode local ZIP bytes with bobcat-source and load the selected entry.
+   *
+   * Decode a ZIP and its selected template using bobcat-source. entryUrl must
+   * be absolute: its decoded pathname selects the member and its origin maps
+   * the ZIP resources. XML is strict UTF-8; binary bundles require root.
+   * The shared loader limits input to 64 MiB, output to 128 MiB, and 4096 entries.
+   */
+  async loadZip(
+    data: ArrayBuffer | Uint8Array,
+    entryUrl: string | URL,
+  ): Promise<void> {
     if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) {
       throw new TypeError('BobcatCanvas.loadZip requires an ArrayBuffer or Uint8Array')
     }
@@ -627,7 +715,7 @@ export class BobcatCanvas {
   }
 
   /** Retain font faces for every page this canvas loads. Call before a load. */
-  async registerFonts(data) {
+  async registerFonts(data: ArrayBuffer | Uint8Array): Promise<void> {
     await this.#request('registerFonts', { bytes: fontBytes(data) })
   }
 
@@ -635,7 +723,7 @@ export class BobcatCanvas {
    * Map CSS system-ui, sans-serif, and serif to a family for every page this
    * canvas loads. A name nothing provides makes the next load reject.
    */
-  async setDefaultFontFamily(family) {
+  async setDefaultFontFamily(family: string): Promise<void> {
     if (typeof family !== 'string' || family.trim() === '') {
       throw new TypeError(
         'BobcatCanvas.setDefaultFontFamily requires a non-empty family name',
@@ -646,7 +734,11 @@ export class BobcatCanvas {
     })
   }
 
-  async resize(width, height, devicePixelRatio) {
+  async resize(
+    width: number,
+    height: number,
+    devicePixelRatio: number,
+  ): Promise<void> {
     validateMetrics(width, height, devicePixelRatio)
     // Messages from one Window reach the Worker in order: updating the input
     // map before posting resize means a following pointer is expressed in the
@@ -655,7 +747,8 @@ export class BobcatCanvas {
     await this.#request('resize', { devicePixelRatio, height, width })
   }
 
-  async dispose() {
+  /** Releases pointer capture/listeners and terminates the Render Worker. */
+  async dispose(): Promise<void> {
     if (this.#disposed) {
       return
     }
