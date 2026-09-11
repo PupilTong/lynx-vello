@@ -65,6 +65,7 @@ allowBuilds:
   unrs-resolver: false
 
 overrides:
+  "@lynx-js/tasm": "0.0.53"
   "@rspack/core": "catalog:rspack"
   "@rsbuild/core>@rspack/core": "catalog:rspack"
   "@rsdoctor/rspack-plugin>@rspack/core": "catalog:rspack"

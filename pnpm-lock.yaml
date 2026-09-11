@@ -69,6 +69,7 @@ catalogs:
       version: 5.9.3
 
 overrides:
+  '@lynx-js/tasm': 0.0.53
   '@rspack/core': 2.1.4
   '@rsbuild/core>@rspack/core': 2.1.4
   '@rsdoctor/rspack-plugin>@rspack/core': 2.1.4
@@ -603,6 +604,28 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
+
+  packages/reactlynx-test-fixtures:
+    dependencies:
+      '@lynx-js/react':
+        specifier: 'catalog:'
+        version: 0.123.0(@lynx-js/types@4.0.0)(@types/react@18.3.28)
+    devDependencies:
+      '@lynx-js/react-rsbuild-plugin':
+        specifier: 'catalog:'
+        version: 0.18.0(@lynx-js/lynx-core@0.1.4)(@lynx-js/react@0.123.0(@lynx-js/types@4.0.0)(@types/react@18.3.28))(tslib@2.8.1)
+      '@lynx-js/rspeedy':
+        specifier: 'catalog:'
+        version: 0.16.0(@emnapi/core@2.0.0-alpha.3)(@emnapi/runtime@2.0.0-alpha.3)(@rspack/core@2.1.4(@swc/helpers@0.5.23))(csso@5.0.5)(esbuild@0.28.1)(supports-color@8.1.1)(typescript@5.9.3)(webpack@5.109.0(cssnano@7.1.9(postcss@8.5.23))(csso@5.0.5)(esbuild@0.28.1)(postcss@8.5.23))
+      '@lynx-js/tasm':
+        specifier: 0.0.53
+        version: 0.0.53
+      '@lynx-js/types':
+        specifier: 'catalog:'
+        version: 4.0.0
+      '@types/react':
+        specifier: 18.3.28
+        version: 18.3.28
 
 packages:
 
@@ -1168,8 +1191,8 @@ packages:
     peerDependencies:
       tailwindcss: ^3.4.0
 
-  '@lynx-js/tasm@0.0.39':
-    resolution: {integrity: sha512-FNIV6Cc2K0wCKOHVMfpr3M6kpIZqHHNI02GpVl+h0ClyyK44jxEO+lf58gLFD5E3o0hJ1cp3H2OBIxSUJGkPDw==}
+  '@lynx-js/tasm@0.0.53':
+    resolution: {integrity: sha512-P4b16NDniUC5IQ5lHxXvXFb+rK9nQtFMBNUXV2UQydIJlxun1XKWZk6Rm/GoKTiQ01rBvxctoxyKu7sLPo0BOw==}
     hasBin: true
 
   '@lynx-js/template-webpack-plugin@0.13.0':
@@ -4111,7 +4134,7 @@ snapshots:
     dependencies:
       '@lynx-js/css-serializer': 0.1.6
       '@lynx-js/runtime-wrapper-webpack-plugin': 0.2.2
-      '@lynx-js/tasm': 0.0.39
+      '@lynx-js/tasm': 0.0.53
       '@lynx-js/web-core': 0.22.2(@lynx-js/css-serializer@0.1.6)(@lynx-js/lynx-core@0.1.4)(tslib@2.8.1)
     transitivePeerDependencies:
       - '@lynx-js/lynx-core'
@@ -4220,13 +4243,13 @@ snapshots:
     dependencies:
       tailwindcss: 3.4.19
 
-  '@lynx-js/tasm@0.0.39': {}
+  '@lynx-js/tasm@0.0.53': {}
 
   '@lynx-js/template-webpack-plugin@0.13.0(@lynx-js/lynx-core@0.1.4)(tslib@2.8.1)':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@lynx-js/css-serializer': 0.1.6
-      '@lynx-js/tasm': 0.0.39
+      '@lynx-js/tasm': 0.0.53
       '@lynx-js/web-core': 0.22.2(@lynx-js/css-serializer@0.1.6)(@lynx-js/lynx-core@0.1.4)(tslib@2.8.1)
       '@lynx-js/webpack-runtime-globals': 0.0.7
       '@rspack/lite-tapable': 1.1.0

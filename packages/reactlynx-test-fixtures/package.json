@@ -1,0 +1,23 @@
+{
+  "name": "reactlynx-test-fixtures",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ReactLynx source fixtures and bundle generators for Bobcat integration tests.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:fixture": "node scripts/regenerate-react-lazy.mjs",
+    "build:legacy-query": "node scripts/regenerate-react-bts-query.mjs && node scripts/regenerate-react-lazy-query.mjs",
+    "build:legacy-native": "pnpm --filter @lynx-js/example-react build && node scripts/regenerate-react-native.mjs"
+  },
+  "dependencies": {
+    "@lynx-js/react": "catalog:"
+  },
+  "devDependencies": {
+    "@lynx-js/react-rsbuild-plugin": "catalog:",
+    "@lynx-js/rspeedy": "catalog:",
+    "@lynx-js/tasm": "0.0.53",
+    "@lynx-js/types": "catalog:",
+    "@types/react": "18.3.28"
+  }
+}
