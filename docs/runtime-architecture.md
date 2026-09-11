@@ -410,9 +410,9 @@ This prevents an embedder from bypassing commit ordering, mutating the tree
 beside JavaScript, reaching the main-thread document at all, submitting a
 scene independently of the painter, or evaluating code directly in the view's
 realm. A `Painter` is public, but everything it holds of a view is
-non-owning — a `watch` receiver, a weak command sender, a weak handle on the
-host's resource system — so it is a second *observer* rather than a second way
-to drive a view.
+non-owning — a `watch` receiver, and a `Weak` on the view's seat, which holds
+the view's command sender and its handle on the host's resource system — so it
+is a second *observer* rather than a second way to drive a view.
 
 ## The core-owned JavaScript engine
 
@@ -807,8 +807,8 @@ recommits. A frame that names a source not yet loaded paints nothing for it,
 the same not-yet-loaded state a browser shows. Each `LynxView::pump` gives the
 fetcher a moment of its own (`service_images`) to forward loads that completed
 elsewhere, before the sources that turn discovered are named. A painter asks
-the host for nothing at all; it only *reads*, through a `Weak<dyn FrameImages>`
-on the store its view owns.
+the host for nothing at all; it only *reads*, through the seat it holds a
+`Weak` of, which carries the view's handle on the store the view owns.
 Adopting a commit is that read: the painter resolves the frame's images once
 per commit through `FrameImages::read`, synchronously and off the swap-chain
 window, each with the
@@ -847,9 +847,9 @@ no receiver has to defer one.
 
 - `ToMain`, an mpsc FIFO in: `DispatchEvent`, `Resize`, `BeginFrame { now, seq }`,
   `Refill { offsets }`, `ImageEvents`. A FIFO because the order two commands
-  arrive in is what they mean. `LynxView` holds the one strong sender; an
-  attached `Painter` holds a weak one, so a painter can never keep a released
-  view's task alive.
+  arrive in is what they mean. `LynxView` holds the one strong sender, inside
+  the seat an attached `Painter` holds only a `Weak` of, so a painter can never
+  keep a released view's task alive.
 - `ViewNotice`, an mpsc FIFO back, drained by `LynxView::pump`: `Engine(event)`,
   `RequestImages(sources)`, and `RequestSource { request, completion }`. Only
   what a host must *act* on rides here.

@@ -13,10 +13,9 @@
 //! painter can outlive its view. The sibling `paint` and `main` modules hold
 //! those two, and this one holds the handles that join them.
 
-use std::cell::Cell;
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use dom::{FontBlob, FrameImages, ImageInbox, StylePool};
@@ -25,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::background::WorkerHome;
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, ViewNotice};
+use crate::link::{Published, ToMain, ViewNotice, ViewSeat};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
@@ -613,15 +612,21 @@ impl LynxGroup {
         // queue it was started for, which teardown has already detached,
         // rather than into its successor's document.
         let (reports, inbox) = ImageInbox::new();
+        let fetcher = Rc::new(resources(reports));
         Ok(LynxView {
             cancel,
-            commands,
+            // The seat a painter observes this view through: both halves of it
+            // are this view's, and the view is the only holder of a strong
+            // reference to it.
+            seat: Rc::new(ViewSeat {
+                commands,
+                images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
+            }),
             notices: notice_receiver,
             frames: frame_receiver,
             inbox,
-            fetcher: Rc::new(resources(reports)),
+            fetcher,
             failed: false,
-            painter_attached: Rc::new(Cell::new(false)),
             timeline_epoch: ClockInstant::now(),
             group: Rc::clone(&self.inner),
         })
@@ -649,26 +654,30 @@ pub struct LynxView<F> {
     /// task holds a clone, and every worker its realm creates holds a child of
     /// it.
     cancel: CancellationToken,
-    /// The goodbye. Dropping this closes the view's task's inbox, which is
-    /// what ends it — so it drops before the fetcher whose completions that
-    /// task may still be holding.
-    commands: mpsc::UnboundedSender<ToMain>,
+    /// What a painter observes this view through, and the goodbye with it:
+    /// dropping this closes the view's task's inbox, which is what ends it —
+    /// so it is declared before the fetcher whose completions that task may
+    /// still be holding, and before the share of that fetcher the seat itself
+    /// carries for the painter.
+    ///
+    /// The only strong reference there is. `Painter::attach` downgrades it,
+    /// and a live weak handle on it is what "this view already has an
+    /// interactive painter" means.
+    seat: Rc<ViewSeat>,
     notices: mpsc::UnboundedReceiver<ViewNotice>,
     frames: watch::Receiver<Published>,
     /// Where the host's completed image loads land. Detached in `Drop` before
     /// the fetcher goes, so a loader still in flight finds it closed rather
     /// than queueing into a released view.
     inbox: ImageInbox,
-    /// The host's whole resource system. An `Rc` because an attached painter
-    /// holds a `Weak` of it to read pixels through — non-owning, so this view
-    /// releasing it is what releases it.
+    /// The host's whole resource system, as this view itself speaks to it. An
+    /// `Rc` because the seat above carries a second, erased handle on it for
+    /// an attached painter to read pixels through — so this view dropping
+    /// both is what releases it.
     fetcher: Rc<F>,
     /// Whether a fatal lifecycle event has arrived. Nothing further is
     /// dispatched to the host's resource system after one.
     failed: bool,
-    /// Whether an interactive painter is already observing this view. Written
-    /// by `Painter::attach` and cleared by the link's own drop.
-    painter_attached: Rc<Cell<bool>>,
     /// When this view's document started, which is the epoch its animations
     /// are timed against. A painter adopts it at `attach`, so a painter that
     /// changes views does not restart the new one's timeline.
@@ -690,7 +699,7 @@ impl<F> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
-            .field("painter_attached", &self.painter_attached.get())
+            .field("painter_attached", &(Rc::weak_count(&self.seat) > 0))
             .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
@@ -711,8 +720,9 @@ impl<F> Drop for LynxView<F> {
         // still in flight must find it detached rather than queue into a
         // released view.
         self.inbox.detach();
-        // The fields then drop in declaration order — the goodbye, which is
-        // the command sender closing, before the fetcher. `bobcat-main`
+        // The fields then drop in declaration order — the seat first, and
+        // inside it the command sender whose closing is the goodbye, then the
+        // fetcher whose other handle that seat carried. `bobcat-main`
         // answers that by releasing this view's document and realm and going
         // on serving its siblings, and the group is what joins the thread
         // once the last of them is gone.
@@ -780,7 +790,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         // will never commit again.
         let reports = self.inbox.drain();
         if !self.failed && !reports.is_empty() {
-            let _ = self.commands.send(ToMain::ImageEvents(reports));
+            let _ = self.seat.commands.send(ToMain::ImageEvents(reports));
         }
         events
     }
@@ -814,26 +824,15 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         self.frames.clone()
     }
 
-    /// This view's command sender, which a painter keeps a `Weak` of: the
-    /// strong one stays here, so a painter can never keep a released view's
-    /// task alive.
-    pub(crate) const fn commands(&self) -> &mpsc::UnboundedSender<ToMain> {
-        &self.commands
-    }
-
-    /// A non-owning handle on the host's resource system, for reading the
-    /// pixels a committed frame draws.
+    /// The seat a painter observes this view from: its command sender and its
+    /// handle on the host's resource system, as one thing.
     ///
-    /// `Weak` deliberately: this view is the fetcher's owner, and dropping it
-    /// releases the host's store there and then, even under an attached
-    /// painter.
-    pub(crate) fn images(&self) -> Weak<dyn FrameImages> {
-        Rc::downgrade(&self.fetcher) as Weak<dyn FrameImages>
-    }
-
-    /// Whether an interactive painter is already observing this view.
-    pub(crate) const fn painter_attached(&self) -> &Rc<Cell<bool>> {
-        &self.painter_attached
+    /// The view owns the only strong reference, so the `Weak`
+    /// [`Painter::attach`](crate::Painter::attach) takes of it can never keep
+    /// a released view's task alive or hold its store open — and the weak
+    /// count here is what says whether a painter has taken the seat.
+    pub(crate) const fn seat(&self) -> &Rc<ViewSeat> {
+        &self.seat
     }
 
     /// When this view's document started, which is the epoch its animations
@@ -862,9 +861,12 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         probe: impl FnOnce(&mut crate::main::tree::LynxDocument) -> T + Send + 'static,
     ) -> Option<T> {
         let (sender, receiver) = std::sync::mpsc::channel();
-        let _ = self.commands.send(ToMain::Probe(Box::new(move |document| {
-            let _ = sender.send(probe(document));
-        })));
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::Probe(Box::new(move |document| {
+                let _ = sender.send(probe(document));
+            })));
         receiver
             .recv_timeout(std::time::Duration::from_secs(30))
             .ok()

@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 
-use dom::{CommittedFrame, NodeId, Vector2D};
+use dom::scroll::ScrollAxes;
+use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
@@ -29,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
+use crate::paint::RouterHost;
 use crate::resource::{LoadedSource, SourceCompletion, SourceRequest};
 use crate::view::{EngineEvent, EventRequester, LynxViewError};
 
@@ -111,6 +113,55 @@ impl Published {
     pub(crate) fn commit(&self) -> Option<u64> {
         self.frame.as_ref().map(|frame| frame.commit_id())
     }
+}
+
+/// Every document fact the gesture router asks for is in the snapshot the
+/// painter has adopted, so the snapshot *is* the router's host.
+///
+/// One pass therefore answers out of one state: the frame the pass hit-tested
+/// against is the frame a latched scroller is looked up in, and the listener
+/// names are the ones that pass adopted.
+impl RouterHost for Published {
+    fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
+        let frame = self.frame.as_ref()?;
+        let slot = frame.nearest_user_scrollable(from.scroll, axes)?;
+        Some(frame.scroll_slots()[slot as usize].node)
+    }
+
+    fn contains_node(&self, node: NodeId) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| frame.slot_of(node).is_some())
+    }
+
+    fn has_listener(&self, name: &str) -> bool {
+        self.listeners.contains(name)
+    }
+}
+
+/// The non-owning seat one painter takes on one view: the two things a painter
+/// reaches a live view through, released together.
+///
+/// The view holds the only `Rc`, and [`crate::Painter::attach`] is the only
+/// place a view's seat is downgraded (`Painter::detached` builds a seat of its
+/// own for the tests that play a view by hand) — so whether a view already has
+/// an interactive painter is the weak count of this, rather than a flag
+/// somebody has to remember to clear. The painter's `Weak` failing to upgrade
+/// is the view being gone, which is a fact the painter reads rather than one it
+/// is told.
+///
+/// The field order is the release order: the goodbye — closing the view's
+/// command channel, which is what ends its task — precedes giving up the
+/// view's share of the host's resource system.
+pub(crate) struct ViewSeat {
+    /// The view's own strong sender. Closing it is the goodbye that ends the
+    /// view's task, which is why the seat dies with the view rather than with
+    /// whatever a painter is holding.
+    pub(crate) commands: mpsc::UnboundedSender<ToMain>,
+    /// The host's resource system, as the painter reads a commit's pixels out
+    /// of it. A clone of the view's own handle, so the store is released when
+    /// the view drops both — seat first, by declaration order there.
+    pub(crate) images: Rc<dyn FrameImages>,
 }
 
 /// The view task's sending end: what the runtime, the tree and the listener

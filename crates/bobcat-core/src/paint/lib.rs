@@ -7,11 +7,11 @@
 //! else. [`Painter`] is `!Send` by construction, which is what makes the
 //! constructing thread the painting thread for its whole life.
 //!
-//! What it holds of a view is [`PainterLink`], and every part of that is
-//! non-owning: a watch receiver, a weak command sender, a weak handle on the
-//! host's resource system. A painter observes a view; it does not keep one
-//! alive, cannot end one, and asks its host for nothing — servicing the
-//! resource protocol is [`crate::LynxView::pump`]'s alone.
+//! What it holds of a view is a receiver on the view's publication watch and
+//! a `Weak` on the view's [`ViewSeat`]. Neither owns anything: a painter
+//! observes a view; it does not keep one alive, cannot end one, and asks its
+//! host for nothing — servicing the resource protocol is
+//! [`crate::LynxView::pump`]'s alone.
 
 mod gesture;
 mod graphics;
@@ -34,16 +34,19 @@ use dom::input::{InputEvent, InputKind};
 use dom::render::gpu::Headless;
 use dom::scroll::ScrollAxes;
 use dom::vello::Scene;
-use dom::vello::peniko::Color;
-use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
+use dom::vello::peniko::{Color, ImageData};
+use dom::{CommittedFrame, HitTarget, NodeId, Vector2D};
 use rustc_hash::FxHashMap;
-use tokio::sync::{mpsc, watch};
+#[cfg(test)]
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 
-use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions, RouterHost};
+pub(crate) use self::gesture::RouterHost;
+use self::gesture::{EmitEvent, GestureRouter, InputDecision, InputDecisions};
 pub use self::graphics::WindowTarget;
 use self::graphics::{FrameAcquisition, WindowGraphics};
 use crate::clock::ClockInstant;
-use crate::link::{Published, ToMain, block_on_deadline};
+use crate::link::{Published, ToMain, ViewSeat, block_on_deadline};
 use crate::main::tree::Viewport;
 use crate::resource::ResourceFetcher;
 #[cfg(not(target_arch = "wasm32"))]
@@ -132,58 +135,22 @@ mod clock_tests {
     }
 }
 
-/// What one painter needs to observe one view, and nothing else.
-///
-/// Every field is the view's, and every one of them is non-owning: the watch
-/// it publishes on, a weak sender for the commands a painter has to send it,
-/// a weak handle on the host resource system the pixels are read out of, and
-/// the flag saying this view already has an interactive painter. Nothing here
-/// can keep a released view alive, which is what makes "the view is gone" a
-/// fact the painter reads rather than one it has to be told.
-struct PainterLink {
-    frames: watch::Receiver<Published>,
-    /// Weak deliberately: the one strong sender is the view's own, and its
-    /// closing is the goodbye that ends the view's task.
-    commands: mpsc::WeakUnboundedSender<ToMain>,
-    /// Weak for the same reason. A view dropped under an attached painter
-    /// releases its host's resource system there and then; what the painter
-    /// already resolved out of it stays drawable. Which is why a commit is
-    /// adopted only together with its pixels: past this point there is no
-    /// second chance to read them, and a frame over another commit's table
-    /// would draw that commit's images.
-    images: Weak<dyn FrameImages>,
-    /// The view's "somebody is already painting me".
-    attached: Rc<Cell<bool>>,
-}
-
-/// Releasing the link is the one place the view's flag is cleared, so
-/// `detach`, the auto-detach, dropping the painter and unwinding out of one
-/// all say the same thing and none of them can forget to.
-impl Drop for PainterLink {
-    fn drop(&mut self) {
-        self.attached.set(false);
-    }
-}
-
 /// A view's whole side of one link, for the tests that play that side by
 /// hand rather than over a group's thread.
 #[cfg(test)]
 pub(crate) struct FarEnd {
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,
-    /// The strong sender a live view holds. Without it here the painter's
-    /// weak one would not upgrade, and the painter would detach itself on its
-    /// first turn.
-    #[expect(dead_code, reason = "held so the painter's weak sender upgrades")]
-    sender: mpsc::UnboundedSender<ToMain>,
+    /// The seat a live view holds: its command sender and its resource
+    /// system. Without it here the painter's `Weak` would not upgrade, and the
+    /// painter would detach itself on its first turn.
+    #[expect(dead_code, reason = "held so the painter's weak seat upgrades")]
+    seat: Rc<ViewSeat>,
     pub(crate) outbox: crate::link::ViewOutbox,
     #[expect(
         dead_code,
         reason = "held so the outbox's notices have somewhere to go"
     )]
     notices: mpsc::UnboundedReceiver<crate::link::ViewNotice>,
-    /// The resource system a view owns, held for the painter's weak handle.
-    #[expect(dead_code, reason = "held so the painter's weak image handle upgrades")]
-    images: Rc<dyn FrameImages>,
 }
 
 /// Where a painter's pixels go: a window's presentation stack, or a texture
@@ -221,12 +188,12 @@ impl Output {
         }
     }
 
-    /// Forgets what this target last rendered and what its retained planes
-    /// were baked from.
+    /// Forgets what this target's retained planes were baked from, and — for a
+    /// target that is itself the only copy of a frame — the frame too.
     ///
     /// What a painter does when it points at a different document: commit ids
-    /// restart at one per document, so a retained key from the previous page
-    /// would make the next page's first frame look already drawn.
+    /// restart at one per document, so planes baked from the previous page
+    /// would be reused for the next one's first composite.
     ///
     /// A window keeps its surface, because what is on screen is the previous
     /// page's last frame and it stays there until the next one is presented.
@@ -239,6 +206,52 @@ impl Output {
             Self::None => {}
             Self::Offscreen(gpu) => gpu.forget(),
             Self::Window(graphics) => graphics.forget(),
+        }
+    }
+
+    /// Brings this target's retained plane textures up to a layered frame's
+    /// plan, before the frame is composed over them.
+    fn prepare_planes(
+        &mut self,
+        frame: &CommittedFrame,
+        images: &[Option<ImageData>],
+    ) -> Result<(), EngineError> {
+        match self {
+            #[cfg(test)]
+            Self::None => Ok(()),
+            Self::Offscreen(gpu) => gpu
+                .prepare_planes(frame, images)
+                .map_err(|error| EngineError::Gpu(error.to_string())),
+            Self::Window(graphics) => graphics.prepare_planes(frame, images),
+        }
+    }
+
+    /// The retained planes' registered images, as a composite draws them.
+    fn plane_images(&self) -> &[ImageData] {
+        match self {
+            #[cfg(test)]
+            Self::None => &[],
+            Self::Offscreen(gpu) => gpu.plane_images(),
+            Self::Window(graphics) => graphics.plane_images(),
+        }
+    }
+
+    /// Renders one composed scene into this target at `size`.
+    ///
+    /// A window renders into the texture it re-presents rather than into the
+    /// swap-chain image, which is what lets re-exposure present the same frame
+    /// again with a blit alone. Neither kind waits for the submitted work here:
+    /// a window presents, and an offscreen target's readback polls the device
+    /// itself — only [`Painter::tick`], which renders offscreen and reads
+    /// nothing back, waits.
+    fn render(&mut self, scene: &Scene, size: FrameSize) -> Result<(), EngineError> {
+        match self {
+            #[cfg(test)]
+            Self::None => Ok(()),
+            Self::Offscreen(gpu) => gpu
+                .render_frame(scene, size.width, size.height, Color::WHITE)
+                .map_err(|error| EngineError::Gpu(error.to_string())),
+            Self::Window(graphics) => graphics.render_to_target(scene, size),
         }
     }
 
@@ -272,15 +285,23 @@ impl Output {
 ///
 /// It is built before any view exists and outlives every view it shows.
 /// [`Self::attach`] points it at one, [`Self::detach`] releases it, and
-/// between the two everything derived from that view — the frames, what was
-/// composed from them, the gesture arena, the resolved pixels — belongs to
-/// the attachment rather than to the painter. The draw target does not: what
-/// was last drawn stays on screen across both.
+/// between the two everything derived from that view — the frames, the gesture
+/// arena, the resolved pixels — belongs to the attachment rather than to the
+/// painter. The draw target and what it holds do not: what was last drawn
+/// stays on screen, and stays capturable, across both.
 pub struct Painter {
-    /// The view this painter observes, if it observes one. Kept first so its
-    /// drop — which clears the view's attached flag — runs before anything
-    /// else here is released.
-    link: Option<PainterLink>,
+    /// The seat this painter took on the view it observes, if it observes one.
+    /// Non-owning, and the only handle there is on a live view: an upgrade
+    /// that fails is the view having been released, which is therefore a fact
+    /// this painter reads rather than one anybody has to tell it.
+    seat: Weak<ViewSeat>,
+    /// A receiver on that view's publication watch, cloned when this painter
+    /// attached.
+    ///
+    /// Deliberately not in the seat: a released view's last frame is still the
+    /// frame to draw, so the receiver has to outlive the view it came from and
+    /// the poll that notices the view is gone has to read it one last time.
+    frames: Option<watch::Receiver<Published>>,
     viewport: Viewport,
     frame_size: FrameSize,
     output: Output,
@@ -301,7 +322,15 @@ pub struct Painter {
     pub(super) gesture: GestureRouter,
     pub(super) clock: FrameClock,
     pub(super) scroll_intents: ScrollIntents,
-    composed: Option<ComposeKey>,
+    /// What this painter's draw target holds: the compose key it was rendered
+    /// from, at the size it was rendered for. The one record of that — a
+    /// target has no second one of its own — so it says whether a frame may be
+    /// skipped and whether there is anything to capture.
+    ///
+    /// The target's, not the attachment's: what was drawn stays drawn across a
+    /// detach, and [`Painter::attach`] is what clears it, together with the
+    /// planes it was baked from.
+    composed: Option<(ComposeKey, FrameSize)>,
     composed_scene: Scene,
     refill_requested_for: Option<u64>,
     /// The pixels this commit draws, read out of the attached view's store.
@@ -315,7 +344,7 @@ impl std::fmt::Debug for Painter {
             .debug_struct("Painter")
             .field("viewport", &self.viewport)
             .field("frame_size", &self.frame_size)
-            .field("attached", &self.link.is_some())
+            .field("attached", &self.is_attached())
             .finish_non_exhaustive()
     }
 }
@@ -328,28 +357,6 @@ fn emit_detail(event: &EmitEvent) -> String {
             position.x, position.y, delta.x, delta.y
         ),
         None => format!(r#"{{"x":{},"y":{}}}"#, position.x, position.y),
-    }
-}
-
-struct FrameRouterHost<'a> {
-    frame: Option<&'a CommittedFrame>,
-    published: &'a Published,
-}
-
-impl RouterHost for FrameRouterHost<'_> {
-    fn nearest_user_scrollable(&self, from: HitTarget, axes: ScrollAxes) -> Option<NodeId> {
-        let frame = self.frame?;
-        let slot = frame.nearest_user_scrollable(from.scroll, axes)?;
-        Some(frame.scroll_slots()[slot as usize].node)
-    }
-
-    fn contains_node(&self, node: NodeId) -> bool {
-        self.frame
-            .is_some_and(|frame| frame.slot_of(node).is_some())
-    }
-
-    fn has_listener(&self, name: &str) -> bool {
-        self.published.listeners.contains(name)
     }
 }
 
@@ -475,79 +482,43 @@ fn clamp_scroll_axis(value: f32, max: f32) -> f32 {
     }
 }
 
-fn scene_for<'frame>(
+/// Composes one frame and renders it into `output`, whatever kind of target
+/// that is and whether or not the frame is layered.
+///
+/// The one render path.
+fn compose_and_render(
+    output: &mut Output,
+    buffer: &mut Scene,
     intents: &ScrollIntents,
-    buffer: &'frame mut Scene,
-    frame: &'frame CommittedFrame,
-    images: &[Option<dom::vello::peniko::ImageData>],
+    frame: &CommittedFrame,
+    images: &[Option<ImageData>],
+    size: FrameSize,
     animation_now: Option<f64>,
-) -> &'frame Scene {
-    if intents.offsets.is_empty()
+) -> Result<(), EngineError> {
+    let offsets: &dyn Fn(&dom::ScrollSlot) -> Option<Vector2D<f32>> =
+        &|slot| intents.offset_for(slot.node);
+    let scene = if frame.composite_plan().is_some() {
+        output.prepare_planes(frame, images)?;
+        buffer.reset();
+        frame.composite_into(
+            buffer,
+            output.plane_images(),
+            images,
+            offsets,
+            animation_now,
+        );
+        &*buffer
+    } else if intents.offsets.is_empty()
         && animation_now.is_none()
         && let Some(scene) = frame.scene()
     {
-        return scene;
-    }
-    buffer.reset();
-    frame.compose_into(
-        buffer,
-        images,
-        &|slot| intents.offset_for(slot.node),
-        animation_now,
-    );
-    buffer
-}
-
-fn composite_scene<'frame>(
-    intents: &ScrollIntents,
-    buffer: &'frame mut Scene,
-    frame: &CommittedFrame,
-    plane_images: &[dom::vello::peniko::ImageData],
-    images: &[Option<dom::vello::peniko::ImageData>],
-    animation_now: Option<f64>,
-) -> &'frame Scene {
-    buffer.reset();
-    frame.composite_into(
-        buffer,
-        plane_images,
-        images,
-        &|slot| intents.offset_for(slot.node),
-        animation_now,
-    );
-    buffer
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one compose call's full inputs, none of which the painter owns together"
-)]
-fn paint_window(
-    graphics: &mut WindowGraphics,
-    intents: &ScrollIntents,
-    buffer: &mut Scene,
-    frame: &CommittedFrame,
-    images: &[Option<dom::vello::peniko::ImageData>],
-    size: FrameSize,
-    key: ComposeKey,
-    animation_now: Option<f64>,
-) -> Result<(), EngineError> {
-    if animation_now.is_none() && !graphics.needs_paint(key, size) {
-        return Ok(());
-    }
-    let scene = if frame.composite_plan().is_some() {
-        graphics.prepare_planes(frame, images)?;
-        composite_scene(
-            intents,
-            buffer,
-            frame,
-            graphics.plane_images(),
-            images,
-            animation_now,
-        )
+        scene
     } else {
-        scene_for(intents, buffer, frame, images, animation_now)
+        buffer.reset();
+        frame.compose_into(buffer, images, offsets, animation_now);
+        &*buffer
     };
-    graphics.render_to_target(scene, size, key)
+    output.render(scene, size)
 }
 
 fn route_published(
@@ -599,7 +570,8 @@ impl Painter {
 
     fn with_output(viewport: Viewport, frame_size: FrameSize, output: Output) -> Self {
         Self {
-            link: None,
+            seat: Weak::new(),
+            frames: None,
             viewport,
             frame_size,
             output,
@@ -645,19 +617,18 @@ impl Painter {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        let images: Rc<dyn FrameImages> = Rc::new(dom::NoImages);
-        let mut painter = Self::without_output(width, height, 1.0);
-        painter.link = Some(PainterLink {
-            frames: frame_receiver,
-            commands: commands.downgrade(),
-            images: Rc::downgrade(&images),
-            attached: Rc::new(Cell::new(true)),
+        let seat = Rc::new(ViewSeat {
+            commands,
+            images: Rc::new(dom::NoImages),
         });
+        let mut painter = Self::without_output(width, height, 1.0);
+        painter.seat = Rc::downgrade(&seat);
+        painter.frames = Some(frame_receiver);
         (
             painter,
             FarEnd {
                 commands: command_receiver,
-                sender: commands,
+                seat,
                 outbox: crate::link::ViewOutbox::new(
                     notices,
                     frames,
@@ -667,7 +638,6 @@ impl Painter {
                     tokio_util::sync::CancellationToken::new(),
                 ),
                 notices: notice_receiver,
-                images,
             },
         )
     }
@@ -676,11 +646,11 @@ impl Painter {
     /// pixels its host has loaded.
     ///
     /// Everything derived from whatever came before is dropped first — the
-    /// published snapshot, what was composed from it, the scroll intents, the
-    /// gesture arena, the resolved pixels, and the target's own retained key
-    /// and plane bank. Commit ids restart at one per document, so a key kept
-    /// across the change would make the new page's first frame look already
-    /// drawn and hand it the old page's planes.
+    /// published snapshot, the scroll intents, the gesture arena, the resolved
+    /// pixels, and what the target holds: its compose key and its plane bank.
+    /// Commit ids restart at one per document, so a key kept across the change
+    /// would make the new page's first frame look already drawn and hand it the
+    /// old page's planes.
     ///
     /// The painter's metrics win: attaching sends them to the view, so a view
     /// built at one size and shown at another is resized rather than showing
@@ -702,22 +672,22 @@ impl Painter {
                 "the painter's draw target failed".to_owned(),
             ));
         }
-        if self
-            .link
-            .as_ref()
-            .is_some_and(|link| link.commands.upgrade().is_some())
-        {
+        // A seat whose view is gone is not an attachment, only one this painter
+        // has not taken a turn to notice — `is_attached` reads the view's
+        // liveness rather than a bit somebody set — which is what lets a host
+        // replace a view without pumping in between.
+        if self.is_attached() {
             return Err(EngineError::PainterAttached);
         }
-        // A link whose view is gone is not an attachment, only one this
-        // painter has not taken a turn to notice; releasing it here is what
-        // lets a host replace a view without pumping in between.
-        self.detach();
-        if view.painter_attached().get() {
+        // This is the only place a view's seat is downgraded, so a view has at
+        // most one weak handle on its seat: the painter observing it.
+        debug_assert!(
+            Rc::weak_count(view.seat()) <= 1,
+            "only `Painter::attach` downgrades a view's seat"
+        );
+        if Rc::weak_count(view.seat()) > 0 {
             return Err(EngineError::PainterAttached);
         }
-        let attached = Rc::clone(view.painter_attached());
-        attached.set(true);
         let frames = view.frames();
         // A `BeginFrame` a previous attachment sent and main has not
         // acknowledged yet could otherwise satisfy this attachment's first
@@ -726,14 +696,10 @@ impl Painter {
         self.begin_frames_sent = self
             .begin_frames_sent
             .max(frames.borrow().begin_frame_serviced);
-        self.link = Some(PainterLink {
-            frames,
-            commands: view.commands().downgrade(),
-            images: view.images(),
-            attached,
-        });
+        self.seat = Rc::downgrade(view.seat());
+        self.frames = Some(frames);
         self.forget_view();
-        self.output.forget();
+        self.forget_target();
         self.clock.rebase(view.timeline_epoch());
         self.send(ToMain::Resize {
             width: self.viewport.width,
@@ -751,16 +717,20 @@ impl Painter {
     /// next page loads. Nothing is said to the view — a painter cannot end
     /// one — and nothing is cancelled.
     pub fn detach(&mut self) {
-        if self.link.take().is_none() {
+        if self.frames.take().is_none() {
             return;
         }
+        self.seat = Weak::new();
         self.forget_view();
     }
 
     /// Whether this painter is observing a view.
+    ///
+    /// A view that has been released is not one: its seat is gone with it, and
+    /// nothing had to tell this painter so.
     #[must_use]
-    pub const fn is_attached(&self) -> bool {
-        self.link.is_some()
+    pub fn is_attached(&self) -> bool {
+        self.seat.strong_count() > 0
     }
 
     /// Whether this painter's draw target has failed. A failed painter draws
@@ -770,16 +740,30 @@ impl Painter {
         self.render_failed
     }
 
-    /// Drops everything derived from a view: what it published, what was
-    /// composed out of that, where it was scrolled to, the gesture in
-    /// progress, and the pixels resolved out of its host's store.
+    /// Drops everything derived from a view: what it published, where it was
+    /// scrolled to, the gesture in progress, and the pixels resolved out of its
+    /// host's store.
+    ///
+    /// Not what the target holds — that is [`Self::forget_target`], and it
+    /// survives a detach, because so do the pixels on screen.
     fn forget_view(&mut self) {
         self.published = Published::default();
-        self.composed = None;
         self.refill_requested_for = None;
         self.scroll_intents = ScrollIntents::default();
         self.gesture = GestureRouter::default();
         self.images.forget();
+    }
+
+    /// Drops what the draw target holds: the key it was rendered from and the
+    /// planes that key was baked out of.
+    ///
+    /// The two are one fact and are forgotten together, which is why there is
+    /// one caller: pointing this painter at a different document. Commit ids
+    /// restart at one per document, so either half kept alone would answer the
+    /// new page's first frame with the old page's work.
+    fn forget_target(&mut self) {
+        self.composed = None;
+        self.output.forget();
     }
 
     /// Adopts whatever the attached view has published since the last look —
@@ -809,50 +793,55 @@ impl Painter {
     /// Every poll on the drawing path runs before that path acquires a
     /// swap-chain image, so a restore cannot stall the chain under vsync.
     fn poll_link(&mut self) {
-        let Some((latest, alive, store)) = self.link.as_mut().map(|link| {
-            let published = link.frames.borrow_and_update();
-            let latest = published.clone();
-            drop(published);
-            (
-                latest,
-                link.commands.upgrade().is_some(),
-                link.images.upgrade(),
-            )
-        }) else {
+        let Some(frames) = self.frames.as_mut() else {
             return;
         };
+        let published = frames.borrow_and_update();
+        let latest = published.clone();
+        drop(published);
+        // One upgrade, for both halves of the seat: a commit's pixels are read
+        // out of the view's store through the same handle whose loss means the
+        // view is gone, so the two can never disagree.
+        let seat = self.seat.upgrade();
         if latest.commit() != self.published.commit() {
             if let Some(frame) = latest.frame.as_ref()
                 && !self.images.holds(frame.commit_id())
             {
-                let Some(store) = store else {
+                let Some(seat) = seat.as_ref() else {
                     // The view is gone with its store, so this commit's pixels
                     // can no longer be read. It is not adopted; the painter
                     // keeps the last commit it did read, whole.
-                    if !alive {
-                        self.link = None;
-                    }
+                    self.release_seat();
                     return;
                 };
-                self.images.resolve(frame, store.as_ref());
+                self.images.resolve(frame, seat.images.as_ref());
             }
             self.redraw_pending.set(true);
         }
         self.published = latest;
-        // Losing the view's own sender is the view being released, which is
-        // the one end a painter has to notice. It keeps what it adopted, what
-        // it composed and what it drew: the last frame stays on screen.
-        if !alive {
-            self.link = None;
+        // Losing the view's seat is the view being released, which is the one
+        // end a painter has to notice — and it is noticed after the adoption
+        // above, so a commit published in the release turn is still taken. It
+        // keeps what it adopted, what it composed and what it drew: the last
+        // frame stays on screen.
+        if seat.is_none() {
+            self.release_seat();
         }
+    }
+
+    /// Lets go of a view that has been released: the dangling weak seat, and
+    /// the watch whose publisher went with it.
+    fn release_seat(&mut self) {
+        self.seat = Weak::new();
+        self.frames = None;
     }
 
     /// Sends one command to the attached view's task. A detached painter, or
     /// one whose view has ended, says nothing; it goes on showing what it
     /// last drew.
     fn send(&self, command: ToMain) {
-        if let Some(commands) = self.link.as_ref().and_then(|link| link.commands.upgrade()) {
-            let _ = commands.send(command);
+        if let Some(seat) = self.seat.upgrade() {
+            let _ = seat.commands.send(command);
         }
     }
 
@@ -894,14 +883,8 @@ impl Painter {
         let animation_now = frame.and_then(|frame| frame.has_live_curves().then_some(at));
         let target = route_published(frame, &self.scroll_intents, &event, animation_now);
         let mut decisions = InputDecisions::new();
-        {
-            let host = FrameRouterHost {
-                frame,
-                published: &self.published,
-            };
-            self.gesture
-                .on_input(&event, target, at, &host, &mut decisions);
-        }
+        self.gesture
+            .on_input(&event, target, at, &self.published, &mut decisions);
         self.execute_decisions(&mut decisions, published.as_deref());
         if let Some(frame) = &published {
             self.maybe_request_refill(frame);
@@ -976,13 +959,7 @@ impl Painter {
     fn tick_gestures(&mut self, now: f64) {
         let published = self.frame().cloned();
         let mut decisions = InputDecisions::new();
-        {
-            let host = FrameRouterHost {
-                frame: published.as_deref(),
-                published: &self.published,
-            };
-            self.gesture.on_tick(now, &host, &mut decisions);
-        }
+        self.gesture.on_tick(now, &self.published, &mut decisions);
         self.execute_decisions(&mut decisions, published.as_deref());
     }
 
@@ -1084,13 +1061,65 @@ impl Painter {
         if !main_ticks_due && !always {
             return None;
         }
-        let commands = self.link.as_ref()?.commands.upgrade()?;
+        let seat = self.seat.upgrade()?;
         self.begin_frames_sent += 1;
         let seq = self.begin_frames_sent;
-        commands
+        seat.commands
             .send(ToMain::BeginFrame { now, seq })
             .ok()
             .map(|()| seq)
+    }
+
+    /// Composes `frame` at `key` and renders it into the draw target,
+    /// answering whether it rendered anything.
+    ///
+    /// The one path from a published frame to pixels, whatever the target and
+    /// whoever asked: a window's draw, an offscreen tick, and a capture of
+    /// either. The caller passes the frame it derived `key` and `animation_now`
+    /// from, so what the record names and what the target holds cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::Render`] or [`EngineError::Gpu`] if the target refuses
+    /// the scene, in which case it holds nothing: a failed render is allowed to
+    /// have dropped what was there.
+    fn render_frame(
+        &mut self,
+        frame: &CommittedFrame,
+        key: ComposeKey,
+        animation_now: Option<f64>,
+        force: bool,
+    ) -> Result<bool, EngineError> {
+        let size = self.frame_size;
+        if self.composed == Some((key, size)) && !force && animation_now.is_none() {
+            return Ok(false);
+        }
+        let Self {
+            output,
+            composed_scene,
+            scroll_intents,
+            images,
+            ..
+        } = &mut *self;
+        let rendered = compose_and_render(
+            output,
+            composed_scene,
+            scroll_intents,
+            frame,
+            images.resolved(),
+            size,
+            animation_now,
+        );
+        match rendered {
+            Ok(()) => {
+                self.composed = Some((key, size));
+                Ok(true)
+            }
+            Err(error) => {
+                self.composed = None;
+                Err(error)
+            }
+        }
     }
 
     fn draw(&mut self) -> Result<(), EngineError> {
@@ -1134,23 +1163,14 @@ impl Painter {
         self.maybe_request_refill(&frame);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
-        let images = self.images.resolved();
+        self.render_frame(&frame, key, animation_now, false)?;
+        // Presented whether or not this turn rendered: a surface that was
+        // invalidated or re-exposed puts the retained frame up again with a
+        // blit alone.
         let Output::Window(graphics) = &mut self.output else {
             unreachable!("the window output was just checked");
         };
-        paint_window(
-            graphics,
-            &self.scroll_intents,
-            &mut self.composed_scene,
-            &frame,
-            images,
-            size,
-            key,
-            animation_now,
-        )?;
-        if graphics.rendered_at(size) {
-            graphics.present(acquired);
-        }
+        graphics.present(acquired);
         Ok(())
     }
 
@@ -1163,85 +1183,44 @@ impl Painter {
     /// # Errors
     ///
     /// [`EngineError::Render`] if nothing has been rendered to read back, and
-    /// [`EngineError::Gpu`] if the read itself fails.
+    /// [`EngineError::Gpu`] or [`EngineError::Render`] if bringing the target
+    /// up to the newest frame, or the read itself, fails.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn capture(&mut self) -> Result<Screenshot, EngineError> {
+        // Refused before anything is composed, so a painter with no target says
+        // so rather than reporting the empty target a compose would leave.
+        #[cfg(test)]
+        if matches!(self.output, Output::None) {
+            return Err(EngineError::Render(
+                "this painter has no draw target to capture".to_owned(),
+            ));
+        }
         let size = self.frame_size;
         let now = self.clock.now_seconds();
         self.poll_link();
-        let latest = self.frame().cloned();
-        let key = latest
-            .as_ref()
-            .map(|frame| (frame.commit_id(), self.scroll_intents.generation));
-        let animation_now = latest
-            .as_ref()
-            .and_then(|frame| frame.has_live_curves().then_some(now));
-        let images = self.images.resolved();
-        match &mut self.output {
-            #[cfg(test)]
-            Output::None => Err(EngineError::Render(
-                "this painter has no draw target to capture".to_owned(),
-            )),
-            Output::Offscreen(gpu) => {
-                if let (Some(frame), Some(key)) = (&latest, key)
-                    && (self.composed != Some(key) || animation_now.is_some())
-                {
-                    let scene = if frame.composite_plan().is_some() {
-                        gpu.prepare_planes(frame, images)
-                            .map_err(|error| EngineError::Gpu(error.to_string()))?;
-                        composite_scene(
-                            &self.scroll_intents,
-                            &mut self.composed_scene,
-                            frame,
-                            gpu.plane_images(),
-                            images,
-                            animation_now,
-                        )
-                    } else {
-                        scene_for(
-                            &self.scroll_intents,
-                            &mut self.composed_scene,
-                            frame,
-                            images,
-                            animation_now,
-                        )
-                    };
-                    gpu.render_frame(scene, size.width, size.height, Color::WHITE)
-                        .map_err(|error| EngineError::Gpu(error.to_string()))?;
-                    self.composed = Some(key);
-                }
-                if !gpu.has_rendered() {
-                    return Err(EngineError::Render(
-                        "no frame has been rendered to capture".to_owned(),
-                    ));
-                }
-                let pixels = gpu
-                    .read_pixels()
-                    .map_err(|error| EngineError::Gpu(error.to_string()))?;
-                Ok(Screenshot { size, pixels })
-            }
-            Output::Window(graphics) => {
-                if let (Some(frame), Some(key)) = (&latest, key) {
-                    paint_window(
-                        graphics,
-                        &self.scroll_intents,
-                        &mut self.composed_scene,
-                        frame,
-                        images,
-                        size,
-                        key,
-                        animation_now,
-                    )?;
-                }
-                if !graphics.rendered_at(size) {
-                    return Err(EngineError::Render(
-                        "no frame has been rendered to capture".to_owned(),
-                    ));
-                }
-                let pixels = graphics.capture_frame(size)?;
-                Ok(Screenshot { size, pixels })
-            }
+        // The newest frame is brought to the target first, so a capture is of
+        // what this painter would draw rather than of whatever it last drew.
+        if let Some(frame) = self.frame().cloned() {
+            let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
+            let animation_now = frame.has_live_curves().then_some(now);
+            self.render_frame(&frame, key, animation_now, false)?;
         }
+        // Read back only what the record names at the size being read: a
+        // record at another size is not this capture's pixels.
+        if !self.composed.is_some_and(|(_, rendered)| rendered == size) {
+            return Err(EngineError::Render(
+                "no frame has been rendered to capture".to_owned(),
+            ));
+        }
+        let pixels = match &mut self.output {
+            #[cfg(test)]
+            Output::None => unreachable!("a painter with no target was refused above"),
+            Output::Offscreen(gpu) => gpu
+                .read_pixels()
+                .map_err(|error| EngineError::Gpu(error.to_string()))?,
+            Output::Window(graphics) => graphics.capture_frame(size)?,
+        };
+        Ok(Screenshot { size, pixels })
     }
     /// Whether this painter has a frame to put on its window.
     ///
@@ -1307,44 +1286,18 @@ impl Painter {
         self.maybe_request_refill(&frame);
         let key: ComposeKey = (frame.commit_id(), self.scroll_intents.generation);
         let animation_now = frame.has_live_curves().then_some(now);
-        if self.composed == Some(key) && !force && animation_now.is_none() {
-            return Ok(false);
-        }
-        let images = self.images.resolved();
-        let Output::Offscreen(gpu) = &mut self.output else {
-            unreachable!("the offscreen output was just checked");
-        };
-        let scene = if frame.composite_plan().is_some() {
-            gpu.prepare_planes(&frame, images)
+        let rendered = self.render_frame(&frame, key, animation_now, force)?;
+        if rendered {
+            // The submitted work is waited for here rather than in
+            // `Output::render`: a capture's readback polls the device itself,
+            // and this is the caller that asks for pixels nothing reads back.
+            let Output::Offscreen(gpu) = &self.output else {
+                unreachable!("the offscreen output was just checked");
+            };
+            gpu.wait_idle()
                 .map_err(|error| EngineError::Gpu(error.to_string()))?;
-            composite_scene(
-                &self.scroll_intents,
-                &mut self.composed_scene,
-                &frame,
-                gpu.plane_images(),
-                images,
-                animation_now,
-            )
-        } else {
-            scene_for(
-                &self.scroll_intents,
-                &mut self.composed_scene,
-                &frame,
-                images,
-                animation_now,
-            )
-        };
-        gpu.render_frame(
-            scene,
-            self.frame_size.width,
-            self.frame_size.height,
-            Color::WHITE,
-        )
-        .map_err(|error| EngineError::Gpu(error.to_string()))?;
-        gpu.wait_idle()
-            .map_err(|error| EngineError::Gpu(error.to_string()))?;
-        self.composed = Some(key);
-        Ok(true)
+        }
+        Ok(rendered)
     }
 
     /// Waits for the attached view to acknowledge a particular `BeginFrame`,
@@ -1360,20 +1313,20 @@ impl Painter {
         let deadline = ClockInstant::now() + timeout;
         self.poll_link();
         while self.published.begin_frame_serviced < seq && ClockInstant::now() < deadline {
-            let Some(link) = self.link.as_mut() else {
-                break;
-            };
-            // A closed channel is a view whose tasks have ended: nothing
-            // will service this sequence number, so waiting the deadline out
-            // would be the host's own thread spent on nothing.
-            if link
-                .commands
+            // A released view, or one whose tasks have ended and closed the
+            // channel: nothing will service this sequence number, so waiting
+            // the deadline out would be the host's own thread spent on nothing.
+            if self
+                .seat
                 .upgrade()
-                .is_none_or(|commands| commands.is_closed())
+                .is_none_or(|seat| seat.commands.is_closed())
             {
                 break;
             }
-            match block_on_deadline(link.frames.changed(), deadline) {
+            let Some(frames) = self.frames.as_mut() else {
+                break;
+            };
+            match block_on_deadline(frames.changed(), deadline) {
                 // The deadline passed, or the view's publisher is gone.
                 None | Some(Err(_)) => break,
                 Some(Ok(())) => {}

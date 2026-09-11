@@ -28,7 +28,7 @@ use dom::vello;
 use dom::vello::peniko::Color;
 use dom::vello::util::{RenderContext, RenderSurface};
 
-use crate::view::{ComposeKey, EngineError, FrameSize};
+use crate::view::{EngineError, FrameSize};
 
 /// The draw target an embedder lends a view.
 ///
@@ -65,8 +65,6 @@ pub(crate) struct WindowGraphics {
     planes: PlaneBank,
     #[cfg(not(target_arch = "wasm32"))]
     capture: Option<CaptureTarget>,
-    /// The compose key and size last rendered into the retained target.
-    rendered: Option<(ComposeKey, FrameSize)>,
 }
 
 /// A `COPY_SRC` twin of the surface's render target, on the same device, so
@@ -115,7 +113,6 @@ impl WindowGraphics {
             planes: PlaneBank::default(),
             #[cfg(not(target_arch = "wasm32"))]
             capture: None,
-            rendered: None,
         })
     }
 
@@ -143,30 +140,22 @@ impl WindowGraphics {
         self.planes.images()
     }
 
-    pub(super) fn rendered_at(&self, size: FrameSize) -> bool {
-        self.rendered.is_some_and(|(_, rendered)| rendered == size)
-    }
-
-    /// Forgets what this surface last rendered, so the next frame is painted
-    /// whatever key it carries.
+    /// Forgets what this surface's retained planes were baked from, so the next
+    /// layered frame bakes its own.
     ///
     /// For a target that changes documents: commit ids restart at one per
-    /// document, so a retained key from the previous page would make the new
-    /// page's first frame look already drawn, and its retained planes would
-    /// be reused for it. The textures themselves are kept and re-baked.
+    /// document, so planes still carrying the previous page's id would be
+    /// reused for the new one. The textures themselves are kept and re-baked.
+    /// What the surface last rendered is the painter's record, not this one's.
     pub(super) fn forget(&mut self) {
         self.planes.forget();
-        self.rendered = None;
     }
 
-    /// Whether the retained target is stale for this compose key at this
-    /// size.
-    pub(super) fn needs_paint(&self, key: ComposeKey, size: FrameSize) -> bool {
-        self.rendered != Some((key, size))
-    }
-
-    /// Reconfigures the surface when the target size moved, discarding the
-    /// retained frame with it — it was rendered for the old size.
+    /// Reconfigures the surface when the target size moved.
+    ///
+    /// What was rendered into the retained target is not discarded here: the
+    /// painter's own record of it carries the size it was rendered for, so a
+    /// resize already fails to match and the next frame is painted.
     fn configure_for(&mut self, size: FrameSize) {
         if size.width != 0
             && size.height != 0
@@ -175,7 +164,6 @@ impl WindowGraphics {
         {
             self.context
                 .resize_surface(&mut self.surface, size.width, size.height);
-            self.rendered = None;
         }
     }
 
@@ -217,11 +205,12 @@ impl WindowGraphics {
         }))
     }
 
+    /// Renders one composed scene into the retained target texture, which
+    /// [`Self::present`] then blits into a swap-chain image.
     pub(super) fn render_to_target(
         &mut self,
         scene: &vello::Scene,
         size: FrameSize,
-        key: ComposeKey,
     ) -> Result<(), EngineError> {
         self.configure_for(size);
         let handle = &self.context.devices[self.surface.dev_id];
@@ -233,9 +222,7 @@ impl WindowGraphics {
                 &self.surface.target_view,
                 &render_params(Color::WHITE, size.width, size.height),
             )
-            .map_err(|error| EngineError::Render(error.to_string()))?;
-        self.rendered = Some((key, size));
-        Ok(())
+            .map_err(|error| EngineError::Render(error.to_string()))
     }
 
     /// Presents the retained target into the image [`Self::acquire`] took:
