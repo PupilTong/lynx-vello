@@ -1,26 +1,16 @@
 //! Integration tests decoding real `.web.bundle` files produced by the
-//! lynx-stack build pipeline (see `fixtures/README.md`).
+//! fixture workspace (see `packages/reactlynx-test-fixtures/README.md`).
+
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
 
 use bobcat_source::web::style_info::{RuleKind, Selector};
 use bobcat_source::web::{DecodeError, decode};
 
-fn fixture(name: &str) -> &'static [u8] {
-    match name {
-        "basic-class-selector.web.bundle" => {
-            include_bytes!("fixtures/basic-class-selector.web.bundle")
-        }
-        "basic-bindtap.web.bundle" => include_bytes!("fixtures/basic-bindtap.web.bundle"),
-        "basic-performance-large-css.web.bundle" => {
-            include_bytes!("fixtures/basic-performance-large-css.web.bundle")
-        }
-        _ => panic!("unknown fixture: {name}"),
-    }
-}
-
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_card_with_css() {
-    let template = decode(fixture("basic-class-selector.web.bundle")).unwrap();
+    let template = decode(fixtures::fixture("basic-class-selector").page).unwrap();
 
     assert_eq!(template.version, 1);
     assert_eq!(template.config_str("cardType"), Some("react"));
@@ -28,7 +18,6 @@ fn decodes_card_with_css() {
     assert!(template.config_flag("enableFiberArch"));
 
     let root = &template.lepus_code["root"];
-    assert_eq!(root.len(), 26998);
     assert!(root.contains("use strict"), "lepus root should be JS text");
 
     assert!(!template.manifest.is_empty());
@@ -80,7 +69,7 @@ fn decodes_card_with_css() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_card_with_empty_style_info() {
-    let template = decode(fixture("basic-bindtap.web.bundle")).unwrap();
+    let template = decode(fixtures::fixture("basic-bindtap").page).unwrap();
 
     assert_eq!(template.config_str("cardType"), Some("react"));
     assert!(!template.config_flag("isLazy"));
@@ -93,7 +82,7 @@ fn decodes_card_with_empty_style_info() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn decodes_large_style_info() {
-    let template = decode(fixture("basic-performance-large-css.web.bundle")).unwrap();
+    let template = decode(fixtures::fixture("basic-performance-large-css").page).unwrap();
 
     let style_info = template.style_info.as_ref().unwrap();
     let rule_count: usize = style_info
@@ -137,7 +126,7 @@ fn rejects_future_version() {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
 fn rejects_truncated_section() {
-    let bundle = fixture("basic-class-selector.web.bundle");
+    let bundle = fixtures::fixture("basic-class-selector").page;
     let err = decode(&bundle[..bundle.len() - 100]).unwrap_err();
     assert!(matches!(err, DecodeError::UnexpectedEof { .. }), "{err}");
 }

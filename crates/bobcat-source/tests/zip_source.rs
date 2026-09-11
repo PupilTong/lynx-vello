@@ -1,4 +1,7 @@
 //! Identical archive selection/registration cases run natively and in Wasm.
+
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
 use std::io::{Cursor, Write};
 
 use bobcat_resources::{Resources, ResourcesConfig};
@@ -77,7 +80,7 @@ fn selects_real_binary_bundle_through_the_shared_page_adapter() {
     let bytes = archive(
         &[(
             "dist/main.web.bundle",
-            include_bytes!("fixtures/basic-class-selector.web.bundle"),
+            fixtures::fixture("basic-class-selector").page,
         )],
         zip::CompressionMethod::Deflated,
     );

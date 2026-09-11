@@ -1,3 +1,5 @@
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
 mod support;
 
 use std::rc::Rc;
@@ -6,16 +8,15 @@ use std::sync::Arc;
 use bobcat_core::{DrawTarget, LynxViewError, NoWakeup, PageConfig, ViewSources};
 use support::{FetcherDouble, solo_view};
 
-const FIXTURES: &[(&str, &[u8])] = &[
-    (
-        "basic-bindtap",
-        include_bytes!("../../bobcat-source/tests/fixtures/basic-bindtap.web.bundle"),
-    ),
-    (
-        "basic-class-selector",
-        include_bytes!("../../bobcat-source/tests/fixtures/basic-class-selector.web.bundle"),
-    ),
-];
+fn fixtures() -> [(&'static str, &'static [u8]); 2] {
+    [
+        ("basic-bindtap", fixtures::fixture("basic-bindtap").page),
+        (
+            "basic-class-selector",
+            fixtures::fixture("basic-class-selector").page,
+        ),
+    ]
+}
 
 fn page_config(template: &bobcat_source::web::WebTemplate) -> PageConfig {
     PageConfig {
@@ -69,7 +70,7 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
 
 #[test]
 fn decoded_bundle_page_config_is_supplied_at_view_construction() {
-    for (name, bytes) in FIXTURES {
+    for (name, bytes) in fixtures() {
         let template = bobcat_source::web::decode(bytes).expect("decode");
         let config = page_config(&template);
         assert!(config.default_display_linear, "{name}");
@@ -80,7 +81,7 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
 
 #[tokio::test]
 async fn decoded_scripts_boot_through_the_element_papi_alone() {
-    for (name, bytes) in FIXTURES {
+    for (name, bytes) in fixtures() {
         let template = bobcat_source::web::decode(bytes).expect("decode");
         let root = template
             .lepus_code
@@ -98,7 +99,7 @@ async fn decoded_scripts_boot_through_the_element_papi_alone() {
 
 #[tokio::test]
 async fn bundle_shaped_boot_sequence_runs_through_the_public_facade() {
-    let template = bobcat_source::web::decode(FIXTURES[0].1).expect("decode");
+    let template = bobcat_source::web::decode(fixtures()[0].1).expect("decode");
     run(
         page_config(&template),
         r"

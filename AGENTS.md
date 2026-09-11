@@ -2121,8 +2121,12 @@ this section is the only place the absolute paths are spelled out.
 
 ## Testing
 
-Integration tests decode real fixtures vendored from lynx-stack under
-`crates/bobcat-source/tests/fixtures/` (Apache-2.0 build artifacts).
+Integration tests and benchmarks build ReactLynx sources from the
+`packages/reactlynx-test-fixtures` pnpm workspace. Run
+`pnpm --filter reactlynx-test-fixtures build` before compiling Rust tests,
+`cargo clippy --all-targets`, or benchmarks. The generated `dist/index.rs`
+registry includes the emitted bundles; no compiled fixture is versioned.
+Upstream source provenance and licensing are in that package's NOTICE/LICENSE.
 `cargo test` must pass on the pinned nightly toolchain.
 
 ### Input robustness at the external-byte boundaries

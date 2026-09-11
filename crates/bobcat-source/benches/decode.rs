@@ -1,4 +1,4 @@
-//! Decode benchmarks over the vendored real-world bundles, tracked by
+//! Decode benchmarks over the compiled fixture sources, tracked by
 //! `CodSpeed` (walltime mode on the macOS CI runner).
 
 use divan::black_box;
@@ -8,9 +8,8 @@ fn main() {
     divan::main();
 }
 
-const SMALL: &[u8] = include_bytes!("../tests/fixtures/basic-class-selector.web.bundle");
-const EMPTY_STYLE: &[u8] = include_bytes!("../tests/fixtures/basic-bindtap.web.bundle");
-const LARGE_CSS: &[u8] = include_bytes!("../tests/fixtures/basic-performance-large-css.web.bundle");
+#[path = "../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
 
 const BATCH_SIZE: usize = 256;
 
@@ -28,22 +27,26 @@ fn bench_decode(bencher: divan::Bencher<'_, '_>, bytes: &'static [u8]) {
 
 #[divan::bench]
 fn decode_small_card(bencher: divan::Bencher<'_, '_>) {
-    bench_decode(bencher, SMALL);
+    bench_decode(bencher, fixtures::fixture("basic-class-selector").page);
 }
 
 #[divan::bench]
 fn decode_empty_style_info(bencher: divan::Bencher<'_, '_>) {
-    bench_decode(bencher, EMPTY_STYLE);
+    bench_decode(bencher, fixtures::fixture("basic-bindtap").page);
 }
 
 #[divan::bench]
 fn decode_large_style_info(bencher: divan::Bencher<'_, '_>) {
-    bench_decode(bencher, LARGE_CSS);
+    bench_decode(
+        bencher,
+        fixtures::fixture("basic-performance-large-css").page,
+    );
 }
 
 #[divan::bench]
 fn selectors_to_css(bencher: divan::Bencher<'_, '_>) {
-    let template = bobcat_source::web::decode(LARGE_CSS).unwrap();
+    let template =
+        bobcat_source::web::decode(fixtures::fixture("basic-performance-large-css").page).unwrap();
     let style_info = template.style_info.unwrap();
     bencher.counter(ItemsCount::new(BATCH_SIZE)).bench(|| {
         let mut total = 0usize;

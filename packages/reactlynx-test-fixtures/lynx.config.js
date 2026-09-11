@@ -9,7 +9,7 @@ export default defineConfig(({ env }) => {
   const mode = env === 'development' ? 'development' : 'production';
   const fixtures = mode === 'development'
     ? ['react-reload', 'react-global-props', 'react-lazy-nested']
-    : ['react-lazy', 'react-lazy-sync', 'react-lazy-nested', 'react-reload', 'react-data-processor', 'react-global-props'];
+    : ['react-native', 'react-lazy', 'react-lazy-sync', 'react-lazy-nested', 'react-reload', 'react-data-processor', 'react-global-props'];
 
   return {
     plugins: [pluginReactLynx({ engineVersion }), pluginSourceBundles(mode, engineVersion)],
@@ -20,17 +20,20 @@ export default defineConfig(({ env }) => {
       ...Object.fromEntries(fixtures.map(fixture => [
         `lynx-${fixture}`,
         {
-          source: { entry: { [fixture]: `./src/${fixture}.jsx` } },
+          source: { entry: { [fixture]: `./src/${fixture === 'react-native' ? 'react-bts-query' : fixture}.jsx` } },
           output: {
             distPath: { root: `dist/${fixture}${mode === 'development' ? '-development' : ''}` },
           },
         },
       ])),
       ...(mode === 'production' ? {
-        web: {
-          source: { entry: { 'react-bts-query': './src/react-bts-query.jsx' } },
-          output: { distPath: { root: 'dist/react-bts-query' } },
-        },
+        ...Object.fromEntries(['react-bts-query', 'basic-bindtap', 'basic-class-selector',
+          'basic-performance-large-css', 'basic-mts-run-on-main-thread', 'basic-mts-run-on-background']
+          .map(fixture => [`web-${fixture}`, {
+            source: { entry: { [fixture]: fixture === 'react-bts-query'
+              ? `./src/${fixture}.jsx` : `./src/${fixture}/index.jsx` } },
+            output: { distPath: { root: `dist/${fixture}` } },
+          }])),
       } : {}),
     },
   };
