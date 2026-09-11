@@ -73,13 +73,14 @@ crates/bobcat-core/src/
 Shared viewport and source vocabulary stays in `view` beside the public
 handles; the link one view speaks over is `link.rs`, owned by neither side;
 a stateful type whose owner is fixed lives under `paint` or `main`.
-Construction splits `ViewSources` once: document inputs and source specifiers
-cross to the view's task on `bobcat-main`, which stages them as the
-ingredients the realm's own `Document` will be built from.
+Construction sends `ViewSources` whole to the view's task on `bobcat-main`:
+every field is a document input or a source specifier, and the task stages
+what they name as the ingredients the realm's own `Document` will be built
+from.
 
 `ViewSources::init_data` and `global_props` are optional JSON text, and Rust
-never reads it. It travels with that state into the view's boot module as two
-string literals, and `bobcat:runtime`'s `__BobcatReceivePageData` parses them
+never reads it. It crosses with the rest of `ViewSources` and reaches the
+view's boot module as two string literals, and `bobcat:runtime`'s `__BobcatReceivePageData` parses them
 before the entry loads: the global props become `lynx.__globalProps` and the
 entry's `__globalProps`, and boot hands the init data to `processData`. A value
 that was not given is `{}`, as in web-core. Text that is not JSON fails boot

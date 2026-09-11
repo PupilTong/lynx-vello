@@ -60,20 +60,6 @@ fn ingredients() -> DocumentIngredients {
     DocumentIngredients::for_test(Viewport::new(320.0, 240.0), PageConfig::default())
 }
 
-/// A view with an entry and nothing else: no sheets, no fonts, no page data.
-fn sources() -> MainSources {
-    MainSources {
-        config: PageConfig::default(),
-        fonts: Vec::new(),
-        default_font_family: None,
-        style_sheets: Vec::new(),
-        entry: "app:///main.js".to_owned(),
-        background_entry: None,
-        init_data: None,
-        global_props: None,
-    }
-}
-
 /// One view served by the real owner, with the test on the host's end of its
 /// link.
 struct Harness {
@@ -89,13 +75,13 @@ struct Harness {
 
 impl Harness {
     fn new(context: Rc<GroupContext>, workers: mpsc::UnboundedReceiver<WorkerCommand>) -> Self {
-        Self::serving(context, workers, sources())
+        Self::serving(context, workers, ViewSources::new("app:///main.js"))
     }
 
     fn serving(
         context: Rc<GroupContext>,
         workers: mpsc::UnboundedReceiver<WorkerCommand>,
-        sources: MainSources,
+        sources: ViewSources,
     ) -> Self {
         let (outbox, view) = detached_outbox(Arc::new(NoWakeup));
         let (commands, incoming) = mpsc::unbounded_channel();
@@ -300,10 +286,10 @@ fn page_data_reaches_the_realm_it_was_given_to() {
         let mut harness = Harness::serving(
             context,
             workers,
-            MainSources {
+            ViewSources {
                 init_data: Some(r#"{"boxes": 2}"#.to_owned()),
                 global_props: Some(r#"{"theme": "dark"}"#.to_owned()),
-                ..sources()
+                ..ViewSources::new("app:///main.js")
             },
         );
         harness

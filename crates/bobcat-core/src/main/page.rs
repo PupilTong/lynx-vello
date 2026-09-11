@@ -104,7 +104,7 @@ use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
-use crate::view::{EngineEvent, LynxViewError, MainSources, Viewport};
+use crate::view::{EngineEvent, LynxViewError, ViewSources, Viewport};
 
 /// What the page is, which is the only thing that decides what a command can
 /// do to it.
@@ -696,7 +696,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
     // for a turn of its own, and every worker this view created — each
     // holding a child of this token — must wake and end.
     let _cancel = cancel.clone().drop_guard();
-    let MainSources {
+    let ViewSources {
         config,
         fonts,
         default_font_family,

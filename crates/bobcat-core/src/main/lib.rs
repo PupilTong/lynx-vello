@@ -51,8 +51,8 @@ use crate::background::WorkerCommand;
 use crate::link::{ToMain, ViewOutbox};
 use crate::threads::{self, ThreadJoin};
 use crate::view::{
-    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, MainSources,
-    StyleThreads, ViewAttachment, Viewport,
+    EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, StyleThreads,
+    ViewAttachment, ViewSources, Viewport,
 };
 
 /// The main thread's end of its group's link.
@@ -301,7 +301,7 @@ fn finish_view(
 /// One view, minus the ends its outbox already took.
 struct AttachedView {
     viewport: Viewport,
-    sources: MainSources,
+    sources: ViewSources,
     commands: mpsc::UnboundedReceiver<ToMain>,
     /// This view's end signal, minted on the embedder's thread. It is what the
     /// view's owner waits on, what its own end cancels, and the parent of the
