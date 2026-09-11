@@ -26,7 +26,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use http::StatusCode;
-use http::header::{HeaderMap, HeaderName, HeaderValue, LOCATION};
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 use libloading::Library;
 
 /// The platform's libcurl, loaded once per process and shared.
@@ -94,18 +94,6 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
     /// The URL the final response came from.
     pub effective_url: String,
-    /// The `Location` of every redirect followed, in order.
-    pub redirects: Vec<String>,
-    pub timing: HttpTiming,
-}
-
-/// Transfer phases as libcurl measured them.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct HttpTiming {
-    pub name_lookup: Option<Duration>,
-    pub connect: Option<Duration>,
-    pub start_transfer: Option<Duration>,
-    pub total: Option<Duration>,
 }
 
 type Handle = *mut c_void;
@@ -163,11 +151,6 @@ const CURLOPT_REDIR_PROTOCOLS_STR: c_int = 10319;
 const CURLPROTO_HTTP_HTTPS: c_long = 1 | 2;
 const CURLINFO_EFFECTIVE_URL: c_int = 0x0010_0001;
 const CURLINFO_RESPONSE_CODE: c_int = 0x0020_0002;
-const CURLINFO_OFF_T: c_int = 0x0060_0000;
-const CURLINFO_TOTAL_TIME_T: c_int = CURLINFO_OFF_T + 50;
-const CURLINFO_NAMELOOKUP_TIME_T: c_int = CURLINFO_OFF_T + 51;
-const CURLINFO_CONNECT_TIME_T: c_int = CURLINFO_OFF_T + 52;
-const CURLINFO_STARTTRANSFER_TIME_T: c_int = CURLINFO_OFF_T + 54;
 const CURL_ERROR_SIZE: usize = 256;
 
 const CURLE_OK: c_int = 0;
@@ -366,24 +349,15 @@ impl Curl {
                 code: -1,
                 message: format!("libcurl reported an impossible status {response_code}"),
             })?;
-        let timing = HttpTiming {
-            name_lookup: self.timing(handle, CURLINFO_NAMELOOKUP_TIME_T),
-            connect: self.timing(handle, CURLINFO_CONNECT_TIME_T),
-            start_transfer: self.timing(handle, CURLINFO_STARTTRANSFER_TIME_T),
-            total: self.timing(handle, CURLINFO_TOTAL_TIME_T),
-        };
         drop(guard);
         let Transfer {
             collector, body, ..
         } = transfer;
-        let (headers, redirects) = collector.finish();
         Ok(HttpResponse {
             status,
-            headers,
+            headers: collector.finish(),
             body,
             effective_url,
-            redirects,
-            timing,
         })
     }
 
@@ -470,19 +444,6 @@ impl Curl {
         Ok(vec![url, user_agent, accept_encoding, no_proxy, protocols])
     }
 
-    fn timing(&self, handle: Handle, info: c_int) -> Option<Duration> {
-        let mut microseconds: i64 = 0;
-        // SAFETY: the `*_TIME_T` infos write one `curl_off_t` (a 64-bit
-        // integer) through the out-pointer; a libcurl too old to know them
-        // returns an error and writes nothing.
-        let code =
-            unsafe { (self.inner.symbols.easy_getinfo)(handle, info, &raw mut microseconds) };
-        (code == CURLE_OK)
-            .then(|| u64::try_from(microseconds).ok())
-            .flatten()
-            .map(Duration::from_micros)
-    }
-
     fn strerror(&self, code: c_int) -> String {
         // SAFETY: `curl_easy_strerror` returns a static string for any code.
         unsafe { CStr::from_ptr((self.inner.symbols.easy_strerror)(code)) }
@@ -535,14 +496,10 @@ struct Transfer {
 }
 
 /// Accumulates header lines across a redirect chain, keeping only the last
-/// response's block and the `Location` of every block before it.
+/// response's block.
 #[derive(Debug, Default)]
 pub(crate) struct HeaderCollector {
     current: HeaderMap,
-    redirects: Vec<String>,
-    /// The `Location` of the block being collected, moved into `redirects`
-    /// when a later status line proves the block was a redirect.
-    location: Option<String>,
 }
 
 impl HeaderCollector {
@@ -551,9 +508,6 @@ impl HeaderCollector {
     pub(crate) fn line(&mut self, line: &[u8]) {
         let trimmed = line.trim_ascii_end();
         if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case(b"HTTP/") {
-            if let Some(location) = self.location.take() {
-                self.redirects.push(location);
-            }
             self.current.clear();
             return;
         }
@@ -569,15 +523,12 @@ impl HeaderCollector {
         else {
             return;
         };
-        if name == LOCATION {
-            self.location = Some(String::from_utf8_lossy(value.as_bytes()).into_owned());
-        }
         self.current.append(name, value);
     }
 
-    /// The final response's headers and the redirects that led to it.
-    pub(crate) fn finish(self) -> (HeaderMap, Vec<String>) {
-        (self.current, self.redirects)
+    /// The final response's headers.
+    pub(crate) fn finish(self) -> HeaderMap {
+        self.current
     }
 }
 
@@ -660,7 +611,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_lines_keep_the_last_block_and_every_redirect() {
+    fn header_lines_keep_only_the_last_block() {
         let mut collector = HeaderCollector::default();
         for line in [
             &b"HTTP/1.1 302 Found\r\n"[..],
@@ -680,8 +631,7 @@ mod tests {
         ] {
             collector.line(line);
         }
-        let (headers, redirects) = collector.finish();
-        assert_eq!(redirects, ["/second", "http://final.test/x"]);
+        let headers = collector.finish();
         assert_eq!(headers.get("content-type").unwrap(), "image/png");
         assert!(
             headers.get("set-cookie").is_none(),
@@ -816,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_get_returns_status_headers_body_and_timing() {
+    fn a_plain_get_returns_status_headers_and_body() {
         let base = serve();
         let response = curl()
             .get(&HttpRequest::new(format!("{base}/ok")))
@@ -826,19 +776,16 @@ mod tests {
         assert_eq!(response.headers.get("content-type").unwrap(), "image/png");
         assert_eq!(response.headers.get("etag").unwrap(), "\"v1\"");
         assert_eq!(response.effective_url, format!("{base}/ok"));
-        assert!(response.redirects.is_empty());
-        assert!(response.timing.total.is_some());
     }
 
     #[test]
-    fn redirects_are_followed_and_recorded_and_only_the_final_headers_survive() {
+    fn redirects_are_followed_and_only_the_final_headers_survive() {
         let base = serve();
         let response = curl()
             .get(&HttpRequest::new(format!("{base}/redirect")))
             .expect("get");
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, b"pixels");
-        assert_eq!(response.redirects, ["/redirect2", "/ok"]);
         assert_eq!(response.effective_url, format!("{base}/ok"));
         assert!(response.headers.get("set-cookie").is_none());
         assert!(response.headers.get("location").is_none());

@@ -26,8 +26,8 @@ pub enum Registered {
         bytes: Bytes,
         media_type: Option<MediaType>,
     },
-    /// A stylesheet the host already parsed; it answers only
-    /// `fetch_style_sheet`, since it has no bytes to give a byte request.
+    /// A stylesheet the host already parsed; it answers only a stylesheet
+    /// source request, since it has no bytes to give any other one.
     StyleSheet(Arc<PreparsedStyleSheet>),
 }
 

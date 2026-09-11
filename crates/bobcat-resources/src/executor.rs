@@ -38,12 +38,9 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 /// `spawn_blocking` call that finds none idle, on the thread making that
 /// call — the driver's, for those three jobs.
 ///
-/// Not every thread of this executor is created on the driver.
-/// [`Self::blocking`] — what `Resources::fetch` awaits — calls
-/// `spawn_blocking` on whatever thread polls that future, so a fetch can be
-/// what creates a pool thread, and creates it on the caller's own executor.
-/// And [`Self::new`] starts the driver thread itself on whichever thread
-/// builds the `Resources`.
+/// Not every thread of this executor is created on the driver: [`Self::new`]
+/// starts the driver thread itself on whichever thread builds the
+/// `Resources`.
 ///
 /// The one piece of the fetcher's work that does not come here is the
 /// painter's own synchronous restore in `images::read`, which fetches and
@@ -82,11 +79,10 @@ pub type Wakeup = Arc<dyn Fn() + Send + Sync>;
 /// `spawn_blocking` panics on the thread that called it, unless the refusal
 /// is transient and a pool thread is already running to pick the closure up.
 /// For the three jobs above the panic is the task's, on the driver, and the
-/// job goes unreported; under `Resources::fetch` it reaches the awaiting
-/// caller instead. The hand-written pool this replaced asked for its threads
-/// once, at construction, printed a refusal to standard error and carried on
-/// with the threads it had; a fetch it could queue nowhere answered with an
-/// `Unavailable` failure.
+/// job goes unreported. The hand-written pool this replaced asked for its
+/// threads once, at construction, printed a refusal to standard error and
+/// carried on with the threads it had; a fetch it could queue nowhere
+/// answered with an `Unavailable` failure.
 ///
 /// # Shutdown
 ///
@@ -172,18 +168,6 @@ impl Executor {
         F: Future<Output = ()> + Send + 'static,
     {
         drop(self.handle.spawn(job));
-    }
-
-    /// Runs `job` on the blocking pool, for a caller that is not itself one of
-    /// this executor's tasks: `Resources::fetch`, awaited on whatever executor
-    /// the caller has, which is therefore where `spawn_blocking` is called
-    /// from.
-    pub(crate) async fn blocking<T: Send + 'static>(
-        &self,
-        what: &'static str,
-        job: impl FnOnce() -> T + Send + 'static,
-    ) -> Result<T, String> {
-        blocking(&self.handle, what, job).await
     }
 
     /// What a task needs to submit more work: a handle owns no runtime, so a

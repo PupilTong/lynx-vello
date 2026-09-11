@@ -1,19 +1,16 @@
 //! Active source loading owned by the fetcher, with concrete completion values.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bobcat_core::LynxViewError;
 use bobcat_core::resource::{
-    CachePolicy, LoadedSource, RequestId, ResourceErrorKind, ResourceErrorPhase, SourceCompletion,
-    SourceRequest, StyleSheetSource,
+    LoadedSource, ResourceErrorKind, ResourceErrorPhase, SourceCompletion, SourceRequest,
+    StyleSheetSource,
 };
 use http::HeaderMap;
 use url::Url;
 
-use crate::{Registered, Resources, SharedHandle, error, preprocess_fetched};
-
-static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+use crate::{CachePolicy, Registered, Resources, SharedHandle, error, preprocess_fetched};
 
 pub(crate) fn request(resources: &Resources, request: SourceRequest, completion: SourceCompletion) {
     if completion.is_cancelled() {
@@ -36,17 +33,13 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
                         ResourceErrorPhase::Resolve,
                         format!("invalid worker base URL: {error}"),
                     )
-                    .into_error(None, Some(base_url.into()))
+                    .into_error(Some(base_url.into()))
                     .into()));
                     return;
                 }
             };
             (specifier, false, Some(base))
         }
-    };
-    let id = RequestId {
-        namespace: NEXT_REQUEST.fetch_add(1, Ordering::Relaxed),
-        sequence: 0,
     };
     let url = match resources
         .shared
@@ -55,9 +48,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     {
         Ok(url) => url,
         Err(failure) => {
-            completion.complete(Err(failure
-                .into_error(Some(id), Some(specifier.into()))
-                .into()));
+            completion.complete(Err(failure.into_error(Some(specifier.into())).into()));
             return;
         }
     };
@@ -70,12 +61,11 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
         return;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    spawn(resources, url, id, style_sheet, completion);
+    spawn(resources, url, style_sheet, completion);
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_futures::spawn_local(run(
         SharedHandle::clone(&resources.shared),
         url,
-        id,
         style_sheet,
         completion,
     ));
@@ -98,13 +88,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
 /// do pin it — a completion a fetcher still holds when the view is released
 /// reads as cancelled.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn(
-    resources: &Resources,
-    url: Url,
-    id: RequestId,
-    style_sheet: bool,
-    completion: SourceCompletion,
-) {
+fn spawn(resources: &Resources, url: Url, style_sheet: bool, completion: SourceCompletion) {
     let shared = SharedHandle::clone(&resources.shared);
     let handle = resources.executor.handle();
     resources.executor.spawn(async move {
@@ -122,7 +106,7 @@ fn spawn(
         let fetched = match fetched {
             Ok(fetched) => fetched,
             Err(message) => {
-                completion.complete(Err(panicked(&message, id, &url)));
+                completion.complete(Err(panicked(&message, &url)));
                 return;
             }
         };
@@ -131,36 +115,30 @@ fn spawn(
         }
         let prepared = crate::executor::blocking(&handle, "source load", {
             let url = url.clone();
-            move || prepare(fetched, &url, id, style_sheet)
+            move || prepare(fetched, &url, style_sheet)
         })
         .await;
         completion.complete(match prepared {
             Ok(result) => result,
-            Err(message) => Err(panicked(&message, id, &url)),
+            Err(message) => Err(panicked(&message, &url)),
         });
     });
 }
 
 /// A source load answered with what a blocking closure's panic left.
 #[cfg(not(target_arch = "wasm32"))]
-fn panicked(message: &str, id: RequestId, url: &Url) -> LynxViewError {
+fn panicked(message: &str, url: &Url) -> LynxViewError {
     error::Failure::new(
         ResourceErrorKind::Unavailable,
         ResourceErrorPhase::ReadBody,
         message,
     )
-    .into_error(Some(id), Some(Arc::from(url.as_str())))
+    .into_error(Some(Arc::from(url.as_str())))
     .into()
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn run(
-    shared: SharedHandle,
-    url: Url,
-    id: RequestId,
-    style_sheet: bool,
-    completion: SourceCompletion,
-) {
+async fn run(shared: SharedHandle, url: Url, style_sheet: bool, completion: SourceCompletion) {
     if completion.is_cancelled() {
         return;
     }
@@ -171,7 +149,7 @@ async fn run(
     if completion.is_cancelled() {
         return;
     }
-    completion.complete(prepare(fetched, &url, id, style_sheet));
+    completion.complete(prepare(fetched, &url, style_sheet));
 }
 
 /// The CPU half of a source load: preprocessing and the UTF-8 check the
@@ -179,14 +157,11 @@ async fn run(
 fn prepare(
     fetched: Result<crate::Fetched, error::Failure>,
     url: &Url,
-    id: RequestId,
     style_sheet: bool,
 ) -> Result<LoadedSource, LynxViewError> {
     fetched
         .and_then(|fetched| preprocess_fetched(fetched, url))
-        .map_err(|failure| {
-            LynxViewError::from(failure.into_error(Some(id), Some(Arc::from(url.as_str()))))
-        })
+        .map_err(|failure| LynxViewError::from(failure.into_error(Some(Arc::from(url.as_str())))))
         .and_then(|(fetched, processed)| {
             let url = fetched.url.to_string();
             let source = std::str::from_utf8(&processed.bytes)

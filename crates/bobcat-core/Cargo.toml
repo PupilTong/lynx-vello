@@ -9,9 +9,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-bytes = { workspace = true }
 dom = { workspace = true }
-http = { workspace = true }
 quickjs-rust-bridge = { workspace = true }
 rustc-hash = { workspace = true }
 serde_json = { workspace = true }

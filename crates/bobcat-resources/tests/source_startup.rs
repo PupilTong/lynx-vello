@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bobcat_core::resource::ResourceErrorKind;
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, LynxGroup, LynxView, LynxViewError, Painter,
     PreparsedDeclaration, PreparsedRule, PreparsedStyleSheet, StyleThreads, ViewSources,
@@ -161,10 +162,14 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     let (group, resources, receiver) = setup().await;
     let (mut failed, _failed_painter) =
         view(&group, &resources, ViewSources::new("missing.js")).await;
-    assert!(matches!(
-        boot(&mut failed, &receiver),
-        Err(LynxViewError::Resource(_))
-    ));
+    // `app:` is a plausible scheme that nothing registered and no transport
+    // serves, so resolution is where the load stops.
+    match boot(&mut failed, &receiver) {
+        Err(LynxViewError::Resource(error)) => {
+            assert_eq!(error.kind, ResourceErrorKind::UnsupportedScheme);
+        }
+        outcome => panic!("unexpected outcome for a missing source: {outcome:?}"),
+    }
     resources
         .register("app:///main.js", "", Some("text/javascript"))
         .unwrap();
@@ -173,6 +178,38 @@ async fn missing_source_fails_without_blocking_sibling_startup() {
     boot(&mut sibling, &receiver).unwrap();
     sibling_painter.tick(true).unwrap();
     assert!(failed.pump().is_empty());
+}
+
+/// A browser embedder learns the base only from the entry response, so it
+/// names one with `set_base_url` after the system is already built. A source
+/// specifier resolves against that base and not the one the config carried.
+#[tokio::test]
+async fn a_base_named_after_construction_resolves_a_relative_source() {
+    let (group, resources, receiver) = setup().await;
+    resources.set_base_url(Some("app:///nested/".parse().unwrap()));
+    assert_eq!(
+        resources.base_url().map(|base| base.to_string()).as_deref(),
+        Some("app:///nested/")
+    );
+    resources
+        .register(
+            "app:///nested/main.js",
+            r"
+        globalThis.renderPage = () => {
+            const page = __CreatePage('page', 0);
+            const view = __CreateView(0);
+            __SetInlineStyles(view, 'width:32px;height:24px;background:blue');
+            __AppendElement(page, view);
+        };
+    ",
+            Some("text/javascript"),
+        )
+        .unwrap();
+    let (mut view, mut painter) = view(&group, &resources, ViewSources::new("main.js")).await;
+    boot(&mut view, &receiver).unwrap();
+    let screenshot = painter.capture().unwrap();
+    let offset = (12 * screenshot.size.width as usize + 16) * 4;
+    assert_eq!(&screenshot.pixels[offset..offset + 4], &[0, 0, 255, 255]);
 }
 
 #[tokio::test]

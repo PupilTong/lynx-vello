@@ -330,10 +330,12 @@ exits before answering. Other views and their group remain alive; the last
 group/view handle joins the group's threads.
 
 Source requests select an entry or stylesheet payload and carry a specifier;
-the fetcher owns base URL and transport policy. Embedders can still use the
-lower-level `resolve_locator`, `fetch_resource` and `fetch_style_sheet` API;
-core startup no longer calls it. A `ResourceRequest` carries no response-size
-limit; each fetcher owns the bound for the response it materializes.
+the fetcher owns base URL and transport policy. That call, `request_image`,
+`service_images` and the `FrameImages` supertrait are the whole protocol, and
+every one of them is synchronous — core holds no resource future, and core
+names none of a fetcher's own transport API. The protocol carries no
+response-size limit; each fetcher owns the bound for the response it
+materializes.
 
 A view is a set of tasks on the group's `LocalSet`, one per thing it can wait
 for, and tokio owns the polling, parking and waking. `serve_view` is the owner

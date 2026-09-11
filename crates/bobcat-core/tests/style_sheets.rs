@@ -1,16 +1,16 @@
 //! The stylesheet half of [`ViewSources`], over both accepted forms.
 //!
 //! The resource provider answers a stylesheet request with either CSS text or
-//! a [`PreparsedStyleSheet`] it decoded itself; both mount on the document
-//! before the entry module runs, in the order the sources list them, and both
-//! are visible to that script.
+//! a [`PreparsedStyleSheet`] it decoded itself; both mount on the document the
+//! entry module builds, and each listed sheet is its own request. The order
+//! sheets mount in is asserted where it is observable, in bobcat-resources'
+//! `source_startup`.
 
 mod support;
 
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bobcat_core::resource::{ResourceCapability, ResourceFetcher};
 use bobcat_core::{
     DrawTarget, LynxView, LynxViewError, NoWakeup, PreparsedDeclaration, PreparsedRule,
     PreparsedStyleSheet, ViewSources,
@@ -49,6 +49,8 @@ fn style_rule(selectors: &str, declarations: Vec<PreparsedDeclaration>) -> Prepa
     }
 }
 
+/// A sheet whose one rule is observable in a capture: a 100×100 opaque box at
+/// the page's origin.
 fn basic_sheet() -> PreparsedStyleSheet {
     PreparsedStyleSheet {
         rules: vec![style_rule(
@@ -56,6 +58,7 @@ fn basic_sheet() -> PreparsedStyleSheet {
             vec![
                 declaration("width", "100px"),
                 declaration("height", "100px"),
+                declaration("background-color", "rgb(0, 0, 255)"),
             ],
         )],
     }
@@ -84,22 +87,33 @@ async fn view_with(
     .await
 }
 
+/// The pre-parsed arm mounts, and its rules reach the page the entry builds.
+///
+/// That a sheet mounts *before* the entry module runs is asserted where the
+/// order is observable rather than here: bobcat-resources'
+/// `text_and_preparsed_sheets_keep_cascade_order_before_entry`, which paints
+/// the later of two sheets' colour, and this crate's
+/// `screenshots::a_preparsed_author_sheet_paints`.
 #[tokio::test]
-async fn a_preparsed_sheet_mounts_before_the_entry_module_runs() {
+async fn a_preparsed_sheet_styles_the_page() {
     let fetcher = Rc::new(
         FetcherDouble::new(CLASSED_VIEW_SCRIPT.as_bytes().to_vec())
             .with_preparsed_style_sheet(basic_sheet())
             .resolving_to(SCRIPT_URL),
     );
-    assert!(
-        fetcher.supports_capability(ResourceCapability::PreparsedStyleSheet),
-        "a decoding host advertises the pre-parsed arm"
-    );
 
-    let (mut view, _painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
+    let (mut view, mut painter) = view_with(|_sink| fetcher, sources(&[SHEET_URL]))
         .await
         .expect("the pre-parsed arm mounts");
     wait_for_script(&mut view).expect("script execution");
+
+    let shot = painter.capture().expect("capture the styled page");
+    let pixel = |x: usize, y: usize| {
+        let offset = (y * shot.size.width as usize + x) * 4;
+        &shot.pixels[offset..offset + 4]
+    };
+    assert_eq!(pixel(50, 50), &[0, 0, 255, 255], "inside the sheet's box");
+    assert_ne!(pixel(200, 300), &[0, 0, 255, 255], "outside it");
 }
 
 #[tokio::test]
@@ -181,7 +195,7 @@ async fn every_listed_sheet_issues_its_own_stylesheet_request() {
     assert_eq!(
         fetcher.fetch_count(),
         1,
-        "a stylesheet must not be fetched through the byte path when the host answers it \
-         pre-parsed; the one byte fetch is the entry module"
+        "a stylesheet the host answers pre-parsed costs no payload; the one payload served \
+         is the entry module"
     );
 }

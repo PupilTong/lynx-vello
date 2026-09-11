@@ -85,8 +85,8 @@ entry-MTS bytes with the `bobcat-resources` system it owns
 response URLs, then calls `BobcatRenderer::load(entry_url, style_sheet_urls)`.
 Core reads them through `ResourceFetcher`, validates UTF-8 strictly, and uses
 the entry's final URL as the ESM entry specifier; it never receives a bundle
-decoder. That 16 MiB bound is browser-embedder policy and does not cross in
-`ResourceRequest`. The load also makes the entry URL the base a relative
+decoder. That 16 MiB bound is browser-embedder policy and crosses no part of the
+resource protocol. The load also makes the entry URL the base a relative
 `url(...)` in the page's CSS resolves against.
 
 Everything else a page names — its images — the resource system fetches
