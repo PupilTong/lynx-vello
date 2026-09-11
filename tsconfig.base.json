@@ -20,10 +20,11 @@
     "allowUnusedLabels": false,
 
     // ES modules a type stripper can run: Node executes the scripts as
-    // written, `bobcat-core` strips the QuickJS runtime at build time, and
-    // `tsc` emits the browser facade. So no syntax may need type information
-    // to lower — no enums, no namespaces, no parameter properties — and a
-    // type-only import says so, because nothing downstream can work it out.
+    // written, and Rstest and the example bundlers transpile file by file,
+    // while `tsc` emits the QuickJS runtime and the browser facade. So no
+    // syntax may need type information to lower — no enums, no namespaces, no
+    // parameter properties — and a type-only import says so, because nothing
+    // downstream can work it out.
     // Relative imports name the `.ts` file, which is the file Node loads;
     // emit rewrites them to `.js`.
     "target": "es2023",
