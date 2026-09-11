@@ -15,9 +15,8 @@
 //!   realm;
 //! - one [`load_module`] future per resource load an import produced;
 //! - [`consume_worker_events`], the one ordered consumer of this view's workers;
-//! - [`wait_timers`], which owns this realm's one pinned sleep;
-//! - [`follow_checkpoints`], which watches the runtime-wide checkpoint generation for a sibling's
-//!   entry into JavaScript.
+//! - [`serve_clock`], which owns this realm's one pinned sleep and watches the runtime-wide
+//!   checkpoint generation for a sibling's entry into JavaScript.
 //!
 //! Nothing is spawned per input. An ordered stream stays serial because one
 //! task consumes it with `while let Some(x) = rx.recv().await` — a consumer,
@@ -76,8 +75,8 @@
 //! - **thread lifetime** — `group_task` and `serve_workers`, each waiting on attach versus join;
 //! - **an object's lifetime** — one [`Lifetime::serve`] per view and per worker, waiting on the end
 //!   versus the next task of that object to finish;
-//! - **a realm's clock** — one [`wait_timers`] per live realm, waiting on its deadline versus the
-//!   re-arm that moves it: a view's is here, a worker's is in `background/thread.rs`;
+//! - **a realm's clock** — one [`serve_clock`] per live realm, a view's and a worker's alike,
+//!   waiting on its deadline, the re-arm that moves it, and a sibling's checkpoint;
 //! - **the worker's pre-boot wait** — its script versus a `Terminate` that must win, or its parent
 //!   view being released.
 //!
@@ -90,18 +89,18 @@
 use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::pin;
 use std::rc::Rc;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::quickjs::ScriptRuntime;
 use super::runtime::{DocumentIngredients, MainThreadRuntime};
 use super::{AttachedView, GroupContext};
 use crate::background::WorkerEvent;
+#[cfg(test)]
 use crate::clock::ClockInstant;
-use crate::lifetime::Lifetime;
+use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
 use crate::link::{SourceAnswer, ToMain, ViewOutbox};
 use crate::resource::{LoadedSource, SourceRequest, unanswered_source};
 use crate::threads::panicked;
@@ -144,17 +143,12 @@ pub(super) struct Page {
     /// epilogue's commit is what publishes.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
-    /// The runtime-wide checkpoint generation as of this page's own last
-    /// entry, which is what lets [`follow_checkpoints`] ignore its own bumps.
-    own_checkpoint: Cell<u64>,
-    /// This realm's earliest armed timer, for [`wait_timers`]. Republished
-    /// only when it moves, so no `Sleep` is rebuilt for a wake that changed
-    /// nothing.
-    deadline: watch::Sender<Option<ClockInstant>>,
-    /// Every task of this view, the token that ends them, and the latch this
-    /// thread reads. A worker this view's realm creates carries a child of
-    /// that token, so releasing the view ends the workers it made.
-    lifetime: Rc<Lifetime>,
+    /// Every task of this view, the token that ends them, the latch this thread
+    /// reads, and the two numbers this realm's clock task waits on — the
+    /// deadline it armed and the generation its own last entry recorded. A
+    /// worker this view's realm creates carries a child of that token, so
+    /// releasing the view ends the workers it made.
+    lifetime: Lifetime,
     /// Whether this view has already been told why it failed. The first report
     /// wins, so one failure is one `StartupFailed` or one `ScriptRunError`. A
     /// panic is not gated here — it has a latch of its own on the lifetime,
@@ -191,8 +185,6 @@ impl Page {
             realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
-            own_checkpoint: Cell::new(0),
-            deadline: watch::channel(None).0,
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             #[cfg(test)]
@@ -209,7 +201,7 @@ impl Page {
     /// have already happened. The report is the owner's, out of the payload
     /// the lifetime hands it.
     fn spawn(self: &Rc<Self>, future: impl Future<Output = ()> + 'static) {
-        let guard = EndOnUnwind(Rc::clone(self));
+        let guard = EndOnUnwind::new(self);
         self.lifetime.spawn(async move {
             let _guard = guard;
             future.await;
@@ -230,12 +222,11 @@ impl Page {
             return false;
         }
         // A painter blocked in `wait_begin_frame` is released rather than
-        // timed out: the frame it was waiting for will never come.
+        // timed out: the frame it was waiting for will never come. The deadline
+        // the realm had armed is withdrawn by the lifetime's own end above.
         if let Some(seq) = self.pending_begin_frame.take() {
             self.outbox.begin_frame_serviced(seq);
         }
-        self.deadline
-            .send_if_modified(|deadline| deadline.take().is_some());
         true
     }
 
@@ -316,7 +307,7 @@ impl Page {
     ///    number is blocked on that frame.
     /// 5. **The module requests** this entry produced, each spawned as a load of its own.
     /// 6. **The next timer deadline**, republished only when it moved.
-    /// 7. **The checkpoint generation**, so the follower can tell this page's own bumps from a
+    /// 7. **The checkpoint generation**, so the clock task can tell this page's own bumps from a
     ///    sibling's.
     fn epilogue(self: &Rc<Self>, runtime: &mut MainThreadRuntime, js: &mut ScriptRuntime) {
         if self.ended() {
@@ -350,15 +341,8 @@ impl Page {
                 .request_source(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
         }
-        let deadline = runtime.next_timer_deadline();
-        self.deadline.send_if_modified(|armed| {
-            if *armed == deadline {
-                return false;
-            }
-            *armed = deadline;
-            true
-        });
-        self.own_checkpoint.set(js.checkpoint_generation());
+        self.lifetime.arm_deadline(runtime.next_timer_deadline());
+        self.lifetime.record_checkpoint(js.checkpoint_generation());
     }
 
     /// Reports a panic as the failing view's, and ends the view.
@@ -522,7 +506,7 @@ impl Page {
     /// to and including the entry is one synchronous stretch under both
     /// borrows, so the shared runtime is borrowed for exactly this and
     /// released again; the checkpoint receiver is created while that borrow
-    /// is still held, so no sibling's bump between boot and the follower's
+    /// is still held, so no sibling's bump between boot and the clock task's
     /// first poll can be lost.
     fn open_realm(
         self: &Rc<Self>,
@@ -548,8 +532,15 @@ impl Page {
             let Realm::Loading(ingredients) = std::mem::replace(&mut *realm, Realm::Gone) else {
                 return None;
             };
-            let mut runtime = match MainThreadRuntime::new(js, *ingredients, self.outbox.clone()) {
-                Ok(runtime) => runtime,
+            let (mut runtime, worker_events) = match MainThreadRuntime::new(
+                js,
+                *ingredients,
+                self.outbox.clone(),
+                &self.context.workers,
+                url,
+                background_entry,
+            ) {
+                Ok(opened) => opened,
                 Err(error) => return Some(Err(error.into_script_error().into())),
             };
             // The flag is written from the embedder's own thread, so it can
@@ -563,16 +554,6 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            let worker_events = match runtime.install_workers(
-                js,
-                &self.context.workers,
-                self.outbox.clone(),
-                url,
-                background_entry,
-            ) {
-                Ok(events) => events,
-                Err(error) => return Some(Err(error.into_script_error().into())),
-            };
             if let Err(error) = runtime.run_main_thread_script(js, source, url) {
                 if self.outbox.is_cancelled() {
                     return None;
@@ -580,7 +561,7 @@ impl Page {
                 return Some(Err(error.into_script_error().into()));
             }
             let checkpoints = js.checkpoints();
-            self.own_checkpoint.set(js.checkpoint_generation());
+            self.lifetime.record_checkpoint(js.checkpoint_generation());
             *realm = Realm::Live(Box::new(runtime));
             Some(Ok((worker_events, checkpoints)))
         }));
@@ -597,8 +578,11 @@ impl Page {
             Some(Err(error)) => self.fail(EngineEvent::StartupFailed(error)),
             Some(Ok((worker_events, checkpoints))) => {
                 self.spawn(consume_worker_events(Rc::clone(self), worker_events));
-                self.spawn(wait_timers(Rc::clone(self), self.deadline.subscribe()));
-                self.spawn(follow_checkpoints(Rc::clone(self), checkpoints));
+                self.spawn(serve_clock(
+                    Rc::clone(self),
+                    self.lifetime.deadlines(),
+                    checkpoints,
+                ));
                 // A boot that finished synchronously reports here, and the
                 // module requests its entry left are spawned here.
                 self.settle();
@@ -679,24 +663,22 @@ impl Page {
     /// withdrawing it.
     #[cfg(test)]
     pub(super) fn armed_deadline(&self) -> Option<ClockInstant> {
-        *self.deadline.borrow()
+        self.lifetime.armed_deadline()
     }
 }
 
-/// Ends the view if the task it guards is unwinding.
-///
-/// The guard is the page's rather than the lifetime's because what an end owes
-/// is the page's: the `BeginFrame` acknowledgement and the withdrawn deadline
-/// run here, during the unwind, so a sibling polled before the owner sees a
-/// view that has already ended. The payload is not reachable from a `Drop`, so
-/// the report stays the owner's, out of the `JoinError` the lifetime yields.
-struct EndOnUnwind(Rc<Page>);
+/// What this view's clock task and its unwind guard reach it through.
+impl Settles for Page {
+    fn lifetime(&self) -> &Lifetime {
+        &self.lifetime
+    }
 
-impl Drop for EndOnUnwind {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            self.0.end();
-        }
+    fn settle(owner: &Rc<Self>) {
+        owner.settle();
+    }
+
+    fn end(owner: &Rc<Self>) {
+        owner.end();
     }
 }
 
@@ -908,74 +890,6 @@ async fn consume_worker_events(page: Rc<Page>, mut events: mpsc::UnboundedReceiv
                     .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
             }
         });
-    }
-}
-
-/// This realm's one wait on its own clock.
-///
-/// The `select!` below is this task's own wait — a deadline, or the re-arm
-/// that moves it — and dispatches nothing: when a deadline passes, the page's
-/// epilogue is what fires the timers it named. One `Sleep` for the whole
-/// task, re-armed only when the deadline moved, because a `Sleep` registers
-/// with the platform's timer on its first poll and one per wake would leave a
-/// registration behind per wake.
-async fn wait_timers(page: Rc<Page>, mut deadlines: watch::Receiver<Option<ClockInstant>>) {
-    let mut armed: Option<ClockInstant> = None;
-    let mut sleep = pin!(crate::clock::sleep_until(ClockInstant::now()));
-    loop {
-        if page.ended() {
-            return;
-        }
-        // Copied out: nothing holds a `Ref` of the watch across the awaits
-        // below.
-        let deadline = *deadlines.borrow_and_update();
-        if deadline != armed {
-            if let Some(deadline) = deadline {
-                sleep.set(crate::clock::sleep_until(deadline));
-            }
-            armed = deadline;
-        }
-        match armed {
-            // Nothing is armed, and an ended page publishes `None`, which is
-            // what parks this task until the abort lands.
-            None => {
-                if deadlines.changed().await.is_err() {
-                    return;
-                }
-            }
-            Some(_) => {
-                tokio::select! {
-                    () = &mut sleep => {
-                        // Consumed: the next turn arms a wait of its own
-                        // rather than polling this one again.
-                        armed = None;
-                        page.settle();
-                    }
-                    changed = deadlines.changed() => if changed.is_err() { return },
-                }
-            }
-        }
-    }
-}
-
-/// Watches the runtime-wide checkpoint generation for a sibling's entry into
-/// JavaScript.
-///
-/// The promise-job queue is the runtime's, so a sibling's checkpoint runs this
-/// realm's jobs too: an import of this page's may have finished inside an
-/// entry that had nothing to do with it. The epilogue is what spawns the
-/// requests those continuations produced and commits what they changed.
-/// Equality with this page's own generation is what keeps its own bumps from
-/// waking it.
-async fn follow_checkpoints(page: Rc<Page>, mut checkpoints: watch::Receiver<u64>) {
-    while checkpoints.changed().await.is_ok() {
-        if page.ended() {
-            return;
-        }
-        if *checkpoints.borrow_and_update() == page.own_checkpoint.get() {
-            continue;
-        }
-        page.settle();
     }
 }
 

@@ -18,11 +18,11 @@
 //!
 //! Release is the view's task ending. Dropping the `LynxView` closes the
 //! command channel, the task returns, and [`MainThreadRuntime`]'s fields drop
-//! in declaration order — [`RealmHandles`] first, which is everything that
-//! holds a handle of this realm and so is what frees it, and with it the host
-//! functions it held and their clones of this realm's [`DocumentSlot`]; then
-//! the runtime's own `slot` handle, which is when the `LynxDocument` drops.
-//! JavaScript goes first, then the Rust object it named.
+//! in declaration order — every field that holds a handle of this realm first,
+//! which together are what frees it, and with it the host functions it held and
+//! their clones of this realm's [`DocumentSlot`]; then the runtime's own `slot`
+//! handle, which is when the `LynxDocument` drops. JavaScript goes first, then
+//! the Rust object it named.
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::fmt::{self, Write as _};
@@ -488,40 +488,34 @@ impl EventState {
     }
 }
 
-/// Everything that holds a handle of this realm; dropping it frees the realm.
+/// The private main-thread runtime used by the engine pipeline.
 ///
-/// One field rather than three because the rule the runtime's field order
-/// carries is about the *last* of them: a `Value` holds an `Rc` of the context
-/// it came from, so the realm is freed when `init_data` and `global_props` go
-/// as well as the engine, not when the engine alone does. Grouped, that is a
-/// rule a single declaration order states.
-struct RealmHandles {
+/// **The field order is the release, and it must stay in this order.** Fields
+/// drop in declaration order, and two rules fix that order.
+///
+/// Everything that holds an `Rc` of this realm's JavaScript context is declared
+/// before `slot`, so the realm is freed — and with it every host function and
+/// its own clone of that `Rc` — before the `LynxDocument` those functions could
+/// name. JavaScript first, then the Rust object it named. A `Value` holds a
+/// context handle as much as the engine does, which is why `init_data` and
+/// `global_props` are part of that rule rather than incidental to it.
+///
+/// `workers` is declared after all of those handles for a different reason: the
+/// last clone of it going is what sends each live worker its `Terminate`, and
+/// those messages go out after the JavaScript that could still have named a
+/// worker is gone.
+pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
     /// Retained in this realm for the subsequent boot/lynx integration.
-    /// Written by [`MainThreadRuntime::prepare_initial_data`] and read by
-    /// nothing yet. `None` until startup prepares them; an omitted host input
-    /// becomes JavaScript `undefined`.
+    /// Written by [`Self::prepare_initial_data`] and read by nothing yet.
+    /// `None` until startup prepares them; an omitted host input becomes
+    /// JavaScript `undefined`.
     init_data: Option<quickjs_rust_bridge::Value>,
     global_props: Option<quickjs_rust_bridge::Value>,
-}
-
-/// The private main-thread runtime used by the engine pipeline.
-pub(crate) struct MainThreadRuntime {
-    realm: RealmHandles,
     /// This realm's side of the workers it created, shared with the three
-    /// host functions that drive them. `None` until `install_workers` runs.
-    ///
-    /// Declared after every field that holds a handle of this realm, because
-    /// the last clone of it going is what sends each live worker its
-    /// `Terminate`: those messages go out after the JavaScript that could
-    /// still have named a worker is gone.
-    workers: Option<Rc<super::workers::WorkerOwner>>,
-    outbox: ViewOutbox,
-    /// Declared after `realm`, and it must stay there: fields drop in
-    /// declaration order, so freeing the realm — and with it the host
-    /// functions holding their own clones of this `Rc` — happens before this
-    /// handle goes, which is what makes the `LynxDocument` outlive every
-    /// piece of JavaScript that could name it.
+    /// host functions that drive them, and where a worker failure is reported
+    /// from.
+    workers: Rc<super::workers::WorkerOwner>,
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
@@ -541,11 +535,30 @@ impl fmt::Debug for MainThreadRuntime {
 }
 
 impl MainThreadRuntime {
+    /// Opens one view's realm, furnishes it, and installs the `Worker`
+    /// bindings — handing back the one channel everything this view's workers
+    /// say arrives on.
+    ///
+    /// A realm has its `Worker` members from the moment it exists: there is no
+    /// state in which it is missing them, and so no order between furnishing
+    /// the realm and installing them for a caller to get wrong. Which worker
+    /// this realm creates is still the realm's own business — the boot module
+    /// constructs the built-in background context, during the entry evaluation
+    /// this call does not make.
     pub(crate) fn new(
         js_runtime: &mut ScriptRuntime,
         ingredients: DocumentIngredients,
         outbox: ViewOutbox,
-    ) -> Result<Self, MainThreadError> {
+        workers: &super::workers::WorkerFactory,
+        base_url: &str,
+        background_entry: Option<String>,
+    ) -> Result<
+        (
+            Self,
+            tokio::sync::mpsc::UnboundedReceiver<crate::background::WorkerEvent>,
+        ),
+        MainThreadError,
+    > {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
@@ -560,19 +573,22 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
-        Ok(Self {
-            realm: RealmHandles {
+        let (workers, incoming) = workers
+            .install(&mut engine, js_runtime, outbox, base_url, background_entry)
+            .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
+        Ok((
+            Self {
                 engine,
                 init_data: None,
                 global_props: None,
+                workers,
+                slot,
+                events,
+                timers,
+                next_event_id: 0,
             },
-            workers: None,
-            outbox,
-            slot,
-            events,
-            timers,
-            next_event_id: 0,
-        })
+            incoming,
+        ))
     }
 
     pub(super) fn prepare_initial_data(
@@ -580,50 +596,23 @@ impl MainThreadRuntime {
         init_data: Option<&serde_json::Value>,
         global_props: Option<&serde_json::Value>,
     ) -> Result<(), MainThreadError> {
-        let realm = &mut self.realm;
-        let init_data = realm
+        let init_data = self
             .engine
             .json_value(init_data)
             .map_err(|error| MainThreadError::from_engine("converting initial page data", error))?;
-        let global_props = realm.engine.json_value(global_props).map_err(|error| {
+        let global_props = self.engine.json_value(global_props).map_err(|error| {
             MainThreadError::from_engine("converting initial global properties", error)
         })?;
-        realm.init_data = Some(init_data);
-        realm.global_props = Some(global_props);
+        self.init_data = Some(init_data);
+        self.global_props = Some(global_props);
         Ok(())
-    }
-
-    /// Installs the realm's `Worker` bindings, handing back the one channel
-    /// everything this view's workers say arrives on.
-    pub(crate) fn install_workers(
-        &mut self,
-        js_runtime: &mut ScriptRuntime,
-        workers: &super::workers::WorkerFactory,
-        outbox: ViewOutbox,
-        base_url: &str,
-        background_entry: Option<String>,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<crate::background::WorkerEvent>, MainThreadError>
-    {
-        let (owner, incoming) = workers
-            .install(
-                &mut self.realm.engine,
-                js_runtime,
-                outbox,
-                base_url,
-                background_entry,
-            )
-            .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
-        self.workers = Some(owner);
-        Ok(incoming)
     }
 
     /// How many of this realm's workers are still running, which is how many
     /// `Terminate`s releasing it would send.
     #[cfg(test)]
     pub(crate) fn live_workers(&self) -> usize {
-        self.workers
-            .as_ref()
-            .map_or(0, |owner| owner.live_workers())
+        self.workers.live_workers()
     }
 
     pub(crate) fn dispatch_worker_event(
@@ -637,10 +626,8 @@ impl MainThreadRuntime {
         // A worker that closed itself, or whose script or realm failed, has
         // ended: this is where the realm learns it, and so where the right to
         // tell it to stop stops being worth keeping.
-        if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_))
-            && let Some(owner) = self.workers.as_ref()
-        {
-            owner.forget(key);
+        if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
+            self.workers.forget(key);
         }
         let (kind, data) = match payload {
             WorkerPayload::Message(data) => ("message", data),
@@ -655,14 +642,12 @@ impl MainThreadRuntime {
                     "colno": location.and_then(|l| l.column).unwrap_or(0),
                 })
                 .to_string();
-                self.outbox
-                    .engine_event(crate::EngineEvent::WorkerFailed(error));
+                self.workers.report_failure(error);
                 (kind, data)
             }
         };
         let key = key.get().to_string();
         let called = self
-            .realm
             .engine
             .call_module_export(
                 js_runtime,
@@ -815,7 +800,7 @@ impl MainThreadRuntime {
                 HostArgument::Number(f64::from(event_id)),
                 HostArgument::Boolean(index == last),
             ];
-            let called = self.realm.engine.call_module_export(
+            let called = self.engine.call_module_export(
                 js_runtime,
                 ELEMENT_MODULE_SPECIFIER,
                 EVENT_DISPATCH_EXPORT,
@@ -846,8 +831,7 @@ impl MainThreadRuntime {
     /// one that throws neither stops the ones behind it nor ends the realm —
     /// the same standing an event listener that throws already has.
     pub(crate) fn run_due_timers(&mut self, js_runtime: &mut ScriptRuntime) -> Vec<ScriptError> {
-        let Some(mut failures) = run_due_timers(&mut self.realm.engine, js_runtime, &self.timers)
-        else {
+        let Some(mut failures) = run_due_timers(&mut self.engine, js_runtime, &self.timers) else {
             return Vec::new();
         };
         // Callbacks remove elements like any other realm entry point; the
@@ -865,8 +849,7 @@ impl MainThreadRuntime {
         source_name: &str,
     ) -> Result<(), MainThreadError> {
         let entry_source = entry_module_source(source);
-        self.realm
-            .engine
+        self.engine
             .register_module_source(source_name, source_name, &entry_source)
             .map_err(|error| {
                 MainThreadError::from_engine("registering the MTS entry module", error)
@@ -911,12 +894,11 @@ __FlushElementTree();
 
     /// The next module an import in this realm is waiting for, if any.
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
-        self.realm.engine.take_module_request()
+        self.engine.take_module_request()
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
-        self.realm
-            .engine
+        self.engine
             .module_finished()
             .map_err(|error| MainThreadError::from_engine("booting the MTS entry", error))
     }
@@ -935,8 +917,7 @@ __FlushElementTree();
             }
             Err(error) => Err(format!("module '{name}': {error}").replace('\0', "\u{fffd}")),
         };
-        self.realm
-            .engine
+        self.engine
             .complete_module(
                 js_runtime,
                 name,
@@ -950,8 +931,7 @@ __FlushElementTree();
 
     fn collect_garbage(&mut self, js_runtime: &mut ScriptRuntime) -> Result<(), MainThreadError> {
         self.slot.borrow_mut().removals = 0;
-        self.realm
-            .engine
+        self.engine
             .collect_garbage(js_runtime)
             .map_err(|error| MainThreadError::from_engine("collecting garbage", error))
     }
@@ -980,7 +960,6 @@ __FlushElementTree();
         phase: &'static str,
     ) -> Result<(), MainThreadError> {
         let result = self
-            .realm
             .engine
             .start_module(js_runtime, source, name)
             .map_err(|error| MainThreadError::from_engine(phase, error));

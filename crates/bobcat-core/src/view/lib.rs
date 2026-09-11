@@ -29,10 +29,11 @@ use crate::link::{Published, ToMain, ViewNotice};
 #[cfg(target_arch = "wasm32")]
 pub use crate::main::configure_wasm_workers;
 use crate::main::tree::PageConfig;
-use crate::main::{GroupHome, GroupLink, spawn_group};
+use crate::main::{GroupLink, spawn_group};
 pub use crate::paint::WindowTarget;
 use crate::resource::ResourceFetcher;
 use crate::script::ScriptError;
+use crate::threads::ThreadJoin;
 
 /// View metrics, copied across the view's one thread boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -426,31 +427,20 @@ pub struct LynxGroup {
 }
 
 /// What a group owns, and what its views hold it alive by.
+///
+/// **The field order is the teardown, and it must stay in this order.**
+/// `bobcat-main` is waited for before the group's own worker sender closes,
+/// because its view tasks and its `WorkerFactory` hold senders on the worker
+/// thread's channel and it takes them with it.
 struct GroupInner {
-    /// The group's inbox. `Option` only so the goodbye — dropping the last
-    /// sender — can be said before the join below waits for it.
-    attach: Option<mpsc::UnboundedSender<GroupCommand>>,
-    home: GroupHome,
+    attach: mpsc::UnboundedSender<GroupCommand>,
+    #[expect(dead_code, reason = "held to wait for bobcat-main on drop")]
+    home: ThreadJoin,
     /// The group's other thread, held here rather than by `bobcat-main`:
     /// `bobcat-workers` is a runtime of the group's own, and all `bobcat-main`
     /// is given of it is one sender.
+    #[expect(dead_code, reason = "held to end and wait for bobcat-workers on drop")]
     workers: WorkerHome,
-}
-
-impl Drop for GroupInner {
-    fn drop(&mut self) {
-        // Goodbye first, join second. Closing the inbox is what ends the
-        // group's task, and this runs only once every view built from the
-        // group has already been dropped, so there is nothing left on the
-        // thread to end.
-        drop(self.attach.take());
-        self.home.join();
-        // Main first, because its view tasks and its `WorkerFactory` hold
-        // senders on the worker thread's channel. Once `bobcat-main` has
-        // returned, the group's own sender is the last one, and
-        // `WorkerHome::join` drops it and waits.
-        self.workers.join();
-    }
 }
 
 impl fmt::Debug for LynxGroup {
@@ -481,9 +471,9 @@ impl LynxGroup {
         // The group's second runtime, started here beside `bobcat-main`
         // rather than by it: `bobcat-main` is handed one sender on it and
         // nothing else. First, because a `bobcat-main` that will not spawn
-        // leaves this local to end the worker thread — `WorkerHome`'s own
-        // `Drop` joins it — rather than a thread parked on a channel nobody
-        // holds.
+        // leaves this local to end the worker thread — its sender drops before
+        // its own `ThreadJoin` — rather than a thread parked on a channel
+        // nobody holds.
         let workers = WorkerHome::start()?;
         let (attach, attachments) = mpsc::unbounded_channel();
         let (ready, started) = oneshot::channel();
@@ -500,7 +490,7 @@ impl LynxGroup {
         // here on closes both threads and joins them — including this one.
         let group = Self {
             inner: Rc::new(GroupInner {
-                attach: Some(attach),
+                attach,
                 home,
                 workers,
             }),
@@ -581,8 +571,6 @@ impl LynxGroup {
         let (frames, frame_receiver) = watch::channel(Published::default());
         self.inner
             .attach
-            .as_ref()
-            .expect("a group hands out attachments until it is dropped")
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
                 sources: MainSources {

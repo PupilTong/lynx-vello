@@ -5,9 +5,9 @@
 //! `bobcat-workers`, which carries the same group's worker realms. Neither
 //! knows about the other, and both end the same way.
 //!
-//! Waiting is deliberately not here. Each runs a tokio runtime of its own and
-//! parks in its scheduler, so what is left in common is only how a thread is
-//! joined and how one reports having trapped.
+//! Parking is deliberately not here. Each runs a tokio runtime of its own and
+//! parks in its scheduler, so what is left in common is only [`ThreadJoin`] —
+//! how a thread is waited for — and how one reports having trapped.
 
 use crate::script::{ScriptError, ScriptErrorKind, ScriptErrorPhase};
 
@@ -17,6 +17,31 @@ pub(crate) type JoinHandle = std::thread::JoinHandle<()>;
 #[cfg(target_arch = "wasm32")]
 pub(crate) type JoinHandle = wasm_thread::JoinHandle<()>;
 
+/// One of this engine's threads, waited for by this value's own drop.
+///
+/// Held after whatever closes that thread's inbox, so the wait is reached with
+/// the goodbye already said: a group's field order is the whole of its
+/// teardown, and nothing has to call a join by hand.
+pub(crate) struct ThreadJoin(
+    /// `Option` only because [`Drop`] cannot move out of `&mut self`. It is
+    /// `Some` for the whole of this value's life.
+    Option<JoinHandle>,
+);
+
+impl ThreadJoin {
+    pub(crate) const fn new(thread: JoinHandle) -> Self {
+        Self(Some(thread))
+    }
+}
+
+impl Drop for ThreadJoin {
+    fn drop(&mut self) {
+        if let Some(thread) = self.0.take() {
+            join(thread);
+        }
+    }
+}
+
 /// Waits for a thread that has already been told to end.
 ///
 /// Under `panic = "abort"` a trapped wasm thread runs no destructors and
@@ -24,7 +49,7 @@ pub(crate) type JoinHandle = wasm_thread::JoinHandle<()>;
 /// between the check and the wait — so wasm teardown never joins. The goodbye
 /// is already sent: a healthy thread exits on its own, and a trapped one is
 /// already gone.
-pub(crate) fn join(thread: JoinHandle) {
+fn join(thread: JoinHandle) {
     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
     drop(thread);
     #[cfg(not(all(target_arch = "wasm32", panic = "abort")))]

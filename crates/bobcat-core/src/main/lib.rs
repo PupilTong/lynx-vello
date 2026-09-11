@@ -49,30 +49,11 @@ use self::runtime::install_shared_modules;
 pub(crate) use self::workers::WorkerFactory;
 use crate::background::WorkerCommand;
 use crate::link::{ToMain, ViewOutbox};
-use crate::threads::{self, JoinHandle};
+use crate::threads::{self, ThreadJoin};
 use crate::view::{
     EngineError, EngineEvent, EventRequester, GroupCommand, LynxViewError, MainSources,
     StyleThreads, ViewAttachment, Viewport,
 };
-
-/// The group-owned right to join `bobcat-main`.
-///
-/// One per group rather than one per view: the thread outlives any single
-/// view on it, and the join is the last thing that happens once the group and
-/// the last view built from it are both gone.
-pub(crate) struct GroupHome {
-    thread: Option<JoinHandle>,
-}
-
-impl GroupHome {
-    /// Waits for `bobcat-main` to return, once the goodbye that ends it has
-    /// already been sent.
-    pub(crate) fn join(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            threads::join(thread);
-        }
-    }
-}
 
 /// The main thread's end of its group's link.
 pub(crate) struct GroupLink {
@@ -157,7 +138,7 @@ pub fn configure_wasm_workers(worker_script_url: String) -> Result<(), EngineErr
 pub(crate) fn spawn_group(
     style_threads: StyleThreads,
     link: GroupLink,
-) -> Result<GroupHome, EngineError> {
+) -> Result<ThreadJoin, EngineError> {
     let thread = ThreadBuilder::new()
         .name("bobcat-main".to_owned())
         .spawn(move || run_group(style_threads, link))
@@ -165,9 +146,7 @@ pub(crate) fn spawn_group(
             name: "script",
             message: error.to_string(),
         })?;
-    Ok(GroupHome {
-        thread: Some(thread),
-    })
+    Ok(ThreadJoin::new(thread))
 }
 
 /// The thread's whole body: build what the group shares, then run its views.

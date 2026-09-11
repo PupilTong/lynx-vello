@@ -464,12 +464,13 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
         assert!(view.published.commit().is_some(), "the page booted");
         assert_eq!(
             page.task_count(),
-            3,
-            "a live realm waits on its workers, its clock and the runtime's checkpoints"
+            2,
+            "a live realm waits on its workers, and on its clock — its deadline and the \
+             runtime's checkpoints are one task"
         );
 
         // Parked: nothing of this page's own is running, and its own entries
-        // are not what the follower is watching for.
+        // are not what the clock task's checkpoint arm is watching for.
         for _ in 0..8 {
             task::yield_now().await;
         }
@@ -491,11 +492,10 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
     });
 }
 
-/// A page's own entries do not wake its checkpoint follower: the generation
-/// it records at the end of every entry is what tells its own bumps from a
-/// sibling's.
+/// A page's own entries do not wake its clock task: the generation it records
+/// at the end of every entry is what tells its own bumps from a sibling's.
 #[test]
-fn a_pages_own_entries_never_wake_its_checkpoint_follower() {
+fn a_pages_own_entries_never_wake_its_clock_task() {
     on_a_local_set(async {
         let (context, _workers) = group();
         let (outbox, mut view) = detached_outbox(Arc::new(NoWakeup));
