@@ -9,11 +9,11 @@ const packageDirectory = path.resolve(
 );
 // These modules execute as native ESM, so the npm package allowlist is also
 // the Pages asset manifest. A new facade dependency then reaches both outputs.
-const browserScripts = (
+const browserFiles = (
   JSON.parse(
     readFileSync(path.join(packageDirectory, 'package.json'), 'utf8'),
   ) as { files: string[] }
-).files.filter((file) => path.extname(file) === '.js');
+).files;
 
 function pagesBasePath(value: string | undefined): string {
   const segments = (value ?? '')
@@ -27,11 +27,6 @@ function pagesBasePath(value: string | undefined): string {
 const basePath = pagesBasePath(process.env['PAGES_BASE_PATH']);
 
 export default defineConfig({
-  source: {
-    entry: {
-      index: './src/index.ts',
-    },
-  },
   server: {
     base: basePath,
   },
@@ -40,29 +35,53 @@ export default defineConfig({
   },
   output: {
     assetPrefix: basePath,
-    // wasm_thread imports the generated glue by its real URL. Keep this small
-    // package as native ESM instead of letting Rspack inline import.meta.url
-    // as a build-machine file URL.
-    copy: [
-      {
-        from: path.resolve(
-          packageDirectory,
-          '../hughie/tests/fixtures/Roboto-Regular.ttf',
-        ),
-        to: 'Roboto-Regular.ttf',
-        info: { minimized: true },
+  },
+  environments: {
+    web: {
+      source: {
+        entry: {
+          index: './src/index.ts',
+        },
       },
-      ...browserScripts.map((file) => ({
-        from: path.join(packageDirectory, file),
-        to: path.posix.join('bobcat-wasm', file),
-        info: { minimized: true },
-      })),
-      {
-        from: path.join(packageDirectory, 'pkg'),
-        to: 'bobcat-wasm/pkg',
-        info: { minimized: true },
+      output: {
+        // wasm_thread imports the generated glue by its real URL. Keep this
+        // small package as native ESM instead of letting Rspack inline
+        // import.meta.url as a build-machine file URL.
+        copy: [
+          {
+            from: path.resolve(
+              packageDirectory,
+              '../hughie/tests/fixtures/Roboto-Regular.ttf',
+            ),
+            to: 'Roboto-Regular.ttf',
+            info: { minimized: true },
+          },
+          ...browserFiles.map((file) => ({
+            from: path.join(packageDirectory, file),
+            to: path.posix.join('bobcat-wasm', file),
+            info: { minimized: true },
+          })),
+        ],
       },
-    ],
+    },
+    // The page registers this Service Worker by a fixed URL beside it, so it
+    // is built as a classic Worker script with no hash and no directory.
+    'coi-service-worker': {
+      source: {
+        entry: {
+          'coi-service-worker': './src/coi-service-worker.ts',
+        },
+      },
+      output: {
+        target: 'web-worker',
+        distPath: {
+          js: '',
+        },
+        filename: {
+          js: '[name].js',
+        },
+      },
+    },
   },
   html: {
     title: 'Bobcat · Rust on the web',

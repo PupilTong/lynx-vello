@@ -28,7 +28,7 @@ use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 
 pub(super) const MODULE: &str = "bobcat-internal";
-pub(super) const SOURCE: &str = include_str!("../../../../packages/bobcat-element/src/worker.mjs");
+pub(super) const SOURCE: &str = crate::esm::runtime_source!("worker");
 
 /// Issued on bobcat-main, once per group. No cross-thread allocator or lock.
 #[derive(Clone)]

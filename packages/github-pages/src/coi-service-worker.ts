@@ -4,6 +4,8 @@
  * threads to every same-origin response, including the top-level document.
  */
 
+declare const self: ServiceWorkerGlobalScope;
+
 const COOP = 'Cross-Origin-Opener-Policy';
 const COEP = 'Cross-Origin-Embedder-Policy';
 const CORP = 'Cross-Origin-Resource-Policy';

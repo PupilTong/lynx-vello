@@ -31,6 +31,10 @@ wasm_thread = { workspace = true }
 
 web-time = { workspace = true }
 
+[build-dependencies]
+swc_common = { workspace = true }
+swc_ts_fast_strip = { workspace = true }
+
 [dev-dependencies]
 divan = { workspace = true }
 flume = { workspace = true }

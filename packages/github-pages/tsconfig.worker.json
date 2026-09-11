@@ -1,0 +1,8 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2023", "webworker"]
+  },
+  "files": ["src/coi-service-worker.ts"]
+}

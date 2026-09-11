@@ -157,7 +157,10 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build threaded wasm-bindgen bindings
+      - name: Build threaded wasm-bindgen bindings and the TypeScript facade
+        # wasm-pack first, then TypeScript 7 emits `dist/`: the Workers are
+        # typed against the glue wasm-pack generates, so this is where they
+        # are checked.
         run: pnpm --filter bobcat-wasm build
 
       - name: Decode bundles and ZIP resources in Wasm
@@ -224,13 +227,16 @@ jobs:
           cargo clippy --locked -p bobcat-cli --no-default-features --features cli --all-targets --no-deps -- -D warnings
           cargo clippy --locked -p bobcat-cli --no-default-features --features server --all-targets --no-deps -- -D warnings
 
-  element-papi:
-    name: Element PAPI runtime tests (Ubuntu)
+  typescript:
+    name: TypeScript workspace type-check + Element PAPI tests (Ubuntu)
     runs-on: ubuntu-latest
     steps:
-      # No submodules and no Rust toolchain: the runtime is a single
-      # JavaScript file tested over a native mock, so this job needs only the
-      # pnpm workspace.
+      # No submodules and no Rust toolchain. TypeScript 7 checks every program
+      # in the workspace — the realm runtime, the bobcat-wasm facade and
+      # scripts, the Pages site and every example — and the realm runtime is
+      # tested over a native mock. The one program left out is the bobcat-wasm
+      # Workers': they are typed against wasm-pack's glue, so the `browser`
+      # job's package build checks them.
       - uses: actions/checkout@v6
 
       - name: Install pnpm
@@ -245,11 +251,11 @@ jobs:
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Type-check the workspace
+        run: pnpm test:type
+
       - name: Test the Element PAPI runtime
         run: pnpm --filter bobcat-element test
-
-      - name: Type-check the Element PAPI runtime
-        run: pnpm --filter bobcat-element test:type
 
   walltime-benchmarks:
     name: bench (CodSpeed walltime, macOS)
