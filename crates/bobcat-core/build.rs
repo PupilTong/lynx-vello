@@ -41,11 +41,13 @@ fn main() {
     }
 }
 
-/// The module a `.ts` file is, by base name. A declaration file is not one:
-/// it carries no code.
+/// The module a `.ts` file is, by base name. A declaration file
+/// (`native.d.ts`) is not one: it carries no code.
 fn module_name(path: &Path) -> Option<&str> {
-    let name = path.file_name()?.to_str()?.strip_suffix(".ts")?;
-    (!name.ends_with(".d")).then_some(name)
+    let name = path.file_stem()?.to_str()?;
+    let is_module =
+        path.extension()? == "ts" && Path::new(name).extension().is_none_or(|ext| ext != "d");
+    is_module.then_some(name)
 }
 
 fn strip_types(path: &Path) -> String {
