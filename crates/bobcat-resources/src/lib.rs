@@ -50,11 +50,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bobcat_core::resource::{
-    ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
-    ResourceMetadata, ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming,
-    StyleSheetPayload, StyleSheetResponse, fetch_style_sheet_as_text,
-};
+use bobcat_core::resource::ResourceFetcher;
 use bobcat_core::vello::peniko::ImageData;
 use bobcat_core::{FrameImages, ImageReports, ImageSizeHint, PreparsedStyleSheet};
 use bytes::Bytes;
@@ -73,10 +69,34 @@ mod registry;
 mod sources;
 pub mod transport;
 
-pub use crate::executor::Wakeup;
+use crate::executor::Wakeup;
 use crate::images::{Completion, ImageState};
 use crate::registry::{Registered, Registry};
 use crate::transport::{Fetched, HttpSettings, Transports};
+
+/// What a load may do with the caches on its way.
+///
+/// The fetcher's own vocabulary: every load this crate starts names one, the
+/// disk tier turns it into an RFC 9111 plan (`cache::http::plan`), and the
+/// browser transport maps it onto a `fetch` request's cache mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CachePolicy {
+    /// Ordinary freshness rules: a fresh stored response answers, a stale one
+    /// is revalidated.
+    #[default]
+    Default,
+    /// Fetch, and store nothing.
+    NoStore,
+    /// Fetch unconditionally, ignoring what is stored.
+    Reload,
+    /// Revalidate whatever is stored before using it.
+    NoCache,
+    /// Use a stored response however stale, and fetch only without one.
+    ForceCache,
+    /// Use a stored response however stale, and fail without one.
+    OnlyIfCached,
+}
 
 /// The disk tier's location and size.
 #[derive(Clone, Debug)]
@@ -227,7 +247,7 @@ impl Shared {
     fn fetch_job(
         &self,
         url: &Url,
-        policy: bobcat_core::resource::CachePolicy,
+        policy: CachePolicy,
         headers: &http::HeaderMap,
     ) -> Result<Fetched, error::Failure> {
         #[cfg(test)]
@@ -525,8 +545,9 @@ impl Resources {
         Ok(url)
     }
 
-    /// Registers a stylesheet the host already parsed. It answers
-    /// `fetch_style_sheet` pre-parsed and nothing else.
+    /// Registers a stylesheet the host already parsed. It answers a stylesheet
+    /// source request pre-parsed, and no other request at all — it has no
+    /// bytes to give one.
     pub fn register_style_sheet(
         &self,
         url: &str,
@@ -642,48 +663,6 @@ impl Resources {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(message);
     }
-
-    /// Fetches and preprocesses `url` on the executor's blocking pool.
-    ///
-    /// The `JoinHandle` is the whole result path: it is a plain future, so
-    /// the caller awaits it on whatever executor it has and needs no ambient
-    /// runtime of its own.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn fetch(
-        &self,
-        url: Url,
-        policy: bobcat_core::resource::CachePolicy,
-        headers: http::HeaderMap,
-    ) -> Result<(Fetched, preprocess::Preprocessed), error::Failure> {
-        let shared = SharedHandle::clone(&self.shared);
-        self.executor
-            .blocking("fetch", move || {
-                shared
-                    .transports
-                    .fetch_blocking(&url, policy, &headers)
-                    .and_then(|fetched| preprocess_fetched(fetched, &url))
-            })
-            .await
-            .unwrap_or_else(|message| {
-                Err(error::Failure::new(
-                    bobcat_core::resource::ResourceErrorKind::Unavailable,
-                    bobcat_core::resource::ResourceErrorPhase::Open,
-                    message,
-                ))
-            })
-    }
-
-    /// Fetches and preprocesses `url` through the browser.
-    #[cfg(target_arch = "wasm32")]
-    async fn fetch(
-        &self,
-        url: Url,
-        policy: bobcat_core::resource::CachePolicy,
-        headers: http::HeaderMap,
-    ) -> Result<(Fetched, preprocess::Preprocessed), error::Failure> {
-        let fetched = self.shared.transports.fetch(&url, policy, &headers).await?;
-        preprocess_fetched(fetched, &url)
-    }
 }
 
 fn preprocess_fetched(
@@ -735,32 +714,6 @@ impl ViewResources {
     }
 }
 
-/// The response metadata for `request`, answered by `fetched`.
-fn metadata(
-    request: &ResourceRequest,
-    fetched: &Fetched,
-    media_type: &mime::MediaType,
-    content_length: Option<u64>,
-) -> ResourceMetadata {
-    let mut resource = request.resource.clone();
-    if fetched.url != resource.url {
-        resource
-            .rewrite_chain
-            .extend(fetched.redirects.iter().cloned());
-        resource.url = fetched.url.clone();
-    }
-    ResourceMetadata {
-        request_id: request.context.id,
-        resource,
-        headers: fetched.headers.clone(),
-        content_length,
-        media_type: Some(Arc::from(media_type.to_string())),
-        source: fetched.source,
-        cache_status: fetched.cache_status,
-        timing: fetched.timing,
-    }
-}
-
 impl ResourceFetcher for ViewResources {
     fn request_source(
         &self,
@@ -768,91 +721,6 @@ impl ResourceFetcher for ViewResources {
         completion: bobcat_core::resource::SourceCompletion,
     ) {
         sources::request(&self.resources, request, completion);
-    }
-
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        matches!(
-            capability,
-            ResourceCapability::BufferedResource | ResourceCapability::PreparsedStyleSheet
-        )
-    }
-
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        let specifier = request.resource.specifier.clone();
-        let base = request
-            .resource
-            .base_url
-            .clone()
-            .or_else(|| self.resources.base_url());
-        let url = self
-            .resources
-            .shared
-            .transports
-            .resolve(&specifier, base.as_ref())
-            .map_err(|failure| failure.into_error(Some(request.context.id), Some(specifier)))?;
-        let locality = Transports::locality(&url);
-        Ok(ResolvedLocator {
-            resource: request.resource,
-            cache_key: Some(Arc::from(url.as_str())),
-            url,
-            rewrite_chain: Vec::new(),
-            locality,
-        })
-    }
-
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        let locator: Arc<str> = Arc::from(request.resource.url.as_str());
-        let (fetched, preprocessed) = self
-            .resources
-            .fetch(
-                request.resource.url.clone(),
-                request.cache_policy,
-                request.headers.clone(),
-            )
-            .await
-            .map_err(|failure| failure.into_error(Some(request.context.id), Some(locator)))?;
-        let content_length = Some(preprocessed.bytes.len() as u64);
-        Ok(ResourceResponse {
-            metadata: metadata(&request, &fetched, &preprocessed.media_type, content_length),
-            bytes: preprocessed.bytes,
-        })
-    }
-
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
-        if let Some(Registered::StyleSheet(sheet)) = self
-            .resources
-            .shared
-            .transports
-            .registry
-            .get(&request.resource.url)
-        {
-            let media_type = mime::MediaType::parse("text/css").expect("a media type");
-            let fetched = Fetched {
-                bytes: Bytes::new(),
-                media_type: Some(media_type.clone()),
-                url: request.resource.url.clone(),
-                redirects: Vec::new(),
-                source: ResourceSource::PackagedAsset,
-                cache_status: bobcat_core::resource::CacheStatus::NotApplicable,
-                headers: http::HeaderMap::new(),
-                timing: ResourceTiming::default(),
-                restorable: false,
-            };
-            return Ok(StyleSheetResponse {
-                metadata: metadata(&request, &fetched, &media_type, None),
-                payload: StyleSheetPayload::Preparsed(sheet),
-            });
-        }
-        fetch_style_sheet_as_text(self, request).await
     }
 
     fn request_image(&self, source: &str) {

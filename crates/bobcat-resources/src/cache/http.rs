@@ -9,11 +9,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bobcat_core::resource::CachePolicy;
 use http::header::{
     CACHE_CONTROL, DATE, ETAG, EXPIRES, HeaderMap, HeaderName, IF_MODIFIED_SINCE, IF_NONE_MATCH,
     LAST_MODIFIED, VARY,
 };
+
+use crate::CachePolicy;
 
 /// The response record a stored body carries: everything freshness and
 /// revalidation need, and nothing of the body.

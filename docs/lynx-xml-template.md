@@ -545,7 +545,7 @@ ingestion path.
 
 `bobcat-source` implements the shared mapping and source registration for
 `bobcat-cli` and `bobcat-wasm`. They register the main-thread body as a script,
-mount a present `<style>` body through `StyleSheetPayload::Text` before starting
+mount a present `<style>` body as registered CSS text before starting
 that script, and construct the XML page with the fixed `false`/`false`/`true`
 display/overflow/selector defaults unless the browser host deliberately
 overrides them. Both paths register a present background body and pass its URL

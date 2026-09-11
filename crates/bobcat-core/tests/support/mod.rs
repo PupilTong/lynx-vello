@@ -8,17 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use bobcat_core::resource::{
-    CachePolicy, CacheStatus, LoadedSource, RequestContext, RequestId, ResolveRequest,
-    ResolvedLocator, ResourceCapability, ResourceDescriptor, ResourceError, ResourceErrorKind,
-    ResourceErrorPhase, ResourceFetcher, ResourceLocality, ResourceMetadata, ResourcePriority,
-    ResourceRequest, ResourceResponse, ResourceSource, ResourceTiming, RetryAdvice,
-    SourceCompletion, SourceRequest, StyleSheetPayload, StyleSheetResponse, StyleSheetSource,
+    LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
+    RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
 };
 use bobcat_core::{
     DrawTarget, EngineEvent, EventRequester, ImageReports, LynxGroup, LynxView, LynxViewError,
     Painter, PreparsedStyleSheet, StyleThreads, ViewSources,
 };
-use bytes::Bytes;
 use url::Url;
 
 /// One view in a group of its own, with a painter attached to it, at Stylo's
@@ -79,22 +75,20 @@ pub fn wait_for_script<F: ResourceFetcher + 'static>(
     }
 }
 
-/// Which transports the double advertises, and what it hands back.
+/// What the double resolves to, and the one payload it hands back.
 #[derive(Debug)]
 pub struct FetcherDouble {
     pub bytes: Vec<u8>,
-    pub capabilities: Vec<ResourceCapability>,
     /// Overrides the resolved URL, so a test can drive the `data:` branch or a host rewrite
     /// without a real network.
     pub resolve_to: Mutex<Option<String>>,
-    pub cache_key: Option<String>,
     pub resolves: AtomicUsize,
     pub fetches: AtomicUsize,
     /// When set, stylesheet requests are answered pre-parsed instead of as
     /// CSS text — the arm a bundle-decoding embedder uses.
     pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
-    /// When set, stylesheet requests use these bytes while ordinary resource
-    /// requests keep using `bytes` for the entry module.
+    /// When set, stylesheet requests use these bytes while every other source
+    /// keeps using `bytes` for the entry module.
     pub style_sheet_text: Option<Vec<u8>>,
     pub style_sheet_fetches: AtomicUsize,
     /// The images this host serves, if a test installed any. Shared with the
@@ -113,9 +107,7 @@ impl FetcherDouble {
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
-            capabilities: vec![ResourceCapability::BufferedResource],
             resolve_to: Mutex::new(None),
-            cache_key: None,
             resolves: AtomicUsize::new(0),
             fetches: AtomicUsize::new(0),
             style_sheet: None,
@@ -157,13 +149,11 @@ impl FetcherDouble {
     #[must_use]
     pub fn with_preparsed_style_sheet(mut self, sheet: PreparsedStyleSheet) -> Self {
         self.style_sheet = Some(Arc::new(sheet));
-        self.capabilities
-            .push(ResourceCapability::PreparsedStyleSheet);
         self
     }
 
     /// Answers stylesheet requests with raw text bytes independently of the
-    /// entry-module bytes returned by `fetch_resource`.
+    /// payload every other source is served from.
     #[must_use]
     pub fn with_style_sheet_text(mut self, bytes: Vec<u8>) -> Self {
         self.style_sheet_text = Some(bytes);
@@ -175,20 +165,8 @@ impl FetcherDouble {
     }
 
     #[must_use]
-    pub fn with_capabilities(mut self, capabilities: Vec<ResourceCapability>) -> Self {
-        self.capabilities = capabilities;
-        self
-    }
-
-    #[must_use]
     pub fn resolving_to(self, url: &str) -> Self {
         *self.resolve_to.lock().expect("resolve override") = Some(url.to_owned());
-        self
-    }
-
-    #[must_use]
-    pub fn with_cache_key(mut self, key: &str) -> Self {
-        self.cache_key = Some(key.to_owned());
         self
     }
 
@@ -200,94 +178,42 @@ impl FetcherDouble {
         self.resolves.load(Ordering::Relaxed)
     }
 
-    fn metadata(&self, resource: ResolvedLocator, id: RequestId) -> ResourceMetadata {
-        ResourceMetadata {
-            request_id: id,
-            resource,
-            headers: http::HeaderMap::new(),
-            content_length: Some(self.bytes.len() as u64),
-            media_type: None,
-            source: ResourceSource::Custom,
-            cache_status: CacheStatus::Miss,
-            timing: ResourceTiming::default(),
-        }
-    }
-}
-
-impl FetcherDouble {
-    fn style_sheet_response(&self, request: ResourceRequest) -> StyleSheetResponse {
-        self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
-        if let Some(sheet) = self.style_sheet.clone() {
-            let metadata = self.metadata(request.resource.clone(), request.context.id);
-            return StyleSheetResponse {
-                metadata,
-                payload: StyleSheetPayload::Preparsed(sheet),
-            };
-        }
-        if let Some(bytes) = self.style_sheet_text.clone() {
-            let mut metadata = self.metadata(request.resource, request.context.id);
-            metadata.content_length = Some(bytes.len() as u64);
-            return StyleSheetResponse {
-                metadata,
-                payload: StyleSheetPayload::Text(Bytes::from(bytes)),
-            };
-        }
-        // No dedicated sheet registered, so behave like a host that only
-        // moves bytes: run the trait's own default.
-        let response = self.resource_response(request);
-        StyleSheetResponse {
-            metadata: response.metadata,
-            payload: StyleSheetPayload::Text(response.bytes),
-        }
-    }
-
-    fn resolve_source_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
+    /// Where `specifier` resolves, counting the resolve a real host would do.
+    ///
+    /// `resolve_to` overrides the answer, so a test can point every source at
+    /// one URL or at something that is not a URL at all.
+    fn resolve(&self, specifier: &str, base_url: Option<&Url>) -> Result<Url, ResourceError> {
         self.resolves.fetch_add(1, Ordering::Relaxed);
-        let override_url = self.resolve_to.lock().expect("resolve override").clone();
-        let cache_key = self.cache_key.clone();
-        let text = override_url.unwrap_or_else(|| {
-            request.resource.base_url.as_ref().map_or_else(
-                || format!("https://example.test/{}", request.resource.specifier),
-                |base| {
-                    base.join(&request.resource.specifier)
-                        .expect("test source URL")
-                        .to_string()
-                },
-            )
-        });
-        let url = Url::parse(&text).map_err(|error| ResourceError {
-            request_id: Some(request.context.id),
+        let text = self
+            .resolve_to
+            .lock()
+            .expect("resolve override")
+            .clone()
+            .unwrap_or_else(|| {
+                base_url.map_or_else(
+                    || format!("https://example.test/{specifier}"),
+                    |base| base.join(specifier).expect("test source URL").to_string(),
+                )
+            });
+        Url::parse(&text).map_err(|error| ResourceError {
             kind: ResourceErrorKind::InvalidUrl,
             phase: ResourceErrorPhase::Resolve,
-            locator: Some(request.resource.specifier.clone()),
-            status: None,
+            locator: Some(Arc::from(specifier)),
             message: error.to_string().into(),
             retry: RetryAdvice::Never,
-        })?;
-        Ok(ResolvedLocator {
-            resource: request.resource,
-            url,
-            rewrite_chain: Vec::new(),
-            locality: ResourceLocality::Remote,
-            cache_key: cache_key.map(Into::into),
         })
     }
 
-    fn resource_response(&self, request: ResourceRequest) -> ResourceResponse {
+    /// The one payload this double serves every source from, counted as a
+    /// fetch — which is what a test asserting that a pre-parsed sheet cost no
+    /// payload reads.
+    fn payload(&self) -> Vec<u8> {
         self.fetches.fetch_add(1, Ordering::Relaxed);
-        let id = request.context.id;
-        let resource = request.resource;
-        ResourceResponse {
-            metadata: self.metadata(resource, id),
-            bytes: Bytes::from(self.bytes.clone()),
-        }
+        self.bytes.clone()
     }
 
+    /// Resolves and serves one source out of memory, inline.
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
-        // This in-memory test host completes inline.
         let (specifier, style_sheet, base_url) = match request {
             SourceRequest::StyleSheet(url) => (url, true, None),
             SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
@@ -300,38 +226,17 @@ impl FetcherDouble {
                 Some(Url::parse(&base_url).expect("entry URL")),
             ),
         };
-        let context = RequestContext {
-            id: RequestId {
-                namespace: 0,
-                sequence: self.resolve_count() as u64,
-            },
-            priority: ResourcePriority::Critical,
-        };
-        let resource = self.resolve_source_locator(ResolveRequest {
-            context: context.clone(),
-            resource: ResourceDescriptor {
-                specifier: specifier.into(),
-                base_url,
-            },
-            percent_decode: false,
-        })?;
-        let url = resource.url.to_string();
-        let request = ResourceRequest {
-            context,
-            resource,
-            headers: http::HeaderMap::new(),
-            cache_policy: CachePolicy::Default,
-        };
+        let url = self.resolve(&specifier, base_url.as_ref())?.to_string();
         let bytes = if style_sheet {
-            match self.style_sheet_response(request).payload {
-                StyleSheetPayload::Preparsed(sheet) => {
-                    return Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)));
-                }
-                StyleSheetPayload::Text(bytes) => bytes,
-                _ => unreachable!("test host only returns text or pre-parsed sheets"),
+            self.style_sheet_fetches.fetch_add(1, Ordering::Relaxed);
+            if let Some(sheet) = self.style_sheet.clone() {
+                return Ok(LoadedSource::StyleSheet(StyleSheetSource::Preparsed(sheet)));
             }
+            self.style_sheet_text
+                .clone()
+                .unwrap_or_else(|| self.payload())
         } else {
-            self.resource_response(request).bytes
+            self.payload()
         };
         let source = std::str::from_utf8(&bytes)
             .map_err(|error| {
@@ -359,29 +264,6 @@ impl FetcherDouble {
 impl ResourceFetcher for FetcherDouble {
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         completion.complete(self.load_source(request));
-    }
-
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.capabilities.contains(&capability)
-    }
-
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
-        Ok(self.style_sheet_response(request))
-    }
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        self.resolve_source_locator(request)
-    }
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        Ok(self.resource_response(request))
     }
 
     fn request_image(&self, source: &str) {

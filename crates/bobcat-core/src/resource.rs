@@ -4,14 +4,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
-use http::{HeaderMap, StatusCode};
 use thiserror::Error;
-use url::Url;
 
 use crate::style::PreparsedStyleSheet;
 
-/// The host's whole resource system: bytes, stylesheets and images.
+/// The host's whole resource system: sources, stylesheets and images.
 ///
 /// Owned by the [`LynxView`](crate::LynxView), on the thread that constructed
 /// it, and never reachable from `bobcat-main` — every resource the document
@@ -26,16 +23,13 @@ use crate::style::PreparsedStyleSheet;
 /// Source requests are non-blocking: the fetcher resolves the URL, loads and
 /// validates UTF-8 (or returns a pre-parsed sheet), then consumes the concrete
 /// [`SourceCompletion`] to answer whoever asked, without naming them. It owns
-/// any executor its IO
-/// needs; core retains and polls no resource future. Images are reported through
+/// any executor its IO needs. Images are reported through
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
-/// The lower-level async byte API is available to embedders; core startup uses
-/// only [`Self::request_source`]. Its futures require the caller's own executor.
-#[expect(
-    async_fn_in_trait,
-    reason = "embedder byte operations may be thread-bound"
-)]
+/// The protocol is those three calls and nothing else, and every one of them is
+/// synchronous: it starts work and returns. Core therefore holds no resource
+/// future and polls none, and nothing here names a host's transport, caches or
+/// codecs: whatever surface those have belongs to the host's own crate.
 pub trait ResourceFetcher: dom::FrameImages {
     /// Begins one source load without blocking the view's turn. Main requests each
     /// stylesheet in cascade order, then the entry, with one outstanding startup
@@ -48,32 +42,6 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// release or a fatal event, or ended on its own — since a cancelled load
     /// no longer needs to decode or deliver a result.
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion);
-
-    fn supports_capability(&self, capability: ResourceCapability) -> bool;
-
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError>;
-
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError>;
-
-    /// Loads a stylesheet in whichever form this host has it.
-    ///
-    /// The default answers from [`Self::fetch_resource`] as
-    /// [`StyleSheetPayload::Text`], which is correct for any host that only
-    /// moves bytes — a browser embedder cannot decode a `.web.bundle` at all.
-    /// A host that reports [`ResourceCapability::PreparsedStyleSheet`]
-    /// overrides this to return [`StyleSheetPayload::Preparsed`].
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
-        fetch_style_sheet_as_text(self, request).await
-    }
 
     /// Names `source` and begins loading it. Non-blocking.
     ///
@@ -114,8 +82,8 @@ pub trait ResourceFetcher: dom::FrameImages {
 /// this path crosses a thread — an atomic count here would be paid on every
 /// clone and never used.
 ///
-/// It is the right handle for a registry that answers reads and fetches, and
-/// the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
+/// It is the right handle for a registry that answers reads and starts loads,
+/// and the wrong one for a registry that *reports* — an [`ImageReports`](dom::ImageReports)
 /// belongs to one view, and a handle shared across views has nowhere to put
 /// more than one. A host that loads images asynchronously returns a per-view
 /// value from the builder [`create_lynx_view`](crate::LynxGroup::create_lynx_view) takes,
@@ -125,31 +93,6 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).request_source(request, completion);
     }
 
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        (**self).supports_capability(capability)
-    }
-
-    async fn resolve_locator(
-        &self,
-        request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        (**self).resolve_locator(request).await
-    }
-
-    async fn fetch_resource(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        (**self).fetch_resource(request).await
-    }
-
-    async fn fetch_style_sheet(
-        &self,
-        request: ResourceRequest,
-    ) -> Result<StyleSheetResponse, ResourceError> {
-        (**self).fetch_style_sheet(request).await
-    }
-
     fn request_image(&self, source: &str) {
         (**self).request_image(source);
     }
@@ -157,26 +100,6 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     fn service_images(&self) {
         (**self).service_images();
     }
-}
-
-/// Answers a stylesheet request from [`ResourceFetcher::fetch_resource`] as
-/// [`StyleSheetPayload::Text`] — the body of the default
-/// [`ResourceFetcher::fetch_style_sheet`].
-///
-/// An override that answers only *some* requests pre-parsed calls this for the
-/// rest, rather than re-implementing the byte path.
-pub async fn fetch_style_sheet_as_text<F>(
-    fetcher: &F,
-    request: ResourceRequest,
-) -> Result<StyleSheetResponse, ResourceError>
-where
-    F: ResourceFetcher + ?Sized,
-{
-    let response = fetcher.fetch_resource(request).await?;
-    Ok(StyleSheetResponse {
-        metadata: response.metadata,
-        payload: StyleSheetPayload::Text(response.bytes),
-    })
 }
 
 /// One source requested by the document owner. Resolution belongs to the fetcher.
@@ -304,191 +227,21 @@ impl Drop for SourceCompletion {
 /// drop of its own.
 pub(crate) fn unanswered_source() -> ResourceError {
     ResourceError {
-        request_id: None,
         kind: ResourceErrorKind::Unavailable,
         phase: ResourceErrorPhase::ReadBody,
         locator: None,
-        status: None,
         message: "the fetcher dropped a source request without completing it".into(),
         retry: RetryAdvice::Never,
     }
-}
-
-/// A caller-generated identifier unique within one fetcher instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RequestId {
-    pub namespace: u64,
-    pub sequence: u64,
-}
-
-/// Scheduling state shared by every operation for a request.
-#[derive(Clone, Debug)]
-pub struct RequestContext {
-    pub id: RequestId,
-    pub priority: ResourcePriority,
-}
-
-/// Relative or absolute resource input before host resolution.
-#[derive(Clone, Debug)]
-pub struct ResourceDescriptor {
-    pub specifier: Arc<str>,
-    pub base_url: Option<Url>,
-}
-
-/// Input for resolving a resource descriptor before loading it.
-#[derive(Clone, Debug)]
-pub struct ResolveRequest {
-    pub context: RequestContext,
-    pub resource: ResourceDescriptor,
-    pub percent_decode: bool,
-}
-
-/// A host-resolved resource locator.
-#[derive(Clone, Debug)]
-pub struct ResolvedLocator {
-    pub resource: ResourceDescriptor,
-    pub url: Url,
-    pub rewrite_chain: Vec<Url>,
-    pub locality: ResourceLocality,
-    pub cache_key: Option<Arc<str>>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceLocality {
-    Local,
-    Remote,
-    #[default]
-    Unknown,
-}
-
-/// A resolved resource load.
-///
-/// It carries no response-size budget. The fetcher owns any memory limit for
-/// the response it materializes.
-#[derive(Clone, Debug)]
-pub struct ResourceRequest {
-    pub context: RequestContext,
-    pub resource: ResolvedLocator,
-    pub headers: HeaderMap,
-    pub cache_policy: CachePolicy,
-}
-
-/// Metadata shared by every non-Fetch resource response form.
-#[derive(Clone, Debug)]
-pub struct ResourceMetadata {
-    pub request_id: RequestId,
-    pub resource: ResolvedLocator,
-    pub headers: HeaderMap,
-    pub content_length: Option<u64>,
-    pub media_type: Option<Arc<str>>,
-    pub source: ResourceSource,
-    pub cache_status: CacheStatus,
-    pub timing: ResourceTiming,
-}
-
-/// A fully buffered encoded resource.
-#[derive(Clone, Debug)]
-pub struct ResourceResponse {
-    pub metadata: ResourceMetadata,
-    pub bytes: Bytes,
-}
-
-/// A stylesheet in whichever of the two accepted forms the host has.
-///
-/// A host that only moves bytes returns [`StyleSheetPayload::Text`]; one that
-/// already decoded a `.web.bundle`'s pre-parsed CSS returns
-/// [`StyleSheetPayload::Preparsed`], which skips the CSS parser.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum StyleSheetPayload {
-    /// UTF-8 CSS source text.
-    Text(Bytes),
-    /// A stylesheet the host parsed before the engine saw it.
-    Preparsed(Arc<PreparsedStyleSheet>),
-}
-
-/// A fully buffered stylesheet response.
-#[derive(Clone, Debug)]
-pub struct StyleSheetResponse {
-    pub metadata: ResourceMetadata,
-    pub payload: StyleSheetPayload,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceCapability {
-    BufferedResource,
-    /// Answering a stylesheet request with a host-decoded
-    /// [`PreparsedStyleSheet`] instead of CSS text.
-    PreparsedStyleSheet,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourcePriority {
-    Low,
-    #[default]
-    Normal,
-    High,
-    Critical,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CachePolicy {
-    #[default]
-    Default,
-    NoStore,
-    Reload,
-    NoCache,
-    ForceCache,
-    OnlyIfCached,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ResourceSource {
-    Network,
-    FileSystem,
-    PackagedAsset,
-    DataUrl,
-    MemoryCache,
-    DiskCache,
-    Custom,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CacheStatus {
-    #[default]
-    NotApplicable,
-    Miss,
-    HitMemory,
-    HitDisk,
-    Revalidated,
-    Bypassed,
-}
-
-/// Optional durations recorded by a transport implementation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ResourceTiming {
-    pub resolve: Option<Duration>,
-    pub connect: Option<Duration>,
-    pub time_to_first_byte: Option<Duration>,
-    pub transfer: Option<Duration>,
-    pub total: Option<Duration>,
 }
 
 /// Stable resource failure details shared by every operation.
 #[derive(Clone, Debug, Error)]
 #[error("{kind:?} during {phase:?}: {message}")]
 pub struct ResourceError {
-    pub request_id: Option<RequestId>,
     pub kind: ResourceErrorKind,
     pub phase: ResourceErrorPhase,
     pub locator: Option<Arc<str>>,
-    pub status: Option<StatusCode>,
     pub message: Arc<str>,
     pub retry: RetryAdvice,
 }

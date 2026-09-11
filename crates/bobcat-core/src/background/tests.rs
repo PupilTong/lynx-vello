@@ -281,11 +281,9 @@ fn a_script_that_cannot_be_fetched_fails_its_worker_and_nothing_else() {
         .remove(&doomed)
         .expect("the worker is waiting")
         .send(Err(ResourceError {
-            request_id: None,
             kind: ResourceErrorKind::NotFound,
             phase: ResourceErrorPhase::ReceiveHeaders,
             locator: None,
-            status: None,
             message: "404".into(),
             retry: RetryAdvice::Never,
         }

@@ -10,14 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use bobcat_core::resource::{
-    CachePolicy, RequestContext, RequestId, ResolveRequest, ResourceCapability, ResourceDescriptor,
-    ResourceDescriptor as Descriptor, ResourceErrorKind, ResourceFetcher, ResourcePriority,
-    ResourceRequest, ResourceSource, StyleSheetPayload,
-};
-use bobcat_core::{FrameImages, ImageEvent, ImageInbox, ImageSizeHint, PreparsedStyleSheet};
+use bobcat_core::resource::ResourceFetcher;
+use bobcat_core::{FrameImages, ImageEvent, ImageInbox, ImageSizeHint};
 use bobcat_resources::{Resources, ResourcesConfig, ViewResources};
-use http::HeaderMap;
 
 /// A width x height PNG whose quadrants are red, green, blue and white.
 fn quadrant_png(width: u32, height: u32) -> Vec<u8> {
@@ -119,39 +114,6 @@ impl Harness {
             std::thread::sleep(Duration::from_millis(2));
         }
     }
-}
-
-fn request_id(sequence: u64) -> RequestContext {
-    RequestContext {
-        id: RequestId {
-            namespace: 7,
-            sequence,
-        },
-        priority: ResourcePriority::Normal,
-    }
-}
-
-async fn fetch(
-    view: &ViewResources,
-    specifier: &str,
-) -> Result<bobcat_core::resource::ResourceResponse, bobcat_core::resource::ResourceError> {
-    let resolved = view
-        .resolve_locator(ResolveRequest {
-            context: request_id(1),
-            resource: ResourceDescriptor {
-                specifier: Arc::from(specifier),
-                base_url: None,
-            },
-            percent_decode: false,
-        })
-        .await?;
-    view.fetch_resource(ResourceRequest {
-        context: request_id(2),
-        resource: resolved,
-        headers: HeaderMap::new(),
-        cache_policy: CachePolicy::Default,
-    })
-    .await
 }
 
 #[test]
@@ -308,88 +270,6 @@ fn data_urls_and_non_images_and_unknown_schemes_report_precisely() {
     );
 }
 
-#[tokio::test]
-async fn text_resources_are_preprocessed_and_stylesheets_answer_pre_parsed() {
-    let harness = Harness::new(Harness::quiet());
-    harness
-        .resources
-        .register(
-            "bobcat-memory://bundle/main.js",
-            b"\xEF\xBB\xBFlet card = 1;".to_vec(),
-            Some("text/javascript"),
-        )
-        .expect("register");
-    let response = fetch(&harness.view, "bobcat-memory://bundle/main.js")
-        .await
-        .expect("fetch");
-    assert_eq!(&response.bytes[..], b"let card = 1;", "the BOM is removed");
-    assert_eq!(
-        response.metadata.media_type.as_deref(),
-        Some("text/javascript; charset=utf-8")
-    );
-    assert_eq!(response.metadata.source, ResourceSource::PackagedAsset);
-
-    harness
-        .resources
-        .register_style_sheet(
-            "bobcat-memory://bundle/style.css",
-            PreparsedStyleSheet::default(),
-        )
-        .expect("register");
-    assert!(
-        harness
-            .view
-            .supports_capability(ResourceCapability::PreparsedStyleSheet)
-    );
-    let resolved = harness
-        .view
-        .resolve_locator(ResolveRequest {
-            context: request_id(3),
-            resource: Descriptor {
-                specifier: Arc::from("bobcat-memory://bundle/style.css"),
-                base_url: None,
-            },
-            percent_decode: false,
-        })
-        .await
-        .expect("resolve");
-    let sheet = harness
-        .view
-        .fetch_style_sheet(ResourceRequest {
-            context: request_id(4),
-            resource: resolved,
-            headers: HeaderMap::new(),
-            cache_policy: CachePolicy::Default,
-        })
-        .await
-        .expect("style sheet");
-    assert!(matches!(sheet.payload, StyleSheetPayload::Preparsed(_)));
-
-    let missing = fetch(&harness.view, "app:///missing.js")
-        .await
-        .expect_err("unregistered");
-    assert_eq!(missing.kind, ResourceErrorKind::UnsupportedScheme);
-
-    let base = url::Url::parse("https://cards.test/app/").expect("a URL");
-    harness.resources.set_base_url(Some(base));
-    harness
-        .resources
-        .register(
-            "https://cards.test/app/data.json",
-            b"{\"ok\": true}".to_vec(),
-            None,
-        )
-        .expect("register");
-    let relative = fetch(&harness.view, "data.json")
-        .await
-        .expect("relative to the base");
-    assert_eq!(
-        relative.metadata.media_type.as_deref(),
-        Some("application/json; charset=utf-8"),
-        "labelled by extension and validated as JSON"
-    );
-}
-
 #[test]
 fn every_view_of_the_shared_system_sees_the_same_registrations_and_state() {
     let harness = Harness::new(Harness::quiet());
@@ -472,29 +352,6 @@ async fn an_evicted_file_backed_image_is_re_fetched_and_decoded_inside_the_read(
     assert_eq!((restored.width, restored.height), (32, 32));
     assert_eq!(&restored.data.as_ref()[..4], &[255, 0, 0, 255]);
     assert!(harness.resources.take_notes().is_empty());
-}
-
-/// The byte API's future is a `JoinHandle`: a plain future that needs no
-/// ambient runtime, so a caller with none of its own can drive it.
-#[test]
-fn the_byte_api_answers_under_pollster_on_a_thread_with_no_runtime() {
-    let file = TempFile::new("bytes.json", b"{\"ok\": true}");
-    let harness = Harness::new(ResourcesConfig {
-        request_timeout: Duration::from_secs(5),
-        ..Harness::quiet()
-    });
-
-    let response = pollster::block_on(fetch(&harness.view, file.url().as_str())).expect("fetch");
-    assert_eq!(&response.bytes[..], b"{\"ok\": true}");
-    assert_eq!(response.metadata.source, ResourceSource::FileSystem);
-
-    // A host nothing answers on: a failure, never a panic and never a hang.
-    let refused = pollster::block_on(fetch(&harness.view, "http://127.0.0.1:1/nothing"))
-        .expect_err("nothing listens on port 1");
-    assert!(
-        !refused.message.is_empty(),
-        "the failure says what went wrong: {refused:?}"
-    );
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

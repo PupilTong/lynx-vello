@@ -17,8 +17,7 @@ use rustc_hash::FxHashMap;
 
 use crate::paint::Painter;
 use crate::resource::{
-    LoadedSource, ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError,
-    ResourceErrorKind, ResourceErrorPhase, ResourceFetcher, ResourceRequest, ResourceResponse,
+    LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, ResourceFetcher,
     RetryAdvice, SourceCompletion, SourceRequest, StyleSheetSource,
 };
 use crate::style::PreparsedStyleSheet;
@@ -80,33 +79,13 @@ impl ResourceFetcher for InlineFetcher {
         };
         completion.complete(answer);
     }
-
-    fn supports_capability(&self, _capability: ResourceCapability) -> bool {
-        false
-    }
-
-    async fn resolve_locator(
-        &self,
-        _request: ResolveRequest,
-    ) -> Result<ResolvedLocator, ResourceError> {
-        panic!("the harness resolves nothing: every source it serves is already named")
-    }
-
-    async fn fetch_resource(
-        &self,
-        _request: ResourceRequest,
-    ) -> Result<ResourceResponse, ResourceError> {
-        panic!("the harness moves no bytes")
-    }
 }
 
 fn missing(locator: &str) -> crate::LynxViewError {
     ResourceError {
-        request_id: None,
         kind: ResourceErrorKind::NotFound,
         phase: ResourceErrorPhase::Resolve,
         locator: Some(locator.into()),
-        status: None,
         message: format!("the harness was given nothing for `{locator}`").into(),
         retry: RetryAdvice::Never,
     }

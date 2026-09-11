@@ -3,11 +3,9 @@
 //!
 //! The browser's HTTP cache stands in for the disk tier here, driven by the
 //! same [`CachePolicy`] through the request's cache mode; what it did is
-//! opaque, so a response reports no cache status of its own.
+//! opaque, and nothing here asks.
 
-use bobcat_core::resource::{
-    CachePolicy, CacheStatus, ResourceErrorKind, ResourceErrorPhase, ResourceSource, ResourceTiming,
-};
+use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use url::Url;
@@ -16,6 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestCache, RequestInit, Response, WorkerGlobalScope};
 
 use super::{Fetched, HttpSettings, status_failure};
+use crate::CachePolicy;
 use crate::error::Failure;
 use crate::mime::MediaType;
 
@@ -54,7 +53,6 @@ pub(crate) async fn fetch(
     });
     let request = Request::new_with_str_and_init(url.as_str(), &init)
         .map_err(|error| js_failure(ResourceErrorPhase::Open, &error))?;
-    let started = web_time::Instant::now();
     let response = JsFuture::from(scope.fetch_with_request(&request))
         .await
         .map_err(|error| js_failure(ResourceErrorPhase::Connect, &error))?
@@ -97,23 +95,10 @@ pub(crate) async fn fetch(
         .and_then(|value| value.to_str().ok())
         .and_then(MediaType::parse)
         .or_else(|| crate::mime::from_extension(url.path()));
-    let final_url = Url::parse(&response.url()).unwrap_or_else(|_| url.clone());
     Ok(Fetched {
         bytes: Bytes::from(bytes),
         media_type,
-        redirects: if final_url == *url {
-            Vec::new()
-        } else {
-            vec![final_url.clone()]
-        },
-        url: final_url,
-        source: ResourceSource::Network,
-        cache_status: CacheStatus::NotApplicable,
-        headers: response_headers,
-        timing: ResourceTiming {
-            total: Some(started.elapsed()),
-            ..ResourceTiming::default()
-        },
+        url: Url::parse(&response.url()).unwrap_or_else(|_| url.clone()),
         // The browser's HTTP cache cannot be read synchronously.
         restorable: false,
     })

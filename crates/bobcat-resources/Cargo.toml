@@ -46,7 +46,6 @@ bobcat-source = { workspace = true }
 flashbulb = { workspace = true, features = ["render"] }
 flume = { workspace = true }
 png = { workspace = true }
-pollster = { workspace = true }
 # `rt` and `sync` come from `[dependencies]`; every test is a default-flavour
 # `#[tokio::test]`, so only the attribute macro is missing.
 tokio = { workspace = true, features = ["macros"] }

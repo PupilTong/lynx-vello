@@ -278,10 +278,13 @@ useful signal for currently-compatible versions of those libraries.
   value parsers. Decoding a container stays embedder work: core owns the
   `PreparsedStyleSheet` vocabulary, and the embedder fills it. Source requests
   select a stylesheet or entry payload and carry a specifier; the fetcher supplies
-  the base URL and transport policy. The lower-level embedder byte API retains
-  `resolve_locator`, `fetch_resource` and `fetch_style_sheet`; core startup no
-  longer calls them. A `ResourceRequest` carries no
-  response-size limit; each fetcher owns the memory bound for the response it
+  the base URL and transport policy. The whole protocol is that one call plus
+  `request_image`/`service_images` and the `FrameImages` supertrait: every
+  method is synchronous, so no resource future crosses it, and core names
+  none of a fetcher's own transport API — `bobcat-resources`' caches, MIME
+  pipeline and HTTP client are that crate's own surface, reached only by an
+  embedder that builds one. The protocol carries no response-size limit
+  either; each fetcher owns the memory bound for the response it
   materializes. Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The

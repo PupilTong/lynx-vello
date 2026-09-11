@@ -405,11 +405,7 @@ struct Prepared {
 #[cfg(not(target_arch = "wasm32"))]
 fn prepare(shared: &Shared, source: &str, url: &Url) -> Result<Prepared, String> {
     let fetched = shared
-        .fetch_job(
-            url,
-            bobcat_core::resource::CachePolicy::Default,
-            &http::HeaderMap::new(),
-        )
+        .fetch_job(url, crate::CachePolicy::Default, &http::HeaderMap::new())
         .map_err(|failure| failure.to_string())?;
     let restorable = fetched.restorable;
     let preprocessed =
@@ -505,11 +501,7 @@ fn spawn_load(resources: &Resources, source: Arc<str>, url: Url, bound: (u32, u3
     wasm_bindgen_futures::spawn_local(async move {
         let fetched = shared
             .transports
-            .fetch(
-                &url,
-                bobcat_core::resource::CachePolicy::Default,
-                &http::HeaderMap::new(),
-            )
+            .fetch(&url, crate::CachePolicy::Default, &http::HeaderMap::new())
             .await;
         let completion = match load_async(&shared, &source, &url, fetched, bound).await {
             Ok((bitmap, format, header, encoded)) => Completion::Loaded {
@@ -662,11 +654,7 @@ fn spawn_refine(resources: &Resources, source: Arc<str>, refinement: Refinement)
 #[cfg(not(target_arch = "wasm32"))]
 fn restore_for_job(shared: &Shared, url: &Url) -> Result<Bytes, String> {
     shared
-        .fetch_job(
-            url,
-            bobcat_core::resource::CachePolicy::ForceCache,
-            &http::HeaderMap::new(),
-        )
+        .fetch_job(url, crate::CachePolicy::ForceCache, &http::HeaderMap::new())
         .map(|fetched| fetched.bytes)
         .map_err(|failure| failure.to_string())
 }
@@ -681,11 +669,7 @@ fn restore_bytes(shared: &Shared, url: &Url) -> Result<Bytes, String> {
     {
         shared
             .transports
-            .fetch_blocking(
-                url,
-                bobcat_core::resource::CachePolicy::ForceCache,
-                &http::HeaderMap::new(),
-            )
+            .fetch_blocking(url, crate::CachePolicy::ForceCache, &http::HeaderMap::new())
             .map(|fetched| fetched.bytes)
             .map_err(|failure| failure.to_string())
     }

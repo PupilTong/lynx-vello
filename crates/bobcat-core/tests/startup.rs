@@ -8,10 +8,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bobcat_core::resource::{
-    ResolveRequest, ResolvedLocator, ResourceCapability, ResourceError, ResourceFetcher,
-    ResourceRequest, ResourceResponse, SourceCompletion, SourceRequest,
-};
+use bobcat_core::resource::{ResourceFetcher, SourceCompletion, SourceRequest};
 use bobcat_core::{DrawTarget, EngineEvent, EventRequester, NoWakeup, ViewSources};
 use support::{FetcherDouble, solo_view, wait_for_script};
 
@@ -57,10 +54,6 @@ impl bobcat_core::FrameImages for ThreadedFetcher {
 }
 
 impl ResourceFetcher for ThreadedFetcher {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.base.supports_capability(capability)
-    }
-
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         self.record("request");
         let result = self.base.load_source(request);
@@ -74,14 +67,6 @@ impl ResourceFetcher for ThreadedFetcher {
                 .push(("complete".to_owned(), thread_tag()));
             completion.complete(result);
         });
-    }
-
-    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
-        panic!("core must not resolve sources")
-    }
-
-    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
-        panic!("core must not poll resource futures")
     }
 }
 
@@ -179,23 +164,11 @@ impl bobcat_core::FrameImages for PendingFetcher {
 }
 
 impl ResourceFetcher for PendingFetcher {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.base.supports_capability(capability)
-    }
-
     fn request_source(&self, _request: SourceRequest, completion: SourceCompletion) {
         *self.pending.lock().expect("pending completion") = Some(completion);
         if let Some(started) = self.started.lock().expect("start signal").take() {
             let _ = started.send(());
         }
-    }
-
-    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
-        panic!("core must not resolve sources")
-    }
-
-    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
-        panic!("core must not poll resource futures")
     }
 }
 
@@ -569,10 +542,6 @@ impl bobcat_core::FrameImages for TwoScriptFetcher {
 }
 
 impl ResourceFetcher for TwoScriptFetcher {
-    fn supports_capability(&self, capability: ResourceCapability) -> bool {
-        self.base.supports_capability(capability)
-    }
-
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion) {
         if matches!(request, SourceRequest::Worker { .. }) {
             completion.complete(Ok(bobcat_core::resource::LoadedSource::Entry {
@@ -582,14 +551,6 @@ impl ResourceFetcher for TwoScriptFetcher {
             return;
         }
         completion.complete(self.base.load_source(request));
-    }
-
-    async fn resolve_locator(&self, _: ResolveRequest) -> Result<ResolvedLocator, ResourceError> {
-        panic!("core must not resolve sources")
-    }
-
-    async fn fetch_resource(&self, _: ResourceRequest) -> Result<ResourceResponse, ResourceError> {
-        panic!("core must not poll resource futures")
     }
 }
 

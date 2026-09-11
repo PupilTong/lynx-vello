@@ -17,18 +17,15 @@ pub(crate) mod file;
 
 use std::time::Duration;
 
-use bobcat_core::resource::{
-    CachePolicy, CacheStatus, ResourceErrorKind, ResourceErrorPhase, ResourceLocality,
-    ResourceSource, ResourceTiming, RetryAdvice,
-};
+use bobcat_core::resource::{ResourceErrorKind, ResourceErrorPhase, RetryAdvice};
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 use url::Url;
 
-use crate::data_url;
 use crate::error::Failure;
 use crate::mime::MediaType;
 use crate::registry::{Registered, Registry};
+use crate::{CachePolicy, data_url};
 
 /// What the HTTP transports are configured with.
 ///
@@ -54,8 +51,7 @@ pub(crate) struct HttpSettings {
     pub max_redirects: u32,
 }
 
-/// Bytes a transport produced, with everything the response metadata is
-/// built from.
+/// Bytes a transport produced, with what the pipeline behind it needs.
 #[derive(Clone, Debug)]
 pub(crate) struct Fetched {
     pub bytes: Bytes,
@@ -64,11 +60,6 @@ pub(crate) struct Fetched {
     pub media_type: Option<MediaType>,
     /// The URL the bytes finally came from, after redirects.
     pub url: Url,
-    pub redirects: Vec<Url>,
-    pub source: ResourceSource,
-    pub cache_status: CacheStatus,
-    pub headers: HeaderMap,
-    pub timing: ResourceTiming,
     /// Whether the transport can hand these bytes back again synchronously
     /// and without the network — a file, or a response the disk tier holds.
     /// The image pipeline keeps the bytes of anything that cannot, since a
@@ -126,13 +117,6 @@ impl Transports {
             || (cfg!(not(target_arch = "wasm32")) && scheme == "file")
     }
 
-    pub(crate) fn locality(url: &Url) -> ResourceLocality {
-        match url.scheme() {
-            "http" | "https" => ResourceLocality::Remote,
-            _ => ResourceLocality::Local,
-        }
-    }
-
     /// Resources that are already in hand: registered contents and `data:`
     /// URLs. `None` when the URL needs a transport.
     pub(crate) fn local(&self, url: &Url) -> Option<Result<Fetched, Failure>> {
@@ -142,11 +126,6 @@ impl Transports {
                     bytes,
                     media_type,
                     url: url.clone(),
-                    redirects: Vec::new(),
-                    source: ResourceSource::PackagedAsset,
-                    cache_status: CacheStatus::NotApplicable,
-                    headers: HeaderMap::new(),
-                    timing: ResourceTiming::default(),
                     // A registration may be cleared later, and its bytes are
                     // shared rather than copied, so keeping them costs nothing.
                     restorable: false,
@@ -165,11 +144,6 @@ impl Transports {
                         bytes: Bytes::from(decoded.bytes),
                         media_type: Some(decoded.media_type),
                         url: url.clone(),
-                        redirects: Vec::new(),
-                        source: ResourceSource::DataUrl,
-                        cache_status: CacheStatus::NotApplicable,
-                        headers: HeaderMap::new(),
-                        timing: ResourceTiming::default(),
                         restorable: false,
                     })
                     .map_err(|error| {
@@ -203,11 +177,6 @@ impl Transports {
                 bytes,
                 media_type,
                 url: url.clone(),
-                redirects: Vec::new(),
-                source: ResourceSource::FileSystem,
-                cache_status: CacheStatus::NotApplicable,
-                headers: HeaderMap::new(),
-                timing: ResourceTiming::default(),
                 restorable: true,
             }),
             "http" | "https" => self.http_blocking(url, policy, headers),
@@ -239,7 +208,7 @@ impl Transports {
         if matches!(plan, Plan::UseStored) {
             match self.disk.as_ref().and_then(|disk| disk.get(key)) {
                 Some((entry, bytes)) => {
-                    return Self::stored_response(url, entry, bytes, CacheStatus::HitDisk);
+                    return Self::stored_response(url, &entry, bytes);
                 }
                 // The record was there but the body was not: fetch instead.
                 None => plan = Plan::Fetch,
@@ -269,7 +238,7 @@ impl Transports {
             let refreshed = entry.response.refreshed_by(&response.headers, now);
             let _ = disk.update_response(key, &refreshed);
             if let Some((entry, bytes)) = disk.get(key) {
-                return Self::stored_response(url, entry, bytes, CacheStatus::Revalidated);
+                return Self::stored_response(url, &entry, bytes);
             }
         }
         let record = StoredResponse {
@@ -283,13 +252,6 @@ impl Transports {
             .and_then(|value| value.to_str().ok())
             .and_then(MediaType::parse)
             .or_else(|| crate::mime::from_extension(url.path()));
-        let cache_status = if matches!(plan, Plan::FetchNoStore | Plan::Fetch)
-            && !matches!(policy, CachePolicy::Default)
-        {
-            CacheStatus::Bypassed
-        } else {
-            CacheStatus::Miss
-        };
         let mut stored_on_disk = false;
         if !matches!(plan, Plan::FetchNoStore)
             && record.is_storable()
@@ -307,26 +269,10 @@ impl Transports {
         if let Some(failure) = status_failure(response.status) {
             return Err(failure);
         }
-        let redirects = response
-            .redirects
-            .iter()
-            .filter_map(|location| Url::parse(location).ok())
-            .collect();
         Ok(Fetched {
             bytes: Bytes::from(response.body),
             media_type,
             url: Url::parse(&response.effective_url).unwrap_or_else(|_| url.clone()),
-            redirects,
-            source: ResourceSource::Network,
-            cache_status,
-            headers: response.headers,
-            timing: ResourceTiming {
-                resolve: response.timing.name_lookup,
-                connect: response.timing.connect,
-                time_to_first_byte: response.timing.start_transfer,
-                transfer: None,
-                total: response.timing.total,
-            },
             restorable: stored_on_disk,
         })
     }
@@ -356,9 +302,8 @@ impl Transports {
     #[cfg(not(target_arch = "wasm32"))]
     fn stored_response(
         url: &Url,
-        entry: crate::cache::disk::DiskEntry,
+        entry: &crate::cache::disk::DiskEntry,
         bytes: Vec<u8>,
-        cache_status: CacheStatus,
     ) -> Result<Fetched, Failure> {
         let status = StatusCode::from_u16(entry.response.status).ok();
         if let Some(failure) = status.and_then(status_failure) {
@@ -381,11 +326,6 @@ impl Transports {
             bytes: Bytes::from(bytes),
             media_type,
             url: url.clone(),
-            redirects: Vec::new(),
-            source: ResourceSource::DiskCache,
-            cache_status,
-            headers: entry.response.headers,
-            timing: ResourceTiming::default(),
             restorable: true,
         })
     }
@@ -435,7 +375,6 @@ pub(crate) fn status_failure(status: StatusCode) -> Option<Failure> {
             ResourceErrorPhase::ReceiveHeaders,
             format!("the server answered {status}"),
         )
-        .with_status(status)
         .with_retry(retry),
     )
 }
@@ -531,11 +470,6 @@ mod tests {
                 .is_ok(),
             "any registered scheme resolves"
         );
-        assert_eq!(Transports::locality(&registered), ResourceLocality::Local);
-        assert_eq!(
-            Transports::locality(&Url::parse("https://x.test/").unwrap()),
-            ResourceLocality::Remote
-        );
     }
 
     #[test]
@@ -551,13 +485,16 @@ mod tests {
         );
         let fetched = transports.local(&url).expect("registered").expect("bytes");
         assert_eq!(&fetched.bytes[..], b"let a = 1;");
-        assert_eq!(fetched.source, ResourceSource::PackagedAsset);
         assert_eq!(fetched.media_type.unwrap().essence(), "text/javascript");
 
         let data = Url::parse("data:text/css,a%7B%7D").expect("a URL");
         let fetched = transports.local(&data).expect("data").expect("bytes");
         assert_eq!(&fetched.bytes[..], b"a{}");
-        assert_eq!(fetched.source, ResourceSource::DataUrl);
+        assert_eq!(
+            fetched.media_type.unwrap().essence(),
+            "text/css",
+            "a `data:` URL labels its own bytes"
+        );
 
         let sheet = Url::parse("app:///style.css").expect("a URL");
         transports.registry.insert(
@@ -584,7 +521,7 @@ mod tests {
         assert!(status_failure(StatusCode::NO_CONTENT).is_none());
         let not_found = status_failure(StatusCode::NOT_FOUND).unwrap();
         assert_eq!(not_found.kind, ResourceErrorKind::NotFound);
-        assert_eq!(not_found.status, Some(StatusCode::NOT_FOUND));
+        assert!(not_found.message.contains("404"));
         assert_eq!(
             status_failure(StatusCode::FORBIDDEN).unwrap().kind,
             ResourceErrorKind::PermissionDenied
