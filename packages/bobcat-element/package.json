@@ -6,6 +6,7 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
+    "build": "node scripts/build.ts",
     "test": "rstest run",
     "test:type": "tsc -b"
   },

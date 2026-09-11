@@ -693,8 +693,9 @@ useful signal for currently-compatible versions of those libraries.
   views resolving one URL to different bytes cannot collide and no worker
   leaves a registration behind.
   All eight runtime modules live together in `packages/bobcat-element/src` as
-  TypeScript; core's build script strips their types and embeds the resulting
-  JavaScript with `include_str!` (see that package below). The Element module imports
+  TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
+  emitted for them into the package's committed `dist/` (see that package
+  below). The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
   element member is installed on `globalThis`. A `.web.bundle`'s
@@ -1299,16 +1300,18 @@ useful signal for currently-compatible versions of those libraries.
   `src/background-thread-runtime.ts` as `bobcat:bts-runtime`, plus
   `bobcat:event-target`, `bobcat:cross-thread-context` and
   `bobcat:timers` again — registered per runtime, because a source is
-  runtime-wide and no value crosses between two runtimes. Core's `build.rs`
-  strips the types from every `src/*.ts` with swc's strip-only mode — the
-  stripper Node's own type stripping uses, which overwrites each type with
-  whitespace and moves nothing else — and embeds the result with
-  `include_str!`, so a line and column QuickJS reports is the line and column
-  in the `.ts` file. The stripper accepts only erasable syntax, and a file it
-  cannot strip fails the Rust build naming the span; the package's
-  `erasableSyntaxOnly` and `verbatimModuleSyntax` are what keep every file
-  strippable. The Rstest suite imports the same modules and verifies every
-  named export. The package owns the
+  runtime-wide and no value crosses between two runtimes. What core embeds,
+  with `include_str!`, is `dist/`: the JavaScript TypeScript 7 emits for every
+  `src/*.ts` (`pnpm --filter bobcat-element build`), committed so that a cargo
+  build needs no Node — which is also why a QuickJS line and column name a
+  line in `dist/`, not in the `.ts` source. Each emitted file starts with its
+  source's FNV-1a hash, and `bobcat-core`'s `build.rs` recomputes it: a source
+  edited after its emit fails the Rust build, naming the source and that
+  command, rather than building the older code into the engine. CI reruns the
+  emit and fails on any difference in `dist/`, which covers what the hash
+  cannot see — a compiler or tsconfig change, a module added or removed. The
+  Rstest suite imports the same modules and verifies every named export. The
+  package owns the
   supported `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
@@ -2185,12 +2188,14 @@ default explanation for a failure:
 The Element PAPI runtime has two suites over the same source:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (TypeScript 7, `tsc -b`), while
-`crates/bobcat-core/tests/main_thread.rs` drives the same module, its types
-stripped, through the real QuickJS realm, `bobcat` object, and collector. The
-type suite checks every runtime module, the colocated `main-thread-runtime.ts`
-included, whose behavior is covered by the core main-thread tests. Changing a
-source reruns `bobcat-core`'s build script, which strips it again — there is no
-generated artifact to refresh, and no Node step before `cargo`.
+`crates/bobcat-core/tests/main_thread.rs` drives the same module, as
+TypeScript 7 emitted it into `dist/`, through the real QuickJS realm, `bobcat`
+object, and collector. The type suite checks every runtime module, the
+colocated `main-thread-runtime.ts` included, whose behavior is covered by the
+core main-thread tests. After changing a source, run
+`pnpm --filter bobcat-element build` and commit `dist/` with it:
+`bobcat-core`'s build script refuses to build until that emit is current, and
+CI fails when it differs.
 
 `pnpm test:type` type-checks every TypeScript program in the workspace with
 TypeScript 7.0.2 — `tsc -b` over the root `tsconfig.json`, each program
