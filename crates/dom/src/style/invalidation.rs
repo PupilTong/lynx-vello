@@ -589,7 +589,25 @@ impl<T> Document<T> {
         insert_restyle_hint(node, RestyleHint::RESTYLE_STYLE_ATTRIBUTE);
     }
 
+    fn note_generated_attribute_change(&mut self, id: NodeId, name: &LocalName) {
+        use stylo::values::computed::{Content, ContentItem};
+        let depends = self.live_element(id).before_style().is_some_and(|style| {
+            let Content::Items(content) = &style.get_counters().content else {
+                return false;
+            };
+            content.items[..content.alt_start].iter().any(|item| {
+                matches!(item,
+                ContentItem::Attr(attr) if attr.namespace_url.is_empty()
+                    && attr.attribute.as_ref() == name.as_ref())
+            })
+        });
+        if depends {
+            self.invalidate_layout(id);
+        }
+    }
+
     fn note_class_attribute_change(&mut self, id: NodeId) {
+        self.note_generated_attribute_change(id, &CLASS);
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.class_changed = true;
             snapshot.other_attributes_changed = true;
@@ -599,6 +617,7 @@ impl<T> Document<T> {
     }
 
     fn note_id_attribute_change(&mut self, id: NodeId) {
+        self.note_generated_attribute_change(id, &ID);
         if let Some(snapshot) = self.ensure_snapshot(id) {
             snapshot.id_changed = true;
             snapshot.other_attributes_changed = true;
@@ -608,6 +627,7 @@ impl<T> Document<T> {
     }
 
     fn note_attribute_change(&mut self, id: NodeId, name: &LocalName) {
+        self.note_generated_attribute_change(id, name);
         // Attributes are an element-only concept. The check used to ride on
         // `ensure_snapshot`, which the gate below can skip, so it is taken here
         // where it happens on every path.

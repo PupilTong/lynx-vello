@@ -14,6 +14,7 @@ use smallvec::SmallVec;
 use stylo::LocalName;
 use stylo::data::{ElementData, ElementDataRef, ElementDataWrapper};
 use stylo::properties::{ComputedValues, PropertyDeclarationBlock};
+use stylo::selector_parser::PseudoElement;
 use stylo::servo_arc::Arc;
 use stylo::shared_lock::{Locked, SharedRwLock};
 use stylo::stylesheets::UrlExtraData;
@@ -35,9 +36,16 @@ struct DocumentNodeData {
 
 enum NodeData {
     Document(Box<DocumentNodeData>),
-    Element(Option<Arc<ComputedValues>>),
+    Element(ElementStyles),
     Text,
     ShadowRoot(Box<ShadowRootData>),
+}
+
+/// Post-flush styles used by layout and paint. Generated text has no DOM node.
+#[derive(Default)]
+struct ElementStyles {
+    primary: Option<Arc<ComputedValues>>,
+    before: Option<Arc<ComputedValues>>,
 }
 
 /// Inline Stylo traversal and invalidation state.
@@ -126,7 +134,7 @@ pub struct Node<T> {
 /// What a post-flush style swap moved on one element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct StyleRefresh {
-    /// Whether the element's computed style is a different `Arc` than before.
+    /// Whether the primary or generated style is a different `Arc` than before.
     pub(crate) changed: bool,
     /// Whether anything a descendant text node is *shaped* from moved with
     /// it. Only meaningful when `changed`.
@@ -170,7 +178,13 @@ impl<T> Node<T> {
         id: NodeId,
         local_name: LocalName,
     ) -> Self {
-        let mut node = Self::new(owner, id, NodeData::Element(None), Some(local_name), None);
+        let mut node = Self::new(
+            owner,
+            id,
+            NodeData::Element(ElementStyles::default()),
+            Some(local_name),
+            None,
+        );
         node.element_state = ElementState::DEFINED;
         node
     }
@@ -584,7 +598,15 @@ impl<T> Node<T> {
             debug_assert!(live.is_none(), "only elements own computed styles");
             return StyleRefresh::UNCHANGED;
         };
-        let refresh = match (&*snapshot, live) {
+        let before = data
+            .as_ref()
+            .and_then(|data| data.styles.pseudos.get(&PseudoElement::Before));
+        let generated_changed = match (&snapshot.before, before) {
+            (None, None) => false,
+            (Some(old), Some(new)) => !Arc::ptr_eq(old, new),
+            _ => true,
+        };
+        let mut refresh = match (&snapshot.primary, live) {
             (None, None) => StyleRefresh::UNCHANGED,
             (Some(old), Some(new)) => {
                 if Arc::ptr_eq(old, new) {
@@ -604,9 +626,20 @@ impl<T> Node<T> {
             },
         };
         if refresh.changed {
-            *snapshot = live.cloned();
+            snapshot.primary = live.cloned();
+        }
+        if generated_changed {
+            snapshot.before = before.cloned();
+            refresh.changed = true;
         }
         refresh
+    }
+
+    pub(crate) fn before_style(&self) -> Option<&ComputedValues> {
+        let NodeData::Element(snapshot) = &self.data else {
+            return None;
+        };
+        snapshot.before.as_deref()
     }
 
     pub(crate) fn layout_computed_style(&self) -> Option<&ComputedValues> {
@@ -617,7 +650,7 @@ impl<T> Node<T> {
         {
             let live = self.borrow_computed_style();
             let live_primary = live.as_ref().and_then(|data| data.styles.primary.as_ref());
-            let matches = match (snapshot.as_ref(), live_primary) {
+            let matches = match (snapshot.primary.as_ref(), live_primary) {
                 (None, None) => true,
                 (Some(old), Some(new)) => Arc::ptr_eq(old, new),
                 _ => false,
@@ -628,7 +661,7 @@ impl<T> Node<T> {
                  harvest missed this element (invalidation bug) or a traversal did not complete"
             );
         }
-        snapshot.as_deref()
+        snapshot.primary.as_deref()
     }
 
     #[must_use]
@@ -973,14 +1006,16 @@ mod tests {
         const PRE_BOXING_NODE_STRIDE: usize = 408;
         const PRE_STATIC_SPLIT_NODE_STRIDE: usize = 368;
 
-        assert_eq!(std::mem::size_of::<NodeData>(), 16);
+        assert_eq!(std::mem::size_of::<NodeData>(), 24);
         // A handle is identity and storage position in one 8-byte value, and
         // `Option<NodeId>` has a niche where `Option<usize>` had none, so the
         // parent link costs 8 bytes rather than 16. Presentational hints add
         // one optional Arc; the declaration block allocates only when used.
+        // The before-style snapshot adds one optional Arc (8 bytes), without
+        // allocating a generated DOM node or a second computed style.
         assert_eq!(
             std::mem::size_of::<Node<()>>(),
-            if cfg!(debug_assertions) { 232 } else { 224 }
+            if cfg!(debug_assertions) { 240 } else { 232 }
         );
         assert!(
             std::mem::size_of::<NodeData>() < PRE_BOXING_NODE_DATA_SIZE,

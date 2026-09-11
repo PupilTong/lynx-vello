@@ -2,7 +2,7 @@
 //! and what may generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
-//! lays out — is [`super::raw_text`], which owns the `raw-text` component and
+//! lays out — is [`super::raw_text`], which owns the `raw-text` generated-content rule and
 //! the rules that dissolve a carrier into the `text` it is written inside.
 
 use dom::NodeId;

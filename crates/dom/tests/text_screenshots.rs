@@ -144,3 +144,45 @@ fn text_background_clip() {
     let actual = screenshot::capture("text_background_clip", FRAGMENT, 440.0, 260.0);
     assert_text_golden("background-clip", &actual);
 }
+
+/// The same paragraph through generated and literal runs must draw identical
+/// pixels, including the pseudo's own color/decoration and a paint-only update.
+#[test]
+fn generated_text_matches_literal_runs() {
+    let mut generated = html::parse(
+        r#"<div class="text-block" style="width: 240px; height: 80px; font-family: Roboto; font-size: 24px; color: black">after</div>"#,
+        240.0,
+        80.0,
+    );
+    // The fragment helper imports only class/style attributes.
+    generated
+        .dom
+        .set_attribute(generated.root, "text", "Before ");
+    generated
+        .dom
+        .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
+    generated.dom.add_stylesheet(".text-block::before { content: attr(text); color: red; text-decoration: underline; font-size: 30px; }", dom::StylesheetOrigin::Author);
+    for color in ["red", "blue"] {
+        generated.dom.add_stylesheet(
+            &format!(".text-block::before {{ color: {color}; }}"),
+            dom::StylesheetOrigin::Author,
+        );
+        let actual = screenshot::capture_prebuilt_document(
+            "generated-text",
+            &mut generated.dom,
+            &dom::NoImages,
+        );
+        let expected = screenshot::capture(
+            "literal-reference",
+            &format!(
+                r#"<div class="text-block" style="width: 240px; height: 80px; font-family: Roboto; font-size: 24px; color: black"><span style="display: contents; color: {color}; text-decoration: underline; font-size: 30px">Before </span>after</div>"#
+            ),
+            240.0,
+            80.0,
+        );
+        assert_eq!(
+            actual, expected,
+            "generated text must use its pseudo style ({color})"
+        );
+    }
+}

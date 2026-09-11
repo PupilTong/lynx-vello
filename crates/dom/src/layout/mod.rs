@@ -239,7 +239,10 @@ impl<T> Document<T> {
     ///
     /// How a glyph run finds the element whose style painted it.
     #[must_use]
-    pub(crate) fn text_block_sources(&self, id: crate::NodeId) -> Option<&[crate::NodeId]> {
+    pub(crate) fn text_block_sources(
+        &self,
+        id: crate::NodeId,
+    ) -> Option<&[text_block::TextSource]> {
         let slot = self.slot(id)?;
         Some(&self.layout_state().get(slot)?.text.as_deref()?.source_ids)
     }
@@ -301,6 +304,21 @@ impl<T> Document<T> {
     /// that establishes it: every descendant mutation and every ancestor this
     /// walk touches would re-shape a paragraph whose text never changed.
     pub(crate) fn invalidate_layout(&mut self, id: crate::NodeId) {
+        // Paragraph content (including generated runs) shares one cache. A
+        // transparent scope has none, so starting the usual walk there would
+        // stop early and leave its enclosing paragraph measured at the old text.
+        let id = if let Some(paragraph) = self.paragraph_container(id) {
+            // An atomic inline child still owns a measured box. Clear it as
+            // well, before asking the paragraph to measure its children again.
+            if paragraph != id
+                && let Some(slot) = self.slot(id)
+            {
+                self.layout_state_mut().clear_box_cache(slot);
+            }
+            paragraph
+        } else {
+            id
+        };
         let (pending, reached_root) = {
             let (tree, state, _) = self.layout_parts();
             let slot = tree
@@ -368,6 +386,32 @@ impl<T> Document<T> {
         }
     }
 
+    /// Generated runs have no box cache of their own. Reach the paragraph
+    /// through transparent/nested scopes before using normal layout invalidation.
+    fn paragraph_container(&self, id: crate::NodeId) -> Option<crate::NodeId> {
+        use stylo::values::computed::Display;
+        let start = self.get(id)?;
+        // Its own display may just have become none. The old run still
+        // belongs to the surrounding paragraph and must be removed from it.
+        let mut paragraph = start
+            .layout_computed_style()
+            .filter(|style| style.clone_display() == Display::LynxText)
+            .map(|_| id);
+        let mut current = start.flat_parent();
+        while let Some(node) = current {
+            let Some(style) = node.layout_computed_style() else {
+                break;
+            };
+            match style.clone_display() {
+                Display::LynxText => paragraph = Some(node.id()),
+                Display::Contents => {}
+                _ => break,
+            }
+            current = node.flat_parent();
+        }
+        paragraph
+    }
+
     pub(crate) fn invalidate_layout_all(&mut self) {
         for (
             _,
@@ -433,7 +477,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
+            (if cfg!(debug_assertions) { 240 } else { 232 }, 336, 352),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

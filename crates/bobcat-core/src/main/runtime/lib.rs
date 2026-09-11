@@ -1130,8 +1130,8 @@ fn install_host_module(
     // The realm's handle for `node` has been collected, and a handle is the
     // one thing that holds an element: the node is freed now. Only the node —
     // its element children are unlinked and go on as detached roots, each
-    // held by the handle that names it, while the text node a `raw-text`
-    // reflects goes with it because no handle could ever name one. Every
+    // held by the handle that names it. Host-owned text children are freed
+    // with the node because no realm handle names them. Every
     // listener the realm had on it is gone too, since those lived on the
     // handle, so the index stops naming the node.
     install(engine, js_runtime, "dropElement", 1, move |arguments| {

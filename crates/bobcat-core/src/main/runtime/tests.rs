@@ -1524,8 +1524,10 @@ fn a_raw_text_reaches_the_private_document_as_a_laid_out_run() {
     let carrier = tree.get(node_id(4)).expect("the raw-text is live");
     assert_eq!(carrier.tag_name(), Some("raw-text"));
     assert_eq!(carrier.attribute("text"), Some("hello"));
-    let run = carrier.first_child().expect("the reflected run").id();
-    assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hello"));
+    assert!(
+        carrier.child_ids().is_empty(),
+        "generated text is absent from the DOM"
+    );
 
     // The run is content of the paragraph its `text` element owns, so the
     // measured size lives on the element (node 3), not on the text node.
@@ -1678,7 +1680,7 @@ fn replacing_inline_styles_preserves_attribute_text_limits() {
 }
 
 #[test]
-fn rewriting_the_text_attribute_relays_out_the_same_run() {
+fn rewriting_the_text_attribute_updates_generated_content() {
     let (mut js_runtime, mut runtime, elements) = text_runtime();
     runtime
         .run_main_thread_script(
@@ -1699,17 +1701,9 @@ fn rewriting_the_text_attribute_relays_out_the_same_run() {
         .expect("main-thread script");
 
     let tree = elements.tree();
-    let run = tree
-        .get(node_id(4))
-        .and_then(dom::Node::first_child)
-        .expect("the reflected run")
-        .id();
-    assert_eq!(
-        run,
-        node_id(5),
-        "the update re-points the run it already had"
-    );
-    assert_eq!(tree.get(run).and_then(dom::Node::text), Some("hi"));
+    let carrier = tree.get(node_id(4)).expect("carrier");
+    assert_eq!(carrier.attribute("text"), Some("hi"));
+    assert!(carrier.child_ids().is_empty());
     assert!(
         tree.text_block_size(node_id(3))
             .is_some_and(|size| (size.width - 40.0).abs() < f32::EPSILON),
@@ -1718,7 +1712,7 @@ fn rewriting_the_text_attribute_relays_out_the_same_run() {
 }
 
 #[test]
-fn a_collected_raw_text_takes_its_run_with_it() {
+fn a_collected_raw_text_releases_its_attribute_content() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime
         .run_main_thread_script(
@@ -1737,13 +1731,17 @@ fn a_collected_raw_text_takes_its_run_with_it() {
             "app:///collected-raw-text.js",
         )
         .expect("main-thread script");
+    assert_eq!(
+        elements.tree().get(node_id(4)).unwrap().attribute("text"),
+        Some("hello")
+    );
     assert!(
         elements
             .tree()
             .get(node_id(4))
-            .and_then(dom::Node::first_child)
-            .is_some(),
-        "the detached carrier still holds its run"
+            .unwrap()
+            .child_ids()
+            .is_empty()
     );
 
     runtime
@@ -1754,7 +1752,7 @@ fn a_collected_raw_text_takes_its_run_with_it() {
     assert!(tree.get(node_id(4)).is_none(), "the carrier is freed");
     assert!(
         tree.get(node_id(5)).is_none(),
-        "and so is the run's node, which no handle could ever have named"
+        "generated content never allocated a fifth node"
     );
 }
 
@@ -2072,10 +2070,10 @@ fn an_unmounted_subtree_is_freed_by_the_collection_that_takes_its_handles() {
         .collect_garbage(&mut js_runtime)
         .expect("collection");
     let tree = elements.tree();
-    for id in 3..=6 {
+    for id in 3..=5 {
         assert!(
             tree.get(node_id(id)).is_none(),
-            "node {id} of the unmounted subtree (incl. the raw-text run) is freed"
+            "node {id} of the unmounted subtree is freed"
         );
     }
 }
@@ -2327,7 +2325,7 @@ fn enough_removals_end_a_batch_with_a_collection() {
 /// hits, shadow tree included, and script names no shadow node — so the
 /// first such component owes the event path a retarget to its host, the
 /// same one `event_path` already performs for every step outside the
-/// tree. `raw-text`, the only component today, has no shadow root.
+/// tree. Generated text has no DOM identity and cannot become such a target.
 #[test]
 fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
     let (mut js_runtime, mut runtime, elements) = runtime();
@@ -2346,17 +2344,16 @@ fn an_event_target_no_handle_names_is_an_error_not_a_silent_drop() {
             "app:///run-target.js",
         )
         .expect("main-thread script");
-    // page 2, text 3, raw-text 4, and the run the component reflects, 5.
-    assert!(
-        elements
-            .tree()
-            .get(node_id(5))
-            .is_some_and(|node| !node.is_element()),
-        "the run is the node the realm mints no handle for"
-    );
+    // Explicitly construct a host-owned text node the realm has no handle for.
+    let run = {
+        let mut tree = elements.tree();
+        let run = tree.create_text_node("host-owned", ());
+        tree.append_child(node_id(3), run);
+        run
+    };
 
     let error = runtime
-        .dispatch_event(&mut js_runtime, node_id(5), &tap(), &no_detail())
+        .dispatch_event(&mut js_runtime, run, &tap(), &no_detail())
         .expect_err("a target no handle names cannot be delivered");
     assert!(error.to_string().contains("ownership graph"), "{error}");
 }

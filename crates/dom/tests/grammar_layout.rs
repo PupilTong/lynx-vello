@@ -27,9 +27,12 @@ fn display_grammar_is_the_lynx_value_set_and_includes_contents() {
             "`display: {value}` computed value"
         );
     }
+    assert!(
+        parses("display", "inline"),
+        "generated text uses inline display"
+    );
     for value in [
         "block",
-        "inline",
         "inline-block",
         "inline-flex",
         "flow-root",

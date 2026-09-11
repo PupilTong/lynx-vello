@@ -113,11 +113,15 @@ impl std::fmt::Debug for StyleEngine {
 impl StyleEngine {
     #[must_use]
     pub(crate) fn new(device: Device, url_data: UrlExtraData) -> Self {
-        Self {
+        let mut engine = Self {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             lock: StdArc::new(SharedRwLock::new()),
             url_data,
-        }
+        };
+        // The Lynx fork defaults elements to flex. Generated text instead has
+        // the CSS inline default; author rules still participate in the cascade.
+        engine.add_stylesheet("::before { display: inline; }", Origin::UserAgent);
+        engine
     }
 
     pub(crate) fn lock(&self) -> StdArc<SharedRwLock> {

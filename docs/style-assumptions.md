@@ -50,21 +50,29 @@ the semantics are stylo's.** Everything below refines that sentence.
    the web target matched everything via the browser, and `:where()` is
    load-bearing for scoping (§D.16).
 
-4. **`::before`/`::after` + `content`: omitted in v1.** Native-Lynx
-   fidelity wins over web-target parity here — an intentional, recorded
-   divergence from web-core (where browser passthrough renders them).
-   Selectors parse; no pseudo-element boxes are generated and `content` is
-   inert.
+4. **Text-only `::before` generated content (user-directed, 2026-09-11).**
+   The earlier v1 omission is narrowed: `content` string items and untyped,
+   unnamespaced `attr()` (including string fallback) generate runs before the
+   contents of a `display: -lynx-text` paragraph or a nested text/contents scope.
+   Stylo owns matching, cascade and pseudo styles. The DOM's base UA rule gives
+   `::before` inline display while ordinary elements retain the Lynx flex
+   default. The fork exposes `content` and the `inline` display keyword for
+   this path; general inline/block box layout is still unsupported.
 
-   *Policy reconciliation*: this does not trip [AGENTS.md](../AGENTS.md)'s
-   bucket-1 rule ("implement W3C-correct behavior for spec features Lynx
-   supports") because **native Lynx does not support this feature at all** —
-   no `content` property exists anywhere in its property table; only the web
-   target renders it, as a side effect of browser passthrough. The omission
-   is a scoped exception to the *web-core compat target*, recorded as a
-   decision in [deviations.md](tracking/deviations.md). **Milestone to
-   revisit**: when the render engine grows generated-content box support, or
-   the first real fixture/app depends on it — whichever comes first.
+   Generated runs use the pseudo's text style, share the enclosing paragraph's
+   wrapping/truncation, and never enter DOM children, selector structure or
+   `textContent`. Attribute changes invalidate the owning paragraph even when
+   no selector mentions the attribute. `raw-text` uses UA CSS
+   `raw-text::before { content: attr(text); }`; its old custom-element
+   attribute-to-text-node reflection is removed.
+
+   The scope remains text-only: no `::after`, counters, quotes, image content,
+   namespaced/typed attributes, generated boxes or pseudo animations. Only
+   static inline pseudo content is collected; unsupported content lists and
+   box displays produce no generated run. Independent pseudo backgrounds,
+   borders, effects and positioning remain deferred until generated-box
+   support. Native Lynx has no generated content; this is an explicit extension
+   of the earlier omission toward the web target, not a native behavior change.
 
 ## B. Performance architecture
 
@@ -345,8 +353,8 @@ and §D.16 with what the wire format actually permits.)*
       paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit
       testing). Actual pixel output still awaits the render crate.
     - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
-      composite math, but the engine has no counters, quotes, or `content` property, so it has no
-      semantic effect.
+      composite math, but the engine has no counters or quotes; string/attribute generated content
+      needs no containment boundary, so it has no semantic effect.
 
     The layout-side semantics (size-substitution, layout-containment baseline
     suppression + host CB contract, skipped contents, the relayout-boundary
@@ -364,4 +372,4 @@ and §D.16 with what the wire format actually permits.)*
 - Which milestone re-enables dynamic pseudo-classes (§C.13).
 - Whether to keep a CSS-text serialization path purely as a
   differential-testing oracle against web-core output.
-- The revisit trigger for `::before`/`::after` (§A.4) — fixture/app demand.
+- Broader generated-content boxes and `::after` (§A.4) — fixture/app demand.
