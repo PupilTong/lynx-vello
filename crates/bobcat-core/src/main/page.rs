@@ -758,11 +758,11 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
 /// in `LynxView::pump`, which leaves the channel open, takes the same path.
 ///
 /// A painter that was watching is unaffected either way. On the release path
-/// the view's handle on the host's resource system goes with it, so
-/// `Painter::poll_link` can no longer upgrade it and does not adopt a commit
-/// whose pixels it is not already holding; on the fatal-`pump` path that
-/// handle is still alive, and this check is what keeps a frame from being
-/// published after the cancel at all.
+/// the view's seat goes with it — the host's resource system among its fields —
+/// so `Painter::poll_link` can no longer upgrade it and does not adopt a commit
+/// whose pixels it is not already holding; on the fatal-`pump` path that seat
+/// is still alive, and this check is what keeps a frame from being published
+/// after the cancel at all.
 ///
 /// What is left over is a burst that was already inside [`Page::apply`] when
 /// the cancel landed: it finishes, the way synchronous JavaScript already

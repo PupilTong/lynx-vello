@@ -412,6 +412,61 @@ fn a_booted_view_commits_and_publishes() {
     assert!(laid_out, "the boot's final flush laid the page out");
 }
 
+/// A refused render clears the painter's record, so nothing is skipped against
+/// it and nothing is read out of it afterwards.
+///
+/// The rule that keeps the one record from outliving the render that made it:
+/// an offscreen target gives its texture up when a render fails partway, so a
+/// record still naming that frame would skip the next render of the same commit
+/// and then hand a reader pixels that are not there. The record is cleared on
+/// any refusal, whatever the target still holds.
+///
+/// The refusal is a zero-sized target, which is the one render failure a test
+/// can ask for without a broken GPU.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_failed_render_leaves_the_painter_holding_no_frame() {
+    use crate::view::EngineError;
+
+    let mut engine = TestViewSpec::new(
+        r"
+            globalThis.renderPage = function () {
+              const page = __CreatePage('card', 0);
+              const box = __CreateView(0);
+              __SetInlineStyles(box, 'width:32px;height:24px;background-color:#ff0000');
+              __AppendElement(page, box);
+            };
+            ",
+    )
+    .offscreen(32.0, 24.0)
+    .boot();
+    let size = engine.painter.frame_size;
+    engine.tick(true).expect("the committed frame renders");
+    assert!(engine.capture().is_ok(), "and reads back");
+
+    engine.painter.frame_size = FrameSize {
+        width: 0,
+        height: 0,
+    };
+    let error = engine
+        .tick(true)
+        .expect_err("a zero-sized target is refused");
+    assert!(matches!(error, EngineError::Gpu(_)), "{error}");
+
+    // Detached and back at a size the GPU accepts: there is no frame to
+    // re-render now, so what the capture answers is purely what the painter's
+    // record says.
+    engine.painter.detach();
+    engine.painter.frame_size = size;
+    let error = engine
+        .capture()
+        .expect_err("the failed render left nothing to capture");
+    assert!(
+        matches!(error, EngineError::Render(message) if message.contains("no frame has been rendered")),
+        "the refused render cleared the record, so the capture is refused before any readback"
+    );
+}
+
 /// Two painters, each observing a view of its own and nothing between them.
 fn two_painters() -> [(Painter, FarEnd); 2] {
     [detached(), detached()]

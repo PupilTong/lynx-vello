@@ -283,18 +283,11 @@ impl Headless {
     /// kept because it *is* the last frame here — there is no surface in front
     /// of it, so a reader would otherwise be handed the previous document's
     /// pixels as this one's. [`Self::render_frame`] builds a new one, and
-    /// [`Self::has_rendered`] answers `false` until it does.
+    /// [`Self::read_pixels`] has nothing to read until it does.
     pub fn forget(&mut self) {
         self.planes.forget();
         self.target = None;
         self.readback = None;
-    }
-
-    /// Whether a frame has been rendered into this renderer's target since it
-    /// was built or last forgotten.
-    #[must_use]
-    pub fn has_rendered(&self) -> bool {
-        self.target.is_some()
     }
 
     /// Renders a scene into the retained headless texture.

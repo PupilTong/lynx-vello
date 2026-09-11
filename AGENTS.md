@@ -369,25 +369,30 @@ useful signal for currently-compatible versions of those libraries.
   rather than something the view owns**: `Painter::new(DrawTarget, width,
   height, device_pixel_ratio)` builds one over a target before any view exists,
   `attach(&view)` points it at a view and `detach()` releases it. Everything it
-  holds of a view is non-owning — a watch receiver, a weak command sender, a
-  weak handle on the host's resource system — so a painter cannot keep a
+  holds of a view is non-owning — a watch receiver, and a `Weak` on the view's
+  seat, which is the view's own command sender and its handle on the host's
+  resource system as one releasable thing — so a painter cannot keep a
   released view alive, and a view dropped under one leaves it showing and
   capturing the last frame it drew. At most one interactive painter per view,
   and at most one *live* view per painter: a second `attach` is
-  `EngineError::PainterAttached`, while a link whose view is already gone is
-  released by the next `attach` rather than needing a `detach` by hand.
+  `EngineError::PainterAttached` — the refusal is the weak count of the view's
+  seat, and `Painter::attach` is the only place one is downgraded — while a
+  seat whose view is already gone is not an attachment at all and needs no
+  `detach` by hand.
   Attaching drops everything derived from the previous view — the adopted
-  snapshot, what was composed from it, the scroll intents, the gesture arena,
-  the resolved pixels, and the target's own retained key and plane bank,
+  snapshot, the scroll intents, the gesture arena, the resolved pixels, and
+  what the draw target holds, which is its compose key and its plane bank,
   because commit ids restart at one per document — rebases the frame clock onto
   the view's own timeline epoch, seeds the `BeginFrame` sequence past whatever
   has been serviced, and sends its metrics as a `Resize`: **the painter owns
   device metrics**, so a view built at one size and shown at another is resized
   rather than showing a frame its target cannot present. Detaching resets the
-  same minus the target, so the last frame stays up while the next page loads.
+  same minus the target, so the last frame stays up — and stays capturable —
+  while the next page loads.
   Every entry point begins by polling the link — adopting the newest
-  `Published` together with the pixels it draws, and noticing a view that has
-  gone, which auto-detaches while what was adopted stays drawable. A commit
+  `Published` together with the pixels it draws, and only then noticing a view
+  that has gone, so a commit published in the release turn is still adopted and
+  what was adopted stays drawable. A commit
   whose pixels could not be read in the same step is not adopted, because a
   frame indexes its store's bitmaps by draw order and a frame over another
   commit's table would draw the wrong images.
@@ -627,7 +632,8 @@ useful signal for currently-compatible versions of those libraries.
   **Images are entirely the embedder's.** The core fetches, decodes, caches
   and retains no pixel of its own. The one resource system a view has — its
   `ResourceFetcher`, which is also its `dom::FrameImages`, owned by the
-  `LynxView` as an `Rc` and read through a `Weak` by an attached painter — is
+  `LynxView` as an `Rc` and read by an attached painter through the view's
+  seat, which the painter holds only a `Weak` of — is
   asked for one
   image at a time by source string (the `url(…)` value CSS produced, or a
   replaced element's source): named through `request_image`, answered
