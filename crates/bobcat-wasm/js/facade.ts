@@ -509,8 +509,6 @@ export default function init(): Promise<void> {
 }
 
 /**
- * A Worker-owned Bobcat view with automatic canvas pointer forwarding.
- *
  * A Worker-owned Bobcat view attached to one HTML canvas. Active
  * `pointerdown`/`pointermove`/`pointerup`/`pointercancel` sequences on the
  * canvas are captured and forwarded to the native input router automatically.
@@ -678,11 +676,10 @@ export class BobcatCanvas {
   }
 
   /**
-   * Fetch and show a binary web or source-based native template container.
-   *
-   * Fetch and decode a binary web or source-based native bundle (root entry).
-   * Uses the container's page configuration and resolves relative resources
-   * against its response URL. Native bytecode is rejected by the shared parser.
+   * Fetch, decode, and show a binary web or source-based native bundle (root
+   * entry). Uses the container's page configuration and resolves relative
+   * resources against its response URL. Native bytecode is rejected by the
+   * shared parser.
    */
   async loadTemplate(url: string | URL): Promise<void> {
     this.#pointerInput.reset()
@@ -691,11 +688,10 @@ export class BobcatCanvas {
 
   /**
    * Decode local ZIP bytes with bobcat-source and load the selected entry.
-   *
-   * Decode a ZIP and its selected template using bobcat-source. entryUrl must
-   * be absolute: its decoded pathname selects the member and its origin maps
-   * the ZIP resources. XML is strict UTF-8; binary bundles require root.
-   * The shared loader limits input to 64 MiB, output to 128 MiB, and 4096 entries.
+   * `entryUrl` must be absolute: its decoded pathname selects the member and
+   * its origin maps the ZIP resources. XML is strict UTF-8; binary bundles
+   * require root. The shared loader limits input to 64 MiB, output to 128 MiB,
+   * and 4096 entries.
    */
   async loadZip(
     data: ArrayBuffer | Uint8Array,

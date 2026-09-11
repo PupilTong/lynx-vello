@@ -59,6 +59,8 @@ export default defineConfig({
           ...browserFiles.map((file) => ({
             from: path.join(packageDirectory, file),
             to: path.posix.join('bobcat-wasm', file),
+            // `dist/` also holds the compiler's incremental build info.
+            globOptions: { ignore: ['**/*.tsbuildinfo'] },
             info: { minimized: true },
           })),
         ],
