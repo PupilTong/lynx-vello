@@ -4,19 +4,16 @@ import { fileURLToPath } from 'node:url';
 import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@lynx-js/rspeedy';
 
-import { detectLanHost, producerDevPort } from './demo-ports.js';
+import { detectLanHost, producerDevPort } from './demo-ports.ts';
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const enableBundleAnalysis = !!process.env['RSPEEDY_BUNDLE_ANALYSIS'];
-const enableFetchBundle = !!process.env['LAZY_BUNDLE_FETCHBUNDLE'];
 const producerPublicPath = `http://${detectLanHost()}:${producerDevPort}/`;
 
 export default defineConfig({
   source: {
     entry: {
       LazyComponent: './src/LazyComponent.tsx',
-      LazyComponentSync: './src/LazyComponentSync.tsx',
-      LazyComponentAsync: './src/LazyComponentAsync.tsx',
       add: './src/utils/add.ts',
       minus: './src/utils/minus.ts',
       dynamic: './src/utils/dynamic.ts',
@@ -25,10 +22,7 @@ export default defineConfig({
   output: {
     assetPrefix: producerPublicPath,
     distPath: {
-      root: path.join(
-        projectRoot,
-        enableFetchBundle ? 'dist-producer-fetchbundle' : 'dist-producer',
-      ),
+      root: path.join(projectRoot, 'dist-producer'),
     },
   },
   dev: {
@@ -41,7 +35,6 @@ export default defineConfig({
   plugins: [
     pluginReactLynx({
       experimental_isLazyBundle: true,
-      ...(enableFetchBundle ? { engineVersion: '3.9' } : {}),
     }),
   ],
   environments: {

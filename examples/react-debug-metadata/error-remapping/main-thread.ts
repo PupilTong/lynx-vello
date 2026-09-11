@@ -69,26 +69,26 @@ export function buildMainThreadIndex(
       ) {
         if (artifact.kind !== 'main-thread') continue;
         const smds = artifact.debugSources?.find((d) =>
-          d.kind === 'source-map'
+          d['kind'] === 'source-map'
         );
         const bcds = artifact.debugSources?.find((d) =>
-          d.kind === 'bytecode-debug-info'
+          d['kind'] === 'bytecode-debug-info'
         );
-        if (!smds?.key || !smds.map || !bcds?.debugInfo) continue;
-        const map = (typeof smds.map === 'string'
-          ? JSON.parse(smds.map)
-          : smds.map) as RawSourceMap;
-        const dbg = (typeof bcds.debugInfo === 'string'
-          ? JSON.parse(bcds.debugInfo) as unknown
-          : bcds.debugInfo) as {
+        if (!smds?.['key'] || !smds['map'] || !bcds?.['debugInfo']) continue;
+        const map = (typeof smds['map'] === 'string'
+          ? JSON.parse(smds['map'])
+          : smds['map']) as RawSourceMap;
+        const dbg = (typeof bcds['debugInfo'] === 'string'
+          ? JSON.parse(bcds['debugInfo']) as unknown
+          : bcds['debugInfo']) as {
             lepusNG_debug_info?: {
               function_info?: FunctionInfo[];
               function_source?: string;
             };
           };
         const lng = dbg.lepusNG_debug_info;
-        index.set(smds.key as string, {
-          release: smds.key as string,
+        index.set(smds['key'] as string, {
+          release: smds['key'] as string,
           path: artifact.path ?? '',
           functions: lng?.function_info ?? [],
           functionSource: lng?.function_source ?? '',
@@ -110,8 +110,8 @@ export async function inferMainThread(
       c?.includes(marker)
     );
     if (srcIdx < 0) continue;
-    const content = entry.map.sourcesContent![srcIdx];
-    const file = path.basename(entry.map.sources[srcIdx]);
+    const content = entry.map.sourcesContent![srcIdx]!;
+    const file = path.basename(entry.map.sources[srcIdx]!);
     const throwLine =
       content.slice(0, content.indexOf(marker)).split('\n').length;
     const genLines = entry.functionSource.split('\n');
@@ -120,12 +120,7 @@ export async function inferMainThread(
       let selectedPc = -1;
       let selectedPosition: LineCol | null = null;
       for (const functionInfo of entry.functions) {
-        for (
-          let entryIndex = 0;
-          entryIndex < functionInfo.line_col.length;
-          entryIndex++
-        ) {
-          const candidate = functionInfo.line_col[entryIndex];
+        for (const [entryIndex, candidate] of functionInfo.line_col.entries()) {
           const pos = consumer.originalPositionFor({
             line: candidate.line,
             column: candidate.column,

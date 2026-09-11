@@ -5,7 +5,7 @@ import { pluginQRCode } from '@lynx-js/qrcode-rsbuild-plugin';
 import { pluginReactLynx } from '@lynx-js/react-rsbuild-plugin';
 import { defineConfig } from '@lynx-js/rspeedy';
 
-import { detectLanHost, producerDevPort } from './demo-ports.js';
+import { detectLanHost, producerDevPort } from './demo-ports.ts';
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const enableBundleAnalysis = !!process.env['RSPEEDY_BUNDLE_ANALYSIS'];

@@ -4,23 +4,23 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-/**
- * @typedef {{ toJson: (options: typeof BUNDLE_STATS_JSON_OPTIONS) => BundleStatsJson }} BundleStats
- * @typedef {{ stats?: BundleStats }} AfterBuildResult
- * @typedef {{
- *   context: { distPath: string };
- *   onAfterBuild: (callback: (result: AfterBuildResult) => void) => void;
- * }} BundleStatsPluginAPI
- * @typedef {{
- *   name: string;
- *   setup: (api: BundleStatsPluginAPI) => void;
- * }} BundleStatsPlugin
- * @typedef {{
- *   name?: string;
- *   children?: BundleStatsJson[];
- *   [key: string]: unknown;
- * }} BundleStatsJson
- */
+type BundleStats = {
+  toJson: (options: typeof BUNDLE_STATS_JSON_OPTIONS) => BundleStatsJson;
+};
+type AfterBuildResult = { stats?: BundleStats };
+type BundleStatsPluginAPI = {
+  context: { distPath: string };
+  onAfterBuild: (callback: (result: AfterBuildResult) => void) => void;
+};
+type BundleStatsPlugin = {
+  name: string;
+  setup: (api: BundleStatsPluginAPI) => void;
+};
+type BundleStatsJson = {
+  name?: string;
+  children?: BundleStatsJson[];
+  [key: string]: unknown;
+};
 
 export const BUNDLE_STATS_JSON_OPTIONS = {
   assets: true,
@@ -30,24 +30,15 @@ export const BUNDLE_STATS_JSON_OPTIONS = {
   chunkGroups: true,
 };
 
-/**
- * @returns {BundleStatsPlugin}
- */
-export function pluginLynxBundleAnalysisStats() {
+export function pluginLynxBundleAnalysisStats(): BundleStatsPlugin {
   return {
     name: 'example:lynx-bundle-analysis-stats',
-    /**
-     * @param {BundleStatsPluginAPI} api
-     */
-    setup(api) {
+    setup(api: BundleStatsPluginAPI) {
       if (!process.env['RSPEEDY_BUNDLE_ANALYSIS']) {
         return;
       }
 
-      /**
-       * @param {AfterBuildResult} result
-       */
-      const writeLynxStatsJson = ({ stats }) => {
+      const writeLynxStatsJson = ({ stats }: AfterBuildResult) => {
         if (!stats) {
           return;
         }
@@ -69,11 +60,9 @@ export function pluginLynxBundleAnalysisStats() {
   };
 }
 
-/**
- * @param {BundleStatsJson} statsJson
- * @returns {BundleStatsJson}
- */
-export function getLynxBundleStatsJson(statsJson) {
+export function getLynxBundleStatsJson(
+  statsJson: BundleStatsJson,
+): BundleStatsJson {
   if (!statsJson.children || statsJson.children.length === 0) {
     return withoutEmptyChildren(statsJson);
   }
@@ -89,19 +78,11 @@ export function getLynxBundleStatsJson(statsJson) {
   return withoutEmptyChildren(lynxStatsJson ?? fallbackStatsJson);
 }
 
-/**
- * @param {string | undefined} name
- * @returns {boolean}
- */
-function isLynxStatsChild(name) {
+function isLynxStatsChild(name: string | undefined): boolean {
   return name === 'lynx' || name?.startsWith('lynx-') === true;
 }
 
-/**
- * @param {BundleStatsJson} statsJson
- * @returns {BundleStatsJson}
- */
-function withoutEmptyChildren(statsJson) {
+function withoutEmptyChildren(statsJson: BundleStatsJson): BundleStatsJson {
   if (!statsJson.children || statsJson.children.length > 0) {
     return statsJson;
   }

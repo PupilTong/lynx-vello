@@ -1,16 +1,14 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2024", "esnext.array", "esnext.collection", "esnext.iterator"],
     "jsx": "react-jsx",
     "jsxImportSource": "@lynx-js/react",
-    "noEmit": true,
-    "allowJs": true,
-    "checkJs": true,
-    "isolatedDeclarations": false,
     "paths": {
       "@/*": ["./src/*"],
     },
   },
-  "include": ["src", "lynx.config.js", "test", "vitest.config.ts", "tailwind.config.ts"],
+  "include": ["src", "lynx.config.ts", "test", "tailwind.config.ts"],
   "exclude": ["dist/"],
 }

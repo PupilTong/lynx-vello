@@ -69,8 +69,7 @@ export function inferBgFrame(
       continue;
     }
     const lines = text.split('\n');
-    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
-      const line = lines[lineIndex];
+    for (const [lineIndex, line] of lines.entries()) {
       const findIndex = line.indexOf(find);
       if (findIndex < 0) continue;
       const tokenStartColumn0 = findIndex + tokenOffsetInFind;

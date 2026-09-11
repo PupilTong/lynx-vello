@@ -1,13 +1,11 @@
 {
-  "extends": "../../tsconfig.json",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2024", "esnext.array", "esnext.collection", "esnext.iterator"],
+    "types": ["node"],
     "jsx": "react-jsx",
     "jsxImportSource": "@lynx-js/react",
-    "noEmit": true,
-
-    "allowJs": true,
-    "checkJs": true,
-    "isolatedDeclarations": false,
   },
   "include": ["src", "external-bundle", "web", "lynx.config.ts", "rslib-comp-lib.config.ts", "rsbuild.config.ts"],
 }
