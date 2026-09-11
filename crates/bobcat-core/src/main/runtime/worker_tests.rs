@@ -368,7 +368,7 @@ fn lepus_calls_return_async_results_to_the_matching_background_callback() {
         globalThis.echo = async function(data) {
             if (this !== globalThis) throw Error('wrong main receiver');
             await Promise.resolve();
-            return { answer: data + 1 };
+            return { answer: data.value + 1 };
         };
         ",
         Some(
@@ -377,13 +377,13 @@ fn lepus_calls_return_async_results_to_the_matching_background_callback() {
         if (native !== lynx.getNativeApp()) throw Error('unstable native app');
         let calls = 0;
         for (const value of [1, 5]) {
-            const returned = native.callLepusMethod('echo', value, data => {
+            const returned = native.callLepusMethod('echo', {value}, data => {
                 calls++;
                 lynx.getCoreContext().dispatchEvent({ type: 'reply', data: [value, data] });
             });
             if (returned !== undefined || calls !== 0) throw Error('callback was synchronous');
         }
-        native.callLepusMethod('missing', null, data => {
+        native.callLepusMethod('missing', {}, data => {
             lynx.getCoreContext().dispatchEvent({ type: 'reply', data: ['missing', data === undefined] });
         });
         ",
@@ -407,6 +407,7 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
         r"
         globalThis.results = [];
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        globalThis.afterFailure = () => 'alive';
         globalThis.failSync = () => { throw Error('sync lepus failure'); };
         globalThis.failAsync = async () => { throw Error('async lepus failure'); };
         ",
@@ -416,21 +417,25 @@ fn lepus_failures_report_without_success_callbacks_and_leave_bts_usable() {
         lynx.getNativeApp().callLepusMethod('failSync', {}, () => {
             core.dispatchEvent({ type: 'reply', data: 'unexpected callback' });
         });
+        lynx.getNativeApp().callLepusMethod('failAsync', {}, () => {
+            core.dispatchEvent({ type: 'reply', data: 'unexpected async callback' });
+        });
         lynx.getNativeApp().callLepusMethod('failAsync', {});
-        core.addEventListener('ping', () => core.dispatchEvent({ type: 'reply', data: 'alive' }));
+        core.addEventListener('ping', () => lynx.getNativeApp().callLepusMethod('afterFailure', {}, data => core.dispatchEvent({ type: 'reply', data })));
         ",
         ),
     );
-    for _ in 0..4 {
+    for _ in 0..6 {
         pair.deliver();
     }
     let errors = worker_failures(pair.notices());
-    assert_eq!(errors.len(), 2);
+    assert_eq!(errors.len(), 3);
     assert!(errors[0].message.contains("sync lepus failure"));
     assert!(errors[1].message.contains("async lepus failure"));
     pair.check(
-        "import { lynx } from 'bobcat:runtime'; lynx.getJSContext().dispatchEvent({ type: 'ping' });",
+        "import { lynx } from 'bobcat:runtime'; lynx.getJSContext().dispatchEvent({ type: 'ping', data: undefined });",
     );
+    pair.deliver();
     pair.deliver();
     pair.check(
         r#"if (JSON.stringify(results) !== '["alive"]') throw Error(JSON.stringify(results));"#,
@@ -734,9 +739,10 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
+        import { unpackBtsMessage } from 'bobcat:cross-thread-context';
         globalThis.result = null;
         const worker = new Worker('./worker.js', {name: 'ordinary'});
-        worker.onmessage = event => result = event.data;
+        worker.onmessage = event => result = unpackBtsMessage(event.data);
         worker.postMessage({type: 'request', data: 42});
         ",
     );
@@ -757,7 +763,7 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
 }
 
 #[test]
-fn background_contexts_exchange_typed_events_and_flush_early_references_in_order() {
+fn background_contexts_exchange_typed_events_and_snapshot_early_sends_in_order() {
     let mut pair = Pair::with_background(
         r"
         import { EventTarget } from 'bobcat:event-target';
@@ -807,7 +813,7 @@ fn background_contexts_exchange_typed_events_and_flush_early_references_in_order
         pair.deliver();
     }
     pair.check(
-        "if (JSON.stringify(results) !== '[{\"value\":3},{\"value\":2},{\"value\":4}]') throw Error(JSON.stringify(results));",
+        "if (JSON.stringify(results) !== '[{\"value\":1},{\"value\":2},{\"value\":4}]') throw Error(JSON.stringify(results));",
     );
 }
 

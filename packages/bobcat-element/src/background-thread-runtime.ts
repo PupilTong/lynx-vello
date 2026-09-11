@@ -3,12 +3,18 @@ import type { WorkerGlobalScope } from "bobcat:worker";
 import {
   type ContextEvent,
   createCrossThreadContext,
+  packBtsMessage,
+  unpackBtsMessage,
+  cloneBtsValue,
 } from "bobcat:cross-thread-context";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
 // Application module loading through ResourceFetcher remains pending.
 const scope = globalThis as unknown as WorkerGlobalScope;
+
+function postToMain(message: unknown) { scope.postMessage(packBtsMessage(message)); }
+
 const coreContext = createCrossThreadContext();
 
 type AppHook = (...args: unknown[]) => unknown;
@@ -89,14 +95,18 @@ const nativeApp = {
     data: unknown,
     callback?: (result: unknown) => void,
   ) {
+    if (arguments.length < 2) throw new TypeError("callLepusMethod requires name and data");
+    if (typeof name !== "string") name = "";
+    const snapshot = cloneBtsValue(data);
+    if (snapshot === null || typeof snapshot !== "object") return;
     let id;
     if (typeof callback === "function") {
       id = nextCallbackId++;
       callbacks.set(id, callback);
     }
     try {
-      scope.postMessage({
-        bobcat: "runtime", method: "callLepusMethod", name, data, id,
+      postToMain({
+        bobcat: "runtime", method: "callLepusMethod", name, data: snapshot, id,
       });
     } catch (error) {
       if (id !== undefined) callbacks.delete(id);
@@ -105,6 +115,22 @@ const nativeApp = {
   },
 };
 
+// web-worker-rpc callbackify invokes callbacks in a Promise continuation.
+// Release the ID before scheduling it, so duplicate replies cannot invoke it twice.
+async function receiveLepusResult(
+  message: Extract<FromMainThread, { method: "callLepusMethodResult" }>,
+) {
+  const callback = callbacks.get(message.id);
+  callbacks.delete(message.id);
+  await undefined;
+  if (message.error !== undefined) {
+    const error = new Error(message.error.message);
+    error.name = message.error.name;
+    throw error;
+  }
+  return callback?.(message.result);
+}
+
 coreContext.addEventListener(
   "__OnLifecycleEvent",
   (event: { data: unknown }) => {
@@ -112,9 +138,9 @@ coreContext.addEventListener(
   },
 );
 
-coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data }));
-scope.addEventListener("message", (event: { data: FromMainThread }) => {
-  const message = event.data;
+coreContext.connect((event) => postToMain({ type: event.type, data: event.data }));
+scope.addEventListener("message", (event: { data: unknown }): void | Promise<void> => {
+  const message = unpackBtsMessage(event.data) as FromMainThread;
   if (message?.bobcat !== "runtime") {
     coreContext.receive(message);
     return;
@@ -129,17 +155,8 @@ scope.addEventListener("message", (event: { data: FromMainThread }) => {
     case "callDestroyLifetimeFun":
       app.callDestroyLifetimeFun?.call(app);
       break;
-    case "callLepusMethodResult": {
-      const callback = callbacks.get(message.id);
-      callbacks.delete(message.id);
-      if (message.error !== undefined) {
-        const error = new Error(message.error.message);
-        error.name = message.error.name;
-        throw error;
-      }
-      callback?.(message.result);
-      break;
-    }
+    case "callLepusMethodResult":
+      return receiveLepusResult(message);
   }
 });
 

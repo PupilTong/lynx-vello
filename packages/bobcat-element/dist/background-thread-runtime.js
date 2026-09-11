@@ -1,11 +1,12 @@
 // Generated from src/background-thread-runtime.ts by TypeScript 7: edit that file and run `pnpm --filter bobcat-element build`.
-// source fnv1a64 e6d690bc50ab829e
+// source fnv1a64 b73ba82f3b0ed615
 import "bobcat:worker";
-import { createCrossThreadContext, } from "bobcat:cross-thread-context";
+import { createCrossThreadContext, packBtsMessage, unpackBtsMessage, cloneBtsValue, } from "bobcat:cross-thread-context";
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
 // Application module loading through ResourceFetcher remains pending.
 const scope = globalThis;
+function postToMain(message) { scope.postMessage(packBtsMessage(message)); }
 const coreContext = createCrossThreadContext();
 const app = {};
 // Looked up by the id a `callLepusMethodResult` carries, which a result for
@@ -52,14 +53,21 @@ const publishEvent = createPublishHandler("publishEvent");
 const publicComponentEvent = createPublishHandler("publicComponentEvent");
 const nativeApp = {
     callLepusMethod(name, data, callback) {
+        if (arguments.length < 2)
+            throw new TypeError("callLepusMethod requires name and data");
+        if (typeof name !== "string")
+            name = "";
+        const snapshot = cloneBtsValue(data);
+        if (snapshot === null || typeof snapshot !== "object")
+            return;
         let id;
         if (typeof callback === "function") {
             id = nextCallbackId++;
             callbacks.set(id, callback);
         }
         try {
-            scope.postMessage({
-                bobcat: "runtime", method: "callLepusMethod", name, data, id,
+            postToMain({
+                bobcat: "runtime", method: "callLepusMethod", name, data: snapshot, id,
             });
         }
         catch (error) {
@@ -69,12 +77,25 @@ const nativeApp = {
         }
     },
 };
+// web-worker-rpc callbackify invokes callbacks in a Promise continuation.
+// Release the ID before scheduling it, so duplicate replies cannot invoke it twice.
+async function receiveLepusResult(message) {
+    const callback = callbacks.get(message.id);
+    callbacks.delete(message.id);
+    await undefined;
+    if (message.error !== undefined) {
+        const error = new Error(message.error.message);
+        error.name = message.error.name;
+        throw error;
+    }
+    return callback?.(message.result);
+}
 coreContext.addEventListener("__OnLifecycleEvent", (event) => {
     app.OnLifecycleEvent?.call(app, event.data);
 });
-coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data }));
+coreContext.connect((event) => postToMain({ type: event.type, data: event.data }));
 scope.addEventListener("message", (event) => {
-    const message = event.data;
+    const message = unpackBtsMessage(event.data);
     if (message?.bobcat !== "runtime") {
         coreContext.receive(message);
         return;
@@ -89,17 +110,8 @@ scope.addEventListener("message", (event) => {
         case "callDestroyLifetimeFun":
             app.callDestroyLifetimeFun?.call(app);
             break;
-        case "callLepusMethodResult": {
-            const callback = callbacks.get(message.id);
-            callbacks.delete(message.id);
-            if (message.error !== undefined) {
-                const error = new Error(message.error.message);
-                error.name = message.error.name;
-                throw error;
-            }
-            callback?.(message.result);
-            break;
-        }
+        case "callLepusMethodResult":
+            return receiveLepusResult(message);
     }
 });
 // This is the raw BTS environment's MVP. Loading a compiled ReactLynx BTS

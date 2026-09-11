@@ -1,5 +1,5 @@
 // Generated from src/main-thread-runtime.ts by TypeScript 7: edit that file and run `pnpm --filter bobcat-element build`.
-// source fnv1a64 54dfc0c9164b17a8
+// source fnv1a64 77244ff21cbbe1f9
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
@@ -24,7 +24,7 @@
 // the same class, on a runtime this module is not registered on, so the source
 // is shared as a module and each runtime compiles its own copy.
 import { EventTarget } from "bobcat:event-target";
-import { createCrossThreadContext, } from "bobcat:cross-thread-context";
+import { createCrossThreadContext, packBtsMessage, unpackBtsMessage, } from "bobcat:cross-thread-context";
 import { globalProps, initData } from "bobcat-internal:host";
 function noop() {
     return undefined;
@@ -50,44 +50,37 @@ const scope = globalThis;
 let backgroundWorker;
 let pendingBackgroundMessages = [];
 function sendToBackground(message, isContext = false) {
-    if (backgroundWorker === undefined) {
-        pendingBackgroundMessages.push({ message, isContext });
-    }
-    else {
-        // A Context event can carry other user properties. Only its public fields
-        // cross this channel, so an extra property cannot select our runtime calls.
-        backgroundWorker.postMessage(isContext
-            ? { type: message.type, data: message.data }
-            : message);
-    }
+    // A Context event can carry other user properties. Only its public fields
+    // cross this channel, so an extra property cannot select our runtime calls.
+    const wire = packBtsMessage(isContext
+        ? { type: message.type, data: message.data }
+        : message);
+    if (backgroundWorker === undefined)
+        pendingBackgroundMessages.push(wire);
+    else
+        backgroundWorker.postMessage(wire);
 }
 // Context events and runtime calls share the same FIFO, including calls the
-// MTS entry makes before boot constructs its Worker. Keep references until
-// postMessage performs the existing JSON snapshot.
+// MTS entry makes before boot constructs its Worker. Snapshot at the call,
+// including native values that plain JSON cannot represent.
 jsContext.connect((event) => sendToBackground(event, true));
+// Like web-worker-rpc, await the handler result before copying the reply.
+// The ordinary realm checkpoint runs the continuation; no nested host entry.
 async function callLepusMethod(message) {
     try {
         const method = scope[message.name];
-        const result = typeof method === "function"
-            ? await method.call(scope, message.data)
-            : undefined;
+        const result = await (typeof method === "function"
+            ? Reflect.apply(method, scope, [message.data]) : undefined);
         if (message.id !== undefined) {
-            sendToBackground({
-                bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
-                result,
-            });
+            sendToBackground({ bobcat: "runtime", method: "callLepusMethodResult", id: message.id, result });
         }
     }
     catch (error) {
-        // Deliver failures to the calling worker even without a callback. Its
-        // normal error path reports them; a success callback must not run.
-        sendToBackground({
-            bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
-            error: {
-                name: error instanceof Error ? error.name : "Error",
-                message: error instanceof Error ? error.message : String(error),
-            },
-        });
+        // A failed call or result encoding reports on the calling Worker, even
+        // without a callback, through its existing unhandled-rejection path.
+        sendToBackground({ bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
+            error: { name: error instanceof Error ? error.name : "Error",
+                message: error instanceof Error ? error.message : String(error) } });
     }
 }
 /**
@@ -97,7 +90,7 @@ async function callLepusMethod(message) {
  */
 export function __BobcatConnectBackground(worker) {
     worker.addEventListener("message", (event) => {
-        const message = event.data;
+        const message = unpackBtsMessage(event.data);
         if (message?.bobcat === "runtime") {
             if (message.method === "callLepusMethod") {
                 void callLepusMethod(message);
@@ -110,8 +103,8 @@ export function __BobcatConnectBackground(worker) {
     backgroundWorker = worker;
     const queued = pendingBackgroundMessages;
     pendingBackgroundMessages = [];
-    for (const { message, isContext } of queued) {
-        sendToBackground(message, isContext);
+    for (const message of queued) {
+        worker.postMessage(message);
     }
 }
 export function __BobcatPublishEvent(componentId, handlerName, event) {

@@ -544,15 +544,14 @@ machinery, with `data ?? {}`; a missing listener drops the event. `postMessage`
 on these Context objects remains a no-op, matching web-core's unimplemented
 operation. This differs from Worker `postMessage`, which carries the events.
 
-The MTS Context exists during entry evaluation. Until the Worker is connected,
-it queues event references in FIFO order, matching web-core's pre-port RPC
-queue; connection sends them through Worker's JSON transport. Once connected,
-that transport snapshots each event at dispatch time. The worker's own task
-queues what is posted to it until its script has been evaluated, so its
-listeners can be registered first. No new queue or RPC registry is needed. Worker
-release, source cancellation and nonfatal `WorkerFailed` reporting apply to
-BTS too. `ScriptFinished` continues to report MTS boot, not completion of BTS
-loading or execution.
+The MTS Context exists during entry evaluation. Runtime JS snapshots outgoing
+messages into tagged values at the call, including sends before Worker
+connection. The codec preserves undefined and special numbers over the existing
+JSON Worker channel; user objects cannot collide with its structural tags.
+Connection posts those snapshots in FIFO order. The worker's task queues what
+is posted until its entry has evaluated. Worker release, source cancellation
+and nonfatal `WorkerFailed` reporting apply to BTS too. `ScriptFinished`
+continues to report MTS boot, not BTS loading or execution.
 
 The BTS runtime exposes stable `lynx.getApp()` and `lynx.getNativeApp()`
 objects. MTS `__OnLifecycleEvent(data)` sends the existing Context event;
@@ -573,12 +572,29 @@ or component metadata, so its string handlers use `publishEvent`. An owner
 unique ID is not a framework component ID. Global handler fan-out remains
 pending with the existing native event path.
 
-`lynx.getNativeApp().callLepusMethod(name, data, callback?)` calls the current
-MTS `globalThis[name]` with `globalThis` as receiver. It returns `undefined`
-immediately; a supplied callback receives the resolved result asynchronously,
-including `undefined` for a missing method. Failed calls report through the
-worker error path without running success callbacks. Only calls with a
-callback retain an ID, which is removed on reply or request encoding failure.
+`lynx.getNativeApp().callLepusMethod(name, data, callback?)` snapshots object
+arguments and posts a request through worker-global `postMessage`; primitive
+arguments are ignored. MTS reads the current `globalThis[name]`, invokes it with
+that global receiver and awaits the result before encoding and posting its reply
+through `Worker.postMessage`. BTS removes the callback ID on receipt and invokes
+the callback in a Promise job with one result argument. Missing methods yield
+undefined; null remains null. Failed calls, rejected results and encoding errors
+report through the existing Worker error path without success callbacks,
+including calls without a callback. An unresolved call does not block later
+requests, and each reply selects its own callback.
+
+This follows `web-worker-rpc/src/Rpc.ts`'s `await handler(...message.data)` and
+callbackify's `.then(callback)`, with web-core's `Background.ts` named global
+lookup. It deliberately omits native QuickContext's nested job drain: the await
+continuation snapshots the result before any later nested jobs. The full upstream
+RPC registry, synchronous SharedArrayBuffer path and transfer-list support are
+unnecessary for this single asynchronous endpoint.
+
+Rust never parses a runtime envelope, selects a named method or flushes a reply
+queue. The existing Worker transport, realm checkpoint and QuickJS bridge are
+unchanged. The JS codec remains necessary because JSON alone loses undefined
+members and special numbers. It covers plain data, not structured-clone objects
+such as Map, typed arrays or transferable buffers.
 
 An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
 forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`
