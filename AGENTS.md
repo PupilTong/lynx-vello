@@ -692,8 +692,10 @@ useful signal for currently-compatible versions of those libraries.
   runtime: an evaluated module belongs to the realm that evaluated it, so two
   views resolving one URL to different bytes cannot collide and no worker
   leaves a registration behind.
-  All eight JavaScript sources live together in `packages/bobcat-element/src`
-  and are embedded by core with `include_str!`. The Element module imports
+  All eight runtime modules live together in `packages/bobcat-element/src` as
+  TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
+  emitted for them into the package's committed `dist/` (see that package
+  below). The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
   element member is installed on `globalThis`. A `.web.bundle`'s
@@ -1011,7 +1013,7 @@ useful signal for currently-compatible versions of those libraries.
   refined back up as long as the image has more to give. In the browser that restore is the one
   place the Render Worker blocks: the main thread never waits, so a job's
   mailbox in shared Wasm memory and `Atomics.wait` are what let a read that
-  must not miss wait for it (`crates/bobcat-wasm/image-decoder.js` is the
+  must not miss wait for it (`crates/bobcat-wasm/js/image-decoder.ts` is the
   main thread's half). Shape: `Resources` is the shared system (registry, caches,
   executor, decoder; cheaply cloned, bound to the embedder's thread) and the
   only holder of the executor, so the runtime is shut down — without waiting
@@ -1257,7 +1259,7 @@ useful signal for currently-compatible versions of those libraries.
   response URL is the ESM specifier imported by `bobcat:boot` and the base
   its images resolve against. Images a page names are fetched by the
   resource system itself through the same Worker `fetch` and decoded on the
-  main thread by an `Image` element in the package's `image-decoder.js`,
+  main thread by an `Image` element in the package's `js/image-decoder.ts`,
   over a `MessageChannel` whose Worker end the facade hands to
   `BobcatRenderer::create` at init.
   `loadLynxXml(url)` fetches an XML envelope once, decodes it with the web
@@ -1286,21 +1288,30 @@ useful signal for currently-compatible versions of those libraries.
   XML URL. Synchronous GPU
   capture is likewise absent because
   browser WebGPU completion is Promise-driven.
-- `packages/bobcat-element` — the dependency-free JavaScript sources for the
+- `packages/bobcat-element` — the dependency-free TypeScript sources of the
   ESMs `bobcat-core` preloads into its QuickJS realms. Six go on the
-  main-thread runtime: `src/main-thread-runtime.mjs` provides
-  `bobcat:runtime`, `src/element-papi.mjs` provides `bobcat:element`,
-  `src/timers.mjs` provides `bobcat:timers`, `src/event-target.mjs`
-  provides `bobcat:event-target`, `src/cross-thread-context.mjs` provides
-  `bobcat:cross-thread-context`, and `src/worker.mjs` provides the `Worker`
+  main-thread runtime: `src/main-thread-runtime.ts` provides
+  `bobcat:runtime`, `src/element-papi.ts` provides `bobcat:element`,
+  `src/timers.ts` provides `bobcat:timers`, `src/event-target.ts`
+  provides `bobcat:event-target`, `src/cross-thread-context.ts` provides
+  `bobcat:cross-thread-context`, and `src/worker.ts` provides the `Worker`
   class as `bobcat-internal`. The group's *worker* runtime gets
-  `src/worker-runtime.mjs` as `bobcat:worker` and
-  `src/background-thread-runtime.mjs` as `bobcat:bts-runtime`, plus
+  `src/worker-runtime.ts` as `bobcat:worker` and
+  `src/background-thread-runtime.ts` as `bobcat:bts-runtime`, plus
   `bobcat:event-target`, `bobcat:cross-thread-context` and
   `bobcat:timers` again — registered per runtime, because a source is
-  runtime-wide and no value crosses between two runtimes. Core embeds them all with
-  `include_str!`; the Rstest suite imports the Element PAPI's identical bytes
-  and verifies every named export. The package owns the
+  runtime-wide and no value crosses between two runtimes. What core embeds,
+  with `include_str!`, is `dist/`: the JavaScript TypeScript 7 emits for every
+  `src/*.ts` (`pnpm --filter bobcat-element build`), committed so that a cargo
+  build needs no Node — which is also why a QuickJS line and column name a
+  line in `dist/`, not in the `.ts` source. Each emitted file starts with its
+  source's FNV-1a hash, and `bobcat-core`'s `build.rs` recomputes it: a source
+  edited after its emit fails the Rust build, naming the source and that
+  command, rather than building the older code into the engine. CI reruns the
+  emit and fails on any difference in `dist/`, which covers what the hash
+  cannot see — a compiler or tsconfig change, a module added or removed. The
+  Rstest suite imports the same modules and verifies every named export. The
+  package owns the
   supported `__*` PAPI members and their web-core arities,
   plus the Lynx tag vocabulary
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
@@ -1334,8 +1345,11 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
   `console`, and no DOM. Named exports are the only Element-PAPI surface
   for transformed MTS entries; the module installs no `__*` globals. Rstest
-  imports the ESM normally and `tsc --noEmit` checks it under `checkJs`.
-  `src/timers.mjs` is the one module here that does install globals, because
+  imports the TypeScript directly, and TypeScript 7 checks the sources as a
+  program with `lib: es2023` and no ambient types — the realm has neither DOM
+  nor Node — resolving each `bobcat:*` specifier to its file through `paths`
+  and declaring the two native modules' contracts in a `.d.ts`.
+  `src/timers.ts` is the one module here that does install globals, because
   bare `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` are how a
   card reaches them. It keeps only the callbacks, filed under the id the
   host's `setTimer` hands back; the schedule and HTML's `long` delay
@@ -1348,7 +1362,7 @@ useful signal for currently-compatible versions of those libraries.
   and fed by a watch the epilogue publishes, so a due timer needs no host
   protocol of any kind — no deadline crosses the link and no host turn is owed
   for one.
-  `src/element-papi.mjs` also exports `class Document`, whose constructor calls
+  `src/element-papi.ts` also exports `class Document`, whose constructor calls
   the native `createDocument`. It is on no collection schedule at all, which is
   the opposite of the element path in the same file: cards genuinely unroot
   handles, while the boot module holds the document in an exported binding for
@@ -1985,6 +1999,10 @@ this section is the only place the absolute paths are spelled out.
 ## Toolchain
 
 - Nightly Rust (`rust-toolchain.toml`), edition 2024, resolver 3, workspace lints.
+- The pnpm workspace (`packages/*`, `examples/*`, `crates/bobcat-wasm`) is
+  TypeScript and ESM throughout, checked by TypeScript 7.0.2 (`pnpm test:type`)
+  under the strict options in `tsconfig.base.json`; Node (`^22.18 || ^24`)
+  runs its `.ts` scripts directly by type stripping.
 - `cargo fmt` (nightly rustfmt options in `rustfmt.toml`), `cargo clippy`,
   `cargo test`, `cargo bench` (CodSpeed-compatible `divan` benches).
 - **`cargo fmt --all` reaches into `vendor/stylo`** even though the fork is
@@ -2167,14 +2185,26 @@ default explanation for a failure:
   are rustc codegen warnings rather than lints, so `-D warnings` leaves them
   alone.
 
-The Element PAPI runtime has two suites over the same file:
+The Element PAPI runtime has two suites over the same source:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
-`pnpm --filter bobcat-element test:type` (`tsc --noEmit` under `checkJs`),
-while `crates/bobcat-core/tests/main_thread.rs` drives the identical bytes
-through the real QuickJS realm, `bobcat` object, and collector. The type suite
-also checks the colocated `main-thread-runtime.mjs`, whose behavior is covered
-by the core main-thread tests. Changing either source triggers a `bobcat-core`
-rebuild through `include_str!` — there is no generated artifact to refresh.
+`pnpm --filter bobcat-element test:type` (TypeScript 7, `tsc -b`), while
+`crates/bobcat-core/tests/main_thread.rs` drives the same module, as
+TypeScript 7 emitted it into `dist/`, through the real QuickJS realm, `bobcat`
+object, and collector. The type suite checks every runtime module, the
+colocated `main-thread-runtime.ts` included, whose behavior is covered by the
+core main-thread tests. After changing a source, run
+`pnpm --filter bobcat-element build` and commit `dist/` with it:
+`bobcat-core`'s build script refuses to build until that emit is current, and
+CI fails when it differs.
+
+`pnpm test:type` type-checks every TypeScript program in the workspace with
+TypeScript 7.0.2 — `tsc -b` over the root `tsconfig.json`, each program
+extending the strict options in `tsconfig.base.json` — except the bobcat-wasm
+Workers, which are typed against the glue a `wasm-pack` build generates and
+are checked by `pnpm --filter bobcat-wasm build` once it exists. Node runs the
+workspace's `.ts` scripts directly by type stripping. Each rspeedy example also
+installs TypeScript 5.9.3, used by nothing but rspeedy's `lynx.config.ts`
+loader (see the `rspeedy` catalog in `pnpm-workspace.yaml`).
 
 **Screenshot tests** live in `crates/*/tests/screenshots.rs` — plus per-topic
 siblings (`dom` also has `text_screenshots.rs` and `css_atlas.rs`) — with

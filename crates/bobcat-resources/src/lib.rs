@@ -157,7 +157,7 @@ pub struct ResourcesConfig {
     /// Whether image failures are also printed to standard error, natively.
     pub log_to_stderr: bool,
     /// This Worker's end of the channel whose other end the host's
-    /// main-thread image decoder listens on (`image-decoder.js` in the
+    /// main-thread image decoder listens on (`js/image-decoder.ts` in the
     /// `bobcat-wasm` package), in the browser. Without it no image decodes.
     #[cfg(target_arch = "wasm32")]
     pub image_port: Option<web_sys::MessagePort>,

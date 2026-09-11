@@ -18,6 +18,7 @@
     "@lynx-js/types": "catalog:",
     "@rsbuild/plugin-babel": "1.1.2",
     "@types/react": "18.3.28",
-    "babel-plugin-react-compiler": "1.0.0"
+    "babel-plugin-react-compiler": "1.0.0",
+    "typescript": "catalog:rspeedy"
   }
 }

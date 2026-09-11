@@ -1,0 +1,15 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The Worker program: the Render Worker and the `wasm_thread` Worker entry,
+  // emitted to `dist/` beside the facade. It needs the WebWorker library,
+  // which cannot share a program with the DOM one, and it is typed against
+  // `pkg/bobcat_wasm.d.ts`, so it builds only after `wasm-pack` has run.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2023", "webworker"],
+    "noEmit": false,
+    "rootDir": ".",
+    "outDir": "../dist"
+  },
+  "files": ["render-worker.ts", "dom-worker.ts", "protocol.d.ts"]
+}

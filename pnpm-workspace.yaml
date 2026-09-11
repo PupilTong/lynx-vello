@@ -38,10 +38,21 @@ catalog:
   "@lynx-js/types": "4.0.0"
   "@lynx-js/web-core": "0.22.2"
   "@lynx-js/web-elements": "0.12.6"
+  "@types/node": "24.13.2"
+  # The workspace compiler: every program is type-checked, and the bobcat-wasm
+  # facade emitted, by TypeScript 7.
+  typescript: "7.0.2"
 
 catalogs:
   rspack:
     "@rspack/core": "2.1.4"
+  # `@lynx-js/rspeedy` loads `lynx.config.ts` through a Node module hook that
+  # imports the classic `typescript` compiler API as it loads, and its peer
+  # range stops at 5.9. TypeScript 7 has no such API, so every rspeedy project
+  # installs this compiler for that hook alone; TypeScript 7 at the root is what
+  # checks those projects. Drop this once rspeedy's loader stops importing it.
+  rspeedy:
+    typescript: "5.9.3"
 
 strictDepBuilds: true
 

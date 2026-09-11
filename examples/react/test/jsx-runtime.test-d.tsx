@@ -27,7 +27,7 @@ describe('JSX Runtime Types', () => {
 
   test('should validate the required props for raw-text', () => {
     // @ts-expect-error: Missing required prop 'text'
-    const _shouldError = <raw-text></raw-text>;
+    void (<raw-text></raw-text>);
 
     const rawTextELe = <raw-text text={'text'}></raw-text>;
     assertType<JSX.Element>(rawTextELe);
@@ -45,7 +45,7 @@ describe('JSX Runtime Types', () => {
 
   test('should error on unsupported tags', () => {
     // @ts-expect-error: Unsupported tag
-    const _divElement = <div></div>;
+    void (<div></div>);
   });
 
   test('should support event handlers', () => {

@@ -814,7 +814,7 @@ async function start(shell: Shell, router: TabRouter): Promise<void> {
   shell.message.textContent = 'Loading the demo font and threaded Rust module…';
   const fontPromise = loadDemoFont();
   const bobcatModuleUrl = new URL(
-    'bobcat-wasm/facade.js',
+    'bobcat-wasm/dist/facade.js',
     document.baseURI,
   ).href;
   const [fontBytes, bobcatModule] = await Promise.all([

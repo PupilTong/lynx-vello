@@ -92,8 +92,8 @@ resource protocol. The load also makes the entry URL the base a relative
 Everything else a page names — its images — the resource system fetches
 itself, in Rust, through the same Worker `fetch` (so the same origin, CORS,
 credentials and HTTP-cache policy apply), and decodes with the platform's
-`Image` element on the main thread: `image-decoder.js`, shipped in the package
-beside `facade.js`, which the facade connects to the Render Worker over a
+`Image` element on the main thread: `js/image-decoder.ts`, shipped in the
+package's `dist/` beside the facade, which connects it to the Render Worker over a
 `MessageChannel` at init. The Render Worker hands the fetched bytes over; the
 main thread turns them into a Blob URL, decodes and resizes them through a 2D
 canvas, and copies the RGBA pixels straight into a buffer the Render Worker
@@ -309,7 +309,11 @@ Every Rust/LLVM feature in `.cargo/config.toml` has an explicit Binaryen
 counterpart, including threads, bulk memory, extended const, multivalue,
 nontrapping float-to-int, reference types, SIMD, relaxed SIMD, sign extension,
 and tail calls. Generated glue and Wasm live under
-`crates/bobcat-wasm/pkg/` and are not checked in. The verification script
+`crates/bobcat-wasm/pkg/`. The facade, the image decoder and the two Worker
+entries are TypeScript in `crates/bobcat-wasm/js/`; after wasm-pack the build
+emits them with TypeScript 7 into `dist/`, the facade's declarations included
+— after, because the Workers are typed against the glue it generates. Neither
+directory is checked in. The verification script
 checks that optimization removed the debugging name section while preserving
 `target_features`, shared imported/exported memory, the Worker-only Wasm
 import, the facade's four page and font declarations and their dispatches, that
@@ -336,7 +340,8 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-`packages/github-pages/public/coi-service-worker.js` provides those headers
+`packages/github-pages/src/coi-service-worker.ts`, built to
+`coi-service-worker.js` beside the page, provides those headers
 for the demo. With `require-corp`, remote scripts and future image/font/bundle
 resources must satisfy CORS or a compatible Cross-Origin-Resource-Policy.
 

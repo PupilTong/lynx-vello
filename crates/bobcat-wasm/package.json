@@ -3,29 +3,25 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "facade.js",
-  "browser": "facade.js",
-  "types": "facade.d.ts",
+  "types": "./dist/facade.d.ts",
   "files": [
-    "dom-worker.js",
-    "facade.d.ts",
-    "facade.js",
-    "image-decoder.js",
-    "pkg",
-    "render-worker.js"
+    "dist",
+    "pkg"
   ],
   "exports": {
     ".": {
-      "types": "./facade.d.ts",
-      "browser": "./facade.js",
-      "default": "./facade.js"
+      "types": "./dist/facade.d.ts",
+      "default": "./dist/facade.js"
     }
   },
   "devDependencies": {
-    "binaryen": "132.0.0"
+    "@types/node": "catalog:",
+    "binaryen": "132.0.0",
+    "typescript": "catalog:"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "verify": "node --test scripts/wasm-target-features.test.mjs scripts/pointer-input.test.mjs && node scripts/verify-pkg.mjs"
+    "build": "node scripts/build.ts",
+    "test:type": "tsc -b",
+    "verify": "node --test scripts/wasm-target-features.test.ts scripts/pointer-input.test.ts && node scripts/verify-pkg.ts"
   }
 }

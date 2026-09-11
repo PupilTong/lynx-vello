@@ -66,10 +66,8 @@ const INLINE_NODE_LISTENERS: usize = 4;
 /// exist; a path with more than this many *listening* nodes does not.
 const INLINE_DELIVERIES: usize = 8;
 
-const ELEMENT_PAPI_SOURCE: &str =
-    include_str!("../../../../../packages/bobcat-element/src/element-papi.mjs");
-const RUNTIME_MODULE_SOURCE: &str =
-    include_str!("../../../../../packages/bobcat-element/src/main-thread-runtime.mjs");
+const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
+const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,

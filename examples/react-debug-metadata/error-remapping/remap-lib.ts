@@ -27,7 +27,7 @@ export interface Step {
   colno: number;
   /** Original function name when present in the mapping. */
   function_name?: string;
-  context_line?: string;
+  context_line?: string | undefined;
   pre_context: string[];
   post_context: string[];
 }

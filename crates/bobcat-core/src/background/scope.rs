@@ -41,8 +41,7 @@ const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
 /// Called on `bobcat:worker`, in a worker realm, with one JSON message.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 
-const WORKER_MODULE_SOURCE: &str =
-    include_str!("../../../../packages/bobcat-element/src/worker-runtime.mjs");
+const WORKER_MODULE_SOURCE: &str = crate::esm::runtime_source!("worker-runtime");
 
 /// Registers the source modules every worker realm on the group's *worker*
 /// runtime shares.

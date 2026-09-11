@@ -1,0 +1,12 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2023", "dom"],
+    // Rsbuild's declarations for the stylesheet the page imports.
+    "types": ["@rsbuild/core/types"]
+  },
+  "files": ["src/index.ts"],
+  // The page imports bobcat-wasm's emitted declarations.
+  "references": [{ "path": "../../crates/bobcat-wasm/js" }]
+}

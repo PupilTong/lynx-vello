@@ -7,14 +7,14 @@
     "build": "rsbuild build",
     "dev": "rsbuild dev",
     "preview": "rsbuild preview",
-    "test:type": "tsc --noEmit"
+    "test:type": "tsc -b"
   },
   "dependencies": {
     "bobcat-wasm": "workspace:*"
   },
   "devDependencies": {
     "@rsbuild/core": "2.1.4",
-    "@types/node": "^24.10.13",
-    "typescript": "5.9.3"
+    "@types/node": "catalog:",
+    "typescript": "catalog:"
   }
 }

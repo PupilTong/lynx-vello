@@ -17,6 +17,7 @@
     "@lynx-js/rspeedy": "catalog:",
     "@lynx-js/template-webpack-plugin": "catalog:",
     "@lynx-js/types": "catalog:",
-    "@types/react": "18.3.28"
+    "@types/react": "18.3.28",
+    "typescript": "catalog:rspeedy"
   }
 }

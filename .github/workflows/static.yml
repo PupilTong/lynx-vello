@@ -62,7 +62,10 @@ jobs:
         id: pages
         uses: actions/configure-pages@v5
 
-      - name: Build threaded wasm-bindgen bindings
+      - name: Build threaded wasm-bindgen bindings and the TypeScript facade
+        # wasm-pack first, then TypeScript 7 emits `dist/`: the Workers are
+        # typed against the glue wasm-pack generates, so this is where they
+        # are checked.
         run: pnpm --filter bobcat-wasm build
 
       - name: Verify shared-memory and npm artifacts

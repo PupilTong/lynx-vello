@@ -1,0 +1,12 @@
+{
+  "$schema": "https://www.schemastore.org/tsconfig",
+  // The Rstest program, and the package's Node scripts. It runs on Node and
+  // imports the sources by relative path; the `paths` it inherits resolve
+  // the sources' own `bobcat:*` imports, and `native.d.ts` declares the two
+  // native modules.
+  "extends": "../src/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["*.ts", "../src/*.d.ts", "../rstest.config.ts", "../scripts/*.ts"]
+}

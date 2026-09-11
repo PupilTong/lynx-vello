@@ -121,20 +121,20 @@ QuickJS preloaded ESM graph — bobcat-main's runtime
     │      └──▶ bobcat-internal:host.createDocument
     │            └──▶ DocumentIngredients ──▶ private dom::Document<()> tree
     └──▶ await import(resolved entry MTS URL)
-          ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.mjs)
+          ├──▶ bobcat:runtime (packages/bobcat-element/src/main-thread-runtime.ts)
           │     ├── named compatibility exports + engine EventTarget
           │     ├──▶ bobcat:cross-thread-context (MTS getJSContext)
-          │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.mjs)
-          ├──▶ bobcat-internal (explicit import; Worker class in worker.mjs)
+          │     └──▶ bobcat:event-target (packages/bobcat-element/src/event-target.ts)
+          ├──▶ bobcat-internal (explicit import; Worker class in worker.ts)
           │     ├──▶ bobcat:event-target
           │     └──▶ bobcat-internal:host (createWorker, sendWorkerMessage, terminateWorker)
-          └──▶ bobcat:element (packages/bobcat-element/src/element-papi.mjs)
+          └──▶ bobcat:element (packages/bobcat-element/src/element-papi.ts)
                 └──▶ bobcat-internal:host (native named function exports)
                       └──▶ the document created above
 
 QuickJS preloaded ESM graph — the group's worker runtime, on bobcat-workers
   bobcat:worker-boot (one per live worker, evaluated, never registered)
-    ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.mjs)
+    ├──▶ bobcat:worker (packages/bobcat-element/src/worker-runtime.ts)
     │     ├── the global scope: self, postMessage, close, name, onmessage
     │     ├──▶ bobcat:event-target
     │     └──▶ bobcat-internal:worker (postWorkerMessage, closeWorker)

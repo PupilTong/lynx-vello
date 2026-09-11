@@ -14,7 +14,7 @@
 //! signals through `postMessage` echoes on the event loop; a restore waits
 //! on them with `Atomics.wait`, which a dedicated Worker may do and a main
 //! thread may not — which is why the main thread is the side that never
-//! waits. Its half of the protocol is `image-decoder.js`, shipped by
+//! waits. Its half of the protocol is `js/image-decoder.ts`, shipped by
 //! `bobcat-wasm`.
 
 use std::cell::{Cell, RefCell};
