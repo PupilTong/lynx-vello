@@ -102,7 +102,7 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
     }
 }
 
-/// One source requested by the document owner. Resolution belongs to the fetcher.
+/// One source requested by a view or worker realm. Resolution belongs to the fetcher.
 #[derive(Debug)]
 pub enum SourceRequest {
     StyleSheet(String),
@@ -115,6 +115,10 @@ pub enum SourceRequest {
     },
     /// A normalized module URL, loaded after an import discovers it.
     Module(String),
+    /// Native Script or JSON text, returned as `LoadedSource::Entry`.
+    /// The caller supplies the locator; resolution and UTF-8 validation belong
+    /// to the fetcher. This request does not parse JSON or evaluate a Script.
+    Script(String),
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
@@ -124,9 +128,9 @@ pub enum StyleSheetSource {
     Text(String),
 }
 
-/// A loaded source. `Entry` carries JavaScript for a main entry, imported
-/// module or worker script, including its final response URL. The completion
-/// routes it to the runtime that requested it.
+/// A loaded source. `Entry` carries UTF-8 text for a main entry, imported
+/// module, worker script, or native Script/JSON read, with its response URL.
+/// The completion routes it to the runtime that requested it.
 #[derive(Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
@@ -182,12 +186,12 @@ impl SourceCompletion {
         }
     }
 
-    /// Whether the view has ended, or nobody is waiting for this source any
-    /// more.
+    /// Whether the requesting view or worker has ended, or nobody is waiting
+    /// for this source any more.
     ///
-    /// The view's end signal is a cancellation token every completion it hands
-    /// out carries a clone of, cancelled by the embedder's release or a fatal
-    /// event, or by the view's own end. Reading it takes a mutex, so it is
+    /// Each completion carries its requester's cancellation token. A worker
+    /// uses a child of its view's token, so worker termination, view release,
+    /// and fatal view failure all cancel its source work. Reading it takes a mutex, so it is
     /// asked once per decision rather than per byte. Cancellation is
     /// cooperative: an IO operation already running may finish, but its result
     /// is discarded.

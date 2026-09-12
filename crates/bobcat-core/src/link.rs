@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
+use std::time::Duration;
 
 use dom::scroll::ScrollAxes;
 use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
@@ -77,6 +78,36 @@ impl SourceRequester {
         {
             self.requester.request_event();
         }
+    }
+
+    /// Native Script reads keep their JavaScript stack until the host answers.
+    /// Only the completion and cancellation futures are polled here: no nested
+    /// executor, Promise checkpoint or sibling realm can run under that stack.
+    pub(crate) fn request_blocking(
+        &self,
+        request: SourceRequest,
+        timeout: Duration,
+    ) -> Result<LoadedSource, String> {
+        if self.token.is_cancelled() {
+            return Err("source request cancelled".to_owned());
+        }
+        let deadline = ClockInstant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "source timeout is out of range".to_owned())?;
+        let answer = self.request(request);
+        block_on_deadline(
+            async {
+                tokio::select! {
+                    biased;
+                    () = self.token.cancelled() => Err("source request cancelled".to_owned()),
+                    result = answer => result
+                        .map_err(|_| "the fetcher dropped the request".to_owned())?
+                        .map_err(|error| error.to_string()),
+                }
+            },
+            deadline,
+        )
+        .unwrap_or_else(|| Err("timeout".to_owned()))
     }
 }
 
@@ -468,9 +499,8 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
 
 /// Polls `future` on this thread until it is ready or `deadline` passes.
 ///
-/// The one place a host's own thread blocks on `bobcat-main`, reached from
-/// `tick` and from the crate's tests. It parks rather than spins, and it
-/// takes the clock explicitly because `std::time` is not available on every
+/// Used by host frame waits and synchronous worker source reads. It parks
+/// rather than spins, and takes the clock explicitly because `std::time` is not available on every
 /// target this engine runs on.
 ///
 /// The future is polled *unconstrained*: tokio's cooperative budget would

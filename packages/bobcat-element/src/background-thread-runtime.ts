@@ -5,11 +5,11 @@ import {
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
+import { requestScript } from "bobcat-internal:worker";
 import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 
-// The bobcat:bts bootstrap and the BTS application's entry preamble import
-// this runtime. Like MTS, lynx is a module binding, never a global property.
-// Application module loading through ResourceFetcher remains pending.
+// The bobcat:bts bootstrap and BTS applications import this runtime.
+// Like MTS, lynx is a module binding, never a global property.
 const scope = globalThis as unknown as WorkerGlobalScope;
 
 const coreContext = createCrossThreadContext();
@@ -107,6 +107,24 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
   try { scope.postMessage({bobcat: "runtime", method: "nodeQuery", operation, token, params, id}); }
   catch (error) { if (id !== undefined) callbacks.delete(id); throw error; }
 };
+
+type ScriptCallback = (error: string | null, source: string) => void;
+const scriptCallbacks = new Map<string, ScriptCallback>();
+let nextScriptId = 1;
+
+/** Internal source transport; compiled module execution belongs to its caller. */
+export function __BobcatRequestScript(path: string, callback: ScriptCallback) {
+  const id = String(nextScriptId++);
+  scriptCallbacks.set(id, callback);
+  try { requestScript(id, path); }
+  catch (error) { scriptCallbacks.delete(id); throw error; }
+}
+
+export function __BobcatCompleteScript(id: string, error: string | null, source: string) {
+  const callback = scriptCallbacks.get(id);
+  try { callback?.(error, source); }
+  finally { scriptCallbacks.delete(id); }
+}
 
 const nativeApp = {
   callLepusMethod(

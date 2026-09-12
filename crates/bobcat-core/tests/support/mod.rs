@@ -216,7 +216,9 @@ impl FetcherDouble {
     pub fn load_source(&self, request: SourceRequest) -> Result<LoadedSource, LynxViewError> {
         let (specifier, style_sheet, base_url) = match request {
             SourceRequest::StyleSheet(url) => (url, true, None),
-            SourceRequest::Entry(url) | SourceRequest::Module(url) => (url, false, None),
+            SourceRequest::Entry(url) | SourceRequest::Module(url) | SourceRequest::Script(url) => {
+                (url, false, None)
+            }
             SourceRequest::Worker {
                 specifier,
                 base_url,

@@ -531,11 +531,12 @@ Workers use the same asynchronous ESM loader as main. Each discovered module
 gets a source completion on the view's existing host channel; its final response
 URL becomes the base for dependencies. A per-worker boot watch gates posted
 messages until entry settlement, while module completions and timers continue.
-Cancellation follows the worker's child token; source completions never travel
-through the MTS realm. Handled import failures leave the worker usable; a BTS
-startup failure reaches the MTS failure binding. Native Script/JSON reads remain
-a later layer. The runtime cost remains one worker realm per view, with no
-additional OS thread or runtime.
+Native Script/JSON reads use that channel too, with callbacks retained in JS
+and a bounded synchronous wait when requested. Cancellation follows the
+worker's child token; source completions never travel through the MTS realm.
+See [Worker resource loading](worker-resources-runtime.md) for the API, failure
+semantics, and the shared-worker-thread cost of synchronous reads. The runtime
+cost remains one worker realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` return stable
 `CrossThreadContext extends EventTarget` instances. Their native Lynx contract

@@ -102,6 +102,19 @@ impl View {
             _ => panic!("a worker only requests module sources"),
         }
     }
+
+    fn native_script(&mut self) -> (String, SourceCompletion) {
+        match block_on_deadline(self.sources.recv(), ClockInstant::now() + PATIENCE)
+            .flatten()
+            .expect("the worker requested a native Script")
+        {
+            ViewNotice::RequestSource {
+                request: SourceRequest::Script(path),
+                completion,
+            } => (path, completion),
+            _ => panic!("expected a native Script source request"),
+        }
+    }
 }
 
 /// One group's worker thread, with the test on both of its ends.
@@ -551,6 +564,209 @@ fn releasing_a_view_cancels_its_workers_import_requests_immediately() {
         source: String::new(),
         url: "app:///pending.js".to_owned(),
     }));
+}
+
+#[test]
+fn synchronous_native_script_failure_can_be_caught_and_retried_without_poisoning_boot() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import {readScript} from 'bobcat-internal:worker';
+        try { readScript('retry.js'); throw Error('missing script succeeded'); }
+        catch (error) {
+            if (!error.message.includes('dropped a source request')) throw error;
+        }
+        postMessage(readScript('retry.js'));
+    ",
+    );
+    let (_, completion) = group.views[0].native_script();
+    drop(completion);
+    let (path, completion) = group.views[0].native_script();
+    assert_eq!(path, "retry.js");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "17".to_owned(),
+        url: "app:///retry.js".to_owned(),
+    }));
+    assert_eq!(group.views[0].message(), r#"["17"]"#);
+}
+
+#[test]
+fn synchronous_native_json_timeout_discards_late_source_and_allows_retry() {
+    let mut group = Group::new();
+    let started = ClockInstant::now();
+    group.start(
+        r"
+        import {readScript} from 'bobcat-internal:worker';
+        try { readScript('slow.json', 1.9); }
+        catch (error) { postMessage(error.message.includes('timeout')); }
+        postMessage(JSON.parse(readScript('slow.json')));
+    ",
+    );
+    let (_, late) = group.views[0].native_script();
+    assert_eq!(group.views[0].message(), "[true]");
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(late.is_cancelled());
+    let (_, completion) = group.views[0].native_script();
+    late.complete(Ok(LoadedSource::Entry {
+        source: "0".to_owned(),
+        url: "app:///slow.json".to_owned(),
+    }));
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "42".to_owned(),
+        url: "app:///slow.json".to_owned(),
+    }));
+    assert_eq!(group.views[0].message(), "[42]");
+}
+
+#[test]
+fn cancelling_a_view_unblocks_a_synchronous_script_read_and_the_other_views_workers() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import {readScript} from 'bobcat-internal:worker';
+        try { readScript('pending.json', 60); }
+        catch (_) {}
+    ",
+    );
+    let (_, completion) = group.views[0].native_script();
+    assert!(!completion.is_cancelled());
+    group.views[0].token.cancel();
+    assert!(completion.is_cancelled());
+    let sibling = group.construct(1, "sibling");
+    group.answer(sibling, "app:///sibling.js", "postMessage('still running')");
+    let event = block_on_deadline(
+        group.views[1].incoming.recv(),
+        ClockInstant::now() + Duration::from_secs(2),
+    )
+    .flatten()
+    .expect("cancellation wakes the read without waiting for its timeout");
+    assert!(
+        matches!(event.payload, WorkerPayload::Message(data) if data == r#"["still running"]"#)
+    );
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "throw Error('cancelled source ran')".to_owned(),
+        url: "app:///pending.json".to_owned(),
+    }));
+}
+
+#[test]
+fn synchronous_script_and_json_reads_do_not_run_jobs_under_the_calling_stack() {
+    let mut group = Group::new();
+    group.start(
+        r"
+        import {readScript} from 'bobcat-internal:worker';
+        const order = [];
+        Promise.resolve().then(() => order.push('job'));
+        setTimeout(() => postMessage(order), 0);
+        order.push(eval(readScript('external.js')));
+        order.push(JSON.parse(readScript('external.json')).value);
+        postMessage(order);
+    ",
+    );
+    for (path, source) in [
+        ("external.js", "21 * 2"),
+        ("external.json", r#"{"value":7}"#),
+    ] {
+        let (requested, completion) = group.views[0].native_script();
+        assert_eq!(requested, path);
+        completion.complete(Ok(LoadedSource::Entry {
+            source: source.into(),
+            url: format!("app:///{path}"),
+        }));
+    }
+    assert_eq!(group.message(0), "[[42,7]]");
+    assert_eq!(group.message(0), r#"[[42,7,"job"]]"#);
+}
+
+#[test]
+fn async_script_failures_can_retry_during_tla_before_queued_messages_run() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        import {__BobcatRequestScript as request} from 'bobcat:bts-runtime';
+        const value = await new Promise(resolve => request('external.js', (error) => {
+            if (!error) throw Error('missing source succeeded');
+            request('external.json', (error, source) => {
+                if (error) throw Error(error);
+                resolve(JSON.parse(source).value);
+            });
+        }));
+        onmessage = event => postMessage([value, event.data]);
+    ",
+    );
+    group.post(worker, "queued");
+    let (_, completion) = group.views[0].native_script();
+    drop(completion);
+    let (path, completion) = group.views[0].native_script();
+    assert_eq!(path, "external.json");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: r#"{"value":42}"#.into(),
+        url: "app:///external.json".into(),
+    }));
+    assert_eq!(group.message(0), r#"[[42,"queued"]]"#);
+}
+
+#[test]
+fn async_script_callbacks_stay_in_the_requesting_realm_and_throws_are_nonfatal() {
+    let mut group = Group::new();
+    for label in ["A", "B"] {
+        group.start(&format!(
+            r"
+            import {{__BobcatRequestScript as request}} from 'bobcat:bts-runtime';
+            globalThis.label = '{label}';
+            request('shared.js', (error, source) => {{
+                if (error) throw Error(error);
+                postMessage(eval(source));
+                throw Error('callback ' + label);
+            }});
+        "
+        ));
+    }
+    let (_, first) = group.views[0].native_script();
+    let (_, second) = group.views[0].native_script();
+    for completion in [second, first] {
+        completion.complete(Ok(LoadedSource::Entry {
+            source: "globalThis.label".into(),
+            url: "app:///shared.js".into(),
+        }));
+    }
+    let mut values = Vec::new();
+    let mut errors = Vec::new();
+    for _ in 0..4 {
+        match group.next(0).payload {
+            WorkerPayload::Message(value) => values.push(value),
+            WorkerPayload::Errored(error) => errors.push(error.message),
+            _ => panic!("a callback throw does not end its worker"),
+        }
+    }
+    values.sort();
+    assert_eq!(values, [wire("A"), wire("B")]);
+    assert_eq!(errors.len(), 2);
+    assert!(errors.iter().any(|error| error.contains("callback A")));
+    assert!(errors.iter().any(|error| error.contains("callback B")));
+    group.quiet();
+}
+
+#[test]
+fn terminating_during_tla_cancels_pending_script_reads_and_discards_late_answers() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        import {__BobcatRequestScript as request} from 'bobcat:bts-runtime';
+        await new Promise(resolve => request('pending.js', () => {
+            postMessage('must not run'); resolve();
+        }));
+    ",
+    );
+    let (_, completion) = group.views[0].native_script();
+    group.terminate(worker);
+    group.wait_for_workers_to_end(0, PATIENCE, "terminate must not wait for TLA");
+    assert!(completion.is_cancelled());
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "late".into(),
+        url: "app:///pending.js".into(),
+    }));
+    group.quiet();
 }
 
 #[test]

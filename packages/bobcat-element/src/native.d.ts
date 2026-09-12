@@ -102,6 +102,8 @@ interface BobcatNative {
  * worker has no tree to mutate.
  */
 interface BobcatWorkerNative {
+  requestScript(id: string, path: string): void;
+  readScript(path: string, timeout: number): string;
   /** Hands one JSON-encoded message back to the realm that created us. */
   postWorkerMessage(data: string): void;
   /**
@@ -149,6 +151,8 @@ declare module "bobcat-internal:host" {
 }
 
 declare module "bobcat-internal:worker" {
+  export const requestScript: BobcatWorkerNative["requestScript"];
+  export const readScript: BobcatWorkerNative["readScript"];
   export const postWorkerMessage: BobcatWorkerNative["postWorkerMessage"];
   export const closeWorker: BobcatWorkerNative["closeWorker"];
 }

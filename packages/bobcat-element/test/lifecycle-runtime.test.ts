@@ -16,6 +16,8 @@ rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
 const notifyReady = rstest.fn();
 const reportStartupFailure = rstest.fn();
+const requestedScripts = rstest.fn();
+rstest.mockRequire("bobcat-internal:worker", () => ({ requestScript: requestedScripts }));
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
@@ -444,4 +446,39 @@ it("declares readiness through the native binding when BTS acknowledges completi
 it("forwards BTS startup failures through the native binding without throwing in the listener", () => {
   expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
   expect(reportStartupFailure).toHaveBeenCalledExactlyOnceWith("BTS entry failed");
+});
+
+
+describe("BTS Script source callbacks", () => {
+  it("matches out-of-order responses and releases completed callbacks", async () => {
+    const runtime = await import("../src/background-thread-runtime.ts");
+    requestedScripts.mockClear();
+    const first = rstest.fn();
+    const second = rstest.fn();
+    runtime.__BobcatRequestScript("first.js", first);
+    runtime.__BobcatRequestScript("second.json", second);
+    const [firstId, firstPath] = requestedScripts.mock.calls[0] ?? [];
+    const [secondId, secondPath] = requestedScripts.mock.calls[1] ?? [];
+    expect([firstPath, secondPath]).toEqual(["first.js", "second.json"]);
+    runtime.__BobcatCompleteScript(secondId, null, '{"value":42}');
+    runtime.__BobcatCompleteScript(firstId, "failed", "");
+    runtime.__BobcatCompleteScript(firstId, null, "late");
+    expect(first.mock.calls).toEqual([["failed", ""]]);
+    expect(second.mock.calls).toEqual([[null, '{"value":42}']]);
+  });
+
+  it("releases callbacks when delivery or the native request throws", async () => {
+    const runtime = await import("../src/background-thread-runtime.ts");
+    requestedScripts.mockClear();
+    const callback = rstest.fn(() => { throw Error("callback failed"); });
+    runtime.__BobcatRequestScript("throws.js", callback);
+    const id = requestedScripts.mock.calls[0]?.[0];
+    expect(() => runtime.__BobcatCompleteScript(id, null, "source")).toThrow("callback failed");
+    runtime.__BobcatCompleteScript(id, null, "late");
+    expect(callback).toHaveBeenCalledTimes(1);
+    requestedScripts.mockImplementationOnce(() => { throw Error("request failed"); });
+    expect(() => runtime.__BobcatRequestScript("missing.js", callback)).toThrow("request failed");
+    runtime.__BobcatCompleteScript(requestedScripts.mock.calls[1]?.[0], null, "late");
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
 });
