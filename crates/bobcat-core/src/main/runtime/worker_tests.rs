@@ -195,6 +195,17 @@ impl Pair {
             )
             .unwrap();
     }
+    /// Release the creating realm and wait for every worker owner to return.
+    /// Keep the receiver so tests can observe final BTS cleanup after release.
+    fn finish(&mut self) -> Vec<WorkerEvent> {
+        drop(self.runtime.take());
+        drop(self.home.take());
+        let mut events = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            events.push(event);
+        }
+        events
+    }
 }
 
 /// Whether any notice reports a worker failure with this message.
@@ -1627,4 +1638,94 @@ fn a_throwing_native_render_hook_reports_without_failing_bts_startup() {
     assert!(pair.notices().iter().any(|notice| matches!(notice,
         ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. })
         if message.contains("render hook failed"))));
+}
+
+#[test]
+fn releasing_a_view_calls_its_current_bts_destroy_hook_once_and_drains_jobs() {
+    for cancel_first in [false, true] {
+        for throws in [false, true] {
+            let mut pair = Pair::with_background(
+                "",
+                Some(&format!(
+                    r"
+                    import {{__BobcatDestroyBTS}} from 'bobcat:bts-runtime';
+                    const app = lynx.getApp();
+                    app.callDestroyLifetimeFun = () => postMessage('stale-hook');
+                    app.callDestroyLifetimeFun = function(...args) {{
+                        postMessage(['cleanup', this === app, args.length]);
+                        __BobcatDestroyBTS();
+                        Promise.resolve().then(() => postMessage('cleanup-job'));
+                        setTimeout(() => postMessage('cleanup-timer'), 0);
+                        import('app:///after-release.js').then(() => postMessage('cleanup-import'));
+                        if ({throws}) throw Error('cleanup failed');
+                    }};
+                    postMessage('ready');
+                    "
+                )),
+            );
+            assert!(matches!(pair.next_event().unwrap().payload,
+                WorkerPayload::Message(ref value) if value == r#"["ready"]"#));
+            let mut observed = Vec::new();
+            if cancel_first {
+                // No main-thread turn or dropped channel is needed for cleanup.
+                pair.cancel.cancel();
+                observed.push(pair.next_event().expect("BTS ends on the view token"));
+            }
+            observed.extend(pair.finish());
+            let mut messages = Vec::new();
+            let mut errors = Vec::new();
+            for event in observed {
+                match event.payload {
+                    WorkerPayload::Message(value) => {
+                        let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+                        // Protocol messages are separate from the hook observations.
+                        if !value[0].is_object() {
+                            messages.push(value);
+                        }
+                    }
+                    WorkerPayload::Errored(error) => errors.push(error),
+                    WorkerPayload::Failed(error) => panic!("BTS failed: {}", error.message),
+                    WorkerPayload::Closed => panic!("BTS closed during cleanup"),
+                }
+            }
+            assert_eq!(
+                messages,
+                [
+                    serde_json::json!([["cleanup", true, 0]]),
+                    serde_json::json!(["cleanup-job"])
+                ]
+            );
+            assert_eq!(errors.len(), usize::from(throws));
+            if throws {
+                assert!(errors[0].message.contains("cleanup failed"));
+            }
+            assert!(
+                !pair.notices().iter().any(|notice| matches!(notice,
+                ViewNotice::RequestSource { request: SourceRequest::Module(url), .. }
+                if url == "app:///after-release.js")),
+                "cleanup does not start resource work"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_name() {
+    let mut pair = Pair::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        globalThis.worker = new Worker('./worker.js', {name:'lynx-bg'});
+    ",
+    );
+    pair.answer(
+        r"
+        import {lynx} from 'bobcat:bts-runtime';
+        lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
+        postMessage('ready');
+    ",
+    );
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if value == r#"["ready"]"#));
+    pair.check("worker.terminate();");
+    assert!(pair.finish().is_empty());
 }

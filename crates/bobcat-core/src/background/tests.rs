@@ -154,6 +154,10 @@ impl Group {
     /// realm's other half of a construction — asking the host to fetch — is
     /// what the test does by hand in [`Self::answer`].
     fn construct(&mut self, view: usize, name: &str) -> WorkerKey {
+        self.construct_with_role(view, name, false)
+    }
+
+    fn construct_with_role(&mut self, view: usize, name: &str, background: bool) -> WorkerKey {
         let key = WorkerKey::new(self.next_key.get());
         self.next_key.set(key.get() + 1);
         let (script, awaiting) = oneshot::channel();
@@ -167,6 +171,7 @@ impl Group {
         );
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
+            background,
             name: name.to_owned(),
             script: awaiting,
             messages: incoming,
@@ -804,4 +809,75 @@ fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
         }
     }
     group.quiet();
+}
+
+#[test]
+fn bts_destroy_runs_during_an_unfinished_entry_and_leaves_siblings_usable() {
+    let mut group = Group::new();
+    let bts = group.construct_with_role(0, "lynx-bg", true);
+    group.answer(
+        bts,
+        "app:///bts.js",
+        r"
+        import {lynx} from 'bobcat:bts-runtime';
+        lynx.getApp().callDestroyLifetimeFun = () => {
+            postMessage('cleanup');
+            Promise.resolve().then(() => postMessage('cleanup-job'));
+            throw Error('destroy pending app');
+        };
+        await import('./pending.js');
+        postMessage('late entry');
+    ",
+    );
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///pending.js");
+    group.cancel(0);
+    group.wait_for_workers_to_end(0, PATIENCE, "BTS cleanup ends without its pending import");
+    assert!(completion.is_cancelled());
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "postMessage('late module');".into(),
+        url,
+    }));
+    assert_eq!(group.message(0), wire("cleanup"));
+    assert_eq!(group.message(0), wire("cleanup-job"));
+    assert!(
+        matches!(group.next(0).payload, WorkerPayload::Errored(ref error)
+        if error.message.contains("destroy pending app"))
+    );
+    assert!(group.views[0].incoming.try_recv().is_err());
+
+    let sibling = group.construct(1, "survivor");
+    group.answer(
+        sibling,
+        "app:///sibling.js",
+        r"
+        Promise.resolve().then(() => postMessage('sibling-job'));
+        setTimeout(() => postMessage('sibling-timer'), 0);
+        onmessage = () => postMessage('sibling-message');
+    ",
+    );
+    assert_eq!(group.message(1), wire("sibling-job"));
+    assert_eq!(group.message(1), wire("sibling-timer"));
+    group.post(sibling, "ping");
+    assert_eq!(group.message(1), wire("sibling-message"));
+    assert!(group.views[0].incoming.try_recv().is_err());
+}
+
+#[test]
+fn bts_cancelled_before_its_source_arrives_does_not_open_a_realm_to_destroy() {
+    let mut group = Group::new();
+    let bts = group.construct_with_role(0, "lynx-bg", true);
+    group.cancel(0);
+    group.wait_for_workers_to_end(0, PATIENCE, "an unstarted BTS ends");
+    group.answer(
+        bts,
+        "app:///bts.js",
+        r"
+        import {lynx} from 'bobcat:bts-runtime';
+        lynx.getApp().callDestroyLifetimeFun = () => postMessage('cleanup');
+        postMessage('boot');
+    ",
+    );
+    assert!(group.views[0].incoming.try_recv().is_err());
+    assert!(group.views[0].sources.try_recv().is_err());
 }

@@ -549,6 +549,12 @@ useful signal for currently-compatible versions of those libraries.
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
   `bobcat:bts` imports `lynx` from `bobcat:bts-runtime` and, when
   `ViewSources.background_entry` is supplied, executes `await import(entry)`.
+  The creator marks the built-in BTS role independently of the Worker name.
+  View release stops ordinary tasks, calls its current app destruction hook
+  once while the realm is live, drains Promise jobs and then releases the realm.
+  Explicit destroy shares this guard; reload retains it. Object observers use
+  JS `FinalizationRegistry` directly, with late jobs suppressed after app
+  destruction; there is no Rust idle scheduler. See `docs/destruction-runtime.md`.
   Raw BTS application entries explicitly import their bindings from
   `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
   Keeping the runtime separate lets the app import its bindings without a
@@ -595,7 +601,7 @@ useful signal for currently-compatible versions of those libraries.
   containing target/currentTarget `dataset`, `id` and `uid`, never handles.
   Current PAPI elements have no component metadata and use `publishEvent`;
   explicit component calls preserve the supplied ID. An explicit JS engine
-  `__DestroyLifetime` event forwards to BTS `callDestroyLifetimeFun` as a
+  `__DestroyLifetime` event forwards to the once-only BTS destruction export as a
   framework hook only. It does not terminate a Worker, clear pending native-app
   callbacks or release Rust objects; Rust lifetime management stays unchanged.
   `bobcat-main` builds the group's one `dom::StylePool` — sized by the
