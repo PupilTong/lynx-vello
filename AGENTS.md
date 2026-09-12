@@ -743,8 +743,9 @@ useful signal for currently-compatible versions of those libraries.
   `__RemoveElement`, `__ReplaceElement`, `__ReplaceElements`,
   `__SwapElement`), the property surface a Snapshot's `create`/`update`
   functions write through (`__SetClasses`, `__SetID`, `__SetAttribute`,
-  `__SetInlineStyles`) with the queries that read it back
-  (`__GetID`, `__GetTag`, `__GetElementUniqueID`), the listener surface
+  `__SetInlineStyles`, `__AddInlineStyle`, `__SetDataset`, `__AddDataset`)
+  with the queries that read it back
+  (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetDataset`), the listener surface
   (`__AddEventListener`, `__RemoveEventListener`, `__StopPropagation`,
   `__StopImmediatePropagation`), and `__FlushElementTree`;
   `__SetInlineStyles` keeps the whole-value policy in JavaScript: a string is
@@ -759,8 +760,9 @@ useful signal for currently-compatible versions of those libraries.
   The host operation implements the name/value subset of CSSOM
   `style.setProperty` (there is no priority argument, so an embedded
   `!important` is invalid) and intentionally has no numeric-style-id variant:
-  numeric Lynx property ids belong to the
-  separate, still-unimplemented `__AddInlineStyle` surface, not this PAPI;
+  `__AddInlineStyle` updates one named property in the existing block and
+  removes it for empty/nullish values; numeric Lynx CSS property IDs remain
+  unsupported on both surfaces;
   unsupported globals remain precise `ReferenceError`s, including
   `__DropElement`, which no web-core generation has.
   `__CreateList` consumes only its numeric parent-component argument for now;
@@ -1299,7 +1301,7 @@ useful signal for currently-compatible versions of those libraries.
   class as `bobcat-internal`. The group's *worker* runtime gets
   `src/worker-runtime.ts` as `bobcat:worker` and
   `src/background-thread-runtime.ts` as `bobcat:bts-runtime`, plus
-  `bobcat:event-target`, `bobcat:cross-thread-context` and
+  `bobcat:selector-query`, `bobcat:event-target`, `bobcat:cross-thread-context` and
   `bobcat:timers` again — registered per runtime, because a source is
   runtime-wide and no value crosses between two runtimes. What core embeds,
   with `include_str!`, is the JavaScript TypeScript 7 compiles from `src/*.ts`
@@ -1318,8 +1320,18 @@ useful signal for currently-compatible versions of those libraries.
   (`wrapper`/`text`/`image`/`view`/`scroll-view`/`raw-text`/
   `list`). It also owns the value coercions web-core gets from the HTML DOM for
   free: truthiness-not-null clearing for classes, ids, and inline styles,
-  `String(value)` for every attribute, and camelCase-to-kebab hyphenation of a
-  record-shaped inline style. It also owns the event half: a handle is an `EventTarget`, its
+  `String(value)` for DOM attributes, and camelCase-to-kebab hyphenation of a
+  record-shaped inline style. Lynx attribute readback retains a separate typed
+  container copy, and datasets merge typed keys in the MTS handle. BTS
+  `lynx.createSelectorQuery()` builds `NodesRef` tasks carrying selection tokens
+  over the existing Worker messages. MTS resolves those through the document's
+  selector engine, including the query root, and returns fields/path data;
+  `setNativeProps` applies CSS/attributes and commits before the next request.
+  `invoke` delivers selection and unsupported-method failures; actual UI methods
+  remain unimplemented. No callback or document handle crosses into Rust's
+  Worker transport. See `docs/node-query-runtime.md` for the supported fields,
+  callback semantics and remaining boundaries.
+  The package also owns the event half: a handle is an `EventTarget`, its
   listeners are closures filed on the handle itself under a realm-local
   symbol — so a registration can never keep its element alive, and QuickJS's
   non-ephemeron `WeakMap` never gets the chance to — and the per-node

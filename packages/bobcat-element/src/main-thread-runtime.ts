@@ -27,6 +27,8 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
+import { __BobcatQueryNodes } from "bobcat:element";
+import type { NodeQueryRequest } from "bobcat:selector-query";
 import { globalProps, initData } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
@@ -39,7 +41,7 @@ type ToBackground =
   | ContextEvent
   | { bobcat: "runtime"; method: string; [field: string]: unknown };
 
-/** The one runtime call the BTS Worker makes of this realm. */
+/** A named call the BTS Worker makes of this realm. */
 type LepusMethodCall = {
   bobcat: "runtime";
   method: "callLepusMethod";
@@ -49,10 +51,10 @@ type LepusMethodCall = {
 };
 
 /**
- * What the BTS Worker sends this realm: that call, or a Context event's
- * public fields, which carry no `bobcat` tag.
+ * What the BTS Worker sends this realm: a named call, a node query, or a
+ * Context event's public fields, which carry no `bobcat` tag.
  */
-type FromBackground = LepusMethodCall | (ContextEvent & { bobcat?: never });
+type FromBackground = LepusMethodCall | NodeQueryRequest | (ContextEvent & { bobcat?: never });
 
 function noop() {
   return undefined;
@@ -118,7 +120,18 @@ export function __BobcatConnectBackground(worker: Worker) {
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
     if (message?.bobcat === "runtime") {
-      if (message.method === "callLepusMethod") {
+      if (message.method === "nodeQuery") {
+        try {
+          const result = __BobcatQueryNodes(message);
+          if (message.id !== undefined) sendToBackground({bobcat: "runtime", method: "nodeQueryResult", id: message.id, result});
+        }
+        catch (error) {
+          _ReportError(error);
+          const status = {code: 1, data: String(error)};
+          const result = message.operation === "invoke" ? status : {status, data: message.token.first_only ? null : []};
+          if (message.id !== undefined) sendToBackground({bobcat: "runtime", method: "nodeQueryResult", id: message.id, result});
+        }
+      } else if (message.method === "callLepusMethod") {
         void callLepusMethod(message);
       }
     } else {
@@ -202,7 +215,7 @@ export function _AddEventListener() {
   return undefined;
 }
 
-export function _ReportError() {
+export function _ReportError(_error?: unknown) {
   return undefined;
 }
 

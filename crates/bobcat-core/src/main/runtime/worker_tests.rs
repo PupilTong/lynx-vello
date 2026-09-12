@@ -243,11 +243,13 @@ fn string_handlers_reach_background_with_event_snapshots() {
         const child = __CreateView(0);
         __SetID(child, 'button');
         __SetAttribute(child, 'data-item-name', 'first');
+        __SetDataset(child, {count:7, nested:{value:'before'}});
         __AppendElement(page, child);
         __AddEvent(page, 'bindEvent', 'tap', 'opaque:root');
         __AddEvent(child, 'bindEvent', 'tap', '');
         __AddEventListener(child, 'tap', e => {
             e.detail.answer = 99;
+            __AddDataset(child, 'nested', {value:'after'});
             __SetID(child, 'changed');
         });
         ",
@@ -280,6 +282,8 @@ fn string_handlers_reach_background_with_event_snapshots() {
         const e = child[1];
         if (e.target.id !== 'button' || e.currentTarget.uid !== 3 ||
             e.target.dataset.itemName !== 'first' || e.detail.answer !== 42 ||
+            e.target.dataset.count !== 7 || e.target.dataset.nested.value !== 'before' ||
+            page[1].target.dataset.nested.value !== 'after' ||
             'elementRefptr' in e.target || 'stopPropagation' in e ||
             page[1].currentTarget.uid !== 2) throw Error(JSON.stringify(results));
         ",
@@ -945,4 +949,146 @@ fn a_rejected_main_entry_never_starts_its_background_context() {
     drop(pair.runtime.take());
     drop(pair.home.take());
     assert!(pair.events.try_recv().is_err());
+}
+
+#[test]
+fn bts_node_queries_read_real_nodes_and_retain_native_tokens_and_statuses() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        const parent = __CreateView(); __SetID(parent, 'scope');
+        const first = __CreateView(); __SetID(first, 'first'); __SetClasses(first, 'item marked');
+        __SetAttribute(first, 'count', 7);
+        const details = {nested:{value:1}};
+        __SetAttribute(first, 'details', details); details.nested.value = 2;
+        __SetAttribute(first, 'callback', () => {});
+        __SetDataset(first, {value: {n:1}, nil:null});
+        __SetDataset(first, {next:2});
+        const last = __CreateView(); __SetID(last, 'last'); __SetClasses(last, 'item');
+        __AppendElement(page, parent); __AppendElement(parent, first); __AppendElement(parent, last);
+        globalThis.results = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { results = event.data; });
+    ",
+        Some(
+            r"
+        void (async () => {
+        const read = (nodes, fields) => new Promise(resolve => nodes.fields(fields, (data, status) => resolve({data,status})).exec());
+        const query = lynx.createSelectorQuery();
+        const scoped = await read(query.select('#scope'), {query:true});
+        const scopeItself = await read(scoped.data.query.select('#scope'), {id:true});
+        const children = await read(scoped.data.query.selectAll('.item'), {
+            id:true, tag:true, class:true, index:true, unique_id:true, attribute:true, dataset:true,
+        });
+        const byId = await read(query.selectUniqueID(children.data[1].unique_id), {id:true});
+        const missing = await read(query.selectAll('.absent'), {id:true});
+        const invalid = await read(query.select('['), {id:true});
+        const path = await new Promise(resolve => query.select('#first').path((data, status) => resolve({data,status})).exec());
+        lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{scopeItself, children, byId, missing, invalid, path}});
+        })();
+    ",
+        ),
+    );
+    // Seven requests and then the application result, delivered through the
+    // same FIFO as React's hydration and patch calls.
+    for _ in 0..8 {
+        pair.deliver();
+    }
+    pair.check(r"
+        const r = results;
+        if (!r || r.children.status.code !== 0 || r.children.data.length !== 2) throw Error(JSON.stringify(r));
+        const first = r.children.data[0];
+        if (r.scopeItself.data.id !== 'scope') throw Error('query must include its root');
+        if (first.id !== 'first' || first.tag !== 'view' || first.index !== 0 || first.class.join(' ') !== 'item marked') throw Error(JSON.stringify(first));
+        if (first.attribute.count !== 7 || 'id' in first.attribute || 'class' in first.attribute) throw Error('attribute value semantics');
+        if (first.attribute.details.nested.value !== 1 || 'callback' in first.attribute) throw Error('attribute snapshot/function semantics');
+        if (first.dataset.value.n !== 1 || first.dataset.nil !== null || first.dataset.next !== 2) throw Error('dataset merge/value semantics');
+        if (r.byId.data.id !== 'last' || r.missing.status.code !== 2 || r.missing.data.length !== 0) throw Error('selection result');
+        if (r.invalid.status.code !== 5 || r.invalid.data !== null) throw Error('invalid selector status');
+        if (r.path.data.map(node => node.id).join('/') !== 'first/scope/') throw Error(JSON.stringify(r.path));
+    ");
+    assert!(!pair.notices().iter().any(|notice| matches!(
+        notice,
+        ViewNotice::Engine(crate::EngineEvent::WorkerFailed(_))
+    )));
+}
+
+#[test]
+fn bts_native_props_mutate_the_document_before_the_next_query() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        globalThis.item = __CreateView(); __SetID(item, 'item');
+        __SetInlineStyles(item, 'width:10px;height:10px;background-color:pink');
+        __AppendElement(page, item);
+        globalThis.result = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
+    ",
+        Some(
+            r"
+        const query = lynx.createSelectorQuery();
+        const props = {width:'20px', 'background-color':'green', role:'changed'};
+        query.select('#item').setNativeProps(props).exec();
+        props.role = 'too-late';
+        query.select('#item').fields({attribute:true}, (data,status) => {
+            lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{data,status}});
+        }).exec();
+    ",
+        ),
+    );
+    for _ in 0..3 {
+        pair.deliver();
+    }
+    pair.check(r"
+        import {__GetAttributeByName} from 'bobcat:element';
+        if (result.status.code !== 0 || result.data.attribute.role !== 'changed') throw Error(JSON.stringify(result));
+        if ('width' in result.data.attribute || 'background-color' in result.data.attribute) throw Error('CSS incorrectly stored as attributes');
+        const style = __GetAttributeByName(item, 'style');
+        if (!style.includes('20px') || !style.includes('10px') || !style.includes('green')) throw Error(style);
+    ");
+    assert!(!pair.notices().iter().any(|notice| matches!(
+        notice,
+        ViewNotice::Engine(crate::EngineEvent::WorkerFailed(_))
+    )));
+}
+
+#[test]
+fn bts_invoke_reports_failures_and_later_queries_still_complete() {
+    let mut pair = Pair::with_background(
+        r"
+        const page = __CreatePage();
+        const item = __CreateView(); __SetID(item, 'item');
+        __AppendElement(page, item);
+        globalThis.result = null;
+        lynx.getJSContext().addEventListener('queryDone', event => { result = event.data; });
+        ",
+        Some(
+            r"
+        void (async () => {
+            const query = lynx.createSelectorQuery();
+            const invoke = nodes => new Promise(resolve => nodes.invoke({
+                method:'boundingClientRect', fail:resolve,
+                success:() => { throw Error('UI method unexpectedly implemented'); },
+            }).exec());
+            const unsupported = await invoke(query.select('#item'));
+            const missing = await invoke(query.select('#absent'));
+            const multiple = await invoke(query.selectAll('view'));
+            const after = await new Promise(resolve => query.select('#item').fields(
+                {id:true}, (data, status) => resolve({data, status}),
+            ).exec());
+            lynx.getCoreContext().dispatchEvent({type:'queryDone', data:{unsupported, missing, multiple, after}});
+        })();
+        ",
+        ),
+    );
+    // The selectAll failure is local. Two invokes and one field request cross
+    // the Worker, followed by the application result.
+    for _ in 0..4 {
+        pair.deliver();
+    }
+    pair.check(r"
+        if (result.unsupported.code !== 1 || !result.unsupported.data.includes('not implemented')) throw Error(JSON.stringify(result));
+        if (result.missing.code !== 2 || result.multiple.code !== 5) throw Error(JSON.stringify(result));
+        if (result.after.status.code !== 0 || result.after.data.id !== 'item') throw Error(JSON.stringify(result));
+    ");
+    assert!(worker_failures(pair.notices()).is_empty());
 }

@@ -4,6 +4,7 @@ import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
+import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
@@ -43,6 +44,7 @@ type FromMainThread =
       result?: unknown;
       error?: { name: string; message: string };
     }
+  | { bobcat: "runtime"; method: "nodeQueryResult"; id?: number; result?: unknown }
   | (ContextEvent & { bobcat?: never });
 
 /**
@@ -83,6 +85,17 @@ function createPublishHandler(name: "publishEvent" | "publicComponentEvent") {
 
 const publishEvent = createPublishHandler("publishEvent");
 const publicComponentEvent = createPublishHandler("publicComponentEvent");
+
+const sendQuery: SendQuery = (operation, token, params, callback) => {
+  // These are native BTS argument checks, before any asynchronous delivery.
+  if (typeof token.identifier !== "string" || typeof token.component_id !== "string") {
+    throw new TypeError("node identifier and component must be strings");
+  }
+  let id;
+  if (callback) { id = nextCallbackId++; callbacks.set(id, callback); }
+  try { scope.postMessage({bobcat: "runtime", method: "nodeQuery", operation, token, params, id}); }
+  catch (error) { if (id !== undefined) callbacks.delete(id); throw error; }
+};
 
 const nativeApp = {
   callLepusMethod(
@@ -149,6 +162,12 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
     case "callDestroyLifetimeFun":
       app.callDestroyLifetimeFun?.call(app);
       break;
+    case "nodeQueryResult": {
+      const callback = callbacks.get(message.id);
+      try { callback?.(message.result); }
+      finally { callbacks.delete(message.id); }
+      break;
+    }
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
@@ -157,6 +176,12 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
 // This is the raw BTS environment's MVP. Loading a compiled ReactLynx BTS
 // bundle also needs Lynx Core's module/init shell, which is not installed here.
 export const lynx = {
+  createSelectorQuery(component?: string) {
+    return new SelectorQuery(sendQuery, error => {
+      // Use the Worker's existing error path until the Lynx reporter is wired.
+      void Promise.reject(error);
+    }, component);
+  },
   getApp() {
     return app;
   },

@@ -16,10 +16,14 @@ import {
   replaceElement,
   setAttribute,
   setInlineStyles,
+  setInlineStyleProperty,
+  supportsStyleProperty,
+  queryElementIds,
   stopPropagation,
   swapElement,
   tagName,
 } from "bobcat-internal:host";
+import type { NodeQueryRequest, QueryNode } from "bobcat:selector-query";
 import { __BobcatPublishEvent } from "bobcat:runtime";
 
 // The Lynx Element PAPI runtime.
@@ -59,6 +63,8 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__GetAttributeNames(element)` | native `attributeNames` export |
 // | `__GetElementUniqueID(element)` | the handle's own node id |  // (= its Lynx unique id)
 // | `__SetInlineStyles(element, value)` | native `setAttribute` / `removeAttribute` / `setInlineStyles` exports |
+// | `__AddInlineStyle(element, property, value)` | native `setInlineStyleProperty`; CSS names, not numeric native IDs |
+// | `__SetDataset` / `__GetDataset` / `__AddDataset` | typed per-element values in this realm |
 // | `__SetCSSId(elements, cssId, entryName?)` | nothing — accepted and ignored |
 // | `__SetAttribute(element, name, value)` | native `setAttribute` / `removeAttribute` exports |
 // | `__UpdateListCallbacks(list, ...)` | this runtime's own store |
@@ -73,12 +79,14 @@ import { __BobcatPublishEvent } from "bobcat:runtime";
 // | `__FlushElementTree()` | native `flushElementTree` export |
 //
 // Everything else — `__CreateFrame`, `__DropElement` (absent from every
-// web-core generation), `__AddClass`, `__AddInlineStyle`, the dataset,
+// web-core generation), `__AddClass`,
 // component-info, config, template-part and animation members, the rest of
 // tree querying (`__GetParent`, `__FirstElement`, `__LastElement`,
 // `__NextElement`, `__ElementIsEqual`, `__GetPageElement`, `__GetAttributes`),
-// selector querying, and list cell recycling — is not implemented. A bundle
+// direct MTS selector PAPI, and list cell recycling — is not implemented. A bundle
 // that reaches for another member fails at the missing global, not silently.
+// BTS SelectorQuery uses the internal `__BobcatQueryNodes` export below;
+// it resolves through the document's existing selector engine.
 //
 // `__SetCSSId` is the one member installed as a sink. It names the author-CSS
 // scope its elements cascade in, and no layer lowers a decoded `StyleInfo`
@@ -373,6 +381,30 @@ interface ListCallbacks {
   enqueueComponent: unknown;
   componentAtIndexes: unknown;
 }
+const datasetSymbol = Symbol("dataset");
+const attributeValuesSymbol = Symbol("attributeValues");
+
+function valuesOf(element: unknown, key: typeof datasetSymbol | typeof attributeValuesSymbol): Map<string, unknown> {
+  nodeIdOf(element);
+  const handle = element as Handle;
+  return handle[key] ??= new Map();
+}
+
+// Native keeps typed attribute/dataset values separately from DOM strings.
+// Copy containers at assignment, retaining local functions as local values;
+// fields() filters function attributes and the BTS transport serializes the
+// remaining result as JSON. Assigning an attribute is not a cross-realm operation.
+function copyElementValue<T>(value: T, copies = new Map<object, unknown>()): T {
+  if (value === null || typeof value !== "object") return value;
+  if (copies.has(value)) return copies.get(value) as T;
+  const result = Array.isArray(value) ? new Array(value.length) : {};
+  copies.set(value, result);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(result, key, {value: copyElementValue(Reflect.get(value, key), copies),
+      enumerable: true, writable: true, configurable: true});
+  }
+  return result as T;
+}
 
 /**
  * The handles of a handle's children: an unordered strong set, which is what
@@ -409,6 +441,8 @@ interface Handle {
   [handlersSymbol]?: HandlerMaps;
   [indexedSymbol]?: IndexedPasses;
   [listCallbacksSymbol]?: ListCallbacks;
+  [datasetSymbol]?: Map<string, unknown>;
+  [attributeValuesSymbol]?: Map<string, unknown>;
   [ownedChildrenSymbol]?: OwnedChildren;
   [ownerSymbol]?: number | undefined;
 }
@@ -936,6 +970,23 @@ export function __GetElementUniqueID(element: unknown): number {
   return nodeIdOf(element) ?? -1;
 }
 
+export function __SetDataset(element: unknown, dataset: unknown) {
+  // Native SetDataSet merges keys; it does not replace or clear prior keys.
+  const values = valuesOf(element, datasetSymbol);
+  if (dataset !== null && typeof dataset === "object") {
+    for (const [key, value] of Object.entries(copyElementValue(dataset))) values.set(key, value);
+  }
+}
+
+export function __GetDataset(element: unknown) {
+  return copyElementValue(Object.fromEntries(valuesOf(element, datasetSymbol)));
+}
+
+export function __AddDataset(element: unknown, key: string, value: unknown) {
+  if (typeof key !== "string") throw new TypeError("dataset key must be a string");
+  valuesOf(element, datasetSymbol).set(key, copyElementValue(value));
+}
+
 /**
  * Reads a record the native side wrote back — the same
  * `<utf16Length>:<text>` fields [`styleField`] writes, in the other
@@ -1017,6 +1068,15 @@ export function __SetInlineStyles(element: unknown, value: unknown): undefined {
 }
 
 /**
+ * Mutates one named CSS property without replacing the remaining block.
+ * Empty/nullish values remove it; Stylo owns parsing and invalid-value handling.
+ */
+export function __AddInlineStyle(element: unknown, key: unknown, value: unknown) {
+  if (typeof key === "number") throw new TypeError("numeric Lynx CSS property IDs are not supported");
+  setInlineStyleProperty(nodeIdOf(element), String(key), value == null ? "" : String(value));
+}
+
+/**
  * Accepted and ignored.
  *
  * The PAPI names the author-CSS scope a set of elements cascades in, and
@@ -1049,6 +1109,8 @@ export function __SetCSSId(
  * web-core's `setElementPropertyOrAttribute` does for every name that is not
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
  * reach their specialized DOM paths inside the native `setAttribute` export.
+ * A separate typed copy serves the Lynx fields() API. Functions remain local;
+ * cross-thread readback uses the Worker transport's JSON semantics.
  *
  * `update-list-info` is the one name that is not an attribute at all: it
  * drives list cell insertion and removal, and throws here rather than
@@ -1067,12 +1129,125 @@ export function __SetAttribute(
     );
   }
   const nodeId = nodeIdOf(element);
+  const values = valuesOf(element, attributeValuesSymbol);
+  const key = String(name);
   if (value === null || value === undefined) {
-    removeAttribute(nodeId, String(name));
+    removeAttribute(nodeId, key);
+    values.delete(key);
   } else {
-    setAttribute(nodeId, String(name), String(value));
+    setAttribute(nodeId, key, String(value));
+    values.set(key, copyElementValue(value));
   }
   return undefined;
+}
+
+function nodeFields(element: Handle, fields: string[]): QueryNode {
+  const id = nodeIdOf(element);
+  const values = valuesOf(element, attributeValuesSymbol);
+  const result: QueryNode = {};
+  for (const field of fields) {
+    switch (field) {
+      case "id": result['id'] = getAttribute(id, "id") ?? ""; break;
+      case "tag": result['tag'] = tagName(id); break;
+      case "unique_id": result['unique_id'] = id; break;
+      case "name": result['name'] = values.get("name") ?? getAttribute(id, "name") ?? ""; break;
+      case "class": result['class'] = (getAttribute(id, "class") ?? "").split(/\s+/).filter(Boolean); break;
+      case "dataset": case "dataSet": result[field] = __GetDataset(element); break;
+      case "index": {
+        const parent = parentNode(id);
+        const hasElementParent = parent !== null && handleOf(parent) !== undefined;
+        const siblings = hasElementParent ? childElementIds(parent).split(",").map(Number) : [];
+        result['index'] = hasElementParent ? siblings.indexOf(id) : 0;
+        break;
+      }
+      case "attribute": {
+        const entries = splitRecord(attributeNames(id))
+          .filter(key => key !== "id" && key !== "class" && key !== "style" && !key.startsWith("data-"))
+          .map(key => [key, values.has(key) ? values.get(key) : getAttribute(id, key)])
+          .filter(([, value]) => value != null && typeof value !== "function");
+        result['attribute'] = Object.fromEntries(entries);
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+export function __BobcatQueryNodes(request: NodeQueryRequest) {
+  const {operation, token, params} = request;
+  const root = token.root_unique_id !== undefined ? handleOf(token.root_unique_id)
+    : token.component_id ? undefined : pageHandle;
+  let code = 0;
+  let elements: Handle[] = [];
+  if (!root) code = 2;
+  else if (typeof token.identifier !== "string") throw new TypeError("node identifier must be a string");
+  else if (token.type === 2) {
+    // Native unique-ID lookup is global once the specified root exists.
+    const selected = /^-?\d+$/.test(token.identifier) ? handleOf(Number(token.identifier)) : undefined;
+    if (selected) elements = [selected];
+  } else if (token.type === 0 || token.type === 1) {
+    if (token.type === 0 && token.identifier === "") elements = [root];
+    else if (token.type === 1) {
+      // Compare the legacy ref attribute without interpolating author text
+      // into selector syntax. Modern React refs already use a CSS token.
+      const walk = [root];
+      while (walk.length) {
+        const element = walk.pop()!;
+        if (getAttribute(nodeIdOf(element), "react-ref") === token.identifier) {
+          elements.push(element);
+          if (token.first_only) break;
+        }
+        walk.push(...(__GetChildren(element) as Handle[]).reverse());
+      }
+    } else {
+      try {
+        const ids = queryElementIds(nodeIdOf(root), token.identifier, token.first_only ? 1 : 0);
+        elements = ids ? ids.split(",").map(id => {
+          const element = handleOf(Number(id));
+          if (!element) throw new Error("a queried live node has no handle");
+          return element;
+        }) : [];
+      } catch (error) {
+        // Selector parsing is the only normal failure from this validated root.
+        if (error instanceof Error && error.message.includes("not a valid selector")) code = 5;
+        else throw error;
+      }
+    }
+  } else code = 5;
+  if (!code && !elements.length) code = 2;
+  const status = {code, data: code === 0 ? "success"
+    : code === 5 ? `selector '${token.identifier}' not supported`
+    : !root ? `root node not found with identifier = ${token.identifier}`
+    : `no node found for selector '${token.identifier}'`};
+  if (operation === "invoke") {
+    if (code) return status;
+    throw new Error(`UI method ${(params as { method: string }).method} is not implemented`);
+  }
+  if (operation === "setNativeProps") {
+    if (code || params === null || typeof params !== "object" || Array.isArray(params)) return;
+    for (const element of elements) {
+      for (const [name, value] of Object.entries(params)) {
+        if (supportsStyleProperty(name)) __AddInlineStyle(element, name, value);
+        else __SetAttribute(element, name, value);
+      }
+    }
+    __FlushElementTree();
+    return;
+  }
+  if (code) return {status, data: token.first_only ? null : []};
+  const data = elements.map(element => {
+    if (operation === "fields") return nodeFields(element, params as string[]);
+    if (operation !== "path") throw new Error(`unknown node query ${operation}`);
+    const path: QueryNode[] = [];
+    let ancestor: Handle | undefined = element;
+    while (ancestor) {
+      path.push(nodeFields(ancestor, ["tag", "id", "dataSet", "index", "class"]));
+      const parent = parentNode(nodeIdOf(ancestor));
+      ancestor = parent === null ? undefined : handleOf(parent);
+    }
+    return path;
+  });
+  return {status, data: token.first_only ? data[0] : data};
 }
 
 /**
@@ -1517,7 +1692,7 @@ interface Dispatch {
 function backgroundTargetInfo(
   target: ReturnType<typeof targetInfo> | null,
 ): {
-  dataset: Record<string, string | null>;
+  dataset: Record<string, unknown>;
   id: string | null;
   uid: number;
 } | null {
@@ -1532,7 +1707,8 @@ function backgroundTargetInfo(
         getAttribute(target.uid, name),
       ]),
   );
-  return { dataset, id: target.id || null, uid: target.uid };
+  const handle = handleOf(target.uid);
+  return { dataset: {...dataset, ...(handle ? __GetDataset(handle) : {})}, id: target.id || null, uid: target.uid };
 }
 
 /**
