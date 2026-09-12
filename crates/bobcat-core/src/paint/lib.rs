@@ -636,6 +636,7 @@ impl Painter {
                     // A token of its own: this far end plays the view, and
                     // nothing here is ever released.
                     tokio_util::sync::CancellationToken::new(),
+                    None,
                 ),
                 notices: notice_receiver,
             },

@@ -81,7 +81,9 @@ JS char (i.e. UTF-16LE without BOM). Used for `Configurations` and
   (`"true"` when appType != `"card"`), plus every `pageConfig` entry stringified
   (`enableCSSSelector`, `enableRemoveCSSScope`, `defaultDisplayLinear`,
   `defaultOverflowVisible`, `enableJSDataProcessor`, …).
-- CustomSections content: `Record<string, { type?: 'lazy', content: string | object }>`.
+- CustomSections content: `Record<string, { type?: 'lazy', content: string | object }>`;
+  named CSS uses `{encoding:"CSS", content:{ruleList}}`. `PageSource` lowers
+  supported descriptors for [MTS loading and adoption](named-styles-runtime.md).
 
 ### StyleInfo: rkyv-serialized CSS
 

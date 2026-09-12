@@ -825,6 +825,7 @@ mod tests {
                 mpsc::unbounded_channel().0,
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
+                None,
             ),
         );
         worker.spawn(boot_worker(

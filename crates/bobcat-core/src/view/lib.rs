@@ -368,6 +368,9 @@ pub struct ViewSources {
     /// built-in environment. Its imports load through the view's resource fetcher;
     /// startup waits for the entry, including top-level await.
     pub background_entry: Option<String>,
+    /// Already-decoded page styles, addressed as `__Card__` by the MTS section APIs.
+    /// XML and standalone ESM entries may omit this.
+    pub page_bundle: Option<Arc<crate::resource::BundleSource>>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and
     /// boot passes it to `processData`. `None` is `{}`, which is what web-core
@@ -390,6 +393,7 @@ impl ViewSources {
             style_sheets: Vec::new(),
             entry: entry.into(),
             background_entry: None,
+            page_bundle: None,
             init_data: None,
             global_props: None,
         }

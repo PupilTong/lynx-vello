@@ -536,7 +536,7 @@ impl ScriptEngine {
     /// Test snippets use this contract; both engine threads use `start_module`
     /// so boot can wait for resources or timers.
     #[cfg(test)]
-    fn execute_module(
+    pub(crate) fn execute_module(
         &mut self,
         runtime: &mut ScriptRuntime,
         source: &str,

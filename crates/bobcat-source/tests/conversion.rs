@@ -20,6 +20,41 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
 
+fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
+    let mut bytes = convert(native).unwrap();
+    let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
+    let root = scripts.remove(entry).unwrap();
+    scripts.insert("root".to_owned(), root);
+    let mut payload = Vec::new();
+    u32_value(&mut payload, scripts.len());
+    for (name, source) in scripts {
+        string(&mut payload, &name);
+        string(&mut payload, &source);
+    }
+    let mut offset = 12;
+    loop {
+        let tag = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if tag == bobcat_source::web::SectionLabel::LepusCode as u32 {
+            bytes[offset + 4..offset + 8]
+                .copy_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+            bytes.splice(offset + 8..offset + 8 + len, payload);
+            return bytes;
+        }
+        offset += 8 + len;
+    }
+}
+
+fn default_page(native: &[u8], web: bool) -> bobcat_source::PageSource {
+    let input = url::Url::parse("app:///page.bundle").unwrap();
+    if web {
+        bobcat_source::PageSource::from_bytes(&input, &web_page(native, "entry__main-thread"))
+    } else {
+        bobcat_source::PageSource::from_native_bundle(&input, native, "entry__main-thread")
+    }
+    .unwrap()
+}
+
 #[test]
 fn native_boolean_flags_keep_their_types_through_web_conversion() {
     for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
@@ -638,5 +673,73 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
                 _ => {}
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn named_css_survives_native_web_conversion_and_stays_per_view() {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads};
+    use bobcat_resources::{Resources, ResourcesConfig};
+
+    let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
+        .await
+        .unwrap();
+    let mut views = Vec::new();
+    for (name, absent) in [("A", "B"), ("B", "A")] {
+        let main = format!(
+            r"
+            const first = __LoadStyleSheet('{name}', '__Card__');
+            const second = __LoadStyleSheet('{name}', '__Card__');
+            if (first === null || first === second) throw Error('named sheet or fresh handle missing');
+            if (__LoadStyleSheet('{absent}', '__Card__') !== null || __LoadStyleSheet('{name}', 'missing') !== null)
+                throw Error('another views named sheet leaked');
+            if (__AdoptStyleSheet(first) !== null || __AdoptStyleSheet(first) !== null)
+                throw Error('adopt result');
+        "
+        );
+        let native = native_bundle(vec![custom_section(vec![
+            CustomSection::source("entry__main-thread", &main),
+            CustomSection::css(name, &css_fragment()),
+        ])]);
+        let mut expected = None;
+        for web in [false, true] {
+            let page = default_page(&native, web);
+            let sources = page.view_sources();
+            let bundle = sources.page_bundle.as_ref().unwrap();
+            assert_eq!(bundle.named_style_sheets.len(), 1);
+            let sheet = bundle.named_style_sheets[name].clone();
+            if let Some(expected) = expected.as_ref() {
+                assert_eq!(&sheet, expected);
+            } else {
+                expected = Some(sheet);
+            }
+            let resources = Resources::new(ResourcesConfig::default(), || {});
+            page.register_with(&resources);
+            views.push(
+                group
+                    .create_lynx_view(100.0, 100.0, 1.0, resources.builder(), sources)
+                    .unwrap(),
+            );
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut ready = vec![false; views.len()];
+    while ready.iter().any(|ready| !ready) {
+        for (view, ready) in views.iter_mut().zip(&mut ready) {
+            for event in view.pump() {
+                match event {
+                    EngineEvent::ScriptFinished => *ready = true,
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "named stylesheet boot did not finish"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }

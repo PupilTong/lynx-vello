@@ -221,6 +221,127 @@ fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
     }
 }
 
+#[test]
+#[expect(
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    reason = "one cascade sequence checks exact rounded widths before and after adoption and GC"
+)]
+fn named_stylesheets_load_without_mutation_and_adopt_in_order_with_css_cascade() {
+    use crate::resource::{BundleSource, StyleSheetSource};
+    let mut ingredients = ingredients();
+    ingredients.sheets.push(StyleSheetSource::Text(
+        ".box{width:20px;height:10px} #strong{width:90px} .important{width:95px!important}"
+            .to_owned(),
+    ));
+    let sheet = |width: &str| {
+        Arc::new(crate::PreparsedStyleSheet {
+            rules: vec![crate::PreparsedRule::Style {
+                selectors: ".box".to_owned(),
+                declarations: vec![crate::PreparsedDeclaration {
+                    property: "width".to_owned(),
+                    value: width.to_owned(),
+                    important: false,
+                }],
+            }],
+        })
+    };
+    let source = Arc::new(BundleSource {
+        named_style_sheets: [
+            ("A".to_owned(), sheet("40px")),
+            ("B".to_owned(), sheet("80px")),
+        ]
+        .into(),
+        style_sheet: Some(sheet("60px")),
+    });
+    let (mut js, mut runtime, elements, _far) = runtime_over_with_bundle(ingredients, Some(source));
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        const page = __CreatePage();
+        for (let i = 0; i !== 3; ++i) {
+            const element = __CreateView(0);
+            __SetClasses(element, i === 2 ? 'box important' : 'box');
+            if (i === 1) __SetID(element, 'strong');
+            __AppendElement(page, element);
+        }
+        if (__LoadStyleSheet('missing', '__Card__') !== null ||
+            __LoadStyleSheet('A', 'missing.bundle') !== null) throw Error('missing stylesheet');
+        globalThis.a = __LoadStyleSheet('A', '__Card__');
+        globalThis.b = __LoadStyleSheet('B', '__Card__');
+        if (a === __LoadStyleSheet('A', '__Card__')) throw Error('loading reused a native handle');
+        __FlushElementTree();
+    ",
+            "app:///styles.js",
+        )
+        .unwrap();
+    let widths = || {
+        let tree = elements.tree();
+        [3, 4, 5].map(|id| tree.rounded_layout(node_id(id)).unwrap().size.width)
+    };
+    assert_eq!(
+        widths(),
+        [20.0, 90.0, 95.0],
+        "loading leaves the cascade untouched"
+    );
+    for (source, expected) in [
+        (
+            "if (__AdoptStyleSheet(a) !== null) throw Error('adopt result');",
+            40.0,
+        ),
+        ("__AdoptStyleSheet(b);", 80.0),
+        ("__AdoptStyleSheet(a);", 40.0),
+    ] {
+        runtime
+            .engine
+            .execute_module(
+                &mut js,
+                &format!("import {{__AdoptStyleSheet}} from 'bobcat:runtime';{source}"),
+                "app:///adopt.js",
+            )
+            .unwrap();
+        runtime.commit_if_dirty();
+        assert_eq!(widths(), [expected, 90.0, 95.0]);
+    }
+    runtime
+        .engine
+        .execute_module(
+            &mut js,
+            "delete globalThis.a; delete globalThis.b;",
+            "app:///drop-styles.js",
+        )
+        .unwrap();
+    runtime.engine.collect_garbage(&mut js).unwrap();
+    runtime.commit_if_dirty();
+    assert_eq!(
+        widths(),
+        [40.0, 90.0, 95.0],
+        "adopted rules outlive their JS handles"
+    );
+    runtime
+        .engine
+        .execute_module(
+            &mut js,
+            r"
+        import {adoptComponentStyleSheet as adopt} from 'bobcat-internal:host';
+        let rejected = false;
+        try { adopt('missing.bundle'); } catch { rejected = true; }
+        if (!rejected) throw Error('missing component stylesheet accepted');
+        adopt('__Card__');
+        adopt('__Card__');
+    ",
+            "app:///component-styles.js",
+        )
+        .unwrap();
+    runtime.commit_if_dirty();
+    assert_eq!(
+        widths(),
+        [60.0, 90.0, 95.0],
+        "component styles share the author cascade"
+    );
+}
+
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
 ///
@@ -289,7 +410,19 @@ fn runtime_over_watching_names(
     DocumentProbe,
     PublishedNames,
 ) {
-    let (outbox, far_end) = detached_outbox(Arc::new(NoWakeup));
+    runtime_over_with_bundle(ingredients, None)
+}
+
+fn runtime_over_with_bundle(
+    ingredients: DocumentIngredients,
+    bundle: Option<Arc<crate::resource::BundleSource>>,
+) -> (
+    ScriptRuntime,
+    MainThreadRuntime,
+    DocumentProbe,
+    PublishedNames,
+) {
+    let (outbox, far_end) = crate::link::detached_outbox_with_bundle(Arc::new(NoWakeup), bundle);
     let mut js_runtime = ScriptRuntime::new().expect("the test runtime starts");
     install_shared_modules(&mut js_runtime).expect("the shared modules register");
     let (workers, inbox) = mpsc::unbounded_channel();

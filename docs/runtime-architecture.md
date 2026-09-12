@@ -1230,3 +1230,10 @@ there — its tokio features are target-gated, with `time` enabled only off
 wasm32 — while its *dev* dependency asks for `rt-multi-thread`, which does not
 compile for wasm32 at all and which feature unification would drag into any
 build that includes dev targets.
+
+## Named stylesheets
+
+MTS loads opaque handles from already-decoded page CSS and appends their rules
+only when adopted. Component styles use the same author cascade. The source
+metadata, handle lifetime and later bundle-loader boundary are described in
+[named stylesheet loading and adoption](named-styles-runtime.md).

@@ -235,7 +235,7 @@ fn css_value_text(value: LepusValue) -> Result<String, ConvertError> {
 // Fallback maps can double their output at each reference even below the
 // recursion limit. Bound all appended bytes across the traversal, including
 // temporary fallback strings, so a tiny binary cannot expand exponentially.
-fn restore_placeholders(
+pub(crate) fn restore_placeholders(
     source: &str,
     defaults: &BTreeMap<String, String>,
     depth: usize,

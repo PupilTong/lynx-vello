@@ -170,9 +170,9 @@ alongside the existing manifest/MTS map adaptation. Conversion preserves these
 descriptors; named `loadScript` must not lose them to an empty CustomSections
 section. CSS also lowers to StyleInfo and keeps named descriptors in the
 compiler's `{encoding:"CSS",content:{ruleList}}` JSON shape. Named fragments
-include their reachable imports in cascade order. Loading or
-adopting these descriptors remains runtime work; conversion executes no script
-and mounts no stylesheet.
+include their reachable imports in cascade order. `PageSource` lowers these
+descriptors for [MTS loading and adoption](named-styles-runtime.md); conversion
+executes no script and mounts no stylesheet.
 Real bytecode, legacy
 Lepus, card-style top-level CSS, and irreversible parsed CSS encodings return
 errors. The exact known inert external-root stubs are accepted only in the

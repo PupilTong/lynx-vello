@@ -19,7 +19,7 @@ mod decode;
 mod encode;
 mod error;
 mod reader;
-mod style;
+pub(crate) mod style;
 mod tokenize;
 
 pub use error::ConvertError;

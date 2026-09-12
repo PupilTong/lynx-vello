@@ -18,6 +18,9 @@ const notifyReady = rstest.fn();
 const reportStartupFailure = rstest.fn();
 const requestedScripts = rstest.fn();
 rstest.mockRequire("bobcat-internal:worker", () => ({ requestScript: requestedScripts }));
+const loadStyleSheet = rstest.fn();
+const adoptStyleSheet = rstest.fn();
+const releaseStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
@@ -25,6 +28,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
+  loadStyleSheet, adoptStyleSheet, releaseStyleSheet,
   runMtsJobs: () => true, evaluateScript: rstest.fn(),
   initData: () => undefined,
   globalProps: () => undefined,
@@ -103,6 +107,21 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("uses opaque stylesheet handles and native null results", () => {
+    loadStyleSheet.mockReturnValueOnce(null).mockReturnValueOnce('first').mockReturnValueOnce('second');
+    expect(mts.__LoadStyleSheet('missing', 'bundle')).toBeNull();
+    const first = mts.__LoadStyleSheet('CSS', 'bundle');
+    const second = mts.__LoadStyleSheet('CSS', 'bundle');
+    expect(first).not.toBe(second);
+    if (!first) throw Error('missing handle');
+    expect(mts.__AdoptStyleSheet(first)).toBeNull();
+    expect(mts.__AdoptStyleSheet(first)).toBeNull();
+    expect(adoptStyleSheet.mock.calls).toEqual([['first'],['first']]);
+    expect(() => mts.__AdoptStyleSheet({})).toThrow();
+    expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
+  });
+
+
   it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
     const evaluate = rstest.fn(source => {
       if (source === "throw") throw Error("chunk failure");
