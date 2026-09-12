@@ -13,8 +13,17 @@ use crate::style::{CoreStyle, Display};
 
 /// Per-node marks that outlive one layout pass: what the rounding tail still
 /// owes this node, and whether its subtree is already hidden.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SlotMarks(u8);
+
+impl Default for SlotMarks {
+    fn default() -> Self {
+        // A new slot has never been rounded. In particular, a newly inserted
+        // display: contents wrapper has no algorithm or box write to mark
+        // it later, but rounding must still reach the children it flattens.
+        Self(Self::SUBTREE_DIRTY)
+    }
+}
 
 impl SlotMarks {
     /// The node's own unrounded box moved or resized since it was last
@@ -357,6 +366,10 @@ mod tests {
     #[test]
     fn slot_marks_track_what_the_rounding_tail_and_the_hider_still_owe() {
         let mut slot = LayoutSlot::default();
+        assert!(
+            slot.needs_rounding(),
+            "a new subtree has never been rounded"
+        );
         let mut layout = Layout::with_order(3);
         layout.size = Size::new(40.0, 20.0);
 

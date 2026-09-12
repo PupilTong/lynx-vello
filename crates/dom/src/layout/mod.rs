@@ -330,6 +330,19 @@ impl<T> Document<T> {
             while let Some(node_id) = current {
                 let node_slot = tree.live_slot(node_id);
                 let node = tree.at(node_slot);
+                let style_view = node.is_element().then(|| StyleView::of(node));
+                if style_view
+                    .as_ref()
+                    .is_some_and(|style| style.display().is_contents())
+                {
+                    // A contents element never owns a layout cache. Its
+                    // children participate in the nearest box ancestor, so
+                    // an empty cache here cannot prove that ancestor was
+                    // already invalidated or provide an in-place boundary.
+                    state.clear_box_cache(node_slot);
+                    current = node.flat_parent_id();
+                    continue;
+                }
                 let node_state = state.get(node_slot).map(|state| &state.slot);
                 if node_state.is_none_or(LayoutSlot::layout_cache_is_empty)
                     && node.flat_parent_id().is_some()
@@ -345,7 +358,6 @@ impl<T> Document<T> {
                     reached_root = false;
                     break;
                 }
-                let style_view = node.is_element().then(|| StyleView::of(node));
                 if style_view.as_ref().is_some_and(CoreStyle::skips_contents) {
                     reached_root = false;
                     break;

@@ -474,6 +474,45 @@ fn display_contents_cannot_contain_position_or_paint_its_descendants() {
 }
 
 #[test]
+fn mutations_below_display_contents_relayout_the_box_parent() {
+    for display in ["flex", "linear"] {
+        let mut h = Harness::new(&format!(
+            "page {{ display: {display}; linear-direction: row; width: 300px; height: 40px; }}
+         .wrapper {{ display: contents; }}
+         view {{ width: 20px; height: 10px; flex-shrink: 0; }}",
+        ));
+        let root = h.doc.root;
+        let wrapper = h.doc.el(root, ".wrapper");
+        let nested = h.doc.el(wrapper, ".wrapper");
+        let child = h.doc.el(nested, "view");
+        let sibling = h.doc.el(root, "view");
+        h.layout();
+        assert_eq!(h.rect(sibling).0, 20.0);
+
+        h.doc.set_inline(child, "width: 80px");
+        h.layout();
+        assert_eq!(h.rect(child).2, 80.0);
+        assert_eq!(h.rect(sibling).0, 80.0);
+
+        h.doc.dom.remove_element(child);
+        let replacement = h.doc.el(nested, "view");
+        h.layout();
+        assert_eq!(h.rect(replacement).2, 20.0);
+        assert_eq!(h.rect(sibling).0, 20.0);
+
+        h.doc.dom.remove_element(replacement);
+        h.layout();
+        assert_eq!(h.rect(sibling).0, 0.0);
+
+        h.doc.dom.remove_element(wrapper);
+        let new_wrapper = h.doc.el(root, ".wrapper");
+        let child = h.doc.el(new_wrapper, "view");
+        h.layout();
+        assert_eq!(h.rect(child).2, 20.0);
+    }
+}
+
+#[test]
 fn display_contents_flip_relayouts_the_container_and_clears_the_stale_box() {
     let mut h = Harness::new(
         "page { display: flex; width: 300px; height: 40px; }
