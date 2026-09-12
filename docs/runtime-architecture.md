@@ -536,7 +536,7 @@ realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` return stable
 `CrossThreadContext extends EventTarget` instances. Their native Lynx contract
-requires a string type and a data property, snapshots at dispatch, returns `0`
+requires a string type and a data property, captures the public envelope, returns `0`
 for accepted peer sends, and carries a fixed CoreContext/JSContext origin.
 `postMessage` sends a `message` event; null and undefined data are retained.
 Listeners require a string/function, ignore DOM options and receive undefined
@@ -549,8 +549,13 @@ Context fields before queuing; payload objects remain references until Worker
 connection posts the messages in FIFO order. Worker `postMessage` performs the
 JSON copy, for early and connected sends alike. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
-and nonfatal `WorkerFailed` reporting apply to BTS too. `ScriptFinished`
-continues to report MTS boot, not BTS loading or execution.
+and `WorkerFailed` reporting apply to BTS too. When a BTS entry is configured,
+its completion sends a Worker acknowledgement that the MTS boot promise awaits.
+`ScriptFinished` therefore covers both entries; a BTS startup error rejects boot
+and reports `StartupFailed`. Ordinary Worker failures remain nonfatal.
+`LynxView::pump` records readiness before returning `ScriptFinished`, and
+`is_ready()` exposes that state. Host global events require readiness and return
+`EngineError::NotReady` otherwise, without buffering them.
 
 The BTS runtime exposes stable `lynx.getApp()` and `lynx.getNativeApp()`
 objects. MTS `__OnLifecycleEvent(data)` sends the existing Context event;
@@ -671,8 +676,8 @@ only after the boot promise fulfills. Its rejection sends `StartupFailed`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground` and
-`__BobcatInitData` and `__BobcatPageLoaded` from `bobcat:runtime` and `Document` and
+The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground`,
+`__BobcatInitData` and `__BobcatBackgroundReady` from `bobcat:runtime` and `Document` and
 `__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
 effect; the transformed entry itself statically imports both of the first two
 built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
@@ -696,7 +701,8 @@ if (typeof globalThis.renderPage === "function") {
   lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
 }
 __FlushElementTree();
-__BobcatPageLoaded(); // Release global events waiting for initial render.
+// Emitted only when ViewSources.background_entry is configured.
+await __BobcatBackgroundReady();
 ```
 
 The global `renderPage` function remains a compatibility path, not a boot

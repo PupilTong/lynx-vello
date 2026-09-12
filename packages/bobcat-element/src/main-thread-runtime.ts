@@ -55,6 +55,7 @@ type LepusMethodCall = {
  */
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
+  | { bobcat: "runtime"; method: "backgroundReady" }
   | (ContextEvent & { bobcat?: never });
 
 function noop() {
@@ -82,6 +83,19 @@ const engineContext = new EventTarget();
 const scope = globalThis as Record<string, unknown>;
 let backgroundWorker: Worker | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
+let backgroundReady = false;
+let backgroundFailure: unknown;
+let resolveBackground: (() => void) | undefined;
+let rejectBackground: ((error: unknown) => void) | undefined;
+
+export function __BobcatBackgroundReady() {
+  if (backgroundFailure !== undefined) return Promise.reject(backgroundFailure);
+  if (backgroundReady) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    resolveBackground = () => resolve(undefined);
+    rejectBackground = reject;
+  });
+}
 
 function sendToBackground(message: ToBackground) {
   if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
@@ -134,6 +148,10 @@ export function __BobcatConnectBackground(worker: Worker) {
         }
       } else if (message.method === "callLepusMethod") {
         void callLepusMethod(message);
+      } else if (message.method === "backgroundReady") {
+        backgroundReady = true;
+        resolveBackground?.();
+        resolveBackground = rejectBackground = undefined;
       } else if (message.method === "reportError") {
         reportScriptError(message.level, message.message);
       } else if (message.method === "console") {
@@ -141,6 +159,13 @@ export function __BobcatConnectBackground(worker: Worker) {
       }
     } else {
       jsContext.receive(message);
+    }
+  });
+  worker.addEventListener("error", (event: {message: string}) => {
+    if (!backgroundReady) {
+      backgroundFailure = new Error(event.message);
+      rejectBackground?.(backgroundFailure);
+      resolveBackground = rejectBackground = undefined;
     }
   });
   backgroundWorker = worker;
@@ -151,18 +176,7 @@ export function __BobcatConnectBackground(worker: Worker) {
   }
 }
 
-let pageLoaded = false;
-let pendingPageUpdates: string[] = [];
-
-export function __BobcatPageLoaded() {
-  pageLoaded = true;
-  const pending = pendingPageUpdates;
-  pendingPageUpdates = [];
-  for (const update of pending) __BobcatApplyPageUpdate(update);
-}
-
 export function __BobcatApplyPageUpdate(json: string) {
-  if (!pageLoaded) { pendingPageUpdates.push(json); return; }
   sendToBackground({ bobcat: "runtime", ...JSON.parse(json) });
 }
 

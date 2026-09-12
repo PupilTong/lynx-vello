@@ -109,3 +109,98 @@ fn a_view_with_no_painter_boots_and_runs_its_own_timers() {
         "and the entry the timer ran in committed its mutation"
     );
 }
+
+#[test]
+fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed() {
+    let mut view = TestViewSpec::new(
+        r"
+        import {Worker} from 'bobcat-internal';
+        const post = Worker.prototype.postMessage;
+        Worker.prototype.postMessage = function (message) {
+            if (message.method === 'sendGlobalEvent') console.log(message.args);
+            return post.call(this, message);
+        };
+        __CreatePage();
+    ",
+    )
+    .create_view(Arc::new(NoWakeup));
+    assert!(!view.is_ready());
+    assert!(matches!(
+        view.send_global_event("event", vec!["early".into()]),
+        Err(EngineError::NotReady)
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut messages = Vec::new();
+    loop {
+        let events = view.pump();
+        for event in &events {
+            if let EngineEvent::ConsoleMessage { message, .. } = event {
+                messages.push(message.clone());
+            }
+        }
+        if events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::ScriptFinished))
+        {
+            assert!(
+                view.is_ready(),
+                "pump records readiness before returning the event"
+            );
+            break;
+        }
+        assert!(!view.is_ready());
+        assert!(
+            Instant::now() < deadline,
+            "view never became ready: {events:?}"
+        );
+        std::thread::yield_now();
+    }
+    assert!(
+        messages.is_empty(),
+        "rejected event was replayed during boot"
+    );
+    view.send_global_event("event", vec!["accepted".into()])
+        .unwrap();
+    while messages.is_empty() {
+        for event in view.pump() {
+            if let EngineEvent::ConsoleMessage { message, .. } = event {
+                messages.push(message);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "accepted event did not reach the Worker"
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(messages, [r#"["accepted"]"#]);
+    view.cancel.cancel();
+    assert!(!view.is_ready());
+    assert!(matches!(
+        view.send_global_event("event", vec![]),
+        Err(EngineError::NotReady)
+    ));
+}
+
+#[test]
+fn failed_startup_never_makes_a_view_ready() {
+    let mut view =
+        TestViewSpec::new("throw Error('cannot start');").create_view(Arc::new(NoWakeup));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let events = view.pump();
+        assert!(!view.is_ready());
+        assert!(matches!(
+            view.send_global_event("event", vec![]),
+            Err(EngineError::NotReady)
+        ));
+        if events
+            .iter()
+            .any(|event| matches!(event, EngineEvent::StartupFailed(_)))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "startup never failed");
+        std::thread::yield_now();
+    }
+}

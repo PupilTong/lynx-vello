@@ -43,7 +43,7 @@ pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewEr
 /// attaching is the group's own inbox, the goodbye is this channel closing,
 /// and a source answers the one-shot that was minted with its request.
 pub(crate) enum ToMain {
-    /// Global events retain FIFO order, including during boot.
+    /// Global events accepted after the host observes readiness retain FIFO order.
     PageUpdate(PageUpdate),
     DispatchEvent {
         target: NodeId,

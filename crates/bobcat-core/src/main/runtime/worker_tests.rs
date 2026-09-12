@@ -130,7 +130,21 @@ impl Pair {
     }
 
     fn next_event(&mut self) -> Option<WorkerEvent> {
-        block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE).flatten()
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            let event = block_on_deadline(self.events.recv(), deadline).flatten()?;
+            let ready = matches!(&event.payload, WorkerPayload::Message(json)
+                if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value|
+                    value.pointer("/0/method").and_then(serde_json::Value::as_str) == Some("backgroundReady")));
+            if !ready {
+                return Some(event);
+            }
+            self.runtime
+                .as_mut()
+                .unwrap()
+                .dispatch_worker_event(&mut self.js, event.key, event.payload)
+                .unwrap();
+        }
     }
 
     /// How many workers this realm still holds the right to stop.
@@ -1184,4 +1198,66 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("event failed"));
     pair.check(r#"if (JSON.stringify(results) !== '[[1,{"nested":1}],[2,{"nested":2}]]') throw Error(JSON.stringify(results));"#);
+}
+
+#[test]
+fn configured_bts_entry_completion_finishes_mts_boot_over_worker_messages() {
+    let mut pair = Pair::with_background("__CreatePage();", Some("await Promise.resolve();"));
+    assert!(
+        !pair
+            .runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap()
+    );
+    let event = block_on_deadline(pair.events.recv(), ClockInstant::now() + PATIENCE)
+        .flatten()
+        .expect("BTS acknowledgement");
+    assert!(
+        matches!(&event.payload, WorkerPayload::Message(json) if json.contains("backgroundReady"))
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    assert!(
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap()
+    );
+}
+
+#[test]
+fn a_failed_configured_bts_entry_rejects_boot_instead_of_reporting_ready() {
+    let mut pair = Pair::with_background(
+        "__CreatePage();",
+        Some("throw Error('BTS startup failed');"),
+    );
+    assert!(
+        !pair
+            .runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap()
+    );
+    let event = pair.next_event().expect("BTS startup failure");
+    let delivery_error = pair
+        .runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap_err();
+    assert!(delivery_error.to_string().contains("BTS startup failed"));
+    let error = pair
+        .runtime
+        .as_mut()
+        .unwrap()
+        .main_module_finished()
+        .unwrap_err();
+    assert!(error.to_string().contains("BTS startup failed"), "{error}");
 }

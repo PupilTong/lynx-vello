@@ -182,6 +182,8 @@ pub(crate) type ComposeKey = (u64, u64);
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum EngineError {
+    #[error("the view is not ready")]
+    NotReady,
     #[error("invalid viewport: {0}")]
     Viewport(String),
     #[error("GPU operation failed: {0}")]
@@ -224,7 +226,8 @@ pub enum LynxViewError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    /// The entry MTS module and Bobcat boot completed successfully.
+    /// MTS boot and the configured BTS entry completed successfully.
+    /// `LynxView::pump` records readiness before returning this notification.
     ScriptFinished,
     /// Source loading, document configuration, or entry boot failed.
     StartupFailed(LynxViewError),
@@ -590,7 +593,7 @@ impl LynxGroup {
             frames: frame_receiver,
             inbox,
             fetcher,
-            failed: false,
+            state: ViewState::Loading,
             timeline_epoch: ClockInstant::now(),
             group: Rc::clone(&self.inner),
         })
@@ -639,9 +642,8 @@ pub struct LynxView<F> {
     /// an attached painter to read pixels through — so this view dropping
     /// both is what releases it.
     fetcher: Rc<F>,
-    /// Whether a fatal lifecycle event has arrived. Nothing further is
-    /// dispatched to the host's resource system after one.
-    failed: bool,
+    /// Updated by pump from boot/failure notices on the host thread.
+    state: ViewState,
     /// When this view's document started, which is the epoch its animations
     /// are timed against. A painter adopts it at `attach`, so a painter that
     /// changes views does not restart the new one's timeline.
@@ -659,12 +661,28 @@ pub struct LynxView<F> {
     group: Rc<GroupInner>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewState {
+    Loading,
+    Ready,
+    Failed,
+}
+
+impl<F> LynxView<F> {
+    /// Whether pump has observed successful MTS boot and configured BTS entry
+    /// completion, and this view has not ended. Keep calling pump while loading.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.state == ViewState::Ready && !self.cancel.is_cancelled()
+    }
+}
+
 impl<F> fmt::Debug for LynxView<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LynxView")
             .field("painter_attached", &(Rc::weak_count(&self.seat) > 0))
-            .field("failed", &self.failed)
+            .field("state", &self.state)
             .finish_non_exhaustive()
     }
 }
@@ -695,14 +713,27 @@ impl<F> Drop for LynxView<F> {
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
     /// Deliver a native global event. `arguments` is the listener argument list.
-    pub fn send_global_event(&self, name: impl Into<String>, arguments: Vec<serde_json::Value>) {
-        let _ = self
-            .seat
+    /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::NotReady` before readiness is observed or after
+    /// the view ends. Rejected events are not queued for later delivery.
+    pub fn send_global_event(
+        &self,
+        name: impl Into<String>,
+        arguments: Vec<serde_json::Value>,
+    ) -> Result<(), EngineError> {
+        if !self.is_ready() {
+            return Err(EngineError::NotReady);
+        }
+        self.seat
             .commands
             .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent {
                 name: name.into(),
                 arguments,
-            }));
+            }))
+            .map_err(|_| EngineError::NotReady)
     }
 
     /// Runs one view turn: hand the host's resource system everything the
@@ -728,8 +759,11 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         event,
                         EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
                     ) {
-                        self.failed = true;
+                        self.state = ViewState::Failed;
                         self.cancel.cancel();
+                    }
+                    if matches!(event, EngineEvent::ScriptFinished) {
+                        self.state = ViewState::Ready;
                     }
                     events.push(event);
                 }
@@ -741,7 +775,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                     request,
                     completion,
                 } => {
-                    if !self.failed && !completion.is_cancelled() {
+                    if self.state != ViewState::Failed && !completion.is_cancelled() {
                         self.fetcher.request_source(request, completion);
                     }
                 }
@@ -754,7 +788,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         // A view that has failed asks its host for nothing at all, images
         // included: the document those pixels were for is finished with, and
         // the same rule already governs the source requests above.
-        if !self.failed {
+        if self.state != ViewState::Failed {
             self.fetcher.service_images();
             for source in image_requests {
                 self.fetcher.request_image(source.as_ref());
@@ -764,7 +798,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         // discarded here rather than left to accumulate behind a view that
         // will never commit again.
         let reports = self.inbox.drain();
-        if !self.failed && !reports.is_empty() {
+        if self.state != ViewState::Failed && !reports.is_empty() {
             let _ = self.seat.commands.send(ToMain::ImageEvents(reports));
         }
         events

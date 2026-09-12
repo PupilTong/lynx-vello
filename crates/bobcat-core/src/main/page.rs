@@ -143,7 +143,6 @@ pub(super) struct Page {
     /// epilogue's commit is what publishes.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
-    pending_updates: RefCell<Vec<crate::link::PageUpdate>>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded. A
@@ -187,7 +186,6 @@ impl Page {
             realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
-            pending_updates: RefCell::default(),
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             #[cfg(test)]
@@ -302,8 +300,7 @@ impl Page {
     ///
     /// 1. **Due timers.** A timer that has come due runs before the commit, so its mutation rides
     ///    the same frame as whatever else this entry changed. A zero-delay timer armed during boot
-    ///    therefore fires inside boot's own epilogue and adds no commit of its own. Global events
-    ///    staged before the realm existed are handed to its initial-render queue before commit.
+    ///    therefore fires inside boot's own epilogue and adds no commit of its own.
     /// 2. **The commit**, which is what publishes the frame and the image sources the walk
     ///    discovered.
     /// 3. **The boot report**, once, so the frame exists before the event that implies it.
@@ -321,13 +318,6 @@ impl Page {
         self.epilogues.set(self.epilogues.get() + 1);
         for failure in runtime.run_due_timers(js) {
             self.outbox.engine_event(EngineEvent::TimerFailed(failure));
-        }
-        // Once a realm exists, it queues global events until its initial render.
-        for update in self.pending_updates.take() {
-            if let Err(error) = runtime.apply_page_update(js, update) {
-                self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
-                return;
-            }
         }
         runtime.commit_if_dirty();
         if !self.boot_reported.get() {
@@ -475,7 +465,8 @@ impl Page {
             };
             for command in commands {
                 match command {
-                    ToMain::PageUpdate(update) => self.pending_updates.borrow_mut().push(update),
+                    // The public global-event API only enqueues on a ready view.
+                    ToMain::PageUpdate(_) => {}
                     ToMain::Resize {
                         width,
                         height,
@@ -893,12 +884,16 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
 /// the view.
 async fn consume_worker_events(page: Rc<Page>, mut events: mpsc::UnboundedReceiver<WorkerEvent>) {
     while let Some(WorkerEvent { key, payload }) = events.recv().await {
-        page.enter(|runtime, js| {
-            if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                page.outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
-            }
-        });
+        let delivered = page.enter(|runtime, js| runtime.dispatch_worker_event(js, key, payload));
+        // A configured BTS entry can reject the boot promise in this checkpoint.
+        // The epilogue reports that as StartupFailed and ends the view; only an
+        // error that leaves the view running is a listener failure.
+        if let Some(Err(error)) = delivered
+            && !page.ended()
+        {
+            page.outbox
+                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+        }
     }
 }
 

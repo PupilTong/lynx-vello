@@ -768,89 +768,110 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
 }
 
 #[test]
-fn global_events_wait_for_initial_render_and_preserve_host_order_across_boot() {
+fn script_finished_waits_for_the_configured_background_entry_acknowledgement() {
     on_a_local_set(async {
         let (context, workers) = group();
-        let mut harness = Harness::new(context, workers);
-        let send = |harness: &Harness, value: i32| {
-            harness
-                .commands
-                .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent {
-                    name: "host-event".into(),
-                    arguments: vec![value.into()],
-                }))
-                .unwrap();
-        };
-        send(&harness, 1);
+        let mut sources = ViewSources::new("app:///main.js");
+        sources.background_entry = Some("app:///background.js".into());
+        let mut harness = Harness::serving(context, workers, sources);
         harness
             .until("entry request", |h| !h.sources.is_empty())
             .await;
-        harness.answer(
-            "app:///main.js",
-            r"
-            import {Worker} from 'bobcat-internal';
-            import {unpackBtsMessage} from 'bobcat:cross-thread-context';
-            const post = Worker.prototype.postMessage;
-            Worker.prototype.postMessage = function (wire) {
-                const message = unpackBtsMessage(wire);
-                console.log(message.type ?? message.name, message.data ?? message.args);
-                return post.call(this, wire);
-            };
-            await import('./gate.js');
-            globalThis.renderPage = () => {
-                __CreatePage();
-                lynx.getJSContext().dispatchEvent({type:'rendered', data:true});
-            };
-        ",
-        );
+        harness.answer("app:///main.js", "__CreatePage();");
         harness
-            .until("entry import gate", |h| !h.sources.is_empty())
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
             .await;
-        send(&harness, 2);
+        let background = harness.background_worker();
         for _ in 0..4 {
             harness.turn().await;
         }
-        assert!(!harness.events.iter().any(|event| matches!(
-            event,
-            EngineEvent::ScriptFinished | EngineEvent::ConsoleMessage { .. }
-        )));
-        harness.answer("app:///gate.js", "export const ready = true;");
+        assert!(
+            !harness
+                .events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::ScriptFinished))
+        );
+        background
+            .events
+            .send(crate::background::WorkerEvent {
+                key: background.key,
+                payload: crate::background::WorkerPayload::Message(
+                    r#"[{"bobcat":"runtime","method":"backgroundReady"}]"#.into(),
+                ),
+            })
+            .unwrap();
         harness
-            .until("boot did not finish", |h| {
+            .until("BTS acknowledgement did not finish boot", |h| {
                 h.events
                     .iter()
-                    .any(|event| matches!(event, EngineEvent::ScriptFinished))
+                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
             })
             .await;
-        send(&harness, 3);
+        assert_eq!(
+            harness
+                .events
+                .iter()
+                .filter(|e| matches!(e, EngineEvent::ScriptFinished))
+                .count(),
+            1
+        );
+        harness.view.token.cancel();
+        harness.owner.await.unwrap();
+    });
+}
+
+#[test]
+fn a_configured_background_entry_failure_reports_startup_failed_once() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut sources = ViewSources::new("app:///main.js");
+        sources.background_entry = Some("app:///background.js".into());
+        let mut harness = Harness::serving(context, workers, sources);
         harness
-            .until("last global event", |h| {
-                h.events.iter().any(|event| {
-                    matches!(event,
-            EngineEvent::ConsoleMessage {message, ..} if message == "host-event [3]")
-                })
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer("app:///main.js", "__CreatePage();");
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
             })
             .await;
-        let messages: Vec<_> = harness
+        let background = harness.background_worker();
+        background
+            .events
+            .send(crate::background::WorkerEvent {
+                key: background.key,
+                payload: crate::background::WorkerPayload::Failed(crate::script::ScriptError {
+                    kind: crate::script::ScriptErrorKind::Exception,
+                    phase: crate::script::ScriptErrorPhase::ExecuteModule,
+                    message: "BTS startup failed".into(),
+                    location: None,
+                }),
+            })
+            .unwrap();
+        harness
+            .until("BTS failure did not end boot", |h| {
+                h.view.token.is_cancelled()
+            })
+            .await;
+        harness.turn().await;
+        let failures: Vec<_> = harness
             .events
             .iter()
             .filter_map(|event| match event {
-                EngineEvent::ConsoleMessage { message, .. } => Some(message.as_str()),
-                EngineEvent::StartupFailed(error) => panic!("{error}"),
-                EngineEvent::ScriptRunError(error) => panic!("{error}"),
+                EngineEvent::StartupFailed(error) => Some(error.to_string()),
+                EngineEvent::ScriptFinished
+                | EngineEvent::ListenerFailed(_)
+                | EngineEvent::ScriptRunError(_) => {
+                    panic!("BTS startup failure was misreported: {event:?}")
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            messages,
-            [
-                "rendered true",
-                "host-event [1]",
-                "host-event [2]",
-                "host-event [3]"
-            ]
-        );
-        harness.view.token.cancel();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("BTS startup failed"));
         harness.owner.await.unwrap();
     });
 }

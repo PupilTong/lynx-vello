@@ -552,20 +552,24 @@ useful signal for currently-compatible versions of those libraries.
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable `CrossThreadContext extends EventTarget` instances returned directly
-  by `createCrossThreadContext`. `dispatchEvent({type, data})` sends to the peer
-  and returns `3`, and receiving calls `super.dispatchEvent` with EventTarget
-  listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
-  web-core. MTS projects the public Context fields and queues their payload
-  references until the Worker is connected; Worker `postMessage` takes the
-  JSON snapshot. JSON's loss of undefined members and special-number values
-  is an accepted compatibility limit; do not add a custom codec or deep clone
-  to compensate for it. A worker's own task queues what is posted to it until
-  its script has been evaluated, so BTS
+  by `createCrossThreadContext`. `dispatchEvent({type, data})` validates the
+  string type and data property, captures the public envelope, sends to the peer and
+  returns `0`. Context `postMessage(value)` sends a message event. Listeners
+  receive the original null/undefined data and an undefined receiver, and
+  ignore DOM listener options. Origins identify the sending CoreContext or
+  JSContext. MTS queues payload references until the Worker is connected;
+  Worker postMessage takes the JSON snapshot. JSON's loss of undefined members
+  and special-number values is an accepted compatibility limit; do not add a
+  custom codec or deep clone to compensate for it. A worker's own task
+  queues what is posted to it until its script has been evaluated, so BTS
   listeners are registered before the first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one
-  additional realm on the group's existing worker runtime. `ScriptFinished`
-  continues to mean MTS boot; BTS errors are nonfatal `WorkerFailed` events.
+  additional realm on the group's existing worker runtime. When a BTS entry
+  is configured, boot awaits its completion acknowledgement over Worker
+  postMessage. `ScriptFinished` then covers MTS and BTS entry completion; a
+  BTS startup failure rejects boot with `StartupFailed`. Ordinary Worker errors
+  remain nonfatal `WorkerFailed` events.
   BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
   app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
   and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
@@ -729,7 +733,11 @@ useful signal for currently-compatible versions of those libraries.
   prepended import, and the module installs none of them on `globalThis`.
   Native Context behavior, the BTS GlobalEventEmitter and
   `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
-  Global events retain host FIFO order and wait for initial MTS render.
+  `LynxView::pump` records readiness before returning `ScriptFinished`, exposed
+  by `is_ready()`. Global events require observed readiness and otherwise return
+  `EngineError::NotReady`; rejected events are never queued or replayed. Accepted
+  events retain host FIFO order. Internal pre-connection MTS messages still wait
+  for Worker construction.
   `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
   path remains ordinary Worker postMessage delivery with JS-side dispatch.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its

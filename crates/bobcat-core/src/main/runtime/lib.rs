@@ -517,6 +517,7 @@ impl EventState {
 /// worker is gone.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
+    has_background_entry: bool,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -580,12 +581,14 @@ impl MainThreadRuntime {
             &timers,
         )?;
         install_page_data(&mut engine, js_runtime, page_data)?;
+        let has_background_entry = background_entry.is_some();
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
+                has_background_entry,
                 workers,
                 slot,
                 events,
@@ -863,8 +866,13 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
+        let background_ready = if self.has_background_entry {
+            "await __BobcatBackgroundReady();"
+        } else {
+            ""
+        };
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData, __BobcatPageLoaded }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData, __BobcatBackgroundReady }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -889,7 +897,7 @@ if (typeof globalThis.renderPage === "function") {{
   lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
 __FlushElementTree();
-__BobcatPageLoaded();
+{background_ready}
 "#
         );
         self.evaluate_module(

@@ -383,7 +383,7 @@ describe("MTS/BTS lifecycle runtime", () => {
 });
 
 describe("runtime events and diagnostics", () => {
-  it("exposes one BTS event module and delivers queued host argument lists", () => {
+  it("exposes one BTS event module and directly delivers accepted host argument lists", () => {
     const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
     expect(emitter).toBe(bts.getApp().GlobalEventEmitter);
     expect(emitter).toBe(bts.getApp().getJSModule("GlobalEventEmitter"));
@@ -394,8 +394,7 @@ describe("runtime events and diagnostics", () => {
     const listener = rstest.fn();
     emitter.addListener("host-event", listener);
     mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: [1, {value: 2}]}));
-    expect(toBackground).toHaveLength(0);
-    mts.__BobcatPageLoaded();
+    expect(toBackground).toHaveLength(1);
     deliverToBackground();
     expect(listener).toHaveBeenCalledWith(1, {value: 2});
     mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: []}));
@@ -426,9 +425,20 @@ describe("runtime events and diagnostics", () => {
     ]);
     expect(reportedErrors.mock.calls[2]?.[1]).toContain(error.stack);
     expect(consoleMessages).toHaveBeenLastCalledWith("warn", "BTS [1,2]");
-    const circular = /** @type {any} */ ({}); circular.self = circular;
+    const circular: {self?: unknown} = {}; circular.self = circular;
     mts.console["debug"]?.(circular);
     expect(consoleMessages).toHaveBeenLastCalledWith("debug", "[object Object]");
     expect(toMain).toHaveLength(0);
   });
+});
+
+it("keeps boot pending until the configured BTS entry acknowledges completion", async () => {
+  let completed = false;
+  const ready = mts.__BobcatBackgroundReady().then(() => { completed = true; });
+  await Promise.resolve();
+  expect(completed).toBe(false);
+  worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "backgroundReady"}});
+  await ready;
+  expect(completed).toBe(true);
+  await expect(mts.__BobcatBackgroundReady()).resolves.toBeUndefined();
 });
