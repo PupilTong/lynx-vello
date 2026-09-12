@@ -143,6 +143,8 @@ pub(super) struct Page {
     /// epilogue's commit is what publishes.
     pending_begin_frame: Cell<Option<u64>>,
     boot_reported: Cell<bool>,
+    /// Host props received before a realm exists become its initial environment.
+    pending_global_props: RefCell<serde_json::Map<String, serde_json::Value>>,
     /// Every task of this view, the token that ends them, the latch this thread
     /// reads, and the two numbers this realm's clock task waits on — the
     /// deadline it armed and the generation its own last entry recorded. A
@@ -169,6 +171,7 @@ struct BootSources {
     background_entry: Option<String>,
     /// The host's page data, as JSON text only the realm reads.
     init_data: Option<String>,
+    data_processing: crate::view::DataProcessing,
     global_props: Option<String>,
 }
 
@@ -186,6 +189,7 @@ impl Page {
             realm: RefCell::new(Realm::Loading(Box::new(ingredients))),
             pending_begin_frame: Cell::new(None),
             boot_reported: Cell::new(false),
+            pending_global_props: RefCell::default(),
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
             #[cfg(test)]
@@ -400,7 +404,7 @@ impl Page {
         self.stage(commands);
     }
 
-    /// Applies one command to a booted view.
+    /// Applies one command to a view whose realm exists, including during boot.
     fn apply_command(
         &self,
         runtime: &mut MainThreadRuntime,
@@ -409,6 +413,8 @@ impl Page {
     ) {
         match command {
             ToMain::PageUpdate(update) => {
+                // Data updates retain their native initial-render policy;
+                // global events have already passed the host readiness gate.
                 if let Err(error) = runtime.apply_page_update(js, update) {
                     self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
                 }
@@ -465,8 +471,20 @@ impl Page {
             };
             for command in commands {
                 match command {
-                    // The public global-event API only enqueues on a ready view.
-                    ToMain::PageUpdate(_) => {}
+                    ToMain::PageUpdate(crate::link::PageUpdate::Reload(_)) => {
+                        self.outbox.engine_event(EngineEvent::ScriptReported {
+                            level: "error".to_owned(),
+                            message: "ReloadTemplate before LoadTemplate!".to_owned(),
+                        });
+                    }
+                    // Native's default enablePreUpdateData=false drops early
+                    // update/reset; these must never replay after first render.
+                    ToMain::PageUpdate(crate::link::PageUpdate::Data { .. }) => {}
+                    ToMain::PageUpdate(crate::link::PageUpdate::GlobalProps(data)) => {
+                        self.pending_global_props.borrow_mut().extend(data);
+                    }
+                    // Global events are accepted only after the host observes readiness.
+                    ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent { .. }) => {}
                     ToMain::Resize {
                         width,
                         height,
@@ -523,6 +541,7 @@ impl Page {
         init_data: Option<String>,
         global_props: Option<String>,
         background_entry: Option<String>,
+        data_processing: &crate::view::DataProcessing,
     ) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
@@ -560,6 +579,8 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
+            runtime.prepare_global_props(self.pending_global_props.take());
+            runtime.prepare_data_processing(data_processing);
             if let Err(error) = runtime.run_main_thread_script(js, source, url) {
                 if self.outbox.is_cancelled() {
                     return None;
@@ -713,6 +734,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         entry,
         background_entry,
         init_data,
+        data_processing,
         global_props,
         page_bundle: _,
     } = sources;
@@ -742,6 +764,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
             entry,
             background_entry,
             init_data,
+            data_processing,
             global_props,
         },
     ));
@@ -806,6 +829,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         entry,
         background_entry,
         init_data,
+        data_processing,
         global_props,
     } = sources;
     for url in style_sheets {
@@ -854,7 +878,14 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         page.end();
         return;
     }
-    page.open_realm(&source, &url, init_data, global_props, background_entry);
+    page.open_realm(
+        &source,
+        &url,
+        init_data,
+        global_props,
+        background_entry,
+        &data_processing,
+    );
 }
 
 /// One resource load an import produced.

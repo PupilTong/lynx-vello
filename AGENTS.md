@@ -726,28 +726,25 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx`, `__BobcatConnectBackground` and `__BobcatInitData` from
-  `bobcat:runtime`, `Document` and `__FlushElementTree` from
-  `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
-  the timer globals exist before the entry loads. Evaluating `bobcat:runtime`
-  reads the view's `init_data` and `global_props` through `initData` and
-  `globalProps` and parses both with `JSON.parse` — a missing value is `{}`,
-  and one that is not JSON fails boot naming the input — into `__globalProps`
-  (also `lynx.__globalProps`) and `__BobcatInitData`. Boot's first statement
-  after those imports is `export const document = new Document();`, which is what
-  creates the realm's document and holds it for the realm's life. It then uses
-  top-level await on
-  `import(entry_url)`, creates and connects the BTS Worker, and then runs
-  `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
-  otherwise the `__RenderPage` event on `lynx.getEngine()`) →
-  `__FlushElementTree` inside
-  JavaScript; the global function is a compatibility path, not a boot
-  requirement. The runtime module directly exports a `lynx` object, an empty
-  `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
-  sentinel and empty JS event module,
-  performance hooks, nonfatal console/error forwarding, and
-  `__OnLifecycleEvent`; transformed entries receive every binding through the
-  prepended import, and the module installs none of them on `globalThis`.
+  its runtime lifecycle helpers from `bobcat:runtime`, `Document` and
+  `__FlushElementTree` from `bobcat:element`, and `bobcat:timers` for its effect.
+  The runtime parses the view's `init_data` and `global_props` JSON in MTS;
+  missing values become `{}` and malformed inputs fail boot. Boot creates its
+  document first, initializes MTS inputs, retains the host render argument,
+  then awaits the entry. It processes the retained argument and snapshots the
+  result plus current host props before starting BTS. The BTS initializer runs
+  before its entry, so `_params.updateData` and `lynx.__initData` already hold
+  that result. MTS render then flushes and marks the initial render complete;
+  successful boot still waits for BTS readiness. The environment supplies the
+  selected SystemInfo snapshot, including initial viewport metrics, to both realms.
+  `LynxView::{update_data, reset_data, update_global_props, reload}` use the
+  existing ordered command/Worker links. Early data updates are ignored, early
+  global props update the initial environment, and early host reload reports
+  without replay. Later hooks run in native order, with processed data shared
+  with BTS and Script lexical props following the MTS module export. A reload
+  retains the realms and entry; the framework recreates component state.
+  See `docs/data-lifecycle-runtime.md` for processor selection, snapshots,
+  readiness, engine-event precedence and the BTS reload callback boundary.
   Native Context behavior, the BTS GlobalEventEmitter and
   `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
   `LynxView::pump` records readiness before returning `ScriptFinished`, exposed
@@ -758,9 +755,10 @@ useful signal for currently-compatible versions of those libraries.
   `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
   path remains ordinary Worker postMessage delivery with JS-side dispatch.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
-  listeners never cross the host boundary and its only engine-driven delivery
-  today is the boot fallback's `__RenderPage` event, whose `data` is the
-  `processData` result. The MTS `getCoreContext` and `getNative` sinks retain and deliver nothing,
+  listeners never cross the host boundary. Render, update, component removal
+  and global-prop events use `Engine` origin and argument arrays, taking
+  precedence over legacy global hooks. The MTS `getCoreContext` and `getNative`
+  sinks retain and deliver nothing,
   and the module does not invent the background-only `lynxCoreInject` realm.
   The PAPI runtime exports
   the supported Element PAPI only as named ESM bindings; transformed entries

@@ -40,6 +40,11 @@ rstest.mockRequire("bobcat-internal:host", () => ({
  * there for `callLepusMethod` to find.
  */
 interface TestScope {
+  processData: ((data: unknown, processor: string) => unknown) | undefined;
+  renderPage: ((data: unknown, options: unknown) => unknown) | undefined;
+  updatePage: ((data: unknown, options: unknown) => unknown) | undefined;
+  removeComponents: (() => unknown) | undefined;
+  updateGlobalProps: unknown;
   postMessage(message: unknown): void;
   addEventListener(
     name: string,
@@ -107,6 +112,13 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("rejects reload before the initial MTS render without enqueueing a later reload", () => {
+    const before=toBackground.length;
+    mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:2},{processorName:''}]}));
+    expect(reportedErrors).toHaveBeenLastCalledWith('error',expect.stringContaining('ReloadTemplate in another loading process'));
+    expect(toBackground).toHaveLength(before);
+  });
+
   it("uses opaque stylesheet handles and native null results", () => {
     loadStyleSheet.mockReturnValueOnce(null).mockReturnValueOnce('first').mockReturnValueOnce('second');
     expect(mts.__LoadStyleSheet('missing', 'bundle')).toBeNull();
@@ -424,6 +436,271 @@ describe("MTS/BTS lifecycle runtime", () => {
 });
 
 describe("runtime events and diagnostics", () => {
+  it("uses full host props, current MTS hooks and native engine-event precedence", () => {
+    const old=scope.updateGlobalProps;
+    const initial={initData:mts.lynx.__initData,globalProps:mts.lynx.__globalProps,systemInfo:mts.SystemInfo};
+    mts.__BobcatPageLoaded();
+    mts.__BobcatInitializeMTS({...initial,globalProps:{keep:1,nested:{value:2}}});
+    const before=mts.lynx.__globalProps;
+    (before['nested'] as {value: number}).value=99;
+    const apply=(data: unknown)=>mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateGlobalProps',args:[data]}));
+    const listener=rstest.fn(event=>{
+      expect(event).toEqual({type:'__UpdateGlobalProps',data:[mts.lynx.__globalProps],origin:'Engine'});
+      expect(toBackground.at(-1)).toEqual({bobcat:'runtime',method:'updateGlobalProps',args:[mts.lynx.__globalProps]});
+      throw Error('global props hook failed');
+    });
+    const hook=rstest.fn();
+    try {
+      scope.updateGlobalProps=hook;
+      mts.lynx.getEngine().addEventListener('__UpdateGlobalProps',listener);
+      apply(JSON.parse('{"seed":3,"__proto__":{"own":true},"a.b":4}'));
+      expect(hook).not.toHaveBeenCalled();
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(reportedErrors).toHaveBeenLastCalledWith('error',expect.stringContaining('global props hook failed'));
+      expect((mts.lynx.__globalProps['nested'] as {value: number}).value).toBe(2);
+      expect(before).toEqual({keep:1,nested:{value:99}});
+      expect(Object.hasOwn(mts.lynx.__globalProps,'__proto__')).toBe(true);
+      expect(Object.getPrototypeOf(mts.lynx.__globalProps)).toBe(Object.prototype);
+      expect(mts.lynx.__globalProps['a.b']).toBe(4);
+      toBackground.shift();
+      mts.lynx.getEngine().removeEventListener('__UpdateGlobalProps',listener);
+      apply({keep:null});
+      expect(hook).toHaveBeenCalledWith(mts.lynx.__globalProps);
+      expect(mts.lynx.__globalProps).toMatchObject({seed:3,keep:null});
+      toBackground.shift();
+      scope.updateGlobalProps=3;
+      expect(()=>apply({seed:4})).not.toThrow();
+      toBackground.shift();
+    } finally {
+      mts.lynx.getEngine().removeEventListener('__UpdateGlobalProps',listener);
+      scope.updateGlobalProps=old;
+      mts.__BobcatInitializeMTS(initial);
+    }
+  });
+
+  it("processes reload data and enqueues BTS reload before the new MTS first-screen event", () => {
+    const oldProcess=scope.processData, oldRemove=scope.removeComponents, oldUpdate=scope.updatePage;
+    const app=bts.getApp();
+    const oldReload=app.onAppReload, oldLifecycle=app.OnLifecycleEvent;
+    const order: unknown[]=[];
+    mts.__BobcatPageLoaded();
+    try {
+      scope.processData=(data, processor) => {
+        order.push(['process',processor]);
+        return {seed:(data as {seed: number}).seed+1};
+      };
+      scope.removeComponents=() => { order.push('remove'); };
+      scope.updatePage=(data, options) => {
+        order.push(['main',data,options]);
+        expect(toBackground.at(-1)).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:3},{processorName:''}]});
+        mts.__OnLifecycleEvent(['first-screen', {seed:(data as {seed: number}).seed}]);
+      };
+      app.onAppReload=function(...args) { expect(this).toBe(app); order.push(['background',...args]); };
+      app.OnLifecycleEvent=function(...args) { order.push(['lifecycle',...args]); };
+      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:2},{processorName:''}]}));
+      deliverToBackground();
+      deliverToBackground();
+      expect(order).toEqual([
+        ['process',''], 'remove',
+        ['main',{seed:3},{resetPageData:false,reloadFromJS:false,reloadTemplate:true,nativeUpdateDataOrder:0}],
+        ['background',{seed:3},{processorName:''}],
+        ['lifecycle',['first-screen',{seed:3}]],
+      ]);
+      scope.updatePage=() => {};
+      for (const ignored of [null, [], 7, undefined]) {
+        scope.processData=() => ignored;
+        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:4},{processorName:''}]}));
+        expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:4},{processorName:''}]});
+      }
+      const failures=reportedErrors.mock.calls.length;
+      scope.processData=() => {throw Error('processor failed');};
+      scope.removeComponents=() => {throw Error('removal failed');};
+      scope.updatePage=() => {throw Error('render failed');};
+      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:5},{processorName:''}]}));
+      expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:5},{processorName:''}]});
+      expect(reportedErrors.mock.calls.slice(failures).map(call=>call[1])).toEqual([
+        expect.stringContaining('processor failed'),expect.stringContaining('removal failed'),expect.stringContaining('render failed'),
+      ]);
+      const engine=mts.lynx.getEngine(), remove=rstest.fn(), update=rstest.fn();
+      engine.addEventListener('__RemoveComponents',remove);
+      engine.addEventListener('__UpdatePage',update);
+      try {
+        scope.processData=() => ({seed:6});
+        const reports=reportedErrors.mock.calls.length;
+        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{seed:5},{processorName:''}]}));
+        expect(reportedErrors.mock.calls).toHaveLength(reports);
+        expect(remove).toHaveBeenCalledWith({type:'__RemoveComponents',data:[],origin:'Engine'});
+        expect(update).toHaveBeenCalledWith({type:'__UpdatePage',data:[{seed:6},expect.objectContaining({reloadTemplate:true})],origin:'Engine'});
+        expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[{seed:6},{processorName:''}]});
+      } finally {
+        engine.removeEventListener('__RemoveComponents',remove);
+        engine.removeEventListener('__UpdatePage',update);
+      }
+    } finally {
+      scope.processData=oldProcess; scope.removeComponents=oldRemove; scope.updatePage=oldUpdate;
+      if (oldReload) app.onAppReload=oldReload; else delete app.onAppReload;
+      if (oldLifecycle) app.OnLifecycleEvent=oldLifecycle; else delete app.OnLifecycleEvent;
+    }
+  });
+
+  it("forwards processed update/reset data after MTS delivery, including native fallbacks and reported failures", () => {
+    const oldProcess=scope.processData, oldUpdate=scope.updatePage;
+    const app=bts.getApp(), oldHook=app.updateCardData;
+    const update=rstest.fn();
+    const hook=rstest.fn();
+    const engine=mts.lynx.getEngine();
+    engine.addEventListener('__UpdatePage',update);
+    try {
+      app.updateCardData=hook;
+      scope.updatePage=() => {throw Error('engine listener must take precedence');};
+      const processed=Object.fromEntries([
+        ['count',42], ['missing',undefined], ['nan',NaN], ['negativeZero',-0],
+        ['__proto__',{own:true}], ['infinity',Infinity],
+      ]);
+      const process=rstest.fn(() => processed);
+      scope.processData=process;
+      for (const type of [0,1]) {
+        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:7},{type,processorName:''}]}));
+        expect(process).toHaveBeenLastCalledWith({raw:7},'');
+        expect(update).toHaveBeenLastCalledWith({type:'__UpdatePage',data:[processed,{resetPageData:type===1,reloadFromJS:false,reloadTemplate:false,nativeUpdateDataOrder:0}],origin:'Engine'});
+        expect(hook).toHaveBeenCalledTimes(type);
+        deliverToBackground();
+        expect(hook).toHaveBeenLastCalledWith(JSON.parse(JSON.stringify(processed)),{type,processorName:''});
+        const received=hook.mock.calls.at(-1)?.[0];
+        expect(Object.hasOwn(received,'missing')).toBe(false);
+        expect(Object.hasOwn(received,'__proto__')).toBe(true);
+        expect(received.own).toBeUndefined();
+      }
+      engine.removeEventListener('__UpdatePage',update);
+      scope.updatePage=rstest.fn();
+      for (const value of [undefined,null,[],false,7,'wrong',()=>({})]) {
+        scope.processData=()=>value;
+        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:8},{type:0,processorName:''}]}));
+        expect(scope.updatePage).toHaveBeenLastCalledWith({raw:8},expect.objectContaining({resetPageData:false}));
+        deliverToBackground();
+        expect(hook).toHaveBeenLastCalledWith({raw:8},{type:0,processorName:''});
+      }
+      scope.processData=()=>{throw Error('update processor failed');};
+      scope.updatePage=()=>{throw Error('update renderer failed');};
+      const errors=reportedErrors.mock.calls.length;
+      mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:9},{type:1,processorName:''}]}));
+      deliverToBackground();
+      expect(hook).toHaveBeenLastCalledWith({raw:9},{type:1,processorName:''});
+      expect(reportedErrors.mock.calls.slice(errors).map(call=>call[1])).toEqual([
+        expect.stringContaining('update processor failed'),expect.stringContaining('update renderer failed'),
+      ]);
+    } finally {
+      engine.removeEventListener('__UpdatePage',update);
+      scope.processData=oldProcess; scope.updatePage=oldUpdate;
+      if (oldHook) app.updateCardData=oldHook; else delete app.updateCardData;
+    }
+  });
+
+  it("selects named MTS processors and preserves raw data/name only in JS processor mode", () => {
+    const oldProcess=scope.processData, oldRender=scope.renderPage, oldUpdate=scope.updatePage, oldRemove=scope.removeComponents;
+    const initial={initData:mts.lynx.__initData,globalProps:mts.lynx.__globalProps,systemInfo:mts.SystemInfo};
+    const engine=mts.lynx.getEngine(), render=rstest.fn();
+    engine.addEventListener('__RenderPage',render);
+    try {
+      for (const onJS of [false,true]) {
+        mts.__BobcatInitializeMTS({...initial,processorName:'initial',enableJSDataProcessor:onJS});
+        const process=rstest.fn((data,name)=>({value:data.raw+1,name}));
+        scope.processData=process;
+        scope.renderPage=()=>{throw Error('legacy renderer must not run beside engine listener');};
+        scope.updatePage=rstest.fn();
+        scope.removeComponents=()=>{};
+        const data=mts.__BobcatProcessInitData({raw:3});
+        mts.__BobcatRenderPage(data);
+        expect(data).toEqual(onJS?{raw:3}:{value:4,name:'initial'});
+        expect(render).toHaveBeenLastCalledWith({type:'__RenderPage',data:[data,{preLoadTemplate:false,...(onJS?{processorName:'initial'}:{})}],origin:'Engine'});
+        for (const type of [0,1]) {
+          mts.__BobcatApplyPageUpdate(JSON.stringify({method:'updateCardData',args:[{raw:5},{type,processorName:'next'}]}));
+          const data=onJS?{raw:5}:{value:6,name:'next'};
+          expect(scope.updatePage).toHaveBeenLastCalledWith(data,{resetPageData:type===1,reloadFromJS:false,reloadTemplate:false,nativeUpdateDataOrder:0,...(onJS?{processorName:'next'}:{})});
+          expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'updateCardData',args:[data,{type,processorName:onJS?'next':''}]});
+        }
+        mts.__BobcatApplyPageUpdate(JSON.stringify({method:'onAppReload',args:[{raw:7},{processorName:'reload'}]}));
+        expect(toBackground.shift()).toEqual({bobcat:'runtime',method:'onAppReload',args:[onJS?{raw:7}:{value:8,name:'reload'},{processorName:onJS?'reload':''}]});
+        expect(process.mock.calls.map(call=>call[1])).toEqual(onJS?[]:['initial','next','next','reload']);
+      }
+    } finally {
+      mts.__BobcatInitializeMTS(initial);
+      scope.processData=oldProcess; scope.renderPage=oldRender; scope.updatePage=oldUpdate; scope.removeComponents=oldRemove;
+      engine.removeEventListener('__RenderPage',render);
+    }
+  });
+
+  it("uses native reload argument coercion and snapshots object data at the call", () => {
+    const start=toMain.length;
+    for (const value of [undefined,null,7,'data',false,Symbol('ignored'),1n]) {
+      expect(bts.reload(value,17)).toBeUndefined();
+    }
+    const data={seed:2,nested:{keep:undefined}};
+    bts.reload(data);
+    data.seed=9;
+    expect(toMain.splice(start)).toEqual([
+      ...Array(7).fill({bobcat:'runtime',method:'reloadFromJS',data:{}}),
+      {bobcat:'runtime',method:'reloadFromJS',data:{seed:2,nested:{}}},
+    ]);
+    const callback=rstest.fn();
+    expect(bts.reload([],callback)).toBeUndefined();
+    expect(bts.reload(()=>{},callback)).toBeUndefined();
+    const cycle: {self?: unknown}={}; cycle.self=cycle;
+    expect(()=>bts.reload(cycle,callback)).toThrow(TypeError);
+    expect(toMain).toHaveLength(start);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("delivers a zero-argument BTS reload callback after MTS jobs and first-screen notification", async () => {
+    const oldProcess=scope.processData, oldRemove=scope.removeComponents, oldUpdate=scope.updatePage;
+    const app=bts.getApp(), oldReload=app.onAppReload, oldLifecycle=app.OnLifecycleEvent;
+    const order: unknown[]=[];
+    const callback=rstest.fn(function(this: unknown, ...args: unknown[]) {
+      expect(this).toBeUndefined(); expect(args).toEqual([]); order.push('callback');
+    });
+    try {
+      scope.processData=()=>{throw Error('BTS reload must not process MTS data');};
+      scope.removeComponents=()=>{order.push('remove');};
+      scope.updatePage=(data, options)=>{
+        expect(options).toEqual({resetPageData:false,reloadFromJS:true,reloadTemplate:true,nativeUpdateDataOrder:0});
+        order.push(['render',data]);
+        mts.__OnLifecycleEvent(['reload-first',{seed:(data as {seed: number}).seed}]);
+        Promise.resolve().then(()=>order.push('main job'));
+      };
+      app.onAppReload=function(...args){expect(this).toBe(app);order.push(['background',...args]);};
+      app.OnLifecycleEvent=(...args)=>{order.push(['lifecycle',...args]);};
+      expect(bts.reload({seed:2},callback)).toBeUndefined();
+      order.push('returned');
+      expect(callback).not.toHaveBeenCalled();
+      await deliverToMain();
+      expect(order).toEqual(['returned','remove',['render',{seed:2}],'main job']);
+      deliverToBackground();
+      deliverToBackground();
+      const reply=toBackground.shift();
+      receiveInBackground({data:reply});
+      receiveInBackground({data:reply});
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(order.slice(4)).toEqual([
+        ['background',{seed:2},{processorName:''}],
+        ['lifecycle',['reload-first',{seed:2}]],'callback',
+      ]);
+      scope.updatePage=()=>{throw Error('reload render failed');};
+      const throws=rstest.fn(()=>{throw Error('reload callback failed');});
+      bts.reload(null,throws);
+      await deliverToMain();
+      expect(reportedErrors).toHaveBeenLastCalledWith('error',expect.stringContaining('reload render failed'));
+      deliverToBackground();
+      const failureReply=toBackground.shift();
+      expect(()=>receiveInBackground({data:failureReply})).toThrow('reload callback failed');
+      expect(()=>receiveInBackground({data:failureReply})).not.toThrow();
+      expect(throws).toHaveBeenCalledTimes(1);
+    } finally {
+      scope.processData=oldProcess; scope.removeComponents=oldRemove; scope.updatePage=oldUpdate;
+      if(oldReload)app.onAppReload=oldReload;else delete app.onAppReload;
+      if(oldLifecycle)app.OnLifecycleEvent=oldLifecycle;else delete app.OnLifecycleEvent;
+    }
+  });
+
   it("exposes one BTS event module and directly delivers accepted host argument lists", () => {
     const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
     expect(emitter).toBe(bts.getApp().GlobalEventEmitter);

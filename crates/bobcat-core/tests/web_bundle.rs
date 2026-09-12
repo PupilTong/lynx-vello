@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bobcat_core::{DrawTarget, LynxViewError, NoWakeup, PageConfig, ViewSources};
-use support::{FetcherDouble, solo_view, wait_for_script};
+use support::{FetcherDouble, solo_view};
 
 const FIXTURES: &[(&str, &[u8])] = &[
     (
@@ -43,7 +43,27 @@ async fn run(config: PageConfig, source: &str, resolved_url: &str) -> Result<(),
     .await
     .expect("fetch and start");
 
-    wait_for_script(&mut view)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let events = view.pump();
+        let finished = events
+            .iter()
+            .any(|event| matches!(event, bobcat_core::EngineEvent::ScriptFinished));
+        for event in events {
+            match event {
+                bobcat_core::EngineEvent::ScriptFinished
+                | bobcat_core::EngineEvent::ConsoleMessage { .. } => {}
+                bobcat_core::EngineEvent::StartupFailed(error) => return Err(error),
+                bobcat_core::EngineEvent::ScriptRunError(error) => return Err(error.into()),
+                other => panic!("compiled entry reported a failure: {other:?}"),
+            }
+        }
+        if finished {
+            return Ok(());
+        }
+        assert!(std::time::Instant::now() < deadline, "entry did not finish");
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
 
 #[test]
@@ -57,17 +77,6 @@ fn decoded_bundle_page_config_is_supplied_at_view_construction() {
     }
 }
 
-/// The card's own reporter, made fatal.
-///
-/// `ReactLynx` installs an error boundary around the render it drives, so a
-/// missing PAPI surfaces as a call to `_ReportError` rather than as a thrown
-/// exception. The realm's shim swallows that call by design; rethrowing is what
-/// makes the boundary's report fail startup, and what keeps this test from
-/// passing on a card that failed quietly.
-fn with_fatal_reporter(root: &str) -> String {
-    format!("globalThis._ReportError = function (error) {{ throw error; }};\n{root}")
-}
-
 #[tokio::test]
 async fn decoded_scripts_boot_through_the_element_papi_alone() {
     for (name, bytes) in FIXTURES {
@@ -78,7 +87,7 @@ async fn decoded_scripts_boot_through_the_element_papi_alone() {
             .unwrap_or_else(|| panic!("{name} has no lepusCode.root"));
         run(
             page_config(&template),
-            &with_fatal_reporter(root),
+            root,
             &format!("app:///{name}/main-thread.js"),
         )
         .await

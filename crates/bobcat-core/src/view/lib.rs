@@ -344,6 +344,33 @@ impl StyleThreads {
     }
 }
 
+/// Data processor selection and execution policy for one page.
+#[derive(Clone, Debug, Default)]
+pub struct DataProcessing {
+    /// Processor selected for the initial data; empty selects the default.
+    pub initial_processor: String,
+    /// Native `enableJSDataProcessor`: pass raw data and its processor name
+    /// to the framework, without calling the MTS processor.
+    pub on_js: bool,
+}
+
+/// One host update or reload and the processor selected for its data.
+/// A plain JSON map converts to an update using the default processor.
+#[derive(Debug, Default)]
+pub struct DataUpdate {
+    pub data: serde_json::Map<String, serde_json::Value>,
+    pub processor_name: String,
+}
+
+impl From<serde_json::Map<String, serde_json::Value>> for DataUpdate {
+    fn from(data: serde_json::Map<String, serde_json::Value>) -> Self {
+        Self {
+            data,
+            processor_name: String::new(),
+        }
+    }
+}
+
 /// Everything one view is built from.
 ///
 /// Everything *shared* is the group's instead: the script runtime, the style
@@ -381,6 +408,8 @@ pub struct ViewSources {
     /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
     /// the entry's `__globalProps` before the entry loads.
     pub global_props: Option<String>,
+    /// Initial processor selection and the bundle's JS processor switch.
+    pub data_processing: DataProcessing,
 }
 
 impl ViewSources {
@@ -396,6 +425,7 @@ impl ViewSources {
             page_bundle: None,
             init_data: None,
             global_props: None,
+            data_processing: DataProcessing::default(),
         }
     }
 }
@@ -717,6 +747,67 @@ impl<F> Drop for LynxView<F> {
 }
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
+    /// Reload the existing page with merged data, recreating the framework's
+    /// component state and lifetimes without fetching or evaluating the entry
+    /// again. Global properties remain unchanged.
+    ///
+    /// Before the initial MTS render finishes this reports a nonfatal
+    /// [`EngineEvent::ScriptReported`] instead of queueing a later reload.
+    /// The BTS entry may still be loading; its reload notification retains
+    /// FIFO order ahead of the new first-screen lifecycle event.
+    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
+    pub fn reload(&self, data: impl Into<DataUpdate>) {
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::Reload(
+                data.into(),
+            )));
+    }
+
+    /// Merge page data through the MTS update entry and the BTS framework's
+    /// `updateCardData` hook. The default native host policy ignores updates
+    /// before the initial MTS render. After that render, MTS applies them and
+    /// BTS receives them in order when its entry has finished.
+    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
+    pub fn update_data(&self, data: impl Into<DataUpdate>) {
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                data: data.into(),
+                reset: false,
+            }));
+    }
+
+    /// Replace page data using native RESET semantics. The framework owns
+    /// data merging, notification and React rerendering.
+    /// Resets before the initial MTS render are ignored, like updates.
+    /// Pass [`DataUpdate`] to select a named processor, or a JSON map for default.
+    pub fn reset_data(&self, data: impl Into<DataUpdate>) {
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                data: data.into(),
+                reset: true,
+            }));
+    }
+
+    /// Merge literal top-level global-property keys into the host values.
+    /// Before the initial MTS render, changes become the initial environment
+    /// without update hooks. Later, the full props notify BTS before the MTS
+    /// environment and hook update; script mutations do not alter host values.
+    /// BTS notification and rerendering belong to the framework's current hook.
+    pub fn update_global_props(&self, data: serde_json::Map<String, serde_json::Value>) {
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalProps(
+                data,
+            )));
+    }
+
     /// Deliver a native global event. `arguments` is the listener argument list.
     /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
     ///

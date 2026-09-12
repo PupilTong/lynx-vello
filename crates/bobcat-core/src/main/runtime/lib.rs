@@ -580,6 +580,9 @@ pub(crate) struct MainThreadRuntime {
     /// MTS declares application readiness through native bindings. Module
     /// evaluation can finish independently while the BTS entry is still loading.
     readiness: Rc<RefCell<Result<bool, ScriptError>>>,
+    /// JSON input, copied into each realm at bootstrap. No JS Value is kept
+    /// outside its realm or used to keep the document alive.
+    initial_options: Rc<RefCell<serde_json::Map<String, serde_json::Value>>>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -645,6 +648,40 @@ impl MainThreadRuntime {
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
+        let viewport = ingredients.viewport;
+        let initial_options = serde_json::json!({
+            "systemInfo": {
+                "platform": "headless", "runtimeType": "quickjs", "lynxSdkVersion": "4.1.0",
+                "pixelRatio": viewport.device_pixel_ratio,
+                "pixelWidth": viewport.width * viewport.device_pixel_ratio,
+                "pixelHeight": viewport.height * viewport.device_pixel_ratio,
+            }
+        })
+        .as_object()
+        .expect("bootstrap options are an object")
+        .clone();
+        let initial_options = Rc::new(RefCell::new(initial_options));
+        let bootstrap = Rc::clone(&initial_options);
+        install(
+            &mut engine,
+            js_runtime,
+            "prepareBackgroundData",
+            1,
+            move |arguments| {
+                let data =
+                    serde_json::from_str(string_argument("prepareBackgroundData", arguments, 0)?)
+                        .map_err(|error| error.to_string())?;
+                let mut options = bootstrap.borrow_mut();
+                // Boot snapshots the processor result before starting BTS.
+                // Plain JSON has the same value limits as Worker messages,
+                // without retaining an MTS value or the obsolete raw input.
+                options.remove("initData");
+                options.remove("globalProps");
+                options.remove("globalPropsUpdates");
+                options.insert("backgroundData".to_owned(), data);
+                Ok(HostValue::Undefined)
+            },
+        )?;
         let slot = install_bobcat(
             &mut engine,
             js_runtime,
@@ -663,12 +700,20 @@ impl MainThreadRuntime {
         let readiness = Rc::new(RefCell::new(Ok(false)));
         install_readiness(&mut engine, js_runtime, &readiness)?;
         let (workers, incoming) = workers
-            .install(&mut engine, js_runtime, outbox, base_url, background_entry)
+            .install(
+                &mut engine,
+                js_runtime,
+                outbox,
+                base_url,
+                background_entry,
+                Rc::clone(&initial_options),
+            )
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
                 readiness,
+                initial_options,
                 workers,
                 slot,
                 events,
@@ -677,6 +722,27 @@ impl MainThreadRuntime {
             },
             incoming,
         ))
+    }
+
+    pub(super) fn prepare_data_processing(&mut self, processing: &crate::view::DataProcessing) {
+        let mut options = self.initial_options.borrow_mut();
+        options.insert(
+            "processorName".to_owned(),
+            serde_json::Value::String(processing.initial_processor.clone()),
+        );
+        options.insert(
+            "enableJSDataProcessor".to_owned(),
+            serde_json::Value::Bool(processing.on_js),
+        );
+    }
+
+    pub(super) fn prepare_global_props(
+        &mut self,
+        data: serde_json::Map<String, serde_json::Value>,
+    ) {
+        self.initial_options
+            .borrow_mut()
+            .insert("globalPropsUpdates".to_owned(), data.into());
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -946,9 +1012,14 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
+        let initial_options = serde_json::to_string(&*self.initial_options.borrow())
+            .expect("bootstrap options are JSON values");
+        let initial_options =
+            serde_json::to_string(&initial_options).expect("JSON text is a JavaScript string");
         let boot = format!(
-            r#"import {{ __BobcatCallMTS, __BobcatDispatchEngineEvent, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatPageLoaded, __BobcatProcessInitData, __BobcatRenderPage, __BobcatBackgroundData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
+import {{ prepareBackgroundData }} from "{HOST_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
 import "{TIMER_MODULE_SPECIFIER}";
@@ -958,20 +1029,20 @@ import "{TIMER_MODULE_SPECIFIER}";
 // it: it goes when the realm does.
 export const document = new Document();
 
+__BobcatInitializeMTS(JSON.parse({initial_options}));
+// React's entry clears lynx.__initData during initialization. The host's
+// first-screen argument belongs to boot, independently of that mutable slot.
+let data = lynx.__initData;
+
 await import({entry_specifier});
+data = __BobcatProcessInitData(data);
+prepareBackgroundData(JSON.stringify(__BobcatBackgroundData(data)));
 const {{ Worker }} = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
 
-let data = __BobcatInitData;
-if (typeof globalThis.processData === "function") {{
-  data = __BobcatCallMTS(globalThis.processData, [data]);
-}}
-if (typeof globalThis.renderPage === "function") {{
-  __BobcatCallMTS(globalThis.renderPage, [data]);
-}} else {{
-  __BobcatDispatchEngineEvent("__RenderPage", data);
-}}
+__BobcatRenderPage(data);
 __FlushElementTree();
+__BobcatPageLoaded();
 "#
         );
         self.evaluate_module(

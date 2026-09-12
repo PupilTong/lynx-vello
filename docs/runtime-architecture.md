@@ -684,32 +684,30 @@ application readiness through `notifyReady()`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground`,
-`__BobcatInitData` from `bobcat:runtime` and `Document` and
-`__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
-effect; the transformed entry itself statically imports both of the first two
-built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
-so it is ready before either module's own code runs. Boot then runs:
+The final `bobcat:boot` module imports the lifecycle helpers from
+`bobcat:runtime`, `Document` and `__FlushElementTree` from `bobcat:element`,
+and `bobcat:timers` for its effect. The runtime parses the initial JSON before
+entry execution. The generated boot body has this order:
 
 ```js
-// The realm's document, created by this module's first statement and held by
-// this exported binding for the realm's life. Nothing in the realm releases
-// it: it goes when the realm does.
 export const document = new Document();
-
+__BobcatInitializeMTS(initialOptions);
+let data = lynx.__initData;
 await import(entryMtsUrl);
+data = __BobcatProcessInitData(data);
+prepareBackgroundData(JSON.stringify(__BobcatBackgroundData(data)));
 const { Worker } = await import("bobcat-internal");
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-const data = typeof globalThis.processData === "function"
-  ? globalThis.processData(__BobcatInitData)
-  : __BobcatInitData;
-if (typeof globalThis.renderPage === "function") {
-  globalThis.renderPage(data);
-} else {
-  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
-}
+__BobcatRenderPage(data);
 __FlushElementTree();
+__BobcatPageLoaded();
 ```
+
+The retained argument survives entry initialization replacing `lynx.__initData`.
+Processing and its Promise jobs complete before the BTS snapshot and MTS render.
+The Worker initializes its data before importing the BTS entry. Initial MTS render
+is a separate boundary from the later public readiness report; see
+[data lifecycle](data-lifecycle-runtime.md) for early-operation policies.
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
@@ -1237,3 +1235,11 @@ MTS loads opaque handles from already-decoded page CSS and appends their rules
 only when adopted. Component styles use the same author cascade. The source
 metadata, handle lifetime and later bundle-loader boundary are described in
 [named stylesheet loading and adoption](named-styles-runtime.md).
+
+## Data lifecycle
+
+Initial preprocessing, update/reset, global-property snapshots and reload use
+the existing MTS command and Worker links. Initial MTS render is distinct from
+BTS readiness; early operations follow their own native policies. See
+[data and global-property lifecycle](data-lifecycle-runtime.md) for the call
+order, input ownership, Script bindings and framework boundary.

@@ -165,6 +165,12 @@ pub(crate) enum ToMain {
 }
 
 pub(crate) enum PageUpdate {
+    Reload(crate::view::DataUpdate),
+    Data {
+        data: crate::view::DataUpdate,
+        reset: bool,
+    },
+    GlobalProps(serde_json::Map<String, serde_json::Value>),
     GlobalEvent {
         name: String,
         arguments: Vec<serde_json::Value>,
@@ -174,6 +180,15 @@ pub(crate) enum PageUpdate {
 impl PageUpdate {
     pub(crate) fn into_message(self) -> serde_json::Value {
         match self {
+            Self::Reload(data) => {
+                serde_json::json!({"method":"onAppReload", "args":[data.data, {"processorName":data.processor_name}]})
+            }
+            Self::Data { data, reset } => {
+                serde_json::json!({"method":"updateCardData", "args":[data.data, {"type": u8::from(reset), "processorName":data.processor_name}]})
+            }
+            Self::GlobalProps(data) => {
+                serde_json::json!({"method":"updateGlobalProps", "args":[data]})
+            }
             Self::GlobalEvent { name, arguments } => {
                 serde_json::json!({"method":"sendGlobalEvent", "name":name, "args":arguments})
             }
