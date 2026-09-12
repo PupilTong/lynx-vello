@@ -1258,3 +1258,71 @@ fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation()
     let error = runtime.is_ready().unwrap_err();
     assert!(error.to_string().contains("BTS startup failed"), "{error}");
 }
+
+#[test]
+fn engine_listeners_have_individual_native_checkpoints_and_errors_do_not_stop_the_walk() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.order = [];
+        let first = false;
+        const engine = lynx.getEngine();
+        engine.addEventListener('__RenderPage', function() {
+            if (this !== globalThis) throw Error('native listener receiver');
+            Promise.resolve().then(() => { first = true; order.push('first-job'); });
+            throw Error('first listener failed');
+        });
+        engine.addEventListener('__RenderPage', function() {
+            if (first) throw Error('a throwing native call drained jobs');
+            order.push('second');
+            Promise.resolve().then(() => {
+                // This enters the same checkpoint from inside one of its jobs.
+                lynx.__globalProps = {};
+                globalThis.processData = value => {
+                    const result = {};
+                    Promise.resolve().then(() => result.value = value);
+                    return result;
+                };
+                const result = callMts(globalThis.processData, [42]);
+                if (result.value !== 42) throw Error('reentrant jobs did not finish');
+                order.push('nested-call');
+            });
+        });
+        engine.addEventListener('__RenderPage', function() {
+            if (!first || order.join(',') !== 'second,first-job,nested-call') throw Error(order);
+            order.push('third');
+        });
+        import {__BobcatCallMTS as callMts} from 'bobcat:runtime';
+    ",
+        None,
+    );
+    pair.check("if (order.join(',') !== 'second,first-job,nested-call,third') throw Error(order);");
+    let reports: Vec<_> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].contains("first listener failed"));
+}
+
+#[test]
+fn a_throwing_native_render_hook_reports_without_failing_bts_startup() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.renderPage = () => {
+            Promise.resolve().then(() => globalThis.renderJobFinished = true);
+            throw Error('render hook failed');
+        };
+    ",
+        Some("postMessage('BTS started');"),
+    );
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if value == r#"["BTS started"]"#));
+    pair.check("if (!renderJobFinished) throw Error('outer checkpoint lost render jobs');");
+    assert!(pair.notices().iter().any(|notice| matches!(notice,
+        ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. })
+        if message.contains("render hook failed"))));
+}

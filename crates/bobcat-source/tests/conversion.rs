@@ -569,3 +569,74 @@ fn legacy_lepus_is_rejected_as_bytecode() {
         Err(ConvertError::CodeCacheBundle { .. })
     ));
 }
+
+#[tokio::test]
+async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    struct Wake(mpsc::Sender<()>);
+    impl bobcat_core::EventRequester for Wake {
+        fn request_event(&self) {
+            let _ = self.0.send(());
+        }
+    }
+    let native = native_bundle(vec![custom_section(vec![
+        CustomSection::source(
+            "entry__main-thread",
+            r"
+            let count = 0;
+            const identity = lynx;
+            if (count !== 0 || !__LoadLepusChunk('chunk__main-thread', {}))
+                throw Error('chunk missing or eagerly evaluated');
+            if (!__LoadLepusChunk('chunk__main-thread', {}) || count !== 2)
+                throw Error('chunk did not re-evaluate in entry scope');
+            if (__LoadLepusChunk('missing', {}) || typeof chunkLocal !== 'undefined')
+                throw Error('chunk lookup or scope');
+        ",
+        ),
+        CustomSection::source(
+            "chunk__main-thread",
+            r"
+            count++;
+            var chunkLocal = true;
+            if (lynx !== identity || typeof __CreateView !== 'function')
+                throw Error('entry runtime/PAPI bindings lost');
+        ",
+        ),
+    ])]);
+    let input = "app:///chunks.lynx.bundle".parse().unwrap();
+    let page = bobcat_source::PageSource::from_native_bundle(&input, &native, "entry__main-thread")
+        .unwrap();
+    let (wake, events) = mpsc::channel();
+    let group =
+        bobcat_core::LynxGroup::new(Arc::new(Wake(wake)), bobcat_core::StyleThreads::Sequential)
+            .await
+            .unwrap();
+    let resources = bobcat_resources::Resources::new(
+        bobcat_resources::ResourcesConfig {
+            worker_threads: 1,
+            log_to_stderr: false,
+            ..Default::default()
+        },
+        || {},
+    );
+    page.register_with(&resources);
+    let mut view = group
+        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        events
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        for event in view.pump() {
+            match event {
+                bobcat_core::EngineEvent::ScriptFinished => return,
+                bobcat_core::EngineEvent::StartupFailed(error) => panic!("{error}"),
+                bobcat_core::EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
+                _ => {}
+            }
+        }
+    }
+}

@@ -79,6 +79,8 @@ const ENTRY_PREAMBLE: &str = r#"import {
   _ReportError,
   _SetSourceMapRelease,
   __OnLifecycleEvent,
+  __LoadLepusChunk,
+  __BobcatInstallScriptGlobals,
 } from "bobcat:runtime";
 import {
   __CreatePage,
@@ -122,6 +124,58 @@ import {
   __StopImmediatePropagation,
   __FlushElementTree,
 } from "bobcat:element";
+__BobcatInstallScriptGlobals({
+  lynx,
+  console,
+  SystemInfo,
+  __globalProps,
+  NativeModules,
+  _AddEventListener,
+  _ReportError,
+  _SetSourceMapRelease,
+  __OnLifecycleEvent,
+  __LoadLepusChunk,
+  __CreatePage,
+  __CreateElement,
+  __CreateWrapperElement,
+  __CreateText,
+  __CreateImage,
+  __CreateView,
+  __CreateScrollView,
+  __CreateRawText,
+  __CreateList,
+  __AppendElement,
+  __InsertElementBefore,
+  __RemoveElement,
+  __ReplaceElement,
+  __ReplaceElements,
+  __SwapElement,
+  __SetClasses,
+  __SetID,
+  __GetID,
+  __GetTag,
+  __GetChildren,
+  __GetAttributeByName,
+  __GetAttributeNames,
+  __GetElementUniqueID,
+  __SetDataset,
+  __GetDataset,
+  __AddDataset,
+  __SetInlineStyles,
+  __AddInlineStyle,
+  __SetCSSId,
+  __SetAttribute,
+  __UpdateListCallbacks,
+  __AddEvent,
+  __GetEvent,
+  __GetEvents,
+  __SetEvents,
+  __AddEventListener,
+  __RemoveEventListener,
+  __StopPropagation,
+  __StopImmediatePropagation,
+  __FlushElementTree,
+});
 //# allFunctionsCalledOnLoad
 "#;
 
@@ -571,6 +625,17 @@ impl MainThreadRuntime {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
+        let job_reports = outbox.clone();
+        engine
+            .install_mts_job_runner(js_runtime, move |error| {
+                job_reports.engine_event(crate::EngineEvent::ScriptReported {
+                    level: "error".into(),
+                    message: error.message.to_string(),
+                });
+            })
+            .map_err(|error| {
+                MainThreadError::from_engine("installing MTS job checkpoints", error)
+            })?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
@@ -870,7 +935,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ __BobcatCallMTS, __BobcatDispatchEngineEvent, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -887,12 +952,12 @@ __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg
 
 let data = __BobcatInitData;
 if (typeof globalThis.processData === "function") {{
-  data = globalThis.processData(data);
+  data = __BobcatCallMTS(globalThis.processData, [data]);
 }}
 if (typeof globalThis.renderPage === "function") {{
-  globalThis.renderPage(data);
+  __BobcatCallMTS(globalThis.renderPage, [data]);
 }} else {{
-  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
+  __BobcatDispatchEngineEvent("__RenderPage", data);
 }}
 __FlushElementTree();
 "#

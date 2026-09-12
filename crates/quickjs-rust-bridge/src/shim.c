@@ -1171,6 +1171,36 @@ QjsValue *qjs_eval(QjsContext *context, const uint8_t *source,
     return qjs_box(context->raw, result);
 }
 
+/* Arguments and results stay inside the realm. The caller owns pending jobs. */
+static JSValue qjs_evaluate_script(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+    const char *source, *filename;
+    size_t length;
+    JSValue result;
+    (void)this_val;
+    if (argc < 1 || !JS_IsString(argv[0]))
+        return JS_ThrowTypeError(ctx, "Script evaluation expects a string");
+    if (argc < 2 || !JS_IsString(argv[1]))
+        return JS_ThrowTypeError(ctx, "Script evaluation expects a filename");
+    source = JS_ToCStringLen(ctx, &length, argv[0]);
+    if (!source)
+        return JS_EXCEPTION;
+    filename = JS_ToCString(ctx, argv[1]);
+    if (!filename) {
+        JS_FreeCString(ctx, source);
+        return JS_EXCEPTION;
+    }
+    result = JS_Eval(ctx, source, length, filename, JS_EVAL_TYPE_GLOBAL);
+    JS_FreeCString(ctx, filename);
+    JS_FreeCString(ctx, source);
+    return result;
+}
+
+QjsValue *qjs_new_script_evaluator(QjsContext *context) {
+    return qjs_box(context->raw, JS_NewCFunction(context->raw,
+        qjs_evaluate_script, "evaluateScript", 2));
+}
+
 QjsValue *qjs_call(QjsContext *context, const QjsValue *callable,
                    const QjsValue *this_value, size_t argument_count,
                    const QjsValue *const *arguments) {

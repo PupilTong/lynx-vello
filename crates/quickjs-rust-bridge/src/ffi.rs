@@ -161,6 +161,7 @@ unsafe extern "C" {
         flags: c_int,
         failure_stage: *mut c_int,
     ) -> *mut QjsValue;
+    pub(crate) fn qjs_new_script_evaluator(context: *mut QjsContext) -> *mut QjsValue;
     pub(crate) fn qjs_call(
         context: *mut QjsContext,
         callable: *const QjsValue,
