@@ -104,7 +104,7 @@ fn declarations(source: &[PreparsedDeclaration]) -> impl Iterator<Item = CssDecl
 /// Rules that do not parse are dropped, which is what a browser does with a
 /// stylesheet: an unsupported selector or value invalidates its own rule or
 /// declaration and nothing else.
-fn lower(document: &LynxDocument, sheet: &PreparsedStyleSheet) -> Vec<CssRule> {
+pub(crate) fn lower(document: &LynxDocument, sheet: &PreparsedStyleSheet) -> Vec<CssRule> {
     sheet
         .rules
         .iter()

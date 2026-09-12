@@ -241,6 +241,7 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
                         frames,
                         Arc::clone(&context.requester),
                         cancel.clone(),
+                        sources.page_bundle.clone(),
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     add_script_panic_reporter({

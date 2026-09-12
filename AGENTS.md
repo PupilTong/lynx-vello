@@ -286,7 +286,15 @@ useful signal for currently-compatible versions of those libraries.
   pipeline and HTTP client are that crate's own surface, reached only by an
   embedder that builds one. The protocol carries no response-size limit
   either; each fetcher owns the memory bound for the response it
-  materializes. Per-component css-id scoping is
+  materializes. `PageSource` supplies decoded default-page CSS through
+  `ViewSources::page_bundle`; named sheets lower to document-branded rules on
+  `__LoadStyleSheet`, without changing the cascade. `__AdoptStyleSheet` appends
+  those rules in call order, including repeated adoption. JS wrappers have
+  realm-local native handles, and adopted rules outlive their collection.
+  Component-style append uses the same author cascade. At this layer only
+  `__Card__` resolves; external bundle loading remains separate. See
+  `docs/named-styles-runtime.md` for source ownership and the native contract.
+  Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The
   document, tree, engine, and realm cannot be borrowed or decomposed from the

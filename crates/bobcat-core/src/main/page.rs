@@ -714,6 +714,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         background_entry,
         init_data,
         global_props,
+        page_bundle: _,
     } = sources;
     // The fonts first, because a view whose containers cannot serve the family
     // it named will never render and there is nothing worth fetching for it.
