@@ -11,7 +11,8 @@ use quickjs_rust_bridge::HostValue;
 use crate::esm::{
     BTS_RUNTIME_MODULE_SOURCE, BTS_RUNTIME_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE,
     CONTEXT_MODULE_SPECIFIER, EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE,
-    TIMER_MODULE_SOURCE, TIMER_MODULE_SPECIFIER,
+    GLOBAL_EVENT_MODULE_SOURCE, GLOBAL_EVENT_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
+    TIMER_MODULE_SPECIFIER,
 };
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
@@ -56,6 +57,7 @@ pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(
         crate::esm::SELECTOR_QUERY_SPECIFIER,
         crate::esm::SELECTOR_QUERY_SOURCE,
     )?;
+    js_runtime.register_module_source(GLOBAL_EVENT_MODULE_SPECIFIER, GLOBAL_EVENT_MODULE_SOURCE)?;
     js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
     js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
     js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;

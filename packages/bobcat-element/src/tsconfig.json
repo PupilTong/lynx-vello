@@ -9,6 +9,7 @@
     "lib": ["es2023"],
     "types": [],
     "paths": {
+      "bobcat:global-event-emitter": ["./global-event-emitter.ts"],
       "bobcat:selector-query": ["./selector-query.ts"],
       "bobcat:element": ["./element-papi.ts"],
       "bobcat:runtime": ["./main-thread-runtime.ts"],

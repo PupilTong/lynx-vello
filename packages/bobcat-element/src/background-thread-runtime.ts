@@ -5,6 +5,7 @@ import {
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { SelectorQuery, type SendQuery } from "bobcat:selector-query";
+import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
@@ -14,12 +15,21 @@ const scope = globalThis as unknown as WorkerGlobalScope;
 const coreContext = createCrossThreadContext();
 
 type AppHook = (...args: unknown[]) => unknown;
+const emitter = new GlobalEventEmitter();
+const jsModules = new Map<string, unknown>([["GlobalEventEmitter", emitter]]);
 const app: {
   OnLifecycleEvent?: AppHook;
   publishEvent?: AppHook;
   publicComponentEvent?: AppHook;
   callDestroyLifetimeFun?: AppHook;
-} = {};
+  GlobalEventEmitter: GlobalEventEmitter;
+  registerModule(name: string, value: unknown): void;
+  getJSModule(name: string): unknown;
+} = {
+  GlobalEventEmitter: emitter,
+  registerModule(name, value) { jsModules.set(name, value); },
+  getJSModule(name) { return jsModules.get(name); },
+};
 // Looked up by the id a `callLepusMethodResult` carries, which a result for
 // a call made without a callback lacks.
 const callbacks: Map<number | undefined, (result: unknown) => void> =
@@ -45,6 +55,7 @@ type FromMainThread =
       error?: { name: string; message: string };
     }
   | { bobcat: "runtime"; method: "nodeQueryResult"; id?: number; result?: unknown }
+  | { bobcat: "runtime"; method: "sendGlobalEvent"; name: string; args: unknown[] }
   | (ContextEvent & { bobcat?: never });
 
 /**
@@ -145,7 +156,7 @@ coreContext.addEventListener(
   },
 );
 
-coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data }));
+coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
   const message = event.data;
   if (message?.bobcat !== "runtime") {
@@ -168,20 +179,45 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
       finally { callbacks.delete(message.id); }
       break;
     }
+    case "sendGlobalEvent":
+      emitter.emit(message.name, message.args);
+      break;
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
 });
 
+function printable(value: unknown): string {
+  if (value instanceof Error) {
+    const summary = String(value);
+    return value.stack?.includes(summary) ? value.stack
+      : value.stack ? `${summary}\n${value.stack}` : summary;
+  }
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value) ?? String(value); }
+  catch { return String(value); }
+}
+
+export const console = Object.fromEntries(
+  ["log", "info", "debug", "warn", "error"].map(level => [level,
+    (...args: unknown[]) => scope.postMessage({ bobcat: "runtime", method: "console", level,
+      message: args.map(printable).join(" ") }),
+  ]),
+);
+
 // This is the raw BTS environment's MVP. Loading a compiled ReactLynx BTS
 // bundle also needs Lynx Core's module/init shell, which is not installed here.
 export const lynx = {
-  createSelectorQuery(component?: string) {
-    return new SelectorQuery(sendQuery, error => {
-      // Use the Worker's existing error path until the Lynx reporter is wired.
-      void Promise.reject(error);
-    }, component);
+  getJSModule: app.getJSModule,
+  registerModule: app.registerModule,
+  reportError(error: unknown, options?: {level?: string}) {
+    const level = options?.level;
+    scope.postMessage({ bobcat: "runtime", method: "reportError",
+      level: level === "warning" || level === "fatal" ? level : "error",
+      message: printable(error) });
   },
+
+  createSelectorQuery(component?: string) { return new SelectorQuery(sendQuery, error => lynx.reportError(error), component); },
   getApp() {
     return app;
   },

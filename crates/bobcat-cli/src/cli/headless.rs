@@ -234,6 +234,10 @@ fn check_script(view: &mut LynxView<ViewResources>, input: &str) -> Result<bool,
             EngineEvent::WorkerFailed(error) => {
                 eprintln!("worker failed: {error}");
             }
+            EngineEvent::ScriptReported { level, message }
+            | EngineEvent::ConsoleMessage { level, message } => {
+                eprintln!("[{level}] {message}");
+            }
             EngineEvent::TimerFailed(error) => {
                 eprintln!("timer callback failed: {error}");
             }

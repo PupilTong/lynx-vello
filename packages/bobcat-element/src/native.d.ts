@@ -112,6 +112,8 @@ interface BobcatWorkerNative {
 }
 
 declare module "bobcat-internal:host" {
+  export function reportScriptError(level: string, message: string): void;
+  export function logScriptMessage(level: string, message: string): void;
   export function createWorker(url: string, name: string): string;
   export function sendWorkerMessage(key: string, data: string): void;
   export function terminateWorker(key: string): void;

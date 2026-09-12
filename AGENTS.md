@@ -687,7 +687,7 @@ useful signal for currently-compatible versions of those libraries.
   in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
   gets a deliberately shorter list — `bobcat:event-target`, the worker global
   scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
-  the BTS bindings `bobcat:bts-runtime` — because a worker has no
+  the BTS bindings `bobcat:bts-runtime` and `bobcat:global-event-emitter` — because a worker has no
   document to reach and no page to be the main thread of, so an import of
   `bobcat:element` fails to resolve rather than failing late. A worker's own
   script is *inlined* into the one module its realm evaluates, exactly as
@@ -695,7 +695,7 @@ useful signal for currently-compatible versions of those libraries.
   runtime: an evaluated module belongs to the realm that evaluated it, so two
   views resolving one URL to different bytes cannot collide and no worker
   leaves a registration behind.
-  All eight runtime modules live together in `packages/bobcat-element/src` as
+  The runtime modules live together in `packages/bobcat-element/src` as
   TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
   emits during the Cargo build into its private `OUT_DIR` (see that package
   below). The Element module imports
@@ -724,9 +724,14 @@ useful signal for currently-compatible versions of those libraries.
   requirement. The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
-  performance/error hooks, and
+  performance hooks, nonfatal console/error forwarding, and
   `__OnLifecycleEvent`; transformed entries receive every binding through the
   prepended import, and the module installs none of them on `globalThis`.
+  Native Context behavior, the BTS GlobalEventEmitter and
+  `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
+  Global events retain host FIFO order and wait for initial MTS render.
+  `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
+  path remains ordinary Worker postMessage delivery with JS-side dispatch.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
   listeners never cross the host boundary and its only engine-driven delivery
   today is the boot fallback's `__RenderPage` event, whose `data` is the

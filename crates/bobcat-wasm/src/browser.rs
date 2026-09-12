@@ -26,6 +26,8 @@ extern "C" {
     fn console_error(value: &JsValue);
     #[wasm_bindgen(js_namespace = console, js_name = warn)]
     fn console_warn(value: &JsValue);
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(value: &JsValue);
 }
 
 const POINTER_DEVICE_MOUSE: u8 = 0;
@@ -500,6 +502,17 @@ impl BobcatRenderer {
                 | EngineEvent::TimerFailed(error)
                 | EngineEvent::WorkerFailed(error) => {
                     console_error(&js_error(error));
+                }
+                EngineEvent::ScriptReported { level, message } => {
+                    console_error(&JsValue::from_str(&format!("[{level}] {message}")));
+                }
+                EngineEvent::ConsoleMessage { level, message } => {
+                    let message = JsValue::from_str(&format!("[{level}] {message}"));
+                    match level.as_str() {
+                        "error" => console_error(&message),
+                        "warn" => console_warn(&message),
+                        _ => console_log(&message),
+                    }
                 }
                 _ => {}
             }

@@ -535,14 +535,14 @@ a fixture using the existing runtime API. The runtime cost remains one worker
 realm per view, with no additional OS thread or runtime.
 
 MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` return stable
-`CrossThreadContext extends EventTarget` instances. `createCrossThreadContext`
-returns the instance directly; `receive` calls `super.dispatchEvent` for local
-listener delivery. Their shared `bobcat:cross-thread-context` module implements Lynx's custom
-`dispatchEvent({type, data})`: send to the other context and return numeric `3`.
-It never dispatches locally. The receiver uses the shared EventTarget listener
-machinery, with `data ?? {}`; a missing listener drops the event. `postMessage`
-on these Context objects remains a no-op, matching web-core's unimplemented
-operation. This differs from Worker `postMessage`, which carries the events.
+`CrossThreadContext extends EventTarget` instances. Their native Lynx contract
+requires a string type and a data property, snapshots at dispatch, returns `0`
+for accepted peer sends, and carries a fixed CoreContext/JSContext origin.
+`postMessage` sends a `message` event; null and undefined data are retained.
+Listeners require a string/function, ignore DOM options and receive undefined
+as their receiver. Ordinary EventTarget behavior is unchanged. See
+[events and diagnostics](events-diagnostics-runtime.md) for the contract,
+BTS GlobalEventEmitter, ordered host global events and nonfatal reports.
 
 The MTS Context exists during entry evaluation. Runtime JS projects the public
 Context fields before queuing; payload objects remain references until Worker
@@ -672,7 +672,7 @@ Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
 The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground` and
-`__BobcatInitData` from `bobcat:runtime` and `Document` and
+`__BobcatInitData` and `__BobcatPageLoaded` from `bobcat:runtime` and `Document` and
 `__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
 effect; the transformed entry itself statically imports both of the first two
 built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
@@ -696,6 +696,7 @@ if (typeof globalThis.renderPage === "function") {
   lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
 }
 __FlushElementTree();
+__BobcatPageLoaded(); // Release global events waiting for initial render.
 ```
 
 The global `renderPage` function remains a compatibility path, not a boot

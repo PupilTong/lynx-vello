@@ -71,6 +71,7 @@ const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-run
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
+  console,
   SystemInfo,
   __globalProps,
   NativeModules,
@@ -657,6 +658,25 @@ impl MainThreadRuntime {
         self.slot.borrow_mut().commit_if_dirty();
     }
 
+    pub(crate) fn apply_page_update(
+        &mut self,
+        js: &mut ScriptRuntime,
+        update: crate::link::PageUpdate,
+    ) -> Result<(), MainThreadError> {
+        let message = update.into_message().to_string();
+        let called = self
+            .engine
+            .call_module_export(
+                js,
+                RUNTIME_MODULE_SPECIFIER,
+                "__BobcatApplyPageUpdate",
+                &[HostArgument::String(&message)],
+            )
+            .map_err(|error| MainThreadError::from_engine("updating page data", error));
+        let finished = self.finish_batch(js, called.is_ok());
+        called.map(|_| ()).and(finished)
+    }
+
     /// Advances the animation timeline to the painting side's clock
     /// reading. Whether anything changed is the next commit's business.
     pub(crate) fn begin_frame(&mut self, now: f64) {
@@ -844,7 +864,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData, __BobcatPageLoaded }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -869,6 +889,7 @@ if (typeof globalThis.renderPage === "function") {{
   lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
 __FlushElementTree();
+__BobcatPageLoaded();
 "#
         );
         self.evaluate_module(
@@ -997,6 +1018,19 @@ fn install_bobcat(
     events: &Rc<EventState>,
     timers: &Rc<TimerState>,
 ) -> Result<Rc<RefCell<DocumentSlot>>, MainThreadError> {
+    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
+        let reporting = outbox.clone();
+        install(engine, js_runtime, name, 2, move |arguments| {
+            let level = string_argument(name, arguments, 0)?.to_owned();
+            let message = string_argument(name, arguments, 1)?.to_owned();
+            reporting.engine_event(if is_error {
+                crate::EngineEvent::ScriptReported { level, message }
+            } else {
+                crate::EngineEvent::ConsoleMessage { level, message }
+            });
+            Ok(HostValue::Undefined)
+        })?;
+    }
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,

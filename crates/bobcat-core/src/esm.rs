@@ -27,6 +27,9 @@ pub(crate) const TIMER_MODULE_SOURCE: &str = runtime_source!("timers");
 pub(crate) const EVENT_TARGET_MODULE_SPECIFIER: &str = "bobcat:event-target";
 pub(crate) const EVENT_TARGET_SOURCE: &str = runtime_source!("event-target");
 
+pub(crate) const GLOBAL_EVENT_MODULE_SPECIFIER: &str = "bobcat:global-event-emitter";
+pub(crate) const GLOBAL_EVENT_MODULE_SOURCE: &str = runtime_source!("global-event-emitter");
+
 /// Lynx's typed asynchronous Context channel, shared by MTS and BTS.
 pub(crate) const CONTEXT_MODULE_SPECIFIER: &str = "bobcat:cross-thread-context";
 pub(crate) const CONTEXT_MODULE_SOURCE: &str = runtime_source!("cross-thread-context");

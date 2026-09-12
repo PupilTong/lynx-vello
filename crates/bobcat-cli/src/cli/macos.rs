@@ -419,6 +419,10 @@ impl MacApplication {
                 EngineEvent::WorkerFailed(error) => {
                     eprintln!("worker failed: {error}");
                 }
+                EngineEvent::ScriptReported { level, message }
+                | EngineEvent::ConsoleMessage { level, message } => {
+                    eprintln!("[{level}] {message}");
+                }
                 EngineEvent::TimerFailed(error) => {
                     eprintln!("timer callback failed: {error}");
                 }

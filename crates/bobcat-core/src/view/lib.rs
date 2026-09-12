@@ -239,6 +239,12 @@ pub enum EngineEvent {
     TimerFailed(ScriptError),
     /// A worker failed to load or threw. The owning view remains usable.
     WorkerFailed(ScriptError),
+    /// An application reported an error through `lynx.reportError`, or the
+    /// runtime reported a recoverable operation failure.
+    /// Reporting does not throw into its caller or end the view.
+    ScriptReported { level: String, message: String },
+    /// A realm's console output, delivered to the embedder that owns the view.
+    ConsoleMessage { level: String, message: String },
 }
 
 /// One captured frame: tightly packed RGBA8 pixels at size.
@@ -688,6 +694,17 @@ impl<F> Drop for LynxView<F> {
 }
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
+    /// Deliver a native global event. `arguments` is the listener argument list.
+    pub fn send_global_event(&self, name: impl Into<String>, arguments: Vec<serde_json::Value>) {
+        let _ = self
+            .seat
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent {
+                name: name.into(),
+                arguments,
+            }));
+    }
+
     /// Runs one view turn: hand the host's resource system everything the
     /// document asked for, take back what it has finished, and hand back
     /// every lifecycle event the engine has produced since the last call.

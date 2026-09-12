@@ -43,6 +43,8 @@ pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewEr
 /// attaching is the group's own inbox, the goodbye is this channel closing,
 /// and a source answers the one-shot that was minted with its request.
 pub(crate) enum ToMain {
+    /// Global events retain FIFO order, including during boot.
+    PageUpdate(PageUpdate),
     DispatchEvent {
         target: NodeId,
         name: &'static str,
@@ -73,6 +75,23 @@ pub(crate) enum ToMain {
     /// sibling and the owner the way any other task's does.
     #[cfg(test)]
     Trap(std::sync::mpsc::Sender<bool>),
+}
+
+pub(crate) enum PageUpdate {
+    GlobalEvent {
+        name: String,
+        arguments: Vec<serde_json::Value>,
+    },
+}
+
+impl PageUpdate {
+    pub(crate) fn into_message(self) -> serde_json::Value {
+        match self {
+            Self::GlobalEvent { name, arguments } => {
+                serde_json::json!({"method":"sendGlobalEvent", "name":name, "args":arguments})
+            }
+        }
+    }
 }
 
 /// The view's task → the embedder, drained by `LynxView::pump`.
