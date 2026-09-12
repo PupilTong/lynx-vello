@@ -591,16 +591,19 @@ impl<T> Document<T> {
 
     fn note_generated_attribute_change(&mut self, id: NodeId, name: &LocalName) {
         use stylo::values::computed::{Content, ContentItem};
-        let depends = self.live_element(id).before_style().is_some_and(|style| {
-            let Content::Items(content) = &style.get_counters().content else {
-                return false;
-            };
-            content.items[..content.alt_start].iter().any(|item| {
-                matches!(item,
+        let depends = self
+            .live_element(id)
+            .layout_computed_style()
+            .is_some_and(|style| {
+                let Content::Items(content) = &style.get_counters().content else {
+                    return false;
+                };
+                content.items[..content.alt_start].iter().any(|item| {
+                    matches!(item,
                 ContentItem::Attr(attr) if attr.namespace_url.is_empty()
                     && attr.attribute.as_ref() == name.as_ref())
-            })
-        });
+                })
+            });
         if depends {
             self.invalidate_layout(id);
         }

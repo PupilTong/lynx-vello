@@ -239,10 +239,7 @@ impl<T> Document<T> {
     ///
     /// How a glyph run finds the element whose style painted it.
     #[must_use]
-    pub(crate) fn text_block_sources(
-        &self,
-        id: crate::NodeId,
-    ) -> Option<&[text_block::TextSource]> {
+    pub(crate) fn text_block_sources(&self, id: crate::NodeId) -> Option<&[crate::NodeId]> {
         let slot = self.slot(id)?;
         Some(&self.layout_state().get(slot)?.text.as_deref()?.source_ids)
     }
@@ -477,7 +474,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         assert_eq!(
             current,
-            (if cfg!(debug_assertions) { 240 } else { 232 }, 336, 352),
+            (if cfg!(debug_assertions) { 232 } else { 224 }, 336, 352),
             "Node, LayoutSlot and NodeLayoutState sizes changed",
         );
     }

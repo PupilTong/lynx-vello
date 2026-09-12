@@ -119,7 +119,7 @@ divergences found so far.
 **Scope exceptions.** A feature can be deliberately deferred or narrowed
 relative to the compat target by an explicit, user-confirmed decision — the
 styling-system set lives in `docs/style-assumptions.md` (e.g.
-text-only `::before` is supported; generated boxes and `::after` remain
+element text `content` is supported; generated boxes and `::before`/`::after` remain
 deferred despite browser passthrough on the web target). Those decisions override the
 default "match web-core" expectation until their recorded revisit milestone;
 follow them rather than re-deriving the classification.
@@ -854,10 +854,11 @@ useful signal for currently-compatible versions of those libraries.
   the browser paints the live DOM regardless of `__FlushElementTree`.
   **Text** reaches the engine as an attribute and becomes generated paragraph
   content. Script writes `__CreateRawText(value)` — a `raw-text` element
-  carrying `text` — and its UA rule `raw-text::before { content: attr(text); }`
+  carrying `text` — and its UA rule `raw-text { content: attr(text); }`
   feeds the same DOM generated-content path as author CSS. There is no custom
-  element reflection or synthetic DOM text child. The pseudo's computed text
-  style shapes and paints its run; attribute changes invalidate the paragraph,
+  element reflection or synthetic DOM text child. `text[text]` uses the same
+  rule. Content replaces rendered children while preserving DOM structure.
+  The element's primary text style shapes and paints its run; attribute changes invalidate the paragraph,
   and unchanged text/style reuse its shaping. `text` establishes one flattened
   paragraph whatever `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
   `raw-text` dissolves into the `text` it is written inside

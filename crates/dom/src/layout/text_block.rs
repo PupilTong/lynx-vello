@@ -32,26 +32,11 @@ use hughie::text::block::{
     VerticalAlign,
 };
 use stylo::properties::ComputedValues;
-use stylo::values::computed::{Content, ContentItem, Display};
+use stylo::values::computed::{Content, ContentItem};
 
 use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode, inline_style_of};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
 use crate::tree::node::Node;
-
-/// An item's style origin, distinct from its hit-test/DOM owner.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum TextSource {
-    Element(NodeId),
-    Before(NodeId),
-}
-
-impl TextSource {
-    pub(crate) const fn element(self) -> NodeId {
-        match self {
-            Self::Element(id) | Self::Before(id) => id,
-        }
-    }
-}
 
 /// One element's paragraph, plus the table that maps it back to the DOM.
 pub(crate) struct TextBlockStore {
@@ -60,7 +45,7 @@ pub(crate) struct TextBlockStore {
     /// Item index → the node that contributed it. This *is*
     /// `SourceItem::Content(u32)`'s index space and *is* `InlineBoxSpec::id`,
     /// so one table serves painting, box placement and hiding.
-    pub(crate) source_ids: Vec<TextSource>,
+    pub(crate) source_ids: Vec<NodeId>,
     /// What the block was built from. A paragraph is rebuilt, never patched —
     /// parley's own mutability contract — so this is the whole invalidation
     /// question for the shaped half.
@@ -97,7 +82,6 @@ impl TextBlockStore {
 struct Collected {
     item: OwnedItem,
     source: NodeSlot,
-    before: bool,
 }
 
 enum OwnedItem {
@@ -117,7 +101,9 @@ enum OwnedItem {
 /// Lynx text scope may nest without limit.
 fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
     let mut collected = Vec::new();
-    collect_before(tree, element, &mut collected);
+    if collect_generated(tree, element, &mut collected) {
+        return collected;
+    }
     // (node, whether its own children still need visiting)
     let mut stack: Vec<NodeSlot> = tree
         .at(element)
@@ -145,7 +131,6 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
                 // a text node carries no computed style, so it could never
                 // answer the painter, and this is the same node
                 // `TextRunView` read the run's font and colour from.
-                before: false,
                 source: node
                     .flat_parent()
                     .map_or(slot, |parent| tree.slot(parent.id()).unwrap_or(slot)),
@@ -168,8 +153,9 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
             // the difference is only which style its runs carry, and that is
             // read per run from the innermost element ancestor anyway.
             DisplayMode::Text | DisplayMode::Contents => {
-                collect_before(tree, slot, &mut collected);
-                stack.extend(node.flat_children().iter().rev().copied());
+                if !collect_generated(tree, slot, &mut collected) {
+                    stack.extend(node.flat_children().iter().rev().copied());
+                }
             }
             DisplayMode::None => {}
             _ => collected.push(Collected {
@@ -177,53 +163,81 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
                     vertical_align: VerticalAlign::Baseline,
                 },
                 source: slot,
-                before: false,
             }),
         }
     }
     collected
 }
 
-/// The supported generated-content subset is an in-flow Lynx text scope. Other
-/// content types and boxes remain deferred; never turn them into partial text.
-fn collect_before<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collected>) {
-    let node = tree.at(slot);
+/// The supported content list replaces rendered children, including when its
+/// strings resolve to empty. Unsupported lists fall back to ordinary children
+/// as a whole; never render only a supported prefix of a list.
+fn generated_content<T>(node: &Node<T>) -> Option<(&ComputedValues, &[ContentItem])> {
     if node.is_replaced() {
-        return;
+        return None;
     }
-    let Some(style) = node.before_style() else {
-        return;
-    };
-    if style.clone_display() != Display::LynxText
-        || style.get_box().position != stylo::computed_values::position::T::Static
-    {
-        return;
-    }
+    let style = node.layout_computed_style()?;
     let Content::Items(content) = &style.get_counters().content else {
-        return;
+        return None;
+    };
+    let items = &content.items[..content.alt_start];
+    items
+        .iter()
+        .all(|item| match item {
+            ContentItem::String(_) => true,
+            ContentItem::Attr(attr) => attr.namespace_url.is_empty(),
+            _ => false,
+        })
+        .then_some((style, items))
+}
+
+/// Whether this scope suppresses descendants during the later positioning walk.
+/// `contents` only consumes text content when it belongs to a text paragraph.
+pub(super) fn replaces_children<T>(node: &Node<T>) -> bool {
+    let Some(style) = node.layout_computed_style() else {
+        return false;
+    };
+    match display_mode(style.clone_display()) {
+        DisplayMode::Text => generated_content(node).is_some(),
+        DisplayMode::Contents => {
+            generated_content(node).is_some()
+                && crate::layout::style::box_parent(node).is_some_and(|parent| {
+                    parent.layout_computed_style().is_some_and(|style| {
+                        display_mode(style.clone_display()) == DisplayMode::Text
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether generated text replaced this scope's rendered children.
+fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collected>) -> bool {
+    let node = tree.at(slot);
+    let Some((style, items)) = generated_content(node) else {
+        return false;
     };
     let mut text = String::new();
-    for item in &content.items[..content.alt_start] {
+    for item in items {
         match item {
             ContentItem::String(value) => text.push_str(value),
-            ContentItem::Attr(attr) if attr.namespace_url.is_empty() => {
+            ContentItem::Attr(attr) => {
                 text.push_str(node.attribute(&attr.attribute).unwrap_or(&attr.fallback));
             }
-            _ => return,
+            _ => unreachable!("generated_content validated the list"),
         }
     }
-    if text.is_empty() {
-        return;
+    if !text.is_empty() {
+        out.push(Collected {
+            item: OwnedItem::Run {
+                text,
+                style: RunStyle::from_run_style(&TextRunView::from_values(style)),
+                preserve_newlines: style_preserves_newlines(style),
+            },
+            source: slot,
+        });
     }
-    out.push(Collected {
-        item: OwnedItem::Run {
-            text,
-            style: RunStyle::from_run_style(&TextRunView::from_values(style)),
-            preserve_newlines: style_preserves_newlines(style),
-        },
-        source: slot,
-        before: true,
-    });
+    true
 }
 
 /// Whether a run keeps the literal newlines in its source.
@@ -250,7 +264,6 @@ fn fingerprint(collected: &[Collected]) -> u64 {
     collected.len().hash(&mut hasher);
     for entry in collected {
         entry.source.hash(&mut hasher);
-        entry.before.hash(&mut hasher);
         match &entry.item {
             OwnedItem::Run {
                 text,
@@ -340,14 +353,7 @@ pub(crate) fn refresh<T>(
         let items = as_items(&collected);
         let source_ids = collected
             .iter()
-            .map(|entry| {
-                let id = tree.at(entry.source).id();
-                if entry.before {
-                    TextSource::Before(id)
-                } else {
-                    TextSource::Element(id)
-                }
-            })
+            .map(|entry| tree.at(entry.source).id())
             .collect();
         let (context, slot) = state.text_block_parts(element);
         let rebuilds = slot.as_deref().map_or(0, |store| store.rebuilds + 1);
@@ -428,16 +434,26 @@ pub(crate) fn compute_text_block_layout<T>(
     // Phase 2. Each atom is laid out as its own subtree; the paragraph only
     // ever sees the margin-box result.
     for &(atom, id) in &atoms {
-        let output = tree.compute_layout(
-            state,
-            atom,
-            hughie::tree::LayoutInput::measure(
-                Size::new(None, None),
+        let output = if input.goal.commits() {
+            hughie::compute::compute_inline_box_layout(
+                tree,
+                state,
+                atom,
                 input.parent_size,
                 Size::new(ATOM_SPACE, ATOM_SPACE),
-                hughie::tree::RequestedAxis::Both,
-            ),
-        );
+            )
+        } else {
+            tree.compute_layout(
+                state,
+                atom,
+                hughie::tree::LayoutInput::measure(
+                    Size::new(None, None),
+                    input.parent_size,
+                    Size::new(ATOM_SPACE, ATOM_SPACE),
+                    hughie::tree::RequestedAxis::Both,
+                ),
+            )
+        };
         if let Some((_, store)) = context_and_block(state, element) {
             store
                 .block
@@ -492,6 +508,14 @@ fn place_and_hide<T>(
 ) {
     use hughie::text::block::PlacedBox;
     use hughie::tree::LayoutTree;
+
+    if generated_content(tree.at(element)).is_some() {
+        // Replacement suppresses every descendant, including out-of-flow boxes.
+        for child in tree.children(element) {
+            hughie::compute::hide_subtree(tree, state, child);
+        }
+        return;
+    }
 
     let placements: Vec<PlacedBox> = state
         .text_block(element)
@@ -615,7 +639,7 @@ mod generated_content_tests {
 
     #[test]
     fn generated_content_updates_attributes_without_selector_dependencies() {
-        let (mut doc, text) = document("text::before { content: attr(text); }");
+        let (mut doc, text) = document("text { content: attr(text); }");
         for (value, expected) in [
             (Some("hello"), 100.0),
             (Some("hi"), 40.0),
@@ -640,19 +664,21 @@ mod generated_content_tests {
     }
 
     #[test]
-    fn generated_content_precedes_nested_content_and_respects_dom_selectors() {
-        let (mut doc, text) = document(
-            "text::before { content: '[' attr(text) ']'; } scope::before { content: attr(label); }",
-        );
-        doc.set_attribute(text, "text", "A");
+    fn generated_content_replaces_children_without_changing_dom_selectors() {
+        let (mut doc, text) =
+            document("text[text] { content: '[' attr(text) ']'; } scope { content: attr(label); }");
         let scope = doc.create_element("scope", ());
         doc.set_attribute(scope, "label", "B");
         doc.append_child(text, scope);
         let literal = doc.create_text_node("C", ());
         doc.append_child(scope, literal);
         doc.layout();
-        assert_eq!(contents(&doc, text), "[A]BC");
-        width(&doc, text, 100.0);
+        assert_eq!(contents(&doc, text), "B");
+        width(&doc, text, 20.0);
+        doc.set_attribute(text, "text", "A");
+        doc.layout();
+        assert_eq!(contents(&doc, text), "[A]");
+        width(&doc, text, 60.0);
         assert_eq!(doc.get(text).unwrap().child_ids(), [scope]);
         assert_eq!(doc.get(scope).unwrap().child_ids(), [literal]);
         assert_eq!(
@@ -661,51 +687,82 @@ mod generated_content_tests {
             Some(scope)
         );
         doc.set_attribute(scope, "label", "DEF");
+        doc.remove_attribute(text, "text");
         doc.layout();
-        assert_eq!(contents(&doc, text), "[A]DEFC");
-        width(&doc, text, 140.0);
+        assert_eq!(contents(&doc, text), "DEF");
+        width(&doc, text, 60.0);
+        doc.set_attribute(scope, "label", "");
+        doc.layout();
+        assert_eq!(contents(&doc, text), "");
+        width(&doc, text, 0.0);
+        doc.add_stylesheet("scope { content: normal; }", StylesheetOrigin::Author);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "C");
+        width(&doc, text, 20.0);
     }
 
     #[test]
-    fn generated_content_uses_lynx_text_display() {
-        let (mut doc, text) = document(
-            "text::before { content: 'AB'; } text.box::before { display: flex; } text.explicit::before { display: -lynx-text; }",
-        );
-        for (class, expected) in [("", 40.0), ("box", 0.0), ("explicit", 40.0)] {
-            doc.set_classes(text, class);
+    fn generated_content_replaces_atomic_and_out_of_flow_children() {
+        let (mut doc, text) = document("text[text] { content: attr(text); }");
+        let atom = doc.create_element("view", ());
+        doc.set_inline_style(atom, "display: flex; width: 30px; height: 20px;");
+        doc.append_child(text, atom);
+        let absolute = doc.create_element("view", ());
+        doc.set_inline_style(absolute, "position: absolute; width: 50px; height: 20px;");
+        doc.append_child(text, absolute);
+        doc.layout();
+        width(&doc, text, 30.0);
+        assert!((doc.rounded_layout(absolute).unwrap().size.width - 50.0).abs() < f32::EPSILON);
+        for (value, expected) in [("AB", 40.0), ("", 0.0)] {
+            doc.set_attribute(text, "text", value);
             doc.layout();
             width(&doc, text, expected);
-            if class != "box" {
-                assert_eq!(
-                    doc.get(text)
-                        .unwrap()
-                        .before_style()
-                        .unwrap()
-                        .clone_display(),
-                    Display::LynxText,
-                );
+            for child in [atom, absolute] {
+                assert_eq!(doc.rounded_layout(child).unwrap().size, Size::ZERO);
             }
         }
+        // Mutations under a replacement must stay hidden and take effect when
+        // ordinary children become visible again.
+        doc.set_inline_style_property(atom, "width", "60px");
+        doc.set_inline_style_property(absolute, "width", "70px");
+        doc.layout();
+        for child in [atom, absolute] {
+            assert_eq!(doc.rounded_layout(child).unwrap().size, Size::ZERO);
+        }
+        doc.remove_attribute(text, "text");
+        doc.layout();
+        width(&doc, text, 60.0);
+        assert!((doc.rounded_layout(atom).unwrap().size.width - 60.0).abs() < f32::EPSILON);
+        assert!((doc.rounded_layout(absolute).unwrap().size.width - 70.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unsupported_generated_lists_leave_children_and_pseudos_do_not_generate_text() {
+        let (mut doc, text) =
+            document("text { content: 'prefix' open-quote; } text::before { content: 'before'; }");
+        let literal = doc.create_text_node("AB", ());
+        doc.append_child(text, literal);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "AB");
+        width(&doc, text, 40.0);
+        doc.add_stylesheet("text { content: none; }", StylesheetOrigin::Author);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "AB");
+        width(&doc, text, 40.0);
     }
 
     #[test]
     fn generated_content_cascade_changes_invalidate_the_paragraph() {
         let (mut doc, text) = document(
-            "text::before { content: attr(text); } text.off::before { content: none; } text.hidden::before { display: none; } text.large::before { font-size: 40px; }",
+            "text { content: attr(text); } text.off { content: none; } text.large { font-size: 40px; }",
         );
         doc.set_attribute(text, "text", "AB");
-        for (class, expected) in [
-            ("", 40.0),
-            ("off", 0.0),
-            ("", 40.0),
-            ("hidden", 0.0),
-            ("large", 80.0),
-        ] {
+        for (class, expected) in [("", 40.0), ("off", 0.0), ("", 40.0), ("large", 80.0)] {
             doc.set_classes(text, class);
             doc.layout();
             width(&doc, text, expected);
         }
-        doc.add_stylesheet("text::before { content: 'X'; }", StylesheetOrigin::Author);
+        doc.add_stylesheet("text { content: 'X'; }", StylesheetOrigin::Author);
         doc.layout();
         assert_eq!(contents(&doc, text), "X");
         width(&doc, text, 40.0);
@@ -714,7 +771,7 @@ mod generated_content_tests {
     #[test]
     fn generated_content_special_attribute_paths_and_fallback() {
         let (mut doc, text) =
-            document("text::before { content: attr(class) attr(id) attr(missing, 'Z'); }");
+            document("text { content: attr(class) attr(id) attr(missing, 'Z'); }");
         doc.layout();
         width(&doc, text, 20.0);
         doc.add_class(text, "AB");
@@ -731,7 +788,7 @@ mod generated_content_tests {
     #[test]
     fn generated_content_survives_hiding_and_reattaching_its_scope() {
         let (mut doc, text) =
-            document("scope::before { content: attr(label); } scope.hidden { display: none; }");
+            document("scope[label] { content: attr(label); } scope.hidden { display: none; }");
         let wrapper = doc.create_element("scope", ());
         let scope = doc.create_element("scope", ());
         doc.append_child(text, wrapper);
@@ -756,7 +813,9 @@ mod generated_content_tests {
 
     #[test]
     fn generated_content_shares_a_paragraph_with_resized_atomic_boxes() {
-        let (mut doc, text) = document("text::before { content: 'A'; }");
+        let (mut doc, text) = document("scope { content: 'A'; }");
+        let scope = doc.create_element("scope", ());
+        doc.append_child(text, scope);
         let atom = doc.create_element("view", ());
         doc.set_inline_style(atom, "display: flex; width: 30px; height: 20px;");
         doc.append_child(text, atom);
@@ -773,16 +832,10 @@ mod generated_content_tests {
         doc.set_attribute(text, "text", "AB");
         doc.layout();
         width(&doc, text, 0.0);
-        doc.add_stylesheet(
-            "text::before { content: attr(text); }",
-            StylesheetOrigin::Author,
-        );
+        doc.add_stylesheet("text { content: attr(text); }", StylesheetOrigin::Author);
         doc.layout();
         width(&doc, text, 40.0);
-        doc.add_stylesheet(
-            "text::before { content: attr(style); }",
-            StylesheetOrigin::Author,
-        );
+        doc.add_stylesheet("text { content: attr(style); }", StylesheetOrigin::Author);
         doc.set_inline_style(text, "color: red;");
         doc.layout();
         assert_eq!(
@@ -804,7 +857,7 @@ mod generated_content_tests {
     #[test]
     fn generated_content_wraps_and_preserves_requested_newlines() {
         let (mut doc, text) = document(
-            "text { width: 40px; } text::before { content: attr(text); white-space-collapse: preserve-breaks; }",
+            "text { width: 40px; } text { content: attr(text); white-space-collapse: preserve-breaks; }",
         );
         doc.set_attribute(text, "text", "AB\nCD");
         doc.layout();
@@ -815,7 +868,7 @@ mod generated_content_tests {
         assert!(doc.text_block_size(text).unwrap().height >= 60.0);
         doc.set_attribute(text, "text", "AB\nCD");
         doc.add_stylesheet(
-            "text { width: 200px; } text::before { white-space-collapse: collapse; }",
+            "text { width: 200px; } text { white-space-collapse: collapse; }",
             StylesheetOrigin::Author,
         );
         doc.layout();
@@ -825,9 +878,8 @@ mod generated_content_tests {
 
     #[test]
     fn generated_content_repeated_values_reuse_shaping_and_nested_style_changes_rebuild() {
-        let (mut doc, text) = document(
-            "scope::before { content: attr(label); } scope.large::before { font-size: 40px; }",
-        );
+        let (mut doc, text) =
+            document("scope { content: attr(label); } scope.large { font-size: 40px; }");
         let scope = doc.create_element("scope", ());
         doc.append_child(text, scope);
         doc.set_attribute(scope, "label", "AB");

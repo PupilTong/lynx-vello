@@ -291,17 +291,20 @@ absorbed into `dom` or `hughie`.
 
 ### Generated paragraph content
 
-Stylo keeps `::before` styles in its existing eager-pseudo table. The post-flush
-node snapshot retains the primary and before `Arc<ComputedValues>`; no second
-cascade or generated DOM node is created. `layout::text_block` collects string
-and untyped attribute content before each text/contents scope, and retains
-`TextSource::{Element, Before}` so painting selects the correct style while DOM
-identity remains the originating element's. A generated-attribute write reaches
-the enclosing paragraph before normal layout invalidation, because transparent
-scopes have no reusable box cache. Pseudo-style damage follows the same route;
-paint-only changes update the style snapshot without reshaping.
+Stylo parses and cascades `content` on the element's primary computed style.
+`layout::text_block` reads supported string/attribute lists from that existing
+snapshot and replaces the scope's rendered children with text runs. The same
+node ID supplies shaping and painting style; no generated DOM node, eager
+pseudo snapshot or separate pseudo paint origin is needed.
 
-The before snapshot adds one optional pointer per arena node (8 bytes on 64-bit
-hosts); each text-source entry now distinguishes a pseudo from its element.
-`raw-text` saves the former DOM text node and its layout-state slot per carrier.
-See [style-assumptions.md §A.4](style-assumptions.md) for the supported subset.
+A generated-attribute write reaches the enclosing paragraph before normal
+layout invalidation, because transparent scopes have no reusable box cache.
+Primary-style damage follows the same route; paint-only changes update the
+style snapshot without reshaping. Empty replacement content still suppresses
+children, including atomic and out-of-flow boxes, while normal/unsupported
+content falls back to them.
+
+UA rules opt `text[text]` and `raw-text` into attribute content. `raw-text` saves
+its former DOM text node and layout-state slot; ordinary nodes keep their
+original single primary-style pointer. See
+[style-assumptions.md §A.4](style-assumptions.md) for the supported subset.

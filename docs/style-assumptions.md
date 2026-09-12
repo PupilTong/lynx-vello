@@ -50,29 +50,35 @@ the semantics are stylo's.** Everything below refines that sentence.
    the web target matched everything via the browser, and `:where()` is
    load-bearing for scoping (§D.16).
 
-4. **Text-only `::before` generated content (user-directed, 2026-09-11).**
-   The earlier v1 omission is narrowed: `content` string items and untyped,
-   unnamespaced `attr()` (including string fallback) generate runs before the
-   contents of a `display: -lynx-text` paragraph or a nested text/contents scope.
-   Stylo owns matching, cascade and pseudo styles. The DOM's base UA rule gives
-   `::before` the existing `display: -lynx-text` mode while ordinary elements
-   retain the Lynx flex default. The fork only exposes the `content` property;
-   its display grammar is unchanged and still excludes `inline` and `block`.
+4. **Element text content (user-directed, 2026-09-12).**
+   String `content` items and untyped, unnamespaced `attr()` (including string
+   fallback) replace the rendered children of a `display: -lynx-text` paragraph
+   or a nested text/contents scope. This is an explicitly supported text
+   extension, not a claim of browser-compatible string `content` on ordinary
+   elements. It supersedes the earlier text-only `::before` implementation;
+   both `::before` and `::after` rendering remain deferred.
 
-   Generated runs use the pseudo's text style, share the enclosing paragraph's
-   wrapping/truncation, and never enter DOM children, selector structure or
-   `textContent`. Attribute changes invalidate the owning paragraph even when
-   no selector mentions the attribute. `raw-text` uses UA CSS
-   `raw-text::before { content: attr(text); }`; its old custom-element
-   attribute-to-text-node reflection is removed.
+   Stylo owns parsing, matching and cascade on the element's primary style.
+   The fork exposes `content`; its display grammar is unchanged and excludes
+   `inline` and `block`. No global pseudo UA rule, before-style snapshot or
+   separate pseudo paint origin is needed. Generated runs wear their element's
+   font, color, decorations and whitespace policy and share the enclosing
+   paragraph's wrapping/truncation.
 
-   The scope remains text-only: no `::after`, counters, quotes, image content,
-   namespaced/typed attributes, generated boxes or pseudo animations. Only
-   static `display: -lynx-text` pseudo content is collected; unsupported content lists and
-   box displays produce no generated run. Independent pseudo backgrounds,
-   borders, effects and positioning remain deferred until generated-box
-   support. Native Lynx has no generated content; this is an explicit extension
-   of the earlier omission toward the web target, not a native behavior change.
+   UA CSS uses `text[text] { content: attr(text); }` and
+   `raw-text { content: attr(text); }`. A `text` without the attribute retains
+   its child content; an attribute present with an empty value replaces it
+   with empty content. Replacement suppresses all descendant rendering,
+   including atomic and out-of-flow boxes, but leaves DOM children, selectors
+   and `textContent` unchanged. `raw-text` needs no custom-element reflection
+   or synthetic DOM text child. Attribute changes invalidate the owning
+   paragraph even when no selector mentions the attribute.
+
+   `normal` and `none` retain ordinary children. Unsupported lists also retain
+   children as a whole: no partial supported prefix is rendered. Counters,
+   quotes, images, namespaced/typed attributes and generated boxes remain
+   deferred. The supported path is limited to text paragraphs and their
+   nested text/contents scopes; it does not replace arbitrary flex/grid boxes.
 
 ## B. Performance architecture
 
@@ -372,4 +378,4 @@ and §D.16 with what the wire format actually permits.)*
 - Which milestone re-enables dynamic pseudo-classes (§C.13).
 - Whether to keep a CSS-text serialization path purely as a
   differential-testing oracle against web-core output.
-- Broader generated-content boxes and `::after` (§A.4) — fixture/app demand.
+- Generated-content boxes and `::before`/`::after` (§A.4) — fixture/app demand.

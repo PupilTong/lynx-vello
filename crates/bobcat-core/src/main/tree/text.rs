@@ -92,6 +92,7 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
+text[text] { content: attr(text); }
 inline-text { display: -lynx-text !important; }
 inline-image, inline-truncation { display: none; }
 text > * { display: none; }

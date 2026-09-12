@@ -146,25 +146,28 @@ fn text_background_clip() {
 }
 
 /// The same paragraph through generated and literal runs must draw identical
-/// pixels, including the pseudo's own color/decoration and a paint-only update.
+/// pixels, including the element's color/decoration and a paint-only update.
 #[test]
 fn generated_text_matches_literal_runs() {
     let mut generated = html::parse(
-        r#"<div class="text-block" style="width: 240px; height: 80px; font-family: Roboto; font-size: 24px; color: black">after</div>"#,
+        r#"<div class="text-block" style="width: 240px; height: 80px; font-family: Roboto; font-size: 24px"><span class="generated" style="display: contents">suppressed</span>after</div>"#,
         240.0,
         80.0,
     );
-    // The fragment helper imports only class/style attributes.
-    generated
+    let carrier = generated
         .dom
-        .set_attribute(generated.root, "text", "Before ");
+        .query_selector(generated.root, ".generated")
+        .unwrap()
+        .unwrap();
+    // The fragment helper imports only class/style attributes.
+    generated.dom.set_attribute(carrier, "text", "Before ");
     generated
         .dom
         .register_fonts(dom::FontBlob::from_static(screenshot::ROBOTO));
-    generated.dom.add_stylesheet(".text-block::before { content: attr(text); color: red; text-decoration: underline; font-size: 30px; }", dom::StylesheetOrigin::Author);
+    generated.dom.add_stylesheet(".generated { content: attr(text); color: red; text-decoration: underline; font-size: 30px; }", dom::StylesheetOrigin::Author);
     for color in ["red", "blue"] {
         generated.dom.add_stylesheet(
-            &format!(".text-block::before {{ color: {color}; }}"),
+            &format!(".generated {{ color: {color}; }}"),
             dom::StylesheetOrigin::Author,
         );
         let actual = screenshot::capture_prebuilt_document(
@@ -182,7 +185,7 @@ fn generated_text_matches_literal_runs() {
         );
         assert_eq!(
             actual, expected,
-            "generated text must use its pseudo style ({color})"
+            "generated text must use its element style ({color})"
         );
     }
 }

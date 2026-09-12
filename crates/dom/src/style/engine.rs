@@ -113,15 +113,11 @@ impl std::fmt::Debug for StyleEngine {
 impl StyleEngine {
     #[must_use]
     pub(crate) fn new(device: Device, url_data: UrlExtraData) -> Self {
-        let mut engine = Self {
+        Self {
             stylist: Stylist::new(device, QuirksMode::NoQuirks),
             lock: StdArc::new(SharedRwLock::new()),
             url_data,
-        };
-        // Generated text uses the same paragraph mode as text elements.
-        // Author rules still participate in the cascade.
-        engine.add_stylesheet("::before { display: -lynx-text; }", Origin::UserAgent);
-        engine
+        }
     }
 
     pub(crate) fn lock(&self) -> StdArc<SharedRwLock> {

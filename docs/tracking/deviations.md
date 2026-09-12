@@ -364,10 +364,12 @@ consequential choice about whether to follow the spec or the quirk.
   web target via passthrough to the real browser. lynx-vello must explicitly
   decide whether to add real support (W3C-correct) since there's no native
   Lynx behavior to fall back to.
-  **Updated decision (user-directed, 2026-09-11): text-only `::before`.**
-  String and untyped `attr()` content feed existing paragraphs without DOM
-  children. `raw-text` uses this CSS path instead of custom-element reflection.
-  Generated boxes, `::after` and non-text content remain deferred. See
+  **Updated decision (user-directed, 2026-09-12): element text content.**
+  String and untyped `attr()` content on primary styles replace rendered
+  children inside text paragraphs, preserving the DOM. `text[text]` and
+  `raw-text` use UA CSS, without custom-element reflection. This explicit
+  extension supersedes text-only `::before`; both before/after rendering,
+  generated boxes and non-text content remain deferred. See
   [docs/style-assumptions.md](../style-assumptions.md) §A.4.
 
 - **`@media` queries** — the C++ engine has a complete, recently-added,

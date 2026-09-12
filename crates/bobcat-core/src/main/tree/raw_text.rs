@@ -1,13 +1,13 @@
 //! `raw-text` is a CSS text carrier. Its attribute supplies generated content
 //! to the enclosing paragraph; no custom element or DOM text child is needed.
 
-/// Carriers dissolve only inside Lynx text. The newline policy inherits into
-/// `::before`, and author CSS may override or suppress the generated content.
+/// Carriers dissolve only inside Lynx text. Their own style supplies the
+/// newline policy, and author CSS may override or suppress their content.
 pub(super) const UA_RULES: &str = "\
 raw-text { display: none; white-space-collapse: preserve-breaks; }
 text > raw-text, text > wrapper > raw-text,
 inline-text > raw-text, inline-text > wrapper > raw-text { display: contents; }
-raw-text::before { content: attr(text); }
+raw-text { content: attr(text); }
 ";
 
 #[cfg(test)]
@@ -60,17 +60,36 @@ mod tests {
             assert!(document.get(raw).unwrap().child_ids().is_empty());
         }
         document.add_stylesheet(
-            "raw-text::before { content: 'CSS'; }",
+            "raw-text { content: 'CSS'; }",
             dom::StylesheetOrigin::Author,
         );
         document.layout();
         assert!((document.text_block_size(text).unwrap().width - 60.0).abs() < f32::EPSILON);
-        document.add_stylesheet(
-            "raw-text::before { content: none; }",
-            dom::StylesheetOrigin::Author,
-        );
+        document.add_stylesheet("raw-text { content: none; }", dom::StylesheetOrigin::Author);
         document.layout();
         assert!(document.text_block_size(text).unwrap().width.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn text_attribute_replaces_children_and_removal_restores_them() {
+        let mut document = document();
+        document.register_fonts(dom::FontBlob::from_static(AHEM));
+        let text = text_element(&mut document);
+        let raw = raw_text(&mut document, text, "child");
+        for (value, width) in [
+            (None, 100.0),
+            (Some("AB"), 40.0),
+            (Some(""), 0.0),
+            (None, 100.0),
+        ] {
+            match value {
+                Some(value) => document.set_attribute(text, "text", value),
+                None => document.remove_attribute(text, "text"),
+            }
+            document.layout();
+            assert!((document.text_block_size(text).unwrap().width - width).abs() < f32::EPSILON);
+            assert_eq!(document.get(text).unwrap().child_ids(), [raw]);
+        }
     }
 
     #[test]

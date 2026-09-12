@@ -122,8 +122,6 @@ impl<'doc> RunPaints<'doc> {
     ) -> Self {
         use hughie::text::block::SourceItem;
 
-        use crate::layout::text_block::TextSource;
-
         let fallback = RunPaint {
             style: document
                 .paint_style(element)
@@ -134,33 +132,20 @@ impl<'doc> RunPaints<'doc> {
         let mut by_style = Vec::new();
         for index in 0..block.style_count() {
             let resolved = match block.source_of(u16::try_from(index).unwrap_or(u16::MAX)) {
-                SourceItem::Content(item) => {
-                    sources.get(item as usize).copied().and_then(|source| {
-                        let style = match source {
-                            TextSource::Element(node) => document.paint_style(node),
-                            TextSource::Before(node) => document.get(node)?.before_style(),
-                        }?;
-                        Some((source, style))
-                    })
-                }
+                SourceItem::Content(item) => sources
+                    .get(item as usize)
+                    .copied()
+                    .and_then(|node| document.paint_style(node).map(|style| (node, style))),
                 // Neither the truncation flow nor the dots has an element of
                 // its own; both wear the block's own style, which is what
                 // `tail-color-convert` would later override.
                 SourceItem::Truncation(_) | SourceItem::Ellipsis => None,
             };
             by_style.push(match resolved {
-                Some((source, style)) => {
-                    let mut inherited = propagated_decorations(document, source.element());
-                    if matches!(source, TextSource::Before(_))
-                        && let Some(own) = decorations(style)
-                    {
-                        inherited.push(own);
-                    }
-                    RunPaint {
-                        style,
-                        decorations: inherited,
-                    }
-                }
+                Some((node, style)) => RunPaint {
+                    style,
+                    decorations: propagated_decorations(document, node),
+                },
                 None => RunPaint {
                     style: fallback.style,
                     decorations: fallback.decorations.clone(),

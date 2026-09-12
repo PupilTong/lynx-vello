@@ -315,7 +315,7 @@ fn pre_position<T: Sync>(
     if display == DisplayMode::Contents {
         tree.layout_mut(state, node_id)
             .set_unrounded(Layout::default());
-        return true;
+        return !super::text_block::replaces_children(node);
     }
     if node
         .flat_parent_id()
@@ -326,7 +326,9 @@ fn pre_position<T: Sync>(
         let fixed = style.values().clone_position() == PositionProperty::Fixed;
         position_hoisted(tree, state, node_id, viewport, fixed);
     }
-    display != DisplayMode::Leaf && !skips_contents(style.values())
+    display != DisplayMode::Leaf
+        && !skips_contents(style.values())
+        && !(display == DisplayMode::Text && super::text_block::replaces_children(node))
 }
 
 fn position_hoisted<T: Sync>(
