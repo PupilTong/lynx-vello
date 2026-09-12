@@ -20,7 +20,6 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
 
-#[cfg(not(target_arch = "wasm32"))]
 fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
     let mut bytes = convert(native).unwrap();
     let mut scripts = bobcat_source::web::decode(&bytes).unwrap().lepus_code;
@@ -46,7 +45,6 @@ fn web_page(native: &[u8], entry: &str) -> Vec<u8> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn default_page(native: &[u8], web: bool) -> bobcat_source::PageSource {
     let input = url::Url::parse("app:///page.bundle").unwrap();
     if web {
@@ -748,6 +746,37 @@ async fn named_css_is_loaded_by_url_after_native_web_conversion() {
                 );
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
+        }
+    }
+}
+
+#[test]
+fn native_js_data_processor_requires_a_boolean_and_survives_web_conversion() {
+    for (value, expected) in [
+        ("true", true),
+        ("false", false),
+        ("\"true\"", false),
+        ("1", false),
+        ("null", false),
+    ] {
+        let mut encoded = Vec::new();
+        string(
+            &mut encoded,
+            &format!(r#"{{"enableJSDataProcessor":{value}}}"#),
+        );
+        let native = native_bundle(vec![
+            (SECTION_CONFIG, encoded),
+            custom_section(vec![CustomSection::source("entry__main-thread", "void 0")]),
+        ]);
+        for web in [false, true] {
+            assert_eq!(
+                default_page(&native, web)
+                    .view_sources()
+                    .data_processing
+                    .on_js,
+                expected,
+                "config={value}, web={web}"
+            );
         }
     }
 }

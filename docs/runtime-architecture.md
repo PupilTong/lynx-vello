@@ -686,32 +686,33 @@ application readiness through `notifyReady()`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground`,
-`__BobcatInitData` from `bobcat:runtime` and `Document` and
-`__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
-effect; the transformed entry itself statically imports both of the first two
-built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
-so it is ready before either module's own code runs. Boot then runs:
+The final `bobcat:boot` module imports the lifecycle helpers from
+`bobcat:runtime`, `Document` and `__FlushElementTree` from `bobcat:element`,
+and `bobcat:timers` for its effect. The runtime parses the initial JSON before
+entry execution. The generated boot body has this order:
 
 ```js
-// The realm's document, created by this module's first statement and held by
-// this exported binding for the realm's life. Nothing in the realm releases
-// it: it goes when the realm does.
 export const document = new Document();
-
+__BobcatInitEntry(entryMtsUrl);
+__BobcatInitializeMTS(initialOptions);
+let data = lynx.__initData;
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
+data = __BobcatProcessInitData(data);
+prepareBackgroundData(JSON.stringify(__BobcatBackgroundData(data)));
 __BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-const data = typeof globalThis.processData === "function"
-  ? globalThis.processData(__BobcatInitData)
-  : __BobcatInitData;
-if (typeof globalThis.renderPage === "function") {
-  globalThis.renderPage(data);
-} else {
-  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
-}
-__FlushElementTree();
+__BobcatRenderPage(data);
+await Promise.resolve().then(() => __FlushElementTree());
+__BobcatPageLoaded();
 ```
+
+The retained argument survives entry initialization replacing `lynx.__initData`.
+Processing, the BTS snapshot and MTS render run synchronously. Boot then awaits
+a flush queued with `Promise.resolve().then`, preserving the ordinary microtask
+boundary; it does not drain Promise jobs between lifecycle hooks.
+The Worker initializes its data before importing the BTS entry. Initial MTS render
+is a separate boundary from the later public readiness report; see
+[data lifecycle](data-lifecycle-runtime.md) for early-operation policies.
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
@@ -719,8 +720,8 @@ realm-local EventTarget returned by `lynx.getEngine()`. Rust evaluates one boot
 module; it does not issue a second native lifecycle call after evaluating the
 entry.
 
-The engine EventTarget retains JavaScript listeners and receives only the boot
-fallback's `__RenderPage` delivery today. The remaining MTS `getCoreContext`
+The engine EventTarget retains JavaScript listeners and receives render, update,
+component-removal and global-props lifecycle events. The remaining MTS `getCoreContext`
 and `getNative` sinks retain and deliver nothing. They make chunks installable before
 Bobcat has the corresponding runtime subsystems; they do not install runtime
 bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide
@@ -1246,3 +1247,11 @@ or view cancellation; it runs no JS jobs or sibling view tasks. The embedder
 supplies text or preparsed styles without exposing that choice to JS. Cache
 ownership and synchronous failures are described in
 [named stylesheet loading and adoption](named-styles-runtime.md).
+
+## Data lifecycle
+
+Initial preprocessing, update/reset, global-property snapshots and reload use
+the existing MTS command and Worker links. Initial MTS render is distinct from
+BTS readiness; early operations follow their own native policies. See
+[data and global-property lifecycle](data-lifecycle-runtime.md) for the call
+order, input ownership, live ESM bindings and framework boundary.

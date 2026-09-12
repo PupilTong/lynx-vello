@@ -89,13 +89,14 @@ fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
         .run_main_thread_script(
             &mut js,
             r"
+        const initial = lynx.__initData;
         let processorJobRan = false;
         globalThis.processData = () => {
             Promise.resolve().then(() => { processorJobRan = true; });
             throw Error('processor failed');
         };
         globalThis.renderPage = data => {
-            if (data !== undefined || processorJobRan)
+            if (data !== initial || processorJobRan)
                 throw Error('processor failure changed the result or ran jobs before render');
             const page = __CreatePage();
             __AppendElement(page, __CreateView(0));
@@ -164,6 +165,37 @@ fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
             ),
             "MTS execution reported an error"
         );
+    }
+}
+
+#[test]
+fn mts_imported_inputs_follow_global_props_updates() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        const state = {readProps: () => __globalProps};
+        globalThis.scriptInputs = state;
+        globalThis.updateGlobalProps = props => { state.updated = props; };
+        if (state.readProps() !== __globalProps) throw Error('entry inputs');
+    ",
+            "app:///script-inputs.js",
+        )
+        .unwrap();
+    runtime.evaluate_module(&mut js, &entry_module_source(r#"
+        import {__BobcatApplyPageUpdate} from 'bobcat:runtime';
+        const oldProps = scriptInputs.readProps();
+        __BobcatApplyPageUpdate('{"method":"updateGlobalProps","args":[{"next":2}]}');
+        if (scriptInputs.readProps() !== __globalProps || __globalProps === oldProps || __globalProps.next !== 2)
+            throw Error('Script props binding did not follow its module export');
+        if (scriptInputs.updated !== __globalProps)
+            throw Error('global-object lifecycle hook was not found');
+    "#), "app:///update-script-inputs.js", "updating imported props").unwrap();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        if let ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) = notice {
+            panic!("{message}");
+        }
     }
 }
 
@@ -337,10 +369,10 @@ fn page_data_is_parsed_by_the_realm_it_was_given_to() {
               if (data.count !== 2 || data.text !== '中文 🦀') {
                 throw new Error('init data: ' + JSON.stringify(data));
               }
-              return data.count;
+              return { count: data.count };
             };
             globalThis.renderPage = function (processed) {
-              if (processed !== 2) throw new Error('renderPage got ' + processed);
+              if (processed.count !== 2) throw new Error('renderPage got ' + processed);
             };
             ",
             "app:///first.js",
@@ -394,6 +426,101 @@ fn malformed_page_data_fails_boot_before_the_entry_runs() {
             )
             .expect("the entry never loaded");
     }
+}
+
+#[test]
+fn initial_values_reach_each_view_before_its_entry_and_render() {
+    let (mut js, mut first, mut second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some(
+                serde_json::json!({
+                    "count": 42, "text": "中文", "items": [null, false, -1.25, "中文\0🦀", [], {}],
+                    "__proto__": {"polluted": true}, "large": u64::MAX,
+                })
+                .to_string(),
+            ),
+            global_props: Some(serde_json::json!({"theme": "dark"}).to_string()),
+        },
+        PageData {
+            init_data: Some("null".to_owned()),
+            global_props: None,
+        },
+    ]);
+    first.engine.collect_garbage(&mut js).unwrap();
+    first.run_main_thread_script(&mut js, r"
+        if (lynx.__initData.count !== 42 || lynx.__initData.text !== '中文') throw Error('entry data');
+        const data = lynx.__initData;
+        if (data.items[0] !== null || data.items[1] !== false || data.items[2] !== -1.25 ||
+            data.items[3] !== '中文\0🦀' || !Array.isArray(data.items[4]) ||
+            Object.keys(data.items[5]).length !== 0 || !Object.hasOwn(data, '__proto__') ||
+            data.polluted !== undefined || typeof data.large !== 'number' ||
+            data.large !== 18446744073709551615) throw Error('JSON conversion');
+        if (lynx.__globalProps.theme !== 'dark' || __globalProps !== lynx.__globalProps) throw Error('entry props');
+        globalThis.processData = data => {
+            if (data !== lynx.__initData) throw Error('different render data');
+            return {count: data.count + 1};
+        };
+        globalThis.renderPage = data => {
+            if (data.count !== 43) throw Error('processed render data');
+        };
+    ", "app:///first.js").unwrap();
+    second
+        .run_main_thread_script(
+            &mut js,
+            r"
+        if (lynx.__initData !== null) throw Error('null changed');
+        if (Object.keys(lynx.__globalProps).length) throw Error('sibling props leaked');
+        globalThis.renderPage = data => { if (data !== null) throw Error('null render data'); };
+    ",
+            "app:///second.js",
+        )
+        .unwrap();
+}
+
+#[test]
+fn entry_initialization_cannot_replace_the_host_render_argument() {
+    let (mut js, mut first, mut second, _workers) = two_view_group_with([
+        PageData {
+            init_data: Some(r#"{"showInitial":false}"#.to_owned()),
+            global_props: None,
+        },
+        PageData {
+            init_data: Some("null".to_owned()),
+            global_props: None,
+        },
+    ]);
+    first
+        .run_main_thread_script(
+            &mut js,
+            r"
+        const original = lynx.__initData;
+        // React's MTS bootstrap writes this before installing renderPage.
+        lynx.__initData = {};
+        await Promise.resolve();
+        globalThis.processData = data => {
+            if (data !== original || data.showInitial !== false) throw Error('host data lost');
+            return {processed: true};
+        };
+        globalThis.renderPage = data => {
+            if (data.processed !== true) throw Error('processor result lost');
+        };
+    ",
+            "app:///first.js",
+        )
+        .unwrap();
+    second
+        .run_main_thread_script(
+            &mut js,
+            r"
+        lynx.__initData = {replacement:true};
+        const engine = lynx.getEngine();
+        engine.addEventListener('__RenderPage', event => {
+            if (event.data[0] !== null) throw Error('host null replaced by entry');
+        });
+    ",
+            "app:///second.js",
+        )
+        .unwrap();
 }
 
 /// One view's entry failing must not fail the view beside it.
@@ -489,10 +616,10 @@ fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
                 const engine = lynx.getEngine();
                 const page = __CreatePage('card', 0);
                 globalThis.processData = function () {
-                  return 42;
+                  return {count:42};
                 };
                 engine.addEventListener('__RenderPage', function (event) {
-                  if (this !== engine || event.type !== '__RenderPage' || event.data !== 42) {
+                  if (this !== engine || event.type !== '__RenderPage' || event.data[0].count !== 42) {
                     throw new Error('the engine render event lost its target or processed data');
                   }
                   __AppendElement(page, __CreateView(0));
@@ -534,18 +661,16 @@ fn boot_awaits_the_esm_entry_before_rendering_once() {
                 if (typeof globalThis.__CreateView !== 'undefined') {
                   throw new Error('Element PAPI must be ESM-only');
                 }
-                lynx.getEngine().addEventListener('__RenderPage', function () {
-                  throw new Error('the fallback event must not accompany a global renderPage');
-                });
+                globalThis.renderPage = () => { throw Error('engine listener must take precedence'); };
                 let renderCount = 0;
-                globalThis.renderPage = function () {
+                lynx.getEngine().addEventListener('__RenderPage', function () {
                   renderCount += 1;
                   if (renderCount !== 1) {
                     throw new Error('renderPage ran more than once');
                   }
                   const page = __CreatePage('card', 0);
                   __AppendElement(page, createView(0));
-                };
+                });
                 ",
             "app:///async-entry.mjs",
         )
@@ -567,8 +692,8 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
                 if (lynx.__globalProps !== __globalProps) {
                   throw new Error('the bare and lynx global props must share identity');
                 }
-                if (lynx.__initData === null || typeof lynx.__initData !== 'object') {
-                  throw new Error('init data must start as an empty object');
+                if (JSON.stringify(lynx.__initData) !== '{}') {
+                  throw new Error('omitted init data must be an empty object');
                 }
                 if (NativeModules !== undefined) {
                   throw new Error('the imported native-module sentinel must be undefined');

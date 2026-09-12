@@ -26,6 +26,7 @@ pub struct PageSource {
     named_style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
+    js_data_processor: bool,
     compatibility_warnings: Vec<CompatibilityWarning>,
 }
 
@@ -302,6 +303,7 @@ impl PageSource {
             named_style_sheets,
             style_sheet,
             config,
+            js_data_processor: template.config_flag("enableJSDataProcessor"),
             compatibility_warnings,
         })
     }
@@ -323,6 +325,7 @@ impl PageSource {
             named_style_sheets: Vec::new(),
             style_sheet,
             config: raw_lynx_xml_config(),
+            js_data_processor: false,
             compatibility_warnings: Vec::new(),
         })
     }
@@ -378,6 +381,10 @@ impl PageSource {
     pub fn view_sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
+            data_processing: bobcat_core::DataProcessing {
+                on_js: self.js_data_processor,
+                ..Default::default()
+            },
             background_entry: self
                 .background_script
                 .as_ref()
