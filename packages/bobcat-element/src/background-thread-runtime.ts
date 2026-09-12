@@ -37,6 +37,23 @@ const app: {
   registerModule(name, value) { jsModules.set(name, value); },
   getJSModule(name) { return jsModules.get(name); },
 };
+let destroyed = false;
+// The BTS owner calls this after stopping ordinary worker tasks, while the
+// realm and current React hook still exist. An earlier explicit destroy
+// notification consumes the same lifetime, including when its hook throws.
+export function __BobcatDestroyBTS() {
+  if (destroyed) return;
+  destroyed = true;
+  app.callDestroyLifetimeFun?.call(app);
+}
+// Finalization belongs to JavaScript's cleanup jobs. The held callback does
+// not retain its observer; app destruction suppresses any late cleanup job.
+const destructionRegistry = new FinalizationRegistry<Function>(callback => {
+  if (destroyed) return;
+  try { Reflect.apply(callback, undefined, []); }
+  catch (error) { lynx.reportError(error); }
+});
+
 // Looked up by the id a `callLepusMethodResult` carries, which a result for
 // a call made without a callback lacks.
 const callbacks: Map<number | undefined, (result: unknown) => void> =
@@ -117,6 +134,22 @@ const sendQuery: SendQuery = (operation, token, params, callback) => {
 };
 
 const nativeApp = {
+  createJSObjectDestructionObserver(callback: Function): object {
+    if (arguments.length !== 1) throw new TypeError("createJSObjectDestructionObserver arg count must == 1");
+    if (typeof callback !== "function") throw new TypeError("the first argument of createJSObjectDestructionObserver must be a function");
+    // A native HostObject exposes no fields. Property writes report through
+    // the native error funnel and do not attach values to the object.
+    const observer = new Proxy(Object.create(null) as object, {
+      get() { return undefined; },
+      set(_target, key) {
+        lynx.reportError(new TypeError(`Cannot assign to property '${String(key)}' on HostObject with default setter`));
+        return true;
+      },
+    });
+    destructionRegistry.register(observer, callback);
+    return observer;
+  },
+
   callLepusMethod(
     name: string,
     data: unknown,
@@ -211,7 +244,7 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
       publicComponentEvent(message.args);
       break;
     case "callDestroyLifetimeFun":
-      app.callDestroyLifetimeFun?.call(app);
+      __BobcatDestroyBTS();
       break;
     case "reloadResult":
     case "nodeQueryResult": {
