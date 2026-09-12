@@ -25,6 +25,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
+  runMtsJobs: () => true, evaluateScript: rstest.fn(),
   initData: () => undefined,
   globalProps: () => undefined,
 }));
@@ -102,6 +103,22 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
+    const evaluate = rstest.fn(source => {
+      if (source === "throw") throw Error("chunk failure");
+    });
+    mts.__BobcatRegisterLepusChunks({worklet: "worklet bytes", bad: "throw"}, evaluate);
+    expect(mts.__LoadLepusChunk("missing", {})).toBe(false);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "absent"})).toBe(false);
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(mts.__LoadLepusChunk("worklet", {})).toBe(true);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "__Card__"})).toBe(true);
+    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"]]);
+    expect(mts.__LoadLepusChunk("bad", {})).toBe(true);
+    expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
+  });
+
+
   it("queues Context and publish calls together, then replays each late publish hook", () => {
     const seen: unknown[] = [];
     bts.getCoreContext().addEventListener("custom", (event: { data: unknown }) => {

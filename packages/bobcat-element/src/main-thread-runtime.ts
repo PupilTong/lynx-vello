@@ -7,7 +7,7 @@
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
 // dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
 // None of these bindings is installed on `globalThis`; the entry receives them
-// only through the import declarations Bobcat prepends to its source.
+// through entry imports and, for native Scripts, global lexical bindings.
 //
 // The host's page data arrives through `bobcat-internal:host` as the strings
 // the view was given, and is parsed here as this module evaluates.
@@ -21,14 +21,14 @@
 // the same class, on a runtime this module is not registered on, so the source
 // is shared as a module and each runtime compiles its own copy.
 
-import { EventTarget } from "bobcat:event-target";
+import { EventTarget, dispatchEventListeners } from "bobcat:event-target";
 import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, runMtsJobs, evaluateScript } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -92,6 +92,23 @@ function sendToBackground(message: ToBackground) {
 // Only public Context fields cross it; extra event properties cannot select
 // runtime methods. Payloads are copied by Worker's JSON transport when posted.
 jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data, origin: event.origin }));
+
+// Native QuickContext::InternalCall drains jobs after a successful call and
+// before its caller continues. A thrown call skips that nested drain; the
+// enclosing runtime checkpoint still owns the jobs it left pending.
+function callMts(method: Function, args: unknown[]) {
+  let result;
+  try { result = Reflect.apply(method, scope, args); }
+  catch (error) { _ReportError(error); return undefined; }
+  return runMtsJobs() ? result : undefined;
+}
+
+function dispatchEngineEvent(type: string, data: unknown) {
+  dispatchEventListeners(engineContext, {type, data, origin:'Engine'},
+    (callback, _receiver, event) => callMts(callback, [event]));
+}
+
+export { callMts as __BobcatCallMTS, dispatchEngineEvent as __BobcatDispatchEngineEvent };
 
 // Like web-worker-rpc, await the handler result before copying the reply.
 // The ordinary realm checkpoint runs the continuation; no nested host entry.
@@ -258,6 +275,65 @@ export function _SetSourceMapRelease() {
 
 export function __OnLifecycleEvent(data: unknown) {
   jsContext.dispatchEvent({ type: "__OnLifecycleEvent", data });
+}
+
+let lepusChunks: Record<string, string> = {};
+let evaluateLepusChunk: ((source: string) => unknown) | undefined;
+type UpdateScriptInputs = (info: object, props: object) => void;
+let updateScriptInputs: UpdateScriptInputs | undefined;
+
+// Boot supplies the entry's named runtime/PAPI exports once. A native Script
+// initializer retains these exact values in the global lexical environment;
+// no global-object properties or Rust-owned JS value handles are involved.
+export function __BobcatInstallScriptGlobals(bindings: Record<string, unknown>) {
+  // Benchmark steps reuse the entry preamble on an already-booted realm.
+  // Global lexical declarations can only be installed once.
+  if (updateScriptInputs !== undefined) return;
+  const names = Object.keys(bindings);
+  if (names.some(name => !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name))) {
+    throw new TypeError("invalid Script binding name");
+  }
+  const initialize = evaluateScript(`let ${names.join(",")};
+    values => {
+      ({${names.join(",")}} = values);
+      return (info, props) => { SystemInfo = info; __globalProps = props; };
+    }`, "bobcat:script-bindings") as (values: Record<string, unknown>) => UpdateScriptInputs;
+  updateScriptInputs = initialize(bindings);
+}
+
+export function __BobcatRegisterLepusChunks(chunks: Record<string, string>, evaluate: (source: string) => unknown) {
+  lepusChunks = chunks;
+  evaluateLepusChunk = evaluate;
+}
+
+export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?: string; chunkType?: number}) {
+  if (arguments.length < 2 || typeof path !== "string" || options === null || typeof options !== "object") {
+    throw new TypeError("__LoadLepusChunk requires a string path and options object");
+  }
+  const entry = options.dynamicComponentEntry;
+  if (typeof entry === "string" && entry !== "__Card__") return false;
+  if (!Object.hasOwn(lepusChunks, path) || !evaluateLepusChunk) return false;
+  // Native TemplateEntry evaluates again on every call. Finding the chunk
+  // returns true even when its evaluation reports a script exception.
+  try { evaluateLepusChunk(lepusChunks[path]!); }
+  catch (error) { _ReportError(error); }
+  return true;
+}
+
+// Private execution policy; source-section lookup belongs to the bundle loader.
+export function __BobcatEvaluateScript(source: string, filename: string) {
+  // Native MTS returns the Script completion without Core's BTS init/cache.
+  let result;
+  try { result = evaluateScript(source, filename); }
+  catch (error) {
+    // QuickContext::EvalBuf logs a synchronous exception and leaves LoadScript's
+    // default null result untouched. Jobs wait for the enclosing checkpoint.
+    logScriptMessage("error", `QuickContext EvalBuf error: ${printable(error)}`);
+    return null;
+  }
+  // Unlike InternalCall, EvalBuf retains its result after a failed job too.
+  runMtsJobs(true);
+  return result;
 }
 
 export const NativeModules = undefined;
