@@ -31,6 +31,8 @@ use hughie::text::block::{
     BlockConstraint, BlockStyle, InlineBoxSpec, InlineItem, RunStyle, TextBlock, TextRunItem,
     VerticalAlign,
 };
+use stylo::properties::ComputedValues;
+use stylo::values::computed::{Content, ContentItem};
 
 use crate::layout::style::{DisplayMode, StyleView, TextRunView, display_mode, inline_style_of};
 use crate::tree::document::{DocumentLayoutState, NodeId, NodeSlot, TreeArenas};
@@ -99,6 +101,9 @@ enum OwnedItem {
 /// Lynx text scope may nest without limit.
 fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
     let mut collected = Vec::new();
+    if collect_generated(tree, element, &mut collected) {
+        return collected;
+    }
     // (node, whether its own children still need visiting)
     let mut stack: Vec<NodeSlot> = tree
         .at(element)
@@ -148,7 +153,9 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
             // the difference is only which style its runs carry, and that is
             // read per run from the innermost element ancestor anyway.
             DisplayMode::Text | DisplayMode::Contents => {
-                stack.extend(node.flat_children().iter().rev().copied());
+                if !collect_generated(tree, slot, &mut collected) {
+                    stack.extend(node.flat_children().iter().rev().copied());
+                }
             }
             DisplayMode::None => {}
             _ => collected.push(Collected {
@@ -162,17 +169,89 @@ fn collect<T>(tree: &TreeArenas<T>, element: NodeSlot) -> Vec<Collected> {
     collected
 }
 
+/// The supported content list replaces rendered children, including when its
+/// strings resolve to empty. Unsupported lists fall back to ordinary children
+/// as a whole; never render only a supported prefix of a list.
+fn generated_content<T>(node: &Node<T>) -> Option<(&ComputedValues, &[ContentItem])> {
+    if node.is_replaced() {
+        return None;
+    }
+    let style = node.layout_computed_style()?;
+    let Content::Items(content) = &style.get_counters().content else {
+        return None;
+    };
+    let items = &content.items[..content.alt_start];
+    items
+        .iter()
+        .all(|item| match item {
+            ContentItem::String(_) => true,
+            ContentItem::Attr(attr) => attr.namespace_url.is_empty(),
+            _ => false,
+        })
+        .then_some((style, items))
+}
+
+/// Whether this scope suppresses descendants during the later positioning walk.
+/// `contents` only consumes text content when it belongs to a text paragraph.
+pub(super) fn replaces_children<T>(node: &Node<T>) -> bool {
+    let Some(style) = node.layout_computed_style() else {
+        return false;
+    };
+    match display_mode(style.clone_display()) {
+        DisplayMode::Text => generated_content(node).is_some(),
+        DisplayMode::Contents => {
+            generated_content(node).is_some()
+                && crate::layout::style::box_parent(node).is_some_and(|parent| {
+                    parent.layout_computed_style().is_some_and(|style| {
+                        display_mode(style.clone_display()) == DisplayMode::Text
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether generated text replaced this scope's rendered children.
+fn collect_generated<T>(tree: &TreeArenas<T>, slot: NodeSlot, out: &mut Vec<Collected>) -> bool {
+    let node = tree.at(slot);
+    let Some((style, items)) = generated_content(node) else {
+        return false;
+    };
+    let mut text = String::new();
+    for item in items {
+        match item {
+            ContentItem::String(value) => text.push_str(value),
+            ContentItem::Attr(attr) => {
+                text.push_str(node.attribute(&attr.attribute).unwrap_or(&attr.fallback));
+            }
+            _ => unreachable!("generated_content validated the list"),
+        }
+    }
+    if !text.is_empty() {
+        out.push(Collected {
+            item: OwnedItem::Run {
+                text,
+                style: RunStyle::from_run_style(&TextRunView::from_values(style)),
+                preserve_newlines: style_preserves_newlines(style),
+            },
+            source: slot,
+        });
+    }
+    true
+}
+
 /// Whether a run keeps the literal newlines in its source.
 ///
 /// The one place Lynx preserves one: a carrier's UA rule sets
-/// `white-space-collapse: preserve-breaks`, which inherits into the reflected
-/// text node. Read from computed style, so no tag is named.
+/// `white-space-collapse: preserve-breaks`, which inherits into text runs.
+/// Read from computed style, so no tag is named.
 fn preserves_newlines<T>(node: &Node<T>) -> bool {
+    style_preserves_newlines(inline_style_of(node))
+}
+
+fn style_preserves_newlines(style: &ComputedValues) -> bool {
     use stylo::computed_values::white_space_collapse::T as Collapse;
-    inline_style_of(node)
-        .get_inherited_text()
-        .clone_white_space_collapse()
-        == Collapse::PreserveBreaks
+    style.get_inherited_text().clone_white_space_collapse() == Collapse::PreserveBreaks
 }
 
 /// A cheap structural identity of the flattened content.
@@ -186,9 +265,14 @@ fn fingerprint(collected: &[Collected]) -> u64 {
     for entry in collected {
         entry.source.hash(&mut hasher);
         match &entry.item {
-            OwnedItem::Run { text, .. } => {
+            OwnedItem::Run {
+                text,
+                preserve_newlines,
+                ..
+            } => {
                 0_u8.hash(&mut hasher);
                 text.hash(&mut hasher);
+                preserve_newlines.hash(&mut hasher);
             }
             OwnedItem::Atom { .. } => 1_u8.hash(&mut hasher),
         }
@@ -350,16 +434,26 @@ pub(crate) fn compute_text_block_layout<T>(
     // Phase 2. Each atom is laid out as its own subtree; the paragraph only
     // ever sees the margin-box result.
     for &(atom, id) in &atoms {
-        let output = tree.compute_layout(
-            state,
-            atom,
-            hughie::tree::LayoutInput::measure(
-                Size::new(None, None),
+        let output = if input.goal.commits() {
+            hughie::compute::compute_inline_box_layout(
+                tree,
+                state,
+                atom,
                 input.parent_size,
                 Size::new(ATOM_SPACE, ATOM_SPACE),
-                hughie::tree::RequestedAxis::Both,
-            ),
-        );
+            )
+        } else {
+            tree.compute_layout(
+                state,
+                atom,
+                hughie::tree::LayoutInput::measure(
+                    Size::new(None, None),
+                    input.parent_size,
+                    Size::new(ATOM_SPACE, ATOM_SPACE),
+                    hughie::tree::RequestedAxis::Both,
+                ),
+            )
+        };
         if let Some((_, store)) = context_and_block(state, element) {
             store
                 .block
@@ -414,6 +508,14 @@ fn place_and_hide<T>(
 ) {
     use hughie::text::block::PlacedBox;
     use hughie::tree::LayoutTree;
+
+    if generated_content(tree.at(element)).is_some() {
+        // Replacement suppresses every descendant, including out-of-flow boxes.
+        for child in tree.children(element) {
+            hughie::compute::hide_subtree(tree, state, child);
+        }
+        return;
+    }
 
     let placements: Vec<PlacedBox> = state
         .text_block(element)
@@ -497,5 +599,298 @@ fn place_and_hide<T>(
             continue;
         }
         hughie::compute::hide_subtree(tree, state, child);
+    }
+}
+
+#[cfg(test)]
+mod generated_content_tests {
+    use super::*;
+    use crate::{Document, FontBlob, StylesheetOrigin};
+
+    fn document(css: &str) -> (Document<()>, NodeId) {
+        let mut doc = Document::new(crate::tree::document::tests::device(), "page", ());
+        doc.register_fonts(FontBlob::from_static(include_bytes!(
+            "../../../hughie/tests/fixtures/Ahem.ttf"
+        )));
+        doc.add_stylesheet("page { display: flex; } text { display: -lynx-text; font-family: Ahem; font-size: 20px; } scope { display: contents; }", StylesheetOrigin::Author);
+        doc.add_stylesheet(css, StylesheetOrigin::Author);
+        let text = doc.create_element("text", ());
+        doc.append_child(doc.document_element().id(), text);
+        (doc, text)
+    }
+
+    fn contents(doc: &Document<()>, text: NodeId) -> String {
+        collect(doc.arenas(), doc.slot(text).unwrap())
+            .into_iter()
+            .filter_map(|entry| match entry.item {
+                OwnedItem::Run { text, .. } => Some(text),
+                OwnedItem::Atom { .. } => None,
+            })
+            .collect()
+    }
+
+    fn width(doc: &Document<()>, text: NodeId, expected: f32) {
+        let measured = doc.text_block_size(text).expect("laid out paragraph");
+        assert!(
+            (measured.width - expected).abs() < 0.001,
+            "{measured:?} != {expected}"
+        );
+    }
+
+    #[test]
+    fn generated_content_updates_attributes_without_selector_dependencies() {
+        let (mut doc, text) = document("text { content: attr(text); }");
+        for (value, expected) in [
+            (Some("hello"), 100.0),
+            (Some("hi"), 40.0),
+            (Some(""), 0.0),
+            (Some("again"), 100.0),
+            (None, 0.0),
+        ] {
+            match value {
+                Some(value) => doc.set_attribute(text, "text", value),
+                None => doc.remove_attribute(text, "text"),
+            }
+            doc.layout();
+            assert_eq!(contents(&doc, text), value.unwrap_or_default());
+            width(&doc, text, expected);
+            assert!(doc.get(text).unwrap().child_ids().is_empty());
+            assert_eq!(
+                doc.query_selector(doc.document_element().id(), "text:empty")
+                    .unwrap(),
+                Some(text)
+            );
+        }
+    }
+
+    #[test]
+    fn generated_content_replaces_children_without_changing_dom_selectors() {
+        let (mut doc, text) =
+            document("text[text] { content: '[' attr(text) ']'; } scope { content: attr(label); }");
+        let scope = doc.create_element("scope", ());
+        doc.set_attribute(scope, "label", "B");
+        doc.append_child(text, scope);
+        let literal = doc.create_text_node("C", ());
+        doc.append_child(scope, literal);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "B");
+        width(&doc, text, 20.0);
+        doc.set_attribute(text, "text", "A");
+        doc.layout();
+        assert_eq!(contents(&doc, text), "[A]");
+        width(&doc, text, 60.0);
+        assert_eq!(doc.get(text).unwrap().child_ids(), [scope]);
+        assert_eq!(doc.get(scope).unwrap().child_ids(), [literal]);
+        assert_eq!(
+            doc.query_selector(doc.document_element().id(), "scope:first-child")
+                .unwrap(),
+            Some(scope)
+        );
+        doc.set_attribute(scope, "label", "DEF");
+        doc.remove_attribute(text, "text");
+        doc.layout();
+        assert_eq!(contents(&doc, text), "DEF");
+        width(&doc, text, 60.0);
+        doc.set_attribute(scope, "label", "");
+        doc.layout();
+        assert_eq!(contents(&doc, text), "");
+        width(&doc, text, 0.0);
+        doc.add_stylesheet("scope { content: normal; }", StylesheetOrigin::Author);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "C");
+        width(&doc, text, 20.0);
+    }
+
+    #[test]
+    fn generated_content_replaces_atomic_and_out_of_flow_children() {
+        let (mut doc, text) = document("text[text] { content: attr(text); }");
+        let atom = doc.create_element("view", ());
+        doc.set_inline_style(atom, "display: flex; width: 30px; height: 20px;");
+        doc.append_child(text, atom);
+        let absolute = doc.create_element("view", ());
+        doc.set_inline_style(absolute, "position: absolute; width: 50px; height: 20px;");
+        doc.append_child(text, absolute);
+        doc.layout();
+        width(&doc, text, 30.0);
+        assert!((doc.rounded_layout(absolute).unwrap().size.width - 50.0).abs() < f32::EPSILON);
+        for (value, expected) in [("AB", 40.0), ("", 0.0)] {
+            doc.set_attribute(text, "text", value);
+            doc.layout();
+            width(&doc, text, expected);
+            for child in [atom, absolute] {
+                assert_eq!(doc.rounded_layout(child).unwrap().size, Size::ZERO);
+            }
+        }
+        // Mutations under a replacement must stay hidden and take effect when
+        // ordinary children become visible again.
+        doc.set_inline_style_property(atom, "width", "60px");
+        doc.set_inline_style_property(absolute, "width", "70px");
+        doc.layout();
+        for child in [atom, absolute] {
+            assert_eq!(doc.rounded_layout(child).unwrap().size, Size::ZERO);
+        }
+        doc.remove_attribute(text, "text");
+        doc.layout();
+        width(&doc, text, 60.0);
+        assert!((doc.rounded_layout(atom).unwrap().size.width - 60.0).abs() < f32::EPSILON);
+        assert!((doc.rounded_layout(absolute).unwrap().size.width - 70.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unsupported_generated_lists_leave_children_and_pseudos_do_not_generate_text() {
+        let (mut doc, text) =
+            document("text { content: 'prefix' open-quote; } text::before { content: 'before'; }");
+        let literal = doc.create_text_node("AB", ());
+        doc.append_child(text, literal);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "AB");
+        width(&doc, text, 40.0);
+        doc.add_stylesheet("text { content: none; }", StylesheetOrigin::Author);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "AB");
+        width(&doc, text, 40.0);
+    }
+
+    #[test]
+    fn generated_content_cascade_changes_invalidate_the_paragraph() {
+        let (mut doc, text) = document(
+            "text { content: attr(text); } text.off { content: none; } text.large { font-size: 40px; }",
+        );
+        doc.set_attribute(text, "text", "AB");
+        for (class, expected) in [("", 40.0), ("off", 0.0), ("", 40.0), ("large", 80.0)] {
+            doc.set_classes(text, class);
+            doc.layout();
+            width(&doc, text, expected);
+        }
+        doc.add_stylesheet("text { content: 'X'; }", StylesheetOrigin::Author);
+        doc.layout();
+        assert_eq!(contents(&doc, text), "X");
+        width(&doc, text, 40.0);
+    }
+
+    #[test]
+    fn generated_content_special_attribute_paths_and_fallback() {
+        let (mut doc, text) =
+            document("text { content: attr(class) attr(id) attr(missing, 'Z'); }");
+        doc.layout();
+        width(&doc, text, 20.0);
+        doc.add_class(text, "AB");
+        doc.set_id_attribute(text, Some("C"));
+        doc.layout();
+        assert_eq!(contents(&doc, text), "ABCZ");
+        width(&doc, text, 80.0);
+        doc.remove_class(text, "AB");
+        doc.remove_attribute(text, "id");
+        doc.layout();
+        width(&doc, text, 20.0);
+    }
+
+    #[test]
+    fn generated_content_survives_hiding_and_reattaching_its_scope() {
+        let (mut doc, text) =
+            document("scope[label] { content: attr(label); } scope.hidden { display: none; }");
+        let wrapper = doc.create_element("scope", ());
+        let scope = doc.create_element("scope", ());
+        doc.append_child(text, wrapper);
+        doc.append_child(wrapper, scope);
+        doc.set_attribute(scope, "label", "AB");
+        doc.layout();
+        width(&doc, text, 40.0);
+        doc.add_class(scope, "hidden");
+        doc.layout();
+        width(&doc, text, 0.0);
+        doc.set_attribute(scope, "label", "C");
+        doc.remove_class(scope, "hidden");
+        doc.layout();
+        width(&doc, text, 20.0);
+        doc.remove_element(scope);
+        doc.layout();
+        width(&doc, text, 0.0);
+        doc.append_child(wrapper, scope);
+        doc.layout();
+        width(&doc, text, 20.0);
+    }
+
+    #[test]
+    fn generated_content_shares_a_paragraph_with_resized_atomic_boxes() {
+        let (mut doc, text) = document("scope { content: 'A'; }");
+        let scope = doc.create_element("scope", ());
+        doc.append_child(text, scope);
+        let atom = doc.create_element("view", ());
+        doc.set_inline_style(atom, "display: flex; width: 30px; height: 20px;");
+        doc.append_child(text, atom);
+        doc.layout();
+        width(&doc, text, 50.0);
+        doc.set_inline_style_property(atom, "width", "50px");
+        doc.layout();
+        width(&doc, text, 70.0);
+    }
+
+    #[test]
+    fn generated_content_reads_attributes_written_before_its_rule_arrives() {
+        let (mut doc, text) = document("");
+        doc.set_attribute(text, "text", "AB");
+        doc.layout();
+        width(&doc, text, 0.0);
+        doc.add_stylesheet("text { content: attr(text); }", StylesheetOrigin::Author);
+        doc.layout();
+        width(&doc, text, 40.0);
+        doc.add_stylesheet("text { content: attr(style); }", StylesheetOrigin::Author);
+        doc.set_inline_style(text, "color: red;");
+        doc.layout();
+        assert_eq!(
+            contents(&doc, text),
+            doc.get(text).unwrap().attribute("style").unwrap()
+        );
+        doc.set_inline_style_property(text, "color", "blue");
+        doc.layout();
+        assert_eq!(
+            contents(&doc, text),
+            doc.get(text).unwrap().attribute("style").unwrap()
+        );
+        width(&doc, text, 240.0);
+        doc.remove_attribute(text, "style");
+        doc.layout();
+        width(&doc, text, 0.0);
+    }
+
+    #[test]
+    fn generated_content_wraps_and_preserves_requested_newlines() {
+        let (mut doc, text) = document(
+            "text { width: 40px; } text { content: attr(text); white-space-collapse: preserve-breaks; }",
+        );
+        doc.set_attribute(text, "text", "AB\nCD");
+        doc.layout();
+        width(&doc, text, 40.0);
+        assert!((doc.text_block_size(text).unwrap().height - 40.0).abs() < 0.001);
+        doc.set_attribute(text, "text", "A B C");
+        doc.layout();
+        assert!(doc.text_block_size(text).unwrap().height >= 60.0);
+        doc.set_attribute(text, "text", "AB\nCD");
+        doc.add_stylesheet(
+            "text { width: 200px; } text { white-space-collapse: collapse; }",
+            StylesheetOrigin::Author,
+        );
+        doc.layout();
+        width(&doc, text, 100.0);
+        assert!((doc.text_block_size(text).unwrap().height - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn generated_content_repeated_values_reuse_shaping_and_nested_style_changes_rebuild() {
+        let (mut doc, text) =
+            document("scope { content: attr(label); } scope.large { font-size: 40px; }");
+        let scope = doc.create_element("scope", ());
+        doc.append_child(text, scope);
+        doc.set_attribute(scope, "label", "AB");
+        doc.layout();
+        let builds = doc.text_block_rebuilds(text);
+        doc.set_attribute(scope, "label", "AB");
+        doc.layout();
+        assert_eq!(doc.text_block_rebuilds(text), builds);
+        doc.add_class(scope, "large");
+        doc.layout();
+        width(&doc, text, 80.0);
+        assert_ne!(doc.text_block_rebuilds(text), builds);
     }
 }

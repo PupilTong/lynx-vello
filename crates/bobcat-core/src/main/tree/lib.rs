@@ -43,7 +43,6 @@ pub(crate) const PAGE_TAG: &str = "page";
 pub(crate) fn new_document(viewport: Viewport, config: PageConfig) -> LynxDocument {
     let mut document = Document::new(viewport.device(), PAGE_TAG, ());
     image::define(&mut document);
-    raw_text::define(&mut document);
     document.add_stylesheet(
         &ua_sheet::ua_stylesheet(config),
         StylesheetOrigin::UserAgent,

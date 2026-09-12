@@ -172,8 +172,7 @@ impl CustomElement<()> for Image {
         // against a base URL included — is the embedder's resource system's
         // job, not this engine's.
         //
-        // No `old == new` guard, unlike [`super::raw_text`]: that component has
-        // a reshape to stop, while `Document::set_image_source` already returns
+        // No `old == new` guard: `Document::set_image_source` already returns
         // before it binds, asks, or invalidates anything when the source it is
         // handed is the one already there.
         document.set_image_source(element, new.filter(|source| !source.is_empty()));

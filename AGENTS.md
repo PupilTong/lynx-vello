@@ -119,8 +119,8 @@ divergences found so far.
 **Scope exceptions.** A feature can be deliberately deferred or narrowed
 relative to the compat target by an explicit, user-confirmed decision — the
 styling-system set lives in `docs/style-assumptions.md` (e.g.
-`::before`/`::after` omitted in v1: native Lynx has no such feature; only the
-web target renders it via browser passthrough). Those decisions override the
+element text `content` is supported; generated boxes and `::before`/`::after` remain
+deferred despite browser passthrough on the web target). Those decisions override the
 default "match web-core" expectation until their recorded revisit milestone;
 follow them rather than re-deriving the classification.
 
@@ -815,8 +815,8 @@ useful signal for currently-compatible versions of those libraries.
   the tree already answers. `Document::drop_element` frees exactly the node
   the collected handle named — its **element** children are unlinked and go
   on as detached roots, each held by its own handle, while what no handle
-  could ever name goes with it: the text node a `raw-text` reflects, and a
-  host's shadow tree in full. So an unmount is `__RemoveElement` on the
+  could ever name goes with it: host-owned text nodes and a
+  host's shadow tree in full. Generated `raw-text` content has no DOM node. So an unmount is `__RemoveElement` on the
   snapshot's root, which takes it out of its parent's set, and then the
   card's own references going away; the whole subtree's handles become
   unreachable together and each finalizes into one free. A ReactLynx list
@@ -842,8 +842,8 @@ useful signal for currently-compatible versions of those libraries.
   the ownership graph and the tree disagreeing.
   Core owns Lynx page policy in its `tree` module — the `page` root tag,
   `Viewport`/stylo `Device` construction, the Lynx UA cascade defaults, and
-  the components the engine defines (`tree::raw_text` and `tree::image`, one
-  file per component, each owning its own UA rules and tests);
+  the image component and tag-owned UA rules (`tree::raw_text` now contains
+  only generated-content CSS and its tests);
   the native host-module functions call `dom::Document` directly — while tag
   vocabulary, handle lifecycle, and the PAPI member surface live in
   `packages/bobcat-element`. Element identity is the DOM `NodeId`, which is
@@ -854,17 +854,15 @@ useful signal for currently-compatible versions of those libraries.
   exception (unexpected internal panics remain fatal on abort-only Wasm). An unflushed batch may
   present once its evaluation ends — web-core's visibility model, where
   the browser paints the live DOM regardless of `__FlushElementTree`.
-  **Text** reaches the engine as an attribute and leaves it as a W3C text
-  node, and `raw-text` is the join. Script writes a run with
-  `__CreateRawText(value)` — a `raw-text` element carrying `text` — while
-  everything downstream (Parley shaping, line breaking, the glyph painter)
-  speaks the text node. So `tree::raw_text` defines a `dom::CustomElement`
-  observing `text`, reflecting its current value into one text node the way web-core's
-  `RawTextAttributes` does, updating that node in place rather than replacing
-  it (a run keeps its retained Parley layout under its own id), and carrying
-  no node at all for an empty value. The UA sheet carries the other half,
-  again from `web-elements`: `text` establishes one flattened paragraph whatever
-  `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
+  **Text** reaches the engine as an attribute and becomes generated paragraph
+  content. Script writes `__CreateRawText(value)` — a `raw-text` element
+  carrying `text` — and its UA rule `raw-text { content: attr(text); }`
+  feeds the same DOM generated-content path as author CSS. There is no custom
+  element reflection or synthetic DOM text child. `text[text]` uses the same
+  rule. Content replaces rendered children while preserving DOM structure.
+  The element's primary text style shapes and paints its run; attribute changes invalidate the paragraph,
+  and unchanged text/style reuse its shaping. `text` establishes one flattened
+  paragraph whatever `defaultDisplayLinear` says, `wrapper` is `display: contents`, and
   `raw-text` dissolves into the `text` it is written inside
   (`display: none` anywhere else) with
   `white-space-collapse: preserve-breaks`, the one place Lynx keeps a literal
@@ -1893,7 +1891,7 @@ useful signal for currently-compatible versions of those libraries.
   custom inline-truncation content, `tail-color-convert`, and text layout events.
   The flattened paragraph and `text-maxline`/`text-maxlength` attribute wiring
   are implemented (see `tree::text` above). The
-  `raw-text` attribute-to-text-node reflection and its UA display/newline
+  `raw-text` generated-content rule and its UA display/newline
   policy have landed in `bobcat-core`'s `tree::raw_text` (see above), as has
   the `<image>` tag's `src`-to-replaced-content reflection and its UA box in
   `tree::image`. Generic W3C

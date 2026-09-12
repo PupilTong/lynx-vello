@@ -65,7 +65,41 @@ pub fn compute_root_layout<T: LayoutTree>(
         available_space,
         Size::new(true, true),
     );
-    let output = tree.compute_layout(state, root, root_input);
+    commit_independent_box(tree, state, root, root_input);
+}
+
+/// Commits an atomic inline subtree at the same constraints used to measure it.
+/// The paragraph places its outer box afterwards; this writes its own box model
+/// and descendant geometry, which a measurement alone cannot restore after hiding.
+pub fn compute_inline_box_layout<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    node: T::NodeId,
+    parent_size: Size<Option<f32>>,
+    available_space: Size<AvailableSpace>,
+) -> LayoutOutput {
+    commit_independent_box(
+        tree,
+        state,
+        node,
+        LayoutInput::commit(
+            Size::NONE,
+            parent_size,
+            available_space,
+            Size::new(false, false),
+        ),
+    )
+}
+
+fn commit_independent_box<T: LayoutTree>(
+    tree: &T,
+    state: &mut T::State,
+    root: T::NodeId,
+    input: LayoutInput,
+) -> LayoutOutput {
+    let parent_size = input.parent_size;
+    let available_space = input.available_space;
+    let output = tree.compute_layout(state, root, input);
 
     let style = tree.style(root);
     let margin_value = style.margin();
@@ -82,7 +116,7 @@ pub fn compute_root_layout<T: LayoutTree>(
 
     if hidden {
         tree.set_unrounded_layout(state, root, Layout::default());
-        return;
+        return output;
     }
 
     let mut layout = Layout::with_order(0);
@@ -93,6 +127,7 @@ pub fn compute_root_layout<T: LayoutTree>(
     layout.padding = padding;
     layout.margin = margin;
     tree.set_unrounded_layout(state, root, layout);
+    output
 }
 
 fn resolve_root_margins(

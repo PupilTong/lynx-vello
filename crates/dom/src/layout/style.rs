@@ -289,6 +289,10 @@ impl std::fmt::Debug for TextRunView<'_> {
 }
 
 impl<'dom> TextRunView<'dom> {
+    pub(crate) const fn from_values(run: &'dom ComputedValues) -> Self {
+        Self { run }
+    }
+
     /// The run style for `node`'s characters — the style of the innermost
     /// inline box containing them, which for a lone text child is its flat
     /// parent.

@@ -202,8 +202,8 @@ What that covers, and what it does not:
   `__SetAttribute`, `__SetInlineStyles`, `__AddEvent` — and the queries that
   read it back (`__GetID`, `__GetTag`, `__GetElementUniqueID`, `__GetEvent`,
   `__GetEvents`, `__GetAttributeByName`, `__GetAttributeNames`, and
-  `__GetChildren`, which answers in element children so the text node a
-  `raw-text` reflects — the one child no handle names — stays out of it).
+  `__GetChildren`, which answers in element children; generated `raw-text`
+  content has no DOM child or handle).
   Classes, ids, attributes, and inline styles reach stylo
   through the ordinary `Document` setters, so they cascade and lay out on the
   next flush. A string-valued inline style uses the whole-attribute setter;
@@ -287,3 +287,24 @@ absorbed into `dom` or `hughie`.
   `cargo bench -p dom --bench paint`
 - Workspace checks: `cargo fmt --check`, `cargo clippy --all-targets`, and
   `cargo test --workspace`
+
+
+### Generated paragraph content
+
+Stylo parses and cascades `content` on the element's primary computed style.
+`layout::text_block` reads supported string/attribute lists from that existing
+snapshot and replaces the scope's rendered children with text runs. The same
+node ID supplies shaping and painting style; no generated DOM node, eager
+pseudo snapshot or separate pseudo paint origin is needed.
+
+A generated-attribute write reaches the enclosing paragraph before normal
+layout invalidation, because transparent scopes have no reusable box cache.
+Primary-style damage follows the same route; paint-only changes update the
+style snapshot without reshaping. Empty replacement content still suppresses
+children, including atomic and out-of-flow boxes, while normal/unsupported
+content falls back to them.
+
+UA rules opt `text[text]` and `raw-text` into attribute content. `raw-text` saves
+its former DOM text node and layout-state slot; ordinary nodes keep their
+original single primary-style pointer. See
+[style-assumptions.md §A.4](style-assumptions.md) for the supported subset.

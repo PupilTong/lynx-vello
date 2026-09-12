@@ -2,7 +2,7 @@
 //! and what may generate a box inside one.
 //!
 //! The other half of Lynx text — how a run reaches the engine and where it
-//! lays out — is [`super::raw_text`], which owns the `raw-text` component and
+//! lays out — is [`super::raw_text`], which owns the `raw-text` generated-content rule and
 //! the rules that dissolve a carrier into the `text` it is written inside.
 
 use dom::NodeId;
@@ -92,6 +92,7 @@ pub(super) const UA_RULES: &str = r#"
 @property --lynx-text-maxline { syntax: "<integer>"; inherits: false; initial-value: 0; }
 @property --lynx-text-maxlength { syntax: "<integer>"; inherits: false; initial-value: -1; }
 text { box-sizing: border-box; display: -lynx-text !important; color: initial; }
+text[text] { content: attr(text); }
 inline-text { display: -lynx-text !important; }
 inline-image, inline-truncation { display: none; }
 text > * { display: none; }

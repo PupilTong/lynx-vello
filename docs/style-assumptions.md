@@ -50,21 +50,35 @@ the semantics are stylo's.** Everything below refines that sentence.
    the web target matched everything via the browser, and `:where()` is
    load-bearing for scoping (§D.16).
 
-4. **`::before`/`::after` + `content`: omitted in v1.** Native-Lynx
-   fidelity wins over web-target parity here — an intentional, recorded
-   divergence from web-core (where browser passthrough renders them).
-   Selectors parse; no pseudo-element boxes are generated and `content` is
-   inert.
+4. **Element text content (user-directed, 2026-09-12).**
+   String `content` items and untyped, unnamespaced `attr()` (including string
+   fallback) replace the rendered children of a `display: -lynx-text` paragraph
+   or a nested text/contents scope. This is an explicitly supported text
+   extension, not a claim of browser-compatible string `content` on ordinary
+   elements. It supersedes the earlier text-only `::before` implementation;
+   both `::before` and `::after` rendering remain deferred.
 
-   *Policy reconciliation*: this does not trip [AGENTS.md](../AGENTS.md)'s
-   bucket-1 rule ("implement W3C-correct behavior for spec features Lynx
-   supports") because **native Lynx does not support this feature at all** —
-   no `content` property exists anywhere in its property table; only the web
-   target renders it, as a side effect of browser passthrough. The omission
-   is a scoped exception to the *web-core compat target*, recorded as a
-   decision in [deviations.md](tracking/deviations.md). **Milestone to
-   revisit**: when the render engine grows generated-content box support, or
-   the first real fixture/app depends on it — whichever comes first.
+   Stylo owns parsing, matching and cascade on the element's primary style.
+   The fork exposes `content`; its display grammar is unchanged and excludes
+   `inline` and `block`. No global pseudo UA rule, before-style snapshot or
+   separate pseudo paint origin is needed. Generated runs wear their element's
+   font, color, decorations and whitespace policy and share the enclosing
+   paragraph's wrapping/truncation.
+
+   UA CSS uses `text[text] { content: attr(text); }` and
+   `raw-text { content: attr(text); }`. A `text` without the attribute retains
+   its child content; an attribute present with an empty value replaces it
+   with empty content. Replacement suppresses all descendant rendering,
+   including atomic and out-of-flow boxes, but leaves DOM children, selectors
+   and `textContent` unchanged. `raw-text` needs no custom-element reflection
+   or synthetic DOM text child. Attribute changes invalidate the owning
+   paragraph even when no selector mentions the attribute.
+
+   `normal` and `none` retain ordinary children. Unsupported lists also retain
+   children as a whole: no partial supported prefix is rendered. Counters,
+   quotes, images, namespaced/typed attributes and generated boxes remain
+   deferred. The supported path is limited to text paragraphs and their
+   nested text/contents scopes; it does not replace arbitrary flex/grid boxes.
 
 ## B. Performance architecture
 
@@ -345,8 +359,8 @@ and §D.16 with what the wire format actually permits.)*
       paint/hit-area clipping are implemented by `dom`'s `visual` module (paint order + hit
       testing). Actual pixel output still awaits the render crate.
     - **Style containment is N/A.** `contain: style` parses and feeds the `content` / `strict`
-      composite math, but the engine has no counters, quotes, or `content` property, so it has no
-      semantic effect.
+      composite math, but the engine has no counters or quotes; string/attribute generated content
+      needs no containment boundary, so it has no semantic effect.
 
     The layout-side semantics (size-substitution, layout-containment baseline
     suppression + host CB contract, skipped contents, the relayout-boundary
@@ -364,4 +378,4 @@ and §D.16 with what the wire format actually permits.)*
 - Which milestone re-enables dynamic pseudo-classes (§C.13).
 - Whether to keep a CSS-text serialization path purely as a
   differential-testing oracle against web-core output.
-- The revisit trigger for `::before`/`::after` (§A.4) — fixture/app demand.
+- Generated-content boxes and `::before`/`::after` (§A.4) — fixture/app demand.

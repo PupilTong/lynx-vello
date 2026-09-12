@@ -364,10 +364,14 @@ consequential choice about whether to follow the spec or the quirk.
   web target via passthrough to the real browser. lynx-vello must explicitly
   decide whether to add real support (W3C-correct) since there's no native
   Lynx behavior to fall back to.
-  **Decision (user-confirmed, 2026-07-11): omit in v1** — native-Lynx
-  fidelity; selectors parse but generate no boxes and `content` stays inert.
-  This is an intentional divergence from the web target; revisit on fixture
-  demand. See [docs/style-assumptions.md](../style-assumptions.md) §A.4.
+  **Updated decision (user-directed, 2026-09-12): element text content.**
+  String and untyped `attr()` content on primary styles replace rendered
+  children inside text paragraphs, preserving the DOM. `text[text]` and
+  `raw-text` use UA CSS, without custom-element reflection. This explicit
+  extension supersedes text-only `::before`; both before/after rendering,
+  generated boxes and non-text content remain deferred. See
+  [docs/style-assumptions.md](../style-assumptions.md) §A.4.
+
 - **`@media` queries** — the C++ engine has a complete, recently-added,
   spec-modeled evaluator, but it is **wired only into the native `.lynx.bundle`
   pipeline**. The `.web.bundle` wire format lynx-vello actually decodes has

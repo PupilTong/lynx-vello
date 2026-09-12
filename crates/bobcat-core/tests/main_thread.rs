@@ -233,14 +233,13 @@ async fn tree_and_attribute_queries_answer_over_the_real_document() {
           __AppendElement(text, raw);
           __AppendElement(page, text);
 
-          // The raw-text reflects its content into a DOM text node, which no
-          // handle names. Element children is what keeps it out of the answer.
+          // Generated content contributes no DOM children.
           const children = __GetChildren(text);
           if (children.length !== 1 || children[0] !== raw) {
             throw new Error('a text element has exactly its raw-text child');
           }
           if (__GetChildren(raw).length !== 0) {
-            throw new Error('a reflected text node is not an element child');
+            throw new Error('generated text is not a DOM child');
           }
 
           const view = __CreateView(0);
