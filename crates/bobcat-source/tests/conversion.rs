@@ -2,6 +2,7 @@ use bobcat_source::native::{ConvertError, convert};
 use bobcat_source::web::css_property::{CssPropertyId, token_types};
 
 const SECTION_ROUTE: u8 = 10;
+const SECTION_CONFIG: u8 = 6;
 const SECTION_ROOT_LEPUS: u8 = 11;
 const SECTION_JS_BYTECODE: u8 = 14;
 const SECTION_CUSTOM: u8 = 16;
@@ -18,6 +19,51 @@ const EMPTY_ROOT_LEPUS: &[u8] = &[
     1, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0, 0, 194, 40, 94, 1, 12, 0, 0,
     128, 128, 128, 144, 128, 128, 128, 128, 128, 1,
 ];
+
+#[test]
+fn native_boolean_flags_keep_their_types_through_web_conversion() {
+    for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
+        for (value, expected) in [
+            ("true", true),
+            ("false", false),
+            ("\"true\"", false),
+            ("1", false),
+            ("null", false),
+        ] {
+            let mut config = Vec::new();
+            string(&mut config, &format!("{{\"{key}\":{value}}}"));
+            let native = native_bundle(vec![
+                (SECTION_CONFIG, config),
+                custom_section(vec![CustomSection::source("entry__main-thread", "void 0")]),
+            ]);
+            for template in [
+                bobcat_source::native::decode(&native).unwrap(),
+                bobcat_source::web::decode(&convert(&native).unwrap()).unwrap(),
+            ] {
+                assert_eq!(template.config_flag(key), expected, "{key}={value}");
+            }
+        }
+    }
+}
+
+#[test]
+fn named_source_contents_survive_conversion_without_inventing_a_root() {
+    let native = native_bundle(vec![custom_section(vec![
+        CustomSection::source("background", "({init(){return 42}})"),
+        CustomSection::source("main-thread", "value => value + 1"),
+        CustomSection::source("__proto__", "'中文'"),
+    ])]);
+    for template in [
+        bobcat_source::native::decode(&native).unwrap(),
+        bobcat_source::web::decode(&convert(&native).unwrap()).unwrap(),
+    ] {
+        let sections = template.custom_sections.unwrap();
+        assert_eq!(sections["background"]["content"], "({init(){return 42}})");
+        assert_eq!(sections["main-thread"]["content"], "value => value + 1");
+        assert_eq!(sections["__proto__"]["content"], "'中文'");
+        assert!(!template.lepus_code.contains_key("root"));
+    }
+}
 
 #[test]
 fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
@@ -49,7 +95,20 @@ fn converts_source_scripts_and_css_to_a_decodable_web_bundle() {
         decoded.manifest.get("/library").map(String::as_str),
         Some("globalThis.background = true;")
     );
-    assert_eq!(decoded.custom_sections, Some(serde_json::json!({})));
+    let sections = decoded.custom_sections.as_ref().unwrap();
+    assert_eq!(
+        sections["library"]["content"],
+        "globalThis.background = true;"
+    );
+    assert_eq!(
+        sections["library__main-thread"]["content"],
+        "globalThis.mainThread = true;"
+    );
+    assert_eq!(sections["library:CSS"]["encoding"], "CSS");
+    assert_eq!(
+        sections["library:CSS"]["content"]["ruleList"][0]["selectorText"]["value"],
+        ".box"
+    );
 
     let style_info = decoded.style_info.expect("StyleInfo section");
     let sheet = style_info
@@ -115,6 +174,36 @@ fn rejects_a_nonempty_root_program_as_code_cache() {
         convert(&native),
         Err(ConvertError::CodeCacheBundle { section }) if section == "ROOT_LEPUS"
     ));
+}
+
+#[test]
+fn latest_compiler_empty_root_is_accepted_only_as_an_exact_inert_program() {
+    // Actual tasm 0.0.53 output for engine 4.1.0, debugInfoOutside:true and
+    // absent lepusCode, as used by the reactlynx-test-fixtures workspace.
+    let empty = [
+        9, 204, 1, 176, 202, 3, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 0, 194, 40,
+        94, 1, 0,
+    ];
+    let bundle = |root: &[u8]| {
+        native_bundle(vec![
+            root_lepus(root),
+            custom_section(vec![CustomSection::source("library", "source")]),
+        ])
+    };
+    assert!(convert(&bundle(&empty)).is_ok());
+    for index in 0..empty.len() {
+        let mut changed = empty;
+        changed[index] ^= 1;
+        assert!(
+            matches!(convert(&bundle(&changed)),
+            Err(ConvertError::CodeCacheBundle { section }) if section == "ROOT_LEPUS"),
+            "changing byte {index} must invalidate the empty-program fingerprint"
+        );
+    }
+    let mut extended = empty.to_vec();
+    extended.push(0);
+    assert!(matches!(convert(&bundle(&extended)),
+        Err(ConvertError::CodeCacheBundle { section }) if section == "ROOT_LEPUS"));
 }
 
 #[test]
@@ -436,6 +525,15 @@ fn native_keyframes_and_font_faces_share_the_web_rule_model() {
         &fragment,
     )])]);
     let decoded = bobcat_source::web::decode(&convert(&bytes).unwrap()).unwrap();
+    let descriptors =
+        &decoded.custom_sections.as_ref().unwrap()["library:CSS"]["content"]["ruleList"];
+    assert_eq!(descriptors.as_array().unwrap().len(), 3);
+    assert_eq!(descriptors[1]["type"], "KeyframesRule");
+    assert_eq!(descriptors[1]["name"]["value"], "fade");
+    assert_eq!(descriptors[1]["styles"][0]["keyText"]["value"], "50%");
+    assert_eq!(descriptors[1]["styles"][0]["style"][0]["value"], "0.5");
+    assert_eq!(descriptors[2]["type"], "FontFaceRule");
+    assert_eq!(descriptors[2]["style"][1]["value"], "url(font.woff2)");
     let style = decoded.style_info.unwrap();
     let rules = &style.css_id_to_style_sheet[&7].rules;
     assert_eq!(rules.len(), 3);

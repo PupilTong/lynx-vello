@@ -82,6 +82,22 @@ fn fragment_order(style_info: &StyleInfo) -> Vec<i32> {
     ordered
 }
 
+/// A named fragment includes only its reachable imports, in the same cascade
+/// order as the ordinary bundle stylesheet. Other named sections stay separate.
+pub(crate) fn fragment_rules(style_info: &StyleInfo, root: i32) -> impl Iterator<Item = &Rule> {
+    let mut reachable = HashSet::new();
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if reachable.insert(id) {
+            pending.extend(live_imports(&style_info.css_id_to_style_sheet, id));
+        }
+    }
+    fragment_order(style_info)
+        .into_iter()
+        .filter(move |id| reachable.contains(id))
+        .flat_map(|id| style_info.css_id_to_style_sheet[&id].rules.iter())
+}
+
 /// The imports of `id` that name a fragment this bundle actually carries.
 fn live_imports(sheets: &HashMap<i32, StyleSheet>, id: i32) -> impl Iterator<Item = i32> + '_ {
     sheets
@@ -242,6 +258,30 @@ mod tests {
             css_id_to_style_sheet: fragments.into_iter().collect::<HashMap<_, _>>(),
             style_text_size_hint: 0,
         }
+    }
+
+    #[test]
+    fn named_fragment_includes_reachable_imports_without_adopting_other_sections() {
+        let fragment = |id, imports| {
+            (
+                id,
+                StyleSheet {
+                    imports,
+                    rules: vec![style_rule(vec![class_selector(&format!("s{id}"))], vec![])],
+                },
+            )
+        };
+        let info = style_info(vec![
+            fragment(1, vec![2, 2, 99]),
+            fragment(2, vec![3]),
+            fragment(3, vec![]),
+            fragment(4, vec![]),
+        ]);
+        let names = fragment_rules(&info, 1)
+            .map(|rule| selector_text(&rule.prelude).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [".s3", ".s2", ".s1"]);
+        assert_eq!(fragment_rules(&info, 99).count(), 0);
     }
 
     #[test]

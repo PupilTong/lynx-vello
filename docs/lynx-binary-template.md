@@ -164,7 +164,19 @@ to QuickJS bytecode, and serializes all sections.
 `bobcat-source::native::decode` handles source-based flexible external bundles
 (target SDK 2.8+ with serialized selectors and source CSS values), returning
 the shared web-compatible template model directly. `native::convert` explicitly
-serializes that result as a web bundle for tooling. Real bytecode, legacy
+serializes that result as a web bundle for tooling. JavaScript custom sections
+retain their original names and `{content: source}` descriptors in that model,
+alongside the existing manifest/MTS map adaptation. Conversion preserves these
+descriptors; named `loadScript` must not lose them to an empty CustomSections
+section. CSS also lowers to StyleInfo and keeps named descriptors in the
+compiler's `{encoding:"CSS",content:{ruleList}}` JSON shape. Named fragments
+include their reachable imports in cascade order. Loading or
+adopting these descriptors remains runtime work; conversion executes no script
+and mounts no stylesheet.
+Real bytecode, legacy
 Lepus, card-style top-level CSS, and irreversible parsed CSS encodings return
-errors. The exact two known inert external-root stubs are accepted only in
-the external layout. See [source architecture](source-architecture.md).
+errors. The exact known inert external-root stubs are accepted only in the
+external layout. These include tasm 0.0.53's 29-byte external-debug empty root,
+verified by encoding an external bundle with no MTS source at engine 4.1.0.
+Every one-byte mutation of that fingerprint is rejected. No bytecode executes.
+See [source architecture](source-architecture.md).

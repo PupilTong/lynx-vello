@@ -101,6 +101,23 @@ Migration:
   select one. Selection does not implement runtime chunk imports or execute
   its paired background chunk. The low-level decoder retains all named modules.
 
+Source custom sections retain their original names and `{content: source}`
+descriptors in `WebTemplate.custom_sections`, alongside the existing script-map
+adaptation. Native-to-web conversion serializes those descriptors instead of
+replacing them with an empty CustomSections object. Native CSS sections retain
+both their aggregate StyleInfo representation and the compiler's named
+`{encoding:"CSS", content:{ruleList}}` descriptors. Each named fragment includes
+only reachable imports, in the same cascade order as the aggregate sheet;
+StyleRule, KeyframesRule and FontFaceRule remain distinct JSON shapes. The
+rkyv 0.7 wire layout is unchanged, and no stylesheet text is synthesized.
+
+The native decoder normalizes boolean-only `enableQueryComponentSync` and
+`enableJSDataProcessor` fields before web configuration stringification, so a
+native string `"true"` cannot turn into an enabled flag after conversion. Their
+runtime consumers, named-sheet loading and PageSource bundle registration remain
+separate integration work. This layer preserves source data without executing
+scripts, fetching lazy bundles or changing the existing page boot path.
+
 ```sh
 cargo run -p bobcat-source \
   --example convert -- input.lynx.bundle output.web.bundle
