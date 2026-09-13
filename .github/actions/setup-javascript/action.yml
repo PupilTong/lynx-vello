@@ -1,0 +1,12 @@
+name: Set up workspace JavaScript
+description: Install Node, pnpm and locked workspace dependencies for TypeScript builds.
+runs:
+  using: composite
+  steps:
+    - uses: pnpm/action-setup@v6
+    - uses: actions/setup-node@v6
+      with:
+        node-version: 24.15.0
+        cache: pnpm
+    - shell: bash
+      run: pnpm install --frozen-lockfile

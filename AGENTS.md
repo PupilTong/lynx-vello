@@ -694,7 +694,7 @@ useful signal for currently-compatible versions of those libraries.
   leaves a registration behind.
   All eight runtime modules live together in `packages/bobcat-element/src` as
   TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
-  emitted for them into the package's committed `dist/` (see that package
+  emits during the Cargo build into its private `OUT_DIR` (see that package
   below). The Element module imports
   native
   operations directly from `bobcat-internal:host`; no host object and no
@@ -1299,15 +1299,15 @@ useful signal for currently-compatible versions of those libraries.
   `bobcat:event-target`, `bobcat:cross-thread-context` and
   `bobcat:timers` again — registered per runtime, because a source is
   runtime-wide and no value crosses between two runtimes. What core embeds,
-  with `include_str!`, is `dist/`: the JavaScript TypeScript 7 emits for every
-  `src/*.ts` (`pnpm --filter bobcat-element build`), committed so that a cargo
-  build needs no Node — which is also why a QuickJS line and column name a
-  line in `dist/`, not in the `.ts` source. Each emitted file starts with its
-  source's FNV-1a hash, and `bobcat-core`'s `build.rs` recomputes it: a source
-  edited after its emit fails the Rust build, naming the source and that
-  command, rather than building the older code into the engine. CI reruns the
-  emit and fails on any difference in `dist/`, which covers what the hash
-  cannot see — a compiler or tsconfig change, a module added or removed. The
+  with `include_str!`, is the JavaScript TypeScript 7 compiles from `src/*.ts`
+  during the Cargo build. `bobcat-core/build.rs` invokes the package's build
+  script with an output directory under Cargo's `OUT_DIR`; each target/profile
+  owns its emit, so parallel builds never write into a shared source directory.
+  Cargo tracks the sources, build script, TypeScript configuration and pnpm
+  dependency files. Run `pnpm install --frozen-lockfile` before Cargo; Node is
+  a build dependency for native and Wasm consumers alike. Generated JS is not
+  committed. `pnpm --filter bobcat-element build` emits to ignored `dist/` for
+  local inspection. QuickJS error lines refer to emitted JS, not TS. The
   Rstest suite imports the same modules and verifies every named export. The
   package owns the
   supported `__*` PAPI members and their web-core arities,
@@ -2001,6 +2001,9 @@ this section is the only place the absolute paths are spelled out.
   TypeScript and ESM throughout, checked by TypeScript 7.0.2 (`pnpm test:type`)
   under the strict options in `tsconfig.base.json`; Node (`^22.18 || ^24`)
   runs its `.ts` scripts directly by type stripping.
+- Cargo builds of `bobcat-core` require Node and a prior
+  `pnpm install --frozen-lockfile`; the built-in JS runtime is compiled into
+  `OUT_DIR` during the build, including for Wasm targets.
 - `cargo fmt` (nightly rustfmt options in `rustfmt.toml`), `cargo clippy`,
   `cargo test`, `cargo bench` (CodSpeed-compatible `divan` benches).
 - **`cargo fmt --all` reaches into `vendor/stylo`** even though the fork is
@@ -2187,13 +2190,12 @@ The Element PAPI runtime has two suites over the same source:
 `pnpm --filter bobcat-element test` (Rstest, over a recording native mock) and
 `pnpm --filter bobcat-element test:type` (TypeScript 7, `tsc -b`), while
 `crates/bobcat-core/tests/main_thread.rs` drives the same module, as
-TypeScript 7 emitted it into `dist/`, through the real QuickJS realm, `bobcat`
-object, and collector. The type suite checks every runtime module, the
+TypeScript 7 emitted it into Cargo's `OUT_DIR`, through the real QuickJS realm,
+`bobcat` object, and collector. The type suite checks every runtime module, the
 colocated `main-thread-runtime.ts` included, whose behavior is covered by the
-core main-thread tests. After changing a source, run
-`pnpm --filter bobcat-element build` and commit `dist/` with it:
-`bobcat-core`'s build script refuses to build until that emit is current, and
-CI fails when it differs.
+core main-thread tests. After changing a source, Cargo regenerates the JS before
+embedding it. Commit the TypeScript source only; `dist/` and Cargo's output
+are generated artifacts and must stay out of version control.
 
 `pnpm test:type` type-checks every TypeScript program in the workspace with
 TypeScript 7.0.2 — `tsc -b` over the root `tsconfig.json`, each program
