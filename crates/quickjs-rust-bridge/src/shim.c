@@ -90,6 +90,13 @@ enum QjsHostArgKind {
     QJS_ARG_NUMBER = 3,
     QJS_ARG_STRING = 4,
     QJS_ARG_UNSUPPORTED = 5,
+    /* A structured clone: `JS_WriteObject`'s own bytes, in `text`. Opaque to
+       the host, and read back by whichever realm of this build receives it. */
+    QJS_ARG_STRUCTURED = 6,
+    /* The serializer refused this value and has thrown. Never crosses into
+       Rust: the trampoline returns the pending exception instead of
+       dispatching. */
+    QJS_ARG_FAILED = 7,
 };
 
 
@@ -102,8 +109,8 @@ typedef struct QjsHostArg {
 
 
 /* The result of a host call travels in the same struct an argument does:
-   both are the primitives-only boundary vocabulary, and both carry text as
-   UTF-8 bytes. */
+   both are the boundary's own vocabulary — primitives plus opaque structured
+   clones — and both carry their bytes in `text`. */
 typedef QjsHostArg QjsHostResult;
 
 
@@ -1334,8 +1341,36 @@ static void qjs_host_describe(JSContext *raw_context, JSValueConst value,
         slot->text = (const uint8_t *)text;
         slot->text_len = length;
     } else {
-        slot->kind = QJS_ARG_UNSUPPORTED;
+        /* Everything that is not a primitive — an object, a BigInt, a Symbol
+           — crosses as QuickJS's own serialization rather than not at all.
+           Never `JS_WRITE_OBJ_BYTECODE`, so the stream writes every atom as a
+           string and is self-contained across the runtimes of a group; never
+           SAB, because this bridge exposes no shared memory. A refusal is the
+           serializer's own exception, left pending for the trampoline. */
+        size_t length = 0;
+        uint8_t *bytes =
+            JS_WriteObject(raw_context, &length, value, JS_WRITE_OBJ_REFERENCE);
+        if (bytes == NULL) {
+            slot->kind = QJS_ARG_FAILED;
+            return;
+        }
+        slot->kind = QJS_ARG_STRUCTURED;
+        slot->text = bytes;
+        slot->text_len = length;
     }
+}
+
+/* Releases whatever one described argument holds. Both kinds that carry bytes
+   own them: a string is `JS_ToCStringLen2`'s, a structured clone is
+   `JS_WriteObject`'s. */
+static void qjs_host_release_arg(JSContext *raw_context, QjsHostArg *slot) {
+    if (slot->kind == QJS_ARG_STRING) {
+        JS_FreeCString(raw_context, (const char *)slot->text);
+    } else if (slot->kind == QJS_ARG_STRUCTURED) {
+        js_free(raw_context, (void *)slot->text);
+    }
+    slot->text = NULL;
+    slot->text_len = 0;
 }
 
 static JSValue qjs_host_build(JSContext *raw_context,
@@ -1352,6 +1387,12 @@ static JSValue qjs_host_build(JSContext *raw_context,
     case QJS_ARG_STRING:
         return JS_NewStringLen(raw_context, (const char *)result->text,
                                result->text_len);
+    case QJS_ARG_STRUCTURED:
+        /* Rebuilds the value in this realm. May throw — a truncated or
+           foreign stream — which the callers already treat as any other
+           exception from building an argument or a return value. */
+        return JS_ReadObject(raw_context, result->text, result->text_len,
+                             JS_READ_OBJ_REFERENCE);
     default:
         return JS_ThrowInternalError(raw_context, "invalid host return value");
     }
@@ -1440,6 +1481,8 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
     void *handler;
     int status;
     int count;
+    int described;
+    int refused = 0;
 
     (void)this_value;
     (void)magic;
@@ -1466,8 +1509,29 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
             return JS_EXCEPTION;
         }
     }
-    for (count = 0; count < argc; ++count) {
-        qjs_host_describe(raw_context, argv[count], &arguments[count]);
+    /* An argument the serializer refuses ends the call before the host sees
+       any of it: the exception it already threw is what reaches the JS caller,
+       so `postMessage(function(){})` is a `TypeError` at the call rather than
+       a host-side refusal wearing a different message. Describing stops at
+       that argument, so the exception the caller sees is the *first* refusal
+       rather than whichever argument threw last. `described` is then how many
+       slots hold anything to release. */
+    for (described = 0; described < argc; ++described) {
+        qjs_host_describe(raw_context, argv[described], &arguments[described]);
+        if (arguments[described].kind == QJS_ARG_FAILED) {
+            refused = 1;
+            ++described;
+            break;
+        }
+    }
+    if (refused) {
+        for (count = 0; count < described; ++count) {
+            qjs_host_release_arg(raw_context, &arguments[count]);
+        }
+        if (arguments != inline_arguments) {
+            free(arguments);
+        }
+        return JS_EXCEPTION;
     }
 
     result.kind = QJS_ARG_UNDEFINED;
@@ -1478,9 +1542,7 @@ static JSValue qjs_host_trampoline(JSContext *raw_context,
                                     (size_t)argc, arguments, &result);
 
     for (count = 0; count < argc; ++count) {
-        if (arguments[count].kind == QJS_ARG_STRING) {
-            JS_FreeCString(raw_context, (const char *)arguments[count].text);
-        }
+        qjs_host_release_arg(raw_context, &arguments[count]);
     }
     if (arguments != inline_arguments) {
         free(arguments);

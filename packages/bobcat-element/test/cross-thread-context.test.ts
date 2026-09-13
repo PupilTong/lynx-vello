@@ -37,7 +37,7 @@ describe("Lynx cross-thread context", () => {
     first.data.value = 3;
     expect(sent).toEqual([]);
 
-    context.connect((event) => sent.push(JSON.parse(JSON.stringify(event))));
+    context.connect((event) => sent.push(structuredClone(event)));
     first.data.value = 4;
     const third = { type: "third", data: { value: 5 } };
     context.dispatchEvent(third);

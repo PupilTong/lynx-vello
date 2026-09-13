@@ -102,8 +102,12 @@ interface BobcatNative {
  * worker has no tree to mutate.
  */
 interface BobcatWorkerNative {
-  /** Hands one JSON-encoded message back to the realm that created us. */
-  postWorkerMessage(data: string): void;
+  /**
+   * Hands one message back to the realm that created us. Any value the host
+   * boundary carries: a primitive, or a structured clone of anything else.
+   * A value the engine's serializer refuses throws at this call.
+   */
+  postWorkerMessage(data: unknown): void;
   /**
    * Ends this worker once the running task returns. Queued messages and armed
    * timers go with it.
@@ -113,7 +117,11 @@ interface BobcatWorkerNative {
 
 declare module "bobcat-internal:host" {
   export function createWorker(url: string, name: string): string;
-  export function sendWorkerMessage(key: string, data: string): void;
+  /**
+   * Posts one message to that worker. Any value the host boundary carries; a
+   * value the engine's serializer refuses throws at this call.
+   */
+  export function sendWorkerMessage(key: string, data: unknown): void;
   export function terminateWorker(key: string): void;
   export const createDocument: BobcatNative["createDocument"];
   export const createPage: BobcatNative["createPage"];

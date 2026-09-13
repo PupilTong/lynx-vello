@@ -458,11 +458,26 @@ Every construction opens its own context on the existing `bobcat-workers`
 thread. The class is an `EventTarget` with `onmessage` and `onerror`; it is
 neither installed on `globalThis` nor available inside a worker. Modules are
 the only script kind, also when `type` is omitted; explicit `classic` is
-rejected. This internal API currently retains the worker scope's JSON
-transport (`JSON.stringify([message])`), not structured clone. Transfer lists,
-external module fetching, credentials options, and worker-local `onerror`
-remain unsupported. For example, `undefined` becomes `null`, cycles and
-BigInt throw, and typed arrays do not preserve their type.
+rejected.
+
+A message crosses as a **structured clone**: the host-function boundary
+serializes the value with the engine's own serializer (`JS_WriteObject` with
+object references, never bytecode and never shared memory), the bytes cross the
+existing channel inside a `HostValue`, and the receiving realm rebuilds the
+value with `JS_ReadObject`. Preserved: `undefined`, `NaN` and `-0`, `Date`,
+`BigInt`, `ArrayBuffer` and typed arrays, cycles and shared references (two
+properties naming one object still name one object on the other side), and the
+`Number`/`String`/`Boolean`/`BigInt` wrapper objects. Refused, because this
+first version does not extend the engine's serializer: functions, `Symbol`s,
+`Map`, `Set`, `RegExp`, `Error`, `DataView`, and accessor properties. A
+refusal is thrown synchronously **at the `postMessage`/`dispatchEvent` call**,
+in the realm that wrote the value — a `TypeError` for an unsupported object
+class or a non-value property, an `InternalError` for an unsupported tag — and
+the host is never dispatched to at all, so nothing partial is sent.
+
+Transfer lists, external module fetching, credentials options, and worker-local
+`onerror` remain unsupported. `messageerror` is absent because the reader
+cannot fail on what the same build's writer produced.
 
 ```text
 main realm: new Worker(url)
@@ -547,7 +562,9 @@ operation. This differs from Worker `postMessage`, which carries the events.
 The MTS Context exists during entry evaluation. Runtime JS projects the public
 Context fields before queuing; payload objects remain references until Worker
 connection posts the messages in FIFO order. Worker `postMessage` performs the
-JSON copy, for early and connected sends alike. The worker's task queues what
+structured-clone copy, for early and connected sends alike — so what a Context
+event carries is whatever that transport preserves, and a value it refuses
+throws at the `dispatchEvent` call. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
 and nonfatal `WorkerFailed` reporting apply to BTS too. `ScriptFinished`
 continues to report MTS boot, not BTS loading or execution.
@@ -560,8 +577,11 @@ as receiver. Separate runtime Worker messages carry `publishEvent`,
 these calls do not become application Context events. Context and runtime
 messages share the MTS queue before Worker connection.
 
-String `__AddEvent` handlers, including an empty string, now publish a JSON
-snapshot to BTS. Target identities contain `dataset`, `id` and `uid`; no
+String `__AddEvent` handlers, including an empty string, now publish an event
+snapshot to BTS. The snapshot is the event's own fields with its two stop
+methods destructured out and its element handles replaced by values; the copy
+itself is the transport's, taken at send time. Target identities contain
+`dataset`, `id` and `uid`; no
 element handle or propagation method crosses the boundary. Catch forms still
 stop the MTS walk before publishing. BTS reads the app hook at each delivery,
 and each publish hook retains early calls until its first installation.
@@ -577,8 +597,8 @@ ignored. MTS reads the current `globalThis[name]`, invokes it with that global
 receiver and awaits the result before posting its reply through
 `Worker.postMessage`. BTS removes the callback ID on receipt and invokes
 the callback in a Promise job with one result argument. Missing methods yield
-undefined; null remains null. Failed calls, rejected results and JSON
-serialization errors report through the existing Worker error path without
+undefined; null remains null. Failed calls, rejected results and values the
+transport refuses report through the existing Worker error path without
 success callbacks,
 including calls without a callback. An unresolved call does not block later
 requests, and each reply selects its own callback.
@@ -591,13 +611,12 @@ RPC registry, synchronous SharedArrayBuffer path and transfer-list support are
 unnecessary for this single asynchronous endpoint.
 
 Rust never parses a runtime envelope, selects a named method or flushes a reply
-queue. The existing Worker transport, realm checkpoint and QuickJS bridge are
-unchanged. The current JSON value semantics are an accepted compatibility limit:
-undefined object members are omitted, undefined array entries and nonfinite
-numbers become null, and negative zero becomes zero. BigInts inside messages
-and cyclic objects fail serialization. No custom value codec or extra deep
-clone compensates for these effects; structured clone and transfers remain
-outside this endpoint's scope.
+queue. The realm checkpoint and the QuickJS bridge's call path are unchanged;
+the Worker transport is the structured clone described above, so undefined
+members, nonfinite numbers, negative zero, BigInts and cyclic objects all
+survive a call and its reply. No custom value codec or extra deep clone sits on
+top of it: a value the serializer refuses throws at the call, and transfer
+lists remain outside this endpoint's scope.
 
 An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
 forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`

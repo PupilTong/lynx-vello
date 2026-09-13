@@ -123,7 +123,10 @@ impl WorkerFactory {
             2,
             Box::new(move |arguments| {
                 let key = key(arguments)?;
-                let data = string(arguments, 1)?.to_owned();
+                // Any value the boundary carries. A value the serializer
+                // refuses throws in the realm that called `postMessage`, so
+                // nothing here has to decide what a message may be.
+                let data = arguments.get(1).cloned().unwrap_or(HostValue::Undefined);
                 sender.post(key, WorkerMessage::Post(data));
                 Ok(HostValue::Undefined)
             }),

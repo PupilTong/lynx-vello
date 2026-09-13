@@ -89,7 +89,8 @@ function sendToBackground(message: ToBackground) {
 
 // Context events and runtime calls share one FIFO before Worker connection.
 // Only public Context fields cross it; extra event properties cannot select
-// runtime methods. Payloads are copied by Worker's JSON transport when posted.
+// runtime methods. Payloads are copied by Worker's structured-clone transport
+// when posted.
 jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data }));
 
 // Like web-worker-rpc, await the handler result before copying the reply.
@@ -103,8 +104,9 @@ async function callLepusMethod(message: LepusMethodCall) {
       sendToBackground({bobcat: "runtime", method: "callLepusMethodResult", id: message.id, result});
     }
   } catch (error) {
-    // A failed call or JSON serialization reports on the calling Worker, even
-    // without a callback, through its existing unhandled-rejection path.
+    // A failed call, or a result value the transport refuses, reports on the
+    // calling Worker — even without a callback — through its existing
+    // unhandled-rejection path.
     sendToBackground({bobcat: "runtime", method: "callLepusMethodResult", id: message.id,
       error: {name: error instanceof Error ? error.name : "Error",
         message: error instanceof Error ? error.message : String(error)}});

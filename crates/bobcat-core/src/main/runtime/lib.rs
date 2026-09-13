@@ -500,6 +500,20 @@ impl EventState {
     }
 }
 
+/// A worker error's four `ErrorEvent` fields, owned for the length of the one
+/// call that lends them to the realm.
+///
+/// Owned rather than borrowed out of the
+/// [`ScriptError`](crate::script::ScriptError) because that error goes to the
+/// embedder first, as a `WorkerFailed`; what the realm is told is what stays
+/// behind.
+struct WorkerErrorReport {
+    message: String,
+    filename: String,
+    line: f64,
+    column: f64,
+}
+
 /// The private main-thread runtime used by the engine pipeline.
 ///
 /// **The field order is the release, and it must stay in this order.** Fields
@@ -616,35 +630,51 @@ impl MainThreadRuntime {
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
             self.workers.forget(key);
         }
-        let (kind, data) = match payload {
-            WorkerPayload::Message(data) => ("message", data),
-            WorkerPayload::Closed => ("closed", String::new()),
+        // `(key, kind, ...payload)`: what follows the kind is that kind's own
+        // arguments rather than one encoded blob, so a message is the value
+        // the worker posted — primitive or structured clone — and an error is
+        // its four fields.
+        let (kind, message, report) = match payload {
+            WorkerPayload::Message(data) => ("message", Some(data), None),
+            WorkerPayload::Closed => ("closed", None, None),
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
                 let kind = if failed { "failed" } else { "error" };
                 let location = error.location.as_ref();
-                let data = serde_json::json!({
-                    "message": error.message.as_ref(),
-                    "filename": location.and_then(|l| l.source.as_deref()).unwrap_or(""),
-                    "lineno": location.and_then(|l| l.line).unwrap_or(0),
-                    "colno": location.and_then(|l| l.column).unwrap_or(0),
-                })
-                .to_string();
+                let report = WorkerErrorReport {
+                    message: error.message.to_string(),
+                    filename: location
+                        .and_then(|location| location.source.as_deref())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    line: f64::from(location.and_then(|location| location.line).unwrap_or(0)),
+                    column: f64::from(location.and_then(|location| location.column).unwrap_or(0)),
+                };
                 self.workers.report_failure(error);
-                (kind, data)
+                (kind, None, Some(report))
             }
         };
         let key = key.get().to_string();
+        // Six is the longest of the three shapes, so no kind allocates.
+        let mut arguments: SmallVec<[HostArgument<'_>; 6]> =
+            SmallVec::from_slice(&[HostArgument::String(&key), HostArgument::String(kind)]);
+        if let Some(data) = &message {
+            arguments.push(data.as_argument());
+        }
+        if let Some(report) = &report {
+            arguments.extend([
+                HostArgument::String(&report.message),
+                HostArgument::String(&report.filename),
+                HostArgument::Number(report.line),
+                HostArgument::Number(report.column),
+            ]);
+        }
         let called = self
             .engine
             .call_module_export(
                 js_runtime,
                 super::workers::MODULE,
                 "__BobcatDispatchWorkerEvent",
-                &[
-                    HostArgument::String(&key),
-                    HostArgument::String(kind),
-                    HostArgument::String(&data),
-                ],
+                &arguments,
             )
             .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
         let finished = self.finish_batch(js_runtime, called.is_ok());

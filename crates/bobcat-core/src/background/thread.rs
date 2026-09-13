@@ -37,7 +37,7 @@ use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::rc::Rc;
 
-use quickjs_rust_bridge::HostArgument;
+use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{self, JoinError, JoinSet, LocalSet};
@@ -475,7 +475,7 @@ async fn boot_worker(
     mut script: oneshot::Receiver<Result<LoadedSource, crate::LynxViewError>>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
 ) {
-    let mut queued: Vec<String> = Vec::new();
+    let mut queued: Vec<HostValue> = Vec::new();
     let loaded = loop {
         tokio::select! {
             biased;
@@ -595,13 +595,13 @@ fn open_realm(
     })
 }
 
-/// Hands one JSON message to a realm that is up.
+/// Hands one message value to a realm that is up.
 fn deliver(
     events: &mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
     realm: &mut WorkerRealm,
     js_runtime: &mut ScriptRuntime,
-    data: &str,
+    data: &HostValue,
 ) {
     // Closed, with its realm still standing until this entry's epilogue: HTML
     // discards whatever was queued behind a `close()`, so this message is
@@ -614,7 +614,7 @@ fn deliver(
         js_runtime,
         WORKER_MODULE_SPECIFIER,
         WORKER_DELIVER_EXPORT,
-        &[HostArgument::String(data)],
+        &[data.as_argument()],
     );
     if let Err(error) = delivered {
         report(events, key, "delivering a message to a worker", error);
@@ -759,7 +759,7 @@ mod tests {
             // queue both realms share.
             second
                 .messages
-                .send(WorkerMessage::Post("\"ping\"".to_owned()))
+                .send(WorkerMessage::Post(HostValue::String("ping".to_owned())))
                 .expect("the second worker is still serving");
             for _ in 0..TURNS {
                 if first.worker.epilogue_count() > settled {
