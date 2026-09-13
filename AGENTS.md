@@ -968,14 +968,24 @@ useful signal for currently-compatible versions of those libraries.
   objects, arrays, functions, symbols, and ill-formed UTF-16 strings are
   rejected on the way in rather than lossily converted; element identity
   crosses as plain numbers, and handle objects never leave JavaScript. This
-  boundary also means a callback
-  cannot call back into its own realm, so host functions are strictly
-  leaf calls today. A slot is vacated for the duration of its call (a guard
-  that restores it on the unwinding path too), so a panicking callback becomes
-  a JS exception rather than an unwind into C and leaves its slot usable, and
-  a re-entrant invocation is refused rather than aliasing the `FnMut` (the
-  closure lives behind a `RefCell`, so that guard is structural). A closure's
-  lifetime follows its JS function object rather than the realm: the closure
+  boundary keeps ordinary callbacks as leaf operations. Their `FnMut` closure
+  is borrowed through a `RefCell`, so reentry is refused rather than aliasing
+  it; a panicking callback becomes a JS exception and leaves the slot usable.
+  The private `evaluateScript` native ESM export keeps its arguments/results
+  within QuickJS: it never widens `HostValue` or retains a Rust handle for the
+  evaluated Script's objects/functions. Runtime JS reads ReactLynx's hooks
+  directly from `globalThis`. Named calls and replies belong to the two JS
+  Worker message handlers; Rust transports opaque messages and performs no
+  Lepus-specific dispatch or reply flush.
+  `register_reentrant_host_module_function` separately accepts `Fn`, for a
+  callback that can safely run nested JavaScript jobs. `Context::job_queue`
+  supplies a weak, owner-thread handle for that work; it neither retains its
+  realm through the installed callback nor changes scheduling/reporting policy.
+  Core uses this for native MTS call and Script checkpoints. A failed job can
+  stop a function checkpoint or be reported while a Script checkpoint continues;
+  either path retains one bounded drain and the enclosing execution deadline.
+  See `docs/mts-execution-runtime.md` for the execution boundaries.
+  A closure's lifetime follows its JS function object rather than the realm: the closure
   sits at its own stable heap address, which a companion JS object holds and
   the collector hands back through a finalizer — so nothing is indexed,
   recycled, or aliasable by a stale reference, and discarding a function drops
@@ -1379,7 +1389,8 @@ useful signal for currently-compatible versions of those libraries.
   `dom`. Native access is limited to named imports from the native
   `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
   `console`, and no DOM. Named exports are the only Element-PAPI surface
-  for transformed MTS entries; the module installs no `__*` globals. Rstest
+  for transformed MTS entries. Boot also installs these values as global
+  lexical bindings for native Scripts, without global-object properties. Rstest
   imports the TypeScript directly, and TypeScript 7 checks the sources as a
   program with `lib: es2023` and no ambient types — the realm has neither DOM
   nor Node — resolving each `bobcat:*` specifier to its file through `paths`

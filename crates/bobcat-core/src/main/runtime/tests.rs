@@ -34,6 +34,193 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     runtime_over(ingredients())
 }
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one realm exercises Script completion, jobs and global bindings across one boot"
+)]
+fn mts_scripts_preserve_globals_results_jobs_and_error_boundaries() {
+    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
+    let sections = [
+        (
+            "declarations",
+            r"
+            var scriptState = {node:__CreateView(0), pending:false};
+            let scriptLexical = 7;
+            const scriptConstant = 8;
+            function scriptFunction() { return this; }
+            scriptState.readProps = () => __globalProps;
+            scriptState.info = () => SystemInfo;
+            scriptState.runtime = lynx;
+            scriptState.papi = __CreateView;
+            scriptState;
+        ",
+        ),
+        (
+            "read",
+            "[scriptLexical, scriptConstant, scriptFunction, scriptState]",
+        ),
+        (
+            "count",
+            "var scriptCount = (typeof scriptCount === 'undefined' ? 0 : scriptCount) + 1; scriptCount",
+        ),
+        (
+            "promise",
+            "scriptState.promise = Promise.resolve(42); scriptState.promise",
+        ),
+        (
+            "jobs",
+            r"
+            scriptState.ready = false;
+            Promise.resolve().then(() => {
+                Promise.resolve().then(() => { scriptState.ready = true; });
+                scriptState.nested = loadNestedScript('count');
+            });
+            Promise.reject(Error('section rejected'));
+            scriptState;
+        ",
+        ),
+        (
+            "throw",
+            "Promise.resolve().then(() => {scriptState.pending=true;}); throw Error('section threw')",
+        ),
+        ("syntax", "let scriptLexical"),
+        ("empty", ""),
+    ];
+    let sections = serde_json::to_string(
+        &sections
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    let source = r"import {__BobcatEvaluateScript as evaluate} from 'bobcat:runtime';
+        const sections = SECTIONS;
+
+        const page = __CreatePage();
+        const load = key => evaluate(sections[key], key);
+        globalThis.loadNestedScript = load;
+        const state = load('declarations');
+        __AppendElement(page, state.node);
+        if (state.runtime !== lynx || state.papi !== __CreateView || state.info() !== SystemInfo)
+            throw Error('Script bindings lost runtime/PAPI identity');
+        if ('lynx' in globalThis || '__CreateView' in globalThis || 'console' in globalThis)
+            throw Error('PAPI bindings leaked onto the global object');
+        if ('scriptLexical' in globalThis || 'scriptConstant' in globalThis)
+            throw Error('Script lexical bindings became properties');
+        const read = load('read');
+        const scriptFunction = read[2];
+        if (read[0] !== 7 || read[1] !== 8 || read[3] !== state || scriptFunction() !== globalThis)
+            throw Error('Script declarations, completion or sloppy mode lost');
+        if (load('count') !== 1 || load('count') !== 2)
+            throw Error('section was cached or global var was not retained');
+        if (load('promise') !== state.promise || !(state.promise instanceof Promise))
+            throw Error('Script completion was awaited or copied');
+        if (load('jobs') !== state || !state.ready || state.nested !== 3)
+            throw Error('jobs did not finish before Script returned its original value');
+        if (load('empty') !== undefined) throw Error('empty Script completion');
+        if (load('syntax') !== null) throw Error('syntax failure must return null');
+        if (load('throw') !== null || state.pending)
+            throw Error('throw did not return null or ran nested jobs');
+        Promise.resolve().then(() => {
+            if (!state.pending) throw Error('enclosing checkpoint lost the throwing Scripts job');
+        });
+    "
+    .replace("SECTIONS", &sections);
+    runtime
+        .run_main_thread_script(&mut js, &source, "app:///script-sections.js")
+        .unwrap();
+    assert!(elements.tree().get(node_id(3)).is_some());
+    let mut reports = Vec::new();
+    let mut logs = Vec::new();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => {
+                reports.push(message);
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { level, message }) => {
+                assert_eq!(level, "error");
+                logs.push(message);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].contains("section rejected"));
+    assert_eq!(logs.len(), 2, "{logs:?}");
+    assert!(
+        logs.iter()
+            .any(|message| message.contains("section threw") && message.contains("throw"))
+    );
+}
+
+#[test]
+fn native_processing_finishes_jobs_before_render_without_awaiting_the_result() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime.run_main_thread_script(&mut js, r"
+        globalThis.processData = function() {
+            if (this !== globalThis) throw Error('processor receiver');
+            const result = Promise.resolve(42);
+            Promise.resolve().then(() => Promise.resolve().then(() => result.ready = true));
+            globalThis.processed = result;
+            return result;
+        };
+        globalThis.renderPage = function(data) {
+            if (this !== globalThis || data !== processed || !data.ready || !(data instanceof Promise))
+                throw Error('processor call returned before jobs, awaited, or copied its result');
+        };
+    ", "app:///processing.js").unwrap();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        assert!(
+            !matches!(
+                notice,
+                ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+            ),
+            "MTS execution reported an error"
+        );
+    }
+}
+
+#[test]
+fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import {__BobcatRegisterLepusChunks as register} from 'bobcat:runtime';
+        let executions = 0;
+        const chunk = `
+            executions++;
+            var chunkLocal = true;
+            if (lynx !== runtimeIdentity || __CreateView !== papiIdentity)
+                throw Error('chunk lost entry scope');
+            Promise.resolve().then(() => globalThis.chunkJob = true);
+        `;
+        const runtimeIdentity = lynx;
+        const papiIdentity = __CreateView;
+        register({worklet: chunk}, source => eval(source));
+        if (!__LoadLepusChunk('worklet', {}) || !__LoadLepusChunk('worklet', {}))
+            throw Error('chunk not found');
+        if (executions !== 2 || typeof chunkLocal !== 'undefined' || globalThis.chunkJob)
+            throw Error('chunk scope, repeat evaluation or job boundary');
+        globalThis.renderPage = () => {
+            if (!globalThis.chunkJob) throw Error('enclosing checkpoint lost chunk jobs');
+        };
+    ",
+            "app:///chunks.js",
+        )
+        .unwrap();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        assert!(
+            !matches!(
+                notice,
+                ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+            ),
+            "MTS execution reported an error"
+        );
+    }
+}
+
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
 ///
@@ -359,7 +546,7 @@ fn boot_dispatches_render_page_when_the_entry_has_no_global_function() {
                   return 42;
                 };
                 engine.addEventListener('__RenderPage', function (event) {
-                  if (this !== engine || event.type !== '__RenderPage' || event.data !== 42) {
+                  if (this !== globalThis || event.type !== '__RenderPage' || event.data !== 42) {
                     throw new Error('the engine render event lost its target or processed data');
                   }
                   __AppendElement(page, __CreateView(0));
@@ -591,9 +778,7 @@ fn stale_element_ids_become_script_errors_without_losing_the_tree() {
             &mut js_runtime,
             r"
                 import { removeElement } from 'bobcat-internal:host';
-                globalThis.renderPage = function () {
-                  removeElement(999999);
-                };
+                removeElement(999999);
                 ",
             "app:///invalid-tree-operation.js",
         )
@@ -1953,12 +2138,10 @@ fn dropping_a_connected_element_is_refused() {
             &mut js_runtime,
             r"
                 import { dropElement } from 'bobcat-internal:host';
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const view = __CreateView(0);
-                  __AppendElement(page, view);
-                  dropElement(__GetElementUniqueID(view));
-                };
+                const page = __CreatePage('card', 0);
+                const view = __CreateView(0);
+                __AppendElement(page, view);
+                dropElement(__GetElementUniqueID(view));
                 ",
             "app:///connected-drop.js",
         )
@@ -2410,12 +2593,10 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
         .run_main_thread_script(
             &mut js_runtime,
             r"
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const list = __CreateList(0, function () {}, function () {});
-                  __AppendElement(page, list);
-                  __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
-                };
+                const page = __CreatePage('card', 0);
+                const list = __CreateList(0, function () {}, function () {});
+                __AppendElement(page, list);
+                __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
                 ",
             "app:///list.js",
         )

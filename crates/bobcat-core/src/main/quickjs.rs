@@ -193,6 +193,75 @@ impl ScriptRuntime {
 }
 
 impl ScriptEngine {
+    /// Native MTS calls finish their Promise jobs before returning to the
+    /// enclosing render/update operation. This callback may itself be reached
+    /// by one of those jobs, so it holds no mutable Rust borrow across JS.
+    pub(crate) fn install_mts_job_runner(
+        &mut self,
+        runtime: &ScriptRuntime,
+        report: impl Fn(ScriptError) + 'static,
+    ) -> Result<(), ScriptError> {
+        self.realm
+            .register_script_evaluator(crate::esm::HOST_MODULE_SPECIFIER)
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))?;
+        let jobs = self.realm.job_queue();
+        let budget = runtime.config.max_jobs_per_checkpoint.get();
+        let checkpoint = runtime.checkpoint.clone();
+        self.realm
+            .register_reentrant_host_module_function(
+                crate::esm::HOST_MODULE_SPECIFIER,
+                "runMtsJobs",
+                1,
+                move |arguments| {
+                    let continue_after_error =
+                        matches!(arguments.first(), Some(quickjs::HostValue::Boolean(true)));
+                    let drain = jobs.run_up_to_with_error_handler(budget, |error| {
+                        if !continue_after_error {
+                            return Err(error);
+                        }
+                        // EvalBuf reports a failed job and continues, while
+                        // InternalCall stops and discards the function result.
+                        report(map_quickjs_error(error, ScriptErrorPhase::Execute));
+                        Ok(())
+                    });
+                    let result = match drain {
+                        Ok(drain) if !drain.jobs_remaining => {
+                            // Native reports unhandled rejections without replacing
+                            // the successful function's actual return value.
+                            loop {
+                                match jobs.take_unhandled_rejection() {
+                                    Ok(Some(error)) => {
+                                        report(map_quickjs_error(error, ScriptErrorPhase::Execute));
+                                    }
+                                    Ok(None) => break,
+                                    Err(error) => {
+                                        report(map_quickjs_error(error, ScriptErrorPhase::Execute));
+                                        break;
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        Ok(_) => {
+                            report(script_error(
+                                ScriptErrorKind::Other,
+                                ScriptErrorPhase::Execute,
+                                "QuickJS promise jobs exceeded the per-checkpoint limit",
+                            ));
+                            false
+                        }
+                        Err(error) => {
+                            report(map_quickjs_error(error, ScriptErrorPhase::Execute));
+                            false
+                        }
+                    };
+                    checkpoint.send_modify(|generation| *generation = generation.wrapping_add(1));
+                    Ok(quickjs::HostValue::Boolean(result))
+                },
+            )
+            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))
+    }
+
     /// Ends one entry into this realm: the checkpoint runs whether the entry
     /// succeeded or not, because the jobs it queued are due either way.
     ///
