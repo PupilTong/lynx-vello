@@ -550,8 +550,10 @@ useful signal for currently-compatible versions of those libraries.
   that sends module requests directly to the view's resource host. ESM
   completion and timers continue during entry TLA; posted messages wait for
   entry settlement. Each completion shares its worker's cancellation token.
-  Native Script/JSON reads, compiled factory evaluation and module caches
-  remain later layers. Without an entry, only the built-in
+  ReactLynx compiled module execution and lazy-bundle APIs remain a later
+  layer over this resource transport. Bypassing `lynx_core.js` does not require
+  its `requestScript`/`readScript` source-text interfaces; see
+  `docs/worker-resources-runtime.md`. Without an entry, only the built-in
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable `CrossThreadContext extends EventTarget` instances returned directly

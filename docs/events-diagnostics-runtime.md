@@ -59,7 +59,8 @@ completed MTS evaluation. Later errors keep the existing nonfatal Worker path.
 Worker ESM loading is part of this layer: the bootstrap's application import
 requests its source from the view fetcher, including XML background entries.
 Posted messages wait for entry settlement while imports and timers continue.
-Native Script/JSON reads and compiled application bootstrap remain later layers.
+The remaining [compiled-module loading contract](worker-resources-runtime.md)
+is defined by ReactLynx callers, without lynx-core's source-text read APIs.
 
 `LynxView::send_global_event(name, arguments)` returns `EngineError::NotReady`
 before observed readiness or after the view ends. Rejected events are not
