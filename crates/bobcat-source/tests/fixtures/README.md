@@ -1,5 +1,10 @@
 # Test fixtures
 
+ReactLynx application sources and bundle generators live in the
+[`reactlynx-test-fixtures` pnpm workspace](../../../../packages/reactlynx-test-fixtures/README.md).
+Its builds write to that package's `dist/`; the vendored binary fixtures here
+remain explicit test inputs.
+
 Real web binary bundles built by the lynx-stack e2e suite
 (`packages/web-platform/web-core-e2e/dist/` in
 <https://github.com/lynx-family/lynx-stack>, Apache-2.0). Vendored build
