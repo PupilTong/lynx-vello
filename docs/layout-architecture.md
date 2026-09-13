@@ -661,6 +661,15 @@ is read rather than in `compute_layout`, along exactly two lines:
   `Document::{rounded,unrounded}_layout` — matching CSSOM, where an element
   generating no fragments has no client rects.
 
+Cache invalidation also walks through contents ancestors: their cache is
+permanently empty, so it cannot be evidence that an earlier invalidation already
+cleared the box parent. New `LayoutSlot`s start owing a rounding walk. A contents
+wrapper is never run by a layout algorithm and may keep a zero box forever;
+without that initial mark, inserting a new wrapper below an unchanged parent
+would leave its children's rounded geometry at zero. The DOM regression covers
+mutations, replacement and removal under nested contents wrappers in Flex and
+Linear, including insertion of a fresh wrapper after an earlier layout.
+
 `compute_layout` is therefore unreachable for one: the document element
 blockifies in Stylo (`Display::equivalent_block_display`, CSS Display 3
 §2.8), and no other path reaches a box-less node. Inheritance is unaffected — it follows the DOM tree,
