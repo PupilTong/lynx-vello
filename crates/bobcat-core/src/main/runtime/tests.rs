@@ -35,52 +35,84 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 }
 
 #[test]
-fn native_processing_finishes_jobs_before_render_without_awaiting_the_result() {
-    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+#[expect(clippy::float_cmp, reason = "explicit pixel widths are exact")]
+fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
+    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
     runtime.run_main_thread_script(&mut js, r"
         globalThis.processData = function() {
             if (this !== globalThis) throw Error('processor receiver');
             const result = Promise.resolve(42);
-            Promise.resolve().then(() => Promise.resolve().then(() => result.ready = true));
+            result.ready = false;
+            Promise.resolve().then(() => { result.ready = true; });
             globalThis.processed = result;
             return result;
         };
         globalThis.renderPage = function(data) {
-            if (this !== globalThis || data !== processed || !data.ready || !(data instanceof Promise))
-                throw Error('processor call returned before jobs, awaited, or copied its result');
+            if (this !== globalThis || data !== processed || data.ready || !(data instanceof Promise))
+                throw Error('processor result was awaited, copied, or drained before render');
+            const page = __CreatePage();
+            const view = __CreateView(0);
+            __SetInlineStyles(view, 'width:10px;height:10px');
+            __AppendElement(page, view);
+            Promise.resolve().then(() => {
+                __SetInlineStyles(view, 'width:20px;height:10px');
+                Promise.resolve().then(() => {
+                    __SetInlineStyles(view, 'width:30px;height:10px');
+                });
+            });
         };
-    ", "app:///processing.js").unwrap();
+    ", "app:///deferred-flush.js").unwrap();
+    let tree = elements.tree();
+    let view = tree
+        .document_element()
+        .first_child()
+        .expect("rendered view");
+    // The first render job precedes the queued flush; its nested job follows it.
+    // This test drives the realm directly, before Page's dirty-commit epilogue.
+    assert_eq!(tree.rounded_layout(view.id()).unwrap().size.width, 20.0);
+    assert_eq!(view.attribute("style"), Some("width:30px;height:10px"));
     while let Ok(notice) = far.0.notices.try_recv() {
         assert!(
             !matches!(
                 notice,
                 ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
             ),
-            "MTS execution reported an error"
+            "boot reported an error"
         );
     }
 }
 
 #[test]
-fn mts_call_reports_rejections_without_replacing_its_return_value() {
-    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
+    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
     runtime
         .run_main_thread_script(
             &mut js,
             r"
-        import {__BobcatCallMTS as callMts} from 'bobcat:runtime';
-        const result = {ready: false};
-        const returned = callMts(() => {
-            Promise.resolve().then(() => { result.ready = true; });
-            Promise.reject(Error('call rejected'));
-            return result;
-        }, []);
-        if (returned !== result || !returned.ready)
-            throw Error('a rejection replaced the result or interrupted the checkpoint');
+        let processorJobRan = false;
+        globalThis.processData = () => {
+            Promise.resolve().then(() => { processorJobRan = true; });
+            throw Error('processor failed');
+        };
+        globalThis.renderPage = data => {
+            if (data !== undefined || processorJobRan)
+                throw Error('processor failure changed the result or ran jobs before render');
+            const page = __CreatePage();
+            __AppendElement(page, __CreateView(0));
+        };
     ",
-            "app:///call-rejection.js",
+            "app:///processor-error.js",
         )
         .unwrap();
+    let tree = elements.tree();
+    let view = tree
+        .document_element()
+        .first_child()
+        .expect("rendered after processor failure");
+    assert!(
+        tree.rounded_layout(view.id()).is_some(),
+        "boot still flushed"
+    );
     let reports: Vec<_> = std::iter::from_fn(|| far.0.notices.try_recv().ok())
         .filter_map(|notice| match notice {
             ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => Some(message),
@@ -88,7 +120,7 @@ fn mts_call_reports_rejections_without_replacing_its_return_value() {
         })
         .collect();
     assert_eq!(reports.len(), 1, "{reports:?}");
-    assert!(reports[0].contains("call rejected"));
+    assert!(reports[0].contains("processor failed"));
 }
 
 #[test]

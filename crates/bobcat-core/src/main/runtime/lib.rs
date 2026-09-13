@@ -572,17 +572,6 @@ impl MainThreadRuntime {
         let mut engine = js_runtime
             .create_realm()
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
-        let job_reports = outbox.clone();
-        engine
-            .install_mts_job_runner(js_runtime, move |error| {
-                job_reports.engine_event(crate::EngineEvent::ScriptReported {
-                    level: "error".into(),
-                    message: error.message.to_string(),
-                });
-            })
-            .map_err(|error| {
-                MainThreadError::from_engine("installing MTS job checkpoints", error)
-            })?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
@@ -882,7 +871,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ __BobcatCallMTS, __BobcatDispatchEngineEvent, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ _ReportError, __BobcatDispatchEngineEvent, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -899,14 +888,18 @@ __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg
 
 let data = __BobcatInitData;
 if (typeof globalThis.processData === "function") {{
-  data = __BobcatCallMTS(globalThis.processData, [data]);
+  try {{ data = globalThis.processData(data); }}
+  catch (error) {{ _ReportError(error); data = undefined; }}
 }}
 if (typeof globalThis.renderPage === "function") {{
-  __BobcatCallMTS(globalThis.renderPage, [data]);
+  try {{ globalThis.renderPage(data); }}
+  catch (error) {{ _ReportError(error); }}
 }} else {{
   __BobcatDispatchEngineEvent("__RenderPage", data);
 }}
-__FlushElementTree();
+// Queue the boot flush after the jobs already scheduled by these hooks.
+// Await this flush so its failure still rejects boot; hook results are not awaited.
+await Promise.resolve().then(() => __FlushElementTree());
 "#
         );
         self.evaluate_module(

@@ -34,7 +34,7 @@ function captureOf(options: unknown): boolean {
     : Boolean(listenerOption(options, "capture"));
 }
 
-// A native runtime may place a checkpoint around each listener. The public
+// Engine dispatch supplies per-listener error reporting. The public
 // EventTarget walk keeps its ordinary JavaScript call semantics.
 export function dispatchEventListeners(
   target: EventTarget,

@@ -717,7 +717,7 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `__BobcatCallMTS`, `__BobcatDispatchEngineEvent`,
+  `_ReportError`, `__BobcatDispatchEngineEvent`,
   `__BobcatConnectBackground` and `__BobcatInitData` from
   `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
@@ -732,9 +732,11 @@ useful signal for currently-compatible versions of those libraries.
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
   `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
   otherwise the `__RenderPage` event on `lynx.getEngine()`) →
-  `__FlushElementTree` inside
-  JavaScript. Each successful processor/render/listener call drains Promise
-  jobs before boot continues; a throwing hook reports without failing startup.
+  a queued `__FlushElementTree` inside JavaScript. Hooks and engine listeners
+  run synchronously with no intervening checkpoint. Boot awaits
+  `Promise.resolve().then(() => __FlushElementTree())`: jobs already queued by
+  the hooks precede the flush, while jobs they later enqueue may follow it.
+  A throwing hook reports without failing startup; a failed flush rejects boot.
   The global function is a compatibility path, not a boot requirement.
   The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
@@ -980,15 +982,10 @@ useful signal for currently-compatible versions of those libraries.
   Named calls and replies belong to the two JS
   Worker message handlers; Rust transports opaque messages and performs no
   Lepus-specific dispatch or reply flush.
-  `register_reentrant_host_module_function` separately accepts `Fn`, for a
-  callback that can safely run nested JavaScript jobs. `Context::job_queue`
-  supplies a weak, owner-thread handle for that work; it neither retains its
-  realm through the installed callback nor changes scheduling/reporting policy.
-  Core uses this for MTS function/listener checkpoints. A failed job stops
-  the checkpoint and discards the function result; unhandled rejections report
-  without replacing a successful result. The drain remains bounded by its job
-  budget and the enclosing execution deadline.
-  See `docs/mts-execution-runtime.md` for the execution boundaries.
+  Boot's deferred flush uses ordinary Promise scheduling and the existing
+  outer checkpoint, with its job budget, rejection attribution and generation
+  notification. See `docs/mts-execution-runtime.md` for the boot and chunk
+  execution boundaries.
   A closure's lifetime follows its JS function object rather than the realm: the closure
   sits at its own stable heap address, which a companion JS object holds and
   the collector hands back through a finalizer — so nothing is indexed,

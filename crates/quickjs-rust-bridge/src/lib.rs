@@ -49,7 +49,7 @@ mod implementation {
     use std::num::TryFromIntError;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::ptr::{self, NonNull};
-    use std::rc::{Rc, Weak};
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
@@ -512,7 +512,12 @@ mod implementation {
 
         let called = catch_unwind(AssertUnwindSafe(|| {
             let values = read_host_arguments(argument_count, arguments)?;
-            slot.handler.call(&values)
+            let Ok(mut handler) = slot.handler.try_borrow_mut() else {
+                return Err(HostFunctionError::new(
+                    "this host function cannot be called while it is already running",
+                ));
+            };
+            handler(&values)
         }));
 
         let returned = match called {
@@ -654,32 +659,10 @@ mod implementation {
 
     impl std::error::Error for HostFunctionError {}
 
-    type MutableHostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
-    type SharedHostHandler = Box<dyn Fn(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
-
-    enum HostHandler {
-        Exclusive(RefCell<MutableHostHandler>),
-        Reentrant(SharedHostHandler),
-    }
-
-    impl HostHandler {
-        fn call(&self, values: &[HostValue]) -> Result<HostValue, HostFunctionError> {
-            match self {
-                Self::Exclusive(handler) => {
-                    let Ok(mut handler) = handler.try_borrow_mut() else {
-                        return Err(HostFunctionError::new(
-                            "this host function cannot be called while it is already running",
-                        ));
-                    };
-                    handler(values)
-                }
-                Self::Reentrant(handler) => handler(values),
-            }
-        }
-    }
+    type HostHandler = Box<dyn FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError>>;
 
     struct HostSlot {
-        handler: HostHandler,
+        handler: RefCell<HostHandler>,
     }
 
     struct HostTable {
@@ -1185,60 +1168,6 @@ mod implementation {
         inner: Rc<ContextInner>,
     }
 
-    /// A non-owning, owner-thread handle for a host callback that runs jobs
-    /// while JavaScript is already on the stack. It cannot retain its realm
-    /// through a closure stored in that realm. Scheduling/reporting is the
-    /// caller's policy, just as on `Runtime`.
-    #[derive(Debug)]
-    pub struct JobQueue {
-        context: Weak<ContextInner>,
-    }
-
-    impl JobQueue {
-        fn handles(&self) -> Result<(Runtime, Context), Error> {
-            let context = self.context.upgrade().ok_or_else(|| {
-                Error::bridge(
-                    ErrorKind::InvalidInput,
-                    ErrorPhase::PendingJob,
-                    "the job queue's realm was released",
-                )
-            })?;
-            Ok((
-                Runtime {
-                    inner: Rc::clone(&context.runtime),
-                },
-                Context { inner: context },
-            ))
-        }
-
-        /// Runs up to `budget` jobs without consuming unhandled rejections.
-        /// A thrown job is distinct from a rejection: the host may discard a
-        /// call result for the former while reporting and retaining it for the latter.
-        pub fn run_up_to(&self, budget: usize) -> Result<JobDrain, Error> {
-            let (mut runtime, context) = self.handles()?;
-            runtime.inner.reclaim();
-            let guard = context.begin();
-            let result = (|| {
-                let mut executed = 0;
-                while executed < budget && runtime.try_execute_pending_job_inner()? {
-                    executed += 1;
-                }
-                Ok(JobDrain {
-                    executed,
-                    jobs_remaining: runtime.has_pending_jobs(),
-                })
-            })();
-            guard.finish(result, ErrorPhase::PendingJob)
-        }
-
-        /// Takes one rejection belonging to this realm, leaving other realms' alone.
-        /// Call only after a complete drain, so a later job can still handle it.
-        pub fn take_unhandled_rejection(&self) -> Result<Option<Error>, Error> {
-            let (runtime, context) = self.handles()?;
-            Ok(runtime.take_unhandled_rejection(&context))
-        }
-    }
-
     impl fmt::Debug for Context {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter
@@ -1252,12 +1181,6 @@ mod implementation {
     }
 
     impl Context {
-        #[must_use]
-        pub fn job_queue(&self) -> JobQueue {
-            JobQueue {
-                context: Rc::downgrade(&self.inner),
-            }
-        }
         fn reclaim(&self) {
             self.inner.runtime.reclaim();
         }
@@ -1377,42 +1300,6 @@ mod implementation {
         where
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
-            self.register_host_module_handler(
-                module_name,
-                export_name,
-                arity,
-                HostHandler::Exclusive(RefCell::new(Box::new(handler))),
-            )
-        }
-
-        /// Like `register_host_module_function`, but allows synchronous
-        /// reentry. `Fn` forbids a mutable closure borrow spanning a nested
-        /// JavaScript call. State held by the closure must honor that too.
-        pub fn register_reentrant_host_module_function<F>(
-            &mut self,
-            module_name: &str,
-            export_name: &str,
-            arity: u32,
-            handler: F,
-        ) -> Result<(), Error>
-        where
-            F: Fn(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
-        {
-            self.register_host_module_handler(
-                module_name,
-                export_name,
-                arity,
-                HostHandler::Reentrant(Box::new(handler)),
-            )
-        }
-
-        fn register_host_module_handler(
-            &mut self,
-            module_name: &str,
-            export_name: &str,
-            arity: u32,
-            handler: HostHandler,
-        ) -> Result<(), Error> {
             self.reclaim();
             if module_name.is_empty() {
                 return Err(Error::bridge(
@@ -1443,7 +1330,7 @@ mod implementation {
                 )
             })?;
             let function = self
-                .function_with_handler(export_name, arity, handler)
+                .function(export_name, arity, handler)
                 .map_err(|mut error| {
                     error.phase = ErrorPhase::RegisterModule;
                     error
@@ -1563,23 +1450,12 @@ mod implementation {
         where
             F: FnMut(&[HostValue]) -> Result<HostValue, HostFunctionError> + 'static,
         {
-            self.function_with_handler(
-                name,
-                arity,
-                HostHandler::Exclusive(RefCell::new(Box::new(handler))),
-            )
-        }
-
-        fn function_with_handler(
-            &mut self,
-            name: &str,
-            arity: u32,
-            handler: HostHandler,
-        ) -> Result<Value, Error> {
             self.reclaim();
             let name = property_name(name)?;
             let arity = i32::try_from(arity).map_err(int_conversion_error)?;
-            let slot = Box::into_raw(Box::new(HostSlot { handler }));
+            let slot = Box::into_raw(Box::new(HostSlot {
+                handler: RefCell::new(Box::new(handler)),
+            }));
             let raw = unsafe {
                 ffi::qjs_new_host_function(self.raw().as_ptr(), name.as_ptr(), arity, slot.cast())
             };
@@ -2393,114 +2269,6 @@ mod implementation {
             let runtime = Runtime::new().expect("runtime should initialize");
             let realm = runtime.create_context().expect("realm should initialize");
             (runtime, realm)
-        }
-
-        #[test]
-        fn a_reentrant_host_callback_drains_nested_jobs_before_returning() {
-            let mut realm = single_realm();
-            let queue = realm.job_queue();
-            realm
-                .register_reentrant_host_module_function("jobs", "drain", 0, move |_| {
-                    let outcome = queue
-                        .run_up_to(100)
-                        .map_err(|error| HostFunctionError::new(error.message))?;
-                    assert!(!outcome.jobs_remaining);
-                    Ok(HostValue::Undefined)
-                })
-                .unwrap();
-            let evaluation = realm.evaluate(EvalSource::new(r"
-                import {drain} from 'jobs';
-                globalThis.order = ['start'];
-                Promise.resolve().then(() => {
-                    order.push('job');
-                    Promise.resolve().then(() => order.push('nested-job'));
-                    drain();
-                    order.push('after-nested-drain');
-                });
-                drain();
-                order.push('end');
-                if (order.join(',') !== 'start,job,nested-job,after-nested-drain,end') throw Error(order);
-            "), EvalOptions { source_type: SourceType::Module, ..EvalOptions::default() }).unwrap();
-            assert!(realm.settled_promise_result(&evaluation).unwrap().is_some());
-        }
-
-        #[test]
-        fn a_job_queue_does_not_keep_a_registered_callback_or_its_realm_alive() {
-            let outer;
-            {
-                let mut realm = single_realm();
-                outer = realm.job_queue();
-                let captured = realm.job_queue();
-                realm
-                    .register_reentrant_host_module_function("jobs", "drain", 0, move |_| {
-                        captured
-                            .run_up_to(10)
-                            .map_err(|error| HostFunctionError::new(error.message))?;
-                        Ok(HostValue::Undefined)
-                    })
-                    .unwrap();
-                realm
-                    .evaluate(
-                        EvalSource::new("import {drain} from 'jobs'; drain();"),
-                        EvalOptions {
-                            source_type: SourceType::Module,
-                            ..EvalOptions::default()
-                        },
-                    )
-                    .unwrap();
-            }
-            assert!(
-                outer
-                    .run_up_to(10)
-                    .unwrap_err()
-                    .message
-                    .contains("realm was released")
-            );
-        }
-
-        #[test]
-        fn a_nested_job_queue_bounds_work_and_reports_only_its_realms_rejections() {
-            let (mut runtime, mut first) = runtime_and_realm();
-            let mut second = runtime.create_context().unwrap();
-            first.evaluate(EvalSource::new("Promise.reject(Error('first')); Promise.resolve().then(() => Promise.reject(Error('first job')));"), EvalOptions::default()).unwrap();
-            second
-                .evaluate(
-                    EvalSource::new(
-                        "Promise.reject(Error('second')); Promise.resolve().then(() => 1);",
-                    ),
-                    EvalOptions::default(),
-                )
-                .unwrap();
-            let queue = first.job_queue();
-            let bounded = queue.run_up_to(1).unwrap();
-            assert_eq!(bounded.executed, 1);
-            assert!(bounded.jobs_remaining);
-            assert!(!queue.run_up_to(100).unwrap().jobs_remaining);
-            assert!(
-                queue
-                    .take_unhandled_rejection()
-                    .unwrap()
-                    .unwrap()
-                    .message
-                    .contains("first")
-            );
-            assert!(
-                queue
-                    .take_unhandled_rejection()
-                    .unwrap()
-                    .unwrap()
-                    .message
-                    .contains("first job")
-            );
-            assert!(queue.take_unhandled_rejection().unwrap().is_none());
-            assert!(
-                runtime
-                    .drain_pending_jobs(&second)
-                    .unwrap_err()
-                    .message
-                    .contains("second")
-            );
-            assert!(runtime.drain_pending_jobs(&first).is_ok());
         }
 
         fn timed_realm() -> (Runtime, Context) {
@@ -4203,6 +3971,6 @@ mod implementation {
 
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
-    HostFunctionError, HostValue, InterruptHandle, JobDrain, JobQueue, Member, ModuleNormalizer,
-    Runtime, RuntimeOptions, SourceLocation, SourceType, Value, ValueKind,
+    HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, ModuleNormalizer, Runtime,
+    RuntimeOptions, SourceLocation, SourceType, Value, ValueKind,
 };

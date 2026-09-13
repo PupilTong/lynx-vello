@@ -1260,42 +1260,34 @@ fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation()
 }
 
 #[test]
-fn engine_listeners_have_individual_native_checkpoints_and_errors_do_not_stop_the_walk() {
+fn engine_listeners_finish_the_walk_before_jobs_and_report_each_failure() {
     let mut pair = Pair::with_background(
         r"
         globalThis.order = [];
-        let first = false;
         const engine = lynx.getEngine();
         engine.addEventListener('__RenderPage', function() {
-            if (this !== globalThis) throw Error('native listener receiver');
-            Promise.resolve().then(() => { first = true; order.push('first-job'); });
+            if (this !== globalThis) throw Error('engine listener receiver');
+            order.push('first');
+            Promise.resolve().then(() => { order.push('first-job'); });
             throw Error('first listener failed');
         });
         engine.addEventListener('__RenderPage', function() {
-            if (first) throw Error('a throwing native call drained jobs');
             order.push('second');
-            Promise.resolve().then(() => {
-                // This enters the same checkpoint from inside one of its jobs.
-                lynx.__globalProps = {};
-                globalThis.processData = value => {
-                    const result = {};
-                    Promise.resolve().then(() => result.value = value);
-                    return result;
-                };
-                const result = callMts(globalThis.processData, [42]);
-                if (result.value !== 42) throw Error('reentrant jobs did not finish');
-                order.push('nested-call');
+            return Promise.resolve().then(() => {
+                order.push('second-job');
+                Promise.resolve().then(() => { order.push('nested-job'); });
             });
         });
         engine.addEventListener('__RenderPage', function() {
-            if (!first || order.join(',') !== 'second,first-job,nested-call') throw Error(order);
+            if (order.join(',') !== 'first,second') throw Error(order);
             order.push('third');
+            throw Error('third listener failed');
         });
-        import {__BobcatCallMTS as callMts} from 'bobcat:runtime';
+        engine.addEventListener('__RenderPage', () => { order.push('fourth'); });
     ",
         None,
     );
-    pair.check("if (order.join(',') !== 'second,first-job,nested-call,third') throw Error(order);");
+    pair.check("if (order.join(',') !== 'first,second,third,fourth,first-job,second-job,nested-job') throw Error(order);");
     let reports: Vec<_> = pair
         .notices()
         .into_iter()
@@ -1304,12 +1296,13 @@ fn engine_listeners_have_individual_native_checkpoints_and_errors_do_not_stop_th
             _ => None,
         })
         .collect();
-    assert_eq!(reports.len(), 1);
+    assert_eq!(reports.len(), 2, "{reports:?}");
     assert!(reports[0].contains("first listener failed"));
+    assert!(reports[1].contains("third listener failed"));
 }
 
 #[test]
-fn a_throwing_native_render_hook_reports_without_failing_bts_startup() {
+fn a_throwing_render_hook_reports_without_failing_bts_startup() {
     let mut pair = Pair::with_background(
         r"
         globalThis.renderPage = () => {

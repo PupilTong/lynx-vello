@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, runMtsJobs } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -93,22 +93,15 @@ function sendToBackground(message: ToBackground) {
 // runtime methods. Payloads are copied by Worker's JSON transport when posted.
 jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data, origin: event.origin }));
 
-// Native QuickContext::InternalCall drains jobs after a successful call and
-// before its caller continues. A thrown call skips that nested drain; the
-// enclosing runtime checkpoint still owns the jobs it left pending.
-function callMts(method: Function, args: unknown[]) {
-  let result;
-  try { result = Reflect.apply(method, scope, args); }
-  catch (error) { _ReportError(error); return undefined; }
-  return runMtsJobs() ? result : undefined;
-}
-
-function dispatchEngineEvent(type: string, data: unknown) {
+// Engine listeners report independently so a failed listener cannot stop
+// delivery. Promise jobs run at the existing outer checkpoint, after the walk.
+export function __BobcatDispatchEngineEvent(type: string, data: unknown) {
   dispatchEventListeners(engineContext, {type, data, origin:'Engine'},
-    (callback, _receiver, event) => callMts(callback, [event]));
+    (callback, _receiver, event) => {
+      try { Reflect.apply(callback, scope, [event]); }
+      catch (error) { _ReportError(error); }
+    });
 }
-
-export { callMts as __BobcatCallMTS, dispatchEngineEvent as __BobcatDispatchEngineEvent };
 
 // Like web-worker-rpc, await the handler result before copying the reply.
 // The ordinary realm checkpoint runs the continuation; no nested host entry.
