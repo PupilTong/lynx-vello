@@ -69,6 +69,8 @@ const INLINE_DELIVERIES: usize = 8;
 const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
 const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
+mod bundle_styles;
+
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
   console,
@@ -80,6 +82,8 @@ const ENTRY_PREAMBLE: &str = r#"import {
   _SetSourceMapRelease,
   __OnLifecycleEvent,
   __LoadLepusChunk,
+  __LoadStyleSheet,
+  __AdoptStyleSheet,
   __BobcatInstallScriptGlobals,
 } from "bobcat:runtime";
 import {
@@ -135,6 +139,8 @@ __BobcatInstallScriptGlobals({
   _SetSourceMapRelease,
   __OnLifecycleEvent,
   __LoadLepusChunk,
+  __LoadStyleSheet,
+  __AdoptStyleSheet,
   __CreatePage,
   __CreateElement,
   __CreateWrapperElement,
@@ -646,6 +652,12 @@ impl MainThreadRuntime {
             outbox.clone(),
             &events,
             &timers,
+        )?;
+        bundle_styles::install_styles(
+            &mut engine,
+            js_runtime,
+            &slot,
+            outbox.source_requester(outbox.token().clone()),
         )?;
         install_page_data(&mut engine, js_runtime, page_data)?;
         let readiness = Rc::new(RefCell::new(Ok(false)));

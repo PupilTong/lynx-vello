@@ -137,6 +137,14 @@ pub enum LoadedSource {
     Entry { source: String, url: String },
 }
 
+/// Decoded styles from one source container. Loading a named sheet does not
+/// adopt it. Container fetching and executable source sections are separate layers.
+#[derive(Debug, Default)]
+pub struct BundleSource {
+    pub style_sheet: Option<Arc<PreparsedStyleSheet>>,
+    pub named_style_sheets: std::collections::BTreeMap<String, Arc<PreparsedStyleSheet>>,
+}
+
 /// The concrete, transferable right to answer one source request.
 ///
 /// This is neither a closure nor a trait object, and it names no destination:

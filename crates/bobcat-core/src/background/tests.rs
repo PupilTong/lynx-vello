@@ -163,6 +163,7 @@ impl Group {
             self.views[view].notices.clone(),
             Arc::new(crate::NoWakeup),
             token.clone(),
+            None,
         );
         self.tell(WorkerCommand::Start(WorkerStart {
             key,

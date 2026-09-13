@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, runMtsJobs, evaluateScript } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, runMtsJobs, evaluateScript, loadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -337,6 +337,31 @@ export function __BobcatEvaluateScript(source: string, filename: string) {
 }
 
 export const NativeModules = undefined;
+
+const styleHandles = new WeakMap<object, string>();
+const styleCleanup = new FinalizationRegistry<string>(id => {
+  // A finalizer can run after native host members were revoked at teardown.
+  try { releaseStyleSheet(id); } catch { /* realm teardown */ }
+});
+
+export function __LoadStyleSheet(key: string, bundleName: string): object | null {
+  if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
+    throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
+  }
+  const id = loadStyleSheet(key, bundleName);
+  if (id === null) return null;
+  const handle: object = Object.freeze(Object.create(null));
+  styleHandles.set(handle, id);
+  styleCleanup.register(handle, id);
+  return handle;
+}
+
+export function __AdoptStyleSheet(handle: object) {
+  const id = styleHandles.get(handle);
+  if (id === undefined) throw new TypeError("__AdoptStyleSheet requires a stylesheet handle");
+  adoptStyleSheet(id);
+  return null;
+}
 
 export const lynx = {
   SystemInfo,

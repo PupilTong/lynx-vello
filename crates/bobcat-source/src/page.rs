@@ -23,6 +23,7 @@ pub struct PageSource {
     script_url: Url,
     script: Arc<str>,
     background_script: Option<(Url, Arc<str>)>,
+    page_bundle: Option<Arc<bobcat_core::resource::BundleSource>>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
     compatibility_warnings: Vec<CompatibilityWarning>,
@@ -254,16 +255,20 @@ impl PageSource {
         }
         let script_url = Url::parse("bobcat-memory://bundle/lepus-root.js")
             .expect("the built-in root-script URL must be valid");
-        let style_sheet = template
-            .style_info
-            .as_ref()
-            .map(crate::lower_style::to_preparsed_style_sheet)
-            .filter(|sheet| !sheet.is_empty())
-            .map(|sheet| {
-                let url = Url::parse("bobcat-memory://bundle/style-info.css")
-                    .expect("the built-in stylesheet URL must be valid");
-                (url, PageStyleSheet::Preparsed(sheet))
-            });
+        let page_bundle = Arc::new(bobcat_core::resource::BundleSource {
+            style_sheet: template
+                .style_info
+                .as_ref()
+                .map(crate::lower_style::to_preparsed_style_sheet)
+                .filter(|sheet| !sheet.is_empty())
+                .map(Arc::new),
+            named_style_sheets: crate::custom_style::named_style_sheets(&template),
+        });
+        let style_sheet = page_bundle.style_sheet.as_ref().map(|sheet| {
+            let url = Url::parse("bobcat-memory://bundle/style-info.css")
+                .expect("the built-in stylesheet URL must be valid");
+            (url, PageStyleSheet::Preparsed(sheet.as_ref().clone()))
+        });
         let scoped_css_ids = template
             .style_info
             .as_ref()
@@ -294,6 +299,7 @@ impl PageSource {
             script_url,
             script: Arc::from(source),
             background_script: None,
+            page_bundle: Some(page_bundle),
             style_sheet,
             config,
             compatibility_warnings,
@@ -314,6 +320,7 @@ impl PageSource {
             script_url: mapped.main_thread.0,
             script: Arc::from(mapped.main_thread.1),
             background_script,
+            page_bundle: None,
             style_sheet,
             config: raw_lynx_xml_config(),
             compatibility_warnings: Vec::new(),
@@ -366,6 +373,7 @@ impl PageSource {
     pub fn view_sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
+            page_bundle: self.page_bundle.clone(),
             background_entry: self
                 .background_script
                 .as_ref()
