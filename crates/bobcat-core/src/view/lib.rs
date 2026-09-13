@@ -226,7 +226,7 @@ pub enum LynxViewError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum EngineEvent {
-    /// MTS boot and the configured BTS entry completed successfully.
+    /// MTS boot completed and MTS declared application readiness after BTS acknowledged it.
     /// `LynxView::pump` records readiness before returning this notification.
     ScriptFinished,
     /// Source loading, document configuration, or entry boot failed.

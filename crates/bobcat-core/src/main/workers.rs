@@ -91,10 +91,8 @@ impl WorkerFactory {
                         source.push_str("\nawait import(");
                         source.push_str(&entry);
                         source.push_str(");\n");
-                        source.push_str(
-                            "postMessage({bobcat:'runtime',method:'backgroundReady'});\n",
-                        );
                     }
+                    source.push_str("postMessage({bobcat:'runtime',method:'backgroundReady'});\n");
                     // The built-in background script is this thread's own, so
                     // it answers its own request rather than asking a host
                     // that has no bytes for it.

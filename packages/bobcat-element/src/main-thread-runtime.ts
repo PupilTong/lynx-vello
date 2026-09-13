@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -83,20 +83,6 @@ const engineContext = new EventTarget();
 const scope = globalThis as Record<string, unknown>;
 let backgroundWorker: Worker | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
-let backgroundReady = false;
-let backgroundFailure: unknown;
-let resolveBackground: (() => void) | undefined;
-let rejectBackground: ((error: unknown) => void) | undefined;
-
-export function __BobcatBackgroundReady() {
-  if (backgroundFailure !== undefined) return Promise.reject(backgroundFailure);
-  if (backgroundReady) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    resolveBackground = () => resolve(undefined);
-    rejectBackground = reject;
-  });
-}
-
 function sendToBackground(message: ToBackground) {
   if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
   else backgroundWorker.postMessage(message);
@@ -149,9 +135,7 @@ export function __BobcatConnectBackground(worker: Worker) {
       } else if (message.method === "callLepusMethod") {
         void callLepusMethod(message);
       } else if (message.method === "backgroundReady") {
-        backgroundReady = true;
-        resolveBackground?.();
-        resolveBackground = rejectBackground = undefined;
+        notifyReady();
       } else if (message.method === "reportError") {
         reportScriptError(message.level, message.message);
       } else if (message.method === "console") {
@@ -162,11 +146,7 @@ export function __BobcatConnectBackground(worker: Worker) {
     }
   });
   worker.addEventListener("error", (event: {message: string}) => {
-    if (!backgroundReady) {
-      backgroundFailure = new Error(event.message);
-      rejectBackground?.(backgroundFailure);
-      resolveBackground = rejectBackground = undefined;
-    }
+    reportStartupFailure(event.message);
   });
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;

@@ -549,10 +549,13 @@ Context fields before queuing; payload objects remain references until Worker
 connection posts the messages in FIFO order. Worker `postMessage` performs the
 JSON copy, for early and connected sends alike. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
-and `WorkerFailed` reporting apply to BTS too. When a BTS entry is configured,
-its completion sends a Worker acknowledgement that the MTS boot promise awaits.
-`ScriptFinished` therefore covers both entries; a BTS startup error rejects boot
-and reports `StartupFailed`. Ordinary Worker failures remain nonfatal.
+and `WorkerFailed` reporting apply to BTS too. The built-in BTS always posts a
+readiness acknowledgement after its optional entry completes. MTS receives it
+and calls `notifyReady()` through the native binding; MTS boot itself never
+awaits BTS. `ScriptFinished` requires both MTS completion and this declaration.
+A BTS startup error uses `reportStartupFailure(message)` and reports
+`StartupFailed`, independently of MTS evaluation. Ordinary Worker failures and
+BTS failures after readiness remain nonfatal.
 `LynxView::pump` records readiness before returning `ScriptFinished`, and
 `is_ready()` exposes that state. Host global events require readiness and return
 `EngineError::NotReady` otherwise, without buffering them.
@@ -671,13 +674,14 @@ rejection leaves the realm usable.
 Boot stays pending while top-level await needs resources or timers. A host
 `LynxView::pump` keeps the resources moving; the timers need nothing from a
 host, because the view's task waits its own realm's deadlines out.
-`ScriptFinished` is sent
-only after the boot promise fulfills. Its rejection sends `StartupFailed`.
+The boot promise tracks only MTS evaluation. Its rejection sends `StartupFailed`;
+`ScriptFinished` is published after it fulfills and the MTS runtime has declared
+application readiness through `notifyReady()`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
 The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground`,
-`__BobcatInitData` and `__BobcatBackgroundReady` from `bobcat:runtime` and `Document` and
+`__BobcatInitData` from `bobcat:runtime` and `Document` and
 `__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
 effect; the transformed entry itself statically imports both of the first two
 built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
@@ -701,8 +705,6 @@ if (typeof globalThis.renderPage === "function") {
   lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
 }
 __FlushElementTree();
-// Emitted only when ViewSources.background_entry is configured.
-await __BobcatBackgroundReady();
 ```
 
 The global `renderPage` function remains a compatibility path, not a boot

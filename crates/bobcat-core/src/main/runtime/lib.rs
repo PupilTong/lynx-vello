@@ -517,7 +517,9 @@ impl EventState {
 /// worker is gone.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
-    has_background_entry: bool,
+    /// MTS declares application readiness through native bindings. Module
+    /// evaluation can finish independently while the BTS entry is still loading.
+    readiness: Rc<RefCell<Result<bool, ScriptError>>>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -581,14 +583,15 @@ impl MainThreadRuntime {
             &timers,
         )?;
         install_page_data(&mut engine, js_runtime, page_data)?;
-        let has_background_entry = background_entry.is_some();
+        let readiness = Rc::new(RefCell::new(Ok(false)));
+        install_readiness(&mut engine, js_runtime, &readiness)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
-                has_background_entry,
+                readiness,
                 workers,
                 slot,
                 events,
@@ -866,13 +869,8 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
-        let background_ready = if self.has_background_entry {
-            "await __BobcatBackgroundReady();"
-        } else {
-            ""
-        };
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData, __BobcatBackgroundReady }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -897,7 +895,6 @@ if (typeof globalThis.renderPage === "function") {{
   lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
 __FlushElementTree();
-{background_ready}
 "#
         );
         self.evaluate_module(
@@ -911,6 +908,17 @@ __FlushElementTree();
     /// The next module an import in this realm is waiting for, if any.
     pub(crate) fn take_module_request(&mut self) -> Option<String> {
         self.engine.take_module_request()
+    }
+
+    /// Module completion and the application's readiness declaration are
+    /// separate facts. The page reports success only after both, after commit.
+    pub(crate) fn is_ready(&mut self) -> Result<bool, MainThreadError> {
+        let module_finished = self.main_module_finished()?;
+        self.readiness
+            .borrow()
+            .clone()
+            .map(|ready| ready && module_finished)
+            .map_err(|error| MainThreadError::from_engine("starting the BTS application", error))
     }
 
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
@@ -1240,6 +1248,41 @@ fn install_document_members(
         Ok(HostValue::Undefined)
     })?;
 
+    Ok(())
+}
+
+/// Installs MTS declarations of application readiness and startup failure.
+fn install_readiness(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    readiness: &Rc<RefCell<Result<bool, ScriptError>>>,
+) -> Result<(), MainThreadError> {
+    for (name, ready) in [("notifyReady", true), ("reportStartupFailure", false)] {
+        let readiness = Rc::clone(readiness);
+        install(
+            engine,
+            js_runtime,
+            name,
+            u8::from(!ready),
+            move |arguments| {
+                let outcome = if ready {
+                    Ok(true)
+                } else {
+                    Err(ScriptError {
+                        kind: crate::script::ScriptErrorKind::Exception,
+                        phase: crate::script::ScriptErrorPhase::ExecuteModule,
+                        message: string_argument(name, arguments, 0)?.into(),
+                        location: None,
+                    })
+                };
+                let mut state = readiness.borrow_mut();
+                if matches!(*state, Ok(false)) {
+                    *state = outcome;
+                }
+                Ok(HostValue::Undefined)
+            },
+        )?;
+    }
     Ok(())
 }
 

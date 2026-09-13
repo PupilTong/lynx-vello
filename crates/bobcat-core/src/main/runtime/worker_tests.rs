@@ -40,7 +40,25 @@ struct Pair {
 
 impl Pair {
     fn new(script: &str) -> Self {
-        Self::with_background(script, None)
+        let mut pair = Self::with_background(script, None);
+        // Ordinary Worker tests start with the built-in empty BTS ready, so
+        // its acknowledgement is not mistaken for the worker under test.
+        pair.acknowledge_background();
+        pair
+    }
+
+    fn acknowledge_background(&mut self) {
+        let event = block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE)
+            .flatten()
+            .expect("BTS acknowledgement, including an empty BTS entry");
+        assert!(
+            matches!(&event.payload, WorkerPayload::Message(json) if json.contains("backgroundReady"))
+        );
+        self.runtime
+            .as_mut()
+            .unwrap()
+            .dispatch_worker_event(&mut self.js, event.key, event.payload)
+            .unwrap();
     }
 
     fn with_background(script: &str, background_source: Option<&str>) -> Self {
@@ -1201,27 +1219,28 @@ fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
 }
 
 #[test]
-fn configured_bts_entry_completion_finishes_mts_boot_over_worker_messages() {
-    let mut pair = Pair::with_background("__CreatePage();", Some("await Promise.resolve();"));
-    assert!(
-        !pair
-            .runtime
-            .as_mut()
-            .unwrap()
-            .main_module_finished()
-            .unwrap()
+fn mts_module_finishes_before_bts_declares_application_ready() {
+    for background in [None, Some("await Promise.resolve();")] {
+        let mut pair = Pair::with_background("__CreatePage();", background);
+        let runtime = pair.runtime.as_mut().unwrap();
+        assert!(
+            runtime.main_module_finished().unwrap(),
+            "MTS never awaits BTS"
+        );
+        assert!(!runtime.is_ready().unwrap());
+        pair.acknowledge_background();
+        let runtime = pair.runtime.as_mut().unwrap();
+        assert!(runtime.main_module_finished().unwrap());
+        assert!(runtime.is_ready().unwrap());
+    }
+}
+
+#[test]
+fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation() {
+    let mut pair = Pair::with_background(
+        "__CreatePage();",
+        Some("throw Error('BTS startup failed');"),
     );
-    let event = block_on_deadline(pair.events.recv(), ClockInstant::now() + PATIENCE)
-        .flatten()
-        .expect("BTS acknowledgement");
-    assert!(
-        matches!(&event.payload, WorkerPayload::Message(json) if json.contains("backgroundReady"))
-    );
-    pair.runtime
-        .as_mut()
-        .unwrap()
-        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
-        .unwrap();
     assert!(
         pair.runtime
             .as_mut()
@@ -1229,35 +1248,13 @@ fn configured_bts_entry_completion_finishes_mts_boot_over_worker_messages() {
             .main_module_finished()
             .unwrap()
     );
-}
-
-#[test]
-fn a_failed_configured_bts_entry_rejects_boot_instead_of_reporting_ready() {
-    let mut pair = Pair::with_background(
-        "__CreatePage();",
-        Some("throw Error('BTS startup failed');"),
-    );
-    assert!(
-        !pair
-            .runtime
-            .as_mut()
-            .unwrap()
-            .main_module_finished()
-            .unwrap()
-    );
+    assert!(!pair.runtime.as_mut().unwrap().is_ready().unwrap());
     let event = pair.next_event().expect("BTS startup failure");
-    let delivery_error = pair
-        .runtime
-        .as_mut()
-        .unwrap()
+    let runtime = pair.runtime.as_mut().unwrap();
+    runtime
         .dispatch_worker_event(&mut pair.js, event.key, event.payload)
-        .unwrap_err();
-    assert!(delivery_error.to_string().contains("BTS startup failed"));
-    let error = pair
-        .runtime
-        .as_mut()
-        .unwrap()
-        .main_module_finished()
-        .unwrap_err();
+        .unwrap();
+    assert!(runtime.main_module_finished().unwrap());
+    let error = runtime.is_ready().unwrap_err();
     assert!(error.to_string().contains("BTS startup failed"), "{error}");
 }

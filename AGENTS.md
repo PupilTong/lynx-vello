@@ -301,7 +301,7 @@ useful signal for currently-compatible versions of those libraries.
   defers incomplete import graphs, and resumes the original promises on main
   when sources arrive. Cycles never become partially linked while fetching.
   Top-level await can span resource and timer turns; `ScriptFinished` waits
-  for the boot promise. Handled import failures leave the realm usable, and
+  for the boot promise and the application's readiness declaration. Handled import failures leave the realm usable, and
   dropping the view cancels outstanding completions and releases continuations.
   This is JavaScript ESM loading; import maps, import attributes, JSON modules
   and Lynx component-bundle imports remain unsupported.
@@ -565,11 +565,14 @@ useful signal for currently-compatible versions of those libraries.
   listeners are registered before the first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one
-  additional realm on the group's existing worker runtime. When a BTS entry
-  is configured, boot awaits its completion acknowledgement over Worker
-  postMessage. `ScriptFinished` then covers MTS and BTS entry completion; a
-  BTS startup failure rejects boot with `StartupFailed`. Ordinary Worker errors
-  remain nonfatal `WorkerFailed` events.
+  additional realm on the group's existing worker runtime. MTS boot does not
+  await BTS: the built-in BTS posts `backgroundReady` after its optional entry
+  completes, including when no entry is configured. MTS then calls the native
+  `notifyReady()` binding. The page publishes `ScriptFinished` once both MTS
+  completion and that declaration hold, after commit. MTS forwards BTS errors
+  through `reportStartupFailure(message)`; an error before readiness produces
+  `StartupFailed` without rejecting MTS evaluation. Ordinary Worker errors and
+  BTS errors after readiness remain nonfatal `WorkerFailed` events.
   BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
   app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
   and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a

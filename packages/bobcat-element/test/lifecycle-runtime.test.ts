@@ -14,10 +14,13 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
+const notifyReady = rstest.fn();
+const reportStartupFailure = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
 rstest.mockRequire("bobcat-internal:host", () => ({
+  notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   initData: () => undefined,
@@ -432,13 +435,13 @@ describe("runtime events and diagnostics", () => {
   });
 });
 
-it("keeps boot pending until the configured BTS entry acknowledges completion", async () => {
-  let completed = false;
-  const ready = mts.__BobcatBackgroundReady().then(() => { completed = true; });
-  await Promise.resolve();
-  expect(completed).toBe(false);
+it("declares readiness through the native binding when BTS acknowledges completion", () => {
+  expect(notifyReady).not.toHaveBeenCalled();
   worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "backgroundReady"}});
-  await ready;
-  expect(completed).toBe(true);
-  await expect(mts.__BobcatBackgroundReady()).resolves.toBeUndefined();
+  expect(notifyReady).toHaveBeenCalledExactlyOnceWith();
+});
+
+it("forwards BTS startup failures through the native binding without throwing in the listener", () => {
+  expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
+  expect(reportStartupFailure).toHaveBeenCalledExactlyOnceWith("BTS entry failed");
 });

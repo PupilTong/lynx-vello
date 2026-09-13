@@ -48,10 +48,15 @@ matching listener, and iterates the live array. `emit`/`toggle` spread arguments
 A listener throw stops that emission; later Worker messages still run.
 
 `LynxView::is_ready()` becomes true when `pump()` observes `ScriptFinished`.
-Boot finishes after the initial MTS render and, when a BTS entry is configured,
-its completion acknowledgement over Worker `postMessage`. An entry failure
-reports `StartupFailed`; readiness stays false. Without a configured BTS entry,
-MTS boot is sufficient. This adds no BTS application-module loading support.
+MTS boot finishes after its own entry and initial render; it never awaits BTS.
+The built-in BTS sends `backgroundReady` over Worker `postMessage` after its
+optional entry completes, including when that entry is absent. The MTS message
+handler calls the native `notifyReady()` binding. The page publishes readiness
+once, after both that declaration and MTS completion, following the commit.
+BTS errors call `reportStartupFailure(message)` through the MTS error handler;
+before readiness this reports `StartupFailed`, without rejecting the already
+completed MTS evaluation. Later errors keep the existing nonfatal Worker path.
+This adds no BTS application-module loading support.
 
 `LynxView::send_global_event(name, arguments)` returns `EngineError::NotReady`
 before observed readiness or after the view ends. Rejected events are not
@@ -100,6 +105,6 @@ JS tests cover Context values/validation, emitter mutations and diagnostic
 formatting/forwarding. Real QuickJS tests exercise both realms and the actual
 Worker channel, including recovery after errors. Public view tests cover
 readiness observed through `pump()`, startup failure, early-event refusal without
-replay, and refusal after cancellation. Page-owner tests verify that a configured
-BTS entry must acknowledge completion and that its failure reports one
+replay, and refusal after cancellation. Page-owner and runtime tests verify that MTS completes independently and
+BTS must acknowledge completion and that its failure reports one
 `StartupFailed`, without also reporting a listener failure or successful boot.

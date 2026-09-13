@@ -321,7 +321,7 @@ impl Page {
         }
         runtime.commit_if_dirty();
         if !self.boot_reported.get() {
-            match runtime.main_module_finished() {
+            match runtime.is_ready() {
                 Ok(false) => {}
                 Ok(true) => {
                     self.boot_reported.set(true);

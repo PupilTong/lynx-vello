@@ -64,6 +64,7 @@ fn ingredients() -> DocumentIngredients {
 /// link.
 struct Harness {
     workers: mpsc::UnboundedReceiver<WorkerCommand>,
+    background: Option<WorkerStart>,
     commands: mpsc::UnboundedSender<ToMain>,
     view: DetachedView,
     events: Vec<EngineEvent>,
@@ -94,6 +95,7 @@ impl Harness {
         let owner = task::spawn_local(serve_view(context, attached, outbox));
         Self {
             workers,
+            background: None,
             commands,
             view,
             events: Vec::new(),
@@ -159,6 +161,13 @@ impl Harness {
         })
         .await;
         self.answer("app:///main.js", entry);
+        self.until("MTS never rendered", |h| {
+            h.view.published.commit().is_some()
+        })
+        .await;
+        let background = self.background_worker();
+        acknowledge_background(&background);
+        self.background = Some(background);
         self.until("the entry never finished", |harness| {
             harness
                 .events
@@ -175,11 +184,26 @@ impl Harness {
     /// The `Start` the boot module's BTS `Worker` sent, which nothing on this
     /// test's side ever boots.
     fn background_worker(&mut self) -> WorkerStart {
+        if let Some(background) = self.background.take() {
+            return background;
+        }
         let Some(WorkerCommand::Start(start)) = self.workers.try_recv().ok() else {
             panic!("boot creates the BTS worker")
         };
         start
     }
+}
+
+fn acknowledge_background(background: &WorkerStart) {
+    background
+        .events
+        .send(crate::background::WorkerEvent {
+            key: background.key,
+            payload: crate::background::WorkerPayload::Message(
+                r#"[{"bobcat":"runtime","method":"backgroundReady"}]"#.into(),
+            ),
+        })
+        .unwrap();
 }
 
 /// One page over the token that ends it, with the test holding the owner's
@@ -768,7 +792,7 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
 }
 
 #[test]
-fn script_finished_waits_for_the_configured_background_entry_acknowledgement() {
+fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
     on_a_local_set(async {
         let (context, workers) = group();
         let mut sources = ViewSources::new("app:///main.js");
@@ -793,15 +817,8 @@ fn script_finished_waits_for_the_configured_background_entry_acknowledgement() {
                 .iter()
                 .any(|e| matches!(e, EngineEvent::ScriptFinished))
         );
-        background
-            .events
-            .send(crate::background::WorkerEvent {
-                key: background.key,
-                payload: crate::background::WorkerPayload::Message(
-                    r#"[{"bobcat":"runtime","method":"backgroundReady"}]"#.into(),
-                ),
-            })
-            .unwrap();
+        acknowledge_background(&background);
+        acknowledge_background(&background);
         harness
             .until("BTS acknowledgement did not finish boot", |h| {
                 h.events
