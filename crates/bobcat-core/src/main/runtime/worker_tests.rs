@@ -1258,3 +1258,64 @@ fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation()
     let error = runtime.is_ready().unwrap_err();
     assert!(error.to_string().contains("BTS startup failed"), "{error}");
 }
+
+#[test]
+fn engine_listeners_finish_the_walk_before_jobs_and_report_each_failure() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.order = [];
+        const engine = lynx.getEngine();
+        engine.addEventListener('__RenderPage', function() {
+            if (this !== engine) throw Error('engine listener receiver');
+            order.push('first');
+            Promise.resolve().then(() => { order.push('first-job'); });
+            throw Error('first listener failed');
+        });
+        engine.addEventListener('__RenderPage', function() {
+            order.push('second');
+            return Promise.resolve().then(() => {
+                order.push('second-job');
+                Promise.resolve().then(() => { order.push('nested-job'); });
+            });
+        });
+        engine.addEventListener('__RenderPage', function() {
+            if (order.join(',') !== 'first,second') throw Error(order);
+            order.push('third');
+            throw Error('third listener failed');
+        });
+        engine.addEventListener('__RenderPage', () => { order.push('fourth'); });
+    ",
+        None,
+    );
+    pair.check("if (order.join(',') !== 'first,second,third,fourth,first-job,second-job,nested-job') throw Error(order);");
+    let reports: Vec<_> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 2, "{reports:?}");
+    assert!(reports[0].contains("first listener failed"));
+    assert!(reports[1].contains("third listener failed"));
+}
+
+#[test]
+fn a_throwing_render_hook_reports_without_failing_bts_startup() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.renderPage = () => {
+            Promise.resolve().then(() => globalThis.renderJobFinished = true);
+            throw Error('render hook failed');
+        };
+    ",
+        Some("postMessage('BTS started');"),
+    );
+    assert!(matches!(pair.next_event().unwrap().payload,
+        WorkerPayload::Message(ref value) if value == r#"["BTS started"]"#));
+    pair.check("if (!renderJobFinished) throw Error('outer checkpoint lost render jobs');");
+    assert!(pair.notices().iter().any(|notice| matches!(notice,
+        ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. })
+        if message.contains("render hook failed"))));
+}

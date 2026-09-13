@@ -34,6 +34,139 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
     runtime_over(ingredients())
 }
 
+#[test]
+#[expect(clippy::float_cmp, reason = "explicit pixel widths are exact")]
+fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
+    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime.run_main_thread_script(&mut js, r"
+        globalThis.processData = function() {
+            if (this !== globalThis) throw Error('processor receiver');
+            const result = Promise.resolve(42);
+            result.ready = false;
+            Promise.resolve().then(() => { result.ready = true; });
+            globalThis.processed = result;
+            return result;
+        };
+        globalThis.renderPage = function(data) {
+            if (this !== globalThis || data !== processed || data.ready || !(data instanceof Promise))
+                throw Error('processor result was awaited, copied, or drained before render');
+            const page = __CreatePage();
+            const view = __CreateView(0);
+            __SetInlineStyles(view, 'width:10px;height:10px');
+            __AppendElement(page, view);
+            Promise.resolve().then(() => {
+                __SetInlineStyles(view, 'width:20px;height:10px');
+                Promise.resolve().then(() => {
+                    __SetInlineStyles(view, 'width:30px;height:10px');
+                });
+            });
+        };
+    ", "app:///deferred-flush.js").unwrap();
+    let tree = elements.tree();
+    let view = tree
+        .document_element()
+        .first_child()
+        .expect("rendered view");
+    // The first render job precedes the queued flush; its nested job follows it.
+    // This test drives the realm directly, before Page's dirty-commit epilogue.
+    assert_eq!(tree.rounded_layout(view.id()).unwrap().size.width, 20.0);
+    assert_eq!(view.attribute("style"), Some("width:30px;height:10px"));
+    while let Ok(notice) = far.0.notices.try_recv() {
+        assert!(
+            !matches!(
+                notice,
+                ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+            ),
+            "boot reported an error"
+        );
+    }
+}
+
+#[test]
+fn a_throwing_processor_reports_and_still_runs_render_and_flush() {
+    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        let processorJobRan = false;
+        globalThis.processData = () => {
+            Promise.resolve().then(() => { processorJobRan = true; });
+            throw Error('processor failed');
+        };
+        globalThis.renderPage = data => {
+            if (data !== undefined || processorJobRan)
+                throw Error('processor failure changed the result or ran jobs before render');
+            const page = __CreatePage();
+            __AppendElement(page, __CreateView(0));
+        };
+    ",
+            "app:///processor-error.js",
+        )
+        .unwrap();
+    let tree = elements.tree();
+    let view = tree
+        .document_element()
+        .first_child()
+        .expect("rendered after processor failure");
+    assert!(
+        tree.rounded_layout(view.id()).is_some(),
+        "boot still flushed"
+    );
+    let reports: Vec<_> = std::iter::from_fn(|| far.0.notices.try_recv().ok())
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].contains("processor failed"));
+}
+
+#[test]
+fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import {__BobcatRegisterLepusChunks as register} from 'bobcat:runtime';
+        if ((0, eval)('typeof lynx') !== 'undefined'
+            || (0, eval)('typeof __CreateView') !== 'undefined')
+            throw Error('runtime/PAPI imports were also installed as global bindings');
+        let executions = 0;
+        const chunk = `
+            executions++;
+            var chunkLocal = true;
+            if (lynx !== runtimeIdentity || __CreateView !== papiIdentity)
+                throw Error('chunk lost entry scope');
+            Promise.resolve().then(() => globalThis.chunkJob = true);
+        `;
+        const runtimeIdentity = lynx;
+        const papiIdentity = __CreateView;
+        register({worklet: chunk}, source => eval(source));
+        if (!__LoadLepusChunk('worklet', {}) || !__LoadLepusChunk('worklet', {}))
+            throw Error('chunk not found');
+        if (executions !== 2 || typeof chunkLocal !== 'undefined' || globalThis.chunkJob)
+            throw Error('chunk scope, repeat evaluation or job boundary');
+        globalThis.renderPage = () => {
+            if (!globalThis.chunkJob) throw Error('enclosing checkpoint lost chunk jobs');
+        };
+    ",
+            "app:///chunks.js",
+        )
+        .unwrap();
+    while let Ok(notice) = far.0.notices.try_recv() {
+        assert!(
+            !matches!(
+                notice,
+                ViewNotice::Engine(crate::EngineEvent::ScriptReported { .. })
+            ),
+            "MTS execution reported an error"
+        );
+    }
+}
+
 /// The same runtime over a document that can shape text: Ahem's solid em
 /// squares make a run's box its glyph count times its font size.
 ///
@@ -591,9 +724,7 @@ fn stale_element_ids_become_script_errors_without_losing_the_tree() {
             &mut js_runtime,
             r"
                 import { removeElement } from 'bobcat-internal:host';
-                globalThis.renderPage = function () {
-                  removeElement(999999);
-                };
+                removeElement(999999);
                 ",
             "app:///invalid-tree-operation.js",
         )
@@ -1953,12 +2084,10 @@ fn dropping_a_connected_element_is_refused() {
             &mut js_runtime,
             r"
                 import { dropElement } from 'bobcat-internal:host';
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const view = __CreateView(0);
-                  __AppendElement(page, view);
-                  dropElement(__GetElementUniqueID(view));
-                };
+                const page = __CreatePage('card', 0);
+                const view = __CreateView(0);
+                __AppendElement(page, view);
+                dropElement(__GetElementUniqueID(view));
                 ",
             "app:///connected-drop.js",
         )
@@ -2410,12 +2539,10 @@ fn update_list_info_is_refused_instead_of_becoming_an_attribute() {
         .run_main_thread_script(
             &mut js_runtime,
             r"
-                globalThis.renderPage = function () {
-                  const page = __CreatePage('card', 0);
-                  const list = __CreateList(0, function () {}, function () {});
-                  __AppendElement(page, list);
-                  __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
-                };
+                const page = __CreatePage('card', 0);
+                const list = __CreateList(0, function () {}, function () {});
+                __AppendElement(page, list);
+                __SetAttribute(list, 'update-list-info', { insertAction: [], removeAction: [] });
                 ",
             "app:///list.js",
         )

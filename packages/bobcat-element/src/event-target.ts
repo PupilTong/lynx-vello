@@ -34,6 +34,49 @@ function captureOf(options: unknown): boolean {
     : Boolean(listenerOption(options, "capture"));
 }
 
+// Engine dispatch supplies per-listener error reporting. The public
+// EventTarget walk keeps its ordinary JavaScript call semantics.
+export function dispatchEventListeners(
+  target: EventTarget,
+  event: unknown,
+  call: (callback: Function, receiver: object, event: unknown) => unknown = (callback, receiver, value) => Reflect.apply(callback, receiver, [value])) {
+  if (
+    event === null ||
+    (typeof event !== "object" && typeof event !== "function")
+  ) {
+    throw new TypeError("dispatchEvent requires an event object");
+  }
+
+  const name = String(Reflect.get(event, "type"));
+  const listeners = target[eventTargetListeners].get(name);
+  if (listeners === undefined) {
+    return true;
+  }
+
+  // A snapshot prevents a listener added during this dispatch from running
+  // in it. Looking each entry up in the live list also honors removals made
+  // by an earlier callback.
+  for (const listener of listeners.slice()) {
+    const live = target[eventTargetListeners].get(name);
+    if (live === undefined || !live.includes(listener)) {
+      continue;
+    }
+    if (listener.once) {
+      target.removeEventListener(name, listener.callback, listener.capture);
+    }
+
+    if (typeof listener.callback === "function") {
+      call(listener.callback, target, event);
+    } else {
+      const handleEvent = Reflect.get(listener.callback, "handleEvent");
+      if (typeof handleEvent === "function") {
+        call(handleEvent, listener.callback, event);
+      }
+    }
+  }
+  return Reflect.get(event, "defaultPrevented") !== true;
+}
+
 export class EventTarget {
   declare [eventTargetListeners]: Map<string, RuntimeEventListener[]>;
 
@@ -104,41 +147,7 @@ export class EventTarget {
   }
 
   dispatchEvent(event: unknown): boolean {
-    if (
-      event === null ||
-      (typeof event !== "object" && typeof event !== "function")
-    ) {
-      throw new TypeError("dispatchEvent requires an event object");
-    }
-
-    const name = String(Reflect.get(event, "type"));
-    const listeners = this[eventTargetListeners].get(name);
-    if (listeners === undefined) {
-      return true;
-    }
-
-    // A snapshot prevents a listener added during this dispatch from running
-    // in it. Looking each entry up in the live list also honors removals made
-    // by an earlier callback.
-    for (const listener of listeners.slice()) {
-      const live = this[eventTargetListeners].get(name);
-      if (live === undefined || !live.includes(listener)) {
-        continue;
-      }
-      if (listener.once) {
-        this.removeEventListener(name, listener.callback, listener.capture);
-      }
-
-      if (typeof listener.callback === "function") {
-        listener.callback.call(this, event);
-      } else {
-        const handleEvent = Reflect.get(listener.callback, "handleEvent");
-        if (typeof handleEvent === "function") {
-          handleEvent.call(listener.callback, event);
-        }
-      }
-    }
-    return Reflect.get(event, "defaultPrevented") !== true;
+    return dispatchEventListeners(this, event);
   }
 
   get [Symbol.toStringTag]() {

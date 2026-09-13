@@ -237,10 +237,21 @@ impl PageSource {
         input: &Url,
         mut template: crate::web::WebTemplate,
     ) -> Result<Self, SourceError> {
-        let source = template
+        let mut source = template
             .lepus_code
             .remove("root")
             .ok_or_else(|| SourceError::MissingRoot(diagnostic_url(input)))?;
+        if !template.lepus_code.is_empty() {
+            let chunks = serde_json::to_string(&template.lepus_code)
+                .expect("a string map is JSON serializable");
+            let chunks = serde_json::to_string(&chunks).expect("JSON text is a JavaScript string");
+            // The evaluator retains the entry's lexical PAPI imports. Each
+            // chunk has its own Script scope, and loads only when requested.
+            source = format!(
+                "import {{ __BobcatRegisterLepusChunks }} from \"bobcat:runtime\";\n\
+                 __BobcatRegisterLepusChunks(JSON.parse({chunks}), source => eval(source));\n{source}"
+            );
+        }
         let script_url = Url::parse("bobcat-memory://bundle/lepus-root.js")
             .expect("the built-in root-script URL must be valid");
         let style_sheet = template

@@ -717,7 +717,8 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx`, `__BobcatConnectBackground` and `__BobcatInitData` from
+  `lynx`, `_ReportError`,
+  `__BobcatConnectBackground` and `__BobcatInitData` from
   `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads. Evaluating `bobcat:runtime`
@@ -731,9 +732,15 @@ useful signal for currently-compatible versions of those libraries.
   `import(entry_url)`, creates and connects the BTS Worker, and then runs
   `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
   otherwise the `__RenderPage` event on `lynx.getEngine()`) →
-  `__FlushElementTree` inside
-  JavaScript; the global function is a compatibility path, not a boot
-  requirement. The runtime module directly exports a `lynx` object, an empty
+  a queued `__FlushElementTree` inside JavaScript. Hooks and engine listeners
+  run synchronously with no intervening checkpoint. Boot uses the ordinary
+  `lynx.getEngine().dispatchEvent(...)` API; the engine context itself reports
+  each listener failure and continues delivery. Boot awaits
+  `Promise.resolve().then(() => __FlushElementTree())`: jobs already queued by
+  the hooks precede the flush, while jobs they later enqueue may follow it.
+  A throwing hook reports without failing startup; a failed flush rejects boot.
+  The global function is a compatibility path, not a boot requirement.
+  The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
   performance hooks, nonfatal console/error forwarding, and
@@ -967,14 +974,21 @@ useful signal for currently-compatible versions of those libraries.
   objects, arrays, functions, symbols, and ill-formed UTF-16 strings are
   rejected on the way in rather than lossily converted; element identity
   crosses as plain numbers, and handle objects never leave JavaScript. This
-  boundary also means a callback
-  cannot call back into its own realm, so host functions are strictly
-  leaf calls today. A slot is vacated for the duration of its call (a guard
-  that restores it on the unwinding path too), so a panicking callback becomes
-  a JS exception rather than an unwind into C and leaves its slot usable, and
-  a re-entrant invocation is refused rather than aliasing the `FnMut` (the
-  closure lives behind a `RefCell`, so that guard is structural). A closure's
-  lifetime follows its JS function object rather than the realm: the closure
+  boundary keeps ordinary callbacks as leaf operations. Their `FnMut` closure
+  is borrowed through a `RefCell`, so reentry is refused rather than aliasing
+  it; a panicking callback becomes a JS exception and leaves the slot usable.
+  Runtime JS reads ReactLynx's hooks directly from `globalThis`.
+  Runtime/PAPI identifiers remain module imports; named Lepus chunks execute
+  through a direct-eval closure in the selected entry's scope. No native Script
+  evaluator or second set of global bindings is installed.
+  Named calls and replies belong to the two JS
+  Worker message handlers; Rust transports opaque messages and performs no
+  Lepus-specific dispatch or reply flush.
+  Boot's deferred flush uses ordinary Promise scheduling and the existing
+  outer checkpoint, with its job budget, rejection attribution and generation
+  notification. See `docs/mts-execution-runtime.md` for the boot and chunk
+  execution boundaries.
+  A closure's lifetime follows its JS function object rather than the realm: the closure
   sits at its own stable heap address, which a companion JS object holds and
   the collector hands back through a finalizer — so nothing is indexed,
   recycled, or aliasable by a stale reference, and discarding a function drops
@@ -1378,7 +1392,8 @@ useful signal for currently-compatible versions of those libraries.
   `dom`. Native access is limited to named imports from the native
   `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
   `console`, and no DOM. Named exports are the only Element-PAPI surface
-  for transformed MTS entries; the module installs no `__*` globals. Rstest
+  for transformed MTS entries; local named Lepus chunks retain those imports
+  through an entry-scope direct-eval closure. Rstest
   imports the TypeScript directly, and TypeScript 7 checks the sources as a
   program with `lib: es2023` and no ambient types — the realm has neither DOM
   nor Node — resolving each `bobcat:*` specifier to its file through `paths`

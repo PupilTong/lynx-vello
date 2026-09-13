@@ -100,6 +100,22 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
+  it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
+    const evaluate = rstest.fn(source => {
+      if (source === "throw") throw Error("chunk failure");
+    });
+    mts.__BobcatRegisterLepusChunks({worklet: "worklet bytes", bad: "throw"}, evaluate);
+    expect(mts.__LoadLepusChunk("missing", {})).toBe(false);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "absent"})).toBe(false);
+    expect(evaluate).not.toHaveBeenCalled();
+    expect(mts.__LoadLepusChunk("worklet", {})).toBe(true);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "__Card__"})).toBe(true);
+    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"]]);
+    expect(mts.__LoadLepusChunk("bad", {})).toBe(true);
+    expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
+  });
+
+
   it("queues Context and publish calls together, then replays each late publish hook", () => {
     const seen: unknown[] = [];
     bts.getCoreContext().addEventListener("custom", (event: { data: unknown }) => {
@@ -386,6 +402,41 @@ describe("MTS/BTS lifecycle runtime", () => {
 });
 
 describe("runtime events and diagnostics", () => {
+  it("reports engine listener errors through dispatchEvent and preserves the event walk", async () => {
+    const engine = mts.lynx.getEngine();
+    const event = {type: "engine-error-test", data: 1, defaultPrevented: true};
+    const order: string[] = [];
+    const first = rstest.fn(function(this: unknown, received: unknown) {
+      expect(this).toBe(engine);
+      expect(received).toBe(event);
+      order.push("first");
+      Promise.resolve().then(() => { order.push("job"); });
+      throw Error("engine listener failed");
+    });
+    const second = rstest.fn((received: unknown) => {
+      expect(received).toBe(event);
+      order.push("second");
+    });
+    reportedErrors.mockClear();
+    engine.addEventListener(event.type, first, {once: true});
+    engine.addEventListener(event.type, second);
+    try {
+      expect(engine.dispatchEvent(event)).toBe(false);
+      expect(order).toEqual(["first", "second"]);
+      expect(reportedErrors).toHaveBeenCalledExactlyOnceWith("error", expect.stringContaining("engine listener failed"));
+      engine.removeEventListener(event.type, second);
+      expect(engine.dispatchEvent({...event, defaultPrevented: false})).toBe(true);
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(1);
+      await Promise.resolve();
+      expect(order).toEqual(["first", "second", "job"]);
+    } finally {
+      engine.removeEventListener(event.type, first);
+      engine.removeEventListener(event.type, second);
+      reportedErrors.mockClear();
+    }
+  });
+
   it("exposes one BTS event module and directly delivers accepted host argument lists", () => {
     const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
     expect(emitter).toBe(bts.getApp().GlobalEventEmitter);

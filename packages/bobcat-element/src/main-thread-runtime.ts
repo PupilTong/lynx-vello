@@ -21,7 +21,7 @@
 // the same class, on a runtime this module is not registered on, so the source
 // is shared as a module and each runtime compiles its own copy.
 
-import { EventTarget } from "bobcat:event-target";
+import { EventTarget, dispatchEventListeners } from "bobcat:event-target";
 import {
   type ContextEvent,
   createCrossThreadContext,
@@ -74,10 +74,21 @@ function createContextSink() {
   };
 }
 
+// Engine dispatch owns its listener error policy. All callers use the same
+// EventTarget API, with Promise jobs left to the existing outer checkpoint.
+class EngineContext extends EventTarget {
+  override dispatchEvent(event: unknown): boolean {
+    return dispatchEventListeners(this, event, (callback, receiver, value) => {
+      try { Reflect.apply(callback, receiver, [value]); }
+      catch (error) { _ReportError(error); }
+    });
+  }
+}
+
 const coreContext = createContextSink();
 const jsContext = createCrossThreadContext("CoreContext");
 const nativeContext = createContextSink();
-const engineContext = new EventTarget();
+const engineContext = new EngineContext();
 // The realm's global object, where a card installs the methods
 // `callLepusMethod` looks up by name.
 const scope = globalThis as Record<string, unknown>;
@@ -258,6 +269,28 @@ export function _SetSourceMapRelease() {
 
 export function __OnLifecycleEvent(data: unknown) {
   jsContext.dispatchEvent({ type: "__OnLifecycleEvent", data });
+}
+
+let lepusChunks: Record<string, string> = {};
+let evaluateLepusChunk: ((source: string) => unknown) | undefined;
+
+export function __BobcatRegisterLepusChunks(chunks: Record<string, string>, evaluate: (source: string) => unknown) {
+  lepusChunks = chunks;
+  evaluateLepusChunk = evaluate;
+}
+
+export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?: string; chunkType?: number}) {
+  if (arguments.length < 2 || typeof path !== "string" || options === null || typeof options !== "object") {
+    throw new TypeError("__LoadLepusChunk requires a string path and options object");
+  }
+  const entry = options.dynamicComponentEntry;
+  if (typeof entry === "string" && entry !== "__Card__") return false;
+  if (!Object.hasOwn(lepusChunks, path) || !evaluateLepusChunk) return false;
+  // Native TemplateEntry evaluates again on every call. Finding the chunk
+  // returns true even when its evaluation reports a script exception.
+  try { evaluateLepusChunk(lepusChunks[path]!); }
+  catch (error) { _ReportError(error); }
+  return true;
 }
 
 export const NativeModules = undefined;

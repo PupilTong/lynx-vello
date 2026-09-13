@@ -79,6 +79,7 @@ const ENTRY_PREAMBLE: &str = r#"import {
   _ReportError,
   _SetSourceMapRelease,
   __OnLifecycleEvent,
+  __LoadLepusChunk,
 } from "bobcat:runtime";
 import {
   __CreatePage,
@@ -870,7 +871,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -887,14 +888,18 @@ __BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg
 
 let data = __BobcatInitData;
 if (typeof globalThis.processData === "function") {{
-  data = globalThis.processData(data);
+  try {{ data = globalThis.processData(data); }}
+  catch (error) {{ _ReportError(error); data = undefined; }}
 }}
 if (typeof globalThis.renderPage === "function") {{
-  globalThis.renderPage(data);
+  try {{ globalThis.renderPage(data); }}
+  catch (error) {{ _ReportError(error); }}
 }} else {{
   lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
-__FlushElementTree();
+// Queue the boot flush after the jobs already scheduled by these hooks.
+// Await this flush so its failure still rejects boot; hook results are not awaited.
+await Promise.resolve().then(() => __FlushElementTree());
 "#
         );
         self.evaluate_module(
