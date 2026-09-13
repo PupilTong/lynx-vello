@@ -130,6 +130,8 @@ pub(crate) struct WorkerStart {
     /// first, and a worker whose realm was gone before it could speak still
     /// wakes.
     pub(crate) token: CancellationToken,
+    /// Imported text reaches the view resource host under this worker's cancellation scope.
+    pub(crate) sources: crate::link::SourceRequester,
 }
 
 /// Everything the worker thread is ever told.

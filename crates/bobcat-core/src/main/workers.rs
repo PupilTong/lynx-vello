@@ -197,6 +197,8 @@ impl WorkerOwner {
     ) -> Result<oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>, String> {
         let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
+        let token = self.outbox.token().child_token();
+        let sources = self.outbox.source_requester(token.clone());
         self.factory
             .commands
             .send(WorkerCommand::Start(WorkerStart {
@@ -205,7 +207,8 @@ impl WorkerOwner {
                 script: awaiting,
                 messages: incoming,
                 events: self.events.clone(),
-                token: self.outbox.token().child_token(),
+                token,
+                sources,
             }))
             .map_err(|_| "the worker thread has ended".to_owned())?;
         self.live.borrow_mut().insert(key, messages);

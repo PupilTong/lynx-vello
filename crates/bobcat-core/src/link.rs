@@ -37,6 +37,49 @@ use crate::view::{EngineEvent, EventRequester, LynxViewError};
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
 
+/// A realm's right to request source text from its view's resource host.
+/// Unlike `ViewOutbox`, this carries no main-thread publication state and can
+/// travel to a worker. Completions are cancelled with that worker's lifetime.
+#[derive(Clone)]
+pub(crate) struct SourceRequester {
+    notices: mpsc::UnboundedSender<ViewNotice>,
+    requester: Arc<dyn EventRequester>,
+    token: CancellationToken,
+}
+
+impl SourceRequester {
+    pub(crate) fn new(
+        notices: mpsc::UnboundedSender<ViewNotice>,
+        requester: Arc<dyn EventRequester>,
+        token: CancellationToken,
+    ) -> Self {
+        Self {
+            notices,
+            requester,
+            token,
+        }
+    }
+
+    pub(crate) fn request(&self, request: SourceRequest) -> SourceAnswer {
+        let (completion, answer) = SourceCompletion::new(self.token.clone());
+        self.send(request, completion);
+        answer
+    }
+
+    fn send(&self, request: SourceRequest, completion: SourceCompletion) {
+        if self
+            .notices
+            .send(ViewNotice::RequestSource {
+                request,
+                completion,
+            })
+            .is_ok()
+        {
+            self.requester.request_event();
+        }
+    }
+}
+
 /// Embedder and painter → the view's task: every fact the document must see.
 ///
 /// There is no attach, no shutdown and no source completion among them:
@@ -224,6 +267,10 @@ impl ViewOutbox {
     /// worker it creates.
     pub(crate) const fn token(&self) -> &CancellationToken {
         &self.token
+    }
+
+    pub(crate) fn source_requester(&self, token: CancellationToken) -> SourceRequester {
+        SourceRequester::new(self.notices.clone(), Arc::clone(&self.requester), token)
     }
 
     /// Announces one notice, then wakes the thread that paints.

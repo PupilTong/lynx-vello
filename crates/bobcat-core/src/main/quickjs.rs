@@ -464,9 +464,10 @@ impl ScriptEngine {
     }
 
     /// Evaluates an in-memory module through its immediate job checkpoint.
-    /// Worker boot keeps this synchronous contract; main uses `start_module`
-    /// when its boot promise can wait for resources or timers.
-    pub(crate) fn execute_module(
+    /// Test snippets use this contract; both engine threads use `start_module`
+    /// so boot can wait for resources or timers.
+    #[cfg(test)]
+    fn execute_module(
         &mut self,
         runtime: &mut ScriptRuntime,
         source: &str,

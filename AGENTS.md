@@ -521,8 +521,8 @@ useful signal for currently-compatible versions of those libraries.
   existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
   `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
   module scripts (also with omitted options) and the existing worker scope's
-  JSON transport; structured clone, transfer lists and external module
-  fetching remain pending. `main/workers.rs` installs its three native
+  JSON transport; structured clone and transfer lists remain pending. External
+  ESM imports now load through the view's resource fetcher and support TLA. `main/workers.rs` installs its three native
   operations — `createWorker`, `sendWorkerMessage`, `terminateWorker` — before
   entry boot. The `Start` goes out before the host is asked for anything;
   `SourceRequest::Worker` carries the entry's resolved URL as its
@@ -541,14 +541,17 @@ useful signal for currently-compatible versions of those libraries.
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
   `bobcat:bts` imports `lynx` from `bobcat:bts-runtime` and, when
   `ViewSources.background_entry` is supplied, executes `await import(entry)`.
-  BTS application entries receive the same named import as a preamble, like
-  MTS entries importing `bobcat:runtime`; neither installs `globalThis.lynx`.
+  Raw BTS application entries explicitly import their bindings from
+  `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
   Keeping the runtime separate lets the app import its bindings without a
   dependency back to the bootstrap awaiting it.
   XML uses this identical startup path. The bootstrap contains no application
-  source and does not fetch it in advance. Application module loading through
-  `ResourceFetcher` is explicitly deferred; an entry not already preloaded
-  reports a worker import error. Without an entry, only the built-in
+  source and does not fetch it in advance. A worker carries a `SourceRequester`
+  that sends module requests directly to the view's resource host. ESM
+  completion and timers continue during entry TLA; posted messages wait for
+  entry settlement. Each completion shares its worker's cancellation token.
+  Native Script/JSON reads, compiled factory evaluation and module caches
+  remain later layers. Without an entry, only the built-in
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable `CrossThreadContext extends EventTarget` instances returned directly
@@ -691,7 +694,7 @@ useful signal for currently-compatible versions of those libraries.
   runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
   shared `EventTarget` as `bobcat:event-target` and the typed Context protocol
   as `bobcat:cross-thread-context`,
-  in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
+  as built-in sources in QuickJS's ESM loader. The group's worker runtime
   gets a deliberately shorter list — `bobcat:event-target`, the worker global
   scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
   the BTS bindings `bobcat:bts-runtime` and `bobcat:global-event-emitter` — because a worker has no
