@@ -51,10 +51,10 @@ async fn public_view_boots_element_papi_without_exposing_the_tree() {
 async fn public_view_boots_through_the_engine_render_event() {
     run(
         r"
-        globalThis.processData = function () { return 'processed'; };
+        globalThis.processData = function () { return {value:'processed'}; };
         const engine = lynx.getEngine();
         engine.addEventListener('__RenderPage', function (event) {
-          if (this !== engine || event.data !== 'processed') {
+          if (this !== engine || event.data[0].value !== 'processed') {
             throw new Error('invalid engine render event');
           }
           __AppendElement(__CreatePage('card', 0), __CreateView(0));

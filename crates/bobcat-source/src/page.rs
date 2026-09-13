@@ -26,6 +26,7 @@ pub struct PageSource {
     page_bundle: Option<Arc<bobcat_core::resource::BundleSource>>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
+    js_data_processor: bool,
     compatibility_warnings: Vec<CompatibilityWarning>,
 }
 
@@ -302,6 +303,7 @@ impl PageSource {
             page_bundle: Some(page_bundle),
             style_sheet,
             config,
+            js_data_processor: template.config_flag("enableJSDataProcessor"),
             compatibility_warnings,
         })
     }
@@ -323,6 +325,7 @@ impl PageSource {
             page_bundle: None,
             style_sheet,
             config: raw_lynx_xml_config(),
+            js_data_processor: false,
             compatibility_warnings: Vec::new(),
         })
     }
@@ -373,6 +376,10 @@ impl PageSource {
     pub fn view_sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
+            data_processing: bobcat_core::DataProcessing {
+                on_js: self.js_data_processor,
+                ..Default::default()
+            },
             page_bundle: self.page_bundle.clone(),
             background_entry: self
                 .background_script

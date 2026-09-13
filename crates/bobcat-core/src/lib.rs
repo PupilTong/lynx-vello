@@ -13,7 +13,9 @@
 //! and one Stylo pool; views in different groups share nothing.
 //!
 //! A view boots once, at construction: [`ViewSources`] carries everything it
-//! runs on and [`LynxGroup::create_lynx_view`] does the rest. Decoded images are one of
+//! runs on and [`LynxGroup::create_lynx_view`] does the rest. [`LynxView::reload`]
+//! recreates the framework's component state inside those same realms; it does
+//! not evaluate the entry again. Decoded images are one of
 //! those sources — the core neither fetches, decodes, caches nor retains a
 //! single pixel. It asks the embedder's [`ResourceFetcher`](resource::ResourceFetcher),
 //! which is the one resource system a view has, for them by source string:
@@ -71,6 +73,7 @@ pub use style::{PreparsedDeclaration, PreparsedKeyframe, PreparsedRule, Preparse
 #[cfg(target_arch = "wasm32")]
 pub use view::configure_wasm_workers;
 pub use view::{
-    DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize, LynxGroup, LynxView,
-    LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources, WindowTarget,
+    DataProcessing, DataUpdate, DrawTarget, EngineError, EngineEvent, EventRequester, FrameSize,
+    LynxGroup, LynxView, LynxViewError, NoWakeup, Screenshot, StyleThreads, ViewSources,
+    WindowTarget,
 };

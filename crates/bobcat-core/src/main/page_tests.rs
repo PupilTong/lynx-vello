@@ -243,8 +243,14 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        self.page
-            .open_realm(entry, "app:///main.js", None, None, None);
+        self.page.open_realm(
+            entry,
+            "app:///main.js",
+            None,
+            None,
+            None,
+            &crate::DataProcessing::default(),
+        );
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -372,6 +378,283 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
 
 /// A module completion is a task of its own, so what its continuation changed
 /// is committed without a command to carry it.
+#[test]
+fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_flush() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        let booted = owned.boot(&format!(
+            "{ONE_BOX}\nglobalThis.updatePage = data => __SetAttribute(box, 'data-value', String(data.value));"
+        )).await;
+        owned.page.apply(
+            [
+                ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                    data: serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        r#"{"value":7}"#,
+                    )
+                    .unwrap()
+                    .into(),
+                    reset: false,
+                }),
+                ToMain::Probe(Box::new(|document| {
+                    let node = document.document_element().children().next().unwrap();
+                    assert_eq!(node.attribute("data-value"), Some("7"));
+                })),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(owned.view.published.commit(), Some(booted + 1));
+        assert!(!owned.page.ended());
+    });
+}
+
+#[test]
+fn reload_before_loading_is_rejected_without_poisoning_boot_or_replaying_it() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        owned.page.apply(std::iter::once(ToMain::PageUpdate(
+            crate::link::PageUpdate::Reload(
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                    r#"{"value":9}"#,
+                )
+                .unwrap()
+                .into(),
+            ),
+        )));
+        assert!(
+            matches!(owned.events().as_slice(), [EngineEvent::ScriptReported { message, .. }] if message == "ReloadTemplate before LoadTemplate!")
+        );
+        owned.boot(&format!(
+            "{ONE_BOX}\nglobalThis.updatePage = (data,options) => {{ if(!options.reloadTemplate) throw Error('missing reload'); __SetAttribute(box, 'data-value', String(data.value)); }};"
+        )).await;
+        owned
+            .page
+            .apply(std::iter::once(ToMain::Probe(Box::new(|document| {
+                let node = document.document_element().children().next().unwrap();
+                assert_eq!(node.attribute("data-value"), None);
+            }))));
+        owned.page.apply(std::iter::once(ToMain::PageUpdate(
+            crate::link::PageUpdate::Reload(
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                    r#"{"value":7}"#,
+                )
+                .unwrap()
+                .into(),
+            ),
+        )));
+        owned
+            .page
+            .apply(std::iter::once(ToMain::Probe(Box::new(|document| {
+                let node = document.document_element().children().next().unwrap();
+                assert_eq!(node.attribute("data-value"), Some("7"));
+            }))));
+        assert!(!owned.page.ended());
+    });
+}
+
+#[test]
+fn reload_during_mts_import_is_rejected_without_replaying_after_import() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("entry request", |harness| !harness.sources.is_empty())
+            .await;
+        harness.answer("app:///main.js", &format!(
+            "{ONE_BOX}\nglobalThis.updatePage = (data,options) => {{ if(options.reloadTemplate) throw Error('early reload was replayed'); __SetAttribute(box,'data-value',String(data.value)); }}; await import('./continue.js');"
+        ));
+        harness
+            .until("deferred import", |harness| !harness.sources.is_empty())
+            .await;
+        for reset in [false, true] {
+            harness
+                .commands
+                .send(ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                    data: serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        r#"{"value":9}"#,
+                    )
+                    .unwrap()
+                    .into(),
+                    reset,
+                }))
+                .unwrap();
+        }
+        harness
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::Reload(
+                serde_json::Map::new().into(),
+            )))
+            .unwrap();
+        harness.until("early reload report", |harness| harness.events.iter().any(|event| {
+            matches!(event, EngineEvent::ScriptReported { message, .. } if message.contains("ReloadTemplate in another loading process"))
+        })).await;
+        harness
+            .commands
+            .send(ToMain::Probe(Box::new(|document| {
+                assert!(
+                    document.document_element().children().next().is_none(),
+                    "the initial render has not started during entry import"
+                );
+            })))
+            .unwrap();
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 1 })
+            .unwrap();
+        harness
+            .until("probe during import", |harness| {
+                harness.view.published.begin_frame_serviced() == 1
+            })
+            .await;
+        harness.answer("app:///continue.js", "export {};");
+        harness
+            .until("BTS never started", |h| !h.workers.is_empty())
+            .await;
+        let background = harness.background_worker();
+        acknowledge_background(&background);
+        harness
+            .until("boot after rejected reload", |harness| {
+                harness
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, EngineEvent::ScriptFinished))
+            })
+            .await;
+        assert!(harness.events.iter().all(|event| matches!(
+            event,
+            EngineEvent::ScriptReported { .. } | EngineEvent::ScriptFinished
+        )));
+        assert!(!harness.owner.is_finished());
+        harness
+            .commands
+            .send(ToMain::Probe(Box::new(|document| {
+                let node = document.document_element().children().next().unwrap();
+                assert_eq!(node.attribute("data-value"), None);
+            })))
+            .unwrap();
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 2 })
+            .unwrap();
+        harness
+            .until("probe after import", |harness| {
+                harness.view.published.begin_frame_serviced() == 2
+            })
+            .await;
+    });
+}
+
+#[test]
+fn updates_before_boot_are_ignored_by_default() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        for reset in [false, true] {
+            owned.page.apply(std::iter::once(ToMain::PageUpdate(
+                crate::link::PageUpdate::Data {
+                    data: serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                        r#"{"value":9}"#,
+                    )
+                    .unwrap()
+                    .into(),
+                    reset,
+                },
+            )));
+        }
+        owned.boot(&format!(
+            "{ONE_BOX}\nglobalThis.updatePage = data => __SetAttribute(box, 'data-value', String(data.value));"
+        )).await;
+        // The default host policy discards early data rather than replaying it
+        // into an update after the first render.
+        let booted = owned.view.published.commit();
+        owned
+            .page
+            .apply(std::iter::once(ToMain::Probe(Box::new(|document| {
+                let node = document.document_element().children().next().unwrap();
+                assert_eq!(node.attribute("data-value"), None);
+            }))));
+        assert_eq!(owned.view.published.commit(), booted);
+        assert!(!owned.page.ended());
+    });
+}
+
+#[test]
+fn global_props_received_while_loading_become_the_initial_environment() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        for data in [r#"{"seed":1,"keep":2}"#, r#"{"seed":3}"#] {
+            harness
+                .commands
+                .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalProps(
+                    serde_json::from_str(data).unwrap(),
+                )))
+                .unwrap();
+        }
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 1 })
+            .unwrap();
+        harness
+            .until("staged props", |h| {
+                h.view.published.begin_frame_serviced() == 1
+            })
+            .await;
+        harness.answer("app:///main.js",&format!(r"
+            {ONE_BOX}
+            if (lynx.__globalProps.seed!==3 || lynx.__globalProps.keep!==2) throw Error('entry props');
+            const render=globalThis.renderPage;
+            globalThis.renderPage=data=>{{
+                if (lynx.__globalProps.seed!==4 || lynx.__globalProps.keep!==2) throw Error('render props');
+                render(data);
+            }};
+            globalThis.updateGlobalProps=()=>{{throw Error('early props triggered update hook');}};
+            await import('./continue.js');
+            if (lynx.__globalProps.seed!==4) throw Error('import-time props');
+        "));
+        harness
+            .until("deferred import", |h| !h.sources.is_empty())
+            .await;
+        harness
+            .commands
+            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalProps(
+                serde_json::from_str(r#"{"seed":4}"#).unwrap(),
+            )))
+            .unwrap();
+        harness
+            .commands
+            .send(ToMain::BeginFrame { now: 0.0, seq: 2 })
+            .unwrap();
+        harness
+            .until("import-time props delivered", |h| {
+                h.view.published.begin_frame_serviced() == 2
+            })
+            .await;
+        harness.answer("app:///continue.js", "export {};");
+        harness
+            .until("BTS never started", |h| !h.workers.is_empty())
+            .await;
+        let background = harness.background_worker();
+        acknowledge_background(&background);
+        harness
+            .until("boot outcome", |h| !h.events.is_empty())
+            .await;
+        assert!(
+            harness
+                .events
+                .iter()
+                .all(|e| matches!(e, EngineEvent::ScriptFinished)),
+            "{:?}",
+            harness.events
+        );
+        assert!(harness.view.published.commit().is_some());
+    });
+}
+
 #[test]
 fn a_module_completion_commits_with_no_command_behind_it() {
     on_a_local_set(async {
@@ -508,7 +791,14 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             ingredients(),
             view.token.clone(),
         );
-        page.open_realm(ONE_BOX, "app:///main.js", None, None, None);
+        page.open_realm(
+            ONE_BOX,
+            "app:///main.js",
+            None,
+            None,
+            None,
+            &crate::DataProcessing::default(),
+        );
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -561,7 +851,14 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
-        page.open_realm(LISTENING_BOX, "app:///main.js", None, None, None);
+        page.open_realm(
+            LISTENING_BOX,
+            "app:///main.js",
+            None,
+            None,
+            None,
+            &crate::DataProcessing::default(),
+        );
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;

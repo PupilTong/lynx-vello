@@ -68,6 +68,10 @@ impl Pair {
     }
 
     fn unbooted(background_source: Option<&str>) -> Self {
+        Self::unbooted_with_data(background_source, PageData::default())
+    }
+
+    fn unbooted_with_data(background_source: Option<&str>, page_data: PageData) -> Self {
         let home = match background_source {
             Some(source) => {
                 WorkerHome::with_entry_for_test((source.to_owned(), "test:bts-entry".to_owned()))
@@ -89,7 +93,7 @@ impl Pair {
             &WorkerFactory::new(home.commands()),
             "app:///nested/main.js",
             background_source.map(|_| "test:bts-entry".to_owned()),
-            PageData::default(),
+            page_data,
         )
         .unwrap();
         Self {
@@ -226,6 +230,304 @@ fn asked_for_a_worker(notices: &[ViewNotice]) -> bool {
 }
 
 #[test]
+fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
+    let mut pair = Pair::unbooted_with_data(
+        Some(
+            r"
+        const params = lynx.getApp()._params;
+        if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
+        const data = params.updateData;
+        if (data !== lynx.__initData || data.count !== 42 || 'raw' in data ||
+            Object.hasOwn(data, 'missing') ||
+            data.nan !== null || data.infinity !== null || !Object.is(data.zero, 0) ||
+            !Object.hasOwn(data, '__proto__') || data.__proto__.own !== true || data.own !== undefined ||
+            data.nested.count !== 42 || lynx.__globalProps.theme !== 'dark') throw Error('BTS bootstrap data');
+        lynx.getCoreContext().dispatchEvent({type:'reply',data});
+        ",
+        ),
+        PageData {
+            init_data: Some(serde_json::json!({"raw":41}).to_string()),
+            global_props: Some(serde_json::json!({"theme":"dark"}).to_string()),
+        },
+    );
+
+    pair.boot(r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        const initial = lynx.__initData;
+        lynx.__initData = {};
+        await Promise.resolve();
+        globalThis.processData = function(data, name) {
+            if (data !== initial || arguments.length !== 2 || name !== '') throw Error('processor arguments');
+            return Object.fromEntries([
+                ['count', data.raw + 1], ['missing', undefined], ['nan', NaN], ['infinity', Infinity],
+                ['zero', -0], ['__proto__', {own:true}], ['nested', {count:42}],
+            ]);
+        };
+        globalThis.renderPage = data => {
+            if (data.count !== 42 || !Number.isNaN(data.nan)) throw Error('MTS processor result');
+            // The data posted to BTS is already a snapshot of the result.
+            data.nested.count = 99;
+        };
+        ").unwrap();
+    pair.deliver();
+    pair.check(
+        r"
+        if (results.length !== 1 || results[0].count !== 42 || results[0].nested.count !== 42 ||
+            Object.hasOwn(results[0], 'missing') || !Object.is(results[0].zero, 0) ||
+            results[0].nan !== null) throw Error('BTS result');
+        ",
+    );
+    assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn native_mts_jobs_finish_between_processing_rendering_and_bts_notifications() {
+    for engine_hooks in [false, true] {
+        let mut pair = Pair::unbooted_with_data(
+            Some(
+                r"
+            const app = lynx.getApp();
+            const reply = (kind, data) => lynx.getCoreContext().dispatchEvent({type:'reply', data:[kind,data]});
+            reply('initial', app._params.updateData);
+            app.updateCardData = data => reply('update', data);
+            app.onAppReload = data => reply('reload', data);
+        ",
+            ),
+            PageData {
+                init_data: Some(serde_json::json!({"count":1}).to_string()),
+                global_props: None,
+            },
+        );
+
+        pair.boot(&format!(r"
+            globalThis.results = [];
+            lynx.getJSContext().addEventListener('reply', event => results.push(event.data));
+            let current;
+            globalThis.processData = data => {{
+                current = {{count:data.count}};
+                const result = current;
+                Promise.resolve().then(() => Promise.resolve().then(() => result.count += 2));
+                return result;
+            }};
+            const render = data => {{
+                if (data.count !== 3) throw Error('render preceded processor jobs');
+                Promise.resolve().then(() => data.afterRender = true);
+            }};
+            const remove = () => {{
+                Promise.resolve().then(() => Promise.resolve().then(() => current.removed = true));
+            }};
+            const update = (data, options) => {{
+                if (data.count !== (options.reloadTemplate ? 9 : 6)) throw Error('update preceded processor jobs');
+                if (options.reloadTemplate && data.removed !== true) throw Error('update preceded removal jobs');
+                Promise.resolve().then(() => Promise.resolve().then(() => data.afterUpdate = true));
+            }};
+            if ({engine_hooks}) {{
+                const engine = lynx.getEngine();
+                engine.addEventListener('__RenderPage', event => render(...event.data));
+                engine.addEventListener('__RemoveComponents', remove);
+                engine.addEventListener('__UpdatePage', event => update(...event.data));
+            }} else {{
+                globalThis.renderPage = render;
+                globalThis.removeComponents = remove;
+                globalThis.updatePage = update;
+            }}
+        ")).unwrap();
+        pair.deliver();
+        for (count, reload) in [(4, false), (7, true)] {
+            let data = serde_json::json!({"count":count})
+                .as_object()
+                .unwrap()
+                .clone()
+                .into();
+            let update = if reload {
+                crate::link::PageUpdate::Reload(data)
+            } else {
+                crate::link::PageUpdate::Data { data, reset: false }
+            };
+            pair.runtime
+                .as_mut()
+                .unwrap()
+                .apply_page_update(&mut pair.js, update)
+                .unwrap();
+            pair.deliver();
+        }
+        pair.check(r"
+            const expected = [['initial',{count:3}],['update',{count:6,afterUpdate:true}],['reload',{count:9,removed:true}]];
+            if (JSON.stringify(results) !== JSON.stringify(expected)) throw Error(JSON.stringify(results));
+        ");
+        assert!(!pair.notices().iter().any(|notice| matches!(
+            notice,
+            ViewNotice::Engine(
+                crate::EngineEvent::ScriptReported { .. } | crate::EngineEvent::WorkerFailed(_)
+            )
+        )));
+    }
+}
+
+#[test]
+fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
+    let mut pair = Pair::unbooted_with_data(
+        Some(
+            r"
+        const props=lynx.__globalProps;
+        if (props.seed!==3 || props.keep!==1 || props.nested.value!==2) throw Error('BTS initial props');
+        lynx.getApp().updateGlobalProps=data=>{
+            if (data.keep!==1 || data.nested.value!==2 || 'scriptOnly' in data) throw Error('host props mutated');
+            lynx.getCoreContext().dispatchEvent({type:'reply',data:['update',data.seed]});
+        };
+        lynx.getCoreContext().addEventListener('mts-props', e=>{
+            lynx.getCoreContext().dispatchEvent({type:'reply',data:['mts',e.data]});
+        });
+        lynx.getCoreContext().dispatchEvent({type:'reply',data:['initial',props.seed]});
+    ",
+        ),
+        PageData {
+            init_data: None,
+            global_props: Some(
+                serde_json::json!({"seed":1,"keep":1,"nested":{"value":2}}).to_string(),
+            ),
+        },
+    );
+
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .prepare_global_props(serde_json::from_str(r#"{"seed":2}"#).unwrap());
+    pair.boot(r"
+        import {__BobcatApplyPageUpdate} from 'bobcat:runtime';
+        globalThis.results=[];
+        lynx.getJSContext().addEventListener('reply', e=>results.push(e.data));
+        if (lynx.__globalProps.seed!==2) throw Error('staged initial props');
+        globalThis.updateGlobalProps=()=>{throw Error('early hook');};
+        __BobcatApplyPageUpdate(JSON.stringify({method:'updateGlobalProps',args:[{seed:3}]}));
+        const initial=lynx.__globalProps;
+        globalThis.renderPage=()=>{
+            if (initial.seed!==3) throw Error('initial render props');
+            initial.nested.value=99;
+            initial.scriptOnly=true;
+        };
+        lynx.getEngine().addEventListener('__UpdateGlobalProps',e=>{
+            if (e.origin!=='Engine' || e.data.length!==1 || e.data[0].seed!==4 || lynx.__globalProps.seed!==4 ||
+                lynx.__globalProps===initial || initial.seed!==3) throw Error('MTS props delivery');
+            lynx.getJSContext().dispatchEvent({type:'mts-props',data:e.data[0].seed});
+            throw Error('props hook failed');
+        });
+    ").unwrap();
+    pair.deliver();
+    pair.check(
+        r#"if (JSON.stringify(results)!=='[["initial",3]]') throw Error('initial hook count');"#,
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .apply_page_update(
+            &mut pair.js,
+            crate::link::PageUpdate::GlobalProps(serde_json::from_str(r#"{"seed":4}"#).unwrap()),
+        )
+        .unwrap();
+    pair.deliver();
+    pair.deliver();
+    pair.check(r#"if (JSON.stringify(results)!=='[["initial",3],["update",4],["mts",4]]') throw Error('props event order');"#);
+    assert!(pair.notices().iter().any(|notice| matches!(notice,
+        ViewNotice::Engine(crate::EngineEvent::ScriptReported {message,..}) if message.contains("props hook failed"))));
+}
+
+#[test]
+fn initial_processor_name_is_consumed_by_mts_or_preserved_for_the_js_processor_path() {
+    for on_js in [false, true] {
+        let mut pair = Pair::unbooted_with_data(
+            Some(&format!(
+                r"
+            const params=lynx.getApp()._params;
+            if (params.processorName !== {name:?} || params.updateData.value !== {value}) throw Error('BTS processor parameters');
+            lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
+            ",
+                name = if on_js { "selected" } else { "" },
+                value = if on_js { 3 } else { 4 }
+            )),
+            PageData {
+                init_data: Some(serde_json::json!({"value":3}).to_string()),
+                global_props: None,
+            },
+        );
+
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .prepare_data_processing(&crate::DataProcessing {
+                initial_processor: "selected".into(),
+                on_js,
+            });
+        pair.boot(&format!(r"
+            globalThis.results=[];
+            lynx.getJSContext().addEventListener('reply',e=>results.push(e.data));
+            globalThis.processData=(data,name)=>{{
+                if ({on_js} || name!=='selected') throw Error('unexpected processor');
+                return {{value:data.value+1}};
+            }};
+            globalThis.renderPage=(data,options)=>{{
+                if (data.value !== {value} || options.processorName !== {name}) throw Error('MTS processor parameters');
+            }};
+            ",value=if on_js {3} else {4},name=if on_js {"'selected'"} else {"undefined"})).unwrap();
+        pair.deliver();
+        pair.check(&format!(
+            "if (results.length!==1 || results[0]!=={}) throw Error('BTS data');",
+            if on_js { 3 } else { 4 }
+        ));
+        assert!(!pair.notices().iter().any(|notice| matches!(
+            notice,
+            ViewNotice::Engine(
+                crate::EngineEvent::ScriptReported { .. } | crate::EngineEvent::WorkerFailed(_)
+            )
+        )));
+    }
+}
+
+#[test]
+fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms() {
+    for result in [
+        "undefined",
+        "null",
+        "[]",
+        "7",
+        "(() => {throw Error('processor failed')})()",
+    ] {
+        let mut pair = Pair::unbooted_with_data(
+            Some(
+                r"
+            const params = lynx.getApp()._params;
+        if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
+        const data = params.updateData;
+            if (data.seed !== 3) throw Error('BTS fallback data');
+            lynx.getCoreContext().dispatchEvent({type:'reply',data});
+            ",
+            ),
+            PageData {
+                init_data: Some(serde_json::json!({"seed":3}).to_string()),
+                global_props: None,
+            },
+        );
+
+        pair.boot(&format!(r"
+            globalThis.results = [];
+            lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+            globalThis.processData = () => {result};
+            globalThis.renderPage = data => {{ if (data.seed !== 3) throw Error('MTS fallback data'); }};
+            ")).unwrap();
+        pair.deliver();
+        pair.check(
+            "if (results.length !== 1 || results[0].seed !== 3) throw Error('missing fallback');",
+        );
+        let notices = pair.notices();
+        let reports = notices.iter().filter(|notice| matches!(notice,
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported {message,..}) if message.contains("processor failed"))).count();
+        assert_eq!(reports, usize::from(result.contains("throw")));
+        assert!(worker_failures(notices).is_empty());
+    }
+}
+
+#[test]
 fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
     let mut pair = Pair::with_background(
         r"
@@ -235,7 +537,7 @@ fn engine_render_delivers_lifecycle_to_the_current_background_app_hook() {
         globalThis.renderPage = false;
         await Promise.resolve();
         lynx.getEngine().addEventListener('__RenderPage', e => {
-            __OnLifecycleEvent(['render', e.data]);
+            __OnLifecycleEvent(['render', e.data[0]]);
         });
         ",
         Some(

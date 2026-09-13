@@ -743,3 +743,34 @@ async fn named_css_survives_native_web_conversion_and_stays_per_view() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
+
+#[test]
+fn native_js_data_processor_requires_a_boolean_and_survives_web_conversion() {
+    for (value, expected) in [
+        ("true", true),
+        ("false", false),
+        ("\"true\"", false),
+        ("1", false),
+        ("null", false),
+    ] {
+        let mut encoded = Vec::new();
+        string(
+            &mut encoded,
+            &format!(r#"{{"enableJSDataProcessor":{value}}}"#),
+        );
+        let native = native_bundle(vec![
+            (SECTION_CONFIG, encoded),
+            custom_section(vec![CustomSection::source("entry__main-thread", "void 0")]),
+        ]);
+        for web in [false, true] {
+            assert_eq!(
+                default_page(&native, web)
+                    .view_sources()
+                    .data_processing
+                    .on_js,
+                expected,
+                "config={value}, web={web}"
+            );
+        }
+    }
+}
