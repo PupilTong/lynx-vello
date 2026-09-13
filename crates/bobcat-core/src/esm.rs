@@ -6,16 +6,10 @@
 //! neither runtime owns them.
 
 /// The `packages/bobcat-element/src` module `$name` as the JavaScript a realm
-/// evaluates: what TypeScript 7 emitted for it into the package's committed
-/// `dist/`, which `build.rs` refuses to build over once the source has changed.
+/// evaluates, compiled by `build.rs` into this Cargo build's `OUT_DIR`.
 macro_rules! runtime_source {
     ($name:literal) => {
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/bobcat-element/dist/",
-            $name,
-            ".js"
-        ))
+        include_str!(concat!(env!("OUT_DIR"), "/runtime/", $name, ".js"))
     };
 }
 pub(crate) use runtime_source;

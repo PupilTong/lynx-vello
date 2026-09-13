@@ -12,7 +12,7 @@ Rust and pnpm monorepo exploring a native [Lynx](https://lynxjs.org) rendering s
 | [`crates/bobcat-wasm`](crates/bobcat-wasm) | Pure-Rust `wasm-bindgen` browser embedder. An explicit Worker owns the complete engine, crates.io Vello 0.9/wgpu 29, and a transferred `OffscreenCanvas` — with one `Painter` over that canvas kept across page loads; it uses `wasm_thread` to run the DOM/style/layout owner in a nested shared-memory Worker. The URL facade loads JavaScript, CSS, or a complete Lynx XML source card while the UI remains a JavaScript-only asynchronous host boundary. |
 | [`crates/bobcat-source`](crates/bobcat-source) | Unified Lynx XML, web-bundle and source-based native external-bundle parsing; shared source registration for embedders. [Architecture and API](docs/source-architecture.md). |
 | [`crates/dom`](crates/dom) | Generic W3C-DOM-subset `Document<T>`/`Node<T>` tree, standards-oriented Stylo cascade/layout core, and document-owned private paint pipeline. |
-| [`packages/bobcat-element`](packages/bobcat-element) | The colocated TypeScript ESMs whose TypeScript 7 emit, committed in `dist/`, `bobcat-core` embeds — `bobcat:runtime`, the `bobcat:element` PAPI, timers, `EventTarget`, the cross-thread Context, the `Worker` class, and the worker/BTS scopes. The PAPI module's named `__*` exports own the Element PAPI, Lynx tag vocabulary, native `NodeId` handles, and `FinalizationRegistry` lifecycle, and its `Document` class is what the boot script creates the page with. |
+| [`packages/bobcat-element`](packages/bobcat-element) | The colocated TypeScript ESMs that `bobcat-core` compiles with TypeScript 7 into Cargo's `OUT_DIR` and embeds — `bobcat:runtime`, the `bobcat:element` PAPI, timers, `EventTarget`, the cross-thread Context, the `Worker` class, and the worker/BTS scopes. The PAPI module's named `__*` exports own the Element PAPI, Lynx tag vocabulary, native `NodeId` handles, and `FinalizationRegistry` lifecycle, and its `Document` class is what the boot script creates the page with. |
 | [`crates/hughie`](crates/hughie) | Statically-dispatched box-layout engine speaking the stylo fork's computed-value vocabulary: CSS Flexbox, numeric CSS Grid Level 2, Starlight `display: linear` and `display: relative`, and shared leaf/cache/positioned/rounding machinery are implemented. |
 | [`crates/quickjs-rust-bridge`](crates/quickjs-rust-bridge) | Owner-thread-bound Rust wrapper around the pinned QuickJS C submodule, including exact values, sanitized exceptions, pending jobs, synchronous source/native-module loading, module namespaces, and Rust-closure-backed host functions; it is independent of Bobcat and runtime policy. |
 | [`crates/flashbulb`](crates/flashbulb) | Screenshot testing infrastructure: RGBA images, a `pixelmatch` port matching Playwright's tolerances, and golden-file management. This is to lynx-vello's render tests what Playwright is to lynx-stack's `web-core-e2e` and `web-elements`. |
@@ -42,6 +42,12 @@ and type-checked by TypeScript 7 (`pnpm test:type`). Libraries belong under
 by `lynx-stack`.
 
 ## Running Bobcat
+
+Install Node.js (`^22.18.0 || ^24`) and the workspace's pnpm version, then run
+`pnpm install --frozen-lockfile` before invoking Cargo. `bobcat-core` compiles
+its TypeScript runtime during the Rust build, including Wasm builds. Generated
+JavaScript stays in Cargo's `OUT_DIR` and is never committed. For local
+inspection, `pnpm --filter bobcat-element build` emits to ignored `dist/`.
 
 The headed runner currently opens a native window on macOS:
 

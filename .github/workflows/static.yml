@@ -46,17 +46,8 @@ jobs:
         with:
           tool: wasm-pack@0.13.1
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24.15.0
-          cache: pnpm
-
-      - name: Install JavaScript dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Set up workspace JavaScript
+        uses: ./.github/actions/setup-javascript
 
       - name: Configure Pages
         id: pages

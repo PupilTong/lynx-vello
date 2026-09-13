@@ -23,8 +23,14 @@ interface TestScope {
   postMessage(message: unknown): void;
   addEventListener(
     name: string,
-    callback: (event: { data: unknown }) => void,
+    callback: (event: { data: unknown }) => void | Promise<void>,
   ): void;
+  emptyLepusMethod?: () => undefined;
+  slowLepusMethod?: () => Promise<unknown>;
+  fastLepusMethod?: () => Promise<null>;
+  nestedLepusMethod?: () => unknown;
+  rejectedLepusMethod?: () => Promise<never>;
+  'method; throw Error("name evaluated")'?: () => unknown;
   failedLepusMethod?: (data: unknown) => unknown;
   inspectLepusData?: (data: unknown) => unknown;
   bigIntLepusMethod?: (data: unknown) => unknown;
@@ -42,7 +48,7 @@ const originalPostMessage = scope.postMessage;
 const originalAddEventListener = scope.addEventListener;
 let mts: typeof mtsRuntime;
 let bts: typeof btsRuntime.lynx;
-let receiveInBackground: (event: { data: unknown }) => void;
+let receiveInBackground: (event: { data: unknown }) => void | Promise<void>;
 const toBackground: Recorded[] = [];
 const toMain: unknown[] = [];
 const worker = Object.assign(new eventTarget.EventTarget(), {
@@ -53,6 +59,7 @@ const worker = Object.assign(new eventTarget.EventTarget(), {
 
 beforeAll(async () => {
   mts = await import("../src/main-thread-runtime.ts");
+  scope.emptyLepusMethod = () => undefined;
   scope.postMessage = (message: unknown) => {
     toMain.push(JSON.parse(JSON.stringify([message]))[0]);
   };
@@ -63,17 +70,18 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  delete scope.emptyLepusMethod;
   scope.postMessage = originalPostMessage;
   scope.addEventListener = originalAddEventListener;
 });
 
 function deliverToBackground() {
-  receiveInBackground({ data: toBackground.shift() });
+  return receiveInBackground({ data: toBackground.shift() });
 }
 
 async function deliverToMain() {
   worker.dispatchEvent({ type: "message", data: toMain.shift() });
-  // callLepusMethod awaits both synchronous and asynchronous return values.
+  // Run the MTS await continuation that sends the reply.
   await Promise.resolve();
   await Promise.resolve();
 }
@@ -95,11 +103,11 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
-    expect(toBackground[1]).toEqual({ type: "custom", data: 2 });
+    expect(toBackground[1]).toEqual({ type: "custom", data: 0 });
     deliverToBackground();
     deliverToBackground();
     deliverToBackground();
-    expect(seen).toEqual([["context", 2]]);
+    expect(seen).toEqual([["context", 0]]);
     const app = bts.getApp();
     app.publicComponentEvent = function (...args) {
       expect(this).toBe(app);
@@ -110,7 +118,7 @@ describe("MTS/BTS lifecycle runtime", () => {
       seen.push(args);
     };
     expect(seen).toEqual([
-      ["context", 2], ["component", "second", { value: 3 }], ["first", { value: 1 }],
+      ["context", 0], ["component", "second", { value: 3 }], ["first", { value: 1 }],
     ]);
     app.publishEvent = function (...args) { seen.push(["replacement", ...args]); };
     mts.__BobcatPublishEvent(0, "third", { value: 4 });
@@ -143,88 +151,168 @@ describe("MTS/BTS lifecycle runtime", () => {
     ]);
   });
 
-  it("reports rejected methods through BTS and removes failed callback registrations", async () => {
+  it("reads the current global property and schedules both reply and callback as Promise jobs", async () => {
+    const name = 'method; throw Error("name evaluated")';
     const callback = rstest.fn();
-    scope.failedLepusMethod = async () => { throw new TypeError("method failed"); };
+    scope[name] = () => 'before delivery';
     try {
-      bts.getNativeApp().callLepusMethod("failedLepusMethod", {}, callback);
-      await deliverToMain();
-      const reply = toBackground[0];
-      expect(() => deliverToBackground()).toThrow("method failed");
+      bts.getNativeApp().callLepusMethod(name, {}, callback);
+      scope[name] = function () {
+        expect(this).toBe(scope);
+        return 'at delivery';
+      };
+      worker.dispatchEvent({type: "message", data: toMain.shift()});
+      expect(toBackground).toHaveLength(0);
+      await Promise.resolve();
+      expect(toBackground[0]).toMatchObject({method: "callLepusMethodResult", result: 'at delivery'});
+      const delivery = deliverToBackground();
       expect(callback).not.toHaveBeenCalled();
-      receiveInBackground({ data: { ...reply, error: undefined, result: "late" } });
-      expect(callback).not.toHaveBeenCalled();
-      bts.getNativeApp().callLepusMethod("failedLepusMethod", {});
+      await delivery;
+      expect(callback).toHaveBeenCalledWith('at delivery');
+    } finally { delete scope[name]; }
+  });
+
+  it("awaits returned Promises without blocking later calls or mixing their callbacks", async () => {
+    let resolveSlow: (value: unknown) => void = () => {};
+    const slow = rstest.fn();
+    const fast = rstest.fn();
+    scope.slowLepusMethod = () => new Promise(resolve => { resolveSlow = resolve; });
+    scope.fastLepusMethod = async () => null;
+    try {
+      bts.getNativeApp().callLepusMethod("slowLepusMethod", {}, slow);
       await deliverToMain();
-      expect(() => deliverToBackground()).toThrow("method failed");
+      expect(toBackground).toHaveLength(0);
+      bts.getNativeApp().callLepusMethod("fastLepusMethod", {}, fast);
+      await deliverToMain(); await deliverToBackground();
+      expect(fast.mock.calls).toEqual([[null]]);
+      expect(slow).not.toHaveBeenCalled();
+      resolveSlow({answer: 42});
+      await Promise.resolve();
+      await deliverToBackground();
+      expect(slow).toHaveBeenCalledWith({answer: 42});
+    } finally {
+      delete scope.slowLepusMethod;
+      delete scope.fastLepusMethod;
+    }
+  });
+
+  it("snapshots at the await continuation rather than draining every nested job", async () => {
+    const callback = rstest.fn();
+    const result = {value: 0};
+    scope.nestedLepusMethod = () => {
+      Promise.resolve().then(() => Promise.resolve().then(() => result.value++));
+      return result;
+    };
+    try {
+      bts.getNativeApp().callLepusMethod("nestedLepusMethod", {}, callback);
+      await deliverToMain(); await deliverToBackground();
+      expect(result.value).toBe(1);
+      expect(callback).toHaveBeenCalledWith({value: 0});
+    } finally { delete scope.nestedLepusMethod; }
+  });
+
+  it("reports throws and rejected results without invoking success callbacks", async () => {
+    const callback = rstest.fn();
+    scope.failedLepusMethod = () => { throw new TypeError("method failed"); };
+    scope.rejectedLepusMethod = async () => { throw new Error("method rejected"); };
+    try {
+      for (const name of ["failedLepusMethod", "rejectedLepusMethod"]) {
+        bts.getNativeApp().callLepusMethod(name, {}, callback);
+        await deliverToMain();
+        const reply = toBackground[0];
+        await expect(deliverToBackground()).rejects.toThrow(/method (failed|rejected)/);
+        await receiveInBackground({data: {...reply, error: undefined, result: "duplicate"}});
+        expect(callback).not.toHaveBeenCalled();
+      }
+      bts.getNativeApp().callLepusMethod("rejectedLepusMethod", {});
+      await deliverToMain();
+      await expect(deliverToBackground()).rejects.toThrow("method rejected");
+      bts.getNativeApp().callLepusMethod("absentLepusMethod", {}, callback);
+      await deliverToMain(); await deliverToBackground();
+      expect(callback.mock.calls).toEqual([[undefined]]);
     } finally {
       delete scope.failedLepusMethod;
+      delete scope.rejectedLepusMethod;
     }
   });
 
-  it("removes callback registrations before invoking a callback that throws", async () => {
+  it("releases callback IDs before a throwing callback or a duplicate reply", async () => {
     const callback = rstest.fn(() => { throw new Error("callback failed"); });
-    bts.getNativeApp().callLepusMethod("missingLepusMethod", {}, callback);
+    bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
     await deliverToMain();
     const reply = toBackground[0];
-    expect(() => deliverToBackground()).toThrow("callback failed");
+    const delivery = deliverToBackground();
+    const duplicate = receiveInBackground({data: reply});
+    expect(callback).not.toHaveBeenCalled();
+    await expect(delivery).rejects.toThrow("callback failed");
+    await duplicate;
     expect(callback).toHaveBeenCalledTimes(1);
-    receiveInBackground({ data: reply });
+    await receiveInBackground({data: reply});
     expect(callback).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps missing method data distinct from explicit null through JSON transport", async () => {
-    const seen: unknown[] = [];
-    scope.inspectLepusData = (data: unknown) => {
-      seen.push(data);
-      return data;
-    };
+  it("ignores primitive RPC arguments and uses the Worker JSON value semantics", async () => {
     const callback = rstest.fn();
+    scope.inspectLepusData = (data: unknown) => data;
     try {
-      bts.getNativeApp().callLepusMethod("inspectLepusData", undefined, callback);
-      await deliverToMain();
-      deliverToBackground();
-      bts.getNativeApp().callLepusMethod("inspectLepusData", null, callback);
-      await deliverToMain();
-      deliverToBackground();
-      expect(seen).toEqual([undefined, null]);
-      expect(callback.mock.calls).toEqual([[undefined], [null]]);
-    } finally {
-      delete scope.inspectLepusData;
-    }
+      for (const data of [undefined, null, false, 42, "text", 1n, Symbol(), () => {}]) {
+        bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
+      }
+      expect(toMain).toEqual([]);
+      const data = {
+        missing: undefined,
+        nil: null as null | string,
+        negativeZero: -0,
+        nan: NaN,
+        infinity: Infinity,
+        array: [undefined, null],
+        object: { bobcat: "value", value: ["undefined"] },
+      };
+      bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
+      data.nil = "changed after send";
+      await deliverToMain(); await deliverToBackground();
+      expect(callback.mock.calls).toEqual([[{
+        nil: null,
+        negativeZero: 0,
+        nan: null,
+        infinity: null,
+        array: [null, null],
+        object: { bobcat: "value", value: ["undefined"] },
+      }]]);
+      expect(Object.hasOwn(callback.mock.calls[0]?.[0], "missing")).toBe(false);
+    } finally { delete scope.inspectLepusData; }
   });
 
-  it("cleans callbacks when request encoding fails and reports result encoding failures", async () => {
+  it("releases callbacks on failed sends and reports result JSON serialization failures", async () => {
     const callback = rstest.fn();
+    expect(() => bts.getNativeApp().callLepusMethod("emptyLepusMethod", { value: 1n }, callback)).toThrow();
     const postMessage = scope.postMessage;
     let failedId: number | undefined;
-    scope.postMessage = (message: { id?: number }) => {
-      failedId = message.id;
-      postMessage(message);
+    scope.postMessage = (message: unknown) => {
+      failedId = (message as { id?: number }).id;
+      throw new Error("send failed");
     };
     try {
-      expect(() => bts.getNativeApp().callLepusMethod("missingLepusMethod", 1n, callback)).toThrow();
-      receiveInBackground({ data: {
+      expect(() => bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback)).toThrow("send failed");
+      expect(failedId).toBeDefined();
+      await receiveInBackground({data: {
         bobcat: "runtime", method: "callLepusMethodResult", id: failedId, result: 1,
-      } });
+      }});
       expect(callback).not.toHaveBeenCalled();
-    } finally {
-      scope.postMessage = postMessage;
-    }
+    } finally { scope.postMessage = postMessage; }
     scope.bigIntLepusMethod = () => 1n;
     try {
       bts.getNativeApp().callLepusMethod("bigIntLepusMethod", {}, callback);
       await deliverToMain();
-      expect(() => deliverToBackground()).toThrow();
+      await expect(deliverToBackground()).rejects.toThrow();
       expect(callback).not.toHaveBeenCalled();
-    } finally {
-      delete scope.bigIntLepusMethod;
-    }
+    } finally { delete scope.bigIntLepusMethod; }
   });
+
 
   it("forwards explicit destroy events to the current app hook without disposing the runtime", async () => {
     const callback = rstest.fn();
-    bts.getNativeApp().callLepusMethod("missingLepusMethod", {}, callback);
+    bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
     await deliverToMain();
     const lateReply = toBackground.shift();
     const engine = mts.lynx.getEngine();
@@ -237,7 +325,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     engine.dispatchEvent({ type: "__DestroyLifetime", data: "ignored" });
     expect(toBackground).toEqual([{ bobcat: "runtime", method: "callDestroyLifetimeFun" }]);
     expect(() => deliverToBackground()).toThrow("BTS destroy");
-    receiveInBackground({ data: lateReply });
+    await receiveInBackground({ data: lateReply });
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledWith(undefined);
 
@@ -250,9 +338,9 @@ describe("MTS/BTS lifecycle runtime", () => {
     deliverToBackground();
     expect(replacement).toHaveBeenCalledTimes(1);
 
-    bts.getNativeApp().callLepusMethod("missingLepusMethod", {}, callback);
+    bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
     await deliverToMain();
-    deliverToBackground();
+    await deliverToBackground();
     expect(callback).toHaveBeenCalledTimes(2);
   });
 });
