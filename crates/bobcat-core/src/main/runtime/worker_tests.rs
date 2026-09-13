@@ -15,6 +15,20 @@ use crate::view::NoWakeup;
 /// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
 
+/// Recognizes the BTS readiness declaration inside a structured clone, which
+/// Rust cannot read into: the clone goes back into a realm and this predicate
+/// is applied there.
+const IS_READY: &str = r#"(m) => m?.bobcat === "runtime" && m.method === "backgroundReady""#;
+
+/// Whether the worker posted exactly this string.
+///
+/// A string crosses the transport as itself rather than inside an encoding,
+/// so this is the whole comparison; anything that is not a primitive is a
+/// structured clone, read back through `wire_json`.
+fn posted(value: &HostValue, text: &str) -> bool {
+    matches!(value, HostValue::String(value) if value == text)
+}
+
 struct Pair {
     runtime: Option<MainThreadRuntime>,
     js: ScriptRuntime,
@@ -52,9 +66,8 @@ impl Pair {
         let event = block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE)
             .flatten()
             .expect("BTS acknowledgement, including an empty BTS entry");
-        assert!(
-            matches!(&event.payload, WorkerPayload::Message(json) if json.contains("backgroundReady"))
-        );
+        assert!(matches!(&event.payload, WorkerPayload::Message(value)
+            if crate::background::wire_matches(value, IS_READY)));
         self.runtime
             .as_mut()
             .unwrap()
@@ -159,9 +172,12 @@ impl Pair {
         let deadline = ClockInstant::now() + PATIENCE;
         loop {
             let event = block_on_deadline(self.events.recv(), deadline).flatten()?;
-            let ready = matches!(&event.payload, WorkerPayload::Message(json)
-                if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value|
-                    value.pointer("/0/method").and_then(serde_json::Value::as_str) == Some("backgroundReady")));
+            // Readiness is declared once, so the reader below runs only
+            // until it has been: reading a structured clone back costs a
+            // realm of its own, and after readiness no message is this one.
+            let ready = !self.runtime.as_ref().unwrap().readiness_declared()
+                && matches!(&event.payload, WorkerPayload::Message(value)
+                    if crate::background::wire_matches(value, IS_READY));
             if !ready {
                 return Some(event);
             }
@@ -215,7 +231,7 @@ impl Pair {
         while !self.runtime.as_mut().unwrap().disposal_finished().unwrap() {
             let event = self.next_event().expect("BTS acknowledges disposal");
             if let WorkerPayload::Message(ref data) = event.payload {
-                messages.push(data.clone());
+                messages.push(crate::background::wire_json(data));
             }
             self.runtime
                 .as_mut()
@@ -293,9 +309,12 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
         const params = lynx.getApp()._params;
         if (params.initData !== null || !Array.isArray(params.cacheData) || params.cacheData.length) throw Error('native initial slots');
         const data = params.updateData;
+        // The structured-clone transport keeps what JSON lost: an
+        // `undefined`-valued member stays an own member, the nonfinite
+        // numbers stay themselves, and negative zero stays negative.
         if (data !== lynx.__initData || data.count !== 42 || 'raw' in data ||
-            Object.hasOwn(data, 'missing') ||
-            data.nan !== null || data.infinity !== null || !Object.is(data.zero, 0) ||
+            !Object.hasOwn(data, 'missing') || data.missing !== undefined ||
+            !Number.isNaN(data.nan) || data.infinity !== Infinity || !Object.is(data.zero, -0) ||
             !Object.hasOwn(data, '__proto__') || data.__proto__.own !== true || data.own !== undefined ||
             data.nested.count !== 42 || lynx.__globalProps.theme !== 'dark') throw Error('BTS bootstrap data');
         lynx.getCoreContext().dispatchEvent({type:'reply',data});
@@ -331,8 +350,8 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
     pair.check(
         r"
         if (results.length !== 1 || results[0].count !== 42 || results[0].nested.count !== 42 ||
-            Object.hasOwn(results[0], 'missing') || !Object.is(results[0].zero, 0) ||
-            results[0].nan !== null) throw Error('BTS result');
+            !Object.hasOwn(results[0], 'missing') || !Object.is(results[0].zero, -0) ||
+            !Number.isNaN(results[0].nan)) throw Error('BTS result');
         ",
     );
     assert!(worker_failures(pair.notices()).is_empty());
@@ -741,6 +760,140 @@ fn string_handlers_reach_background_with_event_snapshots() {
             page[1].target.dataset.nested.value !== 'after' ||
             'elementRefptr' in e.target || 'stopPropagation' in e ||
             page[1].currentTarget.uid !== 2) throw Error(JSON.stringify(results));
+        ",
+    );
+}
+
+/// What a Context event carries is a structured clone in both directions, so
+/// the values a JSON transport could not spell survive the two threads: an
+/// `undefined`-valued key, `NaN`, a `Date`, a typed array, a `BigInt`, and a
+/// cycle.
+#[test]
+fn context_events_carry_structured_values_in_both_directions() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        const context = lynx.getJSContext();
+        context.addEventListener('reply', e => results.push(e.data));
+        const sent = { tag: 'mts', missing: undefined, nan: NaN,
+                       at: new Date(1700000000123),
+                       bytes: new Uint8Array([1, 2, 255]),
+                       big: 9007199254740993n };
+        sent.self = sent;
+        context.dispatchEvent({ type: 'request', data: sent });
+        ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', event => {
+            const d = event.data;
+            const seen = [
+                typeof d, d.tag, 'missing' in d, d.missing === undefined,
+                Number.isNaN(d.nan),
+                d.at instanceof Date && d.at.getTime() === 1700000000123,
+                d.bytes instanceof Uint8Array && Array.from(d.bytes).join(',') === '1,2,255',
+                d.big === 9007199254740993n, d.self === d,
+            ].join(':');
+            const back = { seen, at: new Date(42), bytes: new Uint8Array([9]),
+                           big: -9007199254740993n, missing: undefined };
+            back.self = back;
+            core.dispatchEvent({ type: 'reply', data: back });
+        });
+        ",
+        ),
+    );
+    pair.deliver();
+    pair.check(
+        r"
+        const d = results[0];
+        const expected = 'object:mts:true:true:true:true:true:true:true';
+        if (d.seen !== expected) throw Error('MTS -> BTS: ' + d.seen);
+        if (!(d.at instanceof Date) || d.at.getTime() !== 42) throw Error('Date');
+        if (!(d.bytes instanceof Uint8Array) || d.bytes[0] !== 9) throw Error('Uint8Array');
+        if (d.big !== -9007199254740993n) throw Error('BigInt');
+        if (!('missing' in d) || d.missing !== undefined) throw Error('undefined-valued key');
+        if (d.self !== d) throw Error('cycle');
+        ",
+    );
+}
+
+/// A value the serializer refuses is refused where it was written, so the
+/// poster hears about it rather than the other thread.
+#[test]
+fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.seen = [];
+        globalThis.thrown = null;
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => seen.push(event.data);
+        try { worker.postMessage(() => 1); } catch (error) { thrown = error; }
+        worker.postMessage('fine');
+        ",
+    );
+    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.deliver();
+    pair.check(
+        r#"
+        if (!(thrown instanceof TypeError)) throw Error('expected a TypeError, got ' + thrown);
+        if (JSON.stringify(seen) !== '["fine"]') throw Error(JSON.stringify(seen));
+        "#,
+    );
+}
+
+/// The published snapshot of a DOM event is the same shape it was under the
+/// JSON transport: the two stop methods are gone rather than present as
+/// `undefined`, the element handles are replaced by values, and nothing else
+/// was added or lost.
+#[test]
+fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        const page = __CreatePage('card', 0);
+        const child = __CreateView(0);
+        __SetID(child, 'button');
+        __SetAttribute(child, 'data-item-name', 'first');
+        __AppendElement(page, child);
+        __AddEvent(child, 'bindEvent', 'tap', 'handler');
+        ",
+        Some(
+            r"
+        lynx.getApp().publishEvent = (name, event) => {
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data: {
+                keys: Object.keys(event).sort().join(','),
+                targetKeys: Object.keys(event.target).sort().join(','),
+                shape: [name, event.type, event.eventPhase, event.target.id,
+                        event.target.dataset.itemName, event.target.uid,
+                        event.currentTarget.uid, event.detail.answer,
+                        'stopPropagation' in event,
+                        'stopImmediatePropagation' in event,
+                        'elementRefptr' in event.target].join(':'),
+            }});
+        };
+        ",
+        ),
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_event(
+            &mut pair.js,
+            dom::NodeId::from_bits(3).unwrap(),
+            "tap",
+            r#"{"answer":42}"#,
+        )
+        .unwrap();
+    pair.deliver();
+    pair.check(
+        r"
+        const d = results[0];
+        if (d.keys !== 'currentTarget,detail,eventPhase,target,type') throw Error(d.keys);
+        if (d.targetKeys !== 'dataset,id,uid') throw Error(d.targetKeys);
+        const expected = 'handler:tap:2:button:first:3:3:42:false:false:false';
+        if (d.shape !== expected) throw Error(d.shape);
         ",
     );
 }
@@ -1706,7 +1859,7 @@ fn a_throwing_render_hook_reports_without_failing_bts_startup() {
         Some("postMessage('BTS started');"),
     );
     assert!(matches!(pair.next_event().unwrap().payload,
-        WorkerPayload::Message(ref value) if value == r#"["BTS started"]"#));
+        WorkerPayload::Message(ref value) if posted(value, "BTS started")));
     pair.check("if (!renderJobFinished) throw Error('outer checkpoint lost render jobs');");
     assert!(pair.notices().iter().any(|notice| matches!(notice,
         ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. })
@@ -1739,12 +1892,12 @@ fn mts_disposal_calls_the_current_bts_hook_once_before_js_terminates_the_worker(
         assert_eq!(
             messages
                 .iter()
-                .filter(|m| m.as_str() == r#"[["cleanup",true,0]]"#)
+                .filter(|m| m.as_str() == r#"["cleanup",true,0]"#)
                 .count(),
             1
         );
         assert!(
-            messages.iter().any(|m| m == r#"["cleanup-job"]"#),
+            messages.iter().any(|m| m == r#""cleanup-job""#),
             "{messages:?}"
         );
         assert!(messages.last().unwrap().contains("disposed"));
@@ -1799,7 +1952,7 @@ fn disposal_remains_deliverable_while_the_bts_entry_is_loading() {
     pair.cancel.cancel();
     assert!(!completion.is_cancelled());
     let messages = pair.dispose();
-    assert_eq!(messages.first().unwrap(), r#"["cleanup"]"#);
+    assert_eq!(messages.first().unwrap(), r#""cleanup""#);
     assert!(messages.last().unwrap().contains("disposed"));
     assert!(pair.finish().is_empty());
     assert!(completion.is_cancelled());
@@ -1894,7 +2047,7 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
     ",
     );
     assert!(matches!(pair.next_event().unwrap().payload,
-        WorkerPayload::Message(ref value) if value == r#"["ready"]"#));
+        WorkerPayload::Message(ref value) if posted(value, "ready")));
     pair.check("worker.terminate();");
     assert!(pair.finish().is_empty());
 }
@@ -1933,7 +2086,7 @@ fn vsync_can_resume_mts_and_bts_entries_awaiting_their_first_frame() {
     pair.check("if (globalThis.firstFrame !== 250) throw Error('MTS frame timestamp');");
     let event = pair.next_event().unwrap();
     assert!(
-        matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"waiting for vsync\"]")
+        matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "waiting for vsync"))
     );
     pair.frame(500.0);
     pair.acknowledge_background();
@@ -2036,8 +2189,10 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
             let WorkerPayload::Message(message) = event.payload else {
                 panic!("unexpected worker event");
             };
-            let value: serde_json::Value = serde_json::from_str(&message).unwrap();
-            assert_eq!(value[0]["frame"], milliseconds);
+            assert_eq!(
+                crate::background::wire_json(&message),
+                format!(r#"{{"frame":{milliseconds}}}"#)
+            );
         }
         release.send(()).unwrap();
         (events, frames, notices, other)
@@ -2078,7 +2233,7 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
     pair.acknowledge_background();
     pair.frame(1000.0);
     let event = pair.next_event().unwrap();
-    assert!(matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"busy\"]"));
+    assert!(matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "busy")));
     pair.frame(2000.0);
     pair.frame(3000.0);
     pair.check(
@@ -2093,6 +2248,6 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
     );
     let event = pair.next_event().unwrap();
     assert!(
-        matches!(event.payload, WorkerPayload::Message(ref value) if value == "[\"finished\"]")
+        matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "finished"))
     );
 }

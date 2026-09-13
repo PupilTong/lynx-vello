@@ -38,18 +38,24 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 #[expect(clippy::float_cmp, reason = "explicit pixel widths are exact")]
 fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
     let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
-    runtime.run_main_thread_script(&mut js, r"
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
         globalThis.processData = function() {
             if (this !== globalThis) throw Error('processor receiver');
-            const result = Promise.resolve(42);
-            result.ready = false;
+            // An ordinary object rather than a Promise: the processed result
+            // is posted to BTS, and the transport refuses a value structured
+            // clone has no encoding for. `ready` still flips in a queued job,
+            // so a drain between the hooks is what this detects.
+            const result = { value: 42, ready: false };
             Promise.resolve().then(() => { result.ready = true; });
             globalThis.processed = result;
             return result;
         };
         globalThis.renderPage = function(data) {
-            if (this !== globalThis || data !== processed || data.ready || !(data instanceof Promise))
-                throw Error('processor result was awaited, copied, or drained before render');
+            if (this !== globalThis || data !== processed || data.ready || data.value !== 42)
+                throw Error('processor result was copied or drained before render');
             const page = __CreatePage();
             const view = __CreateView(0);
             __SetInlineStyles(view, 'width:10px;height:10px');
@@ -61,7 +67,10 @@ fn boot_defers_flush_to_a_microtask_without_draining_between_hooks() {
                 });
             });
         };
-    ", "app:///deferred-flush.js").unwrap();
+    ",
+            "app:///deferred-flush.js",
+        )
+        .unwrap();
     let tree = elements.tree();
     let view = tree
         .document_element()

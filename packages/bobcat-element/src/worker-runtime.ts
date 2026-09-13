@@ -19,12 +19,12 @@ import { closeWorker, postWorkerMessage } from "bobcat-internal:worker";
 // `postMessage`, `close`, `name`, `self`, the `message` event and the
 // EventTarget surface under it. Not here: `importScripts` (this realm loads
 // ESM, so a worker script uses `import`), `location`, `navigator`, `fetch`,
-// `XMLHttpRequest`, `MessagePort`, `messageerror` (JSON cannot fail to
-// deserialize what JSON produced), `onerror` (an uncaught exception in here is
-// reported at the parent `Worker` and to the embedder, but this side has no
-// hook to intercept it first), and the DOM — a worker realm holds no document
-// and cannot reach one, which is the whole reason it is on another runtime and
-// another thread.
+// `XMLHttpRequest`, `MessagePort`, `messageerror` (the reader cannot fail on
+// what the same build's writer produced), `onerror` (an uncaught exception in
+// here is reported at the parent `Worker` and to the embedder, but this side
+// has no hook to intercept it first), and the DOM — a worker realm holds no
+// document and cannot reach one, which is the whole reason it is on another
+// runtime and another thread.
 
 /**
  * The worker realm's global scope once this module has run: an `EventTarget`
@@ -64,15 +64,11 @@ for (const method of [
   });
 }
 
-function encodeMessage(data: unknown): string {
-  return JSON.stringify([data]);
-}
-
 /**
  * Delivers one message the host took off this worker's queue.
  */
-export function __BobcatDeliverWorkerMessage(data: string): undefined {
-  scope.dispatchEvent({ type: "message", data: JSON.parse(data)[0] });
+export function __BobcatDeliverWorkerMessage(data: unknown): undefined {
+  scope.dispatchEvent({ type: "message", data });
   return undefined;
 }
 
@@ -88,7 +84,7 @@ Object.assign(scope, {
     if (transfer !== undefined) {
       throw new TypeError("Bobcat's postMessage has no transfer list");
     }
-    postWorkerMessage(encodeMessage(message));
+    postWorkerMessage(message);
     return undefined;
   },
   /**

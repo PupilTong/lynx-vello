@@ -561,7 +561,8 @@ The MTS `lynx.getJSContext()` and BTS `lynx.getCoreContext()` expose the MVP
 context protocol: `dispatchEvent({ type, data })` sends a named event to
 listeners registered with `addEventListener` on the other side, and
 `removeEventListener` removes those listeners. The transport uses the existing
-Worker JSON encoding. Context `postMessage` remains inert, matching web-core.
+Worker structured clone. Context `postMessage` remains inert, matching
+web-core.
 This raw-module entry path does not initialize compiled background chunks from
 binary bundles: their Lynx Core `lynxCoreInject`/`init`/`requireModule` wrapper
 remains pending.

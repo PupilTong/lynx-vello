@@ -9,7 +9,7 @@ beforeAll(async () => {
 });
 
 describe("native Lynx Context contract", () => {
-  it("preserves FIFO and queued payload references until Worker JSON copies the send", () => {
+  it("preserves FIFO and queued payload references until the structured clone copies the send", () => {
     const context = createCrossThreadContext("CoreContext");
     const sent: ContextEvent[] = [];
     const heard: unknown[] = [];
@@ -18,7 +18,8 @@ describe("native Lynx Context contract", () => {
     expect(context.dispatchEvent(first)).toBe(0);
     first.data.value = 2;
     context.dispatchEvent({ type: "change", data: null });
-    context.connect(event => sent.push(JSON.parse(JSON.stringify(event))));
+    // `structuredClone` stands in for the Worker transport's own copy.
+    context.connect(event => sent.push(structuredClone(event)));
     first.data.value = 3;
     context.postMessage(undefined);
     expect(sent).toEqual([
@@ -68,24 +69,34 @@ describe("native Lynx Context contract", () => {
     expect(calls).toEqual(["first", "first", "added"]);
   });
 
-  it("uses ordinary JSON values and toJSON across the Worker boundary", () => {
+  it("uses structured-clone values across the Worker boundary", () => {
     const context = createCrossThreadContext();
-    const received: unknown[] = [];
-    context.addEventListener("message", (event: unknown) => received.push(event));
-    context.connect(event => context.receive(JSON.parse(JSON.stringify(event))));
+    const received: {data?: unknown}[] = [];
+    context.addEventListener("message", (event: unknown) => received.push(event as {data?: unknown}));
+    context.connect(event => context.receive(structuredClone(event)));
     context.postMessage({missing: undefined, zero: -0, nan: NaN, list: [undefined, null]});
-    context.postMessage({toJSON: () => "custom JSON"});
     context.postMessage(undefined);
     context.postMessage(null);
-    expect(received).toEqual([
-      {type: "message", data: {zero: 0, nan: null, list: [null, null]}, origin: "JSContext"},
-      {type: "message", data: "custom JSON", origin: "JSContext"},
-      {type: "message", data: undefined, origin: "JSContext"},
-      {type: "message", data: null, origin: "JSContext"},
-    ]);
-    expect(() => context.postMessage(1n)).toThrow();
+    context.postMessage(1n);
     const cycle: {self?: unknown} = {};
     cycle.self = cycle;
-    expect(() => context.postMessage(cycle)).toThrow();
+    context.postMessage(cycle);
+    expect(received).toHaveLength(5);
+    // What JSON dropped or flattened all survives.
+    const values = received[0]!.data as Record<string, unknown>;
+    expect(Object.hasOwn(values, "missing")).toBe(true);
+    expect(values["missing"]).toBeUndefined();
+    expect(Object.is(values["zero"], -0)).toBe(true);
+    expect(Number.isNaN(values["nan"])).toBe(true);
+    expect(values["list"]).toEqual([undefined, null]);
+    expect(received[1]!.data).toBeUndefined();
+    expect(received[2]!.data).toBeNull();
+    expect(received[3]!.data).toBe(1n);
+    expect((received[4]!.data as {self?: unknown}).self).toBe(received[4]!.data);
+    // A function is refused, and `toJSON` is never consulted: structured
+    // clone has no such hook, so an object carrying one is refused for the
+    // method it holds rather than replaced by its result.
+    expect(() => context.postMessage(() => 1)).toThrow();
+    expect(() => context.postMessage({toJSON: () => "custom JSON"})).toThrow();
   });
 });
