@@ -35,125 +35,6 @@ fn runtime() -> (ScriptRuntime, MainThreadRuntime, DocumentProbe) {
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one realm exercises Script completion, jobs and global bindings across one boot"
-)]
-fn mts_scripts_preserve_globals_results_jobs_and_error_boundaries() {
-    let (mut js, mut runtime, elements, mut far) = runtime_over_watching_names(ingredients());
-    let sections = [
-        (
-            "declarations",
-            r"
-            var scriptState = {node:__CreateView(0), pending:false};
-            let scriptLexical = 7;
-            const scriptConstant = 8;
-            function scriptFunction() { return this; }
-            scriptState.readProps = () => __globalProps;
-            scriptState.info = () => SystemInfo;
-            scriptState.runtime = lynx;
-            scriptState.papi = __CreateView;
-            scriptState;
-        ",
-        ),
-        (
-            "read",
-            "[scriptLexical, scriptConstant, scriptFunction, scriptState]",
-        ),
-        (
-            "count",
-            "var scriptCount = (typeof scriptCount === 'undefined' ? 0 : scriptCount) + 1; scriptCount",
-        ),
-        (
-            "promise",
-            "scriptState.promise = Promise.resolve(42); scriptState.promise",
-        ),
-        (
-            "jobs",
-            r"
-            scriptState.ready = false;
-            Promise.resolve().then(() => {
-                Promise.resolve().then(() => { scriptState.ready = true; });
-                scriptState.nested = loadNestedScript('count');
-            });
-            Promise.reject(Error('section rejected'));
-            scriptState;
-        ",
-        ),
-        (
-            "throw",
-            "Promise.resolve().then(() => {scriptState.pending=true;}); throw Error('section threw')",
-        ),
-        ("syntax", "let scriptLexical"),
-        ("empty", ""),
-    ];
-    let sections = serde_json::to_string(
-        &sections
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>(),
-    )
-    .unwrap();
-    let source = r"import {__BobcatEvaluateScript as evaluate} from 'bobcat:runtime';
-        const sections = SECTIONS;
-
-        const page = __CreatePage();
-        const load = key => evaluate(sections[key], key);
-        globalThis.loadNestedScript = load;
-        const state = load('declarations');
-        __AppendElement(page, state.node);
-        if (state.runtime !== lynx || state.papi !== __CreateView || state.info() !== SystemInfo)
-            throw Error('Script bindings lost runtime/PAPI identity');
-        if ('lynx' in globalThis || '__CreateView' in globalThis || 'console' in globalThis)
-            throw Error('PAPI bindings leaked onto the global object');
-        if ('scriptLexical' in globalThis || 'scriptConstant' in globalThis)
-            throw Error('Script lexical bindings became properties');
-        const read = load('read');
-        const scriptFunction = read[2];
-        if (read[0] !== 7 || read[1] !== 8 || read[3] !== state || scriptFunction() !== globalThis)
-            throw Error('Script declarations, completion or sloppy mode lost');
-        if (load('count') !== 1 || load('count') !== 2)
-            throw Error('section was cached or global var was not retained');
-        if (load('promise') !== state.promise || !(state.promise instanceof Promise))
-            throw Error('Script completion was awaited or copied');
-        if (load('jobs') !== state || !state.ready || state.nested !== 3)
-            throw Error('jobs did not finish before Script returned its original value');
-        if (load('empty') !== undefined) throw Error('empty Script completion');
-        if (load('syntax') !== null) throw Error('syntax failure must return null');
-        if (load('throw') !== null || state.pending)
-            throw Error('throw did not return null or ran nested jobs');
-        Promise.resolve().then(() => {
-            if (!state.pending) throw Error('enclosing checkpoint lost the throwing Scripts job');
-        });
-    "
-    .replace("SECTIONS", &sections);
-    runtime
-        .run_main_thread_script(&mut js, &source, "app:///script-sections.js")
-        .unwrap();
-    assert!(elements.tree().get(node_id(3)).is_some());
-    let mut reports = Vec::new();
-    let mut logs = Vec::new();
-    while let Ok(notice) = far.0.notices.try_recv() {
-        match notice {
-            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => {
-                reports.push(message);
-            }
-            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { level, message }) => {
-                assert_eq!(level, "error");
-                logs.push(message);
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(reports.len(), 1, "{reports:?}");
-    assert!(reports[0].contains("section rejected"));
-    assert_eq!(logs.len(), 2, "{logs:?}");
-    assert!(
-        logs.iter()
-            .any(|message| message.contains("section threw") && message.contains("throw"))
-    );
-}
-
-#[test]
 fn native_processing_finishes_jobs_before_render_without_awaiting_the_result() {
     let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
     runtime.run_main_thread_script(&mut js, r"
@@ -181,6 +62,36 @@ fn native_processing_finishes_jobs_before_render_without_awaiting_the_result() {
 }
 
 #[test]
+fn mts_call_reports_rejections_without_replacing_its_return_value() {
+    let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
+    runtime
+        .run_main_thread_script(
+            &mut js,
+            r"
+        import {__BobcatCallMTS as callMts} from 'bobcat:runtime';
+        const result = {ready: false};
+        const returned = callMts(() => {
+            Promise.resolve().then(() => { result.ready = true; });
+            Promise.reject(Error('call rejected'));
+            return result;
+        }, []);
+        if (returned !== result || !returned.ready)
+            throw Error('a rejection replaced the result or interrupted the checkpoint');
+    ",
+            "app:///call-rejection.js",
+        )
+        .unwrap();
+    let reports: Vec<_> = std::iter::from_fn(|| far.0.notices.try_recv().ok())
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { message, .. }) => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].contains("call rejected"));
+}
+
+#[test]
 fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
     let (mut js, mut runtime, _elements, mut far) = runtime_over_watching_names(ingredients());
     runtime
@@ -188,6 +99,9 @@ fn lepus_chunks_keep_entry_scope_and_defer_jobs_to_the_enclosing_checkpoint() {
             &mut js,
             r"
         import {__BobcatRegisterLepusChunks as register} from 'bobcat:runtime';
+        if ((0, eval)('typeof lynx') !== 'undefined'
+            || (0, eval)('typeof __CreateView') !== 'undefined')
+            throw Error('runtime/PAPI imports were also installed as global bindings');
         let executions = 0;
         const chunk = `
             executions++;

@@ -717,7 +717,8 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `lynx`, `__BobcatConnectBackground` and `__BobcatInitData` from
+  `__BobcatCallMTS`, `__BobcatDispatchEngineEvent`,
+  `__BobcatConnectBackground` and `__BobcatInitData` from
   `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
   the timer globals exist before the entry loads. Evaluating `bobcat:runtime`
@@ -732,8 +733,10 @@ useful signal for currently-compatible versions of those libraries.
   `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
   otherwise the `__RenderPage` event on `lynx.getEngine()`) →
   `__FlushElementTree` inside
-  JavaScript; the global function is a compatibility path, not a boot
-  requirement. The runtime module directly exports a `lynx` object, an empty
+  JavaScript. Each successful processor/render/listener call drains Promise
+  jobs before boot continues; a throwing hook reports without failing startup.
+  The global function is a compatibility path, not a boot requirement.
+  The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
   performance hooks, nonfatal console/error forwarding, and
@@ -970,19 +973,21 @@ useful signal for currently-compatible versions of those libraries.
   boundary keeps ordinary callbacks as leaf operations. Their `FnMut` closure
   is borrowed through a `RefCell`, so reentry is refused rather than aliasing
   it; a panicking callback becomes a JS exception and leaves the slot usable.
-  The private `evaluateScript` native ESM export keeps its arguments/results
-  within QuickJS: it never widens `HostValue` or retains a Rust handle for the
-  evaluated Script's objects/functions. Runtime JS reads ReactLynx's hooks
-  directly from `globalThis`. Named calls and replies belong to the two JS
+  Runtime JS reads ReactLynx's hooks directly from `globalThis`.
+  Runtime/PAPI identifiers remain module imports; named Lepus chunks execute
+  through a direct-eval closure in the selected entry's scope. No native Script
+  evaluator or second set of global bindings is installed.
+  Named calls and replies belong to the two JS
   Worker message handlers; Rust transports opaque messages and performs no
   Lepus-specific dispatch or reply flush.
   `register_reentrant_host_module_function` separately accepts `Fn`, for a
   callback that can safely run nested JavaScript jobs. `Context::job_queue`
   supplies a weak, owner-thread handle for that work; it neither retains its
   realm through the installed callback nor changes scheduling/reporting policy.
-  Core uses this for native MTS call and Script checkpoints. A failed job can
-  stop a function checkpoint or be reported while a Script checkpoint continues;
-  either path retains one bounded drain and the enclosing execution deadline.
+  Core uses this for MTS function/listener checkpoints. A failed job stops
+  the checkpoint and discards the function result; unhandled rejections report
+  without replacing a successful result. The drain remains bounded by its job
+  budget and the enclosing execution deadline.
   See `docs/mts-execution-runtime.md` for the execution boundaries.
   A closure's lifetime follows its JS function object rather than the realm: the closure
   sits at its own stable heap address, which a companion JS object holds and
@@ -1388,8 +1393,8 @@ useful signal for currently-compatible versions of those libraries.
   `dom`. Native access is limited to named imports from the native
   `bobcat-internal:host` ESM; the realm has no `globalThis.bobcat`, no
   `console`, and no DOM. Named exports are the only Element-PAPI surface
-  for transformed MTS entries. Boot also installs these values as global
-  lexical bindings for native Scripts, without global-object properties. Rstest
+  for transformed MTS entries; local named Lepus chunks retain those imports
+  through an entry-scope direct-eval closure. Rstest
   imports the TypeScript directly, and TypeScript 7 checks the sources as a
   program with `lib: es2023` and no ambient types — the realm has neither DOM
   nor Node — resolving each `bobcat:*` specifier to its file through `paths`

@@ -13,11 +13,6 @@
 
 const eventTargetListeners = Symbol("eventTargetListeners");
 
-// Keep internal listener lookup off the public EventTarget API.
-export function hasEventListener(target: EventTarget, type: string): boolean {
-  return target[eventTargetListeners].has(type);
-}
-
 interface RuntimeEventListener {
   callback: Function | object;
   capture: boolean;

@@ -201,9 +201,6 @@ impl ScriptEngine {
         runtime: &ScriptRuntime,
         report: impl Fn(ScriptError) + 'static,
     ) -> Result<(), ScriptError> {
-        self.realm
-            .register_script_evaluator(crate::esm::HOST_MODULE_SPECIFIER)
-            .map_err(|error| map_quickjs_error(error, ScriptErrorPhase::RegisterModule))?;
         let jobs = self.realm.job_queue();
         let budget = runtime.config.max_jobs_per_checkpoint.get();
         let checkpoint = runtime.checkpoint.clone();
@@ -211,20 +208,9 @@ impl ScriptEngine {
             .register_reentrant_host_module_function(
                 crate::esm::HOST_MODULE_SPECIFIER,
                 "runMtsJobs",
-                1,
-                move |arguments| {
-                    let continue_after_error =
-                        matches!(arguments.first(), Some(quickjs::HostValue::Boolean(true)));
-                    let drain = jobs.run_up_to_with_error_handler(budget, |error| {
-                        if !continue_after_error {
-                            return Err(error);
-                        }
-                        // EvalBuf reports a failed job and continues, while
-                        // InternalCall stops and discards the function result.
-                        report(map_quickjs_error(error, ScriptErrorPhase::Execute));
-                        Ok(())
-                    });
-                    let result = match drain {
+                0,
+                move |_arguments| {
+                    let result = match jobs.run_up_to(budget) {
                         Ok(drain) if !drain.jobs_remaining => {
                             // Native reports unhandled rejections without replacing
                             // the successful function's actual return value.

@@ -1,68 +1,57 @@
-# MTS same-thread execution
+# MTS calls and named Lepus chunks
 
-This layer is extracted from `codex/reactlynx-bts-mvp`, after the Worker resource
-transport PR. It supplies Script evaluation, global lexical bindings, local Lepus
-chunks and synchronous Promise-job checkpoints. Bundle lookup/cache,
-`lynx.loadScript`'s public lookup wrapper, data/update/reload policy and compiled
-BTS bootstrap remain separate layers.
+This layer adds on-demand execution of local named Lepus chunks and the
+same-thread Promise-job/error policy for MTS functions and native engine
+listeners. Bundle lookup/cache, the public `lynx.loadScript` API,
+data/update/reload policy and compiled BTS bootstrap remain separate layers.
 
-## Native contract and ownership
+## MTS calls and errors
 
-The source audit used Lynx revision
-`66b002855a25a5a8812fe878af69e20a346d0408`; `LoadScript`, `EvalBuf`,
-`EvalLepusPendingTask`, `InternalCall` and `GetAndCall` were also checked against
-Lynx 4.1.0. Relevant native owners are:
+The native call audit used Lynx revision
+`66b002855a25a5a8812fe878af69e20a346d0408` and Lynx 4.1.0. Relevant owners are
+`core/runtime/lepusng/quick_context.cc` (`InternalCall`) and
+`core/runtime/lepus/bindings/event/lepus_event_listener.cc`
+(`LepusClosureEventListener::Invoke`).
 
-- `core/runtime/lepusng/quick_context.cc`: `InternalCall` and `EvalBuf`.
-- `core/runtime/lepus/bindings/event/lepus_event_listener.cc`:
-  `LepusClosureEventListener::Invoke`.
-- `core/runtime/lepus/bindings/renderer_functions.cc`: `LoadScript` and
-  `__LoadLepusChunk`; `core/renderer/template_entry.cc`: chunk lookup/evaluation.
-
-| Entry | Successful return | Synchronous throw | Failed job |
-| --- | --- | --- | --- |
-| MTS function / engine listener | Drain jobs, then return the original value | Report; return undefined; skip nested drain | Report; stop drain; discard result |
-| Global Script | Drain jobs, then return the original completion | Log; return null; skip nested drain | Report; continue drain; retain completion |
-| Local Lepus chunk | Return true when found, after entry-scope evaluation | Report; still return true when found | Enclosing checkpoint owns jobs |
-
-Unhandled Promise rejections report without replacing a successful function or
-Script result. Neither execution entry awaits a returned Promise. A throwing
-call leaves its queued jobs to the enclosing checkpoint. A render hook error
-is nonfatal; an entry-module error still fails startup.
+After a successful function call, `callMts` drains Promise jobs before returning
+its original result. A synchronous throw reports and returns undefined without
+that nested drain; the enclosing checkpoint owns the jobs it left pending.
+A failed job or exhausted job budget reports and discards the result.
+Unhandled Promise rejections report without replacing a successful result.
+A returned Promise remains the same Promise; this call does not await it.
 
 `callMts` uses the global object as receiver. Native engine dispatch wraps each
-listener separately, so one listener's jobs finish before the next listener;
-a failed listener does not stop the walk. Ordinary `EventTarget.dispatchEvent`
-retains its existing JavaScript semantics. Boot uses this policy for its existing
-processor, render hook and fallback event. This extraction preserves boot's
-existing hook selection and payload shape; later lifecycle policy is separate.
+listener separately, so one listener's successful checkpoint finishes before
+the next listener; a failed listener does not stop the walk. Ordinary
+`EventTarget.dispatchEvent` retains its existing JavaScript semantics.
 
-Named cross-thread calls continue to await through the existing Worker
-`postMessage` RPC implementation. Rust never resolves named application hooks or
-schedules their replies.
+Boot applies this policy to `processData`, `renderPage`, and the fallback
+`__RenderPage` engine event. A hook error reports without failing entry boot;
+an entry-module error still fails startup. The existing hook selection and
+payload shape remain unchanged. Named cross-thread calls continue to await
+through Worker `postMessage` RPC; Rust does not dispatch application hooks.
 
-## Script values and bindings
+## Named Lepus chunks and imported bindings
 
-The bridge's private native `evaluateScript(source, filename)` invokes QuickJS
-in global Script mode. It returns the JS value directly inside the realm:
-objects, functions, thrown values and Promises retain identity, with no Rust
-`HostValue` conversion. Script strict directives are honored independently of
-the importing module. `var` and function declarations persist as global-object
-properties; `let` and `const` persist in that realm's global lexical environment.
+`PageSource` preserves non-entry Lepus source chunks. It registers their source
+map with `__BobcatRegisterLepusChunks` and supplies `source => eval(source)`
+inside the selected entry module. That direct-eval closure retains the entry's
+runtime/PAPI imports and lexical scope. It needs no global binding installer,
+second copy of those bindings, or native Script evaluator.
 
-Boot installs its named runtime and Element PAPI values into the same lexical
-environment once. It creates no `globalThis.lynx`, `console` or PAPI properties,
-and requires no vendor global-binding lookup API. The private
-`__BobcatEvaluateScript` wrapper owns error handling and the Script checkpoint;
-its callers supply source text and a filename. Source retrieval remains outside
-this helper. The installed input setter is retained for the later live-input
-lifecycle layer; this PR supplies only the existing initial snapshots.
+`__LoadLepusChunk` executes only a matching local card chunk, on demand and
+again on each call. It returns false for an absent chunk or a different
+component entry. Finding a chunk returns true even if its evaluation reports
+an exception. Chunk evaluation does not add a nested checkpoint: queued jobs
+belong to the enclosing checkpoint. These lookup/evaluation rules follow
+`core/runtime/lepus/bindings/renderer_functions.cc` and
+`core/renderer/template_entry.cc`.
 
-`PageSource` registers non-entry Lepus source chunks with an evaluator that
-retains the selected entry's lexical scope. `__LoadLepusChunk` loads only a
-matching local card chunk, repeats evaluation on every call, and returns false
-for an absent chunk or a different component entry. This preserves the existing
-ESM/direct-eval chunk boundary; it does not replace it with global Script mode.
+The retained entry scope lets a chunk access the module's own variables;
+it does not provide arbitrary global Script declarations shared between
+separate evaluations. ReactLynx's `__LoadLepusChunk('worklet-runtime', ...)`
+caller is in `packages/react/runtime/src/worklet-runtime/bindings/loadRuntime.ts`
+of the read-only `lynx-stack` checkout.
 
 ## Checkpoints and lifetime
 
@@ -75,16 +64,20 @@ jobs, not timers, resource work, renderer commits or a nested executor.
 
 The queue is runtime-wide, so sibling-realm jobs may run. Unhandled rejections
 remain attributed to their own realm, and the generation notification lets a
-sibling settle work completed by another realm's checkpoint. Arbitrary OOM job
-failures are not covered by a native fixture oracle.
+sibling settle work completed by another realm's checkpoint. There is a single
+stop-on-failure job policy; no extra continuation mode exists for native Script
+evaluation.
 
 ## Validation coverage
 
-Real QuickJS regressions cover persistent globals, per-realm lexical isolation,
-strict mode, TDZ, thrown-value identity and source locations; nested jobs,
-finite work, rejection isolation and weak callback lifetime. Core tests cover
-runtime/PAPI identity, original Script/Promise completions, repeat evaluation,
-nonfatal reports, error logs/null results, processor-to-render ordering and
-per-listener checkpoints. A source-native container test exercises selected
-entry/chunk registration through the shipped resource host. JavaScript tests
-cover missing/local chunk lookup and repeated failed evaluation.
+Bridge tests cover nested/reentrant jobs, bounded work, rejection isolation and
+weak callback lifetime. Core tests cover processor-to-render ordering, original
+Promise/object results, nonfatal reports, per-listener checkpoints, and nested
+calls from a Promise job. The chunk test verifies that runtime/PAPI values are
+module imports, absent even from the global lexical environment, and remain
+available to the chunk through its entry scope. It also checks repeat evaluation
+and the enclosing checkpoint's ownership of chunk jobs.
+
+A source-container integration test exercises selected entry/chunk registration
+through the shipped resource host. JavaScript tests cover missing/local chunk
+lookup and repeated failed evaluation. No compiled fixture artifacts are added.

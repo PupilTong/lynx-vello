@@ -1215,28 +1215,12 @@ mod implementation {
         /// A thrown job is distinct from a rejection: the host may discard a
         /// call result for the former while reporting and retaining it for the latter.
         pub fn run_up_to(&self, budget: usize) -> Result<JobDrain, Error> {
-            self.run_up_to_with_error_handler(budget, Err)
-        }
-
-        /// Like `run_up_to`, with a policy for a job that throws. Returning
-        /// `Ok(())` continues the drain; returning an error stops it. Failed
-        /// jobs count toward the same budget, and one deadline spans the drain.
-        pub fn run_up_to_with_error_handler(
-            &self,
-            budget: usize,
-            mut handle_error: impl FnMut(Error) -> Result<(), Error>,
-        ) -> Result<JobDrain, Error> {
             let (mut runtime, context) = self.handles()?;
             runtime.inner.reclaim();
             let guard = context.begin();
             let result = (|| {
                 let mut executed = 0;
-                while executed < budget {
-                    match runtime.try_execute_pending_job_inner() {
-                        Ok(false) => break,
-                        Ok(true) => {}
-                        Err(error) => handle_error(error)?,
-                    }
+                while executed < budget && runtime.try_execute_pending_job_inner()? {
                     executed += 1;
                 }
                 Ok(JobDrain {
@@ -1429,31 +1413,6 @@ mod implementation {
             arity: u32,
             handler: HostHandler,
         ) -> Result<(), Error> {
-            let function = self
-                .function_with_handler(export_name, arity, handler)
-                .map_err(|mut error| {
-                    error.phase = ErrorPhase::RegisterModule;
-                    error
-                })?;
-            self.register_host_module_export(module_name, export_name, &function)
-        }
-
-        /// Installs `evaluateScript(source, filename)` in a private native module.
-        /// Arguments and results stay in the realm without a Rust host-value
-        /// conversion. Evaluation leaves pending jobs to its caller.
-        pub fn register_script_evaluator(&mut self, module_name: &str) -> Result<(), Error> {
-            let function = self.construct(ErrorPhase::RegisterModule, |context| unsafe {
-                ffi::qjs_new_script_evaluator(context)
-            })?;
-            self.register_host_module_export(module_name, "evaluateScript", &function)
-        }
-
-        fn register_host_module_export(
-            &mut self,
-            module_name: &str,
-            export_name: &str,
-            function: &Value,
-        ) -> Result<(), Error> {
             self.reclaim();
             if module_name.is_empty() {
                 return Err(Error::bridge(
@@ -1483,6 +1442,12 @@ mod implementation {
                     "module export name contains a NUL byte",
                 )
             })?;
+            let function = self
+                .function_with_handler(export_name, arity, handler)
+                .map_err(|mut error| {
+                    error.phase = ErrorPhase::RegisterModule;
+                    error
+                })?;
             let status = unsafe {
                 ffi::qjs_context_add_host_module_export(
                     self.raw().as_ptr(),
@@ -2428,87 +2393,6 @@ mod implementation {
             let runtime = Runtime::new().expect("runtime should initialize");
             let realm = runtime.create_context().expect("realm should initialize");
             (runtime, realm)
-        }
-
-        #[test]
-        fn script_evaluator_preserve_global_bindings_values_and_execution_boundaries() {
-            let mut realm = single_realm();
-            realm.register_script_evaluator("script").unwrap();
-            let evaluation = realm.evaluate(EvalSource::new(r#"
-                import {evaluateScript as run} from 'script';
-                const evaluate = source => run(source, 'section.js');
-                if (evaluate('') !== undefined || evaluate('1; 42') !== 42)
-                    throw Error('Script completion');
-                const value = evaluate('var stored = {}; let lexical = 8; const fixed = 9; stored');
-                if (value !== globalThis.stored || lexical !== 8 || fixed !== 9)
-                    throw Error('global bindings or object identity');
-                if ('lexical' in globalThis || 'fixed' in globalThis)
-                    throw Error('lexical bindings became properties');
-                if (evaluate('++lexical') !== 9 || lexical !== 9)
-                    throw Error('Script declarations did not persist');
-                const fn = evaluate('function callable() { return this; } callable');
-                if (fn !== globalThis.callable || fn() !== globalThis)
-                    throw Error('Script inherited module strict mode');
-                if (evaluate('"use strict"; (function() { return this; })()') !== undefined)
-                    throw Error('Script strict directive was ignored');
-                const reason = evaluate('stored.reason = {}; stored.reason');
-                let caught;
-                try { evaluate('Promise.resolve().then(() => { stored.job = true; }); throw stored.reason'); }
-                catch (error) { caught = error; }
-                if (caught !== reason || value.job !== undefined)
-                    throw Error('exception identity or premature jobs');
-                try { evaluate('throw Error("before declaration"); let uninitialized'); } catch {}
-                caught = undefined;
-                try { uninitialized; } catch (error) { caught = error; }
-                if (!(caught instanceof ReferenceError)) throw Error('TDZ was erased');
-                for (const source of ['let lexical', 'export const x = 1', '42\0invalid']) {
-                    caught = undefined;
-                    try { evaluate(source); } catch (error) { caught = error; }
-                    if (!(caught instanceof SyntaxError)) throw Error('invalid Script accepted');
-                }
-                caught = undefined;
-                try { evaluate('throw Error("located")'); } catch (error) { caught = error; }
-                if (!caught.stack.includes('section.js')) throw Error('source filename lost');
-                if (evaluate('"你好"') !== '你好') throw Error('source UTF-8 lost');
-                for (const call of [() => run(1, 'file'), () => run('', 2)]) {
-                    caught = undefined;
-                    try { call(); } catch (error) { caught = error; }
-                    if (!(caught instanceof TypeError)) throw Error('invalid intrinsic arguments');
-                }
-                if (value.job !== undefined) throw Error('intrinsic ran pending jobs');
-            "#), EvalOptions {source_type:SourceType::Module, ..EvalOptions::default()}).unwrap();
-            assert!(realm.settled_promise_result(&evaluation).unwrap().is_some());
-            assert!(!realm.job_queue().run_up_to(100).unwrap().jobs_remaining);
-            let result = realm
-                .evaluate(EvalSource::new("stored.job"), EvalOptions::default())
-                .unwrap();
-            assert_eq!(result.as_boolean(), Some(true));
-        }
-
-        #[test]
-        fn script_evaluator_keep_global_lexical_environments_per_realm() {
-            let (runtime, mut first) = runtime_and_realm();
-            let mut second = runtime.create_context().unwrap();
-            for realm in [&mut first, &mut second] {
-                realm.register_script_evaluator("script").unwrap();
-                let evaluation = realm
-                    .evaluate(
-                        EvalSource::new(
-                            r"
-                    import {evaluateScript as run} from 'script';
-                    if (typeof local !== 'undefined') throw Error('sibling global leaked');
-                    run('let local = 1', 'local.js');
-                    if (local !== 1) throw Error('own global missing');
-                ",
-                        ),
-                        EvalOptions {
-                            source_type: SourceType::Module,
-                            ..EvalOptions::default()
-                        },
-                    )
-                    .unwrap();
-                assert!(realm.settled_promise_result(&evaluation).unwrap().is_some());
-            }
         }
 
         #[test]

@@ -23,7 +23,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
-  runMtsJobs: () => true, evaluateScript: rstest.fn(),
+  runMtsJobs: () => true,
   initData: () => undefined,
   globalProps: () => undefined,
 }));
