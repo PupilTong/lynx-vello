@@ -365,7 +365,8 @@ pub struct ViewSources {
     pub entry: String,
     /// Optional BTS application module specifier imported by `bobcat:bts`.
     /// The view always starts a BTS context; without this it runs only the
-    /// built-in environment. Application module loading is not implemented yet.
+    /// built-in environment. Its imports load through the view's resource fetcher;
+    /// startup waits for the entry, including top-level await.
     pub background_entry: Option<String>,
     /// Initial page data, as JSON text. The engine hands it to the view's
     /// realm unread, as a plain string; `bobcat:runtime` parses it there and

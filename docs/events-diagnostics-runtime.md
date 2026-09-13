@@ -56,10 +56,8 @@ once, after both that declaration and MTS completion, following the commit.
 BTS errors call `reportStartupFailure(message)` through the MTS error handler;
 before readiness this reports `StartupFailed`, without rejecting the already
 completed MTS evaluation. Later errors keep the existing nonfatal Worker path.
-Worker ESM loading is part of this layer: the bootstrap's application import
-requests its source from the view fetcher, including XML background entries.
-Posted messages wait for entry settlement while imports and timers continue.
-Native Script/JSON reads and compiled application bootstrap remain later layers.
+Worker ESM loading is included in this readiness layer; the
+[resource layer](worker-resources-runtime.md) adds native Script/JSON reads.
 
 `LynxView::send_global_event(name, arguments)` returns `EngineError::NotReady`
 before observed readiness or after the view ends. Rejected events are not

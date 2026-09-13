@@ -18,7 +18,7 @@ pub(crate) fn request(resources: &Resources, request: SourceRequest, completion:
     }
     let (specifier, style_sheet, base_url) = match request {
         SourceRequest::StyleSheet(url) => (url, true, resources.base_url()),
-        SourceRequest::Entry(url) | SourceRequest::Module(url) => {
+        SourceRequest::Entry(url) | SourceRequest::Module(url) | SourceRequest::Script(url) => {
             (url, false, resources.base_url())
         }
         SourceRequest::Worker {

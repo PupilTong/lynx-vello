@@ -44,8 +44,8 @@ use tokio::task::{self, JoinError, JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
 
 use super::scope::{
-    WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_worker_members, install_worker_modules,
-    worker_boot_source,
+    ScriptLoad, WORKER_DELIVER_EXPORT, WORKER_MODULE_SPECIFIER, install_script_reader,
+    install_worker_members, install_worker_modules, worker_boot_source,
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
@@ -155,6 +155,7 @@ fn report_trap(
 struct WorkerRealm {
     engine: ScriptEngine,
     timers: Rc<TimerState>,
+    scripts: Rc<RefCell<Vec<ScriptLoad>>>,
     /// Set by the native `closeWorker` export. A flag rather than a direct
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
@@ -315,7 +316,7 @@ impl Worker {
 
     /// Everything one entry into this realm leaves owing: the timers that
     /// have come due, a `close()` whatever just ran may have called, entry
-    /// completion, module requests, the next timer deadline, and
+    /// completion, module and Script requests, the next timer deadline, and
     /// the checkpoint generation as of this entry.
     fn epilogue(self: &Rc<Self>, realm: &mut WorkerRealm, js: &mut ScriptRuntime) {
         if self.ended() {
@@ -352,6 +353,10 @@ impl Worker {
             let answer = self.sources.request(SourceRequest::Module(url.clone()));
             self.spawn(load_module(Rc::clone(self), url, answer));
         }
+        for ScriptLoad { id, path } in realm.scripts.take() {
+            let answer = self.sources.request(SourceRequest::Script(path));
+            self.spawn(load_script(Rc::clone(self), id, answer));
+        }
         self.lifetime.arm_deadline(realm.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
         // one it started from.
@@ -383,25 +388,32 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(js, self.events.clone(), self.key).map(|mut realm| {
-                        let (source, url) = script;
-                        let source = worker_boot_source(name, &source);
-                        if let Err(error) = realm.engine.start_module(js, &source, &url) {
-                            // Nothing to clean up after: a throw at this module's
-                            // top level rejects through the runtime's shared job
-                            // queue, and what it leaves there is this realm's — it
-                            // waits for this worker rather than reaching the next
-                            // realm to be entered on this runtime.
-                            report(&self.events, self.key, "running the worker's script", error);
-                        }
-                        // Both under the borrow the script ran under, so a
-                        // sibling's bump between this boot and the clock task's
-                        // first poll is neither lost nor mistaken for this
-                        // worker's own.
-                        let checkpoints = js.checkpoints();
-                        self.lifetime.record_checkpoint(js.checkpoint_generation());
-                        (realm, checkpoints)
-                    })
+                    open_realm(js, self.events.clone(), self.key, self.sources.clone()).map(
+                        |mut realm| {
+                            let (source, url) = script;
+                            let source = worker_boot_source(name, &source);
+                            if let Err(error) = realm.engine.start_module(js, &source, &url) {
+                                // Nothing to clean up after: a throw at this module's
+                                // top level rejects through the runtime's shared job
+                                // queue, and what it leaves there is this realm's — it
+                                // waits for this worker rather than reaching the next
+                                // realm to be entered on this runtime.
+                                report(
+                                    &self.events,
+                                    self.key,
+                                    "running the worker's script",
+                                    error,
+                                );
+                            }
+                            // Both under the borrow the script ran under, so a
+                            // sibling's bump between this boot and the clock task's
+                            // first poll is neither lost nor mistaken for this
+                            // worker's own.
+                            let checkpoints = js.checkpoints();
+                            self.lifetime.record_checkpoint(js.checkpoint_generation());
+                            (realm, checkpoints)
+                        },
+                    )
                 }
             }
         };
@@ -617,6 +629,35 @@ async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
     });
 }
 
+/// Native Scripts use the existing source protocol and cancellation scope,
+/// but their text goes to a JS-owned callback without ESM linking or evaluation.
+async fn load_script(worker: Rc<Worker>, id: String, answer: SourceAnswer) {
+    let loaded = worker_script(answer.await);
+    worker.enter(|realm, js| {
+        let (source, error) = match &loaded {
+            Ok((source, _)) => (source.as_str(), HostArgument::Null),
+            Err(error) => ("", HostArgument::String(error)),
+        };
+        if let Err(error) = realm.engine.call_module_export(
+            js,
+            crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
+            "__BobcatCompleteScript",
+            &[
+                HostArgument::String(&id),
+                error,
+                HostArgument::String(source),
+            ],
+        ) {
+            report(
+                &worker.events,
+                worker.key,
+                "loading a native BTS Script",
+                error,
+            );
+        }
+    });
+}
+
 /// The script and the URL it is named by, or why there is neither.
 fn worker_script(
     answer: Result<
@@ -638,22 +679,33 @@ fn open_realm(
     js_runtime: &mut ScriptRuntime,
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
+    sources: SourceRequester,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
     engine.enable_module_loading();
+    install_script_reader(&mut engine, js_runtime, sources)?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
-    install_worker_members(&mut engine, js_runtime, &timers, &closing, move |data| {
-        let _ = events.send(WorkerEvent {
-            key,
-            payload: WorkerPayload::Message(data),
-        });
-    })?;
+    let scripts = Rc::new(RefCell::new(Vec::new()));
+    install_worker_members(
+        &mut engine,
+        js_runtime,
+        &timers,
+        &closing,
+        &scripts,
+        move |data| {
+            let _ = events.send(WorkerEvent {
+                key,
+                payload: WorkerPayload::Message(data),
+            });
+        },
+    )?;
     Ok(WorkerRealm {
         engine,
         timers,
+        scripts,
         closing,
     })
 }

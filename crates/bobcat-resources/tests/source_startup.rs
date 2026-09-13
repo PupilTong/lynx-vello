@@ -303,11 +303,15 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
 }
 
 #[tokio::test]
-async fn xml_background_loads_esm_through_the_view_fetcher() {
+async fn xml_background_loads_esm_and_script_sources_through_the_view_fetcher() {
     let (group, resources, receiver) = setup().await;
-    resources
-        .register("app:///dep.js", "export const value = 42;", None)
-        .unwrap();
+    for (url, source) in [
+        ("app:///dep.js", "export const value = 42;"),
+        ("app:///sync.json", r#"{"value":7}"#),
+        ("app:///async.js", "21 * 2"),
+    ] {
+        resources.register(url, source, None).unwrap();
+    }
     let page = PageSource::from_bytes(
         &"app:///card.lynx.xml".parse().unwrap(),
         br#"
@@ -317,18 +321,22 @@ async fn xml_background_loads_esm_through_the_view_fetcher() {
             lynx.getJSContext().dispatchEvent({type: 'initialize', data: null});
           ]]></script>
           <script thread="background"><![CDATA[
-            import {lynx} from 'bobcat:bts-runtime';
+            import {lynx, __BobcatRequestScript as request} from 'bobcat:bts-runtime';
+            import {readScript} from 'bobcat-internal:worker';
             const {value} = await import('app:///dep.js');
+            const json = JSON.parse(readScript('sync.json'));
+            const script = await new Promise((resolve, reject) => request('async.js', (error, source) => {
+                if (error) reject(Error(error)); else resolve(eval(source));
+            }));
             await new Promise(resolve => setTimeout(resolve, 1));
-            if (value !== 42) throw Error('source value');
+            if (value !== 42 || json.value !== 7 || script !== 42) throw Error('source values');
             lynx.getCoreContext().addEventListener('initialize', () => {
                 lynx.reportError('BTS sources ready');
             });
           ]]></script>
         </lynx>
         "#,
-    )
-    .unwrap();
+    ).unwrap();
     page.register_with(&resources);
     let mut view = group
         .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())

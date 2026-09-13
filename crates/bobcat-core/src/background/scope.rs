@@ -3,8 +3,9 @@
 //! Only that. Which realms exist, and when, is [`super::thread`]; the handle
 //! the rest of the engine holds them by is [`super::Background`].
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use quickjs_rust_bridge::HostValue;
 
@@ -14,15 +15,16 @@ use crate::esm::{
     GLOBAL_EVENT_MODULE_SOURCE, GLOBAL_EVENT_MODULE_SPECIFIER, TIMER_MODULE_SOURCE,
     TIMER_MODULE_SPECIFIER,
 };
+use crate::link::SourceRequester;
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
+use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members};
 
 /// One string argument, or why it is not one.
 ///
-/// A worker realm carries its own rather than borrowing the view realm's:
-/// two members is the whole of its host surface, and reaching across for four
-/// lines is what put the timers in the wrong module in the first place.
+/// Worker host members validate primitives without depending on the document
+/// or the main realm's native members.
 fn string_argument<'a>(
     function: &str,
     arguments: &'a [HostValue],
@@ -39,6 +41,11 @@ pub(super) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 /// The worker realm's host module: what `bobcat-internal:host` is to
 /// `bobcat-main`, minus everything that would need a document.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
+/// A pending native Script load. The callback itself remains inside BTS.
+pub(super) struct ScriptLoad {
+    pub id: String,
+    pub path: String,
+}
 /// Called on `bobcat:worker`, in a worker realm, with one JSON message.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 
@@ -93,7 +100,7 @@ globalThis.name = {name};
 
 /// Installs everything one worker realm reaches the host through: the timer
 /// pair under `bobcat-internal:host`, so `bobcat:timers` compiles unchanged,
-/// and the two members that are a worker's whole outward surface.
+/// and the message, close and native Script request members.
 ///
 /// There is no document member here and no way to add one: this realm is on
 /// another runtime, on another thread, and the document is neither `Send` nor
@@ -103,9 +110,25 @@ pub(super) fn install_worker_members(
     js_runtime: &mut ScriptRuntime,
     timers: &Rc<TimerState>,
     closing: &Rc<Cell<bool>>,
+    scripts: &Rc<RefCell<Vec<ScriptLoad>>>,
     mut post: impl FnMut(String) + 'static,
 ) -> Result<(), ScriptError> {
     install_timer_members(engine, js_runtime, timers)?;
+
+    let scripts = Rc::clone(scripts);
+    engine.register_host_module_function(
+        js_runtime,
+        WORKER_HOST_MODULE_SPECIFIER,
+        "requestScript",
+        2,
+        Box::new(move |arguments| {
+            const NAME: &str = "bobcat-internal:worker.requestScript";
+            let id = string_argument(NAME, arguments, 0)?.to_owned();
+            let path = string_argument(NAME, arguments, 1)?.to_owned();
+            scripts.borrow_mut().push(ScriptLoad { id, path });
+            Ok(HostValue::Undefined)
+        }),
+    )?;
 
     engine.register_host_module_function(
         js_runtime,
@@ -130,6 +153,40 @@ pub(super) fn install_worker_members(
             // tear down, so the thread reads it once the task returns.
             closing.set(true);
             Ok(HostValue::Undefined)
+        }),
+    )
+}
+
+/// A synchronous native read waits on the same transferable completion as an
+/// async Script load. The resource host stays on the embedder's thread.
+pub(super) fn install_script_reader(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    sources: SourceRequester,
+) -> Result<(), ScriptError> {
+    engine.register_host_module_function(
+        js_runtime,
+        WORKER_HOST_MODULE_SPECIFIER,
+        "readScript",
+        2,
+        Box::new(move |arguments| {
+            const NAME: &str = "bobcat-internal:worker.readScript";
+            let path = string_argument(NAME, arguments, 0)?.to_owned();
+            // Native truncates to whole seconds, then replaces non-positive
+            // timeouts with five seconds. Non-numbers use that same default.
+            let timeout = match arguments.get(1) {
+                Some(HostValue::Number(value)) if value.is_finite() && value.trunc() > 0.0 => {
+                    Duration::try_from_secs_f64(value.trunc())
+                        .map_err(|_| "source timeout is out of range".to_owned())?
+                }
+                _ => Duration::from_secs(5),
+            };
+            match sources.request_blocking(SourceRequest::Script(path), timeout)? {
+                LoadedSource::Entry { source, .. } => Ok(HostValue::String(source)),
+                LoadedSource::StyleSheet(_) => {
+                    Err("the fetcher returned a stylesheet for a Script".to_owned())
+                }
+            }
         }),
     )
 }

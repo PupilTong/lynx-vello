@@ -74,7 +74,7 @@ impl ResourceFetcher for InlineFetcher {
                 )),
                 None => Err(missing(&url)),
             },
-            SourceRequest::Module(url) => Err(missing(&url)),
+            SourceRequest::Module(url) | SourceRequest::Script(url) => Err(missing(&url)),
             SourceRequest::Worker { specifier, .. } => Err(missing(&specifier)),
         };
         completion.complete(answer);
