@@ -64,6 +64,7 @@ fn ingredients() -> DocumentIngredients {
 /// link.
 struct Harness {
     workers: mpsc::UnboundedReceiver<WorkerCommand>,
+    background: Option<WorkerStart>,
     commands: mpsc::UnboundedSender<ToMain>,
     view: DetachedView,
     events: Vec<EngineEvent>,
@@ -94,6 +95,7 @@ impl Harness {
         let owner = task::spawn_local(serve_view(context, attached, outbox));
         Self {
             workers,
+            background: None,
             commands,
             view,
             events: Vec::new(),
@@ -159,6 +161,13 @@ impl Harness {
         })
         .await;
         self.answer("app:///main.js", entry);
+        self.until("MTS never rendered", |h| {
+            h.view.published.commit().is_some()
+        })
+        .await;
+        let background = self.background_worker();
+        acknowledge_background(&background);
+        self.background = Some(background);
         self.until("the entry never finished", |harness| {
             harness
                 .events
@@ -175,11 +184,26 @@ impl Harness {
     /// The `Start` the boot module's BTS `Worker` sent, which nothing on this
     /// test's side ever boots.
     fn background_worker(&mut self) -> WorkerStart {
+        if let Some(background) = self.background.take() {
+            return background;
+        }
         let Some(WorkerCommand::Start(start)) = self.workers.try_recv().ok() else {
             panic!("boot creates the BTS worker")
         };
         start
     }
+}
+
+fn acknowledge_background(background: &WorkerStart) {
+    background
+        .events
+        .send(crate::background::WorkerEvent {
+            key: background.key,
+            payload: crate::background::WorkerPayload::Message(
+                r#"[{"bobcat":"runtime","method":"backgroundReady"}]"#.into(),
+            ),
+        })
+        .unwrap();
 }
 
 /// One page over the token that ends it, with the test holding the owner's
@@ -764,5 +788,107 @@ fn a_view_that_already_failed_still_reports_a_task_that_traps() {
             "carrying the payload: {}",
             reports[0]
         );
+    });
+}
+
+#[test]
+fn readiness_is_reported_once_when_bts_acknowledges_after_mts_render() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut sources = ViewSources::new("app:///main.js");
+        sources.background_entry = Some("app:///background.js".into());
+        let mut harness = Harness::serving(context, workers, sources);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer("app:///main.js", "__CreatePage();");
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
+            .await;
+        let background = harness.background_worker();
+        for _ in 0..4 {
+            harness.turn().await;
+        }
+        assert!(
+            !harness
+                .events
+                .iter()
+                .any(|e| matches!(e, EngineEvent::ScriptFinished))
+        );
+        acknowledge_background(&background);
+        acknowledge_background(&background);
+        harness
+            .until("BTS acknowledgement did not finish boot", |h| {
+                h.events
+                    .iter()
+                    .any(|e| matches!(e, EngineEvent::ScriptFinished))
+            })
+            .await;
+        assert_eq!(
+            harness
+                .events
+                .iter()
+                .filter(|e| matches!(e, EngineEvent::ScriptFinished))
+                .count(),
+            1
+        );
+        harness.view.token.cancel();
+        harness.owner.await.unwrap();
+    });
+}
+
+#[test]
+fn a_configured_background_entry_failure_reports_startup_failed_once() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut sources = ViewSources::new("app:///main.js");
+        sources.background_entry = Some("app:///background.js".into());
+        let mut harness = Harness::serving(context, workers, sources);
+        harness
+            .until("entry request", |h| !h.sources.is_empty())
+            .await;
+        harness.answer("app:///main.js", "__CreatePage();");
+        harness
+            .until("MTS did not render", |h| {
+                h.view.published.commit().is_some()
+            })
+            .await;
+        let background = harness.background_worker();
+        background
+            .events
+            .send(crate::background::WorkerEvent {
+                key: background.key,
+                payload: crate::background::WorkerPayload::Failed(crate::script::ScriptError {
+                    kind: crate::script::ScriptErrorKind::Exception,
+                    phase: crate::script::ScriptErrorPhase::ExecuteModule,
+                    message: "BTS startup failed".into(),
+                    location: None,
+                }),
+            })
+            .unwrap();
+        harness
+            .until("BTS failure did not end boot", |h| {
+                h.view.token.is_cancelled()
+            })
+            .await;
+        harness.turn().await;
+        let failures: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::StartupFailed(error) => Some(error.to_string()),
+                EngineEvent::ScriptFinished
+                | EngineEvent::ListenerFailed(_)
+                | EngineEvent::ScriptRunError(_) => {
+                    panic!("BTS startup failure was misreported: {event:?}")
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("BTS startup failed"));
+        harness.owner.await.unwrap();
     });
 }

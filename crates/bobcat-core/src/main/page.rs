@@ -321,7 +321,7 @@ impl Page {
         }
         runtime.commit_if_dirty();
         if !self.boot_reported.get() {
-            match runtime.main_module_finished() {
+            match runtime.is_ready() {
                 Ok(false) => {}
                 Ok(true) => {
                     self.boot_reported.set(true);
@@ -408,6 +408,11 @@ impl Page {
         command: ToMain,
     ) {
         match command {
+            ToMain::PageUpdate(update) => {
+                if let Err(error) = runtime.apply_page_update(js, update) {
+                    self.fail(EngineEvent::ScriptRunError(error.into_script_error()));
+                }
+            }
             ToMain::DispatchEvent {
                 target,
                 name,
@@ -460,6 +465,8 @@ impl Page {
             };
             for command in commands {
                 match command {
+                    // The public global-event API only enqueues on a ready view.
+                    ToMain::PageUpdate(_) => {}
                     ToMain::Resize {
                         width,
                         height,
@@ -877,12 +884,16 @@ async fn load_module(page: Rc<Page>, url: String, answer: SourceAnswer) {
 /// the view.
 async fn consume_worker_events(page: Rc<Page>, mut events: mpsc::UnboundedReceiver<WorkerEvent>) {
     while let Some(WorkerEvent { key, payload }) = events.recv().await {
-        page.enter(|runtime, js| {
-            if let Err(error) = runtime.dispatch_worker_event(js, key, payload) {
-                page.outbox
-                    .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
-            }
-        });
+        let delivered = page.enter(|runtime, js| runtime.dispatch_worker_event(js, key, payload));
+        // A configured BTS entry can reject the boot promise in this checkpoint.
+        // The epilogue reports that as StartupFailed and ends the view; only an
+        // error that leaves the view running is a listener failure.
+        if let Some(Err(error)) = delivered
+            && !page.ended()
+        {
+            page.outbox
+                .engine_event(EngineEvent::ListenerFailed(error.into_script_error()));
+        }
     }
 }
 

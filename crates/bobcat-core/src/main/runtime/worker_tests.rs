@@ -40,7 +40,25 @@ struct Pair {
 
 impl Pair {
     fn new(script: &str) -> Self {
-        Self::with_background(script, None)
+        let mut pair = Self::with_background(script, None);
+        // Ordinary Worker tests start with the built-in empty BTS ready, so
+        // its acknowledgement is not mistaken for the worker under test.
+        pair.acknowledge_background();
+        pair
+    }
+
+    fn acknowledge_background(&mut self) {
+        let event = block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE)
+            .flatten()
+            .expect("BTS acknowledgement, including an empty BTS entry");
+        assert!(
+            matches!(&event.payload, WorkerPayload::Message(json) if json.contains("backgroundReady"))
+        );
+        self.runtime
+            .as_mut()
+            .unwrap()
+            .dispatch_worker_event(&mut self.js, event.key, event.payload)
+            .unwrap();
     }
 
     fn with_background(script: &str, background_source: Option<&str>) -> Self {
@@ -130,7 +148,21 @@ impl Pair {
     }
 
     fn next_event(&mut self) -> Option<WorkerEvent> {
-        block_on_deadline(self.events.recv(), ClockInstant::now() + PATIENCE).flatten()
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            let event = block_on_deadline(self.events.recv(), deadline).flatten()?;
+            let ready = matches!(&event.payload, WorkerPayload::Message(json)
+                if serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value|
+                    value.pointer("/0/method").and_then(serde_json::Value::as_str) == Some("backgroundReady")));
+            if !ready {
+                return Some(event);
+            }
+            self.runtime
+                .as_mut()
+                .unwrap()
+                .dispatch_worker_event(&mut self.js, event.key, event.payload)
+                .unwrap();
+        }
     }
 
     /// How many workers this realm still holds the right to stop.
@@ -299,7 +331,7 @@ fn publish_hooks_install_lazily_and_component_ids_stay_opaque() {
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         __BobcatPublishEvent(undefined, 'first', { value: 1 });
         __BobcatPublishEvent('component:7', 'second', { value: 2 });
-        lynx.getJSContext().dispatchEvent({ type: 'install' });
+        lynx.getJSContext().dispatchEvent({ type: 'install', data: undefined });
         __BobcatPublishEvent(undefined, 'third', { value: 3 });
         ",
         Some(
@@ -341,7 +373,7 @@ fn a_late_publish_hook_failure_does_not_discard_later_queued_events() {
         lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
         __BobcatPublishEvent(undefined, 'throws', {});
         __BobcatPublishEvent(undefined, 'survives', {});
-        lynx.getJSContext().dispatchEvent({ type: 'install' });
+        lynx.getJSContext().dispatchEvent({ type: 'install', data: undefined });
         ",
         Some(
             r"
@@ -474,7 +506,7 @@ fn a_js_lifetime_event_calls_the_background_hook_without_releasing_the_worker() 
         r#"
         import { lynx } from 'bobcat:runtime';
         if (JSON.stringify(results) !== '["hook"]') throw Error(JSON.stringify(results));
-        lynx.getJSContext().dispatchEvent({ type: 'ping' });
+        lynx.getJSContext().dispatchEvent({ type: 'ping', data: undefined });
         "#,
     );
     pair.deliver();
@@ -761,12 +793,12 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     );
     pair.deliver();
     pair.check(
-        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42]}') throw Error(JSON.stringify(result));",
+        "if (JSON.stringify(result) !== '{\"type\":\"reply\",\"data\":[\"ordinary\",42],\"origin\":\"JSContext\"}') throw Error(JSON.stringify(result));",
     );
 }
 
 #[test]
-fn background_contexts_exchange_typed_events_and_flush_early_payload_references_in_order() {
+fn background_contexts_exchange_native_events_and_flush_early_payload_references_in_order() {
     let mut pair = Pair::with_background(
         r"
         import { EventTarget } from 'bobcat:event-target';
@@ -777,11 +809,11 @@ fn background_contexts_exchange_typed_events_and_flush_early_payload_references_
         globalThis.results = [];
         context.addEventListener('request', () => { throw Error('local echo'); });
         context.addEventListener('reply', function (event) {
-            if (this !== context) throw Error('listener receiver');
+            if (this !== undefined) throw Error('listener receiver');
             results.push(event.data);
         });
         const first = {type: 'request', data: {value: 1}};
-        if (context.dispatchEvent(first) !== 3) throw Error('dispatch result');
+        if (context.dispatchEvent(first) !== 0) throw Error('dispatch result');
         context.dispatchEvent({type: 'request', data: {value: 2}});
         await Promise.resolve();
         first.data.value = 3;
@@ -804,8 +836,8 @@ fn background_contexts_exchange_typed_events_and_flush_early_payload_references_
         }
         core.addEventListener('reply', () => { throw Error('local echo'); });
         core.addEventListener('request', function (event) {
-            if (this !== core) throw Error('listener receiver');
-            if (core.dispatchEvent({type: 'reply', data: event.data}) !== 3) {
+            if (this !== undefined) throw Error('listener receiver');
+            if (core.dispatchEvent({type: 'reply', data: event.data}) !== 0) {
                 throw Error('dispatch result');
             }
         });
@@ -836,7 +868,7 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
         await Promise.resolve();
         finished = true;
         ",
-        Some("lynx.getCoreContext().dispatchEvent({type: 'ready'});"),
+        Some("lynx.getCoreContext().dispatchEvent({ type: 'ready', data: undefined });"),
     );
     pair.check("if (!connected) throw Error('BTS was not connected');");
     pair.deliver();
@@ -844,31 +876,26 @@ fn background_starts_only_after_the_awaited_main_entry_finishes() {
 }
 
 #[test]
-fn context_post_message_remains_a_noop_on_both_realms() {
+fn context_post_message_delivers_message_events_in_both_directions() {
     let mut pair = Pair::with_background(
         r"
         const context = lynx.getJSContext();
         globalThis.results = [];
-        context.addEventListener('ignored', () => { throw Error('postMessage delivered'); });
-        context.addEventListener('ready', e => results.push(e.data));
-        context.addEventListener('reply', e => results.push(e.data));
-        context.postMessage({type: 'request', data: 'ignored'});
-        context.dispatchEvent({type: 'request', data: 'typed'});
-    ",
+        context.addEventListener('message', e => results.push([e.data, e.origin]));
+        context.postMessage({value: 7});
+        ",
         Some(
             r"
         const core = lynx.getCoreContext();
-        core.addEventListener('request', e => core.dispatchEvent({type: 'reply', data: e.data}));
-        core.postMessage({type: 'ignored', data: 'ignored'});
-        core.dispatchEvent({type: 'ready'});
-    ",
+        core.addEventListener('message', e => {
+            if (e.origin !== 'CoreContext') throw Error('wrong origin');
+            core.postMessage(e.data);
+        });
+        ",
         ),
     );
     pair.deliver();
-    pair.deliver();
-    pair.check(
-        "if (JSON.stringify(results) !== '[{},\"typed\"]') throw Error(JSON.stringify(results));",
-    );
+    pair.check(r#"if (JSON.stringify(results) !== '[[{"value":7},"JSContext"]]') throw Error(JSON.stringify(results));"#);
 }
 
 #[test]
@@ -1091,4 +1118,143 @@ fn bts_invoke_reports_failures_and_later_queries_still_complete() {
         if (result.after.status.code !== 0 || result.after.data.id !== 'item') throw Error(JSON.stringify(result));
     ");
     assert!(worker_failures(pair.notices()).is_empty());
+}
+
+#[test]
+fn diagnostics_cross_the_worker_channel_and_keep_both_realms_usable() {
+    let mut pair = Pair::with_background(
+        r"
+        __CreatePage();
+        _ReportError(new Error('MTS warning'), {level:'warning'});
+        console.info('MTS', {value:1});
+        globalThis.alive = false;
+        lynx.getJSContext().addEventListener('alive', () => { alive = true; });
+        ",
+        Some(
+            r"
+        import {console} from 'bobcat:bts-runtime';
+        lynx.reportError(new Error('BTS fatal label'), {level:'fatal'});
+        console.warn('BTS', [1,2]);
+        lynx.getCoreContext().dispatchEvent({type:'alive', data:undefined});
+        ",
+        ),
+    );
+    for _ in 0..3 {
+        pair.deliver();
+    }
+    pair.check("if (!alive) throw Error('a diagnostic stopped delivery');");
+    let diagnostics: Vec<_> = pair
+        .notices()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            ViewNotice::Engine(crate::EngineEvent::ScriptReported { level, message }) => {
+                Some((true, level, message))
+            }
+            ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { level, message }) => {
+                Some((false, level, message))
+            }
+            ViewNotice::Engine(crate::EngineEvent::WorkerFailed(error)) => panic!("{error}"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(diagnostics.len(), 4);
+    assert_eq!(
+        (diagnostics[0].0, diagnostics[0].1.as_str()),
+        (true, "warning")
+    );
+    assert!(diagnostics[0].2.contains("MTS warning"));
+    assert!(diagnostics[0].2.contains("app:///nested/main.js"));
+    assert_eq!(
+        diagnostics[1],
+        (false, "info".into(), "MTS {\"value\":1}".into())
+    );
+    assert_eq!(
+        (diagnostics[2].0, diagnostics[2].1.as_str()),
+        (true, "fatal")
+    );
+    assert!(diagnostics[2].2.contains("BTS fatal label"));
+    assert_eq!(diagnostics[3], (false, "warn".into(), "BTS [1,2]".into()));
+}
+
+#[test]
+fn host_global_events_reach_the_bts_emitter_in_order_after_a_listener_throws() {
+    let mut pair = Pair::with_background(
+        r"
+        __CreatePage();
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        ",
+        Some(
+            r"
+        const emitter = lynx.getJSModule('GlobalEventEmitter');
+        if (emitter !== lynx.getApp().GlobalEventEmitter) throw Error('emitter identity');
+        emitter.addListener('host-event', function (value, extra) {
+            if (this !== emitter) throw Error('emitter receiver');
+            if (value === 0) throw Error('event failed');
+            lynx.getCoreContext().dispatchEvent({type:'reply', data:[value, extra]});
+        });
+        ",
+        ),
+    );
+    for value in 0..3 {
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .apply_page_update(
+                &mut pair.js,
+                crate::link::PageUpdate::GlobalEvent {
+                    name: "host-event".into(),
+                    arguments: vec![value.into(), serde_json::json!({"nested":value})],
+                },
+            )
+            .unwrap();
+    }
+    for _ in 0..3 {
+        pair.deliver();
+    }
+    let failures = worker_failures(pair.notices());
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("event failed"));
+    pair.check(r#"if (JSON.stringify(results) !== '[[1,{"nested":1}],[2,{"nested":2}]]') throw Error(JSON.stringify(results));"#);
+}
+
+#[test]
+fn mts_module_finishes_before_bts_declares_application_ready() {
+    for background in [None, Some("await Promise.resolve();")] {
+        let mut pair = Pair::with_background("__CreatePage();", background);
+        let runtime = pair.runtime.as_mut().unwrap();
+        assert!(
+            runtime.main_module_finished().unwrap(),
+            "MTS never awaits BTS"
+        );
+        assert!(!runtime.is_ready().unwrap());
+        pair.acknowledge_background();
+        let runtime = pair.runtime.as_mut().unwrap();
+        assert!(runtime.main_module_finished().unwrap());
+        assert!(runtime.is_ready().unwrap());
+    }
+}
+
+#[test]
+fn a_failed_bts_entry_reports_startup_failure_without_rejecting_mts_evaluation() {
+    let mut pair = Pair::with_background(
+        "__CreatePage();",
+        Some("throw Error('BTS startup failed');"),
+    );
+    assert!(
+        pair.runtime
+            .as_mut()
+            .unwrap()
+            .main_module_finished()
+            .unwrap()
+    );
+    assert!(!pair.runtime.as_mut().unwrap().is_ready().unwrap());
+    let event = pair.next_event().expect("BTS startup failure");
+    let runtime = pair.runtime.as_mut().unwrap();
+    runtime
+        .dispatch_worker_event(&mut pair.js, event.key, event.payload)
+        .unwrap();
+    assert!(runtime.main_module_finished().unwrap());
+    let error = runtime.is_ready().unwrap_err();
+    assert!(error.to_string().contains("BTS startup failed"), "{error}");
 }

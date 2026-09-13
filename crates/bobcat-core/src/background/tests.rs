@@ -7,6 +7,7 @@
 //! one would be testing something else.
 
 use std::cell::Cell;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -17,9 +18,10 @@ use super::{
     WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
 use crate::clock::ClockInstant;
-use crate::link::block_on_deadline;
+use crate::link::{SourceRequester, ViewNotice, block_on_deadline};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
+    SourceCompletion, SourceRequest,
 };
 
 impl WorkerHome {
@@ -54,16 +56,21 @@ struct View {
     /// This view's end signal, standing in for the one `create_lynx_view`
     /// mints on the embedder's thread.
     token: CancellationToken,
+    notices: mpsc::UnboundedSender<ViewNotice>,
+    sources: mpsc::UnboundedReceiver<ViewNotice>,
 }
 
 impl View {
     fn new() -> Self {
         let (events, incoming) = mpsc::unbounded_channel();
+        let (notices, sources) = mpsc::unbounded_channel();
         Self {
             messages: FxHashMap::default(),
             events,
             incoming,
             token: CancellationToken::new(),
+            notices,
+            sources,
         }
     }
 
@@ -81,6 +88,18 @@ impl View {
                 panic!("expected a message, got {}", error.message)
             }
             WorkerPayload::Closed => panic!("expected a message, the worker closed"),
+        }
+    }
+    fn source(&mut self) -> (String, SourceCompletion) {
+        match block_on_deadline(self.sources.recv(), ClockInstant::now() + PATIENCE)
+            .flatten()
+            .expect("the worker requested a module")
+        {
+            ViewNotice::RequestSource {
+                request: SourceRequest::Module(url),
+                completion,
+            } => (url, completion),
+            _ => panic!("a worker only requests module sources"),
         }
     }
 }
@@ -126,13 +145,20 @@ impl Group {
         self.next_key.set(key.get() + 1);
         let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
+        let token = self.views[view].token.child_token();
+        let sources = SourceRequester::new(
+            self.views[view].notices.clone(),
+            Arc::new(crate::NoWakeup),
+            token.clone(),
+        );
         self.tell(WorkerCommand::Start(WorkerStart {
             key,
             name: name.to_owned(),
             script: awaiting,
             messages: incoming,
             events: self.views[view].events.clone(),
-            token: self.views[view].token.child_token(),
+            token,
+            sources,
         }));
         self.views[view].messages.insert(key, messages);
         self.scripts.insert(key, script);
@@ -465,4 +491,100 @@ onmessage = () => postMessage(globalThis.marker);",
     assert_eq!(data, "[\"undefined\"]");
     group.post(first, "ask");
     assert_eq!(group.message(0), "[\"first\"]");
+}
+
+#[test]
+fn imported_worker_graph_uses_response_urls_and_queues_messages_until_entry_finishes() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        const [first, second] = await Promise.all([import('./dep.js'), import('./dep.js')]);
+        if (first !== second) throw Error('duplicate module evaluation');
+        await new Promise(resolve => setTimeout(resolve, 1));
+        addEventListener('message', event => postMessage([first.value, event.data]));
+    ",
+    );
+    group.post(worker, "first");
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "app:///dep.js");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "export { value } from './leaf.js';".to_owned(),
+        url: "https://example.test/redirected/dep.js".to_owned(),
+    }));
+    let (url, completion) = group.views[0].source();
+    assert_eq!(url, "https://example.test/redirected/leaf.js");
+    group.post(worker, "second");
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "export const value = 42;".to_owned(),
+        url,
+    }));
+    assert_eq!(group.views[0].message(), "[[42,\"first\"]]");
+    assert_eq!(group.views[0].message(), "[[42,\"second\"]]");
+    assert!(group.views[0].sources.try_recv().is_err());
+}
+
+#[test]
+fn a_handled_import_failure_keeps_the_worker_usable() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        let failed = false;
+        try { await import('./missing.js'); } catch { failed = true; }
+        addEventListener('message', event => postMessage([failed, event.data]));
+    ",
+    );
+    group.post(worker, "queued");
+    let (_, completion) = group.views[0].source();
+    drop(completion);
+    assert_eq!(group.views[0].message(), "[[true,\"queued\"]]");
+}
+
+#[test]
+fn releasing_a_view_cancels_its_workers_import_requests_immediately() {
+    let mut group = Group::new();
+    group.start("await import('./pending.js'); postMessage('must not run');");
+    let (_, completion) = group.views[0].source();
+    assert!(!completion.is_cancelled());
+    group.views[0].token.cancel();
+    assert!(completion.is_cancelled());
+    completion.complete(Ok(LoadedSource::Entry {
+        source: String::new(),
+        url: "app:///pending.js".to_owned(),
+    }));
+}
+
+#[test]
+fn a_rejected_worker_tla_is_reported_and_leaves_the_message_queue_usable() {
+    let mut group = Group::new();
+    let worker = group.start(
+        r"
+        onmessage = event => postMessage(event.data);
+        await import('./rejected.js');
+    ",
+    );
+    group.post(worker, "queued");
+    let (_, completion) = group.views[0].source();
+    completion.complete(Ok(LoadedSource::Entry {
+        source: "await new Promise(resolve => setTimeout(resolve, 1)); throw Error('TLA failed');"
+            .into(),
+        url: "app:///rejected.js".into(),
+    }));
+    let mut reported = false;
+    loop {
+        match group.next(0).payload {
+            WorkerPayload::Errored(error) => {
+                // The existing engine exposes both checkpoint failures and
+                // entry rejection; neither may poison later message delivery.
+                assert!(error.message.contains("TLA failed"), "{error}");
+                reported = true;
+            }
+            WorkerPayload::Message(value) => {
+                assert!(reported, "TLA rejection must be reported");
+                assert_eq!(value, wire("queued"));
+                break;
+            }
+            _ => panic!("a rejected entry must leave its worker usable"),
+        }
+    }
+    group.quiet();
 }

@@ -301,7 +301,7 @@ useful signal for currently-compatible versions of those libraries.
   defers incomplete import graphs, and resumes the original promises on main
   when sources arrive. Cycles never become partially linked while fetching.
   Top-level await can span resource and timer turns; `ScriptFinished` waits
-  for the boot promise. Handled import failures leave the realm usable, and
+  for the boot promise and the application's readiness declaration. Handled import failures leave the realm usable, and
   dropping the view cancels outstanding completions and releases continuations.
   This is JavaScript ESM loading; import maps, import attributes, JSON modules
   and Lynx component-bundle imports remain unsupported.
@@ -521,8 +521,8 @@ useful signal for currently-compatible versions of those libraries.
   existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
   `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
   module scripts (also with omitted options) and the existing worker scope's
-  JSON transport; structured clone, transfer lists and external module
-  fetching remain pending. `main/workers.rs` installs its three native
+  JSON transport; structured clone and transfer lists remain pending. External
+  ESM imports now load through the view's resource fetcher and support TLA. `main/workers.rs` installs its three native
   operations — `createWorker`, `sendWorkerMessage`, `terminateWorker` — before
   entry boot. The `Start` goes out before the host is asked for anything;
   `SourceRequest::Worker` carries the entry's resolved URL as its
@@ -541,31 +541,41 @@ useful signal for currently-compatible versions of those libraries.
   `lynx-bg` through that same class, using the engine entry `bobcat:bts`.
   `bobcat:bts` imports `lynx` from `bobcat:bts-runtime` and, when
   `ViewSources.background_entry` is supplied, executes `await import(entry)`.
-  BTS application entries receive the same named import as a preamble, like
-  MTS entries importing `bobcat:runtime`; neither installs `globalThis.lynx`.
+  Raw BTS application entries explicitly import their bindings from
+  `bobcat:bts-runtime`; neither runtime installs `globalThis.lynx`.
   Keeping the runtime separate lets the app import its bindings without a
   dependency back to the bootstrap awaiting it.
   XML uses this identical startup path. The bootstrap contains no application
-  source and does not fetch it in advance. Application module loading through
-  `ResourceFetcher` is explicitly deferred; an entry not already preloaded
-  reports a worker import error. Without an entry, only the built-in
+  source and does not fetch it in advance. A worker carries a `SourceRequester`
+  that sends module requests directly to the view's resource host. ESM
+  completion and timers continue during entry TLA; posted messages wait for
+  entry settlement. Each completion shares its worker's cancellation token.
+  Native Script/JSON reads, compiled factory evaluation and module caches
+  remain later layers. Without an entry, only the built-in
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
   stable `CrossThreadContext extends EventTarget` instances returned directly
-  by `createCrossThreadContext`. `dispatchEvent({type, data})` sends to the peer
-  and returns `3`, and receiving calls `super.dispatchEvent` with EventTarget
-  listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
-  web-core. MTS projects the public Context fields and queues their payload
-  references until the Worker is connected; Worker `postMessage` takes the
-  JSON snapshot. JSON's loss of undefined members and special-number values
-  is an accepted compatibility limit; do not add a custom codec or deep clone
-  to compensate for it. A worker's own task queues what is posted to it until
-  its script has been evaluated, so BTS
+  by `createCrossThreadContext`. `dispatchEvent({type, data})` validates the
+  string type and data property, captures the public envelope, sends to the peer and
+  returns `0`. Context `postMessage(value)` sends a message event. Listeners
+  receive the original null/undefined data and an undefined receiver, and
+  ignore DOM listener options. Origins identify the sending CoreContext or
+  JSContext. MTS queues payload references until the Worker is connected;
+  Worker postMessage takes the JSON snapshot. JSON's loss of undefined members
+  and special-number values is an accepted compatibility limit; do not add a
+  custom codec or deep clone to compensate for it. A worker's own task
+  queues what is posted to it until its script has been evaluated, so BTS
   listeners are registered before the first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one
-  additional realm on the group's existing worker runtime. `ScriptFinished`
-  continues to mean MTS boot; BTS errors are nonfatal `WorkerFailed` events.
+  additional realm on the group's existing worker runtime. MTS boot does not
+  await BTS: the built-in BTS posts `backgroundReady` after its optional entry
+  completes, including when no entry is configured. MTS then calls the native
+  `notifyReady()` binding. The page publishes `ScriptFinished` once both MTS
+  completion and that declaration hold, after commit. MTS forwards BTS errors
+  through `reportStartupFailure(message)`; an error before readiness produces
+  `StartupFailed` without rejecting MTS evaluation. Ordinary Worker errors and
+  BTS errors after readiness remain nonfatal `WorkerFailed` events.
   BTS also exposes stable `getApp()` and `getNativeApp()` objects. The current
   app hooks receive `OnLifecycleEvent`, `publishEvent`, `publicComponentEvent`
   and `callDestroyLifetimeFun`; the native app's `callLepusMethod` invokes a
@@ -684,10 +694,10 @@ useful signal for currently-compatible versions of those libraries.
   runtime as `bobcat:element`, the timer runtime as `bobcat:timers`, and the
   shared `EventTarget` as `bobcat:event-target` and the typed Context protocol
   as `bobcat:cross-thread-context`,
-  in QuickJS's synchronous preloaded ESM loader. The group's worker runtime
+  as built-in sources in QuickJS's ESM loader. The group's worker runtime
   gets a deliberately shorter list — `bobcat:event-target`, the worker global
   scope as `bobcat:worker`, `bobcat:timers`, `bobcat:cross-thread-context`, and
-  the BTS bindings `bobcat:bts-runtime` — because a worker has no
+  the BTS bindings `bobcat:bts-runtime` and `bobcat:global-event-emitter` — because a worker has no
   document to reach and no page to be the main thread of, so an import of
   `bobcat:element` fails to resolve rather than failing late. A worker's own
   script is *inlined* into the one module its realm evaluates, exactly as
@@ -695,7 +705,7 @@ useful signal for currently-compatible versions of those libraries.
   runtime: an evaluated module belongs to the realm that evaluated it, so two
   views resolving one URL to different bytes cannot collide and no worker
   leaves a registration behind.
-  All eight runtime modules live together in `packages/bobcat-element/src` as
+  The runtime modules live together in `packages/bobcat-element/src` as
   TypeScript; core embeds, with `include_str!`, the JavaScript TypeScript 7
   emits during the Cargo build into its private `OUT_DIR` (see that package
   below). The Element module imports
@@ -724,9 +734,18 @@ useful signal for currently-compatible versions of those libraries.
   requirement. The runtime module directly exports a `lynx` object, an empty
   `SystemInfo` snapshot, the host's global props, the JS Context and other context sinks, the native-module
   sentinel and empty JS event module,
-  performance/error hooks, and
+  performance hooks, nonfatal console/error forwarding, and
   `__OnLifecycleEvent`; transformed entries receive every binding through the
   prepended import, and the module installs none of them on `globalThis`.
+  Native Context behavior, the BTS GlobalEventEmitter and
+  `LynxView::send_global_event` are described in `docs/events-diagnostics-runtime.md`.
+  `LynxView::pump` records readiness before returning `ScriptFinished`, exposed
+  by `is_ready()`. Global events require observed readiness and otherwise return
+  `EngineError::NotReady`; rejected events are never queued or replayed. Accepted
+  events retain host FIFO order. Internal pre-connection MTS messages still wait
+  for Worker construction.
+  `ScriptReported` and `ConsoleMessage` are nonfatal host notices; their BTS
+  path remains ordinary Worker postMessage delivery with JS-side dispatch.
   `lynx.getEngine()` returns one stable, realm-local `EventTarget`; its
   listeners never cross the host boundary and its only engine-driven delivery
   today is the boot fallback's `__RenderPage` event, whose `data` is the

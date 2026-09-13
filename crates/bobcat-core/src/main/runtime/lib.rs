@@ -71,6 +71,7 @@ const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-run
 
 const ENTRY_PREAMBLE: &str = r#"import {
   lynx,
+  console,
   SystemInfo,
   __globalProps,
   NativeModules,
@@ -516,6 +517,9 @@ impl EventState {
 /// worker is gone.
 pub(crate) struct MainThreadRuntime {
     engine: ScriptEngine,
+    /// MTS declares application readiness through native bindings. Module
+    /// evaluation can finish independently while the BTS entry is still loading.
+    readiness: Rc<RefCell<Result<bool, ScriptError>>>,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -579,12 +583,15 @@ impl MainThreadRuntime {
             &timers,
         )?;
         install_page_data(&mut engine, js_runtime, page_data)?;
+        let readiness = Rc::new(RefCell::new(Ok(false)));
+        install_readiness(&mut engine, js_runtime, &readiness)?;
         let (workers, incoming) = workers
             .install(&mut engine, js_runtime, outbox, base_url, background_entry)
             .map_err(|error| MainThreadError::from_engine("installing Worker", error))?;
         Ok((
             Self {
                 engine,
+                readiness,
                 workers,
                 slot,
                 events,
@@ -655,6 +662,25 @@ impl MainThreadRuntime {
     /// epilogue, after every entry into the realm.
     pub(crate) fn commit_if_dirty(&mut self) {
         self.slot.borrow_mut().commit_if_dirty();
+    }
+
+    pub(crate) fn apply_page_update(
+        &mut self,
+        js: &mut ScriptRuntime,
+        update: crate::link::PageUpdate,
+    ) -> Result<(), MainThreadError> {
+        let message = update.into_message().to_string();
+        let called = self
+            .engine
+            .call_module_export(
+                js,
+                RUNTIME_MODULE_SPECIFIER,
+                "__BobcatApplyPageUpdate",
+                &[HostArgument::String(&message)],
+            )
+            .map_err(|error| MainThreadError::from_engine("updating page data", error));
+        let finished = self.finish_batch(js, called.is_ok());
+        called.map(|_| ()).and(finished)
     }
 
     /// Advances the animation timeline to the painting side's clock
@@ -884,6 +910,17 @@ __FlushElementTree();
         self.engine.take_module_request()
     }
 
+    /// Module completion and the application's readiness declaration are
+    /// separate facts. The page reports success only after both, after commit.
+    pub(crate) fn is_ready(&mut self) -> Result<bool, MainThreadError> {
+        let module_finished = self.main_module_finished()?;
+        self.readiness
+            .borrow()
+            .clone()
+            .map(|ready| ready && module_finished)
+            .map_err(|error| MainThreadError::from_engine("starting the BTS application", error))
+    }
+
     pub(crate) fn main_module_finished(&mut self) -> Result<bool, MainThreadError> {
         self.engine
             .module_finished()
@@ -997,6 +1034,19 @@ fn install_bobcat(
     events: &Rc<EventState>,
     timers: &Rc<TimerState>,
 ) -> Result<Rc<RefCell<DocumentSlot>>, MainThreadError> {
+    for (name, is_error) in [("reportScriptError", true), ("logScriptMessage", false)] {
+        let reporting = outbox.clone();
+        install(engine, js_runtime, name, 2, move |arguments| {
+            let level = string_argument(name, arguments, 0)?.to_owned();
+            let message = string_argument(name, arguments, 1)?.to_owned();
+            reporting.engine_event(if is_error {
+                crate::EngineEvent::ScriptReported { level, message }
+            } else {
+                crate::EngineEvent::ConsoleMessage { level, message }
+            });
+            Ok(HostValue::Undefined)
+        })?;
+    }
     let handle = Rc::new(RefCell::new(DocumentSlot {
         ingredients: Some(ingredients),
         document: None,
@@ -1198,6 +1248,41 @@ fn install_document_members(
         Ok(HostValue::Undefined)
     })?;
 
+    Ok(())
+}
+
+/// Installs MTS declarations of application readiness and startup failure.
+fn install_readiness(
+    engine: &mut ScriptEngine,
+    js_runtime: &mut ScriptRuntime,
+    readiness: &Rc<RefCell<Result<bool, ScriptError>>>,
+) -> Result<(), MainThreadError> {
+    for (name, ready) in [("notifyReady", true), ("reportStartupFailure", false)] {
+        let readiness = Rc::clone(readiness);
+        install(
+            engine,
+            js_runtime,
+            name,
+            u8::from(!ready),
+            move |arguments| {
+                let outcome = if ready {
+                    Ok(true)
+                } else {
+                    Err(ScriptError {
+                        kind: crate::script::ScriptErrorKind::Exception,
+                        phase: crate::script::ScriptErrorPhase::ExecuteModule,
+                        message: string_argument(name, arguments, 0)?.into(),
+                        location: None,
+                    })
+                };
+                let mut state = readiness.borrow_mut();
+                if matches!(*state, Ok(false)) {
+                    *state = outcome;
+                }
+                Ok(HostValue::Undefined)
+            },
+        )?;
+    }
     Ok(())
 }
 

@@ -62,9 +62,9 @@ native numeric-length conversion remain unsupported.
 
 Legacy component-scoped roots, direct MTS selector PAPI, actual UI invoke
 methods, animation methods, dataset-to-DOM reflection and cross-realm host
-objects remain pending. The complete Lynx diagnostics layer is also pending:
-query status replies work now, the MTS error reporter remains its existing sink,
-and invalid legacy ReactRef chaining uses the Worker's existing error path.
+objects remain pending. Query failures and invalid legacy ReactRef chaining
+now use the nonfatal [runtime reporter](events-diagnostics-runtime.md), alongside
+the existing query status replies.
 Compiled ReactLynx bundle loading and ref hydration integration remain later
 stack layers; these tests exercise raw BTS with real QuickJS and document nodes.
 

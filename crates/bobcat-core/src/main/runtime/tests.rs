@@ -477,8 +477,8 @@ fn imported_runtime_bindings_supply_bridges_without_globals() {
                   context.postMessage({});
                   context.addEventListener('ignored', function () {});
                   context.removeEventListener('ignored', function () {});
-                  if (context.dispatchEvent({ type: 'ignored', data: {} }) !== 3) {
-                    throw new Error(name + ' context must report a suppressed event');
+                  if (context.dispatchEvent({ type: 'ignored', data: {} }) !== (name === 'js' ? 0 : 3)) {
+                    throw new Error(name + ' context returned the wrong delivery result');
                   }
                 }
 

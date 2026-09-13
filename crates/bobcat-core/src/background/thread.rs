@@ -49,8 +49,9 @@ use super::scope::{
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
+use crate::link::{SourceAnswer, SourceRequester};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
-use crate::resource::LoadedSource;
+use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
 use crate::threads::{panicked, platform_script_error};
 use crate::timers::{TimerState, run_due_timers};
@@ -195,6 +196,10 @@ struct Worker {
     /// report wins, so a `Failed` and a `Closed` cannot both arrive. A panic
     /// has a latch of its own on the lifetime.
     reported: Cell<bool>,
+    sources: SourceRequester,
+    /// Messages wait for entry evaluation, including imports and top-level
+    /// await. Timers and module completions continue to enter the realm.
+    boot_finished: watch::Sender<bool>,
     /// How many times the epilogue has run, for the test that counts the wakes
     /// a worker answers.
     #[cfg(test)]
@@ -207,6 +212,7 @@ impl Worker {
         key: WorkerKey,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
+        sources: SourceRequester,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
@@ -215,6 +221,8 @@ impl Worker {
             state: RefCell::new(WorkerState::Loading),
             lifetime: Lifetime::new(token),
             reported: Cell::new(false),
+            sources,
+            boot_finished: watch::channel(false).0,
             #[cfg(test)]
             epilogues: Cell::new(0),
         })
@@ -306,10 +314,10 @@ impl Worker {
     }
 
     /// Everything one entry into this realm leaves owing: the timers that
-    /// have come due, a `close()` whatever just ran may have called, the next
-    /// deadline this task waits out, and the checkpoint generation as of this
-    /// entry.
-    fn epilogue(&self, realm: &mut WorkerRealm, js: &mut ScriptRuntime) {
+    /// have come due, a `close()` whatever just ran may have called, entry
+    /// completion, module requests, the next timer deadline, and
+    /// the checkpoint generation as of this entry.
+    fn epilogue(self: &Rc<Self>, realm: &mut WorkerRealm, js: &mut ScriptRuntime) {
         if self.ended() {
             return;
         }
@@ -327,6 +335,22 @@ impl Worker {
             }
             self.end();
             return;
+        }
+        if !*self.boot_finished.borrow() {
+            let finished = match realm.engine.module_finished() {
+                Ok(finished) => finished,
+                Err(error) => {
+                    report(&self.events, self.key, "running the worker's script", error);
+                    true
+                }
+            };
+            if finished {
+                self.boot_finished.send_replace(true);
+            }
+        }
+        while let Some(url) = realm.engine.take_module_request() {
+            let answer = self.sources.request(SourceRequest::Module(url.clone()));
+            self.spawn(load_module(Rc::clone(self), url, answer));
         }
         self.lifetime.arm_deadline(realm.timers.next_deadline());
         // Last, so it names the generation this entry ran up rather than the
@@ -358,25 +382,27 @@ impl Worker {
                 // The runtime failed once, for every worker that will ever be
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
-                Ok(js) => open_realm(js, self.events.clone(), self.key).map(|mut realm| {
-                    let (source, url) = script;
-                    let source = worker_boot_source(name, &source);
-                    if let Err(error) = realm.engine.execute_module(js, &source, &url) {
-                        // Nothing to clean up after: a throw at this module's
-                        // top level rejects through the runtime's shared job
-                        // queue, and what it leaves there is this realm's — it
-                        // waits for this worker rather than reaching the next
-                        // realm to be entered on this runtime.
-                        report(&self.events, self.key, "running the worker's script", error);
-                    }
-                    // Both under the borrow the script ran under, so a
-                    // sibling's bump between this boot and the clock task's
-                    // first poll is neither lost nor mistaken for this
-                    // worker's own.
-                    let checkpoints = js.checkpoints();
-                    self.lifetime.record_checkpoint(js.checkpoint_generation());
-                    (realm, checkpoints)
-                }),
+                Ok(js) => {
+                    open_realm(js, self.events.clone(), self.key).map(|mut realm| {
+                        let (source, url) = script;
+                        let source = worker_boot_source(name, &source);
+                        if let Err(error) = realm.engine.start_module(js, &source, &url) {
+                            // Nothing to clean up after: a throw at this module's
+                            // top level rejects through the runtime's shared job
+                            // queue, and what it leaves there is this realm's — it
+                            // waits for this worker rather than reaching the next
+                            // realm to be entered on this runtime.
+                            report(&self.events, self.key, "running the worker's script", error);
+                        }
+                        // Both under the borrow the script ran under, so a
+                        // sibling's bump between this boot and the clock task's
+                        // first poll is neither lost nor mistaken for this
+                        // worker's own.
+                        let checkpoints = js.checkpoints();
+                        self.lifetime.record_checkpoint(js.checkpoint_generation());
+                        (realm, checkpoints)
+                    })
+                }
             }
         };
         match opened {
@@ -447,8 +473,9 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         messages,
         events,
         token,
+        sources,
     } = start;
-    let worker = Worker::new(js, key, events, token);
+    let worker = Worker::new(js, key, events, token, sources);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -520,16 +547,13 @@ async fn boot_worker(
     let Some(checkpoints) = worker.boot(&name, source) else {
         return;
     };
-    for data in queued {
-        worker.enter(|realm, js| deliver(&worker.events, worker.key, realm, js, &data));
-    }
     // A load-time `close()` is reported here, and the first deadline is
     // published here, for a script that armed a timer and was posted nothing.
     worker.settle();
     if worker.ended() {
         return;
     }
-    worker.spawn(consume_messages(Rc::clone(&worker), messages));
+    worker.spawn(consume_messages(Rc::clone(&worker), messages, queued));
     worker.spawn(serve_clock(
         Rc::clone(&worker),
         worker.lifetime.deadlines(),
@@ -541,7 +565,25 @@ async fn boot_worker(
 async fn consume_messages(
     worker: Rc<Worker>,
     mut messages: mpsc::UnboundedReceiver<WorkerMessage>,
+    mut queued: Vec<String>,
 ) {
+    let mut ready = worker.boot_finished.subscribe();
+    while !*ready.borrow_and_update() {
+        tokio::select! {
+            biased;
+            message = messages.recv() => match message {
+                None | Some(WorkerMessage::Terminate) => {
+                    worker.end();
+                    return;
+                }
+                Some(WorkerMessage::Post(data)) => queued.push(data),
+            },
+            changed = ready.changed() => if changed.is_err() { return; },
+        }
+    }
+    for data in queued {
+        worker.enter(|realm, js| deliver(&worker.events, worker.key, realm, js, &data));
+    }
     while let Some(message) = messages.recv().await {
         match message {
             // As before the boot: the realm's `Terminate`, or — below — the
@@ -553,6 +595,26 @@ async fn consume_messages(
         }
     }
     worker.end();
+}
+
+/// One imported resource, awaited by the realm that requested it. The source
+/// response supplies the base URL for its own dependencies, just as on MTS.
+async fn load_module(worker: Rc<Worker>, url: String, answer: SourceAnswer) {
+    let loaded = worker_script(answer.await);
+    worker.enter(|realm, js| {
+        let result = loaded
+            .as_ref()
+            .map(|(source, resolved)| (resolved.as_str(), source.as_str()))
+            .map_err(String::as_str);
+        if let Err(error) = realm.engine.complete_module(js, &url, result) {
+            report(
+                &worker.events,
+                worker.key,
+                "loading an imported worker module",
+                error,
+            );
+        }
+    });
 }
 
 /// The script and the URL it is named by, or why there is neither.
@@ -580,6 +642,7 @@ fn open_realm(
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
+    engine.enable_module_loading();
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
     install_worker_members(&mut engine, js_runtime, &timers, &closing, move |data| {
@@ -706,6 +769,11 @@ mod tests {
             WorkerKey::new(key),
             events,
             CancellationToken::new(),
+            SourceRequester::new(
+                mpsc::unbounded_channel().0,
+                std::sync::Arc::new(crate::NoWakeup),
+                CancellationToken::new(),
+            ),
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),

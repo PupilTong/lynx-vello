@@ -5,6 +5,8 @@ import type * as btsRuntime from "../src/background-thread-runtime.ts";
 import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
 import * as selectorQuery from "../src/selector-query.ts";
+import * as globalEventEmitter from "../src/global-event-emitter.ts";
+rstest.mockRequire("bobcat:global-event-emitter", () => globalEventEmitter);
 rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
 const queryNodes = rstest.fn();
 rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }));
@@ -12,8 +14,15 @@ rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }))
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
 rstest.mockRequire("bobcat:worker", () => ({}));
+const notifyReady = rstest.fn();
+const reportStartupFailure = rstest.fn();
+const reportedErrors = rstest.fn();
+const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
 rstest.mockRequire("bobcat-internal:host", () => ({
+  notifyReady, reportStartupFailure,
+  reportScriptError: reportedErrors,
+  logScriptMessage: consoleMessages,
   initData: () => undefined,
   globalProps: () => undefined,
 }));
@@ -107,7 +116,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(toBackground.map((message) => message.method ?? message.type)).toEqual([
       "publishEvent", "custom", "publicComponentEvent",
     ]);
-    expect(toBackground[1]).toEqual({ type: "custom", data: 0 });
+    expect(toBackground[1]).toEqual({ type: "custom", data: 0, origin: "CoreContext" });
     deliverToBackground();
     deliverToBackground();
     deliverToBackground();
@@ -171,14 +180,14 @@ describe("MTS/BTS lifecycle runtime", () => {
       type: "protocol-like", data: 7, bobcat: "runtime", method: "callDestroyLifetimeFun",
     };
     mts.lynx.getJSContext().dispatchEvent(event);
-    expect(toBackground[0]).toEqual({ type: "protocol-like", data: 7 });
+    expect(toBackground[0]).toEqual({ type: "protocol-like", data: 7, origin: "CoreContext" });
     deliverToBackground();
     bts.getCoreContext().dispatchEvent(event);
-    expect(toMain[0]).toEqual({ type: "protocol-like", data: 7 });
+    expect(toMain[0]).toEqual({ type: "protocol-like", data: 7, origin: "JSContext" });
     await deliverToMain();
     expect(seen).toEqual([
-      ["BTS", { type: "protocol-like", data: 7 }],
-      ["MTS", { type: "protocol-like", data: 7 }],
+      ["BTS", { type: "protocol-like", data: 7, origin: "CoreContext" }],
+      ["MTS", { type: "protocol-like", data: 7, origin: "JSContext" }],
     ]);
   });
 
@@ -374,4 +383,65 @@ describe("MTS/BTS lifecycle runtime", () => {
     await deliverToBackground();
     expect(callback).toHaveBeenCalledTimes(2);
   });
+});
+
+describe("runtime events and diagnostics", () => {
+  it("exposes one BTS event module and directly delivers accepted host argument lists", () => {
+    const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
+    expect(emitter).toBe(bts.getApp().GlobalEventEmitter);
+    expect(emitter).toBe(bts.getApp().getJSModule("GlobalEventEmitter"));
+    expect(bts.getJSModule("missing")).toBeUndefined();
+    const registered = {};
+    bts.registerModule("custom-module", registered);
+    expect(bts.getApp().getJSModule("custom-module")).toBe(registered);
+    const listener = rstest.fn();
+    emitter.addListener("host-event", listener);
+    mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: [1, {value: 2}]}));
+    expect(toBackground).toHaveLength(1);
+    deliverToBackground();
+    expect(listener).toHaveBeenCalledWith(1, {value: 2});
+    mts.__BobcatApplyPageUpdate(JSON.stringify({method: "sendGlobalEvent", name: "host-event", args: []}));
+    deliverToBackground();
+    expect(listener.mock.calls).toEqual([[1, {value: 2}], []]);
+    emitter.removeAllListeners("host-event");
+  });
+
+  it("forwards both realms' diagnostics with severity, values and Error stacks", async () => {
+    reportedErrors.mockClear();
+    consoleMessages.mockClear();
+    const error = new Error("render failed");
+    mts._ReportError(error, {level: "warning"});
+    expect(reportedErrors).toHaveBeenLastCalledWith("warning", expect.stringContaining("render failed"));
+    mts.lynx.reportError("still running", {level: "fatal"});
+    expect(reportedErrors).toHaveBeenLastCalledWith("fatal", "still running");
+    mts.console["log"]?.("MTS", {value: 1}, undefined);
+    expect(consoleMessages).toHaveBeenLastCalledWith("log", 'MTS {"value":1} undefined');
+    const {console: backgroundConsole} = await import("../src/background-thread-runtime.ts");
+    bts.reportError(error, {level: "invalid"});
+    bts.reportError(null, {level: "warning"});
+    backgroundConsole["warn"]?.("BTS", [1, 2]);
+    await deliverToMain();
+    await deliverToMain();
+    await deliverToMain();
+    expect(reportedErrors.mock.calls.slice(2)).toEqual([
+      ["error", expect.stringContaining("render failed")], ["warning", "null"],
+    ]);
+    expect(reportedErrors.mock.calls[2]?.[1]).toContain(error.stack);
+    expect(consoleMessages).toHaveBeenLastCalledWith("warn", "BTS [1,2]");
+    const circular: {self?: unknown} = {}; circular.self = circular;
+    mts.console["debug"]?.(circular);
+    expect(consoleMessages).toHaveBeenLastCalledWith("debug", "[object Object]");
+    expect(toMain).toHaveLength(0);
+  });
+});
+
+it("declares readiness through the native binding when BTS acknowledges completion", () => {
+  expect(notifyReady).not.toHaveBeenCalled();
+  worker.dispatchEvent({type: "message", data: {bobcat: "runtime", method: "backgroundReady"}});
+  expect(notifyReady).toHaveBeenCalledExactlyOnceWith();
+});
+
+it("forwards BTS startup failures through the native binding without throwing in the listener", () => {
+  expect(() => worker.dispatchEvent({type: "error", message: "BTS entry failed"})).not.toThrow();
+  expect(reportStartupFailure).toHaveBeenCalledExactlyOnceWith("BTS entry failed");
 });

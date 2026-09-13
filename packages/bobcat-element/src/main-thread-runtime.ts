@@ -1,10 +1,9 @@
 // The `bobcat:runtime` compatibility ESM imported by each transformed MTS entry.
 //
 // The JS Context and lifecycle/event calls reach this view's BTS Worker.
-// Native modules and the error reporter remain sinks. A compiled chunk
-// still probes those APIs while it installs
-// the ReactLynx snapshot runtime, so this module exports explicit sinks for
-// that bootstrap surface. The one local delivery path is `lynx.getEngine()`:
+// Native modules remain sinks. Diagnostics reach the view's host; global
+// events reach BTS through the same Worker FIFO as Context messages.
+// The one local delivery path is `lynx.getEngine()`:
 // its stable EventTarget retains realm-local listeners so `bobcat:boot` can
 // dispatch `__RenderPage` when an entry has no legacy `globalThis.renderPage`.
 // None of these bindings is installed on `globalThis`; the entry receives them
@@ -29,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -54,7 +53,10 @@ type LepusMethodCall = {
  * What the BTS Worker sends this realm: a named call, a node query, or a
  * Context event's public fields, which carry no `bobcat` tag.
  */
-type FromBackground = LepusMethodCall | NodeQueryRequest | (ContextEvent & { bobcat?: never });
+type FromBackground = LepusMethodCall | NodeQueryRequest
+  | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
+  | { bobcat: "runtime"; method: "backgroundReady" }
+  | (ContextEvent & { bobcat?: never });
 
 function noop() {
   return undefined;
@@ -73,7 +75,7 @@ function createContextSink() {
 }
 
 const coreContext = createContextSink();
-const jsContext = createCrossThreadContext();
+const jsContext = createCrossThreadContext("CoreContext");
 const nativeContext = createContextSink();
 const engineContext = new EventTarget();
 // The realm's global object, where a card installs the methods
@@ -81,7 +83,6 @@ const engineContext = new EventTarget();
 const scope = globalThis as Record<string, unknown>;
 let backgroundWorker: Worker | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
-
 function sendToBackground(message: ToBackground) {
   if (backgroundWorker === undefined) pendingBackgroundMessages.push(message);
   else backgroundWorker.postMessage(message);
@@ -90,7 +91,7 @@ function sendToBackground(message: ToBackground) {
 // Context events and runtime calls share one FIFO before Worker connection.
 // Only public Context fields cross it; extra event properties cannot select
 // runtime methods. Payloads are copied by Worker's JSON transport when posted.
-jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data }));
+jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data, origin: event.origin }));
 
 // Like web-worker-rpc, await the handler result before copying the reply.
 // The ordinary realm checkpoint runs the continuation; no nested host entry.
@@ -133,10 +134,19 @@ export function __BobcatConnectBackground(worker: Worker) {
         }
       } else if (message.method === "callLepusMethod") {
         void callLepusMethod(message);
+      } else if (message.method === "backgroundReady") {
+        notifyReady();
+      } else if (message.method === "reportError") {
+        reportScriptError(message.level, message.message);
+      } else if (message.method === "console") {
+        logScriptMessage(message.level, message.message);
       }
     } else {
       jsContext.receive(message);
     }
+  });
+  worker.addEventListener("error", (event: {message: string}) => {
+    reportStartupFailure(event.message);
   });
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
@@ -144,6 +154,10 @@ export function __BobcatConnectBackground(worker: Worker) {
   for (const message of queued) {
     worker.postMessage(message);
   }
+}
+
+export function __BobcatApplyPageUpdate(json: string) {
+  sendToBackground({ bobcat: "runtime", ...JSON.parse(json) });
 }
 
 export function __BobcatPublishEvent(
@@ -215,9 +229,28 @@ export function _AddEventListener() {
   return undefined;
 }
 
-export function _ReportError(_error?: unknown) {
-  return undefined;
+export function _ReportError(error?: unknown, options?: {level?: string}) {
+  const level = options?.level;
+  reportScriptError(level === "warning" || level === "fatal" ? level : "error", printable(error));
 }
+
+function printable(value: unknown): string {
+  if (value instanceof Error) {
+    const summary = String(value);
+    return value.stack?.includes(summary) ? value.stack
+      : value.stack ? `${summary}\n${value.stack}` : summary;
+  }
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value) ?? String(value); }
+  catch { return String(value); }
+}
+
+export const console = Object.fromEntries(
+  ["log", "info", "debug", "warn", "error"].map(level => [level,
+    (...args: unknown[]) => logScriptMessage(level, args.map(printable).join(" ")),
+  ]),
+);
+
 
 export function _SetSourceMapRelease() {
   return undefined;

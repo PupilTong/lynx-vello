@@ -1,150 +1,91 @@
 import { beforeAll, describe, expect, it, rstest } from "@rstest/core";
 import * as eventTarget from "../src/event-target.ts";
-import type * as contextModule from "../src/cross-thread-context.ts";
-
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
-
+import type { ContextEvent } from "../src/cross-thread-context.ts";
+import type * as contextModule from "../src/cross-thread-context.ts";
 let createCrossThreadContext: typeof contextModule.createCrossThreadContext;
 beforeAll(async () => {
-  ({ createCrossThreadContext } = await import("../src/cross-thread-context.ts"));
+  ({createCrossThreadContext} = await import("../src/cross-thread-context.ts"));
 });
 
-describe("Lynx cross-thread context", () => {
-  it("returns an EventTarget subclass with inherited listener methods", () => {
-    const context = createCrossThreadContext();
-    expect(context).toBeInstanceOf(eventTarget.EventTarget);
-    expect(Object.getPrototypeOf(Object.getPrototypeOf(context))).toBe(
-      eventTarget.EventTarget.prototype,
-    );
-    expect(context.addEventListener).toBe(
-      eventTarget.EventTarget.prototype.addEventListener,
-    );
-    expect(context.removeEventListener).toBe(
-      eventTarget.EventTarget.prototype.removeEventListener,
-    );
-    expect(Object.hasOwn(context, "addEventListener")).toBe(false);
-    expect(Object.hasOwn(context, "removeEventListener")).toBe(false);
-  });
-
-  it("retains queued event references until the Worker transport snapshots them", () => {
-    const context = createCrossThreadContext();
-    const sent: unknown[] = [];
-    const first = { type: "first", data: { value: 1 } };
-    const second = { type: "second", data: { value: 2 } };
-
-    expect(context.dispatchEvent(first)).toBe(3);
-    context.dispatchEvent(second);
+describe("native Lynx Context contract", () => {
+  it("preserves FIFO and queued payload references until Worker JSON copies the send", () => {
+    const context = createCrossThreadContext("CoreContext");
+    const sent: ContextEvent[] = [];
+    const heard: unknown[] = [];
+    context.addEventListener("change", (e: unknown) => heard.push(e));
+    const first = { type: "change", data: { value: 1 } };
+    expect(context.dispatchEvent(first)).toBe(0);
+    first.data.value = 2;
+    context.dispatchEvent({ type: "change", data: null });
+    context.connect(event => sent.push(JSON.parse(JSON.stringify(event))));
     first.data.value = 3;
-    expect(sent).toEqual([]);
-
-    context.connect((event) => sent.push(JSON.parse(JSON.stringify(event))));
-    first.data.value = 4;
-    const third = { type: "third", data: { value: 5 } };
-    context.dispatchEvent(third);
-    third.data.value = 6;
-
+    context.postMessage(undefined);
     expect(sent).toEqual([
-      { type: "first", data: { value: 3 } },
-      { type: "second", data: { value: 2 } },
-      { type: "third", data: { value: 5 } },
+      { type: "change", data: { value: 2 }, origin: "CoreContext" },
+      { type: "change", data: null, origin: "CoreContext" },
+      { type: "message", origin: "CoreContext" },
     ]);
+    expect(heard).toEqual([]);
+    context.receive(sent[1]!);
+    expect(heard).toEqual([sent[1]]);
   });
 
-  it("sends typed events without local echo and returns the ContextProxy result", () => {
+  it("validates native arguments and ignores DOM listener options", () => {
     const context = createCrossThreadContext();
-    const sent: unknown[] = [];
-    const received: unknown[] = [];
-    context.connect((event) => sent.push(event));
-    context.addEventListener("update", (event: unknown) => {
-      received.push(event);
-    });
-
-    const event = { type: "update", data: { value: 7 } };
-    expect(context.dispatchEvent(event)).toBe(3);
-    expect(sent).toEqual([event]);
-    expect(received).toEqual([]);
-
-    context.receive(event);
-    expect(received).toEqual([event]);
-    expect(sent).toEqual([event]);
-  });
-
-  it("receives by type and defaults only nullish data to an empty object", () => {
-    const context = createCrossThreadContext();
-    const received: unknown[] = [];
-    context.addEventListener("update", (event: unknown) => {
-      received.push(event);
-    });
-
-    context.receive({ type: "unrelated", data: 1 });
-    context.receive({ type: "update" });
-    context.receive({ type: "update", data: null });
-    context.receive({ type: "update", data: false });
-    context.receive({ type: "update", data: 0 });
-    context.receive({ type: "update", data: "" });
-
-    expect(received).toEqual([
-      { type: "update", data: {} },
-      { type: "update", data: {} },
-      { type: "update", data: false },
-      { type: "update", data: 0 },
-      { type: "update", data: "" },
-    ]);
-  });
-
-  it("does not retain incoming events for listeners registered later", () => {
-    const context = createCrossThreadContext();
-    const received: unknown[] = [];
-    context.receive({ type: "update", data: "early" });
-    context.addEventListener("update", (event: unknown) => {
-      received.push(event);
-    });
-    context.receive({ type: "update", data: "now" });
-    expect(received).toEqual([{ type: "update", data: "now" }]);
-  });
-
-  it("keeps callback identity, capture and once semantics with the context as this", () => {
-    const context = createCrossThreadContext();
-    const receivers: unknown[] = [];
-    function listener(this: unknown) {
-      receivers.push(this);
+    for (const invalid of [null, {}, {type: 1, data: 0}, {type: "x"}]) {
+      expect(() => context.dispatchEvent(invalid as ContextEvent)).toThrow();
     }
-    context.addEventListener("update", listener, { once: true });
-    context.addEventListener("update", listener);
-    context.addEventListener("update", listener, true);
-
-    context.receive({ type: "update" });
-    expect(receivers).toEqual([context, context]);
-    context.receive({ type: "update" });
-    expect(receivers).toEqual([context, context, context]);
-    context.removeEventListener("update", listener, true);
-    context.receive({ type: "update" });
-    expect(receivers).toEqual([context, context, context]);
+    expect(() => context.postMessage()).toThrow();
+    expect(() => context.addEventListener(1, () => {})).toThrow();
+    expect(() => context.addEventListener("x", {handleEvent() {}})).toThrow();
+    expect(() => context.removeEventListener("x", null)).toThrow();
+    const receivers: unknown[] = [];
+    function listener(this: unknown) { receivers.push(this); }
+    context.addEventListener("x", listener, { once: true, capture: true });
+    context.addEventListener("x", listener, false);
+    context.receive({type: "x", data: undefined, origin: "CoreContext"});
+    context.receive({type: "x", data: null, origin: "CoreContext"});
+    expect(receivers).toEqual([undefined, undefined]);
+    context.removeEventListener("x", listener, false);
+    context.receive({type: "x", data: 0});
+    expect(receivers).toHaveLength(2);
   });
 
-  it("honors listener removals during receive and defers additions to the next event", () => {
+  it("honors removal in the current walk and defers new listeners", () => {
     const context = createCrossThreadContext();
     const calls: string[] = [];
     const removed = () => calls.push("removed");
     const added = () => calls.push("added");
-    context.addEventListener("update", () => {
+    context.addEventListener("x", () => {
       calls.push("first");
-      context.removeEventListener("update", removed);
-      context.addEventListener("update", added);
+      context.removeEventListener("x", removed);
+      context.addEventListener("x", added);
     });
-    context.addEventListener("update", removed);
-
-    context.receive({ type: "update" });
-    expect(calls).toEqual(["first"]);
-    context.receive({ type: "update" });
+    context.addEventListener("x", removed);
+    context.receive({type: "x", data: 0});
+    context.receive({type: "x", data: 0});
     expect(calls).toEqual(["first", "first", "added"]);
   });
 
-  it("leaves postMessage unimplemented without sending or local delivery", () => {
+  it("uses ordinary JSON values and toJSON across the Worker boundary", () => {
     const context = createCrossThreadContext();
-    const sent: unknown[] = [];
-    context.connect((event) => sent.push(event));
-    expect(context.postMessage({ type: "update", data: 1 })).toBeUndefined();
-    expect(sent).toEqual([]);
+    const received: unknown[] = [];
+    context.addEventListener("message", (event: unknown) => received.push(event));
+    context.connect(event => context.receive(JSON.parse(JSON.stringify(event))));
+    context.postMessage({missing: undefined, zero: -0, nan: NaN, list: [undefined, null]});
+    context.postMessage({toJSON: () => "custom JSON"});
+    context.postMessage(undefined);
+    context.postMessage(null);
+    expect(received).toEqual([
+      {type: "message", data: {zero: 0, nan: null, list: [null, null]}, origin: "JSContext"},
+      {type: "message", data: "custom JSON", origin: "JSContext"},
+      {type: "message", data: undefined, origin: "JSContext"},
+      {type: "message", data: null, origin: "JSContext"},
+    ]);
+    expect(() => context.postMessage(1n)).toThrow();
+    const cycle: {self?: unknown} = {};
+    cycle.self = cycle;
+    expect(() => context.postMessage(cycle)).toThrow();
   });
 });

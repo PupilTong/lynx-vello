@@ -303,55 +303,62 @@ async fn workers_load_relative_to_entry_and_route_back_to_their_own_views() {
 }
 
 #[tokio::test]
-async fn xml_background_uses_bts_bootstrap_and_defers_application_module_loading() {
+async fn xml_background_loads_esm_through_the_view_fetcher() {
     let (group, resources, receiver) = setup().await;
+    resources
+        .register("app:///dep.js", "export const value = 42;", None)
+        .unwrap();
     let page = PageSource::from_bytes(
         &"app:///card.lynx.xml".parse().unwrap(),
         br#"
         <lynx engine-version="4.2">
           <script thread="main"><![CDATA[
             __CreatePage();
-            lynx.getJSContext().dispatchEvent({type: 'initialize'});
+            lynx.getJSContext().dispatchEvent({type: 'initialize', data: null});
           ]]></script>
           <script thread="background"><![CDATA[
-            throw Error('XML body was executed without being imported');
+            import {lynx} from 'bobcat:bts-runtime';
+            const {value} = await import('app:///dep.js');
+            await new Promise(resolve => setTimeout(resolve, 1));
+            if (value !== 42) throw Error('source value');
+            lynx.getCoreContext().addEventListener('initialize', () => {
+                lynx.reportError('BTS sources ready');
+            });
           ]]></script>
         </lynx>
         "#,
     )
     .unwrap();
     page.register_with(&resources);
-    let sources = page.view_sources();
-    let background_url = sources.background_entry.clone().unwrap();
-    let (mut view, _painter) = view(&group, &resources, sources).await;
+    let mut view = group
+        .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), page.view_sources())
+        .unwrap();
+    assert!(!view.is_ready());
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut script_finished = false;
-    let mut import_failed = false;
-    while !script_finished || !import_failed {
+    let mut received_queued_event = false;
+    while !script_finished || !received_queued_event {
         for event in view.pump() {
             match event {
                 EngineEvent::ScriptFinished => script_finished = true,
-                EngineEvent::WorkerFailed(error) => {
-                    // The bootstrap imports the XML entry. Loading that module
-                    // from ResourceFetcher is explicitly deferred in this MVP.
-                    assert!(!import_failed, "duplicate import failure");
-                    assert!(error.message.contains(&background_url), "{error}");
-                    assert!(error.message.contains("not preloaded"), "{error}");
-                    import_failed = true;
+                EngineEvent::ScriptReported { message, .. } => {
+                    assert_eq!(message, "BTS sources ready");
+                    received_queued_event = true;
                 }
                 EngineEvent::StartupFailed(error) => panic!("startup: {error}"),
-                EngineEvent::ListenerFailed(error) | EngineEvent::ScriptRunError(error) => {
-                    panic!("script: {error}")
-                }
+                EngineEvent::WorkerFailed(error)
+                | EngineEvent::ListenerFailed(error)
+                | EngineEvent::ScriptRunError(error) => panic!("script: {error}"),
                 _ => {}
             }
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "BTS import did not report its outcome"
+            "BTS did not finish loading"
         );
         let _ = receiver.recv_timeout(Duration::from_millis(5));
     }
+    assert!(view.is_ready());
 }
 
 #[tokio::test]
