@@ -5,10 +5,10 @@
   "type": "module",
   "description": "ReactLynx source fixtures and bundle generators for Bobcat integration tests.",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "build:fixture": "node scripts/regenerate-react-lazy.mjs",
-    "build:legacy-query": "node scripts/regenerate-react-bts-query.mjs && node scripts/regenerate-react-lazy-query.mjs",
-    "build:legacy-native": "pnpm --filter @lynx-js/example-react build && node scripts/regenerate-react-native.mjs"
+    "build": "pnpm build:production && pnpm build:development",
+    "build:production": "NODE_ENV=production DEBUG=rspeedy rspeedy build --no-env --mode production",
+    "build:development": "NODE_ENV=development DEBUG=rspeedy rspeedy build --no-env --mode development",
+    "test:type": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "@lynx-js/react": "catalog:"

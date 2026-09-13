@@ -1,73 +1,75 @@
 # ReactLynx test fixtures
 
-This private pnpm workspace owns the ReactLynx JSX/CSS/JS test applications and
-their bundle generators, extracted from the BTS implementation checkpoint
-`e04e4168`. The 13 files in `src/` retain that checkpoint's source bytes.
-Rust runtime changes, integration tests and generated bundles are separate
-integration steps; this package builds without Bobcat or its Rust submodules.
+This private pnpm workspace owns 13 JSX/CSS/JS fixture sources extracted unchanged
+from BTS checkpoint `e04e4168`. It builds independently of Bobcat and its Rust
+submodules. Runtime integration tests are a separate change.
 
 ## Build
-
-From the repository root:
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm --filter reactlynx-test-fixtures build
 ```
 
-The command builds six production fixtures and three development variants into
-this package's ignored `dist/` directory. Each output has a companion
-`*.provenance.json` with compiler versions, script hashes and bundle hashes.
-The package is included by the existing `packages/*` workspace glob.
+`lynx.config.js` declares the entries, independent output directories and
+`pluginReactLynx({ engineVersion: '4.1.0' })`. Other ReactLynx options keep their
+defaults. The package scripts invoke the public `rspeedy build` CLI once in
+production mode and once in development mode. No script creates a compiler or
+imports an internal Rspeedy entry point.
+Both commands set `NODE_ENV` explicitly: Rspeedy reads the config function's
+`env` before applying `--mode`, and the fixture matrix must match that mode.
 
-Only `engineVersion: '4.1.0'` is selected; other ReactLynx plugin options retain
-their defaults. This is the latest stable engine verified for the BTS work on
-2026-09-11. `@lynx-js/tasm@0.0.53` supports that target; the workspace override
-keeps the compiler and repacker on the same encoder. The old 0.0.39 encoder
-rejects targets above 3.9. The fixture package owns the direct dependency.
+The default build produces six native production pages, three native development
+variants and the web node-query page. Each native environment has its own
+compilation, so its lazy chunks cannot be shared with another test page.
 
-Build a single fixture, including a development variant:
-
-```sh
-pnpm --filter reactlynx-test-fixtures build:fixture react-lazy-nested
-pnpm --filter reactlynx-test-fixtures build:fixture react-reload development
-```
-
-| Fixture source | Behavior exercised by the application |
+| Environment | Fixture behavior |
 | --- | --- |
-| `react-lazy` and child JSX/CSS | Lazy/Suspense, a BTS effect and child CSS |
-| `react-lazy-sync` | Synchronous first-screen import and a later event-triggered import |
-| `react-lazy-nested`, outer/inner JSX, CSS and value JS | Async outer/sync inner imports, shared BTS-only module and state-update colors |
-| `react-reload` | State, effect mount/cleanup, host/BTS reload and an entry execution counter |
-| `react-data-processor` | Default/named processors, nested Promise work, update/reset/reload and clicks |
-| `react-global-props` | Reactive global props, initial state and clicks |
-| `react-bts-query` | Ref fields, typed dataset, scoped query and native props |
+| `lynx-react-lazy` | Lazy/Suspense, a BTS effect and child CSS |
+| `lynx-react-lazy-sync` | First-screen sync import and event-triggered import |
+| `lynx-react-lazy-nested` | Nested async/sync imports, shared BTS module and CSS |
+| `lynx-react-reload` | State, effect cleanup, host/BTS reload and entry counter |
+| `lynx-react-data-processor` | Default/named processors, Promise jobs and data updates |
+| `lynx-react-global-props` | Reactive global props, initial state and clicks |
+| `web` | Ref fields, typed dataset, scoped query and native props |
 
-## Source-only native output
-
-The current generator builds the `lynx` target with `DEBUG=rspeedy` to preserve
-the compiler's source for lazy MTS sections. It repacks the page's original
-MTS/BTS sources into external custom sections. Lazy bundles retain their emitted
-bytes. This is a source-container fixture, not execution of native bytecode.
-Generated names can change when paths, compiler versions or HMR hashes change;
-consumers should read the provenance bundle map instead of guessing chunk names.
-Development keeps the compiler's default HMR client and asset prefix.
-
-## Historical generators
-
-The existing generator code is retained for earlier evidence. These commands
-are separate from the latest-engine build and do not expand its compatibility
-target:
+Development builds select `lynx-react-reload`, `lynx-react-global-props` and
+`lynx-react-lazy-nested`, retaining the compiler's default HMR client and asset
+prefix. Select a single environment through the CLI:
 
 ```sh
-pnpm --filter reactlynx-test-fixtures build:legacy-query
-pnpm --filter reactlynx-test-fixtures build:legacy-native
+pnpm --filter reactlynx-test-fixtures build:production --environment lynx-react-lazy
+pnpm --filter reactlynx-test-fixtures build:development --environment lynx-react-reload
+pnpm --filter reactlynx-test-fixtures build:production --environment web
 ```
 
-`build:legacy-query` emits the ref-query web fixture and the old default-engine
-QueryComponent lazy fixture. It uses this package's sources and dependencies.
-`build:legacy-native` first builds the existing `examples/react` workspace, then
-repackages its native BTS and web MTS into the original style-free external
-fixture. That historical fixture intentionally uses the example's source; it
-does not borrow the example's `node_modules`. Neither command writes into Rust
-test directories or overwrites checked-in fixture artifacts.
+`pnpm test:type` includes the configuration and TypeScript build hook. The JSX
+fixture inputs keep their original bytes and are compiled by ReactLynx.
+
+## Outputs
+
+Outputs live only in ignored `dist/`; compiled bundles and provenance must not
+be committed. Native pages retain `dist/<fixture>/<fixture>.lynx.bundle` and
+`dist/<fixture>/async/*`. Development directory names append `-development`.
+The web page is `dist/react-bts-query/react-bts-query.web.bundle`.
+
+`scripts/source-bundles.ts` registers one Rsbuild completion hook. For native
+pages it reads the compiler input retained by `DEBUG=rspeedy` and repacks the
+original MTS/BTS source into external custom sections using `@lynx-js/tasm`.
+It replaces the page's bytecode container, preserves emitted lazy bundle bytes
+and leaves web output unchanged. `DEBUG=rspeedy` also retains MTS source inside
+lazy bundles; these fixtures exercise source evaluation, not native bytecode.
+
+The encoder is pinned to `@lynx-js/tasm@0.0.53`. A workspace override keeps the
+compiler and repacker on that same version; the previous encoder cannot target
+engine 4.1.0. The hook still relies on the pinned compiler's debug `tasm.json`
+format, which should be checked when upgrading the toolchain.
+
+Each environment writes `dist/<output-directory>.provenance.json` with its actual
+source dependencies, compiler versions and bundle hashes. Native records also
+include source-section hashes, the original page hash and its public path.
+Chunk names may change with paths, compiler versions and development hashes;
+consumers should use the provenance map instead of guessing filenames.
+
+Historical 3.5/native-example and QueryComponent generators are removed. This
+workspace targets the selected 4.1.0/default-options fixtures only.

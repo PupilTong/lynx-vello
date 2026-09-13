@@ -11,6 +11,7 @@
   "files": [],
   "references": [
     { "path": "packages/bobcat-element" },
+    { "path": "packages/reactlynx-test-fixtures" },
     { "path": "crates/bobcat-wasm" },
     { "path": "packages/github-pages" },
     { "path": "examples/gesture" },
