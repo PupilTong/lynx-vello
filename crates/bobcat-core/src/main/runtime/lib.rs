@@ -871,7 +871,7 @@ impl MainThreadRuntime {
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
         let boot = format!(
-            r#"import {{ _ReportError, __BobcatDispatchEngineEvent, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -895,7 +895,7 @@ if (typeof globalThis.renderPage === "function") {{
   try {{ globalThis.renderPage(data); }}
   catch (error) {{ _ReportError(error); }}
 }} else {{
-  __BobcatDispatchEngineEvent("__RenderPage", data);
+  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data, origin: "Engine" }});
 }}
 // Queue the boot flush after the jobs already scheduled by these hooks.
 // Await this flush so its failure still rejects boot; hook results are not awaited.

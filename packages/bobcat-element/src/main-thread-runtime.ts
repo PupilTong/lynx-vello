@@ -74,10 +74,21 @@ function createContextSink() {
   };
 }
 
+// Engine dispatch owns its listener error policy. All callers use the same
+// EventTarget API, with Promise jobs left to the existing outer checkpoint.
+class EngineContext extends EventTarget {
+  override dispatchEvent(event: unknown): boolean {
+    return dispatchEventListeners(this, event, (callback, receiver, value) => {
+      try { Reflect.apply(callback, receiver, [value]); }
+      catch (error) { _ReportError(error); }
+    });
+  }
+}
+
 const coreContext = createContextSink();
 const jsContext = createCrossThreadContext("CoreContext");
 const nativeContext = createContextSink();
-const engineContext = new EventTarget();
+const engineContext = new EngineContext();
 // The realm's global object, where a card installs the methods
 // `callLepusMethod` looks up by name.
 const scope = globalThis as Record<string, unknown>;
@@ -92,16 +103,6 @@ function sendToBackground(message: ToBackground) {
 // Only public Context fields cross it; extra event properties cannot select
 // runtime methods. Payloads are copied by Worker's JSON transport when posted.
 jsContext.connect((event) => sendToBackground({ type: event.type, data: event.data, origin: event.origin }));
-
-// Engine listeners report independently so a failed listener cannot stop
-// delivery. Promise jobs run at the existing outer checkpoint, after the walk.
-export function __BobcatDispatchEngineEvent(type: string, data: unknown) {
-  dispatchEventListeners(engineContext, {type, data, origin:'Engine'},
-    (callback, _receiver, event) => {
-      try { Reflect.apply(callback, scope, [event]); }
-      catch (error) { _ReportError(error); }
-    });
-}
 
 // Like web-worker-rpc, await the handler result before copying the reply.
 // The ordinary realm checkpoint runs the continuation; no nested host entry.

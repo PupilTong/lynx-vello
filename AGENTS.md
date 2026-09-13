@@ -717,7 +717,7 @@ useful signal for currently-compatible versions of those libraries.
   `lepusCode.root` or
   raw XML main body becomes a real ESM at its resolved entry URL: core
   prepends named imports from both built-ins. The `bobcat:boot` ESM imports
-  `_ReportError`, `__BobcatDispatchEngineEvent`,
+  `lynx`, `_ReportError`,
   `__BobcatConnectBackground` and `__BobcatInitData` from
   `bobcat:runtime`, `Document` and `__FlushElementTree` from
   `bobcat:element`, and `bobcat:timers` for its effect — a static import, so
@@ -733,7 +733,9 @@ useful signal for currently-compatible versions of those libraries.
   `processData(__BobcatInitData)` → (`globalThis.renderPage` when present,
   otherwise the `__RenderPage` event on `lynx.getEngine()`) →
   a queued `__FlushElementTree` inside JavaScript. Hooks and engine listeners
-  run synchronously with no intervening checkpoint. Boot awaits
+  run synchronously with no intervening checkpoint. Boot uses the ordinary
+  `lynx.getEngine().dispatchEvent(...)` API; the engine context itself reports
+  each listener failure and continues delivery. Boot awaits
   `Promise.resolve().then(() => __FlushElementTree())`: jobs already queued by
   the hooks precede the flush, while jobs they later enqueue may follow it.
   A throwing hook reports without failing startup; a failed flush rejects boot.

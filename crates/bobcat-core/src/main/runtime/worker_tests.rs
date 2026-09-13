@@ -1265,8 +1265,9 @@ fn engine_listeners_finish_the_walk_before_jobs_and_report_each_failure() {
         r"
         globalThis.order = [];
         const engine = lynx.getEngine();
-        engine.addEventListener('__RenderPage', function() {
-            if (this !== globalThis) throw Error('engine listener receiver');
+        engine.addEventListener('__RenderPage', function(event) {
+            if (this !== engine) throw Error('engine listener receiver');
+            if (event.origin !== 'Engine') throw Error('engine event origin');
             order.push('first');
             Promise.resolve().then(() => { order.push('first-job'); });
             throw Error('first listener failed');

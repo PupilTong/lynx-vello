@@ -14,9 +14,12 @@ calls or between engine listeners.
 
 Each hook has a JavaScript error boundary. A throwing processor reports and
 supplies undefined to rendering; a throwing render hook reports and still
-reaches the final flush. Engine dispatch reports each throwing listener and
-continues the walk, using the global object as receiver. Ordinary
-`EventTarget.dispatchEvent` retains its existing semantics.
+reaches the final flush. Boot dispatches through
+`lynx.getEngine().dispatchEvent({ type: '__RenderPage', data, origin: 'Engine' })`.
+The private engine context implements listener error reporting inside that
+standard method and continues the walk. Function listeners receive the engine
+as their receiver; object listeners retain their own receiver.
+The base `EventTarget` retains its existing semantics.
 
 Boot then runs:
 

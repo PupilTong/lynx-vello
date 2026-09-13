@@ -402,6 +402,41 @@ describe("MTS/BTS lifecycle runtime", () => {
 });
 
 describe("runtime events and diagnostics", () => {
+  it("reports engine listener errors through dispatchEvent and preserves the event walk", async () => {
+    const engine = mts.lynx.getEngine();
+    const event = {type: "engine-error-test", data: 1, defaultPrevented: true};
+    const order: string[] = [];
+    const first = rstest.fn(function(this: unknown, received: unknown) {
+      expect(this).toBe(engine);
+      expect(received).toBe(event);
+      order.push("first");
+      Promise.resolve().then(() => { order.push("job"); });
+      throw Error("engine listener failed");
+    });
+    const second = rstest.fn((received: unknown) => {
+      expect(received).toBe(event);
+      order.push("second");
+    });
+    reportedErrors.mockClear();
+    engine.addEventListener(event.type, first, {once: true});
+    engine.addEventListener(event.type, second);
+    try {
+      expect(engine.dispatchEvent(event)).toBe(false);
+      expect(order).toEqual(["first", "second"]);
+      expect(reportedErrors).toHaveBeenCalledExactlyOnceWith("error", expect.stringContaining("engine listener failed"));
+      engine.removeEventListener(event.type, second);
+      expect(engine.dispatchEvent({...event, defaultPrevented: false})).toBe(true);
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(1);
+      await Promise.resolve();
+      expect(order).toEqual(["first", "second", "job"]);
+    } finally {
+      engine.removeEventListener(event.type, first);
+      engine.removeEventListener(event.type, second);
+      reportedErrors.mockClear();
+    }
+  });
+
   it("exposes one BTS event module and directly delivers accepted host argument lists", () => {
     const emitter = bts.getJSModule("GlobalEventEmitter") as globalEventEmitter.GlobalEventEmitter;
     expect(emitter).toBe(bts.getApp().GlobalEventEmitter);
