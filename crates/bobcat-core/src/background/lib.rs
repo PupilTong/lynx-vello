@@ -111,6 +111,8 @@ impl WorkerKey {
 /// that arrives with it.
 pub(crate) struct WorkerStart {
     pub(crate) key: WorkerKey,
+    /// The view's built-in BTS has an app lifetime; an ordinary Worker does not.
+    pub(crate) background: bool,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
     /// Its script, answered by whichever thread owns the creating view's

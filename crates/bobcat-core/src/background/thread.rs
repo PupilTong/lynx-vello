@@ -23,6 +23,11 @@
 //! `Terminate` stays the protocol, and is what discards whatever was queued
 //! behind it.
 //!
+//! The built-in BTS owner then makes one final synchronous call to the React
+//! destruction hook before releasing its realm. This is outside ordinary
+//! cancelled entries and has no timer/resource epilogue; ordinary Workers
+//! invoke no app hook.
+//!
 //! The `select!`s on this thread are of four kinds, and none of them
 //! dispatches anything. [`serve_workers`] is thread lifetime: attach versus
 //! join. Each [`serve_worker`] waits on its worker's [`Lifetime`]: the end,
@@ -183,6 +188,7 @@ enum WorkerState {
 /// things afterwards.
 struct Worker {
     js: WorkerRuntime,
+    background: bool,
     key: WorkerKey,
     /// Where this worker reports, which is the creating view's own channel.
     events: mpsc::UnboundedSender<WorkerEvent>,
@@ -214,9 +220,11 @@ impl Worker {
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
         sources: SourceRequester,
+        background: bool,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
+            background,
             key,
             events,
             state: RefCell::new(WorkerState::Loading),
@@ -444,7 +452,33 @@ impl Worker {
         self.lifetime
             .reap(&mut |payload| self.trapped(payload.as_ref()))
             .await;
+        self.destroy_background();
         *self.state.borrow_mut() = WorkerState::Gone;
+    }
+
+    /// The app's final synchronous entry, after ordinary work has stopped.
+    /// It deliberately bypasses `enter`'s ended gate and has no timer/resource
+    /// epilogue: cleanup may run promise jobs, but cannot restart the worker.
+    fn destroy_background(&self) {
+        if !self.background {
+            return;
+        }
+        let mut state = self.state.borrow_mut();
+        let WorkerState::Live(realm) = &mut *state else {
+            return;
+        };
+        let mut runtime = self.js.borrow_mut();
+        let Ok(js) = runtime.as_mut() else {
+            return;
+        };
+        if let Err(error) = realm.engine.call_module_export(
+            js,
+            crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
+            "__BobcatDestroyBTS",
+            &[],
+        ) {
+            report(&self.events, self.key, "destroying the BTS app", error);
+        }
     }
 
     /// Whether this worker's realm is up, for a test that has to wait for it.
@@ -480,6 +514,7 @@ impl Settles for Worker {
 async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
     let WorkerStart {
         key,
+        background,
         name,
         script,
         messages,
@@ -487,7 +522,7 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         token,
         sources,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources);
+    let worker = Worker::new(js, key, events, token, sources, background);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -799,7 +834,7 @@ mod tests {
         worker: Rc<Worker>,
         messages: mpsc::UnboundedSender<WorkerMessage>,
         /// Held so the channels stay open for as long as the worker does.
-        _events: mpsc::UnboundedReceiver<WorkerEvent>,
+        events: mpsc::UnboundedReceiver<WorkerEvent>,
     }
 
     /// Starts one worker on `js`, with its script already answered.
@@ -827,6 +862,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
             ),
+            false,
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),
@@ -837,7 +873,7 @@ mod tests {
         Started {
             worker,
             messages,
-            _events: events_rx,
+            events: events_rx,
         }
     }
 
@@ -893,6 +929,154 @@ mod tests {
                 settled + 1,
                 "the sibling's checkpoint is what settles this worker, once"
             );
+        });
+    }
+    impl Started {
+        fn execute(&self, source: &str) {
+            self.worker
+                .enter(|realm, js| {
+                    realm
+                        .engine
+                        .execute_module(js, source, "app:///observer-test.js")
+                        .unwrap();
+                })
+                .expect("the worker is live");
+        }
+
+        fn collect(&self) {
+            self.worker
+                .enter(|realm, js| realm.engine.collect_garbage(js).unwrap())
+                .expect("the worker is live");
+        }
+
+        fn messages(&mut self) -> Vec<String> {
+            let mut messages = Vec::new();
+            while let Ok(event) = self.events.try_recv() {
+                match event.payload {
+                    WorkerPayload::Message(message) => messages.push(message),
+                    WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
+                        panic!("observer error: {}", error.message)
+                    }
+                    WorkerPayload::Closed => panic!("observer worker closed"),
+                }
+            }
+            messages
+        }
+    }
+
+    /// Drive actual `QuickJS` finalization without exposing a GC API to app code.
+    fn with_observers(test: impl FnOnce(&mut Started, &mut Started)) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        LocalSet::new().block_on(&runtime, async {
+            let mut js = ScriptRuntime::new().unwrap();
+            install_worker_modules(&mut js).unwrap();
+            let js = Rc::new(RefCell::new(Ok(js)));
+            let mut first = start(&js, 1);
+            let mut second = start(&js, 2);
+            for _ in 0..TURNS {
+                if first.worker.is_live() && second.worker.is_live() {
+                    break;
+                }
+                task::yield_now().await;
+            }
+            assert!(first.worker.is_live() && second.worker.is_live());
+            test(&mut first, &mut second);
+        });
+    }
+
+    #[test]
+    fn object_destruction_observers_finalize_in_js_once_without_retaining_the_target() {
+        with_observers(|first, _| {
+            first.execute(r"
+                import {lynx} from 'bobcat:bts-runtime';
+                const create = lynx.getNativeApp().createJSObjectDestructionObserver;
+                for (const args of [[], [null], [() => {}, 1]]) {
+                    let rejected = false;
+                    try { create(...args); } catch (error) { rejected = error instanceof TypeError; }
+                    if (!rejected) throw Error('invalid observer arguments accepted');
+                }
+                globalThis.observer = create(function(...args) {
+                    postMessage(['finalized', this === undefined, args.length]);
+                });
+                if (Object.keys(observer).length || observer.anything !== undefined)
+                    throw Error('observer exposes fields');
+            ");
+            first.collect();
+            assert!(
+                first.messages().is_empty(),
+                "the live target retains its registration"
+            );
+            first.execute("delete globalThis.observer; postMessage('script-end');");
+            first.collect();
+            assert_eq!(
+                first.messages(),
+                [r#"["script-end"]"#, r#"[["finalized",true,0]]"#]
+            );
+            first.collect();
+            assert!(first.messages().is_empty(), "a target finalizes once");
+        });
+    }
+
+    #[test]
+    fn object_destruction_errors_report_without_stopping_other_js_finalizers() {
+        with_observers(|first, _| {
+            first.execute(
+                r"
+                import {lynx} from 'bobcat:bts-runtime';
+                const create = lynx.getNativeApp().createJSObjectDestructionObserver;
+                globalThis.targets = [
+                    create(() => { throw Error('observer failed'); }),
+                    create(() => postMessage('survivor')),
+                ];
+                targets[0].field = 1;
+                if (targets[0].field !== undefined) throw Error('observer stored a property');
+            ",
+            );
+            let writes = first.messages();
+            assert_eq!(writes.len(), 1);
+            assert!(writes[0].contains("HostObject with default setter"));
+            first.execute("delete globalThis.targets;");
+            first.collect();
+            let messages = first.messages();
+            assert_eq!(messages.len(), 2);
+            assert!(messages.iter().any(|message| message == r#"["survivor"]"#));
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("reportError")
+                        && message.contains("observer failed"))
+            );
+            first.execute("postMessage('still-usable');");
+            assert_eq!(first.messages(), [r#"["still-usable"]"#]);
+        });
+    }
+
+    #[test]
+    fn object_destruction_after_app_destroy_is_suppressed_without_affecting_siblings() {
+        with_observers(|first, second| {
+            for worker in [&*first, &*second] {
+                worker.execute(r"
+                    import {lynx} from 'bobcat:bts-runtime';
+                    globalThis.observer = lynx.getNativeApp().createJSObjectDestructionObserver(() => postMessage('finalized'));
+                ");
+            }
+            first.execute(
+                r"
+                import {__BobcatDestroyBTS} from 'bobcat:bts-runtime';
+                __BobcatDestroyBTS();
+                delete globalThis.observer;
+            ",
+            );
+            second.execute("delete globalThis.observer;");
+            second.collect();
+            assert!(
+                first.messages().is_empty(),
+                "a destroyed app cannot receive cleanup jobs"
+            );
+            assert_eq!(second.messages(), [r#"["finalized"]"#]);
         });
     }
 }

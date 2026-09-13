@@ -400,7 +400,7 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
 
-  it("forwards explicit destroy events to the current app hook without disposing the runtime", async () => {
+  it("consumes a destroy notification once even if the current app hook throws", async () => {
     const callback = rstest.fn();
     bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
     await deliverToMain();
@@ -426,7 +426,7 @@ describe("MTS/BTS lifecycle runtime", () => {
     app.callDestroyLifetimeFun = replacement;
     engine.dispatchEvent({ type: "__DestroyLifetime" });
     deliverToBackground();
-    expect(replacement).toHaveBeenCalledTimes(1);
+    expect(replacement).not.toHaveBeenCalled();
 
     bts.getNativeApp().callLepusMethod("emptyLepusMethod", {}, callback);
     await deliverToMain();

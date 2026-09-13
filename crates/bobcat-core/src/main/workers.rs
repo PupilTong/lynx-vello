@@ -84,8 +84,9 @@ impl WorkerFactory {
                     .next
                     .set(id.checked_add(1).ok_or("worker ids exhausted")?);
                 let key = WorkerKey::new(id);
-                let script = creator.start(key, name)?;
-                if specifier == BTS_MODULE_SPECIFIER {
+                let background = specifier == BTS_MODULE_SPECIFIER;
+                let script = creator.start(key, name, background)?;
+                if background {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
                     let options = serde_json::to_string(&*initial_options.borrow())
                         .expect("bootstrap options are JSON values");
@@ -206,6 +207,7 @@ impl WorkerOwner {
         &self,
         key: WorkerKey,
         name: String,
+        background: bool,
     ) -> Result<oneshot::Sender<Result<LoadedSource, crate::LynxViewError>>, String> {
         let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
@@ -215,6 +217,7 @@ impl WorkerOwner {
             .commands
             .send(WorkerCommand::Start(WorkerStart {
                 key,
+                background,
                 name,
                 script: awaiting,
                 messages: incoming,
