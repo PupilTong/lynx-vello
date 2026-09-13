@@ -895,7 +895,7 @@ if (typeof globalThis.renderPage === "function") {{
   try {{ globalThis.renderPage(data); }}
   catch (error) {{ _ReportError(error); }}
 }} else {{
-  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data, origin: "Engine" }});
+  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
 }}
 // Queue the boot flush after the jobs already scheduled by these hooks.
 // Await this flush so its failure still rejects boot; hook results are not awaited.
