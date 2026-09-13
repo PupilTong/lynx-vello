@@ -4,6 +4,10 @@ import * as crossThreadContext from "../src/cross-thread-context.ts";
 import type * as btsRuntime from "../src/background-thread-runtime.ts";
 import type * as mtsRuntime from "../src/main-thread-runtime.ts";
 import type { Worker } from "../src/worker.ts";
+import * as selectorQuery from "../src/selector-query.ts";
+rstest.mockRequire("bobcat:selector-query", () => selectorQuery);
+const queryNodes = rstest.fn();
+rstest.mockRequire("bobcat:element", () => ({ __BobcatQueryNodes: queryNodes }));
 
 rstest.mockRequire("bobcat:event-target", () => eventTarget);
 rstest.mockRequire("bobcat:cross-thread-context", () => crossThreadContext);
@@ -127,6 +131,33 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(bts.getApp()).toBe(app);
     expect(bts.getNativeApp()).toBe(bts.getNativeApp());
   });
+
+  it("snapshots node requests and removes query callbacks even when they throw", async () => {
+    queryNodes.mockImplementation(() => ({data:{id:'target'}, status:{code:0,data:'success'}}));
+    const callback = rstest.fn(() => { throw Error('query callback failed'); });
+    bts.createSelectorQuery().select('#target').fields({id:true}, callback)?.exec();
+    await deliverToMain();
+    const reply = toBackground[0];
+    expect(() => deliverToBackground()).toThrow('query callback failed');
+    receiveInBackground({data:reply});
+    expect(callback).toHaveBeenCalledTimes(1);
+    const next = rstest.fn();
+    bts.createSelectorQuery().select('#target').fields({id:true}, next)?.exec();
+    await deliverToMain(); deliverToBackground();
+    expect(next).toHaveBeenCalledWith({id:'target'}, {code:0,data:'success'});
+    const before = toMain.length;
+    expect(() => bts.createSelectorQuery().select(7 as unknown as string).fields({id:true})?.exec()).toThrow('identifier');
+    expect(toMain).toHaveLength(before);
+  });
+
+  it("answers a query whose result cannot be serialized as JSON with status 1", async () => {
+    queryNodes.mockImplementationOnce(() => ({data:{attribute:{value:7n}}, status:{code:0,data:'success'}}));
+    const callback = rstest.fn();
+    bts.createSelectorQuery().select('#target').fields({attribute:true}, callback)?.exec();
+    await deliverToMain(); deliverToBackground();
+    expect(callback).toHaveBeenCalledWith(null, {code:1,data:expect.stringMatching(/bigint/i)});
+  });
+
 
   it("keeps extra Context properties separate from runtime messages in both directions", async () => {
     const seen: unknown[] = [];

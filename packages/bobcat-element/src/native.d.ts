@@ -22,6 +22,9 @@ interface BobcatNative {
    * declaration. An empty payload leaves an empty `style` attribute.
    */
   setInlineStyles(nodeId: number, record: string): void;
+  setInlineStyleProperty(nodeId: number, name: string, value: string): void;
+  supportsStyleProperty(name: string): boolean;
+  queryElementIds(root: number, selector: string, firstOnly: 0 | 1): string;
   removeAttribute(nodeId: number, name: string): void;
   /** The attribute's value, or null when the element does not carry it. */
   getAttribute(nodeId: number, name: string): string | null;
@@ -117,6 +120,9 @@ declare module "bobcat-internal:host" {
   export const createElement: BobcatNative["createElement"];
   export const setAttribute: BobcatNative["setAttribute"];
   export const setInlineStyles: BobcatNative["setInlineStyles"];
+  export const queryElementIds: BobcatNative["queryElementIds"];
+  export const supportsStyleProperty: BobcatNative["supportsStyleProperty"];
+  export const setInlineStyleProperty: BobcatNative["setInlineStyleProperty"];
   export const removeAttribute: BobcatNative["removeAttribute"];
   export const getAttribute: BobcatNative["getAttribute"];
   export const tagName: BobcatNative["tagName"];

@@ -22,6 +22,9 @@ rstest.mockRequire("bobcat-internal:host", () => {
     createElement: native.createElement,
     setAttribute: native.setAttribute,
     setInlineStyles: native.setInlineStyles,
+    setInlineStyleProperty: native.setInlineStyleProperty,
+    supportsStyleProperty: native.supportsStyleProperty,
+    queryElementIds: native.queryElementIds,
     removeAttribute: native.removeAttribute,
     getAttribute: native.getAttribute,
     tagName: native.tagName,
@@ -168,6 +171,11 @@ function createMockBobcat(issuedIds?: number[]): MockBobcat {
       element.set(name, value);
       calls.push(["setAttribute", id, name, value]);
     },
+    setInlineStyleProperty: (node: unknown, name: string, value: string) => {
+      calls.push(["setInlineStyleProperty", nodeId("setInlineStyleProperty", node), name, value]);
+    },
+    supportsStyleProperty: (name: string) => name === "background-color" || name === "width",
+    queryElementIds: () => { throw new Error("selectors are tested against the real DOM"); },
     /**
      * Decodes the record payload the way the native side does, so the
      * expectations below read as declarations rather than as wire text — and
@@ -393,6 +401,10 @@ describe("installation", () => {
       ["__GetAttributeNames", 1],
       ["__GetElementUniqueID", 1],
       ["__SetInlineStyles", 2],
+      ["__AddInlineStyle", 3],
+      ["__SetDataset", 2],
+      ["__GetDataset", 1],
+      ["__AddDataset", 3],
       ["__SetCSSId", 3],
       ["__SetAttribute", 3],
       ["__UpdateListCallbacks", 4],
@@ -414,6 +426,7 @@ describe("installation", () => {
     expect(Object.keys(elementModule).sort()).toEqual(
       [
         ...arities.map(([name]) => name),
+        "__BobcatQueryNodes",
         "__BobcatDispatchEvent",
         // Not a PAPI member: the lifecycle export the boot module
         // constructs, which no entry preamble imports.
@@ -1037,6 +1050,20 @@ describe("__SetInlineStyles", () => {
 });
 
 describe("__SetAttribute", () => {
+  it("keeps native dataset values, merges keys and returns independent copies", () => {
+    const view = __CreateView(0);
+    const input = {count:7, nested:{value:1}, nil:null};
+    elementModule.__SetDataset(view, input);
+    input.nested.value = 2;
+    elementModule.__SetDataset(view, {next:undefined});
+    const result = elementModule.__GetDataset(view) as typeof input;
+    expect(result).toEqual({count:7, nested:{value:1}, nil:null, next:undefined});
+    expect(Object.hasOwn(result, 'next')).toBe(true);
+    result.nested.value = 3;
+    expect((elementModule.__GetDataset(view) as typeof input).nested.value).toBe(1);
+    elementModule.__AddDataset(view, 'count', false);
+    expect(elementModule.__GetDataset(view)["count"]).toBe(false);
+  });
   it("stringifies the value", () => {
     const view = __CreateView(0);
     mock.calls.length = 0;
@@ -1049,6 +1076,17 @@ describe("__SetAttribute", () => {
       ["setAttribute", 3, "flex-grow", "1"],
       ["setAttribute", 3, "clip-radius", "true"],
     ]);
+  });
+
+  it("does not impose the cross-thread value domain on attribute assignment", () => {
+    const view = __CreateView(0);
+    const cyclic: {self: unknown} = {self:null};
+    cyclic.self = cyclic;
+    const values = [7n, Symbol('local'), cyclic, {nested: {callback() {}}}];
+    for (const value of values) {
+      __SetAttribute(view, 'value', value);
+      expect(elementModule.__GetAttributeByName(view, 'value')).toBe(String(value));
+    }
   });
 
   it("removes the attribute for null and undefined", () => {

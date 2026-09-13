@@ -777,6 +777,51 @@ fn inline_styles_reach_computed_style_and_layout() {
 }
 
 #[test]
+fn adding_inline_styles_preserves_other_properties_and_uses_cssom_validation() {
+    let (mut js_runtime, mut runtime, elements) = runtime();
+    runtime
+        .run_main_thread_script(
+            &mut js_runtime,
+            r"
+                const page = __CreatePage();
+                const view = __CreateView();
+                __AppendElement(page, view);
+                __SetInlineStyles(view, 'width:10px;height:14px;padding:9px');
+                __AddInlineStyle(view, 'width', '20px');
+                __AddInlineStyle(view, 'width', '30px; height:99px');
+                __AddInlineStyle(view, 'height', 'not-a-length');
+                __AddInlineStyle(view, 'padding', null);
+                __AddInlineStyle(view, '--accent', 'green');
+                __AddInlineStyle(view, 'unknown-property', 'yes');
+                let rejected = false;
+                try { __AddInlineStyle(view, 1, '30px'); }
+                catch (error) { rejected = error instanceof TypeError; }
+                if (!rejected) throw Error('numeric native CSS IDs must be rejected');
+                __FlushElementTree();
+            ",
+            "app:///add-inline-style.js",
+        )
+        .expect("main-thread script");
+    let elements = elements.tree();
+    let view = elements.get(node_id(3)).expect("the view is live");
+    let style = view.attribute("style").expect("inline style remains");
+    assert!(style.contains("--accent: green"), "{style}");
+    assert!(!style.contains("padding"), "{style}");
+    assert!(!style.contains("unknown-property"), "{style}");
+    let layout = elements
+        .rounded_layout(node_id(3))
+        .expect("view is laid out");
+    assert!(
+        (layout.size.width - 20.0).abs() < f32::EPSILON,
+        "{layout:?}"
+    );
+    assert!(
+        (layout.size.height - 14.0).abs() < f32::EPSILON,
+        "{layout:?}"
+    );
+}
+
+#[test]
 fn record_inline_styles_are_resolved_by_name_before_reaching_stylo() {
     let (mut js_runtime, mut runtime, elements) = runtime();
     runtime

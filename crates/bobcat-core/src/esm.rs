@@ -41,3 +41,7 @@ pub(crate) const BTS_RUNTIME_MODULE_SOURCE: &str = runtime_source!("background-t
 /// Named imports prepended to a BTS application entry, as for MTS. The
 /// bootstrap uses the same import to initialize the Context before the app.
 pub(crate) const BTS_ENTRY_PREAMBLE: &str = "import { lynx } from \"bobcat:bts-runtime\";\n";
+
+/// BTS query builders carry selection tokens across Worker messages.
+pub(crate) const SELECTOR_QUERY_SPECIFIER: &str = "bobcat:selector-query";
+pub(crate) const SELECTOR_QUERY_SOURCE: &str = runtime_source!("selector-query");

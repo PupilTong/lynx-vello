@@ -52,6 +52,10 @@ const WORKER_MODULE_SOURCE: &str = crate::esm::runtime_source!("worker-runtime")
 /// document to reach and no page to be the main thread of, and registering
 /// them would make an import that must fail merely fail late.
 pub(super) fn install_worker_modules(js_runtime: &mut ScriptRuntime) -> Result<(), ScriptError> {
+    js_runtime.register_module_source(
+        crate::esm::SELECTOR_QUERY_SPECIFIER,
+        crate::esm::SELECTOR_QUERY_SOURCE,
+    )?;
     js_runtime.register_module_source(EVENT_TARGET_MODULE_SPECIFIER, EVENT_TARGET_SOURCE)?;
     js_runtime.register_module_source(WORKER_MODULE_SPECIFIER, WORKER_MODULE_SOURCE)?;
     js_runtime.register_module_source(CONTEXT_MODULE_SPECIFIER, CONTEXT_MODULE_SOURCE)?;

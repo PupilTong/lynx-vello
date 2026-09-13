@@ -484,6 +484,15 @@ impl<T> Document<T> {
         self.drain_reactions(base);
     }
 
+    /// Whether this document's CSS parser recognizes a property name.
+    ///
+    /// This tests the name, independently of whether a particular value parses.
+    /// Embedders use it to distinguish CSS properties from element attributes.
+    #[must_use]
+    pub fn supports_style_property(&self, property: &str) -> bool {
+        self.style_engine().supports_property(property)
+    }
+
     /// Sets one property in an element's inline declaration block.
     ///
     /// This has the mutation semantics of

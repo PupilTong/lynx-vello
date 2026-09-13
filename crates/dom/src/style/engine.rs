@@ -136,6 +136,10 @@ impl StyleEngine {
         &self.lock
     }
 
+    pub(crate) fn supports_property(&self, property: &str) -> bool {
+        PropertyId::parse(property, &self.parser_context(CssRuleType::Style)).is_ok()
+    }
+
     /// Applies one CSSOM-style property update to a declaration block.
     ///
     /// Returning `None` means that the property name or value was invalid, or

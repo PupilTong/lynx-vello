@@ -103,7 +103,11 @@ import {
   __GetAttributeByName,
   __GetAttributeNames,
   __GetElementUniqueID,
+  __SetDataset,
+  __GetDataset,
+  __AddDataset,
   __SetInlineStyles,
+  __AddInlineStyle,
   __SetCSSId,
   __SetAttribute,
   __UpdateListCallbacks,
@@ -1312,6 +1316,37 @@ fn install_attribute_members(
             let declarations = split_style_record(NAME, record)?;
             document.set_inline_style_declarations(node, declarations);
             Ok(HostValue::Undefined)
+        }
+        fn setInlineStyleProperty(
+            node: node_id_argument,
+            name: string_argument,
+            value: string_argument
+        ) |document| {
+            validate_live_element(document, NAME, node)?;
+            document.set_inline_style_property(node, name, value);
+            Ok(HostValue::Undefined)
+        }
+        fn supportsStyleProperty(name: string_argument) |document| {
+            Ok(HostValue::Boolean(document.supports_style_property(name)))
+        }
+        fn queryElementIds(
+            root: node_id_argument,
+            selector: string_argument,
+            first_only: capture_argument
+        ) |document| {
+            validate_live_element(document, NAME, root)?;
+            // SelectorQuery is Lynx's inclusive query scope. Matching itself
+            // still uses the same standard selector engine as the cascade.
+            let matches_root = document.matches(root, selector).map_err(|e| e.to_string())?;
+            let mut ids = if matches_root { vec![root] } else { Vec::new() };
+            if !first_only || ids.is_empty() {
+                if first_only {
+                    ids.extend(document.query_selector(root, selector).map_err(|e| e.to_string())?);
+                } else {
+                    ids.extend(document.query_selector_all(root, selector).map_err(|e| e.to_string())?);
+                }
+            }
+            Ok(HostValue::String(ids.into_iter().map(|id| id.to_bits().to_string()).collect::<Vec<_>>().join(",")))
         }
         fn removeAttribute(node: node_id_argument, name: string_argument) |document| {
             validate_live_element(document, NAME, node)?;
