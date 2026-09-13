@@ -1,93 +1,73 @@
 # Worker resource loading
 
-This stack layer adds native Script/JSON source reads to Worker realms,
-including the built-in BTS Worker. It builds on the asynchronous ESM loader
-and cancellation scope already required by the events/diagnostics and
-readiness layer.
+Worker ESM loading already supplies the transport needed by raw BTS entries.
+The remaining ReactLynx compiled-module layer must follow the framework's
+callers and generated wrappers. Bypassing `lynx_core.js` does not require its
+`requestScript` or `readScript` interfaces, or a separate protocol returning
+source text to JavaScript callbacks.
 
-## Ownership and transport
+## Existing ESM transport
 
-`WorkerStart` carries a `SourceRequester` alongside its cancellation token.
-The requester holds only the view's notice sender, its host wakeup, and that
-worker's child token. It sends `ViewNotice::RequestSource` directly to the
-host; `LynxView::pump` calls the existing `ResourceFetcher::request_source`.
-The concrete `SourceCompletion` answers its oneshot receiver on the worker
-thread. Neither source results nor JavaScript callbacks pass through MTS.
-No new thread, executor, resource cache, or public callback registry is added.
+`WorkerStart` carries a `SourceRequester` and a child of the view's cancellation
+token. Discovered imports use `SourceRequest::Module` on the view's existing
+notice channel. `LynxView::pump` calls `ResourceFetcher::request_source`; the
+concrete `SourceCompletion` answers the requesting worker directly. Resolution,
+transport, UTF-8 validation, and the final response URL belong to the fetcher.
+MTS does not route resource replies.
 
-The shipped native/Wasm fetcher handles `SourceRequest::Script` like other
-text sources: URL resolution, transport, UTF-8 validation, and response URL
-belong to the fetcher. Custom fetchers must handle the new enum variant and
-return `LoadedSource::Entry`. Request locators are passed unchanged; native
-module-name normalization belongs to the caller above this layer.
+The Worker uses the same asynchronous QuickJS ESM loader as main. Imports share
+one evaluation and namespace per normalized URL in each realm. Response URLs
+provide the base for dependencies. Imports and timers continue during entry
+top-level await; posted messages wait for entry settlement. Worker termination
+or view release cancels outstanding completions and discards late results.
 
-## ESM and top-level await
+Raw XML background entries use this path and import their runtime bindings from
+`bobcat:bts-runtime`. After its application entry completes, BTS sends ready;
+MTS then calls its readiness binding. MTS evaluation does not await BTS.
 
-Worker realms enable the existing asynchronous QuickJS module loader and use
-`start_module`, just as main does. Each normalized import URL starts one
-request per realm. Responses retain the final URL as the base for static
-and dynamic dependencies; duplicate imports share evaluation and namespace.
-The existing QuickJS graph/linking and promise-job machinery is unchanged.
+## ReactLynx compiled-module contract
 
-The entry can await imports, Script completions, and realm timers. Messages
-posted before its evaluation settles remain in FIFO order. A worker's clock
-and one task per outstanding load continue to enter and settle its realm.
-Termination can end the worker while entry TLA is pending.
+This inventory was checked against `@lynx-js/react` 0.123.0, Rspeedy 0.16.0,
+and the source fixture configuration: `engineVersion: '4.1.0'` with default
+ReactLynx options. Rebuilding the six native production fixtures produced
+12 BTS manifest sections across 11 containers. None contains `requestScript`,
+`readScript`, or the legacy `QueryComponent` path. These are build outputs for
+inspection, not files to commit. Source references below name files in the
+read-only `lynx-stack` checkout at `f47d3e6a56200bf07d58fc1656712878ea851a3d`.
 
-A handled import rejection stays in JS. An unhandled entry rejection reports
-nonfatal worker errors and enables the message queue, preserving the
-existing ordinary Worker failure contract. A rejection may be observed both
-at the checkpoint that settles it and when entry status is read; this layer
-preserves those error exits. A configured BTS entry instead
-participates in the existing startup acknowledgement: the MTS failure binding
-reports `StartupFailed`, and its ready binding precedes `ScriptFinished`/`is_ready`.
-MTS evaluation completes independently of BTS readiness.
+| Required API | Actual caller and observable result |
+| --- | --- |
+| `lynx.requireModule(path, bundleName)` | Generated entry loads an embedded module and synchronously receives its exports. `packages/webpack/template-webpack-plugin/src/LynxEncodePlugin.ts`. |
+| `lynx.requireModuleAsync(url, callback)` | Dynamic JS imports and generated JS chunk loading receive `(error, exports)`. `packages/react/runtime/src/core/lynx/dynamic-import.ts` and `packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/chunk-loading.js`. |
+| `lynx.fetchBundle(url, {})` | Default asynchronous lazy loading calls the returned handler's `.then(callback)` and reads `code` and `url`. `packages/react/runtime/src/core/lynx/lazy-bundle.ts`. |
+| `fetchBundle(...).wait(5)` | Only a lazy import explicitly using `mode: 'sync'` takes this path. Ordinary asynchronous lazy loading does not wait synchronously. Same lazy-bundle source. |
+| `lynx.loadScript('background', { bundleName })` | Executes the loaded bundle's BTS section and synchronously returns its result. Same lazy-bundle source. |
+| `lynx.getNativeApp().callLepusMethod(...)` | Requests `rLynxPrepareLazyBundleMTS`; asynchronous lazy loading resolves after the callback confirms MTS preparation. Same lazy-bundle source. |
+| `tt.define(...)` and `tt.require(...)` | The generated wrapper receives `tt` through `init({tt})`, registers a module factory, then obtains its exports. `packages/webpack/runtime-wrapper-webpack-plugin/src/RuntimeWrapperWebpackPlugin.ts`. |
 
-Raw BTS entries explicitly import their runtime bindings from
-`bobcat:bts-runtime`. XML background entries now load through the host instead
-of requiring test-only preloading.
+`lynx.loadLazyBundle` is installed by ReactLynx itself. It composes the host APIs
+above; the host should not duplicate it. The compiler selects `FetchBundle`
+for engine versions at least 3.9 by default
+(`packages/rspeedy/plugin-react/src/resolveLazyBundleFetcher.ts`). Supporting
+the current engine configuration does not require the legacy `QueryComponent`
+and `getDynamicComponentExports` fallback.
 
-## Native Script and JSON source text
+Development HMR also obtains its JSON manifest through `requireModuleAsync`
+and consumes the parsed result
+(`packages/webpack/chunk-loading-webpack-plugin/src/runtime/javascript/hmr-load-manifest.js`).
+That caller does not require a separate raw JSON text API.
 
-`bobcat-internal:worker.readScript(path, timeout)` returns UTF-8 source text
-synchronously. Finite positive timeouts are truncated to whole seconds;
-nonpositive and nonnumeric values use five seconds, matching the MVP's native
-read contract. An unrepresentable timeout throws before requesting a source.
-A stylesheet result, fetch failure, dropped completion, timeout, or cancellation
-throws into the calling JS stack.
+## Implementation boundary
 
-This wait blocks the group's shared worker thread, including sibling worker
-realms. It polls only the response and cancellation; it does not run a nested
-executor, promise jobs, or timers. The embedder and MTS threads remain free.
-The host must keep pumping resources. Releasing the view cancels the token
-from the embedder thread and wakes the read immediately. A `terminate()`
-message cannot interrupt a synchronous JS stack; it is consumed after the
-read returns or times out.
+The compiled-module and lazy-bundle execution APIs above remain unimplemented
+on this PR's base; `callLepusMethod` already supplies the message boundary.
+They should reuse the existing resource transport while providing execution
+results, exports, caching, and errors at the required API boundary. Lynx module
+factories and section evaluation have different semantics from ESM; reusing
+transport does not make an ordinary `import()` a complete implementation of
+`requireModule` or `loadScript`.
 
-The private `__BobcatRequestScript(path, callback)` export in
-`bobcat:bts-runtime` registers a callback in JS, allocates its opaque ID, and
-calls native `requestScript(id, path)`. Rust queues only that ID and locator.
-A later completion calls `__BobcatCompleteScript(id, error, source)` in the
-same realm. Success uses a null error; failure carries a string and empty
-source. Callback cleanup runs even when the callback throws, which reports a
-nonfatal worker error. A failed native request also removes the registration.
-Independent completions may arrive out of order.
-
-Both paths return text. JSON parsing, Script evaluation, compiled factory
-execution, `lynx.requireModule`/`requireModuleAsync`, module caches, and lazy
-bundle lookup remain in the subsequent module layer. The private asynchronous
-request export isolates this transport PR from those dependencies.
-
-## Cancellation and validation
-
-Every load shares its worker's token. Worker termination ends pending async
-loads; dropping the view cancels them and synchronous waits immediately.
-Timed-out receivers are dropped, making `SourceCompletion::is_cancelled()`
-true and discarding late results. A failed read can be retried in the same realm.
-
-Worker tests cover redirected dependency graphs, duplicate imports, TLA timer
-turns and message ordering, rejected entries, Script callbacks across realms,
-retry, synchronous job ordering, timeout, and cancellation. JS tests cover
-callback identity and cleanup. The resource integration test boots a real XML
-BTS entry using ESM plus synchronous JSON and asynchronous Script sources,
-then observes readiness and delivery of an MTS event queued during startup.
+There is no `ScriptLoad` queue, `SourceRequest::Script` variant, synchronous
+`readScript` binding, or JS source-callback registry. Tests should exercise
+the existing ESM/readiness/cancellation path and, when implemented, the actual
+ReactLynx caller contracts rather than reintroducing a private text-read API.

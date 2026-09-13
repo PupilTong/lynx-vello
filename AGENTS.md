@@ -547,13 +547,12 @@ useful signal for currently-compatible versions of those libraries.
   dependency back to the bootstrap awaiting it.
   XML uses this identical startup path. The bootstrap contains no application
   source and does not fetch it in advance. A worker carries a `SourceRequester`
-  that sends module and native Script reads directly to the view's resource
-  host. ESM completion and timers continue during entry TLA; posted messages
-  wait for entry settlement. Script/JSON reads return UTF-8 text synchronously
-  or through JS-owned callbacks. Synchronous reads block the group's worker
-  thread without running jobs and wake on response, timeout, or view cancellation.
-  Each completion shares its worker's cancellation token. Compiled factory
-  evaluation and module caches remain a later layer; see
+  that sends module requests directly to the view's resource host. ESM
+  completion and timers continue during entry TLA; posted messages wait for
+  entry settlement. Each completion shares its worker's cancellation token.
+  ReactLynx compiled module execution and lazy-bundle APIs remain a later
+  layer over this resource transport. Bypassing `lynx_core.js` does not require
+  its `requestScript`/`readScript` source-text interfaces; see
   `docs/worker-resources-runtime.md`. Without an entry, only the built-in
   environment runs. All workers use the same scope and protocol.
   MTS `lynx.getJSContext()` and this BTS Context are
