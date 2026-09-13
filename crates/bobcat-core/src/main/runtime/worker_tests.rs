@@ -290,6 +290,140 @@ fn string_handlers_reach_background_with_event_snapshots() {
     );
 }
 
+/// What a Context event carries is a structured clone in both directions, so
+/// the values a JSON transport could not spell survive the two threads: an
+/// `undefined`-valued key, `NaN`, a `Date`, a typed array, a `BigInt`, and a
+/// cycle.
+#[test]
+fn context_events_carry_structured_values_in_both_directions() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        const context = lynx.getJSContext();
+        context.addEventListener('reply', e => results.push(e.data));
+        const sent = { tag: 'mts', missing: undefined, nan: NaN,
+                       at: new Date(1700000000123),
+                       bytes: new Uint8Array([1, 2, 255]),
+                       big: 9007199254740993n };
+        sent.self = sent;
+        context.dispatchEvent({ type: 'request', data: sent });
+        ",
+        Some(
+            r"
+        const core = lynx.getCoreContext();
+        core.addEventListener('request', event => {
+            const d = event.data;
+            const seen = [
+                typeof d, d.tag, 'missing' in d, d.missing === undefined,
+                Number.isNaN(d.nan),
+                d.at instanceof Date && d.at.getTime() === 1700000000123,
+                d.bytes instanceof Uint8Array && Array.from(d.bytes).join(',') === '1,2,255',
+                d.big === 9007199254740993n, d.self === d,
+            ].join(':');
+            const back = { seen, at: new Date(42), bytes: new Uint8Array([9]),
+                           big: -9007199254740993n, missing: undefined };
+            back.self = back;
+            core.dispatchEvent({ type: 'reply', data: back });
+        });
+        ",
+        ),
+    );
+    pair.deliver();
+    pair.check(
+        r"
+        const d = results[0];
+        const expected = 'object:mts:true:true:true:true:true:true:true';
+        if (d.seen !== expected) throw Error('MTS -> BTS: ' + d.seen);
+        if (!(d.at instanceof Date) || d.at.getTime() !== 42) throw Error('Date');
+        if (!(d.bytes instanceof Uint8Array) || d.bytes[0] !== 9) throw Error('Uint8Array');
+        if (d.big !== -9007199254740993n) throw Error('BigInt');
+        if (!('missing' in d) || d.missing !== undefined) throw Error('undefined-valued key');
+        if (d.self !== d) throw Error('cycle');
+        ",
+    );
+}
+
+/// A value the serializer refuses is refused where it was written, so the
+/// poster hears about it rather than the other thread.
+#[test]
+fn posting_a_function_to_a_worker_throws_in_the_poster_and_sends_nothing() {
+    let mut pair = Pair::new(
+        r"
+        import { Worker } from 'bobcat-internal';
+        globalThis.seen = [];
+        globalThis.thrown = null;
+        globalThis.worker = new Worker('./worker.js');
+        worker.onmessage = event => seen.push(event.data);
+        try { worker.postMessage(() => 1); } catch (error) { thrown = error; }
+        worker.postMessage('fine');
+        ",
+    );
+    pair.answer("onmessage = event => postMessage(event.data);");
+    pair.deliver();
+    pair.check(
+        r#"
+        if (!(thrown instanceof TypeError)) throw Error('expected a TypeError, got ' + thrown);
+        if (JSON.stringify(seen) !== '["fine"]') throw Error(JSON.stringify(seen));
+        "#,
+    );
+}
+
+/// The published snapshot of a DOM event is the same shape it was under the
+/// JSON transport: the two stop methods are gone rather than present as
+/// `undefined`, the element handles are replaced by values, and nothing else
+/// was added or lost.
+#[test]
+fn a_published_dom_event_carries_values_only_and_no_propagation_methods() {
+    let mut pair = Pair::with_background(
+        r"
+        globalThis.results = [];
+        lynx.getJSContext().addEventListener('reply', e => results.push(e.data));
+        const page = __CreatePage('card', 0);
+        const child = __CreateView(0);
+        __SetID(child, 'button');
+        __SetAttribute(child, 'data-item-name', 'first');
+        __AppendElement(page, child);
+        __AddEvent(child, 'bindEvent', 'tap', 'handler');
+        ",
+        Some(
+            r"
+        lynx.getApp().publishEvent = (name, event) => {
+            lynx.getCoreContext().dispatchEvent({ type: 'reply', data: {
+                keys: Object.keys(event).sort().join(','),
+                targetKeys: Object.keys(event.target).sort().join(','),
+                shape: [name, event.type, event.eventPhase, event.target.id,
+                        event.target.dataset.itemName, event.target.uid,
+                        event.currentTarget.uid, event.detail.answer,
+                        'stopPropagation' in event,
+                        'stopImmediatePropagation' in event,
+                        'elementRefptr' in event.target].join(':'),
+            }});
+        };
+        ",
+        ),
+    );
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .dispatch_event(
+            &mut pair.js,
+            dom::NodeId::from_bits(3).unwrap(),
+            "tap",
+            r#"{"answer":42}"#,
+        )
+        .unwrap();
+    pair.deliver();
+    pair.check(
+        r"
+        const d = results[0];
+        if (d.keys !== 'currentTarget,detail,eventPhase,target,type') throw Error(d.keys);
+        if (d.targetKeys !== 'dataset,id,uid') throw Error(d.targetKeys);
+        const expected = 'handler:tap:2:button:first:3:3:42:false:false:false';
+        if (d.shape !== expected) throw Error(d.shape);
+        ",
+    );
+}
+
 #[test]
 fn publish_hooks_install_lazily_and_component_ids_stay_opaque() {
     let mut pair = Pair::with_background(

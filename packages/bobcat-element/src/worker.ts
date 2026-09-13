@@ -6,8 +6,11 @@ import {
 } from "bobcat-internal:host";
 
 // Main-thread-only `bobcat-internal` exports. Each object owns a context on
-// the group's existing worker thread. Transport currently uses the worker
-// scope's JSON encoding; structured clone and transfer lists are pending.
+// the group's existing worker thread. A message crosses as a structured clone:
+// the host boundary serializes it with the engine's own serializer, so
+// `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
+// references survive, and a value it refuses — a function, a `Symbol`, a `Map`
+// — throws synchronously here. Transfer lists remain unsupported.
 const workers: Map<string, Worker> = new Map();
 
 /** A message the worker's script posted, as its `Worker` dispatches it. */
@@ -68,10 +71,11 @@ export class Worker extends EventTarget {
     if (transfer !== undefined) {
       throw new TypeError("Bobcat's postMessage has no transfer list");
     }
-    const data = JSON.stringify([message]);
-    if (workers.has(this.#key)) {
-      sendWorkerMessage(this.#key, data);
-    }
+    // Serialized whether or not this worker still runs, as HTML's
+    // StructuredSerialize comes before the "is it terminated" check: a
+    // refused value throws here either way. The host drops a message for a
+    // worker it no longer names.
+    sendWorkerMessage(this.#key, message);
   }
 
   terminate() {
@@ -92,16 +96,21 @@ export class Worker extends EventTarget {
 export function __BobcatDispatchWorkerEvent(
   key: string,
   kind: string,
-  data: string,
+  ...rest: unknown[]
 ) {
   const worker = workers.get(key);
   if (worker === undefined) return;
   if (kind === "closed" || kind === "failed") workers.delete(key);
   if (kind === "message") {
-    worker.dispatchEvent({
-      type: "message", data: JSON.parse(data)[0], target: worker,
-    });
+    worker.dispatchEvent({ type: "message", data: rest[0], target: worker });
   } else if (kind === "error" || kind === "failed") {
-    worker.dispatchEvent({ type: "error", ...JSON.parse(data), target: worker });
+    worker.dispatchEvent({
+      type: "error",
+      message: String(rest[0]),
+      filename: String(rest[1]),
+      lineno: Number(rest[2]),
+      colno: Number(rest[3]),
+      target: worker,
+    });
   }
 }

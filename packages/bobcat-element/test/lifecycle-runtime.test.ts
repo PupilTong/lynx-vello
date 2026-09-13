@@ -37,10 +37,10 @@ interface TestScope {
   'method; throw Error("name evaluated")'?: () => unknown;
   failedLepusMethod?: (data: unknown) => unknown;
   inspectLepusData?: (data: unknown) => unknown;
-  bigIntLepusMethod?: (data: unknown) => unknown;
+  functionLepusMethod?: (data: unknown) => unknown;
 }
 
-/** A message for the background realm, as the transport's JSON copy of it. */
+/** A message for the background realm, as the transport's own copy of it. */
 interface Recorded {
   type?: unknown;
   method?: unknown;
@@ -57,7 +57,8 @@ const toBackground: Recorded[] = [];
 const toMain: unknown[] = [];
 const worker = Object.assign(new eventTarget.EventTarget(), {
   postMessage(message: unknown) {
-    toBackground.push(JSON.parse(JSON.stringify([message]))[0]);
+    // `structuredClone` stands in for the host boundary's structured clone.
+    toBackground.push(structuredClone(message) as Recorded);
   },
 });
 
@@ -65,7 +66,7 @@ beforeAll(async () => {
   mts = await import("../src/main-thread-runtime.ts");
   scope.emptyLepusMethod = () => undefined;
   scope.postMessage = (message: unknown) => {
-    toMain.push(JSON.parse(JSON.stringify([message]))[0]);
+    toMain.push(structuredClone(message));
   };
   scope.addEventListener = (name: string, callback) => {
     if (name === "message") receiveInBackground = callback;
@@ -150,12 +151,14 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(toMain).toHaveLength(before);
   });
 
-  it("answers a query whose result cannot be serialized as JSON with status 1", async () => {
-    queryNodes.mockImplementationOnce(() => ({data:{attribute:{value:7n}}, status:{code:0,data:'success'}}));
+  it("answers a query whose result the transport refuses with status 1", async () => {
+    // A function, not a BigInt: the transport carries a BigInt, so what a
+    // reply can still fail on is a value the serializer has no encoding for.
+    queryNodes.mockImplementationOnce(() => ({data:{attribute:{value:() => 7}}, status:{code:0,data:'success'}}));
     const callback = rstest.fn();
     bts.createSelectorQuery().select('#target').fields({attribute:true}, callback)?.exec();
     await deliverToMain(); deliverToBackground();
-    expect(callback).toHaveBeenCalledWith(null, {code:1,data:expect.stringMatching(/bigint/i)});
+    expect(callback).toHaveBeenCalledWith(null, {code:1,data:expect.stringMatching(/clon|serializ|unsupported/i)});
   });
 
 
@@ -282,41 +285,56 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(callback).toHaveBeenCalledTimes(1);
   });
 
-  it("ignores primitive RPC arguments and uses the Worker JSON value semantics", async () => {
+  it("ignores primitive RPC arguments and keeps the Worker structured-clone value semantics", async () => {
     const callback = rstest.fn();
     scope.inspectLepusData = (data: unknown) => data;
     try {
+      // Native BTS filters a non-object argument before any send, which is
+      // what keeps a BigInt, a Symbol or a function from reaching the
+      // transport as the whole payload.
       for (const data of [undefined, null, false, 42, "text", 1n, Symbol(), () => {}]) {
         bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
       }
       expect(toMain).toEqual([]);
+      // Inside an object, the transport preserves what JSON could not: an
+      // `undefined`-valued member, negative zero, the nonfinite numbers,
+      // array holes, a BigInt, and a cycle.
       const data = {
         missing: undefined,
         nil: null as null | string,
         negativeZero: -0,
         nan: NaN,
         infinity: Infinity,
+        big: 9007199254740993n,
         array: [undefined, null],
         object: { bobcat: "value", value: ["undefined"] },
+        self: undefined as unknown,
       };
+      data.self = data;
       bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
+      // Copied at send time, so this never reaches the other side.
       data.nil = "changed after send";
       await deliverToMain(); await deliverToBackground();
-      expect(callback.mock.calls).toEqual([[{
-        nil: null,
-        negativeZero: 0,
-        nan: null,
-        infinity: null,
-        array: [null, null],
-        object: { bobcat: "value", value: ["undefined"] },
-      }]]);
-      expect(Object.hasOwn(callback.mock.calls[0]?.[0], "missing")).toBe(false);
+      const seen = callback.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(callback.mock.calls).toHaveLength(1);
+      expect(Object.hasOwn(seen, "missing")).toBe(true);
+      expect(seen["missing"]).toBeUndefined();
+      expect(seen["nil"]).toBeNull();
+      expect(Object.is(seen["negativeZero"], -0)).toBe(true);
+      expect(Number.isNaN(seen["nan"])).toBe(true);
+      expect(seen["infinity"]).toBe(Infinity);
+      expect(seen["big"]).toBe(9007199254740993n);
+      expect(seen["array"]).toEqual([undefined, null]);
+      expect(seen["object"]).toEqual({ bobcat: "value", value: ["undefined"] });
+      expect(seen["self"]).toBe(seen);
     } finally { delete scope.inspectLepusData; }
   });
 
-  it("releases callbacks on failed sends and reports result JSON serialization failures", async () => {
+  it("releases callbacks on failed sends and reports refused result values", async () => {
     const callback = rstest.fn();
-    expect(() => bts.getNativeApp().callLepusMethod("emptyLepusMethod", { value: 1n }, callback)).toThrow();
+    // A function is what the transport refuses; a BigInt now crosses.
+    expect(() => bts.getNativeApp().callLepusMethod(
+      "emptyLepusMethod", { value: () => undefined }, callback)).toThrow();
     const postMessage = scope.postMessage;
     let failedId: number | undefined;
     scope.postMessage = (message: unknown) => {
@@ -331,13 +349,13 @@ describe("MTS/BTS lifecycle runtime", () => {
       }});
       expect(callback).not.toHaveBeenCalled();
     } finally { scope.postMessage = postMessage; }
-    scope.bigIntLepusMethod = () => 1n;
+    scope.functionLepusMethod = () => () => undefined;
     try {
-      bts.getNativeApp().callLepusMethod("bigIntLepusMethod", {}, callback);
+      bts.getNativeApp().callLepusMethod("functionLepusMethod", {}, callback);
       await deliverToMain();
       await expect(deliverToBackground()).rejects.toThrow();
       expect(callback).not.toHaveBeenCalled();
-    } finally { delete scope.bigIntLepusMethod; }
+    } finally { delete scope.functionLepusMethod; }
   });
 
 

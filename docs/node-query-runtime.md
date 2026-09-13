@@ -8,8 +8,8 @@ pending compiled-bundle initialization shell.
 `lynx.createSelectorQuery()` sends operation, selection token, parameters and an
 optional callback ID through `globalThis.postMessage`. MTS receives the request
 through its existing Worker, calls `__BobcatQueryNodes` in `bobcat:element`, and
-replies through `worker.postMessage`. The existing Worker JSON transport copies
-messages at send time. Rust transports Worker messages unchanged; only MTS host
+replies through `worker.postMessage`. The Worker's structured-clone transport
+copies messages at send time. Rust transports Worker messages unchanged; only MTS host
 members access the document. Named Lepus RPC keeps the asynchronous boundary
 established in the preceding stack layer.
 
@@ -27,7 +27,8 @@ queue without clearing it. Selection captures its root at select time.
 - `fields()` and `path()` call back with `(data, status)`. A successful status
   is `{code: 0, data: "success"}`. Missing nodes return code 2 with null for a
   single result or an empty array for multiple results; invalid selectors use
-  code 5. Result JSON serialization failures reply with code 1 and release the callback.
+  code 5. A result value the transport refuses replies with code 1 and releases
+  the callback.
 - `invoke()` calls `success(result.data)` or `fail(result)`. Selecting all nodes
   fails locally with code 5. Missing targets use code 2; an existing target
   currently fails with code 1 because actual UI methods are unimplemented.
@@ -49,7 +50,7 @@ strings. Background event descriptors include those typed dataset values.
 Lynx attributes similarly retain typed copies for readback while ordinary DOM
 attributes remain strings. Attribute fields exclude function/null/undefined
 values and the separate id/class/style/dataset stores. Assigning a local
-attribute does not impose the Worker transport's JSON restrictions.
+attribute does not impose the Worker transport's own restrictions.
 
 `__AddInlineStyle` changes one named CSS property without replacing the rest
 of the declaration block. Empty/nullish values remove it; the existing CSSOM
@@ -79,7 +80,8 @@ The reference checkout is `lynx/` as located in `AGENTS.md`:
 - `core/renderer/dom/attribute_holder.cc`: dataset merge behavior.
 - `core/renderer/page_proxy.cc`: structural result/status shapes and selection.
 
-Rstest checks the facade, container copies, JSON serialization failures and callback cleanup.
+Rstest checks the facade, container copies, refused result values and callback
+cleanup.
 Core tests run both real QuickJS realms, query the actual DOM, and verify that
 native props are applied before a later query observes them. Inline-style
 coverage checks the resulting declaration block and layout through Stylo.

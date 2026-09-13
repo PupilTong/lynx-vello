@@ -17,28 +17,12 @@ use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::script::ScriptError;
 use crate::timers::{TimerState, install_timer_members};
 
-/// One string argument, or why it is not one.
-///
-/// A worker realm carries its own rather than borrowing the view realm's:
-/// two members is the whole of its host surface, and reaching across for four
-/// lines is what put the timers in the wrong module in the first place.
-fn string_argument<'a>(
-    function: &str,
-    arguments: &'a [HostValue],
-    index: usize,
-) -> Result<&'a str, String> {
-    match arguments.get(index) {
-        Some(HostValue::String(value)) => Ok(value),
-        _ => Err(format!("{function} expects a string for argument {index}")),
-    }
-}
-
 /// The worker realm's global-scope module, on the *worker* runtime.
 pub(super) const WORKER_MODULE_SPECIFIER: &str = "bobcat:worker";
 /// The worker realm's host module: what `bobcat-internal:host` is to
 /// `bobcat-main`, minus everything that would need a document.
 const WORKER_HOST_MODULE_SPECIFIER: &str = "bobcat-internal:worker";
-/// Called on `bobcat:worker`, in a worker realm, with one JSON message.
+/// Called on `bobcat:worker`, in a worker realm, with one message value.
 pub(super) const WORKER_DELIVER_EXPORT: &str = "__BobcatDeliverWorkerMessage";
 
 const WORKER_MODULE_SOURCE: &str = crate::esm::runtime_source!("worker-runtime");
@@ -101,7 +85,7 @@ pub(super) fn install_worker_members(
     js_runtime: &mut ScriptRuntime,
     timers: &Rc<TimerState>,
     closing: &Rc<Cell<bool>>,
-    mut post: impl FnMut(String) + 'static,
+    mut post: impl FnMut(HostValue) + 'static,
 ) -> Result<(), ScriptError> {
     install_timer_members(engine, js_runtime, timers)?;
 
@@ -111,8 +95,11 @@ pub(super) fn install_worker_members(
         "postWorkerMessage",
         1,
         Box::new(move |arguments| {
-            const NAME: &str = "bobcat-internal:worker.postWorkerMessage";
-            post(string_argument(NAME, arguments, 0)?.to_owned());
+            // Any value the boundary carries, which for anything that is not a
+            // primitive is the structured clone the realm's own serializer
+            // made. A value it refuses never arrives here at all: the
+            // trampoline throws in the realm that called `postMessage`.
+            post(arguments.first().cloned().unwrap_or(HostValue::Undefined));
             Ok(HostValue::Undefined)
         }),
     )?;

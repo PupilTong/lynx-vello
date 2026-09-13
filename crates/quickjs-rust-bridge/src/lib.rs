@@ -21,6 +21,14 @@
 //! `Promise` after driving the runtime's pending-job queue. Opt-in asynchronous
 //! loading exposes missing source requests and resumes the original imports
 //! after completion; URL normalization and IO remain the caller's policy.
+//!
+//! The host-function boundary carries primitives plus opaque structured
+//! clones: anything that is not a primitive is serialized by `QuickJS` itself
+//! into a [`StructuredClone`], which the host can hold, move between threads
+//! and hand back, but never look inside. Realm values still never cross as
+//! themselves — a clone is a copy the realm made, not a handle on anything in
+//! it — and a value the serializer refuses (a function, a `Symbol`, a `Map`)
+//! throws in the realm at the call rather than reaching the host at all.
 
 #[allow(
     unsafe_code,
@@ -478,8 +486,19 @@ mod implementation {
                         )
                     })
             }
+            // `HOST_ARG_FAILED` is not among these: the trampoline returns the
+            // serializer's own exception without dispatching, so a refused
+            // value never reaches Rust. It falls into the arm below with every
+            // other kind this side does not write.
+            ffi::HOST_ARG_STRUCTURED => {
+                let bytes = unsafe { std::slice::from_raw_parts(argument.text, argument.text_len) };
+                Ok(HostValue::Structured(StructuredClone {
+                    bytes: bytes.to_owned(),
+                }))
+            }
             _ => Err(HostFunctionError::new(
-                "host functions accept undefined, null, Boolean, Number, and String arguments only",
+                "host functions accept undefined, null, Boolean, Number, String, and \
+                 structured-cloneable arguments only",
             )),
         }
     }
@@ -554,15 +573,37 @@ mod implementation {
         }
     }
 
-    /// A primitive a host function receives or returns.
+    /// A structured clone of a realm value, in `QuickJS`'s own serialization.
+    ///
+    /// Opaque to the host: it is produced only by a realm and consumed only by
+    /// a realm of the same `QuickJS` build, so there is no constructor and no
+    /// accessor. What it buys is that the boundary carries an object, a
+    /// `Date`, a typed array, a `BigInt`, a cycle, or a shared reference
+    /// without the host having to name any of it — and, because it is a
+    /// `Vec<u8>`, that it is `Send`: this is what crosses threads inside a
+    /// [`HostValue`].
+    ///
+    /// The stream is self-contained — non-bytecode mode writes every atom as
+    /// a string — so a clone written in one runtime's realm reads back in
+    /// another's.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct StructuredClone {
+        bytes: Vec<u8>,
+    }
+
+    /// A value a host function receives or returns: a primitive, or an opaque
+    /// structured clone.
     ///
     /// Owned, because both are values the boundary has just produced: an
     /// argument was decoded out of the realm, a return value was built by the
     /// host. Text is always well-formed UTF-8, which is what lets an outbound
     /// string take `JS_NewStringLen` directly.
     ///
+    /// A realm value still never crosses as itself. A [`StructuredClone`] is a
+    /// copy the realm made, not a handle on anything in it.
+    ///
     /// [`HostArgument`] is the borrowed counterpart, for the other direction:
-    /// text the host already owns and only lends for the length of a call.
+    /// bytes the host already owns and only lends for the length of a call.
     #[derive(Clone, Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
@@ -571,9 +612,28 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(String),
+        Structured(StructuredClone),
     }
 
-    /// A primitive the host passes into the realm, borrowing its text.
+    impl HostValue {
+        /// Lends this value to a call into a realm.
+        ///
+        /// The one path from what a host function received, or what arrived
+        /// from another thread, back into JavaScript.
+        #[must_use]
+        pub fn as_argument(&self) -> HostArgument<'_> {
+            match self {
+                Self::Undefined => HostArgument::Undefined,
+                Self::Null => HostArgument::Null,
+                Self::Boolean(value) => HostArgument::Boolean(*value),
+                Self::Number(value) => HostArgument::Number(*value),
+                Self::String(value) => HostArgument::String(value),
+                Self::Structured(value) => HostArgument::Structured(value),
+            }
+        }
+    }
+
+    /// A value the host passes into the realm, borrowing its bytes.
     ///
     /// Deliberately not [`HostValue`]. A caller of [`Context::call_member`]
     /// already owns the strings it is passing — an event's name and its JSON
@@ -596,6 +656,7 @@ mod implementation {
         Boolean(bool),
         Number(f64),
         String(&'a str),
+        Structured(&'a StructuredClone),
     }
 
     impl HostArgument<'_> {
@@ -619,6 +680,11 @@ mod implementation {
                     slot.kind = ffi::HOST_ARG_STRING;
                     slot.text = value.as_ptr();
                     slot.text_len = value.len();
+                }
+                Self::Structured(value) => {
+                    slot.kind = ffi::HOST_ARG_STRUCTURED;
+                    slot.text = value.bytes.as_ptr();
+                    slot.text_len = value.bytes.len();
                 }
             }
         }
@@ -667,22 +733,23 @@ mod implementation {
 
     struct HostTable {
         pending_release: RefCell<Vec<*mut HostSlot>>,
-        /// Keeps a returned string alive across the ABI return.
+        /// Keeps a returned string or structured clone alive across the ABI
+        /// return.
         ///
         /// The descriptor the trampoline reads borrows the host function's
         /// return value, which would otherwise be dropped the moment
-        /// `host_dispatch` returns — so the string is moved here instead, and
-        /// the bytes C reads are its own. Nothing is copied and nothing is
+        /// `host_dispatch` returns — so the bytes are moved here instead, and
+        /// what C reads are their own. Nothing is copied and nothing is
         /// re-encoded; the previous return value, already consumed, is
         /// released by the same write.
-        return_text: RefCell<Option<String>>,
+        return_bytes: RefCell<Option<Vec<u8>>>,
     }
 
     impl HostTable {
         fn new() -> Self {
             Self {
                 pending_release: RefCell::new(Vec::new()),
-                return_text: RefCell::new(None),
+                return_bytes: RefCell::new(None),
             }
         }
 
@@ -702,11 +769,18 @@ mod implementation {
                     out.number = value;
                 }
                 HostValue::String(text) => {
-                    let mut parked = self.return_text.borrow_mut();
-                    let text = parked.insert(text);
+                    let mut parked = self.return_bytes.borrow_mut();
+                    let bytes = parked.insert(text.into_bytes());
                     out.kind = ffi::HOST_ARG_STRING;
-                    out.text = text.as_ptr();
-                    out.text_len = text.len();
+                    out.text = bytes.as_ptr();
+                    out.text_len = bytes.len();
+                }
+                HostValue::Structured(clone) => {
+                    let mut parked = self.return_bytes.borrow_mut();
+                    let bytes = parked.insert(clone.bytes);
+                    out.kind = ffi::HOST_ARG_STRUCTURED;
+                    out.text = bytes.as_ptr();
+                    out.text_len = bytes.len();
                 }
             }
         }
@@ -3665,6 +3739,7 @@ mod implementation {
                         HostValue::Boolean(value) => format!("boolean:{value}"),
                         HostValue::Number(value) => format!("number:{value}"),
                         HostValue::String(value) => format!("string:{value}"),
+                        HostValue::Structured(_) => "structured".to_owned(),
                     }))
                 })
                 .unwrap();
@@ -3674,6 +3749,7 @@ mod implementation {
                 ("describe(true)", "boolean:true"),
                 ("describe(1.5)", "number:1.5"),
                 ("describe('hi')", "string:hi"),
+                ("describe({})", "structured"),
             ] {
                 let value = realm
                     .evaluate(EvalSource::new(call), EvalOptions::default())
@@ -3697,18 +3773,28 @@ mod implementation {
         }
 
         #[test]
-        fn a_non_primitive_argument_is_rejected_rather_than_coerced() {
+        fn a_value_the_serializer_refuses_throws_in_the_realm() {
             let mut realm = single_realm();
             realm
                 .define_global_function("take", 1, |_| Ok(HostValue::Undefined))
                 .unwrap();
-            let error = realm
-                .evaluate(EvalSource::new("take({})"), EvalOptions::default())
-                .expect_err("an object argument");
-            assert!(
-                error.message.contains("undefined, null, Boolean"),
-                "{error:?}"
-            );
+            // The serializer's own refusal reaches the JS caller: this is the
+            // first version, which does not extend `QuickJS`'s writer.
+            for (call, fragment) in [
+                ("take(function f() {})", "unsupported object class"),
+                ("take(new Map())", "unsupported object class"),
+                ("take(Symbol('s'))", "unsupported tag"),
+            ] {
+                let error = realm
+                    .evaluate(EvalSource::new(call), EvalOptions::default())
+                    .expect_err(call);
+                assert!(error.message.contains(fragment), "{call}: {error:?}");
+            }
+            // An ordinary object is not refused at all: it crosses as an
+            // opaque structured clone.
+            realm
+                .evaluate(EvalSource::new("take({ a: 1 })"), EvalOptions::default())
+                .unwrap();
         }
 
         #[test]
@@ -3972,5 +4058,5 @@ mod implementation {
 pub use implementation::{
     CallOutcome, Context, Error, ErrorKind, ErrorPhase, EvalOptions, EvalSource, HostArgument,
     HostFunctionError, HostValue, InterruptHandle, JobDrain, Member, ModuleNormalizer, Runtime,
-    RuntimeOptions, SourceLocation, SourceType, Value, ValueKind,
+    RuntimeOptions, SourceLocation, SourceType, StructuredClone, Value, ValueKind,
 };

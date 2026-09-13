@@ -392,8 +392,8 @@ function valuesOf(element: unknown, key: typeof datasetSymbol | typeof attribute
 
 // Native keeps typed attribute/dataset values separately from DOM strings.
 // Copy containers at assignment, retaining local functions as local values;
-// fields() filters function attributes and the BTS transport serializes the
-// remaining result as JSON. Assigning an attribute is not a cross-realm operation.
+// fields() filters function attributes and the BTS transport structure-clones
+// the remaining result. Assigning an attribute is not a cross-realm operation.
 function copyElementValue<T>(value: T, copies = new Map<object, unknown>()): T {
   if (value === null || typeof value !== "object") return value;
   if (copies.has(value)) return copies.get(value) as T;
@@ -1110,7 +1110,7 @@ export function __SetCSSId(
  * a live property of its HTML stand-in element. `id`, `class`, and `style`
  * reach their specialized DOM paths inside the native `setAttribute` export.
  * A separate typed copy serves the Lynx fields() API. Functions remain local;
- * cross-thread readback uses the Worker transport's JSON semantics.
+ * cross-thread readback uses the Worker transport's structured-clone semantics.
  *
  * `update-list-info` is the one name that is not an attribute at all: it
  * drives list cell insertion and removal, and throws here rather than
@@ -1712,17 +1712,27 @@ function backgroundTargetInfo(
 }
 
 /**
- * Snapshot before publication: the Context can queue before BTS is connected,
- * and the local walk reuses and eventually clears the event's currentTarget.
+ * What is published in place of the event: values only.
+ *
+ * The two stop methods are destructured out rather than overwritten with
+ * `undefined`, because the transport carries an `undefined`-valued key as one
+ * rather than dropping it — and the handles in `target`/`currentTarget` are
+ * replaced with the values that describe them. The copy itself is the
+ * transport's, taken at send time: a new object here is only what keeps this
+ * event's own later mutations, and the walk clearing `currentTarget`, out of
+ * what was published.
  */
 function backgroundEvent(event: DispatchedEvent): Record<string, unknown> {
-  return JSON.parse(JSON.stringify({
-    ...event,
+  const {
+    stopPropagation: _stop,
+    stopImmediatePropagation: _stopImmediate,
+    ...rest
+  } = event;
+  return {
+    ...rest,
     target: backgroundTargetInfo(event.target),
     currentTarget: backgroundTargetInfo(event.currentTarget),
-    stopPropagation: undefined,
-    stopImmediatePropagation: undefined,
-  }));
+  };
 }
 
 /**

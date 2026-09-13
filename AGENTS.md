@@ -311,7 +311,9 @@ useful signal for currently-compatible versions of those libraries.
   realm published back, and provides the GC seam. It is created on the
   engine-owned Lynx main thread and never leaves it, which is why nothing
   about it is `Send`. Values crossing it are `quickjs-rust-bridge`'s
-  primitives-only `HostValue`/`HostArgument`, so realm values and DOM handles
+  `HostValue`/`HostArgument` — primitives plus opaque structured clones, which
+  is what lets an object or a typed array cross a thread without the host
+  naming any of it — so realm values and DOM handles
   never cross as themselves. The private
   `MainThreadRuntime` owns the realm integration and, through it, the document.
   **The realm creates its own document, and says so.** The boot module's first
@@ -520,8 +522,13 @@ useful signal for currently-compatible versions of those libraries.
   It is an explicit ESM import, creates a distinct context on the group's
   existing `bobcat-workers` thread, and supports `postMessage`, `terminate`,
   `onmessage`, `onerror` and the shared EventTarget listener methods. It uses
-  module scripts (also with omitted options) and the existing worker scope's
-  JSON transport; structured clone, transfer lists and external module
+  module scripts (also with omitted options) and the worker scope's
+  structured-clone transport — the value is serialized by the engine's own
+  serializer at the host boundary and rebuilt in the receiving realm, so
+  `undefined`, `NaN`, `Date`, `BigInt`, typed arrays, cycles and shared
+  references survive, while a function, `Symbol`, `Map`, `Set`, `RegExp`,
+  `Error`, `DataView` or accessor property throws synchronously at the
+  `postMessage` call. Transfer lists and external module
   fetching remain pending. `main/workers.rs` installs its three native
   operations — `createWorker`, `sendWorkerMessage`, `terminateWorker` — before
   entry boot. The `Start` goes out before the host is asked for anything;
@@ -557,9 +564,9 @@ useful signal for currently-compatible versions of those libraries.
   listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
   web-core. MTS projects the public Context fields and queues their payload
   references until the Worker is connected; Worker `postMessage` takes the
-  JSON snapshot. JSON's loss of undefined members and special-number values
-  is an accepted compatibility limit; do not add a custom codec or deep clone
-  to compensate for it. A worker's own task queues what is posted to it until
+  structured-clone snapshot, for early and connected sends alike. Do not add a
+  custom codec or a deep clone on top of that transport; a value it refuses
+  throws at the call. A worker's own task queues what is posted to it until
   its script has been evaluated, so BTS
   listeners are registered before the first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need

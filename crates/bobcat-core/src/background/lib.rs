@@ -75,6 +75,7 @@ mod thread;
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::Builder as ThreadBuilder;
 
+use quickjs_rust_bridge::HostValue;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 #[cfg(target_arch = "wasm32")]
@@ -140,8 +141,8 @@ pub(crate) enum WorkerCommand {
 
 /// Everything one worker in particular is ever told.
 pub(crate) enum WorkerMessage {
-    /// One JSON-encoded message for the worker's realm.
-    Post(String),
+    /// One value, primitive or structured clone, for the worker's realm.
+    Post(HostValue),
     /// `Worker.terminate()`, and a released realm stopping what it created:
     /// end it between tasks and drop its realm, discarding whatever was
     /// queued behind this.
@@ -155,8 +156,9 @@ pub(crate) struct WorkerEvent {
 }
 
 pub(crate) enum WorkerPayload {
-    /// A JSON-encoded `postMessage` from the worker.
-    Message(String),
+    /// One value, primitive or structured clone, from the worker's
+    /// `postMessage`.
+    Message(HostValue),
     /// Something in the worker threw and it is still running — a timer
     /// callback, which HTML reports at the worker and then at its parent
     /// without ending either.

@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::time::Duration;
 
+use quickjs_rust_bridge::HostValue;
 use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -39,10 +40,10 @@ impl WorkerHome {
 /// How long a test waits for a thread that should already be working.
 const PATIENCE: Duration = Duration::from_secs(30);
 
-/// One message in the shape the boundary carries: JSON, wrapped in an array
-/// so that `undefined` has an encoding at all.
-fn wire(data: &str) -> String {
-    format!("[\"{data}\"]")
+/// One string in the shape the boundary carries it: a `HostValue`, because a
+/// primitive crosses as itself rather than inside an encoding.
+fn wire(data: &str) -> HostValue {
+    HostValue::String(data.to_owned())
 }
 
 /// One realm's whole side of its workers, which is one channel each, the one
@@ -74,7 +75,7 @@ impl View {
     }
 
     /// What the worker said, for the tests that only care about that.
-    fn message(&mut self) -> String {
+    fn message(&mut self) -> HostValue {
         match self.next().payload {
             WorkerPayload::Message(data) => data,
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
@@ -162,6 +163,11 @@ impl Group {
         self.send(key, WorkerMessage::Post(wire(data)));
     }
 
+    /// Posts whatever the test built, for the structured-clone cases.
+    fn post_value(&self, key: WorkerKey, data: HostValue) {
+        self.send(key, WorkerMessage::Post(data));
+    }
+
     fn send(&self, key: WorkerKey, message: WorkerMessage) {
         for view in &self.views {
             if let Some(messages) = view.messages.get(&key) {
@@ -219,7 +225,7 @@ impl Group {
         self.views[view].next()
     }
 
-    fn message(&mut self, view: usize) -> String {
+    fn message(&mut self, view: usize) -> HostValue {
         self.views[view].message()
     }
 
@@ -257,7 +263,46 @@ fn a_worker_answers_what_the_group_posts_and_carries_the_name_it_was_given() {
         "onmessage = (event) => postMessage(`${name}:${event.data}`);",
     );
     group.post(key, "ping");
-    assert_eq!(group.message(0), "[\"counter:ping\"]");
+    assert_eq!(group.message(0), wire("counter:ping"));
+}
+
+/// A value that is not a primitive crosses as a structured clone, which is
+/// what lets it cross a thread at all: the group's worker realms write and
+/// read it with the engine's own serializer, so what one worker posts is what
+/// the next one receives — an `undefined`-valued key, `NaN`, a `Date`, a typed
+/// array, a `BigInt` and a cycle included.
+#[test]
+fn a_structured_value_survives_a_round_trip_through_two_worker_realms() {
+    let mut group = Group::new();
+    group.start(
+        "const value = { tag: 'payload', missing: undefined, nan: NaN,
+  at: new Date(1700000000123), bytes: new Uint8Array([1, 2, 255]),
+  big: 9007199254740993n };
+value.self = value;
+postMessage(value);",
+    );
+    let posted = group.message(0);
+    assert!(
+        matches!(posted, HostValue::Structured(_)),
+        "an object crosses as a structured clone rather than as text"
+    );
+
+    let echo = group.start(
+        "addEventListener('message', (event) => {
+  const d = event.data;
+  postMessage([
+    typeof d, d.tag, 'missing' in d, d.missing === undefined, Number.isNaN(d.nan),
+    d.at instanceof Date && d.at.getTime() === 1700000000123,
+    d.bytes instanceof Uint8Array && Array.from(d.bytes).join(',') === '1,2,255',
+    d.big === 9007199254740993n, d.self === d,
+  ].join(':'));
+});",
+    );
+    group.post_value(echo, posted);
+    assert_eq!(
+        group.message(0),
+        wire("object:payload:true:true:true:true:true:true:true")
+    );
 }
 
 #[test]
@@ -273,8 +318,8 @@ fn what_is_posted_before_the_script_arrives_is_delivered_in_order() {
         "app:///w.js",
         "onmessage = (event) => postMessage(event.data);",
     );
-    assert_eq!(group.message(0), "[\"first\"]");
-    assert_eq!(group.message(0), "[\"second\"]");
+    assert_eq!(group.message(0), wire("first"));
+    assert_eq!(group.message(0), wire("second"));
 }
 
 #[test]
@@ -322,7 +367,7 @@ throw new Error(\"boom\");",
     };
     assert!(error.message.contains("boom"), "{}", error.message);
     group.post(key, "still here");
-    assert_eq!(group.message(0), "[\"still here\"]");
+    assert_eq!(group.message(0), wire("still here"));
 }
 
 #[test]
@@ -344,7 +389,7 @@ fn a_terminated_worker_is_never_heard_from_again() {
     let mut group = Group::new();
     let key = group.start("onmessage = (event) => postMessage(event.data);");
     group.post(key, "one");
-    assert_eq!(group.message(0), "[\"one\"]");
+    assert_eq!(group.message(0), wire("one"));
     // The terminate is followed by a post the worker would echo if it were
     // still running, so the silence below is this worker obeying rather than
     // its channel having closed under it.
@@ -366,7 +411,7 @@ fn releasing_a_view_ends_the_workers_it_created() {
     let mut group = Group::new();
     let key = group.start("onmessage = (event) => postMessage(event.data);");
     group.post(key, "before");
-    assert_eq!(group.message(0), "[\"before\"]");
+    assert_eq!(group.message(0), wire("before"));
 
     group.release(0);
 
@@ -422,7 +467,7 @@ const handle = setInterval(() => {
   }
 }, 1);",
     );
-    assert_eq!(group.message(0), "[3]");
+    assert_eq!(group.message(0), HostValue::Number(3.0));
 }
 
 #[test]
@@ -436,7 +481,7 @@ fn two_views_over_one_url_each_run_their_own_bytes() {
     let first = group.construct(0, "");
     let second = group.construct(1, "");
     group.answer(first, "app:///shared.js", "postMessage(\"first view\");");
-    assert_eq!(group.message(0), "[\"first view\"]");
+    assert_eq!(group.message(0), wire("first view"));
     group.answer(second, "app:///shared.js", "postMessage(\"second view\");");
     let event = group.next(1);
     assert_eq!(
@@ -446,7 +491,7 @@ fn two_views_over_one_url_each_run_their_own_bytes() {
     let WorkerPayload::Message(data) = event.payload else {
         panic!("the second view's worker runs the second view's script")
     };
-    assert_eq!(data, "[\"second view\"]");
+    assert_eq!(data, wire("second view"));
 }
 
 #[test]
@@ -462,7 +507,7 @@ onmessage = () => postMessage(globalThis.marker);",
     let WorkerPayload::Message(data) = event.payload else {
         panic!("the second worker starts on a global of its own")
     };
-    assert_eq!(data, "[\"undefined\"]");
+    assert_eq!(data, wire("undefined"));
     group.post(first, "ask");
-    assert_eq!(group.message(0), "[\"first\"]");
+    assert_eq!(group.message(0), wire("first"));
 }

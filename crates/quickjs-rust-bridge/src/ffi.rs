@@ -11,6 +11,12 @@ pub(crate) const HOST_ARG_NULL: i32 = 1;
 pub(crate) const HOST_ARG_BOOLEAN: i32 = 2;
 pub(crate) const HOST_ARG_NUMBER: i32 = 3;
 pub(crate) const HOST_ARG_STRING: i32 = 4;
+/// A structured clone: `JS_WriteObject`'s own bytes in `text`.
+///
+/// The C enum has one more kind, `QJS_ARG_FAILED = 7`, for a value the
+/// serializer refused: `shim.c` returns the pending exception instead of
+/// dispatching, so it never crosses into Rust and has no constant here.
+pub(crate) const HOST_ARG_STRUCTURED: i32 = 6;
 
 pub(crate) const REJECTION_NONE: i32 = 0;
 pub(crate) const REJECTION_TAKEN: i32 = 1;
@@ -24,7 +30,8 @@ pub(crate) struct QjsHostArg {
 }
 
 /// The result of a host call has the same shape an argument does: both are
-/// the boundary's primitives-only vocabulary, and both spell text as UTF-8.
+/// the boundary's vocabulary — primitives plus opaque structured clones — and
+/// both carry their bytes in `text`.
 pub(crate) type QjsHostResult = QjsHostArg;
 
 pub(crate) type HostDispatch = unsafe extern "C" fn(
