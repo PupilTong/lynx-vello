@@ -555,9 +555,12 @@ useful signal for currently-compatible versions of those libraries.
   by `createCrossThreadContext`. `dispatchEvent({type, data})` sends to the peer
   and returns `3`, and receiving calls `super.dispatchEvent` with EventTarget
   listeners with `data ?? {}`. Context `postMessage` remains a no-op, as in
-  web-core. MTS queues event references until the Worker is connected; after
-  that, the existing JSON transport snapshots each send. A worker's own task
-  queues what is posted to it until its script has been evaluated, so BTS
+  web-core. MTS projects the public Context fields and queues their payload
+  references until the Worker is connected; Worker `postMessage` takes the
+  JSON snapshot. JSON's loss of undefined members and special-number values
+  is an accepted compatibility limit; do not add a custom codec or deep clone
+  to compensate for it. A worker's own task queues what is posted to it until
+  its script has been evaluated, so BTS
   listeners are registered before the first delivery. Raw XML
   adapters supply the optional entry; compiled bundle manifests still need
   the Lynx Core module/init shell and remain pending. Each view costs one

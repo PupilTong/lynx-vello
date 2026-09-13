@@ -148,16 +148,3 @@ describe("Lynx cross-thread context", () => {
     expect(sent).toEqual([]);
   });
 });
-
-
-describe("BTS message values over the Worker JSON channel", () => {
-  it("preserves undefined and special numbers without colliding with user objects", async () => {
-    const {packBtsMessage, unpackBtsMessage} = await import("../src/cross-thread-context.ts");
-    const data = {missing: undefined, negativeZero: -0, nan: NaN, infinity: Infinity,
-      object: {bobcat: "value", value: ["undefined"]}, array: [undefined, null]};
-    const received = unpackBtsMessage(JSON.parse(JSON.stringify(packBtsMessage(data)))) as typeof data;
-    expect(received).toEqual(data);
-    expect(Object.hasOwn(received, "missing")).toBe(true);
-    expect(Object.is(received.negativeZero, -0)).toBe(true);
-  });
-});

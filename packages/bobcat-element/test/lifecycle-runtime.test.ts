@@ -53,7 +53,7 @@ const toBackground: Recorded[] = [];
 const toMain: unknown[] = [];
 const worker = Object.assign(new eventTarget.EventTarget(), {
   postMessage(message: unknown) {
-    toBackground.push(crossThreadContext.unpackBtsMessage(JSON.parse(JSON.stringify([message]))[0]) as Recorded);
+    toBackground.push(JSON.parse(JSON.stringify([message]))[0]);
   },
 });
 
@@ -61,7 +61,7 @@ beforeAll(async () => {
   mts = await import("../src/main-thread-runtime.ts");
   scope.emptyLepusMethod = () => undefined;
   scope.postMessage = (message: unknown) => {
-    toMain.push(crossThreadContext.unpackBtsMessage(JSON.parse(JSON.stringify([message]))[0]));
+    toMain.push(JSON.parse(JSON.stringify([message]))[0]);
   };
   scope.addEventListener = (name: string, callback) => {
     if (name === "message") receiveInBackground = callback;
@@ -251,30 +251,45 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(callback).toHaveBeenCalledTimes(1);
   });
 
-  it("ignores primitive RPC arguments but preserves null and undefined inside objects", async () => {
+  it("ignores primitive RPC arguments and uses the Worker JSON value semantics", async () => {
     const callback = rstest.fn();
     scope.inspectLepusData = (data: unknown) => data;
     try {
-      for (const data of [undefined, null, false, 42, "text"]) {
+      for (const data of [undefined, null, false, 42, "text", 1n, Symbol(), () => {}]) {
         bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
       }
       expect(toMain).toEqual([]);
-      const data: { missing: undefined; nil: null | string } = {missing: undefined, nil: null};
+      const data = {
+        missing: undefined,
+        nil: null as null | string,
+        negativeZero: -0,
+        nan: NaN,
+        infinity: Infinity,
+        array: [undefined, null],
+        object: { bobcat: "value", value: ["undefined"] },
+      };
       bts.getNativeApp().callLepusMethod("inspectLepusData", data, callback);
       data.nil = "changed after send";
       await deliverToMain(); await deliverToBackground();
-      expect(callback.mock.calls).toEqual([[{missing: undefined, nil: null}]]);
-      expect(Object.hasOwn(callback.mock.calls[0]?.[0], "missing")).toBe(true);
+      expect(callback.mock.calls).toEqual([[{
+        nil: null,
+        negativeZero: 0,
+        nan: null,
+        infinity: null,
+        array: [null, null],
+        object: { bobcat: "value", value: ["undefined"] },
+      }]]);
+      expect(Object.hasOwn(callback.mock.calls[0]?.[0], "missing")).toBe(false);
     } finally { delete scope.inspectLepusData; }
   });
 
-  it("releases callbacks on failed sends and reports result encoding failures", async () => {
+  it("releases callbacks on failed sends and reports result JSON serialization failures", async () => {
     const callback = rstest.fn();
-    expect(() => bts.getNativeApp().callLepusMethod("emptyLepusMethod", 1n, callback)).toThrow();
+    expect(() => bts.getNativeApp().callLepusMethod("emptyLepusMethod", { value: 1n }, callback)).toThrow();
     const postMessage = scope.postMessage;
     let failedId: number | undefined;
     scope.postMessage = (message: unknown) => {
-      failedId = (crossThreadContext.unpackBtsMessage(message) as { id?: number }).id;
+      failedId = (message as { id?: number }).id;
       throw new Error("send failed");
     };
     try {

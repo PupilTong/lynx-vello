@@ -3,17 +3,12 @@ import type { WorkerGlobalScope } from "bobcat:worker";
 import {
   type ContextEvent,
   createCrossThreadContext,
-  packBtsMessage,
-  unpackBtsMessage,
-  cloneBtsValue,
 } from "bobcat:cross-thread-context";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
 // Application module loading through ResourceFetcher remains pending.
 const scope = globalThis as unknown as WorkerGlobalScope;
-
-function postToMain(message: unknown) { scope.postMessage(packBtsMessage(message)); }
 
 const coreContext = createCrossThreadContext();
 
@@ -97,16 +92,15 @@ const nativeApp = {
   ) {
     if (arguments.length < 2) throw new TypeError("callLepusMethod requires name and data");
     if (typeof name !== "string") name = "";
-    const snapshot = cloneBtsValue(data);
-    if (snapshot === null || typeof snapshot !== "object") return;
+    if (data === null || typeof data !== "object") return;
     let id;
     if (typeof callback === "function") {
       id = nextCallbackId++;
       callbacks.set(id, callback);
     }
     try {
-      postToMain({
-        bobcat: "runtime", method: "callLepusMethod", name, data: snapshot, id,
+      scope.postMessage({
+        bobcat: "runtime", method: "callLepusMethod", name, data, id,
       });
     } catch (error) {
       if (id !== undefined) callbacks.delete(id);
@@ -138,9 +132,9 @@ coreContext.addEventListener(
   },
 );
 
-coreContext.connect((event) => postToMain({ type: event.type, data: event.data }));
-scope.addEventListener("message", (event: { data: unknown }): void | Promise<void> => {
-  const message = unpackBtsMessage(event.data) as FromMainThread;
+coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data }));
+scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
+  const message = event.data;
   if (message?.bobcat !== "runtime") {
     coreContext.receive(message);
     return;

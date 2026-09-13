@@ -544,11 +544,10 @@ machinery, with `data ?? {}`; a missing listener drops the event. `postMessage`
 on these Context objects remains a no-op, matching web-core's unimplemented
 operation. This differs from Worker `postMessage`, which carries the events.
 
-The MTS Context exists during entry evaluation. Runtime JS snapshots outgoing
-messages into tagged values at the call, including sends before Worker
-connection. The codec preserves undefined and special numbers over the existing
-JSON Worker channel; user objects cannot collide with its structural tags.
-Connection posts those snapshots in FIFO order. The worker's task queues what
+The MTS Context exists during entry evaluation. Runtime JS projects the public
+Context fields before queuing; payload objects remain references until Worker
+connection posts the messages in FIFO order. Worker `postMessage` performs the
+JSON copy, for early and connected sends alike. The worker's task queues what
 is posted until its entry has evaluated. Worker release, source cancellation
 and nonfatal `WorkerFailed` reporting apply to BTS too. `ScriptFinished`
 continues to report MTS boot, not BTS loading or execution.
@@ -572,14 +571,15 @@ or component metadata, so its string handlers use `publishEvent`. An owner
 unique ID is not a framework component ID. Global handler fan-out remains
 pending with the existing native event path.
 
-`lynx.getNativeApp().callLepusMethod(name, data, callback?)` snapshots object
-arguments and posts a request through worker-global `postMessage`; primitive
-arguments are ignored. MTS reads the current `globalThis[name]`, invokes it with
-that global receiver and awaits the result before encoding and posting its reply
-through `Worker.postMessage`. BTS removes the callback ID on receipt and invokes
+`lynx.getNativeApp().callLepusMethod(name, data, callback?)` passes object
+arguments directly to worker-global `postMessage`; primitive arguments are
+ignored. MTS reads the current `globalThis[name]`, invokes it with that global
+receiver and awaits the result before posting its reply through
+`Worker.postMessage`. BTS removes the callback ID on receipt and invokes
 the callback in a Promise job with one result argument. Missing methods yield
-undefined; null remains null. Failed calls, rejected results and encoding errors
-report through the existing Worker error path without success callbacks,
+undefined; null remains null. Failed calls, rejected results and JSON
+serialization errors report through the existing Worker error path without
+success callbacks,
 including calls without a callback. An unresolved call does not block later
 requests, and each reply selects its own callback.
 
@@ -592,9 +592,12 @@ unnecessary for this single asynchronous endpoint.
 
 Rust never parses a runtime envelope, selects a named method or flushes a reply
 queue. The existing Worker transport, realm checkpoint and QuickJS bridge are
-unchanged. The JS codec remains necessary because JSON alone loses undefined
-members and special numbers. It covers plain data, not structured-clone objects
-such as Map, typed arrays or transferable buffers.
+unchanged. The current JSON value semantics are an accepted compatibility limit:
+undefined object members are omitted, undefined array entries and nonfinite
+numbers become null, and negative zero becomes zero. BigInts inside messages
+and cyclic objects fail serialization. No custom value codec or extra deep
+clone compensates for these effects; structured clone and transfers remain
+outside this endpoint's scope.
 
 An explicit JS `lynx.getEngine().dispatchEvent({type: "__DestroyLifetime"})`
 forwards a Worker message to the current BTS `app.callDestroyLifetimeFun()`

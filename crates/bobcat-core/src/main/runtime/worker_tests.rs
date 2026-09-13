@@ -739,10 +739,9 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
     let mut pair = Pair::new(
         r"
         import { Worker } from 'bobcat-internal';
-        import { unpackBtsMessage } from 'bobcat:cross-thread-context';
         globalThis.result = null;
         const worker = new Worker('./worker.js', {name: 'ordinary'});
-        worker.onmessage = event => result = unpackBtsMessage(event.data);
+        worker.onmessage = event => result = event.data;
         worker.postMessage({type: 'request', data: 42});
         ",
     );
@@ -763,7 +762,7 @@ fn an_ordinary_worker_can_install_bts_through_its_own_import() {
 }
 
 #[test]
-fn background_contexts_exchange_typed_events_and_snapshot_early_sends_in_order() {
+fn background_contexts_exchange_typed_events_and_flush_early_payload_references_in_order() {
     let mut pair = Pair::with_background(
         r"
         import { EventTarget } from 'bobcat:event-target';
@@ -813,7 +812,7 @@ fn background_contexts_exchange_typed_events_and_snapshot_early_sends_in_order()
         pair.deliver();
     }
     pair.check(
-        "if (JSON.stringify(results) !== '[{\"value\":1},{\"value\":2},{\"value\":4}]') throw Error(JSON.stringify(results));",
+        "if (JSON.stringify(results) !== '[{\"value\":3},{\"value\":2},{\"value\":4}]') throw Error(JSON.stringify(results));",
     );
 }
 
