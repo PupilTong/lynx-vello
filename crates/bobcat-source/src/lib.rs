@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod archive;
+mod custom_style;
 mod lower_style;
 pub mod native;
 mod page;

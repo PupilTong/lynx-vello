@@ -11,7 +11,12 @@ const WEB_FORMAT_VERSION: u32 = 1;
 pub(crate) fn encode(native: WebTemplate) -> Result<Vec<u8>, ConvertError> {
     let config = encode_utf16_json(&JsonValue::Object(native.config), "Configurations")?;
     let lepus_code = encode_string_map(&native.lepus_code, "LepusCode")?;
-    let custom_sections = encode_utf16_json(&JsonValue::Object(Map::default()), "CustomSections")?;
+    let custom_sections = encode_utf16_json(
+        &native
+            .custom_sections
+            .unwrap_or_else(|| JsonValue::Object(Map::default())),
+        "CustomSections",
+    )?;
     let style_info = encode_style_info(&native.style_info.unwrap_or_default())?;
     let manifest = encode_string_map(&native.manifest, "Manifest")?;
 

@@ -37,6 +37,14 @@ const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG: &[u8] = &[
     9, 204, 1, 176, 202, 1, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 1, 160, 1, 0, 0,
     0, 194, 40, 94, 1, 0,
 ];
+// tasm 0.0.53 emits a shorter empty external-debug program with a new header.
+// Verified by encoding an external source-only
+// bundle with no lepusCode at engineVersion 4.1.0; this is still an exact
+// inert-program fingerprint, not permission to skip executable bytecode.
+const EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53: &[u8] = &[
+    9, 204, 1, 176, 202, 3, 0, 0, 0, 0, 13, 0, 6, 0, 158, 1, 0, 1, 0, 1, 0, 0, 2, 0, 194, 40, 94,
+    1, 0,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Version {
@@ -222,14 +230,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
         .map(|range| {
             let mut reader = section_reader(bytes, *range, SECTION_CUSTOM)?;
             let headers = decode_custom_headers(&mut reader)?;
-            if let Some(header) = headers
-                .iter()
-                .find(|header| header.encoding == CUSTOM_JS_BYTECODE)
-            {
-                return Err(ConvertError::CodeCacheBundle {
-                    section: header.name.clone(),
-                });
-            }
             Ok((headers, reader.position(), range.end))
         })
         .transpose()?;
@@ -267,6 +267,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
     }
 
     let mut styles = BTreeMap::new();
+    let mut custom_sections = Map::new();
+    let mut named_css = BTreeMap::new();
     if let Some((headers, content_start, section_end)) = custom {
         for header in headers {
             decode_custom_content(
@@ -278,10 +280,20 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
                 &mut lepus_code,
                 &mut manifest,
                 &mut styles,
+                &mut custom_sections,
+                &mut named_css,
             )?;
         }
     }
 
+    let style_info = crate::web::StyleInfo {
+        css_id_to_style_sheet: styles.into_iter().collect(),
+        style_text_size_hint: 0,
+    };
+    custom_sections.extend(crate::custom_style::named_descriptors(
+        &style_info,
+        named_css,
+    ));
     let config = build_web_config(page_config, &fields, &target_version_source, &app_type);
 
     Ok(crate::web::WebTemplate {
@@ -289,11 +301,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<crate::web::WebTemplate, ConvertErr
         config,
         lepus_code,
         manifest,
-        style_info: Some(crate::web::StyleInfo {
-            css_id_to_style_sheet: styles.into_iter().collect(),
-            style_text_size_hint: 0,
-        }),
-        custom_sections: Some(JsonValue::Object(Map::new())),
+        style_info: Some(style_info),
+        custom_sections: Some(JsonValue::Object(custom_sections)),
         ..crate::web::WebTemplate::default()
     })
 }
@@ -349,11 +358,18 @@ fn decode_header(reader: &mut Reader<'_>) -> Result<NativeHeader, ConvertError> 
 }
 
 fn build_web_config(
-    page_config: Map<String, JsonValue>,
+    mut page_config: Map<String, JsonValue>,
     fields: &HeaderFields,
     target_version: &str,
     app_type: &str,
 ) -> Map<String, JsonValue> {
+    // Native's config decoder accepts this switch only as a JSON boolean.
+    // Preserve that decision before the web wire erases the value's type.
+    for key in ["enableQueryComponentSync", "enableJSDataProcessor"] {
+        if let Some(value) = page_config.get_mut(key) {
+            *value = JsonValue::Bool(value.as_bool().unwrap_or(false));
+        }
+    }
     let mut config = stringify_page_config(page_config);
     add_header_config(&mut config, fields, target_version);
     config.insert("cardType".to_owned(), JsonValue::String("react".to_owned()));
@@ -567,7 +583,9 @@ fn is_empty_root_lepus(bytes: &[u8], range: SectionRange) -> Result<bool, Conver
         .map_err(|_| ConvertError::invalid(reader.position(), "ROOT_LEPUS length overflow"))?;
     let bytecode = reader.take(length)?;
     ensure_empty(&reader, "ROOT_LEPUS")?;
-    Ok(bytecode == EMPTY_ROOT_LEPUS_INLINE_DEBUG || bytecode == EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG)
+    Ok(bytecode == EMPTY_ROOT_LEPUS_INLINE_DEBUG
+        || bytecode == EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG
+        || bytecode == EMPTY_ROOT_LEPUS_EXTERNAL_DEBUG_TASM_0_0_53)
 }
 
 fn decode_page_config(
@@ -662,6 +680,14 @@ fn decode_custom_headers(reader: &mut Reader<'_>) -> Result<Vec<CustomHeader>, C
         headers.iter().map(|header| (header.start, header.end)),
         reader.position(),
     )?;
+    if let Some(header) = headers
+        .iter()
+        .find(|header| header.encoding == CUSTOM_JS_BYTECODE)
+    {
+        return Err(ConvertError::CodeCacheBundle {
+            section: header.name.clone(),
+        });
+    }
     Ok(headers)
 }
 
@@ -678,6 +704,8 @@ fn decode_custom_content(
     lepus_code: &mut BTreeMap<String, String>,
     manifest: &mut BTreeMap<String, String>,
     styles: &mut BTreeMap<i32, StyleSheet>,
+    custom_sections: &mut Map<String, JsonValue>,
+    named_css: &mut BTreeMap<String, i32>,
 ) -> Result<(), ConvertError> {
     let start = content_start
         .checked_add(header.start)
@@ -705,6 +733,9 @@ fn decode_custom_content(
                     header.name
                 )));
             };
+            // Keep the native section name as well as its legacy script-map
+            // adaptation: loadScript addresses custom sections directly.
+            custom_sections.insert(header.name.clone(), serde_json::json!({"content": source}));
             if header.name.ends_with("__main-thread") {
                 if lepus_code.insert(header.name.clone(), source).is_some() {
                     return Err(ConvertError::invalid(
@@ -732,6 +763,7 @@ fn decode_custom_content(
                 ));
             };
             let (id, style_sheet) = decode_fragment(&fragment, css_options)?;
+            named_css.insert(header.name.clone(), id);
             if styles.insert(id, style_sheet).is_some() {
                 return Err(ConvertError::invalid(
                     start,
