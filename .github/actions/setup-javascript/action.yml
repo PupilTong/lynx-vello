@@ -1,5 +1,9 @@
 name: Set up workspace JavaScript
 description: Install Node, pnpm and locked workspace dependencies for TypeScript builds.
+inputs:
+  fixtures:
+    description: Build source fixtures before compiling Rust tests or benchmarks.
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -10,3 +14,7 @@ runs:
         cache: pnpm
     - shell: bash
       run: pnpm install --frozen-lockfile
+    - name: Build ReactLynx fixtures from source
+      if: inputs.fixtures == 'true'
+      shell: bash
+      run: pnpm --filter reactlynx-test-fixtures build

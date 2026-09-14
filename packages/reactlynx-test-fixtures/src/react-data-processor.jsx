@@ -14,15 +14,11 @@ lynx.registerDataProcessors({
   },
   defaultDataProcessor(data) {
     const result = {};
-    // Native finishes the entire Promise chain before consuming the result.
-    // Returning this object synchronously must still initialize both threads
-    // with its final values; awaiting just one microtask would be too early.
-    Promise.resolve().then(() => Promise.resolve().then(() => {
-      if ('rawColor' in data) result.color = {first:'green', second:'blue', third:'purple'}[data.rawColor];
-      if ('rawSeed' in data) result.seed = data.rawSeed + 1;
-      if ('rawKeep' in data) result.keep = `${data.rawKeep}-processed`;
-      console.log('processor-run', result.color ?? 'absent');
-    }));
+    // A processor returns the data consumed by the runtime in this call.
+    if ('rawColor' in data) result.color = {first:'green', second:'blue', third:'purple'}[data.rawColor];
+    if ('rawSeed' in data) result.seed = data.rawSeed + 1;
+    if ('rawKeep' in data) result.keep = `${data.rawKeep}-processed`;
+    console.log('processor-run', result.color ?? 'absent');
     return result;
   },
 });

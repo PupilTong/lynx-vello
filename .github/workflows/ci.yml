@@ -19,6 +19,8 @@ jobs:
 
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -105,6 +107,8 @@ jobs:
 
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
 
       - name: Install pinned Rust toolchain
         run: rustup toolchain install
@@ -196,6 +200,8 @@ jobs:
 
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -276,6 +282,8 @@ jobs:
 
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -314,6 +322,8 @@ jobs:
 
       - name: Set up workspace JavaScript
         uses: ./.github/actions/setup-javascript
+        with:
+          fixtures: true
 
       - name: Install pinned toolchain
         run: rustup toolchain install

@@ -2251,3 +2251,115 @@ fn mts_animation_frames_continue_while_a_bts_callback_is_busy() {
         matches!(event.payload, WorkerPayload::Message(ref value) if posted(value, "finished"))
     );
 }
+
+#[path = "../../../../../packages/reactlynx-test-fixtures/fixtures.rs"]
+mod fixtures;
+
+#[test]
+fn releasing_a_view_unmounts_the_real_native_react_tree() {
+    verify_react_teardown(false, false);
+}
+
+#[test]
+fn releasing_a_reloaded_view_unmounts_the_new_react_tree() {
+    verify_react_teardown(true, false);
+}
+
+#[test]
+fn releasing_a_development_view_unmounts_the_current_react_tree() {
+    verify_react_teardown(false, true);
+    verify_react_teardown(true, true);
+}
+
+fn verify_react_teardown(reload: bool, development: bool) {
+    let bytes: &[u8] = if development {
+        fixtures::fixture("react-reload-development").page
+    } else {
+        fixtures::fixture("react-reload").page
+    };
+    let template = bobcat_source::native::decode(bytes).unwrap();
+    let background = format!(
+        "import {{__BobcatRegisterBundle}} from 'bobcat:bts-runtime';\n\
+         __BobcatRegisterBundle({}, true, {});\nlynx.requireModule('/app-service.js');",
+        serde_json::to_string(&template.manifest).unwrap(),
+        "{}",
+    );
+    let mut pair = Pair::unbooted_with_data(
+        Some(&background),
+        PageData {
+            init_data: Some(serde_json::json!({"seed":0,"keep":"retained"}).to_string()),
+            ..PageData::default()
+        },
+    );
+
+    pair.boot(&template.lepus_code["react-reload__main-thread"])
+        .unwrap();
+    let mut missing_websocket_warnings = 0;
+    for seed in if reload { &[0, 2][..] } else { &[0][..] } {
+        if *seed == 2 {
+            pair.runtime
+                .as_mut()
+                .unwrap()
+                .apply_page_update(
+                    &mut pair.js,
+                    &crate::link::PageUpdate::Reload {
+                        data: r#"{"seed":2}"#.into(),
+                        processor_name: String::new(),
+                    },
+                )
+                .unwrap();
+        }
+        // Complete actual hydration and its patch acknowledgement, so the
+        // fixture's useEffect and GlobalEventEmitter listener have mounted.
+        let deadline = ClockInstant::now() + PATIENCE;
+        loop {
+            assert!(ClockInstant::now() < deadline, "React effect did not mount");
+            pair.deliver();
+            let notices = pair.notices();
+            assert!(!worker_failed(&notices, ""));
+            for notice in &notices {
+                if let ViewNotice::Engine(crate::EngineEvent::ScriptReported { level, message }) =
+                    notice
+                {
+                    assert!(development && level == "warning"
+                        && message.contains("WebSocket is not found. Please use Lynx >= 2.16 or consider using a polyfill."),
+                        "unexpected React report: {message}");
+                    missing_websocket_warnings += 1;
+                }
+            }
+            if notices.iter().any(|notice| {
+                matches!(notice,
+                ViewNotice::Engine(crate::EngineEvent::ConsoleMessage { message, .. })
+                if message == &format!("reload-mount {seed} retained 1"))
+            }) {
+                break;
+            }
+        }
+    }
+    assert_eq!(missing_websocket_warnings, usize::from(development));
+    pair.cancel.cancel();
+    let events = pair.dispose();
+    let cleanups = events
+        .iter()
+        .filter_map(|event| {
+            let message: serde_json::Value = serde_json::from_str(event).unwrap();
+            assert_ne!(message[0]["method"], "reportError", "{event}");
+            (message[0]["method"] == "console")
+                .then(|| message[0]["message"].as_str().unwrap().to_owned())
+                .filter(|message| message.starts_with("reload-cleanup "))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cleanups.len(),
+        1,
+        "the compiled useEffect cleanup runs on view release"
+    );
+    assert_eq!(
+        cleanups[0],
+        if reload {
+            "reload-cleanup 2"
+        } else {
+            "reload-cleanup 0"
+        }
+    );
+}
