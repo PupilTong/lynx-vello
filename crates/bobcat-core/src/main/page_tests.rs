@@ -69,6 +69,7 @@ struct Harness {
     view: DetachedView,
     events: Vec<EngineEvent>,
     sources: Vec<(SourceRequest, SourceCompletion)>,
+    preloads: Vec<SourceRequest>,
     /// The owner's handle, so a step that never happened because the owner
     /// trapped is reported as that panic rather than as a deadline.
     owner: task::JoinHandle<()>,
@@ -100,6 +101,7 @@ impl Harness {
             view,
             events: Vec::new(),
             sources: Vec::new(),
+            preloads: Vec::new(),
             owner,
         }
     }
@@ -115,6 +117,7 @@ impl Harness {
                     completion,
                 } => self.sources.push((request, completion)),
                 ViewNotice::RequestImages(_) => {}
+                ViewNotice::PreloadSource(request) => self.preloads.push(request),
             }
         }
     }
@@ -910,13 +913,12 @@ fn card_url_uses_the_entry_response_url_before_requesting_styles() {
         ",
         );
         harness
-            .until("the stylesheet was not requested", |h| h.sources.len() == 1)
+            .until("the stylesheet was not requested", |h| {
+                h.preloads.len() == 1
+            })
             .await;
-        let (request, completion) = harness.sources.pop().unwrap();
+        let request = harness.preloads.pop().unwrap();
         assert!(matches!(request, SourceRequest::StyleSheet(ref url)
             if url == "https://cdn.test/redirected/main.js/index.css?version=2#entry"));
-        completion.complete(Ok(LoadedSource::StyleSheet(
-            crate::resource::StyleSheetSource::Text(String::new()),
-        )));
     });
 }

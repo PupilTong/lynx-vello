@@ -66,6 +66,16 @@ impl SourceRequester {
         answer
     }
 
+    pub(crate) fn preload(&self, request: SourceRequest) {
+        if self
+            .notices
+            .send(ViewNotice::PreloadSource(request))
+            .is_ok()
+        {
+            self.requester.request_event();
+        }
+    }
+
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {
         if self
             .notices
@@ -143,6 +153,8 @@ impl PageUpdate {
 /// reads is [`Published`] instead.
 pub(crate) enum ViewNotice {
     Engine(EngineEvent),
+    /// A hint to the same resource fetcher, with no result retained by core.
+    PreloadSource(SourceRequest),
     /// Sources the last paint walk met that the store has not been asked for.
     RequestImages(Vec<Arc<str>>),
     /// One source — a stylesheet, the entry, an imported module or a worker

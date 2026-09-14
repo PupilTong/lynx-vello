@@ -26,9 +26,8 @@ use crate::style::PreparsedStyleSheet;
 /// any executor its IO needs. Images are reported through
 /// [`ImageReports`](dom::ImageReports), then read during composition.
 ///
-/// The protocol is those three calls and nothing else, and every one of them is
-/// synchronous: it starts work and returns. Core therefore holds no resource
-/// future and polls none, and nothing here names a host's transport, caches or
+/// Every protocol method is synchronous: it starts work and returns. Core therefore holds no
+/// resource future and polls none, and nothing here names a host's transport, caches or
 /// codecs: whatever surface those have belongs to the host's own crate.
 pub trait ResourceFetcher: dom::FrameImages {
     /// Begins one source load without blocking the view's turn. Main requests each
@@ -42,6 +41,11 @@ pub trait ResourceFetcher: dom::FrameImages {
     /// release or a fatal event, or ended on its own — since a cancelled load
     /// no longer needs to decode or deliver a result.
     fn request_source(&self, request: SourceRequest, completion: SourceCompletion);
+
+    /// Hints that a later source request may use this URL. The fetcher owns
+    /// preloading, in-flight sharing and cache lifetime; no response is required.
+    /// The default ignores the hint, so preloading is never required for correctness.
+    fn preload_source(&self, _request: SourceRequest) {}
 
     /// Names `source` and begins loading it. Non-blocking.
     ///
@@ -93,6 +97,10 @@ impl<T: ResourceFetcher + ?Sized> ResourceFetcher for Rc<T> {
         (**self).request_source(request, completion);
     }
 
+    fn preload_source(&self, request: SourceRequest) {
+        (**self).preload_source(request);
+    }
+
     fn request_image(&self, source: &str) {
         (**self).request_image(source);
     }
@@ -118,7 +126,7 @@ pub enum SourceRequest {
 }
 
 /// A stylesheet ready to mount. The fetcher has already validated text as UTF-8.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum StyleSheetSource {
     Preparsed(Arc<PreparsedStyleSheet>),
     Text(String),
@@ -127,7 +135,7 @@ pub enum StyleSheetSource {
 /// A loaded source. `Entry` carries JavaScript for a main entry, imported
 /// module or worker script, including its final response URL. The completion
 /// routes it to the runtime that requested it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum LoadedSource {
     StyleSheet(StyleSheetSource),
     Entry { source: String, url: String },

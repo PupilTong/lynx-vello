@@ -280,8 +280,8 @@ useful signal for currently-compatible versions of those libraries.
   value parsers. Decoding a container stays embedder work: core owns the
   `PreparsedStyleSheet` vocabulary, and the embedder fills it. Source requests
   select a stylesheet or entry payload and carry a specifier; the fetcher supplies
-  the base URL and transport policy. The whole protocol is that one call plus
-  `request_image`/`service_images` and the `FrameImages` supertrait: every
+  the base URL and transport policy. The protocol also offers the optional
+  `preload_source` hint, `request_image`/`service_images` and the `FrameImages` supertrait: every
   method is synchronous, so no resource future crosses it, and core names
   none of a fetcher's own transport API — `bobcat-resources`' caches, MIME
   pipeline and HTTP client are that crate's own surface, reached only by an
@@ -291,16 +291,21 @@ useful signal for currently-compatible versions of those libraries.
   resource URLs. Boot supplies the entry response URL to the JS runtime before
   importing the entry, whose `__Card__` import reads that value. JS replaces
   the `"__Card__"` alias and maps the compiler's `CSS` section to
-  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque preload
-  handle and requests that URL through `SourceRequest::StyleSheet`.
-  `__AdoptStyleSheet` synchronously obtains the response and mounts it before
-  returning, including repeated adoption. The embedder returns CSS text or
-  a `PreparsedStyleSheet`; JS sees neither. An incomplete preload parks MTS
-  until the response arrives or the view is cancelled, without executing JS
-  jobs or sibling views. Errors throw at adoption; an unused preload changes
-  no styles. Collection releases the preload handle, cancelling an unused
-  response, while adopted rules belong to the document. No stylesheet task
-  or adoption queue lives in `MainThreadRuntime`. See
+  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque JS handle
+  associated only with that URL and sends a `ResourceFetcher::preload_source`
+  hint, which a fetcher may ignore. Every `__AdoptStyleSheet` requests the URL
+  through `SourceRequest::StyleSheet`, synchronously obtains its response and
+  mounts it before returning, including repeated adoption. The fetcher owns
+  pending loads, cached responses and failures. The reference `Resources`
+  shares them by resolved URL within a scope and invalidates registered URLs
+  when replaced or removed. Core holds only the current call's receiver.
+  The embedder returns CSS text or a `PreparsedStyleSheet`; JS sees neither.
+  An incomplete request parks MTS until the response arrives or the view is
+  cancelled, without executing JS jobs or sibling views. Errors throw at
+  adoption; an unused preload changes no styles. Collection releases only
+  the JS handle's URL association; resource lifetime belongs to the fetcher,
+  while adopted rules belong to the document. No native stylesheet handles,
+  load state or adoption queue live in `MainThreadRuntime`. See
   `docs/named-styles-runtime.md` for URL mapping and load timing.
   Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
@@ -1041,7 +1046,10 @@ useful signal for currently-compatible versions of those libraries.
   fetched bytes in a disk tier under its own budget with RFC 9111
   freshness, `ETag`/`Last-Modified` revalidation, and the fetch cache modes
   mapped from `CachePolicy` (natively; the browser's HTTP cache plays that
-  role there). **Platform image decoding**: no codec is compiled in —
+  role there). Stylesheet responses, including pending loads and failures,
+  are shared by resolved URL within a resource scope. Preload hints populate
+  that same cache; registration changes invalidate the affected URLs.
+  **Platform image decoding**: no codec is compiled in —
   `ImageIO` on macOS (`CGImageSourceCreateThumbnailAtIndex` with a maximum
   pixel size, so a photo shown small is decoded small), gdk-pixbuf on Linux
   (loaded at runtime; `gdk_pixbuf_loader_set_size` from the header probe),

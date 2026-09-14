@@ -332,9 +332,10 @@ exits before answering. Other views and their group remain alive; the last
 group/view handle joins the group's threads.
 
 Source requests select an entry or stylesheet payload and carry a specifier;
-the fetcher owns base URL and transport policy. That call, `request_image`,
-`service_images` and the `FrameImages` supertrait are the whole protocol, and
-every one of them is synchronous — core holds no resource future, and core
+the fetcher owns base URL and transport policy. That call, the optional
+`preload_source` hint, `request_image`, `service_images` and the `FrameImages`
+supertrait are the whole protocol. Every method is synchronous — no transport
+future crosses this interface, and core
 names none of a fetcher's own transport API. The protocol carries no
 response-size limit; each fetcher owns the bound for the response it
 materializes.
@@ -1236,10 +1237,12 @@ build that includes dev targets.
 
 Boot initializes the JS runtime's `__Card__` with the entry response URL before
 importing the entry. JS resolves the card alias into a CSS resource URL.
-`__LoadStyleSheet` preloads through `SourceRequest::StyleSheet` and the same
-`SourceCompletion` as startup styles, returning an opaque handle immediately.
-`__AdoptStyleSheet` synchronously obtains that response and mounts it before
-returning. An unfinished preload parks MTS until completion or view cancellation;
-it runs no JS jobs or sibling view tasks. The embedder supplies text or preparsed
-styles without exposing that choice to JS. Handle lifetime and synchronous
-failures are described in [named stylesheet loading and adoption](named-styles-runtime.md).
+`__LoadStyleSheet` sends an optional `ResourceFetcher::preload_source` hint and
+returns a JS handle associated only with the URL. Each `__AdoptStyleSheet` sends
+an ordinary stylesheet request and synchronously mounts its response before
+returning. The fetcher owns pending loads, caching and failures; core holds only
+that call's response receiver. An unfinished request parks MTS until completion
+or view cancellation; it runs no JS jobs or sibling view tasks. The embedder
+supplies text or preparsed styles without exposing that choice to JS. Cache
+ownership and synchronous failures are described in
+[named stylesheet loading and adoption](named-styles-runtime.md).

@@ -18,7 +18,6 @@ const notifyReady = rstest.fn();
 const reportStartupFailure = rstest.fn();
 const preloadStyleSheet = rstest.fn();
 const adoptStyleSheet = rstest.fn();
-const releaseStyleSheet = rstest.fn();
 const reportedErrors = rstest.fn();
 const consoleMessages = rstest.fn();
 // The runtime reads the view's page data as it evaluates; this view has none.
@@ -26,7 +25,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   notifyReady, reportStartupFailure,
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
-  preloadStyleSheet, adoptStyleSheet, releaseStyleSheet,
+  preloadStyleSheet, adoptStyleSheet,
   initData: () => undefined,
   globalProps: () => undefined,
 }));
@@ -106,7 +105,6 @@ async function deliverToMain() {
 
 describe("MTS/BTS lifecycle runtime", () => {
   it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
-    preloadStyleSheet.mockReturnValueOnce('first').mockReturnValueOnce('second');
     expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
     const first = mts.__LoadStyleSheet('CSS', '__Card__');
     const second = mts.__LoadStyleSheet('CSS', mts.__Card__);
@@ -117,7 +115,10 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(first).not.toBe(second);
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
-    expect(adoptStyleSheet.mock.calls).toEqual([['first'], ['first']]);
+    expect(adoptStyleSheet.mock.calls).toEqual([
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+    ]);
     expect(() => mts.__AdoptStyleSheet({})).toThrow();
     expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
   });
@@ -133,7 +134,6 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
   it("throws a load failure from adopt in the same call", () => {
-    preloadStyleSheet.mockReturnValueOnce('failed');
     const handle = mts.__LoadStyleSheet('CSS', '__Card__');
     adoptStyleSheet.mockImplementationOnce(() => { throw Error('CSS unavailable'); });
     expect(() => mts.__AdoptStyleSheet(handle)).toThrow('CSS unavailable');

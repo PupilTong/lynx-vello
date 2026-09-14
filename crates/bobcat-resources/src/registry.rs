@@ -6,7 +6,8 @@
 //! bundle under `bobcat-memory://` URLs, a browser host registers the bytes
 //! its own `fetch` produced under their response URLs, and a test registers
 //! a PNG. A registered URL resolves and fetches like any other, with any
-//! scheme at all, and is never cached — it is already resident.
+//! scheme at all and bypasses the transport cache. A decoded stylesheet response
+//! may be cached by the source loader; registration changes invalidate it.
 
 use std::sync::{Arc, Mutex};
 

@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
+import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -318,27 +318,23 @@ export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?:
 
 export const NativeModules = undefined;
 
-const styleHandles = new WeakMap<object, string>();
-const styleCleanup = new FinalizationRegistry<string>(id => {
-  // A finalizer can run after native host members were revoked at teardown.
-  try { releaseStyleSheet(id); } catch { /* realm teardown */ }
-});
+const styleURLs = new WeakMap<object, string>();
 
 export function __LoadStyleSheet(key: string, bundleName: string): object {
   if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
     throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
   }
-  const id = preloadStyleSheet(styleSheetURL(key, bundleName));
+  const url = styleSheetURL(key, bundleName);
+  preloadStyleSheet(url);
   const handle: object = Object.freeze(Object.create(null));
-  styleHandles.set(handle, id);
-  styleCleanup.register(handle, id);
+  styleURLs.set(handle, url);
   return handle;
 }
 
 export function __AdoptStyleSheet(handle: object) {
-  const id = styleHandles.get(handle);
-  if (id === undefined) throw new TypeError("__AdoptStyleSheet requires a stylesheet handle");
-  adoptStyleSheet(id);
+  const url = styleURLs.get(handle);
+  if (url === undefined) throw new TypeError("__AdoptStyleSheet requires a stylesheet handle");
+  adoptStyleSheet(url);
   return null;
 }
 

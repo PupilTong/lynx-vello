@@ -30,31 +30,40 @@ script loader remains separate work.
 
 ## Preload and adopt
 
-`__LoadStyleSheet` starts a preload and immediately returns a fresh opaque
-handle. The host binding sends a normal stylesheet request directly through
-`SourceRequester`; its handle retains the response receiver. Preloading does
-not parse text into document rules, mount styles, or wait for IO. A response can
-finish without any MTS task running. Unused preloads produce no script errors.
+`__LoadStyleSheet` returns a fresh opaque JS object whose only associated data
+is the CSS URL. It sends a `ResourceFetcher::preload_source` hint; core retains
+no response, native handle or loading state. A fetcher may ignore the hint.
+Preloading neither mounts styles nor waits for IO, and unused preloads produce
+no script errors.
 
-`__AdoptStyleSheet(handle)` synchronously obtains the preload response, mounts
-the sheet and returns null. If the response has not arrived, it parks MTS until
-the embedder completes it or the view's cancellation token fires. This wait
-runs no JS jobs, timers or sibling-view tasks on the group's shared MTS thread.
-The resource-owning host continues to service requests through `LynxView::pump`.
-There is no nested runtime, stylesheet completion task or deferred adoption queue.
+Each `__AdoptStyleSheet(handle)` reads the URL in JS and makes an ordinary
+`SourceRequest::StyleSheet` through the same loader used for startup styles.
+It synchronously mounts the response and returns null. Only that call holds a
+response receiver. If the response has not arrived, MTS parks until the embedder
+completes it or the view's cancellation token fires. This wait runs no JS jobs,
+timers or sibling-view tasks on the group's shared MTS thread. The resource host
+continues servicing requests through `LynxView::pump`.
+
+The reference fetcher, `bobcat-resources`, owns a stylesheet response cache keyed
+by resolved URL. Preload and ordinary requests share pending work and reuse its
+completed result, including failures. The cache lives in a `Resources` scope;
+clones share it and `new_scope` starts empty. Registering, replacing or removing
+a registered URL invalidates its response. Results from an invalidated load cannot
+replace the new cache entry. Preparsed registrations are already resident and are
+served directly. Other embedders choose their own cache and preload policy.
 
 A loader failure throws from `__AdoptStyleSheet` in that same JS call and can be
 caught there. An uncaught error follows the existing entry/event error path.
-Adopting B never waits for an unused preload A. Sequential adoption calls mount
-in their call order, including repeat calls, preserving CSS specificity and
-importance. Successful responses are retained by the handle for repeated adoption.
-The ordinary element-tree flush/commit publishes the resulting styles.
+Sequential adoption calls mount in call order, including repeats, preserving
+CSS specificity and importance. Every call requests its URL again; core does
+not cache the response behind the JS handle. The ordinary element-tree
+flush/commit publishes the resulting styles.
 
-Collection releases a handle and its response receiver. The existing
-`SourceCompletion::is_cancelled` then tells the fetcher that an unused preload
-has no consumer. Once mounted, styles belong to the document and survive handle
-collection. View release wakes a blocked adoption even if the host retains its
-completion; late source results are discarded by the existing resource protocol.
+Collecting a JS handle releases only its URL association. It sends no native
+release or cancellation; preload lifetime belongs to the resource scope.
+Mounted styles belong to the document and survive handle collection. View
+release wakes a blocked adoption even if the host retains its completion;
+late responses are discarded by the existing resource protocol.
 
 ## Source ownership and validation
 
@@ -69,5 +78,7 @@ native/web wire formats and the rkyv 0.7 model are unchanged.
 Tests cover boot URL initialization, redirects, escaped section URLs,
 text/preparsed equivalence, inert preloading, immediate and repeated adoption,
 CSS precedence, collection, synchronous errors and cancellation while waiting.
+Resource tests cover shared pending loads, cached failures, registration changes
+and scope isolation.
 Native/web integration verifies the final painted result through ordinary
 resource URLs and the embedder's loader.

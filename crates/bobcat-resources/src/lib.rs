@@ -19,7 +19,8 @@
 //! - **Tiered caching.** Decoded bitmaps live in a memory tier under a byte budget with the frame's
 //!   working set pinned ([`cache::memory`]); fetched bytes live on disk under their own budget with
 //!   HTTP freshness and revalidation semantics ([`cache::disk`], [`cache::http`]), natively; the
-//!   browser's HTTP cache plays that role there.
+//!   browser's HTTP cache plays that role there. Stylesheet responses and pending loads are shared
+//!   by URL within each resource scope, including preload hints.
 //! - **Platform image decoding.** No codec is compiled in: `ImageIO` on macOS, gdk-pixbuf on Linux,
 //!   the main thread's `Image` element in the browser, each asked to downsample during decode
 //!   ([`decode`]).
@@ -370,6 +371,7 @@ pub struct Resources {
     #[cfg(not(target_arch = "wasm32"))]
     executor: Arc<executor::Executor>,
     local: Rc<RefCell<ImageState>>,
+    style_cache: Rc<RefCell<sources::StyleCache>>,
 }
 
 impl fmt::Debug for Resources {
@@ -476,6 +478,7 @@ impl Resources {
                 config.worker_threads,
                 config.decode_parallelism,
             )),
+            style_cache: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
                 config.memory_budget_bytes,
                 receiver,
@@ -485,7 +488,7 @@ impl Resources {
 
     /// An independent page resource scope sharing only the executor, the
     /// platform decoder and the disk cache. Registrations, relative URL base,
-    /// decoded images and completion queues start empty. Late image results
+    /// decoded images, stylesheet responses and completion queues start empty. Late image results
     /// from a retired page cannot populate the replacement page's cache.
     ///
     /// The executor is shared rather than rebuilt, so a scope costs no
@@ -518,6 +521,7 @@ impl Resources {
             }),
             #[cfg(not(target_arch = "wasm32"))]
             executor: Arc::clone(&self.executor),
+            style_cache: Rc::default(),
             local: Rc::new(RefCell::new(ImageState::new(
                 self.local.borrow().budget(),
                 receiver,
@@ -527,7 +531,8 @@ impl Resources {
 
     /// Registers `bytes` under `url`, replacing any earlier registration.
     /// `media_type` labels them the way a `Content-Type` would; without it
-    /// they are sniffed. Returns the normalized URL they answer to.
+    /// they are sniffed. Returns the normalized URL they answer to. Invalidates
+    /// any cached stylesheet response for that URL.
     pub fn register(
         &self,
         url: &str,
@@ -535,6 +540,7 @@ impl Resources {
         media_type: Option<&str>,
     ) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
+        self.style_cache.borrow_mut().remove(&url);
         self.shared.transports.registry.insert(
             &url,
             Registered::Bytes {
@@ -547,13 +553,14 @@ impl Resources {
 
     /// Registers a stylesheet the host already parsed. It answers a stylesheet
     /// source request pre-parsed, and no other request at all — it has no
-    /// bytes to give one.
+    /// bytes to give one. Replaces any cached stylesheet response for that URL.
     pub fn register_style_sheet(
         &self,
         url: &str,
         sheet: PreparsedStyleSheet,
     ) -> Result<Url, RegisterError> {
         let url = parse_registration_url(url)?;
+        self.style_cache.borrow_mut().remove(&url);
         self.shared
             .transports
             .registry
@@ -561,17 +568,25 @@ impl Resources {
         Ok(url)
     }
 
-    /// Forgets a registration. Images already decoded from it stay decoded.
+    /// Forgets a registration and its cached stylesheet response.
+    /// Images already decoded from it stay decoded.
     #[must_use = "the answer says whether anything was registered under the URL"]
     pub fn unregister(&self, url: &str) -> bool {
-        parse_registration_url(url)
-            .ok()
-            .and_then(|url| self.shared.transports.registry.remove(&url))
-            .is_some()
+        let Ok(url) = parse_registration_url(url) else {
+            return false;
+        };
+        if self.shared.transports.registry.remove(&url).is_none() {
+            return false;
+        }
+        self.style_cache.borrow_mut().remove(&url);
+        true
     }
 
-    /// Forgets every registration.
+    /// Forgets every registration and its cached stylesheet response.
     pub fn clear_registered(&self) {
+        self.style_cache
+            .borrow_mut()
+            .retain(|url, _| !self.shared.transports.registry.contains(url));
         self.shared.transports.registry.clear();
     }
 
@@ -721,6 +736,10 @@ impl ResourceFetcher for ViewResources {
         completion: bobcat_core::resource::SourceCompletion,
     ) {
         sources::request(&self.resources, request, completion);
+    }
+
+    fn preload_source(&self, request: bobcat_core::resource::SourceRequest) {
+        sources::preload(&self.resources, request);
     }
 
     fn request_image(&self, source: &str) {
