@@ -131,20 +131,20 @@ pub(crate) enum ToMain {
 }
 
 pub(crate) enum PageUpdate {
+    Reload {
+        data: String,
+        processor_name: String,
+    },
+    Data {
+        data: String,
+        processor_name: String,
+        reset: bool,
+    },
+    GlobalProps(String),
     GlobalEvent {
         name: String,
-        arguments: Vec<serde_json::Value>,
+        arguments: String,
     },
-}
-
-impl PageUpdate {
-    pub(crate) fn into_message(self) -> serde_json::Value {
-        match self {
-            Self::GlobalEvent { name, arguments } => {
-                serde_json::json!({"method":"sendGlobalEvent", "name":name, "args":arguments})
-            }
-        }
-    }
 }
 
 /// The view's task → the embedder, drained by `LynxView::pump`.

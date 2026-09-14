@@ -85,6 +85,7 @@ impl WorkerFactory {
                 let script = creator.start(key, name)?;
                 if specifier == BTS_MODULE_SPECIFIER {
                     let mut source = BTS_ENTRY_PREAMBLE.to_owned();
+                    source.push_str("import { __BobcatStartBTS } from \"bobcat:bts-runtime\";\n__BobcatStartBTS(async () => {\n");
                     if let Some(entry) = &background_entry {
                         let entry =
                             serde_json::to_string(entry).expect("a string is JSON serializable");
@@ -92,7 +93,7 @@ impl WorkerFactory {
                         source.push_str(&entry);
                         source.push_str(");\n");
                     }
-                    source.push_str("postMessage({bobcat:'runtime',method:'backgroundReady'});\n");
+                    source.push_str("});\n");
                     // The built-in background script is this thread's own, so
                     // it answers its own request rather than asking a host
                     // that has no bytes for it.

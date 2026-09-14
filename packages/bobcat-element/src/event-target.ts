@@ -34,6 +34,11 @@ function captureOf(options: unknown): boolean {
     : Boolean(listenerOption(options, "capture"));
 }
 
+/** Whether a lifecycle event has a listener before choosing a legacy hook. */
+export function hasEventListener(target: EventTarget, name: string): boolean {
+  return target[eventTargetListeners].has(name);
+}
+
 // Engine dispatch supplies per-listener error reporting. The public
 // EventTarget walk keeps its ordinary JavaScript call semantics.
 export function dispatchEventListeners(

@@ -113,11 +113,13 @@ rkyv 0.7 wire layout is unchanged, and no stylesheet text is synthesized.
 
 The native decoder normalizes boolean-only `enableQueryComponentSync` and
 `enableJSDataProcessor` fields before web configuration stringification, so a
-native string `"true"` cannot turn into an enabled flag after conversion. Their
-configuration consumers and lazy bundle registration remain separate integration
-work. `PageSource` registers decoded named CSS under entry-relative URLs in
-the embedder's existing resource registry. MTS requests those URLs through the
-ordinary stylesheet loader; see [named stylesheet loading](named-styles-runtime.md).
+native string `"true"` cannot turn into an enabled flag after conversion.
+`PageSource` passes the JS-processor flag through `PageConfig.enable_js_data_processor`;
+see [data lifecycle](data-lifecycle-runtime.md). Lazy bundle registration remains
+separate integration work. `PageSource` registers decoded named CSS under
+entry-relative URLs in the embedder's existing resource registry. MTS requests
+those URLs through the ordinary stylesheet loader; see
+[named stylesheet loading](named-styles-runtime.md).
 Source decoding executes no scripts and fetches no lazy bundles.
 
 ```sh

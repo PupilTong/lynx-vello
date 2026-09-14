@@ -247,7 +247,7 @@ impl OwnedPage {
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
         self.page
-            .open_realm(entry, "app:///main.js", None, None, None);
+            .open_realm(entry, "app:///main.js", None, None, None, String::new());
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -376,6 +376,33 @@ fn a_burst_of_commands_is_one_commit_and_one_acknowledgement() {
 /// A module completion is a task of its own, so what its continuation changed
 /// is committed without a command to carry it.
 #[test]
+fn data_updates_are_visible_to_the_next_command_and_commit_without_an_explicit_flush() {
+    on_a_local_set(async {
+        let (context, _workers) = group();
+        let mut owned = OwnedPage::new(context);
+        let booted = owned.boot(&format!(
+            "{ONE_BOX}\nglobalThis.updatePage = data => __SetAttribute(box, 'data-value', String(data.value));"
+        )).await;
+        owned.page.apply(
+            [
+                ToMain::PageUpdate(crate::link::PageUpdate::Data {
+                    data: r#"{"value":7}"#.into(),
+                    processor_name: String::new(),
+                    reset: false,
+                }),
+                ToMain::Probe(Box::new(|document| {
+                    let node = document.document_element().children().next().unwrap();
+                    assert_eq!(node.attribute("data-value"), Some("7"));
+                })),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(owned.view.published.commit(), Some(booted + 1));
+        assert!(!owned.page.ended());
+    });
+}
+
+#[test]
 fn a_module_completion_commits_with_no_command_behind_it() {
     on_a_local_set(async {
         let (context, workers) = group();
@@ -431,6 +458,10 @@ fn a_fatal_module_failure_ends_every_task_of_the_view() {
             .boot(&format!("{ONE_BOX}\nimport('app:///dep.js');"))
             .await;
         let mut background = harness.background_worker();
+        assert!(
+            matches!(background.messages.try_recv(), Ok(WorkerMessage::Post(_))),
+            "boot supplies BTS initial data through its first Worker message"
+        );
         harness
             .until("the entry's import was never requested", |harness| {
                 !harness.sources.is_empty()
@@ -511,7 +542,7 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             ingredients(),
             view.token.clone(),
         );
-        page.open_realm(ONE_BOX, "app:///main.js", None, None, None);
+        page.open_realm(ONE_BOX, "app:///main.js", None, None, None, String::new());
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -564,7 +595,14 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
         );
         // The listener is what makes the dispatch below a real entry into
         // JavaScript rather than a walk that meets nobody.
-        page.open_realm(LISTENING_BOX, "app:///main.js", None, None, None);
+        page.open_realm(
+            LISTENING_BOX,
+            "app:///main.js",
+            None,
+            None,
+            None,
+            String::new(),
+        );
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;

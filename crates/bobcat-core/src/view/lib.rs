@@ -379,6 +379,8 @@ pub struct ViewSources {
     /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
     /// the entry's `__globalProps` before the entry loads.
     pub global_props: Option<String>,
+    /// Processor selected for initial data; empty selects the default.
+    pub initial_processor: String,
 }
 
 impl ViewSources {
@@ -393,6 +395,7 @@ impl ViewSources {
             background_entry: None,
             init_data: None,
             global_props: None,
+            initial_processor: String::new(),
         }
     }
 }
@@ -714,27 +717,95 @@ impl<F> Drop for LynxView<F> {
 }
 
 impl<F: ResourceFetcher + 'static> LynxView<F> {
-    /// Deliver a native global event. `arguments` is the listener argument list.
+    /// Reload the page without fetching or evaluating its entry again. The
+    /// framework recreates component state; global properties remain unchanged.
+    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
+    /// An empty `processor_name` selects the default processor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::pump`] reports
+    /// [`EngineEvent::ScriptFinished`] or after the view ends. No update is queued.
+    pub fn reload(&self, data: String, processor_name: String) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Reload {
+            data,
+            processor_name,
+        })
+    }
+
+    /// Merge data through the MTS update entry and BTS `updateCardData` hook.
+    /// The embedder serializes `data` as JSON; JavaScript parses it on delivery.
+    /// An empty `processor_name` selects the default processor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Rejected updates are not queued.
+    pub fn update_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Data {
+            data,
+            processor_name,
+            reset: false,
+        })
+    }
+
+    /// Replace page data using RESET semantics. The framework owns merging,
+    /// notification and React rerendering. The embedder serializes `data` as
+    /// JSON; JavaScript parses it on delivery. An empty `processor_name`
+    /// selects the default processor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Rejected resets are not queued.
+    pub fn reset_data(&self, data: String, processor_name: String) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::Data {
+            data,
+            processor_name,
+            reset: true,
+        })
+    }
+
+    /// Merge literal top-level global-property keys into host values, then
+    /// notify BTS before updating MTS bindings and invoking its current hook.
+    /// Script mutations do not alter the host values.
+    /// The embedder serializes `data` as a JSON object; JavaScript parses it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError::NotReady`] until [`Self::is_ready`] is true.
+    /// Supply initial properties through [`ViewSources::global_props`]; rejected
+    /// updates are not retained as initial properties or queued for replay.
+    pub fn update_global_props(&self, data: String) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::GlobalProps(data))
+    }
+
+    /// Deliver a global event. The embedder serializes the listener argument
+    /// list as a JSON array in `arguments`; JavaScript parses it on delivery.
     /// Call after pump returns `ScriptFinished`, or when `is_ready()` is true.
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::NotReady` before readiness is observed or after
+    /// Returns [`EngineError::NotReady`] before readiness is observed or after
     /// the view ends. Rejected events are not queued for later delivery.
     pub fn send_global_event(
         &self,
         name: impl Into<String>,
-        arguments: Vec<serde_json::Value>,
+        arguments: String,
     ) -> Result<(), EngineError> {
+        self.send_page_update(crate::link::PageUpdate::GlobalEvent {
+            name: name.into(),
+            arguments,
+        })
+    }
+
+    fn send_page_update(&self, update: crate::link::PageUpdate) -> Result<(), EngineError> {
         if !self.is_ready() {
             return Err(EngineError::NotReady);
         }
         self.seat
             .commands
-            .send(ToMain::PageUpdate(crate::link::PageUpdate::GlobalEvent {
-                name: name.into(),
-                arguments,
-            }))
+            .send(ToMain::PageUpdate(update))
             .map_err(|_| EngineError::NotReady)
     }
 

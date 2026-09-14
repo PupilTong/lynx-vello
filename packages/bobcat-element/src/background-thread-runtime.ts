@@ -9,7 +9,8 @@ import { GlobalEventEmitter } from "bobcat:global-event-emitter";
 
 // The bobcat:bts bootstrap and the BTS application's entry preamble import
 // this runtime. Like MTS, lynx is a module binding, never a global property.
-// Application module loading through ResourceFetcher remains pending.
+// The bootstrap installs a message receiver, then returns so Worker messages
+// can initialize the runtime before the application entry is imported.
 const scope = globalThis as unknown as WorkerGlobalScope;
 
 const coreContext = createCrossThreadContext();
@@ -22,10 +23,16 @@ const app: {
   publishEvent?: AppHook;
   publicComponentEvent?: AppHook;
   callDestroyLifetimeFun?: AppHook;
+  updateGlobalProps?: AppHook;
+  updateCardData?: AppHook;
+  onAppReload?: AppHook;
+  processCardConfig?: AppHook;
+  _params: {initData: unknown; updateData: unknown; processorName: string; cacheData: unknown[]};
   GlobalEventEmitter: GlobalEventEmitter;
   registerModule(name: string, value: unknown): void;
   getJSModule(name: string): unknown;
 } = {
+  _params: {initData: null, updateData: undefined, processorName: "", cacheData: []},
   GlobalEventEmitter: emitter,
   registerModule(name, value) { jsModules.set(name, value); },
   getJSModule(name) { return jsModules.get(name); },
@@ -41,9 +48,10 @@ let nextCallbackId = 1;
  * `bobcat: "runtime"`, or a Context event's public fields, which carry no tag.
  */
 type FromMainThread =
+  | ({ bobcat: "runtime"; method: "initialize" } & BackgroundData & {systemInfo?: Record<string, unknown>})
   | {
       bobcat: "runtime";
-      method: "publishEvent" | "publicComponentEvent";
+      method: "publishEvent" | "publicComponentEvent" | "updateGlobalProps" | "updateCardData" | "onAppReload" | "processCardConfig";
       args: unknown[];
     }
   | { bobcat: "runtime"; method: "callDestroyLifetimeFun" }
@@ -54,7 +62,7 @@ type FromMainThread =
       result?: unknown;
       error?: { name: string; message: string };
     }
-  | { bobcat: "runtime"; method: "nodeQueryResult"; id?: number; result?: unknown }
+  | { bobcat: "runtime"; method: "nodeQueryResult" | "reloadResult"; id?: number; result?: unknown }
   | { bobcat: "runtime"; method: "sendGlobalEvent"; name: string; args: unknown[] }
   | (ContextEvent & { bobcat?: never });
 
@@ -157,8 +165,40 @@ coreContext.addEventListener(
 );
 
 coreContext.connect((event) => scope.postMessage({ type: event.type, data: event.data, origin: event.origin }));
+// Only the built-in BTS bootstrap arms initialization. Its first Worker
+// message supplies inputs; ordinary messages wait for the entry's imports.
+let startBackground: ((options: BackgroundData & {systemInfo?: Record<string, unknown>}) => Promise<void>) | undefined;
+let entryReady: Promise<boolean> | undefined;
+
+export function __BobcatStartBTS(loadEntry: () => Promise<unknown>) {
+  startBackground = async options => {
+    __BobcatInitializeBTS(options);
+    await loadEntry();
+  };
+}
+
 scope.addEventListener("message", (event: { data: FromMainThread }): void | Promise<void> => {
   const message = event.data;
+  if (message?.bobcat === "runtime" && message.method === "initialize") {
+    const start = startBackground;
+    if (start) {
+      startBackground = undefined;
+      entryReady = start(message).then(() => {
+        entryReady = undefined;
+        scope.postMessage({bobcat: "runtime", method: "backgroundReady"});
+        return true;
+      }, error => {
+        scope.postMessage({bobcat: "runtime", method: "backgroundFailed", message: printable(error)});
+        return false;
+      });
+    }
+    return;
+  }
+  if (entryReady) return entryReady.then(ready => { if (ready) return receiveMessage(message); });
+  return receiveMessage(message);
+});
+
+function receiveMessage(message: FromMainThread): void | Promise<void> {
   if (message?.bobcat !== "runtime") {
     coreContext.receive(message);
     return;
@@ -173,18 +213,30 @@ scope.addEventListener("message", (event: { data: FromMainThread }): void | Prom
     case "callDestroyLifetimeFun":
       app.callDestroyLifetimeFun?.call(app);
       break;
+    case "reloadResult":
     case "nodeQueryResult": {
       const callback = callbacks.get(message.id);
       try { callback?.(message.result); }
       finally { callbacks.delete(message.id); }
       break;
     }
+    case "updateGlobalProps":
+    case "updateCardData":
+    case "onAppReload":
+    case "processCardConfig":
+      app[message.method]?.apply(app, message.args);
+      break;
     case "sendGlobalEvent":
       emitter.emit(message.name, message.args);
       break;
     case "callLepusMethodResult":
       return receiveLepusResult(message);
   }
+}
+
+// The selected runtime target, independent of the compiler's minimum SDK.
+export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({
+  platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0",
 });
 
 function printable(value: unknown): string {
@@ -205,9 +257,29 @@ export const console = Object.fromEntries(
   ]),
 );
 
-// This is the raw BTS environment's MVP. Loading a compiled ReactLynx BTS
-// bundle also needs Lynx Core's module/init shell, which is not installed here.
+// This raw BTS environment supplies lifecycle inputs and hooks. Compiled
+// factory/module bootstrap is a separate integration layer.
 export const lynx = {
+  reload(value?: unknown, callback?: unknown) {
+    // Native only parses object arguments. Primitives (including null) mean
+    // an empty data table; arrays/functions do not produce a reload table.
+    let data = {};
+    if (typeof value === "function") return;
+    if (value !== null && typeof value === "object") {
+      data = value;
+      if (Array.isArray(data)) return;
+    }
+    let id;
+    if (typeof callback === "function") {
+      id = nextCallbackId++;
+      callbacks.set(id, () => callback());
+    }
+    try { scope.postMessage({bobcat:"runtime", method:"reloadFromJS", data, id}); }
+    catch (error) { if (id !== undefined) callbacks.delete(id); throw error; }
+  },
+  SystemInfo,
+  __initData: {} as unknown,
+  __globalProps: {} as unknown,
   getJSModule: app.getJSModule,
   registerModule: app.registerModule,
   reportError(error: unknown, options?: {level?: string}) {
@@ -228,3 +300,26 @@ export const lynx = {
     return coreContext;
   },
 };
+
+interface BackgroundData {
+  initData?: unknown;
+  updateData?: unknown;
+  globalProps?: unknown;
+  processorName?: string;
+  cacheData?: unknown[];
+}
+
+export function __BobcatInitializeBTS(options: BackgroundData & {
+  systemInfo?: Record<string, unknown>;
+}) {
+  const params = options;
+  app._params = { initData:params.initData ?? null, updateData:params.updateData, processorName:params.processorName ?? "", cacheData:params.cacheData ?? [] };
+  lynx.__initData = Object.hasOwn(params, "updateData") ? params.updateData : params.initData;
+  lynx.__globalProps = params.globalProps || {};
+  if (options.systemInfo) SystemInfo = Object.freeze({ ...SystemInfo, ...options.systemInfo });
+  lynx.SystemInfo = SystemInfo;
+  // Keep the raw BTS environment consistent with its module snapshot.
+  Object.assign(scope, { SystemInfo });
+}
+
+__BobcatInitializeBTS({});

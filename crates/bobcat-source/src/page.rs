@@ -286,6 +286,7 @@ impl PageSource {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
+            enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
         };
         let compatibility_warnings = if scoped_css_ids.is_empty() {
             Vec::new()
@@ -490,6 +491,7 @@ const fn raw_lynx_xml_config() -> PageConfig {
         default_display_linear: false,
         default_overflow_visible: false,
         enable_css_selector: true,
+        enable_js_data_processor: false,
     }
 }
 
@@ -653,6 +655,7 @@ mod tests {
                 default_display_linear: true,
                 default_overflow_visible: false,
                 enable_css_selector: true,
+                enable_js_data_processor: false,
             }
         );
         let sources = page.view_sources();

@@ -519,19 +519,21 @@ is an ESM export from `bobcat:bts-runtime`; neither MTS nor BTS sets
 `globalThis.lynx`. The bootstrap uses
 `import { lynx } from "bobcat:bts-runtime"`; raw BTS applications explicitly
 import the bindings they need. The application imports its bindings without
-creating a dependency back to the bootstrap awaiting it.
+creating a dependency back to the bootstrap that starts it.
 Main answers the built-in `bobcat:bts` source itself, on the one-shot that
 rode to `bobcat-workers` inside the `Start`, rather than asking a host that has
 no bytes for it. When `ViewSources.background_entry` is
-configured, the bootstrap appends `await import(entry)`, matching MTS boot's
-import structure. XML takes exactly this path; no application source is
-prefetched or concatenated into the bootstrap. Without an entry, the bootstrap
-initializes the Context and the app/native-app hook surfaces.
+configured, the bootstrap passes an `async () => { await import(entry); }`
+loader to its JS initializer and returns. The first `postMessage` initializes
+BTS inputs before that loader runs; later messages wait on its Promise. XML
+takes exactly this path. Without an entry, the same initialization message
+supplies the Context and app/native-app environment, then BTS acknowledges it.
 
 Workers use the same asynchronous ESM loader as main. Each discovered module
 gets a source completion on the view's existing host channel; its final response
 URL becomes the base for dependencies. A per-worker boot watch gates posted
-messages until entry settlement, while module completions and timers continue.
+messages until the Worker bootstrap settles. The BTS runtime separately holds
+its messages on the application import Promise; completions and timers continue.
 Cancellation follows the worker's child token; source completions never travel
 through the MTS realm. Handled import failures leave the worker usable; a BTS
 startup failure reaches the MTS failure binding. ReactLynx compiled-module and
@@ -686,32 +688,33 @@ application readiness through `notifyReady()`.
 Imports started after boot use the same loading path. Dropping a view cancels
 its completion handles and releases its suspended continuations.
 
-The final `bobcat:boot` module imports `lynx`, `__BobcatConnectBackground`,
-`__BobcatInitData` from `bobcat:runtime` and `Document` and
-`__FlushElementTree` from `bobcat:element`, and imports `bobcat:timers` for its
-effect; the transformed entry itself statically imports both of the first two
-built-ins. Evaluating `bobcat:runtime` is what reads and parses the page data,
-so it is ready before either module's own code runs. Boot then runs:
+The final `bobcat:boot` module imports the lifecycle helpers from
+`bobcat:runtime`, `Document` and `__FlushElementTree` from `bobcat:element`,
+and `bobcat:timers` for its effect. The runtime parses the initial JSON before
+entry execution. The generated boot body has this order:
 
 ```js
-// The realm's document, created by this module's first statement and held by
-// this exported binding for the realm's life. Nothing in the realm releases
-// it: it goes when the realm does.
 export const document = new Document();
-
+__BobcatInitEntry(entryMtsUrl);
+__BobcatInitializeMTS({ enableJSDataProcessor, systemInfo: viewportMetrics });
+let data = lynx.__initData;
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
-__BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }));
-const data = typeof globalThis.processData === "function"
-  ? globalThis.processData(__BobcatInitData)
-  : __BobcatInitData;
-if (typeof globalThis.renderPage === "function") {
-  globalThis.renderPage(data);
-} else {
-  lynx.getEngine().dispatchEvent({ type: "__RenderPage", data });
-}
-__FlushElementTree();
+data = __BobcatProcessInitData(data);
+__BobcatConnectBackground(new Worker("bobcat:bts", { name: "lynx-bg" }), data);
+__BobcatRenderPage(data);
+await Promise.resolve().then(() => __FlushElementTree());
 ```
+
+The retained argument survives entry initialization replacing `lynx.__initData`.
+Processing, the BTS snapshot and MTS render run synchronously. Boot then awaits
+a flush queued with `Promise.resolve().then`, preserving the ordinary microtask
+boundary; it does not drain Promise jobs between lifecycle hooks.
+The first Worker message initializes BTS data before its entry imports. JS holds
+later messages on that import's Promise, then acknowledges readiness; import
+failure reports through the same Worker channel. Host updates require observed
+public readiness, with no caching or replay before it. See
+[data lifecycle](data-lifecycle-runtime.md) for the inputs and readiness contract.
 
 The global `renderPage` function remains a compatibility path, not a boot
 requirement. An entry may instead register its renderer on the stable,
@@ -719,8 +722,8 @@ realm-local EventTarget returned by `lynx.getEngine()`. Rust evaluates one boot
 module; it does not issue a second native lifecycle call after evaluating the
 entry.
 
-The engine EventTarget retains JavaScript listeners and receives only the boot
-fallback's `__RenderPage` delivery today. The remaining MTS `getCoreContext`
+The engine EventTarget retains JavaScript listeners and receives render, update,
+component-removal and global-props lifecycle events. The remaining MTS `getCoreContext`
 and `getNative` sinks retain and deliver nothing. They make chunks installable before
 Bobcat has the corresponding runtime subsystems; they do not install runtime
 bindings on `globalThis`, create a background `lynxCoreInject` realm, or hide
@@ -1246,3 +1249,14 @@ or view cancellation; it runs no JS jobs or sibling view tasks. The embedder
 supplies text or preparsed styles without exposing that choice to JS. Cache
 ownership and synchronous failures are described in
 [named stylesheet loading and adoption](named-styles-runtime.md).
+
+## Data lifecycle
+
+Initial preprocessing, update/reset, global-property snapshots and reload use
+the existing MTS command and Worker links. Boot reads the processor switch from
+PageConfig and the metrics from Viewport. The initial processor name crosses the
+startup-data binding as a string, without serialization or source interpolation.
+JS owns BTS initialization and sends its snapshot through postMessage.
+Host updates require observed readiness and otherwise return `NotReady`. See
+[data and global-property lifecycle](data-lifecycle-runtime.md) for the call
+order, input ownership, live ESM bindings and framework boundary.

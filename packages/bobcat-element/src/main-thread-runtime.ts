@@ -21,14 +21,14 @@
 // the same class, on a runtime this module is not registered on, so the source
 // is shared as a module and each runtime compiles its own copy.
 
-import { EventTarget, dispatchEventListeners } from "bobcat:event-target";
+import { EventTarget, hasEventListener, dispatchEventListeners } from "bobcat:event-target";
 import {
   type ContextEvent,
   createCrossThreadContext,
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -56,6 +56,8 @@ type LepusMethodCall = {
 type FromBackground = LepusMethodCall | NodeQueryRequest
   | { bobcat: "runtime"; method: "reportError" | "console"; level: string; message: string }
   | { bobcat: "runtime"; method: "backgroundReady" }
+  | { bobcat: "runtime"; method: "backgroundFailed"; message: string }
+  | { bobcat: "runtime"; method: "reloadFromJS"; data?: unknown; id?: number }
   | (ContextEvent & { bobcat?: never });
 
 function noop() {
@@ -151,7 +153,7 @@ async function callLepusMethod(message: LepusMethodCall) {
  * listeners already exist; events it sent before Worker construction are
  * flushed in order through the same Worker transport as later events.
  */
-export function __BobcatConnectBackground(worker: Worker) {
+export function __BobcatConnectBackground(worker: Worker, data: unknown) {
   worker.addEventListener("message", (event: { data: FromBackground }) => {
     const message = event.data;
     if (message?.bobcat === "runtime") {
@@ -170,6 +172,16 @@ export function __BobcatConnectBackground(worker: Worker) {
         void callLepusMethod(message);
       } else if (message.method === "backgroundReady") {
         notifyReady();
+      } else if (message.method === "backgroundFailed") {
+        reportStartupFailure(message.message);
+      } else if (message.method === "reloadFromJS") {
+        reloadPage(message.data, true);
+        // Acknowledge after jobs already queued by the lifecycle hooks.
+        if (message.id !== undefined) {
+          void Promise.resolve().then(() => {
+            sendToBackground({bobcat: "runtime", method: "reloadResult", id: message.id});
+          });
+        }
       } else if (message.method === "reportError") {
         reportScriptError(message.level, message.message);
       } else if (message.method === "console") {
@@ -182,16 +194,14 @@ export function __BobcatConnectBackground(worker: Worker) {
   worker.addEventListener("error", (event: {message: string}) => {
     reportStartupFailure(event.message);
   });
+  // Snapshot initial data before queued events or render can mutate it.
+  worker.postMessage({bobcat: "runtime", method: "initialize", ...__BobcatBackgroundData(data), systemInfo: SystemInfo});
   backgroundWorker = worker;
   const queued = pendingBackgroundMessages;
   pendingBackgroundMessages = [];
   for (const message of queued) {
     worker.postMessage(message);
   }
-}
-
-export function __BobcatApplyPageUpdate(json: string) {
-  sendToBackground({ bobcat: "runtime", ...JSON.parse(json) });
 }
 
 export function __BobcatPublishEvent(
@@ -235,7 +245,7 @@ const runtimePerformance = {
   },
 };
 
-export const SystemInfo = Object.freeze({});
+export let SystemInfo: Readonly<Record<string, unknown>> = Object.freeze({});
 
 /**
  * Parses one piece of the host's page data: the string the view was given,
@@ -257,7 +267,126 @@ function parsePageData(name: string, json: string | undefined): unknown {
 
 /** The host's init data, which boot hands to `processData`. */
 export const __BobcatInitData = parsePageData("initData", initData());
-export const __globalProps = parsePageData("globalProps", globalProps());
+export let __globalProps = parsePageData("globalProps", globalProps()) as Record<string, unknown>;
+// Host state is separate from the copies the two script realms may mutate.
+let hostGlobalPropsJson = "{}";
+const hostInitialProcessor = getInitialProcessor() ?? "";
+let initialProcessor = hostInitialProcessor;
+let jsDataProcessor = false;
+
+export function __BobcatInitializeMTS(options: {
+  initData?: unknown;
+  globalProps?: Record<string, unknown>;
+  systemInfo?: Record<string, unknown>;
+  processorName?: string;
+  enableJSDataProcessor?: boolean;
+}) {
+  lynx.__initData = "initData" in options ? options.initData : __BobcatInitData;
+  hostGlobalPropsJson = JSON.stringify("globalProps" in options ? options.globalProps : __globalProps);
+  __globalProps = JSON.parse(hostGlobalPropsJson);
+  lynx.__globalProps = __globalProps;
+  SystemInfo = Object.freeze({platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0", ...options.systemInfo});
+  lynx.SystemInfo = SystemInfo;
+  initialProcessor = options.processorName ?? hostInitialProcessor;
+  jsDataProcessor = options.enableJSDataProcessor === true;
+}
+
+export function __BobcatProcessInitData(data: unknown) { return __BobcatProcessData(data, initialProcessor); }
+
+/** App::LoadApp separates encoded data from host TemplateData. React's
+ * Fiber output does not set LepusInitData, so the encoded slot is native nil.
+ */
+function __BobcatBackgroundData(data: unknown) {
+  return {initData:null, updateData:data, processorName:jsDataProcessor ? initialProcessor : "", cacheData:[], globalProps:JSON.parse(hostGlobalPropsJson)};
+}
+
+export function __BobcatProcessData(data: unknown, processorName = "") {
+  if (jsDataProcessor) return data;
+  let candidate;
+  try {
+    const processData = scope["processData"];
+    candidate = typeof processData === "function" ? Reflect.apply(processData, scope, [data, processorName]) : data;
+  }
+  catch (error) { _ReportError(error); }
+  // ProcessTemplateDataForFiber replaces data only for a table. Each native
+  // context call reports an exception and returns to the assembler.
+  return candidate !== null && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : data;
+}
+
+export function __BobcatRenderPage(data: unknown) {
+  const options = {preLoadTemplate:false, ...processorOptions(initialProcessor)};
+  try {
+    if (hasEventListener(engineContext, "__RenderPage")) engineContext.dispatchEvent({type: '__RenderPage', data: [data, options]});
+    else {
+      const renderPage = scope["renderPage"];
+      if (typeof renderPage === "function") Reflect.apply(renderPage, scope, [data, options]);
+    }
+  } catch (error) { _ReportError(error); }
+}
+
+function processorOptions(name: string) { return jsDataProcessor ? {processorName:name} : {}; }
+
+function updatePage(data: unknown, options: Record<string, unknown>) {
+  try {
+    if (hasEventListener(engineContext, "__UpdatePage")) engineContext.dispatchEvent({type: '__UpdatePage', data: [data, options]});
+    else {
+      const update = scope["updatePage"];
+      if (update != null) Reflect.apply(update as Function, scope, [data, options]);
+    }
+  } catch (error) { _ReportError(error); }
+}
+
+function reloadPage(data: unknown, fromJS: boolean, processorName = "") {
+  const processed = fromJS ? data : __BobcatProcessData(data, processorName);
+  try {
+    if (hasEventListener(engineContext, "__RemoveComponents")) engineContext.dispatchEvent({type: '__RemoveComponents', data: []});
+    else {
+      const removeComponents = scope["removeComponents"];
+      if (removeComponents != null) Reflect.apply(removeComponents as Function, scope, []);
+    }
+  } catch (error) { _ReportError(error); }
+  // Native enqueues OnJSAppReload before MTS updatePage can emit the next
+  // first-screen event. React owns cleanup, data merging and rehydration.
+  const name = jsDataProcessor && !fromJS ? processorName : "";
+  sendToBackground({bobcat:"runtime", method:"onAppReload", args:[processed, {processorName:name}]});
+  const options = {resetPageData:false, reloadFromJS:fromJS, reloadTemplate:true, nativeUpdateDataOrder:0, ...processorOptions(name)};
+  updatePage(processed, options);
+}
+
+export function __BobcatReload(json: string, processorName: string) {
+  reloadPage(JSON.parse(json), false, processorName);
+}
+
+export function __BobcatUpdateData(json: string, processorName: string, reset: boolean) {
+  // The compiled MTS entry owns processData/updatePage and its data model.
+  const processed = __BobcatProcessData(JSON.parse(json), processorName);
+  updatePage(processed, {resetPageData:reset, reloadFromJS:false, reloadTemplate:false, nativeUpdateDataOrder:0, ...processorOptions(processorName)});
+  // React's BTS registerDataProcessors is a no-op: its hook must receive
+  // the same processed data as MTS, even if the MTS update reported an error.
+  const options = {type:reset ? 1 : 0, processorName:jsDataProcessor ? processorName : ""};
+  sendToBackground({bobcat:"runtime", method:"updateCardData", args:[processed, options]});
+}
+
+export function __BobcatSendGlobalEvent(name: string, json: string) {
+  sendToBackground({bobcat:"runtime", method:"sendGlobalEvent", name, args:JSON.parse(json)});
+}
+
+export function __BobcatUpdateGlobalProps(json: string) {
+  const data = JSON.parse(json);
+  // Native's host merges literal top-level keys; TemplateAssembler receives
+  // the complete props, not the diff. Notify BTS before entering MTS hooks.
+  hostGlobalPropsJson = JSON.stringify({...JSON.parse(hostGlobalPropsJson), ...data});
+  sendToBackground({bobcat:"runtime", method:"updateGlobalProps", args:[JSON.parse(hostGlobalPropsJson)]});
+  __globalProps = JSON.parse(hostGlobalPropsJson);
+  lynx.__globalProps = __globalProps;
+  try {
+    if (hasEventListener(engineContext, "__UpdateGlobalProps")) engineContext.dispatchEvent({type: '__UpdateGlobalProps', data: [__globalProps]});
+    else {
+      const update = scope["updateGlobalProps"];
+      if (typeof update === "function") Reflect.apply(update, scope, [__globalProps]);
+    }
+  } catch (error) { _ReportError(error); }
+}
 
 export function _AddEventListener() {
   return undefined;
@@ -340,7 +469,7 @@ export function __AdoptStyleSheet(handle: object) {
 
 export const lynx = {
   SystemInfo,
-  __initData: {},
+  __initData: {} as unknown,
   __globalProps,
   performance: runtimePerformance,
   getCoreContext: function () {

@@ -224,12 +224,13 @@ impl DocumentIngredients {
     }
 }
 
-/// The host's page data, as the JSON text the view was given.
+/// The host's initial processor name and page-data strings.
 ///
-/// Nothing on this side reads it. The realm takes each piece through a host
-/// member of its own, and `bobcat:runtime` parses it there.
+/// The realm takes each through a host member. `bobcat:runtime` parses the
+/// data and props as JSON and uses the processor name unchanged.
 #[derive(Default)]
 pub(crate) struct PageData {
+    pub(crate) initial_processor: String,
     pub(crate) init_data: Option<String>,
     pub(crate) global_props: Option<String>,
 }
@@ -630,23 +631,18 @@ impl MainThreadRuntime {
         if matches!(payload, WorkerPayload::Closed | WorkerPayload::Failed(_)) {
             self.workers.forget(key);
         }
-        let (kind, data) = match payload {
-            WorkerPayload::Message(data) => ("message", data),
-            WorkerPayload::Closed => ("closed", String::new()),
+        let (kind, data, location) = match payload {
+            WorkerPayload::Message(data) => ("message", data, None),
+            WorkerPayload::Closed => ("closed", String::new(), None),
             WorkerPayload::Errored(error) | WorkerPayload::Failed(error) => {
                 let kind = if failed { "failed" } else { "error" };
-                let location = error.location.as_ref();
-                let data = serde_json::json!({
-                    "message": error.message.as_ref(),
-                    "filename": location.and_then(|l| l.source.as_deref()).unwrap_or(""),
-                    "lineno": location.and_then(|l| l.line).unwrap_or(0),
-                    "colno": location.and_then(|l| l.column).unwrap_or(0),
-                })
-                .to_string();
+                let data = error.message.to_string();
+                let location = error.location.clone();
                 self.workers.report_failure(error);
-                (kind, data)
+                (kind, data, location)
             }
         };
+        let location = location.as_ref();
         let key = key.get().to_string();
         let called = self
             .engine
@@ -658,6 +654,9 @@ impl MainThreadRuntime {
                     HostArgument::String(&key),
                     HostArgument::String(kind),
                     HostArgument::String(&data),
+                    HostArgument::String(location.and_then(|l| l.source.as_deref()).unwrap_or("")),
+                    HostArgument::Number(f64::from(location.and_then(|l| l.line).unwrap_or(0))),
+                    HostArgument::Number(f64::from(location.and_then(|l| l.column).unwrap_or(0))),
                 ],
             )
             .map_err(|error| MainThreadError::from_engine("delivering a worker event", error));
@@ -674,17 +673,44 @@ impl MainThreadRuntime {
     pub(crate) fn apply_page_update(
         &mut self,
         js: &mut ScriptRuntime,
-        update: crate::link::PageUpdate,
+        update: &crate::link::PageUpdate,
     ) -> Result<(), MainThreadError> {
-        let message = update.into_message().to_string();
+        use crate::link::PageUpdate;
+
+        let (export, arguments): (&str, &[HostArgument<'_>]) = match update {
+            PageUpdate::Reload {
+                data,
+                processor_name,
+            } => (
+                "__BobcatReload",
+                &[
+                    HostArgument::String(data),
+                    HostArgument::String(processor_name),
+                ],
+            ),
+            PageUpdate::Data {
+                data,
+                processor_name,
+                reset,
+            } => (
+                "__BobcatUpdateData",
+                &[
+                    HostArgument::String(data),
+                    HostArgument::String(processor_name),
+                    HostArgument::Boolean(*reset),
+                ],
+            ),
+            PageUpdate::GlobalProps(data) => {
+                ("__BobcatUpdateGlobalProps", &[HostArgument::String(data)])
+            }
+            PageUpdate::GlobalEvent { name, arguments } => (
+                "__BobcatSendGlobalEvent",
+                &[HostArgument::String(name), HostArgument::String(arguments)],
+            ),
+        };
         let called = self
             .engine
-            .call_module_export(
-                js,
-                RUNTIME_MODULE_SPECIFIER,
-                "__BobcatApplyPageUpdate",
-                &[HostArgument::String(&message)],
-            )
+            .call_module_export(js, RUNTIME_MODULE_SPECIFIER, export, arguments)
             .map_err(|error| MainThreadError::from_engine("updating page data", error));
         let finished = self.finish_batch(js, called.is_ok());
         called.map(|_| ()).and(finished)
@@ -876,8 +902,24 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
+        let (viewport, enable_js_data_processor) = {
+            let slot = self.slot.borrow();
+            let ingredients = slot
+                .ingredients
+                .as_ref()
+                .expect("boot creates the document");
+            (
+                ingredients.viewport,
+                ingredients.config.enable_js_data_processor,
+            )
+        };
+        let Viewport {
+            width,
+            height,
+            device_pixel_ratio,
+        } = viewport;
         let boot = format!(
-            r#"import {{ lynx, _ReportError, __BobcatConnectBackground, __BobcatInitData, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
+            r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
 // Imported for its effect: it installs the timer globals, and a static
 // import runs before the entry this module then loads.
@@ -889,23 +931,21 @@ import "{TIMER_MODULE_SPECIFIER}";
 export const document = new Document();
 
 __BobcatInitEntry({entry_specifier});
+__BobcatInitializeMTS({{
+  enableJSDataProcessor: {enable_js_data_processor},
+  systemInfo: {{pixelRatio: {device_pixel_ratio}, pixelWidth: {width} * {device_pixel_ratio}, pixelHeight: {height} * {device_pixel_ratio}}},
+}});
+// React's entry clears lynx.__initData during initialization. The host's
+// first-screen argument belongs to boot, independently of that mutable slot.
+let data = lynx.__initData;
+
 await import({entry_specifier});
 const {{ Worker }} = await import("bobcat-internal");
-__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}));
+data = __BobcatProcessInitData(data);
+__BobcatConnectBackground(new Worker("{BTS_MODULE_SPECIFIER}", {{ name: "lynx-bg" }}), data);
 
-let data = __BobcatInitData;
-if (typeof globalThis.processData === "function") {{
-  try {{ data = globalThis.processData(data); }}
-  catch (error) {{ _ReportError(error); data = undefined; }}
-}}
-if (typeof globalThis.renderPage === "function") {{
-  try {{ globalThis.renderPage(data); }}
-  catch (error) {{ _ReportError(error); }}
-}} else {{
-  lynx.getEngine().dispatchEvent({{ type: "__RenderPage", data }});
-}}
-// Queue the boot flush after the jobs already scheduled by these hooks.
-// Await this flush so its failure still rejects boot; hook results are not awaited.
+// Queue the flush after jobs already scheduled by the lifecycle hooks.
+__BobcatRenderPage(data);
 await Promise.resolve().then(() => __FlushElementTree());
 "#
         );
@@ -1298,12 +1338,12 @@ fn install_readiness(
     Ok(())
 }
 
-/// Installs `initData` and `globalProps`, which hand the realm the host's page
-/// data as the strings the view was given — `undefined` for one it was not.
+/// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm
+/// the original strings. Missing initial data or props become `undefined`.
 ///
-/// Each hands its string over once and keeps nothing: the one call is
-/// `bobcat:runtime` evaluating, which parses both. Neither touches the
-/// document, so both answer before `createDocument` has run.
+/// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
+/// the initial data and props, and uses the processor name as a plain string.
+/// All answer before `createDocument` has run.
 fn install_page_data(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -1312,10 +1352,15 @@ fn install_page_data(
     let PageData {
         init_data,
         global_props,
+        initial_processor,
     } = page_data;
-    for (name, mut json) in [("initData", init_data), ("globalProps", global_props)] {
+    for (name, mut value) in [
+        ("initData", init_data),
+        ("globalProps", global_props),
+        ("initialProcessor", Some(initial_processor)),
+    ] {
         install(engine, js_runtime, name, 0, move |_arguments| {
-            Ok(json.take().map_or(HostValue::Undefined, HostValue::String))
+            Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
         })?;
     }
     Ok(())

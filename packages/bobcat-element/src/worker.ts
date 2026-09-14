@@ -93,6 +93,9 @@ export function __BobcatDispatchWorkerEvent(
   key: string,
   kind: string,
   data: string,
+  filename: string,
+  lineno: number,
+  colno: number,
 ) {
   const worker = workers.get(key);
   if (worker === undefined) return;
@@ -102,6 +105,6 @@ export function __BobcatDispatchWorkerEvent(
       type: "message", data: JSON.parse(data)[0], target: worker,
     });
   } else if (kind === "error" || kind === "failed") {
-    worker.dispatchEvent({ type: "error", ...JSON.parse(data), target: worker });
+    worker.dispatchEvent({ type: "error", message: data, filename, lineno, colno, target: worker });
   }
 }

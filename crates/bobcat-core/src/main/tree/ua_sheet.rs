@@ -13,8 +13,12 @@
 
 use super::{image, raw_text, scroll_container, text};
 
-/// Page configuration that controls the Lynx UA cascade.
+/// Page configuration for the Lynx runtime and UA cascade.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent Lynx page configuration switches"
+)]
 pub struct PageConfig {
     /// Whether elements default to `display: linear`.
     pub default_display_linear: bool,
@@ -22,6 +26,8 @@ pub struct PageConfig {
     pub default_overflow_visible: bool,
     /// Whether author CSS selector matching is enabled.
     pub enable_css_selector: bool,
+    /// Pass data and its processor name to BTS without running the MTS processor.
+    pub enable_js_data_processor: bool,
 }
 
 impl Default for PageConfig {
@@ -30,6 +36,7 @@ impl Default for PageConfig {
             default_display_linear: true,
             default_overflow_visible: true,
             enable_css_selector: true,
+            enable_js_data_processor: false,
         }
     }
 }
@@ -214,6 +221,7 @@ mod tests {
             default_display_linear: false,
             default_overflow_visible: false,
             enable_css_selector: true,
+            enable_js_data_processor: false,
         });
         assert!(!sheet.contains("display: linear;"));
         assert!(sheet.contains("page, view { overflow: hidden; }"));
@@ -243,6 +251,7 @@ mod tests {
                 default_display_linear: false,
                 default_overflow_visible: false,
                 enable_css_selector: false,
+                enable_js_data_processor: false,
             },
         ] {
             let sheet = ua_stylesheet(config);

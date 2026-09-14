@@ -126,7 +126,7 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
     .create_view(Arc::new(NoWakeup));
     assert!(!view.is_ready());
     assert!(matches!(
-        view.send_global_event("event", vec!["early".into()]),
+        view.send_global_event("event", r#"["early"]"#.into()),
         Err(EngineError::NotReady)
     ));
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -159,7 +159,7 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
         messages.is_empty(),
         "rejected event was replayed during boot"
     );
-    view.send_global_event("event", vec!["accepted".into()])
+    view.send_global_event("event", r#"["accepted"]"#.into())
         .unwrap();
     while messages.is_empty() {
         for event in view.pump() {
@@ -177,7 +177,7 @@ fn global_events_require_observed_readiness_and_rejected_events_are_not_replayed
     view.cancel.cancel();
     assert!(!view.is_ready());
     assert!(matches!(
-        view.send_global_event("event", vec![]),
+        view.send_global_event("event", "[]".into()),
         Err(EngineError::NotReady)
     ));
 }
@@ -191,7 +191,7 @@ fn failed_startup_never_makes_a_view_ready() {
         let events = view.pump();
         assert!(!view.is_ready());
         assert!(matches!(
-            view.send_global_event("event", vec![]),
+            view.send_global_event("event", "[]".into()),
             Err(EngineError::NotReady)
         ));
         if events
