@@ -126,10 +126,15 @@ function styleSheetURL(key: string, bundleName: string): string {
 let backgroundWorker: Worker | undefined;
 const animationCallbacks = new Map<number, (milliseconds: number) => void>();
 let nextAnimationId = 1;
+let frameRequested = false;
 function updateFrameRequest() {
-  requestScriptFrame(animationCallbacks.size > 0);
+  const pending = animationCallbacks.size > 0;
+  if (pending === frameRequested) return;
+  frameRequested = pending;
+  requestScriptFrame(pending);
 }
 export function __BobcatBeginFrame(milliseconds: number) {
+  frameRequested = false;
   const mainIds = Array.from(animationCallbacks.keys());
   for (const id of mainIds) {
     const callback = animationCallbacks.get(id);

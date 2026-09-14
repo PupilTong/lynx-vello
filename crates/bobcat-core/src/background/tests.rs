@@ -18,7 +18,7 @@ use super::{
     WorkerCommand, WorkerEvent, WorkerHome, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart,
 };
 use crate::clock::ClockInstant;
-use crate::link::{SourceRequester, ViewNotice, block_on_deadline};
+use crate::link::{HostOutbox, ViewNotice, block_on_deadline};
 use crate::resource::{
     LoadedSource, ResourceError, ResourceErrorKind, ResourceErrorPhase, RetryAdvice,
     SourceCompletion, SourceRequest,
@@ -146,13 +146,12 @@ impl Group {
         let (script, awaiting) = oneshot::channel();
         let (messages, incoming) = mpsc::unbounded_channel();
         let token = CancellationToken::new();
-        let sources = SourceRequester::new(
+        let sources = HostOutbox::new(
             self.views[view].notices.clone(),
             Arc::new(crate::NoWakeup),
             token.clone(),
         );
         self.tell(WorkerCommand::Start(WorkerStart {
-            vsync: crate::script_frames::VsyncRequests::new(Arc::new(crate::NoWakeup)).0,
             key,
             name: name.to_owned(),
             script: awaiting,

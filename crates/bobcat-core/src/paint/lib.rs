@@ -145,7 +145,6 @@ pub(crate) struct FarEnd {
     /// The seat a live view holds: its command sender and its resource
     /// system. Without it here the painter's `Weak` would not upgrade, and the
     /// painter would detach itself on its first turn.
-    #[expect(dead_code, reason = "held so the painter's weak seat upgrades")]
     seat: Rc<ViewSeat>,
     pub(crate) outbox: crate::link::ViewOutbox,
     #[expect(
@@ -619,9 +618,8 @@ impl Painter {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        let (vsync, requests) = crate::script_frames::VsyncRequests::new(Arc::clone(&requester));
         let seat = Rc::new(ViewSeat {
-            vsync: RefCell::new(requests),
+            frame_demand: RefCell::default(),
             commands,
             images: Rc::new(dom::NoImages),
         });
@@ -640,7 +638,6 @@ impl Painter {
                     // A token of its own: this far end plays the view, and
                     // nothing here is ever released.
                     tokio_util::sync::CancellationToken::new(),
-                    vsync,
                 ),
                 notices: notice_receiver,
             },
@@ -867,7 +864,7 @@ impl Painter {
                 || self
                     .seat
                     .upgrade()
-                    .is_some_and(|seat| seat.vsync.borrow_mut().is_pending())
+                    .is_some_and(|seat| seat.frame_demand.borrow_mut().is_pending())
                 || self.gesture.needs_frame())
     }
 
@@ -1073,10 +1070,10 @@ impl Painter {
     }
 
     fn deliver_vsync(&self, now: f64) {
-        if let Some(seat) = self.seat.upgrade()
-            && seat.vsync.borrow_mut().dispatch(now * 1000.0)
-        {
-            let _ = seat.commands.send(ToMain::Vsync);
+        if let Some(seat) = self.seat.upgrade() {
+            seat.frame_demand
+                .borrow_mut()
+                .dispatch(now * 1000.0, &seat.commands);
         }
     }
 

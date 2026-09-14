@@ -17,12 +17,14 @@ source only. External bundle loading remains separate work.
 
 `lynx.requestAnimationFrame` and `cancelAnimationFrame` use each realm's own JS
 callback map. A pending callback requests vsync from the painter, whose
-`owes_frame()` tells the host to enable its display callback. Only that callback
-calls `Painter::vsync()`, which answers the outstanding requests with a timestamp.
-MTS handles a `Vsync` command; BTS waits on its own reply. Each calls its runtime
-module to run the JS callbacks, independently of the other event loop. Cancelling
-the last callback drops that realm's reply receiver; the painter removes closed
-requests. A callback requesting another frame waits for another host vsync.
+`owes_frame()` tells the host to enable its display callback. Demand changes use
+the existing view-to-host notice channel, including direct notices from BTS.
+Only the host display callback calls `Painter::vsync()`, which sends a timestamp
+to each requesting realm through its existing `ToMain` or `WorkerMessage` queue.
+Each calls its runtime module to run the JS callbacks on its own event loop;
+neither waits for the other. Cancelling the last callback withdraws that realm's
+demand. Worker addresses held by the painter are weak and cannot extend Worker
+lifetime. A callback requesting another frame waits for another host vsync.
 Ordinary pumping and native animation ticks do not deliver script frames. Timers
 and BTS microtask aliases use the existing realm timer/job machinery. This follows
 the independent worker rendering steps in

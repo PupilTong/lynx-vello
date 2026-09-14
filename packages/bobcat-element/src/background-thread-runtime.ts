@@ -265,7 +265,7 @@ function receiveMessage(message: FromMainThread): void | Promise<void> {
 
 async function dispose() {
   animationCallbacks.clear();
-  requestScriptFrame(false);
+  updateFrameRequest();
   try { app.callDestroyLifetimeFun?.call(app); }
   catch (error) { lynx.reportError(error); }
   // Match web-worker-rpc's await boundary before replying. This does not
@@ -290,9 +290,18 @@ function printable(value: unknown): string {
   catch { return String(value); }
 }
 
-// Called only by this worker's own display-opportunity task. Callback IDs
+let frameRequested = false;
+function updateFrameRequest() {
+  const pending = animationCallbacks.size > 0;
+  if (pending === frameRequested) return;
+  frameRequested = pending;
+  requestScriptFrame(pending);
+}
+
+// Called while handling the painter's Vsync message. Callback IDs
 // and errors stay on BTS; no MTS message or acknowledgement participates.
 export function __BobcatBeginFrame(milliseconds: number) {
+  frameRequested = false;
   const ids = Array.from(animationCallbacks.keys());
   for (const id of ids) {
     const callback = animationCallbacks.get(id);
@@ -302,7 +311,7 @@ export function __BobcatBeginFrame(milliseconds: number) {
       catch (error) { lynx.reportError(error); }
     }
   }
-  requestScriptFrame(animationCallbacks.size > 0);
+  updateFrameRequest();
 }
 
 export const console = Object.fromEntries(
@@ -329,12 +338,12 @@ export const lynx = {
     if (typeof callback !== "function") throw new TypeError("requestAnimationFrame requires a function");
     const id = nextAnimationId++;
     animationCallbacks.set(id, callback);
-    requestScriptFrame(true);
+    updateFrameRequest();
     return id;
   },
   cancelAnimationFrame(id: number) {
     animationCallbacks.delete(id);
-    requestScriptFrame(animationCallbacks.size > 0);
+    updateFrameRequest();
   },
   reload(value?: unknown, callback?: unknown) {
     // Native only parses object arguments. Primitives (including null) mean

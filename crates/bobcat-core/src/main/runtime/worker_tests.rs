@@ -1,5 +1,6 @@
 //! Real `QuickJS` on both sides, with the test acting as the resource-owning
 //! embedder. No GPU is needed to verify contexts, transport and teardown.
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -23,6 +24,8 @@ struct Pair {
     /// The host's end of the view's link: the test plays the embedder, so it
     /// is what answers every source request.
     view: DetachedView,
+    frame_demand: crate::link::FrameDemand,
+    deferred_notices: VecDeque<ViewNotice>,
     /// The host's view cancellation signal. Worker handles and their sources
     /// have independent lifetimes, which these tests exercise explicitly.
     cancel: tokio_util::sync::CancellationToken,
@@ -99,6 +102,8 @@ impl Pair {
             js,
             events,
             view,
+            frame_demand: crate::link::FrameDemand::default(),
+            deferred_notices: VecDeque::new(),
             cancel,
             home: Some(home),
         }
@@ -115,8 +120,9 @@ impl Pair {
     /// The next source request the realm made, which for these tests is
     /// always a worker script.
     fn source(&mut self) -> SourceCompletion {
+        self.pump_host();
         loop {
-            let notice = self.view.notices.try_recv().expect("source requested");
+            let notice = self.deferred_notices.pop_front().expect("source requested");
             if let ViewNotice::RequestSource {
                 request,
                 completion,
@@ -173,12 +179,17 @@ impl Pair {
     }
 
     /// Everything the realm has said to its host so far.
+    fn pump_host(&mut self) {
+        collect_host_notices(
+            &mut self.frame_demand,
+            &mut self.view.notices,
+            &mut self.deferred_notices,
+        );
+    }
+
     fn notices(&mut self) -> Vec<ViewNotice> {
-        let mut notices = Vec::new();
-        while let Ok(notice) = self.view.notices.try_recv() {
-            notices.push(notice);
-        }
-        notices
+        self.pump_host();
+        self.deferred_notices.drain(..).collect()
     }
 
     fn check(&mut self, source: &str) {
@@ -225,6 +236,20 @@ impl Pair {
             events.push(event);
         }
         events
+    }
+}
+
+fn collect_host_notices(
+    demand: &mut crate::link::FrameDemand,
+    incoming: &mut mpsc::UnboundedReceiver<ViewNotice>,
+    other: &mut VecDeque<ViewNotice>,
+) {
+    while let Ok(notice) = incoming.try_recv() {
+        match notice {
+            ViewNotice::WorkerCreated { key, messages } => demand.register_worker(key, messages),
+            ViewNotice::ScriptFrameDemand { worker, pending } => demand.set(worker, pending),
+            notice => other.push_back(notice),
+        }
     }
 }
 
@@ -1876,8 +1901,16 @@ fn ordinary_worker_does_not_acquire_app_teardown_by_importing_bts_or_using_its_n
 
 impl Pair {
     fn frame(&mut self, milliseconds: f64) {
-        self.view.vsync.dispatch(milliseconds);
-        self.runtime.as_mut().unwrap().vsync(&mut self.js).unwrap();
+        self.pump_host();
+        let (commands, mut incoming) = mpsc::unbounded_channel();
+        self.frame_demand.dispatch(milliseconds, &commands);
+        while let Ok(crate::link::ToMain::Vsync(milliseconds)) = incoming.try_recv() {
+            self.runtime
+                .as_mut()
+                .unwrap()
+                .vsync(&mut self.js, milliseconds)
+                .unwrap();
+        }
     }
 }
 
@@ -1931,7 +1964,11 @@ fn animation_callbacks_use_display_timestamps_and_defer_nested_requests() {
     // Wait until the callback's nested request is armed, independently of
     // delivery of the console/Context messages it posted earlier.
     let deadline = ClockInstant::now() + PATIENCE;
-    while !pair.view.vsync.is_pending() {
+    loop {
+        pair.pump_host();
+        if pair.frame_demand.is_pending() {
+            break;
+        }
         assert!(
             ClockInstant::now() < deadline,
             "nested frame request was not armed"
@@ -1980,16 +2017,18 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
         .unwrap();
     pair.acknowledge_background();
     let mut events = std::mem::replace(&mut pair.events, mpsc::unbounded_channel().1);
-    pair.view.vsync.dispatch(1000.0);
-    let mut frames = std::mem::replace(
-        &mut pair.view.vsync,
-        crate::script_frames::VsyncRequests::new(Arc::new(NoWakeup)).1,
-    );
+    pair.pump_host();
+    let (main_commands, mut incoming) = mpsc::unbounded_channel();
+    pair.frame_demand.dispatch(1000.0, &main_commands);
+    let mut frames = std::mem::take(&mut pair.frame_demand);
+    let mut notices = std::mem::replace(&mut pair.view.notices, mpsc::unbounded_channel().1);
+    let mut other = VecDeque::new();
     let observer = std::thread::spawn(move || {
         waiting.recv_timeout(PATIENCE).unwrap();
         for milliseconds in [1000, 2000, 3000] {
             if milliseconds != 1000 {
-                frames.dispatch(f64::from(milliseconds));
+                collect_host_notices(&mut frames, &mut notices, &mut other);
+                frames.dispatch(f64::from(milliseconds), &main_commands);
             }
             let event = block_on_deadline(events.recv(), ClockInstant::now() + PATIENCE)
                 .flatten()
@@ -2001,10 +2040,21 @@ fn bts_animation_frames_continue_while_an_mts_callback_is_blocked() {
             assert_eq!(value[0]["frame"], milliseconds);
         }
         release.send(()).unwrap();
-        (events, frames)
+        (events, frames, notices, other)
     });
-    pair.runtime.as_mut().unwrap().vsync(&mut pair.js).unwrap();
-    (pair.events, pair.view.vsync) = observer.join().unwrap();
+    let crate::link::ToMain::Vsync(milliseconds) = incoming.try_recv().unwrap() else {
+        panic!("MTS vsync");
+    };
+    pair.runtime
+        .as_mut()
+        .unwrap()
+        .vsync(&mut pair.js, milliseconds)
+        .unwrap();
+    let (events, frames, notices, other) = observer.join().unwrap();
+    pair.events = events;
+    pair.frame_demand = frames;
+    pair.view.notices = notices;
+    pair.deferred_notices.extend(other);
     assert!(worker_failures(pair.notices()).is_empty());
 }
 

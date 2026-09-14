@@ -436,7 +436,6 @@ pub struct LynxGroup {
 /// because its view tasks and its `WorkerFactory` hold senders on the worker
 /// thread's channel and it takes them with it.
 struct GroupInner {
-    requester: Arc<dyn EventRequester>,
     attach: mpsc::UnboundedSender<GroupCommand>,
     #[expect(dead_code, reason = "held to wait for bobcat-main on drop")]
     home: ThreadJoin,
@@ -485,7 +484,7 @@ impl LynxGroup {
             style_threads,
             GroupLink {
                 attach: attachments,
-                requester: event_requester.clone(),
+                requester: event_requester,
                 ready,
                 workers: workers.commands(),
             },
@@ -494,7 +493,6 @@ impl LynxGroup {
         // here on closes both threads and joins them — including this one.
         let group = Self {
             inner: Rc::new(GroupInner {
-                requester: event_requester,
                 attach,
                 home,
                 workers,
@@ -563,15 +561,12 @@ impl LynxGroup {
         let (commands, command_receiver) = mpsc::unbounded_channel();
         let (notices, notice_receiver) = mpsc::unbounded_channel();
         let (frames, frame_receiver) = watch::channel(Published::default());
-        let (vsync, vsync_requests) =
-            crate::script_frames::VsyncRequests::new(Arc::clone(&self.inner.requester));
         self.inner
             .attach
             .send(GroupCommand::Attach(Box::new(ViewAttachment {
                 viewport,
                 // Main owns source ordering; the view owns the fetcher.
                 sources,
-                vsync: vsync.clone(),
                 commands: command_receiver,
                 notices,
                 frames,
@@ -597,7 +592,7 @@ impl LynxGroup {
             // are this view's, and the view is the only holder of a strong
             // reference to it.
             seat: Rc::new(ViewSeat {
-                vsync: RefCell::new(vsync_requests),
+                frame_demand: RefCell::default(),
                 commands,
                 images: Rc::clone(&fetcher) as Rc<dyn FrameImages>,
             }),
@@ -830,6 +825,17 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
         let mut image_requests = Vec::new();
         while let Ok(notice) = self.notices.try_recv() {
             match notice {
+                ViewNotice::WorkerCreated { key, messages } => {
+                    self.seat
+                        .frame_demand
+                        .borrow_mut()
+                        .register_worker(key, messages);
+                }
+                ViewNotice::ScriptFrameDemand { worker, pending } => {
+                    if self.state != ViewState::Failed && !self.cancel.is_cancelled() {
+                        self.seat.frame_demand.borrow_mut().set(worker, pending);
+                    }
+                }
                 ViewNotice::Engine(event) => {
                     // A fatal event ends the view the same way its release
                     // does, and by the same signal: the token this view was
@@ -840,6 +846,7 @@ impl<F: ResourceFetcher + 'static> LynxView<F> {
                         EngineEvent::StartupFailed(_) | EngineEvent::ScriptRunError(_)
                     ) {
                         self.state = ViewState::Failed;
+                        *self.seat.frame_demand.borrow_mut() = crate::link::FrameDemand::default();
                         self.cancel.cancel();
                     }
                     if matches!(event, EngineEvent::ScriptFinished) {
@@ -986,7 +993,6 @@ pub(crate) enum GroupCommand {
 /// the group's — every view in a group paints on the thread that created the
 /// group, and so wakes one event loop.
 pub(crate) struct ViewAttachment {
-    pub(crate) vsync: crate::script_frames::VsyncRequester,
     pub(crate) viewport: Viewport,
     pub(crate) sources: ViewSources,
     pub(crate) commands: mpsc::UnboundedReceiver<ToMain>,

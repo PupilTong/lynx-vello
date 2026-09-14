@@ -234,14 +234,13 @@ async fn group_task(context: Rc<GroupContext>, mut attach: mpsc::UnboundedReceiv
         tokio::select! {
             command = attach.recv() => match command {
                 Some(GroupCommand::Attach(attachment)) => {
-                    let ViewAttachment { viewport, sources, commands, notices, frames, cancel, vsync } =
+                    let ViewAttachment { viewport, sources, commands, notices, frames, cancel } =
                         *attachment;
                     let outbox = ViewOutbox::new(
                         notices,
                         frames,
                         Arc::clone(&context.requester),
                         cancel.clone(),
-                        vsync,
                     );
                     #[cfg(all(target_arch = "wasm32", panic = "abort"))]
                     add_script_panic_reporter({

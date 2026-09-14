@@ -104,8 +104,6 @@ impl WorkerKey {
 /// else a worker has — what is posted to it, what it says back — is a channel
 /// that arrives with it.
 pub(crate) struct WorkerStart {
-    /// Sends rAF wakeup requests to the painter; carries no shared frame clock.
-    pub(crate) vsync: crate::script_frames::VsyncRequester,
     pub(crate) key: WorkerKey,
     /// The worker's `self.name`, empty when the constructor named none.
     pub(crate) name: String,
@@ -120,8 +118,8 @@ pub(crate) struct WorkerStart {
     pub(crate) events: mpsc::UnboundedSender<WorkerEvent>,
     /// This worker's end signal, independent of its creating view's token.
     pub(crate) token: CancellationToken,
-    /// Imported text reaches the view resource host under this worker's cancellation scope.
-    pub(crate) sources: crate::link::SourceRequester,
+    /// Sources and frame demand reach the host directly, under this worker's lifetime.
+    pub(crate) sources: crate::link::HostOutbox,
 }
 
 /// Everything the worker thread is ever told.
@@ -132,6 +130,8 @@ pub(crate) enum WorkerCommand {
 
 /// Everything one worker in particular is ever told.
 pub(crate) enum WorkerMessage {
+    /// A display opportunity from the painter, handled even while entry awaits.
+    Vsync(f64),
     /// One JSON-encoded message for the worker's realm.
     Post(String),
     /// Explicit termination or GC of the MTS Worker object: end it between

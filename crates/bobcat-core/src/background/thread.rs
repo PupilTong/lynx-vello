@@ -48,7 +48,7 @@ use super::scope::{
 };
 use super::{WorkerCommand, WorkerEvent, WorkerKey, WorkerMessage, WorkerPayload, WorkerStart};
 use crate::lifetime::{EndOnUnwind, Lifetime, Settles, serve_clock};
-use crate::link::{SourceAnswer, SourceRequester};
+use crate::link::{HostOutbox, SourceAnswer};
 use crate::main::quickjs::{ScriptEngine, ScriptRuntime};
 use crate::resource::{LoadedSource, SourceRequest};
 use crate::script::ScriptError;
@@ -158,7 +158,6 @@ struct WorkerRealm {
     /// teardown because it is written from inside the realm it would tear
     /// down: the task reads it once the call that set it has returned.
     closing: Rc<Cell<bool>>,
-    frames: Rc<crate::script_frames::AnimationFrames>,
 }
 
 /// What a worker is, which is what decides whether a message has anywhere to
@@ -194,11 +193,10 @@ struct Worker {
     /// report wins, so a `Failed` and a `Closed` cannot both arrive. A panic
     /// has a latch of its own on the lifetime.
     reported: Cell<bool>,
-    sources: SourceRequester,
+    sources: HostOutbox,
     /// Messages wait for entry evaluation, including imports and top-level
     /// await. Timers and module completions continue to enter the realm.
     boot_finished: watch::Sender<bool>,
-    vsync: crate::script_frames::VsyncRequester,
     /// How many times the epilogue has run, for the test that counts the wakes
     /// a worker answers.
     #[cfg(test)]
@@ -211,8 +209,7 @@ impl Worker {
         key: WorkerKey,
         events: mpsc::UnboundedSender<WorkerEvent>,
         token: CancellationToken,
-        sources: SourceRequester,
-        vsync: crate::script_frames::VsyncRequester,
+        sources: HostOutbox,
     ) -> Rc<Self> {
         Rc::new(Self {
             js,
@@ -223,7 +220,6 @@ impl Worker {
             reported: Cell::new(false),
             sources,
             boot_finished: watch::channel(false).0,
-            vsync,
             #[cfg(test)]
             epilogues: Cell::new(0),
         })
@@ -383,7 +379,7 @@ impl Worker {
                 // asked for. Each hears the same reason.
                 Err(error) => Err(error.clone()),
                 Ok(js) => {
-                    open_realm(js, self.events.clone(), self.key, &self.vsync).map(|mut realm| {
+                    open_realm(js, self.events.clone(), self.key, &self.sources).map(|mut realm| {
                         let (source, url) = script;
                         let source = worker_boot_source(name, &source);
                         if let Err(error) = realm.engine.start_module(js, &source, &url) {
@@ -474,9 +470,8 @@ async fn serve_worker(js: WorkerRuntime, start: WorkerStart) {
         events,
         token,
         sources,
-        vsync,
     } = start;
-    let worker = Worker::new(js, key, events, token, sources, vsync);
+    let worker = Worker::new(js, key, events, token, sources);
     worker.spawn(boot_worker(Rc::clone(&worker), name, script, messages));
     worker.run_owner().await;
 }
@@ -514,6 +509,7 @@ async fn boot_worker(
                     return;
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
+                Some(WorkerMessage::Vsync(_)) => {},
             },
             // A worker that ended before its boot task was polled must not
             // evaluate the arriving source.
@@ -546,7 +542,6 @@ async fn boot_worker(
         return;
     }
     worker.spawn(consume_messages(Rc::clone(&worker), messages, queued));
-    worker.spawn(serve_frames(Rc::clone(&worker)));
     worker.spawn(serve_clock(
         Rc::clone(&worker),
         worker.lifetime.deadlines(),
@@ -554,34 +549,23 @@ async fn boot_worker(
     ));
 }
 
-/// Display opportunities reach this event loop directly from the painter.
-/// No MTS task or callback acknowledgement is needed to make progress here.
-async fn serve_frames(worker: Rc<Worker>) {
-    let frames = {
-        let state = worker.state.borrow();
-        let WorkerState::Live(realm) = &*state else {
-            return;
-        };
-        Rc::clone(&realm.frames)
-    };
-    loop {
-        let milliseconds = frames.next().await;
-        worker.enter(|realm, js| {
-            if let Err(error) = realm.engine.call_module_export(
-                js,
-                crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
-                "__BobcatBeginFrame",
-                &[HostArgument::Number(milliseconds)],
-            ) {
-                report(
-                    &worker.events,
-                    worker.key,
-                    "running animation callbacks",
-                    error,
-                );
-            }
-        });
-    }
+/// The painter's message is processed on this worker's event loop.
+fn deliver_vsync(worker: &Rc<Worker>, milliseconds: f64) {
+    worker.enter(|realm, js| {
+        if let Err(error) = realm.engine.call_module_export(
+            js,
+            crate::esm::BTS_RUNTIME_MODULE_SPECIFIER,
+            "__BobcatBeginFrame",
+            &[HostArgument::Number(milliseconds)],
+        ) {
+            report(
+                &worker.events,
+                worker.key,
+                "running animation callbacks",
+                error,
+            );
+        }
+    });
 }
 
 /// The one ordered consumer of what is posted to this worker.
@@ -600,6 +584,7 @@ async fn consume_messages(
                     return;
                 }
                 Some(WorkerMessage::Post(data)) => queued.push(data),
+                Some(WorkerMessage::Vsync(milliseconds)) => deliver_vsync(&worker, milliseconds),
             },
             changed = ready.changed() => if changed.is_err() { return; },
         }
@@ -611,6 +596,7 @@ async fn consume_messages(
         match message {
             // Explicit termination or collection of the MTS handle.
             WorkerMessage::Terminate => break,
+            WorkerMessage::Vsync(milliseconds) => deliver_vsync(&worker, milliseconds),
             WorkerMessage::Post(data) => {
                 worker.enter(|realm, js| deliver(&worker.events, worker.key, realm, js, &data));
             }
@@ -660,14 +646,19 @@ fn open_realm(
     js_runtime: &mut ScriptRuntime,
     events: mpsc::UnboundedSender<WorkerEvent>,
     key: WorkerKey,
-    vsync: &crate::script_frames::VsyncRequester,
+    host: &HostOutbox,
 ) -> Result<WorkerRealm, ScriptError> {
     let mut engine = js_runtime
         .create_realm()
         .map_err(|error| context_of("creating the worker realm", error))?;
     engine.enable_module_loading();
-    let frames = crate::script_frames::AnimationFrames::new(vsync.clone());
-    crate::script_frames::install(&mut engine, js_runtime, &frames)?;
+    let host = host.clone();
+    crate::script_frames::install(&mut engine, js_runtime, move |pending| {
+        host.notify(crate::link::ViewNotice::ScriptFrameDemand {
+            worker: Some(key),
+            pending,
+        });
+    })?;
     let timers = Rc::new(TimerState::new());
     let closing = Rc::new(Cell::new(false));
     install_worker_members(&mut engine, js_runtime, &timers, &closing, move |data| {
@@ -680,7 +671,6 @@ fn open_realm(
         engine,
         timers,
         closing,
-        frames,
     })
 }
 
@@ -795,12 +785,11 @@ mod tests {
             WorkerKey::new(key),
             events,
             CancellationToken::new(),
-            SourceRequester::new(
+            HostOutbox::new(
                 mpsc::unbounded_channel().0,
                 std::sync::Arc::new(crate::NoWakeup),
                 CancellationToken::new(),
             ),
-            crate::script_frames::VsyncRequests::new(std::sync::Arc::new(crate::NoWakeup)).0,
         );
         worker.spawn(boot_worker(
             Rc::clone(&worker),

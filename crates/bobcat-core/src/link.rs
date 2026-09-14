@@ -24,10 +24,11 @@ use std::thread;
 
 use dom::scroll::ScrollAxes;
 use dom::{CommittedFrame, FrameImages, HitTarget, NodeId, Vector2D};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::background::{WorkerKey, WorkerMessage};
 use crate::clock::ClockInstant;
 #[cfg(test)]
 use crate::main::tree::LynxDocument;
@@ -38,17 +39,17 @@ use crate::view::{EngineEvent, EventRequester, LynxViewError};
 /// The answer to one source request, as the side that awaits it sees it.
 pub(crate) type SourceAnswer = oneshot::Receiver<Result<LoadedSource, LynxViewError>>;
 
-/// A realm's right to request source text from its view's resource host.
+/// A realm's source requests and frame demand sent to its view's host.
 /// Unlike `ViewOutbox`, this carries no main-thread publication state and can
 /// travel to a worker. Completions are cancelled with that worker's lifetime.
 #[derive(Clone)]
-pub(crate) struct SourceRequester {
+pub(crate) struct HostOutbox {
     notices: mpsc::UnboundedSender<ViewNotice>,
     requester: Arc<dyn EventRequester>,
     token: CancellationToken,
 }
 
-impl SourceRequester {
+impl HostOutbox {
     pub(crate) fn new(
         notices: mpsc::UnboundedSender<ViewNotice>,
         requester: Arc<dyn EventRequester>,
@@ -67,27 +68,21 @@ impl SourceRequester {
         answer
     }
 
-    pub(crate) fn preload(&self, request: SourceRequest) {
-        if self
-            .notices
-            .send(ViewNotice::PreloadSource(request))
-            .is_ok()
-        {
+    pub(crate) fn notify(&self, notice: ViewNotice) {
+        if self.notices.send(notice).is_ok() {
             self.requester.request_event();
         }
     }
 
+    pub(crate) fn preload(&self, request: SourceRequest) {
+        self.notify(ViewNotice::PreloadSource(request));
+    }
+
     fn send(&self, request: SourceRequest, completion: SourceCompletion) {
-        if self
-            .notices
-            .send(ViewNotice::RequestSource {
-                request,
-                completion,
-            })
-            .is_ok()
-        {
-            self.requester.request_event();
-        }
+        self.notify(ViewNotice::RequestSource {
+            request,
+            completion,
+        });
     }
 }
 
@@ -109,7 +104,7 @@ pub(crate) enum ToMain {
         height: f32,
         device_pixel_ratio: f32,
     },
-    Vsync,
+    Vsync(f64),
     BeginFrame {
         now: f64,
         seq: u64,
@@ -154,6 +149,15 @@ pub(crate) enum PageUpdate {
 /// Only what a host must act on rides here. Everything the painter merely
 /// reads is [`Published`] instead.
 pub(crate) enum ViewNotice {
+    /// The painter can notify this worker without entering the MTS realm.
+    WorkerCreated {
+        key: WorkerKey,
+        messages: mpsc::WeakUnboundedSender<WorkerMessage>,
+    },
+    ScriptFrameDemand {
+        worker: Option<WorkerKey>,
+        pending: bool,
+    },
     Engine(EngineEvent),
     /// A hint to the same resource fetcher, with no result retained by core.
     PreloadSource(SourceRequest),
@@ -215,6 +219,54 @@ impl RouterHost for Published {
     }
 }
 
+/// Host-side script demand contributing to the painter's existing frame request.
+/// Worker addresses are weak so a requested frame cannot keep a worker alive.
+#[derive(Default)]
+pub(crate) struct FrameDemand {
+    main: bool,
+    workers: FxHashMap<WorkerKey, (mpsc::WeakUnboundedSender<WorkerMessage>, bool)>,
+}
+
+impl FrameDemand {
+    pub(crate) fn register_worker(
+        &mut self,
+        key: WorkerKey,
+        messages: mpsc::WeakUnboundedSender<WorkerMessage>,
+    ) {
+        self.workers.insert(key, (messages, false));
+    }
+
+    pub(crate) fn set(&mut self, worker: Option<WorkerKey>, pending: bool) {
+        if let Some(key) = worker {
+            if let Some((_, demand)) = self.workers.get_mut(&key) {
+                *demand = pending;
+            }
+        } else {
+            self.main = pending;
+        }
+    }
+
+    pub(crate) fn is_pending(&mut self) -> bool {
+        self.workers.retain(|_, (messages, _)| {
+            messages.upgrade().is_some_and(|sender| !sender.is_closed())
+        });
+        self.main || self.workers.values().any(|(_, pending)| *pending)
+    }
+
+    pub(crate) fn dispatch(&mut self, milliseconds: f64, main: &mpsc::UnboundedSender<ToMain>) {
+        if std::mem::take(&mut self.main) {
+            let _ = main.send(ToMain::Vsync(milliseconds));
+        }
+        for (messages, pending) in self.workers.values_mut() {
+            if std::mem::take(pending)
+                && let Some(messages) = messages.upgrade()
+            {
+                let _ = messages.send(WorkerMessage::Vsync(milliseconds));
+            }
+        }
+    }
+}
+
 /// The non-owning seat one painter takes on one view: the two things a painter
 /// reaches a live view through, released together.
 ///
@@ -230,7 +282,7 @@ impl RouterHost for Published {
 /// command channel, which is what ends its task — precedes giving up the
 /// view's share of the host's resource system.
 pub(crate) struct ViewSeat {
-    pub(crate) vsync: RefCell<crate::script_frames::VsyncRequests>,
+    pub(crate) frame_demand: RefCell<FrameDemand>,
     /// The view's own strong sender. Closing it is the goodbye that ends the
     /// view's task, which is why the seat dies with the view rather than with
     /// whatever a painter is holding.
@@ -250,7 +302,6 @@ pub(crate) struct ViewSeat {
 /// that costs.
 #[derive(Clone)]
 pub(crate) struct ViewOutbox {
-    pub(crate) vsync: crate::script_frames::VsyncRequester,
     notices: mpsc::UnboundedSender<ViewNotice>,
     /// `Rc` because the sender is the task's and every host closure that
     /// publishes holds a clone of this whole outbox.
@@ -270,10 +321,8 @@ impl ViewOutbox {
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
-        vsync: crate::script_frames::VsyncRequester,
     ) -> Self {
         Self {
-            vsync,
             notices,
             frames: Rc::new(frames),
             requester,
@@ -286,8 +335,8 @@ impl ViewOutbox {
         &self.token
     }
 
-    pub(crate) fn source_requester(&self, token: CancellationToken) -> SourceRequester {
-        SourceRequester::new(self.notices.clone(), Arc::clone(&self.requester), token)
+    pub(crate) fn host_outbox(&self, token: CancellationToken) -> HostOutbox {
+        HostOutbox::new(self.notices.clone(), Arc::clone(&self.requester), token)
     }
 
     /// Announces one notice, then wakes the thread that paints.
@@ -429,8 +478,6 @@ impl ViewObserver {
 /// crate's benchmarks, and the tests that drive a document in place rather
 /// than over a group's thread.
 pub(crate) struct DetachedView {
-    #[cfg(test)]
-    pub(crate) vsync: crate::script_frames::VsyncRequests,
     /// Held even where nothing reads it: a closed notice channel would make
     /// the outbox's sends fail, which is not the shape a caller playing the
     /// host is standing in for.
@@ -462,14 +509,9 @@ pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox
     let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
-    let (vsync, requests) = crate::script_frames::VsyncRequests::new(Arc::clone(&requester));
-    #[cfg(not(test))]
-    drop(requests);
     (
-        ViewOutbox::new(notices, frames, requester, token.clone(), vsync),
+        ViewOutbox::new(notices, frames, requester, token.clone()),
         DetachedView {
-            #[cfg(test)]
-            vsync: requests,
             notices: notice_receiver,
             published: ViewObserver {
                 frames: frame_receiver,

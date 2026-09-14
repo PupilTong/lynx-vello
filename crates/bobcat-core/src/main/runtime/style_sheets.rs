@@ -15,7 +15,7 @@ pub(super) fn install_styles(
     document: &Rc<RefCell<DocumentSlot>>,
     outbox: &ViewOutbox,
 ) -> Result<(), MainThreadError> {
-    let sources = outbox.source_requester(outbox.token().clone());
+    let sources = outbox.host_outbox(outbox.token().clone());
     install(engine, js, "preloadStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("preloadStyleSheet expects a URL".to_owned());
@@ -26,7 +26,7 @@ pub(super) fn install_styles(
 
     let document = Rc::clone(document);
     let token = outbox.token().clone();
-    let sources = outbox.source_requester(token.clone());
+    let sources = outbox.host_outbox(token.clone());
     install(engine, js, "adoptStyleSheet", 1, move |args| {
         let Some(HostValue::String(url)) = args.first() else {
             return Err("adoptStyleSheet expects a URL".to_owned());

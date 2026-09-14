@@ -182,6 +182,7 @@ describe("MTS/BTS lifecycle runtime", () => {
   });
 
   it("runs MTS frames with cancellation, nested requests and errors kept on their own frame", () => {
+    requestScriptFrame.mockClear();
     const calls: [string, number][] = [];
     let cancelled = 0;
     mts.lynx.requestAnimationFrame(time => {
@@ -192,13 +193,31 @@ describe("MTS/BTS lifecycle runtime", () => {
     });
     cancelled = mts.lynx.requestAnimationFrame(() => { throw Error("cancelled callback ran"); });
     mts.lynx.requestAnimationFrame(time => calls.push(["third", time]));
+    expect(requestScriptFrame.mock.calls).toEqual([[true]]);
     mts.__BobcatBeginFrame(1250);
     expect(calls).toEqual([["first", 1250], ["third", 1250]]);
     expect(reportedErrors).toHaveBeenLastCalledWith("error", "undefined");
     expect(requestScriptFrame).toHaveBeenLastCalledWith(true);
     mts.__BobcatBeginFrame(1500);
     expect(calls).toEqual([["first", 1250], ["third", 1250], ["nested", 1500]]);
-    expect(requestScriptFrame).toHaveBeenLastCalledWith(false);
+    expect(requestScriptFrame.mock.calls).toEqual([[true], [true]]);
+  });
+
+  it("coalesces each realm's frame demand and withdraws it when the last callback is cancelled", async () => {
+    for (const runtime of [mts, await import("../src/background-thread-runtime.ts")]) {
+      requestScriptFrame.mockClear();
+      const callback = rstest.fn();
+      const first = runtime.lynx.requestAnimationFrame(callback);
+      const last = runtime.lynx.requestAnimationFrame(callback);
+      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
+      runtime.lynx.cancelAnimationFrame(first);
+      expect(requestScriptFrame.mock.calls).toEqual([[true]]);
+      runtime.lynx.cancelAnimationFrame(last);
+      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
+      runtime.__BobcatBeginFrame(1750);
+      expect(callback).not.toHaveBeenCalled();
+      expect(requestScriptFrame.mock.calls).toEqual([[true], [false]]);
+    }
   });
 
   it("queues Context and publish calls together, then replays each late publish hook", () => {

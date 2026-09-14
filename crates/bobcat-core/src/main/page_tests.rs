@@ -125,7 +125,9 @@ impl Harness {
                     request,
                     completion,
                 } => self.sources.push((request, completion)),
-                ViewNotice::RequestImages(_) => {}
+                ViewNotice::RequestImages(_)
+                | ViewNotice::WorkerCreated { .. }
+                | ViewNotice::ScriptFrameDemand { .. } => {}
                 ViewNotice::PreloadSource(request) => self.preloads.push(request),
             }
         }

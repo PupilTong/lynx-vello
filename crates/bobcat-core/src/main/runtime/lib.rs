@@ -533,7 +533,6 @@ pub(crate) struct MainThreadRuntime {
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
-    script_frames: Rc<crate::script_frames::AnimationFrames>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -580,9 +579,14 @@ impl MainThreadRuntime {
             .map_err(|error| MainThreadError::from_engine("creating the script realm", error))?;
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
-        let script_frames = crate::script_frames::AnimationFrames::new(outbox.vsync.clone());
-        crate::script_frames::install(&mut engine, js_runtime, &script_frames)
-            .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
+        let frame_outbox = outbox.clone();
+        crate::script_frames::install(&mut engine, js_runtime, move |pending| {
+            frame_outbox.notify(crate::link::ViewNotice::ScriptFrameDemand {
+                worker: None,
+                pending,
+            });
+        })
+        .map_err(|error| MainThreadError::from_engine("installing animation frames", error))?;
         engine.enable_module_loading();
         let slot = install_bobcat(
             &mut engine,
@@ -607,7 +611,6 @@ impl MainThreadRuntime {
                 slot,
                 events,
                 timers,
-                script_frames,
                 next_event_id: 0,
             },
             incoming,
@@ -730,10 +733,11 @@ impl MainThreadRuntime {
             .advance_animations(now);
     }
 
-    pub(crate) fn vsync(&mut self, js: &mut ScriptRuntime) -> Result<(), MainThreadError> {
-        let Some(milliseconds) = self.script_frames.take() else {
-            return Ok(());
-        };
+    pub(crate) fn vsync(
+        &mut self,
+        js: &mut ScriptRuntime,
+        milliseconds: f64,
+    ) -> Result<(), MainThreadError> {
         self.engine
             .call_module_export(
                 js,
