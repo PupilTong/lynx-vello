@@ -455,15 +455,33 @@ mod implementation {
         })
     }
 
+    /// The call's arguments, and whether anything in them owns an allocation.
+    ///
+    /// The flag is what lets [`host_dispatch`] skip the vector's drop on the
+    /// path that has nothing to free. It is read off the kinds the loop is
+    /// already matching on, plus whether the vector spilled — with more than
+    /// [`HOST_INLINE_ARGS`] arguments the buffer itself is on the heap, so it
+    /// has to be dropped whatever the elements are.
     fn read_host_arguments(
         count: usize,
         arguments: *const ffi::QjsHostArg,
-    ) -> Result<SmallVec<[HostValue; HOST_INLINE_ARGS]>, HostFunctionError> {
+    ) -> Result<(SmallVec<[HostValue; HOST_INLINE_ARGS]>, bool), HostFunctionError> {
         if count == 0 || arguments.is_null() {
-            return Ok(SmallVec::new());
+            return Ok((SmallVec::new(), false));
         }
         let raw = unsafe { std::slice::from_raw_parts(arguments, count) };
-        raw.iter().map(read_host_argument).collect()
+        let mut values = SmallVec::new();
+        let mut owns_heap = false;
+        for argument in raw {
+            // One comparison: the kinds are ordered so that everything from
+            // `HOST_ARG_STRING` up either owns bytes or is refused outright
+            // by `read_host_argument` below, and a refusal never reaches the
+            // flag's reader.
+            owns_heap |= argument.kind >= ffi::HOST_ARG_STRING;
+            values.push(read_host_argument(argument)?);
+        }
+        let spilled = values.spilled();
+        Ok((values, owns_heap || spilled))
     }
 
     fn read_host_argument(argument: &ffi::QjsHostArg) -> Result<HostValue, HostFunctionError> {
@@ -530,13 +548,26 @@ mod implementation {
         let slot = unsafe { &*handler.cast::<HostSlot>() };
 
         let called = catch_unwind(AssertUnwindSafe(|| {
-            let values = read_host_arguments(argument_count, arguments)?;
+            let (values, owns_heap) = read_host_arguments(argument_count, arguments)?;
             let Ok(mut handler) = slot.handler.try_borrow_mut() else {
                 return Err(HostFunctionError::new(
                     "this host function cannot be called while it is already running",
                 ));
             };
-            handler(&values)
+            let outcome = handler(&values);
+            // Nothing in here owns anything, so its drop would free nothing —
+            // and that drop is an out-of-line call, because `HostValue` has
+            // two variants that *can* own an allocation and the glue for both
+            // is past the inliner's threshold. `owns_heap` is false only when
+            // every element is `Undefined`, `Null`, a `Boolean` or a `Number`
+            // and the buffer is still the inline array, so forgetting the
+            // vector leaks nothing: it skips work that had nothing to do.
+            // A handler that panicked never reaches this and unwinds through
+            // the ordinary drop.
+            if !owns_heap {
+                mem::forget(values);
+            }
+            outcome
         }));
 
         let returned = match called {
@@ -604,7 +635,7 @@ mod implementation {
     ///
     /// [`HostArgument`] is the borrowed counterpart, for the other direction:
     /// bytes the host already owns and only lends for the length of a call.
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Debug, PartialEq)]
     #[non_exhaustive]
     pub enum HostValue {
         Undefined,
@@ -613,6 +644,29 @@ mod implementation {
         Number(f64),
         String(String),
         Structured(StructuredClone),
+    }
+
+    /// Written out rather than derived, for the `#[inline]`.
+    ///
+    /// A host function that hands one of its arguments back — the shape of
+    /// every "return what you were given" member — clones one of these per
+    /// call. Derived, that is one function covering all six variants, and
+    /// with two of them owning an allocation it is large enough that the
+    /// inliner leaves it out of line, which turns the primitive case into a
+    /// call that copies 32 bytes. Inlined, the primitive arms fold into the
+    /// caller and only the owning arms are real work.
+    impl Clone for HostValue {
+        #[inline]
+        fn clone(&self) -> Self {
+            match self {
+                Self::Undefined => Self::Undefined,
+                Self::Null => Self::Null,
+                Self::Boolean(value) => Self::Boolean(*value),
+                Self::Number(value) => Self::Number(*value),
+                Self::String(value) => Self::String(value.clone()),
+                Self::Structured(value) => Self::Structured(value.clone()),
+            }
+        }
     }
 
     impl HostValue {
