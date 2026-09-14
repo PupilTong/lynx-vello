@@ -772,8 +772,8 @@ fn native_js_data_processor_requires_a_boolean_and_survives_web_conversion() {
             assert_eq!(
                 default_page(&native, web)
                     .view_sources()
-                    .data_processing
-                    .on_js,
+                    .config
+                    .enable_js_data_processor,
                 expected,
                 "config={value}, web={web}"
             );

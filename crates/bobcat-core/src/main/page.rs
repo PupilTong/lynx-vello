@@ -171,7 +171,7 @@ struct BootSources {
     background_entry: Option<String>,
     /// The host's page data, as JSON text only the realm reads.
     init_data: Option<String>,
-    data_processing: crate::view::DataProcessing,
+    initial_processor: String,
     global_props: Option<String>,
 }
 
@@ -527,7 +527,7 @@ impl Page {
         init_data: Option<String>,
         global_props: Option<String>,
         background_entry: Option<String>,
-        data_processing: &crate::view::DataProcessing,
+        initial_processor: String,
     ) {
         // A view that has already ended builds no realm and runs no entry:
         // its tasks are about to be reclaimed, and the ingredients go with the
@@ -553,6 +553,7 @@ impl Page {
                 url,
                 background_entry,
                 PageData {
+                    initial_processor,
                     init_data,
                     global_props,
                 },
@@ -565,7 +566,6 @@ impl Page {
             if self.outbox.is_cancelled() {
                 return None;
             }
-            runtime.prepare_data_processing(data_processing);
             if let Err(error) = runtime.run_main_thread_script(js, source, url) {
                 if self.outbox.is_cancelled() {
                     return None;
@@ -719,7 +719,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
         entry,
         background_entry,
         init_data,
-        data_processing,
+        initial_processor,
         global_props,
     } = sources;
     // The fonts first, because a view whose containers cannot serve the family
@@ -748,7 +748,7 @@ pub(super) async fn serve_view(context: Rc<GroupContext>, view: AttachedView, ou
             entry,
             background_entry,
             init_data,
-            data_processing,
+            initial_processor,
             global_props,
         },
     ));
@@ -813,7 +813,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         entry,
         background_entry,
         init_data,
-        data_processing,
+        initial_processor,
         global_props,
     } = sources;
     for url in style_sheets {
@@ -868,7 +868,7 @@ async fn boot_page(page: Rc<Page>, sources: BootSources) {
         init_data,
         global_props,
         background_entry,
-        &data_processing,
+        initial_processor,
     );
 }
 

@@ -696,7 +696,7 @@ entry execution. The generated boot body has this order:
 ```js
 export const document = new Document();
 __BobcatInitEntry(entryMtsUrl);
-__BobcatInitializeMTS({ processorName, enableJSDataProcessor, systemInfo: viewportMetrics });
+__BobcatInitializeMTS({ enableJSDataProcessor, systemInfo: viewportMetrics });
 let data = lynx.__initData;
 await import(entryMtsUrl);
 const { Worker } = await import("bobcat-internal");
@@ -1253,8 +1253,10 @@ ownership and synchronous failures are described in
 ## Data lifecycle
 
 Initial preprocessing, update/reset, global-property snapshots and reload use
-the existing MTS command and Worker links. Rust keeps processor/viewport inputs
-typed; JS owns BTS initialization and sends its snapshot through postMessage.
+the existing MTS command and Worker links. Boot reads the processor switch from
+PageConfig and the metrics from Viewport. The initial processor name crosses the
+startup-data binding as a string, without serialization or source interpolation.
+JS owns BTS initialization and sends its snapshot through postMessage.
 Host updates require observed readiness and otherwise return `NotReady`. See
 [data and global-property lifecycle](data-lifecycle-runtime.md) for the call
 order, input ownership, live ESM bindings and framework boundary.

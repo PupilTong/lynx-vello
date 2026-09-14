@@ -30,17 +30,18 @@ carries JSON protocol data, not realm values or DOM handles. BTS receives the
 parsed data before its entry runs:
 `_params.initData` is null, `_params.updateData` and `lynx.__initData` share the
 processed data, and `_params.cacheData` is empty under the default host policy.
-Rust retains processor selection as `DataProcessing` and viewport metrics as
-`Viewport`. Boot passes the string, boolean and numeric inputs directly to JS;
-only string quoting is needed for the generated source. JS constructs SystemInfo
-from its runtime constants and viewport metrics, then sends its snapshot to BTS.
+The runtime reads `PageConfig.enable_js_data_processor` and `Viewport` from the
+staged document ingredients. `ViewSources.initial_processor` remains a plain
+`String`: the existing one-shot startup-data binding hands it directly to JS,
+without serializing it or embedding it in generated source. JS constructs
+SystemInfo from its runtime constants and viewport metrics, then sends it to BTS.
 Initial global props come solely from `ViewSources.global_props`.
 
-`DataProcessing.initial_processor` selects the initial name; a plain JSON map
+`ViewSources.initial_processor` selects the initial name; a plain JSON map
 passed to a host update selects the default name. `DataUpdate` carries an explicit
 name for update/reset/reload. The framework's `processData` owns named lookup and
 fallback. After MTS processing, BTS receives an empty processor name, preventing
-a second preprocessing pass. The retained `DataProcessing.on_js` switch comes
+a second preprocessing pass. The `PageConfig.enable_js_data_processor` switch comes
 from the normalized `enableJSDataProcessor` source flag: if enabled, the runtime
 passes raw data/name through rather than inventing a BTS processor. The default
 is false. No pre-update cache, processor coalescing or path-based merge is added.

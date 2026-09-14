@@ -344,16 +344,6 @@ impl StyleThreads {
     }
 }
 
-/// Data processor selection and execution policy for one page.
-#[derive(Clone, Debug, Default)]
-pub struct DataProcessing {
-    /// Processor selected for the initial data; empty selects the default.
-    pub initial_processor: String,
-    /// Native `enableJSDataProcessor`: pass raw data and its processor name
-    /// to the framework, without calling the MTS processor.
-    pub on_js: bool,
-}
-
 /// One host update or reload and the processor selected for its data.
 /// A plain JSON map converts to an update using the default processor.
 #[derive(Debug, Default)]
@@ -406,8 +396,8 @@ pub struct ViewSources {
     /// [`Self::init_data`]: the realm parses it into `lynx.__globalProps` and
     /// the entry's `__globalProps` before the entry loads.
     pub global_props: Option<String>,
-    /// Initial processor selection and the bundle's JS processor switch.
-    pub data_processing: DataProcessing,
+    /// Processor selected for initial data; empty selects the default.
+    pub initial_processor: String,
 }
 
 impl ViewSources {
@@ -422,7 +412,7 @@ impl ViewSources {
             background_entry: None,
             init_data: None,
             global_props: None,
-            data_processing: DataProcessing::default(),
+            initial_processor: String::new(),
         }
     }
 }

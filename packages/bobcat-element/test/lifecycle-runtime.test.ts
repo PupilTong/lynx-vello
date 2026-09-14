@@ -26,6 +26,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   preloadStyleSheet, adoptStyleSheet,
+  initialProcessor: () => "",
   initData: () => undefined,
   globalProps: () => undefined,
 }));

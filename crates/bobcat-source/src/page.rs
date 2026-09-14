@@ -26,7 +26,6 @@ pub struct PageSource {
     named_style_sheets: Vec<(Url, Arc<PreparsedStyleSheet>)>,
     style_sheet: Option<(Url, PageStyleSheet)>,
     config: PageConfig,
-    js_data_processor: bool,
     compatibility_warnings: Vec<CompatibilityWarning>,
 }
 
@@ -287,6 +286,7 @@ impl PageSource {
             default_display_linear: template.config_flag("defaultDisplayLinear"),
             default_overflow_visible: template.config_flag("defaultOverflowVisible"),
             enable_css_selector: template.config_flag("enableCSSSelector"),
+            enable_js_data_processor: template.config_flag("enableJSDataProcessor"),
         };
         let compatibility_warnings = if scoped_css_ids.is_empty() {
             Vec::new()
@@ -303,7 +303,6 @@ impl PageSource {
             named_style_sheets,
             style_sheet,
             config,
-            js_data_processor: template.config_flag("enableJSDataProcessor"),
             compatibility_warnings,
         })
     }
@@ -325,7 +324,6 @@ impl PageSource {
             named_style_sheets: Vec::new(),
             style_sheet,
             config: raw_lynx_xml_config(),
-            js_data_processor: false,
             compatibility_warnings: Vec::new(),
         })
     }
@@ -381,10 +379,6 @@ impl PageSource {
     pub fn view_sources(&self) -> ViewSources {
         ViewSources {
             config: self.config,
-            data_processing: bobcat_core::DataProcessing {
-                on_js: self.js_data_processor,
-                ..Default::default()
-            },
             background_entry: self
                 .background_script
                 .as_ref()
@@ -497,6 +491,7 @@ const fn raw_lynx_xml_config() -> PageConfig {
         default_display_linear: false,
         default_overflow_visible: false,
         enable_css_selector: true,
+        enable_js_data_processor: false,
     }
 }
 
@@ -660,6 +655,7 @@ mod tests {
                 default_display_linear: true,
                 default_overflow_visible: false,
                 enable_css_selector: true,
+                enable_js_data_processor: false,
             }
         );
         let sources = page.view_sources();

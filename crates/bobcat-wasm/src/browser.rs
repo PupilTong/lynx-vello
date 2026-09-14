@@ -243,6 +243,7 @@ impl BobcatRenderer {
                 default_display_linear,
                 default_overflow_visible,
                 enable_css_selector,
+                ..PageConfig::default()
             };
 
             Ok(Self {

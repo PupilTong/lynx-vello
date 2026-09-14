@@ -246,6 +246,7 @@ fn bts_entry_receives_processed_initial_data_before_it_installs_app_hooks() {
         ",
         ),
         PageData {
+            initial_processor: String::new(),
             init_data: Some(serde_json::json!({"raw":41}).to_string()),
             global_props: Some(serde_json::json!({"theme":"dark"}).to_string()),
         },
@@ -295,6 +296,7 @@ fn lifecycle_hooks_and_bts_snapshots_precede_queued_mts_jobs() {
         ",
             ),
             PageData {
+                initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"count":1}).to_string()),
                 global_props: None,
             },
@@ -384,6 +386,7 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
     ",
         ),
         PageData {
+            initial_processor: String::new(),
             init_data: None,
             global_props: Some(
                 serde_json::json!({"seed":1,"keep":1,"nested":{"value":2}}).to_string(),
@@ -427,46 +430,60 @@ fn global_props_initialize_bts_before_hooks_and_notify_before_mts_events() {
 }
 
 #[test]
-fn initial_processor_name_is_consumed_by_mts_or_preserved_for_the_js_processor_path() {
-    for on_js in [false, true] {
+fn initial_processor_preserves_its_string_and_reads_the_page_config_switch() {
+    let processor = "selected'\"\\\n中文";
+    // This is a JS assertion literal, while PageData receives the original Rust string.
+    let expected_processor = r#""selected'\"\\\n中文""#;
+    for enable_js_data_processor in [false, true] {
+        let expected_name = if enable_js_data_processor {
+            expected_processor
+        } else {
+            "''"
+        };
+        let expected_value = if enable_js_data_processor { 3 } else { 4 };
         let mut pair = Pair::unbooted_with_data(
             Some(&format!(
                 r"
-            const params=lynx.getApp()._params;
-            if (params.processorName !== {name:?} || params.updateData.value !== {value}) throw Error('BTS processor parameters');
-            lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
-            ",
-                name = if on_js { "selected" } else { "" },
-                value = if on_js { 3 } else { 4 }
+                const params=lynx.getApp()._params;
+                if (params.processorName !== {expected_name} || params.updateData.value !== {expected_value}) throw Error('BTS processor parameters');
+                lynx.getCoreContext().dispatchEvent({{type:'reply',data:params.updateData.value}});
+                ",
             )),
             PageData {
+                initial_processor: processor.to_owned(),
                 init_data: Some(serde_json::json!({"value":3}).to_string()),
                 global_props: None,
             },
         );
-
         pair.runtime
+            .as_ref()
+            .unwrap()
+            .slot
+            .borrow_mut()
+            .ingredients
             .as_mut()
             .unwrap()
-            .prepare_data_processing(&crate::DataProcessing {
-                initial_processor: "selected".into(),
-                on_js,
-            });
+            .config
+            .enable_js_data_processor = enable_js_data_processor;
+        let render_processor = if enable_js_data_processor {
+            expected_processor
+        } else {
+            "undefined"
+        };
         pair.boot(&format!(r"
             globalThis.results=[];
             lynx.getJSContext().addEventListener('reply',e=>results.push(e.data));
             globalThis.processData=(data,name)=>{{
-                if ({on_js} || name!=='selected') throw Error('unexpected processor');
+                if ({enable_js_data_processor} || name!=={expected_processor}) throw Error('unexpected processor');
                 return {{value:data.value+1}};
             }};
             globalThis.renderPage=(data,options)=>{{
-                if (data.value !== {value} || options.processorName !== {name}) throw Error('MTS processor parameters');
+                if (data.value !== {expected_value} || options.processorName !== {render_processor}) throw Error('MTS processor parameters');
             }};
-            ",value=if on_js {3} else {4},name=if on_js {"'selected'"} else {"undefined"})).unwrap();
+        ")).unwrap();
         pair.deliver();
         pair.check(&format!(
-            "if (results.length!==1 || results[0]!=={}) throw Error('BTS data');",
-            if on_js { 3 } else { 4 }
+            "if (results.length!==1 || results[0]!=={expected_value}) throw Error('BTS data');",
         ));
         assert!(!pair.notices().iter().any(|notice| matches!(
             notice,
@@ -497,6 +514,7 @@ fn initial_processor_non_tables_and_exceptions_preserve_host_data_in_both_realms
             ",
             ),
             PageData {
+                initial_processor: String::new(),
                 init_data: Some(serde_json::json!({"seed":3}).to_string()),
                 global_props: None,
             },

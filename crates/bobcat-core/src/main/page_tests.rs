@@ -246,14 +246,8 @@ impl OwnedPage {
     /// Opens the realm over `entry` and turns until its first frame is
     /// published.
     async fn boot(&mut self, entry: &str) -> u64 {
-        self.page.open_realm(
-            entry,
-            "app:///main.js",
-            None,
-            None,
-            None,
-            &crate::DataProcessing::default(),
-        );
+        self.page
+            .open_realm(entry, "app:///main.js", None, None, None, String::new());
         for _ in 0..TURNS {
             if self.view.published.commit().is_some() {
                 break;
@@ -551,14 +545,7 @@ fn a_siblings_checkpoint_makes_a_parked_page_settle() {
             ingredients(),
             view.token.clone(),
         );
-        page.open_realm(
-            ONE_BOX,
-            "app:///main.js",
-            None,
-            None,
-            None,
-            &crate::DataProcessing::default(),
-        );
+        page.open_realm(ONE_BOX, "app:///main.js", None, None, None, String::new());
         for _ in 0..TURNS {
             if view.published.commit().is_some() {
                 break;
@@ -617,7 +604,7 @@ fn a_pages_own_entries_never_wake_its_clock_task() {
             None,
             None,
             None,
-            &crate::DataProcessing::default(),
+            String::new(),
         );
         for _ in 0..TURNS {
             if view.published.commit().is_some() {

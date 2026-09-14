@@ -224,12 +224,13 @@ impl DocumentIngredients {
     }
 }
 
-/// The host's page data, as the JSON text the view was given.
+/// The host's initial processor name and page-data strings.
 ///
-/// Nothing on this side reads it. The realm takes each piece through a host
-/// member of its own, and `bobcat:runtime` parses it there.
+/// The realm takes each through a host member. `bobcat:runtime` parses the
+/// data and props as JSON and uses the processor name unchanged.
 #[derive(Default)]
 pub(crate) struct PageData {
+    pub(crate) initial_processor: String,
     pub(crate) init_data: Option<String>,
     pub(crate) global_props: Option<String>,
 }
@@ -526,9 +527,6 @@ pub(crate) struct MainThreadRuntime {
     /// MTS declares application readiness through native bindings. Module
     /// evaluation can finish independently while the BTS entry is still loading.
     readiness: Rc<RefCell<Result<bool, ScriptError>>>,
-    /// Typed inputs used once to initialize the MTS runtime module.
-    initial_viewport: Viewport,
-    data_processing: crate::view::DataProcessing,
     /// This realm's side of the workers it created, shared with the three
     /// host functions that drive them, and where a worker failure is reported
     /// from.
@@ -583,7 +581,6 @@ impl MainThreadRuntime {
         let events = Rc::new(EventState::new(outbox.clone()));
         let timers = Rc::new(TimerState::new());
         engine.enable_module_loading();
-        let viewport = ingredients.viewport;
         let slot = install_bobcat(
             &mut engine,
             js_runtime,
@@ -603,8 +600,6 @@ impl MainThreadRuntime {
             Self {
                 engine,
                 readiness,
-                initial_viewport: viewport,
-                data_processing: crate::view::DataProcessing::default(),
                 workers,
                 slot,
                 events,
@@ -613,10 +608,6 @@ impl MainThreadRuntime {
             },
             incoming,
         ))
-    }
-
-    pub(super) fn prepare_data_processing(&mut self, processing: &crate::view::DataProcessing) {
-        self.data_processing = processing.clone();
     }
 
     /// How many of this realm's workers are still running, which is how many
@@ -886,14 +877,22 @@ impl MainThreadRuntime {
             })?;
         let entry_specifier = serde_json::to_string(source_name)
             .expect("serializing a Rust string as a JavaScript string cannot fail");
-        let processor_name = serde_json::to_string(&self.data_processing.initial_processor)
-            .expect("a processor name is a JavaScript string");
-        let on_js = self.data_processing.on_js;
+        let (viewport, enable_js_data_processor) = {
+            let slot = self.slot.borrow();
+            let ingredients = slot
+                .ingredients
+                .as_ref()
+                .expect("boot creates the document");
+            (
+                ingredients.viewport,
+                ingredients.config.enable_js_data_processor,
+            )
+        };
         let Viewport {
             width,
             height,
             device_pixel_ratio,
-        } = self.initial_viewport;
+        } = viewport;
         let boot = format!(
             r#"import {{ lynx, __BobcatConnectBackground, __BobcatInitializeMTS, __BobcatProcessInitData, __BobcatRenderPage, __BobcatInitEntry }} from "{RUNTIME_MODULE_SPECIFIER}";
 import {{ Document, __FlushElementTree }} from "{ELEMENT_MODULE_SPECIFIER}";
@@ -908,7 +907,7 @@ export const document = new Document();
 
 __BobcatInitEntry({entry_specifier});
 __BobcatInitializeMTS({{
-  processorName: {processor_name}, enableJSDataProcessor: {on_js},
+  enableJSDataProcessor: {enable_js_data_processor},
   systemInfo: {{pixelRatio: {device_pixel_ratio}, pixelWidth: {width} * {device_pixel_ratio}, pixelHeight: {height} * {device_pixel_ratio}}},
 }});
 // React's entry clears lynx.__initData during initialization. The host's
@@ -1314,12 +1313,12 @@ fn install_readiness(
     Ok(())
 }
 
-/// Installs `initData` and `globalProps`, which hand the realm the host's page
-/// data as the strings the view was given — `undefined` for one it was not.
+/// Installs `initData`, `globalProps` and `initialProcessor`, handing the realm
+/// the original strings. Missing initial data or props become `undefined`.
 ///
-/// Each hands its string over once and keeps nothing: the one call is
-/// `bobcat:runtime` evaluating, which parses both. Neither touches the
-/// document, so both answer before `createDocument` has run.
+/// Each hands its string over once and keeps nothing. `bobcat:runtime` parses
+/// the initial data and props, and uses the processor name as a plain string.
+/// All answer before `createDocument` has run.
 fn install_page_data(
     engine: &mut ScriptEngine,
     js_runtime: &mut ScriptRuntime,
@@ -1328,10 +1327,15 @@ fn install_page_data(
     let PageData {
         init_data,
         global_props,
+        initial_processor,
     } = page_data;
-    for (name, mut json) in [("initData", init_data), ("globalProps", global_props)] {
+    for (name, mut value) in [
+        ("initData", init_data),
+        ("globalProps", global_props),
+        ("initialProcessor", Some(initial_processor)),
+    ] {
         install(engine, js_runtime, name, 0, move |_arguments| {
-            Ok(json.take().map_or(HostValue::Undefined, HostValue::String))
+            Ok(value.take().map_or(HostValue::Undefined, HostValue::String))
         })?;
     }
     Ok(())

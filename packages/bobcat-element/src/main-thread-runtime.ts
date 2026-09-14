@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
+import { initialProcessor as getInitialProcessor, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, preloadStyleSheet, adoptStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -270,7 +270,8 @@ export const __BobcatInitData = parsePageData("initData", initData());
 export let __globalProps = parsePageData("globalProps", globalProps()) as Record<string, unknown>;
 // Host state is separate from the copies the two script realms may mutate.
 let hostGlobalPropsJson = "{}";
-let initialProcessor = "";
+const hostInitialProcessor = getInitialProcessor() ?? "";
+let initialProcessor = hostInitialProcessor;
 let jsDataProcessor = false;
 
 export function __BobcatInitializeMTS(options: {
@@ -286,7 +287,7 @@ export function __BobcatInitializeMTS(options: {
   lynx.__globalProps = __globalProps;
   SystemInfo = Object.freeze({platform: "headless", runtimeType: "quickjs", lynxSdkVersion: "4.1.0", ...options.systemInfo});
   lynx.SystemInfo = SystemInfo;
-  initialProcessor = options.processorName ?? "";
+  initialProcessor = options.processorName ?? hostInitialProcessor;
   jsDataProcessor = options.enableJSDataProcessor === true;
 }
 

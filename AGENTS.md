@@ -755,8 +755,10 @@ useful signal for currently-compatible versions of those libraries.
   Promise-job checkpoint. Boot awaits a `Promise.resolve().then` flush after
   rendering. MTS evaluation completes independently; public readiness still
   requires BTS acknowledgement.
-  Processor selection remains typed `DataProcessing` and initial metrics remain
-  `Viewport`; Rust stores no JSON bootstrap map. JS constructs SystemInfo from
+  Boot reads `PageConfig.enable_js_data_processor` and `Viewport` directly
+  from the staged document ingredients. `ViewSources.initial_processor` is a
+  plain `String`, handed to JS by the one-shot startup-data binding without
+  JSON serialization or source interpolation. JS constructs SystemInfo from
   runtime constants and those metrics, and sends its snapshot to BTS. Entries receive runtime bindings through prepended ESM imports.
   Global props updates replace the live module binding; there is no native
   evaluator or separate Script lexical environment.
