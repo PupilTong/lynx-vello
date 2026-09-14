@@ -1234,7 +1234,10 @@ build that includes dev targets.
 
 ## Named stylesheets
 
-MTS loads opaque handles from already-decoded page CSS and appends their rules
-only when adopted. Component styles use the same author cascade. The source
-metadata, handle lifetime and later bundle-loader boundary are described in
+MTS exposes its entry response URL as the `__Card__` import. JS resolves the
+card alias into a CSS resource URL before invoking the host. Named styles use
+`SourceRequest::StyleSheet` and the same `SourceCompletion` as startup styles;
+one task awaits each load and re-enters the page to apply ready adoptions.
+The embedder supplies CSS text or preparsed styles without exposing that choice
+to JS. Adoption order, failure reporting and cancellation are described in
 [named stylesheet loading and adoption](named-styles-runtime.md).

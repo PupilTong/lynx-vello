@@ -892,3 +892,128 @@ fn a_configured_background_entry_failure_reports_startup_failed_once() {
         harness.owner.await.unwrap();
     });
 }
+
+#[test]
+fn dynamic_styles_use_source_completions_and_failed_loads_do_not_block_later_adoptions() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        let boot = harness
+            .boot(
+                r"
+            const page = __CreatePage();
+            const box = __CreateView(0);
+            __SetClasses(box, 'box');
+            __AppendElement(page, box);
+            __AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));
+            __AdoptStyleSheet(__LoadStyleSheet('CSS', 'https://cdn.test/widget.bundle'));
+        ",
+            )
+            .await;
+        harness
+            .until(
+                "stylesheet requests were not sent through the resource loader",
+                |h| h.sources.len() == 2,
+            )
+            .await;
+        let (request, later) = harness.sources.pop().unwrap();
+        assert!(
+            matches!(request, SourceRequest::StyleSheet(ref url) if url == "https://cdn.test/widget.bundle/index.css")
+        );
+        let (request, first) = harness.sources.pop().unwrap();
+        assert!(
+            matches!(request, SourceRequest::StyleSheet(ref url) if url == "app:///main.js/index.css")
+        );
+        later.complete(Ok(LoadedSource::StyleSheet(
+            crate::resource::StyleSheetSource::Text(
+                ".box{width:40px;height:10px;background:blue}".into(),
+            ),
+        )));
+        // The failed head must release the queue, allowing the successful later
+        // adoption to publish through the ordinary page epilogue.
+        first.complete(Err(unanswered_source().into()));
+        harness
+            .until("a failed stylesheet held up later adoption", |h| {
+                h.view
+                    .published
+                    .commit()
+                    .is_some_and(|commit| commit > boot)
+                    && h.events
+                        .iter()
+                        .any(|event| matches!(event, EngineEvent::ScriptReported { .. }))
+            })
+            .await;
+        let errors: Vec<_> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ScriptReported { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("app:///main.js/index.css"));
+        assert!(!harness.view.token.is_cancelled());
+    });
+}
+
+#[test]
+fn releasing_a_view_cancels_dynamic_stylesheet_completions() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        let boot = harness
+            .boot("__AdoptStyleSheet(__LoadStyleSheet('CSS', '__Card__'));")
+            .await;
+        harness
+            .until("the dynamic sheet was not requested", |h| {
+                h.sources.len() == 1
+            })
+            .await;
+        let (_, completion) = harness.sources.pop().unwrap();
+        assert!(!completion.is_cancelled());
+        harness.view.token.cancel();
+        assert!(completion.is_cancelled());
+        completion.complete(Ok(LoadedSource::StyleSheet(
+            crate::resource::StyleSheetSource::Text("page{background:red}".into()),
+        )));
+        for _ in 0..8 {
+            harness.turn().await;
+        }
+        assert_eq!(harness.view.published.commit(), Some(boot));
+        assert!(
+            harness
+                .events
+                .iter()
+                .all(|event| !matches!(event, EngineEvent::ScriptReported { .. }))
+        );
+    });
+}
+
+#[test]
+fn card_url_uses_the_entry_response_url_before_requesting_styles() {
+    on_a_local_set(async {
+        let (context, workers) = group();
+        let mut harness = Harness::new(context, workers);
+        harness
+            .until("the entry was not requested", |h| h.sources.len() == 1)
+            .await;
+        harness.answer(
+            "https://cdn.test/redirected/main.js?version=2#entry",
+            r"
+            if (__Card__ !== 'https://cdn.test/redirected/main.js?version=2#entry')
+                throw Error('entry URL was not supplied by the resource loader');
+            __LoadStyleSheet('CSS', '__Card__');
+        ",
+        );
+        harness
+            .until("the stylesheet was not requested", |h| h.sources.len() == 1)
+            .await;
+        let (request, completion) = harness.sources.pop().unwrap();
+        assert!(matches!(request, SourceRequest::StyleSheet(ref url)
+            if url == "https://cdn.test/redirected/main.js/index.css?version=2#entry"));
+        completion.complete(Ok(LoadedSource::StyleSheet(
+            crate::resource::StyleSheetSource::Text(String::new()),
+        )));
+    });
+}

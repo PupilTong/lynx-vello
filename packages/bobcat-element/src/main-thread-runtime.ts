@@ -28,7 +28,7 @@ import {
 } from "bobcat:cross-thread-context";
 import { __BobcatQueryNodes } from "bobcat:element";
 import type { NodeQueryRequest } from "bobcat:selector-query";
-import { globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, loadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
+import { entryUrl, globalProps, initData, reportScriptError, logScriptMessage, notifyReady, reportStartupFailure, loadStyleSheet, adoptStyleSheet, releaseStyleSheet } from "bobcat-internal:host";
 import type { Worker } from "bobcat-internal";
 
 /**
@@ -92,6 +92,24 @@ const engineContext = new EngineContext();
 // The realm's global object, where a card installs the methods
 // `callLepusMethod` looks up by name.
 const scope = globalThis as Record<string, unknown>;
+
+/** The entry response URL supplied by the view's resource loader. */
+export const __Card__ = entryUrl();
+
+function cardURL(bundleName: string): string {
+  return bundleName === "__Card__" ? __Card__ : bundleName;
+}
+
+function styleSheetURL(key: string, bundleName: string): string {
+  const base = cardURL(bundleName);
+  const suffixAt = base.search(/[?#]/);
+  const path = suffixAt < 0 ? base : base.slice(0, suffixAt);
+  const suffix = suffixAt < 0 ? "" : base.slice(suffixAt);
+  const name = encodeURIComponent(key).replace(/[!~'()]/g,
+    character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  const section = key === "CSS" ? "" : `${name}/`;
+  return `${path.replace(/\/$/, "")}/${section}index.css${suffix}`;
+}
 let backgroundWorker: Worker | undefined;
 let pendingBackgroundMessages: ToBackground[] = [];
 function sendToBackground(message: ToBackground) {
@@ -284,7 +302,7 @@ export function __LoadLepusChunk(path: string, options: {dynamicComponentEntry?:
     throw new TypeError("__LoadLepusChunk requires a string path and options object");
   }
   const entry = options.dynamicComponentEntry;
-  if (typeof entry === "string" && entry !== "__Card__") return false;
+  if (typeof entry === "string" && cardURL(entry) !== __Card__) return false;
   if (!Object.hasOwn(lepusChunks, path) || !evaluateLepusChunk) return false;
   // Native TemplateEntry evaluates again on every call. Finding the chunk
   // returns true even when its evaluation reports a script exception.
@@ -301,12 +319,11 @@ const styleCleanup = new FinalizationRegistry<string>(id => {
   try { releaseStyleSheet(id); } catch { /* realm teardown */ }
 });
 
-export function __LoadStyleSheet(key: string, bundleName: string): object | null {
+export function __LoadStyleSheet(key: string, bundleName: string): object {
   if (arguments.length < 2 || typeof key !== "string" || typeof bundleName !== "string") {
     throw new TypeError("__LoadStyleSheet requires a section key and bundle name");
   }
-  const id = loadStyleSheet(key, bundleName);
-  if (id === null) return null;
+  const id = loadStyleSheet(styleSheetURL(key, bundleName));
   const handle: object = Object.freeze(Object.create(null));
   styleHandles.set(handle, id);
   styleCleanup.register(handle, id);

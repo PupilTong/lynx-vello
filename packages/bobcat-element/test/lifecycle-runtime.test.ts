@@ -27,6 +27,7 @@ rstest.mockRequire("bobcat-internal:host", () => ({
   reportScriptError: reportedErrors,
   logScriptMessage: consoleMessages,
   loadStyleSheet, adoptStyleSheet, releaseStyleSheet,
+  entryUrl: () => "https://example.test/page/main.js?version=2#entry",
   initData: () => undefined,
   globalProps: () => undefined,
 }));
@@ -104,20 +105,32 @@ async function deliverToMain() {
 }
 
 describe("MTS/BTS lifecycle runtime", () => {
-  it("uses opaque stylesheet handles and native null results", () => {
-    loadStyleSheet.mockReturnValueOnce(null).mockReturnValueOnce('first').mockReturnValueOnce('second');
-    expect(mts.__LoadStyleSheet('missing', 'bundle')).toBeNull();
-    const first = mts.__LoadStyleSheet('CSS', 'bundle');
-    const second = mts.__LoadStyleSheet('CSS', 'bundle');
+  it("resolves the card alias to stylesheet URLs and keeps opaque handles", () => {
+    loadStyleSheet.mockReturnValueOnce('first').mockReturnValueOnce('second');
+    expect(mts.__Card__).toBe("https://example.test/page/main.js?version=2#entry");
+    const first = mts.__LoadStyleSheet('CSS', '__Card__');
+    const second = mts.__LoadStyleSheet('CSS', mts.__Card__);
+    expect(loadStyleSheet.mock.calls).toEqual([
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+      ['https://example.test/page/main.js/index.css?version=2#entry'],
+    ]);
     expect(first).not.toBe(second);
-    if (!first) throw Error('missing handle');
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
     expect(mts.__AdoptStyleSheet(first)).toBeNull();
-    expect(adoptStyleSheet.mock.calls).toEqual([['first'],['first']]);
+    expect(adoptStyleSheet.mock.calls).toEqual([['first'], ['first']]);
     expect(() => mts.__AdoptStyleSheet({})).toThrow();
     expect(() => Reflect.apply(mts.__LoadStyleSheet, undefined, ['CSS'])).toThrow();
   });
 
+  it("passes external and escaped stylesheet URLs to the same loader", () => {
+    loadStyleSheet.mockClear();
+    mts.__LoadStyleSheet('CSS', 'https://cdn.test/component.bundle?rev=3');
+    mts.__LoadStyleSheet('A &/中', './component.bundle#entry');
+    expect(loadStyleSheet.mock.calls).toEqual([
+      ['https://cdn.test/component.bundle/index.css?rev=3'],
+      ['./component.bundle/A%20%26%2F%E4%B8%AD/index.css#entry'],
+    ]);
+  });
 
   it("loads only a named local MTS chunk and re-evaluates it on every request", () => {
     const evaluate = rstest.fn(source => {
@@ -129,7 +142,8 @@ describe("MTS/BTS lifecycle runtime", () => {
     expect(evaluate).not.toHaveBeenCalled();
     expect(mts.__LoadLepusChunk("worklet", {})).toBe(true);
     expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: "__Card__"})).toBe(true);
-    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"]]);
+    expect(mts.__LoadLepusChunk("worklet", {dynamicComponentEntry: mts.__Card__})).toBe(true);
+    expect(evaluate.mock.calls).toEqual([["worklet bytes"], ["worklet bytes"], ["worklet bytes"]]);
     expect(mts.__LoadLepusChunk("bad", {})).toBe(true);
     expect(reportedErrors).toHaveBeenLastCalledWith("error", expect.stringContaining("chunk failure"));
   });

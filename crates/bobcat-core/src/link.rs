@@ -45,7 +45,6 @@ pub(crate) struct SourceRequester {
     notices: mpsc::UnboundedSender<ViewNotice>,
     requester: Arc<dyn EventRequester>,
     token: CancellationToken,
-    page_bundle: Option<Arc<crate::resource::BundleSource>>,
 }
 
 impl SourceRequester {
@@ -53,13 +52,11 @@ impl SourceRequester {
         notices: mpsc::UnboundedSender<ViewNotice>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
-        page_bundle: Option<Arc<crate::resource::BundleSource>>,
     ) -> Self {
         Self {
             notices,
             requester,
             token,
-            page_bundle,
         }
     }
 
@@ -79,16 +76,6 @@ impl SourceRequester {
             .is_ok()
         {
             self.requester.request_event();
-        }
-    }
-
-    /// Looks up already-decoded page styles. Lazy-container transport extends
-    /// this lookup; CSS load/adopt itself never starts IO.
-    pub(crate) fn bundle(&self, name: &str) -> Option<Arc<crate::resource::BundleSource>> {
-        if name == "__Card__" {
-            self.page_bundle.clone()
-        } else {
-            None
         }
     }
 }
@@ -259,7 +246,6 @@ pub(crate) struct ViewOutbox {
     /// carries a clone, which is what lets a host read cancellation without
     /// waiting for a turn.
     token: CancellationToken,
-    page_bundle: Option<Arc<crate::resource::BundleSource>>,
 }
 
 impl ViewOutbox {
@@ -268,14 +254,12 @@ impl ViewOutbox {
         frames: watch::Sender<Published>,
         requester: Arc<dyn EventRequester>,
         token: CancellationToken,
-        page_bundle: Option<Arc<crate::resource::BundleSource>>,
     ) -> Self {
         Self {
             notices,
             frames: Rc::new(frames),
             requester,
             token,
-            page_bundle,
         }
     }
 
@@ -286,12 +270,7 @@ impl ViewOutbox {
     }
 
     pub(crate) fn source_requester(&self, token: CancellationToken) -> SourceRequester {
-        SourceRequester::new(
-            self.notices.clone(),
-            Arc::clone(&self.requester),
-            token,
-            self.page_bundle.clone(),
-        )
+        SourceRequester::new(self.notices.clone(), Arc::clone(&self.requester), token)
     }
 
     /// Announces one notice, then wakes the thread that paints.
@@ -471,18 +450,11 @@ pub(crate) struct DetachedView {
 /// One view's publishing end and the far end that reads it, with no thread
 /// between them.
 pub(crate) fn detached_outbox(requester: Arc<dyn EventRequester>) -> (ViewOutbox, DetachedView) {
-    detached_outbox_with_bundle(requester, None)
-}
-
-pub(crate) fn detached_outbox_with_bundle(
-    requester: Arc<dyn EventRequester>,
-    page_bundle: Option<Arc<crate::resource::BundleSource>>,
-) -> (ViewOutbox, DetachedView) {
     let token = CancellationToken::new();
     let (notices, notice_receiver) = mpsc::unbounded_channel();
     let (frames, frame_receiver) = watch::channel(Published::default());
     (
-        ViewOutbox::new(notices, frames, requester, token.clone(), page_bundle),
+        ViewOutbox::new(notices, frames, requester, token.clone()),
         DetachedView {
             notices: notice_receiver,
             published: ViewObserver {

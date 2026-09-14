@@ -1,77 +1,67 @@
-# Named stylesheet loading and adoption
+# Named stylesheet loading through resource URLs
 
-Named CSS has a source-side decoder and an MTS-only handle table. The decoder
-produces the same `PreparsedStyleSheet` vocabulary as ordinary page styles;
-the runtime lowers it into document-branded Stylo rules. This layer supports
-already-decoded default-page metadata under `__Card__`. External bundle fetching,
-caching and component execution are separate work; no resource request is made
-by loading or adopting a stylesheet.
+Named CSS uses the same resource loader as startup stylesheets. The embedder
+resolves a URL and returns `StyleSheetSource::Text` or
+`StyleSheetSource::Preparsed`; JavaScript receives an opaque handle in either
+case. Core carries no decoded bundle metadata in its view configuration.
 
-## Source ownership
+## Entry identity and URL mapping
 
-Native decoding and explicit native-to-web conversion already preserve named
-`{encoding:"CSS", content:{ruleList}}` descriptors. `custom_style::named_style_sheets`
-selects those descriptors and lowers StyleRule, KeyframesRule and FontFaceRule,
-including compiler variable placeholders, fallbacks and token-level trailing
-`!important`. It does not reconstruct a whole stylesheet. Font-face descriptors
-retain their separate descriptor grammar. Native imports have already been
-flattened into each named fragment in cascade order. The rkyv 0.7 layout and
-binary section formats are unchanged.
+The `__Card__` import in MTS contains the entry response URL already supplied
+by the resource loader. It is also exported by `bobcat:runtime`. The string
+`"__Card__"` remains an accepted alias; JavaScript replaces it with that URL.
+Local Lepus chunk lookup accepts either the alias or the same entry URL.
 
-Malformed or unsupported descriptors do not become partially loadable sheets.
-MediaRule, SupportsRule, LayerRule and ImportRule descriptors are unsupported;
-invalid CSS syntax inside a supported descriptor goes through Stylo's normal
-rule/declaration handling. Real native bytecode and irreversible CSS encodings
-remain source-parser errors.
+`__LoadStyleSheet('CSS', bundleName)` appends `/index.css` to the entry or
+bundle URL's path. Other section names use `/<encoded-name>/index.css`.
+Query and fragment suffixes are preserved after the appended path. For example:
 
-`PageSource` retains the ordinary sheet and the decoded named sheets in an
-`Arc<BundleSource>` and supplies it through `ViewSources::page_bundle`. Ordinary
-StyleInfo is still mounted during document construction. The named map is only
-metadata until explicitly adopted. Each view's outbox supplies this immutable
-metadata to its runtime through `SourceRequester::bundle`; at this stage only
-`__Card__` resolves. XML sources supply no bundle metadata.
+- `__LoadStyleSheet('CSS', '__Card__')`, with entry `https://app.test/main.js`,
+  requests `https://app.test/main.js/index.css`.
+- `__LoadStyleSheet('CSS', 'https://cdn.test/component.bundle?rev=2')`
+  requests `https://cdn.test/component.bundle/index.css?rev=2`.
 
-## MTS handles and component styles
+The wrapper constructs the specifier; URL resolution and transport policy
+remain with the embedder. It can answer registered URLs, load CSS from a
+server, or decode a container and supply preparsed styles through the same
+completion. The stylesheet API adds no resource protocol or Rust bundle-name
+lookup. A complete lazy-component script loader remains separate work.
 
-`__LoadStyleSheet(key, bundleName)` requires two strings. Missing bundles or
-named sheets return `null`. Each successful load lowers fresh document-branded
-rules, stores them under a private native id and returns a fresh frozen JS
-object. Loading changes no cascade. A WeakMap associates each object with its
-id; a FinalizationRegistry releases the native table entry after collection.
+## Load and adoption timing
 
-`__AdoptStyleSheet(handle)` accepts only a handle minted by that realm, appends
-its rules to the document and returns `null`. Repeated adoption appends again
-in call order. The document retains the adopted rules independently, so freeing
-a handle cannot remove styles. Rules enter the existing author cascade:
-specificity and `!important` still apply, and fragments are global under the
-existing `enableRemoveCSSScope` policy. No component CSS-id scoping is added.
+Loading immediately returns a fresh opaque handle and queues a normal
+stylesheet request. It does not mount styles or wait for IO. Resource absence
+therefore cannot be reported by a synchronous null return: failed loads produce
+one host `ScriptReported` error, including the requested URL. Boot readiness
+continues to follow entry completion and the existing BTS readiness declaration.
 
-The private `adoptComponentStyleSheet(bundleName)` host entry appends a decoded
-bundle's ordinary sheet through the same lowering/cascade path. A missing
-bundle is an error; a bundle without an ordinary sheet is a no-op. This is the
-component-style append operation; the later component loader will decide when
-to call it after an external bundle becomes available. Tests use `__Card__` to
-exercise the operation without adding that transport or execution layer.
+`__AdoptStyleSheet(handle)` returns null and records an adoption. Ready
+adoptions are applied in call order. If A is adopted before B, a faster B
+response waits for A; a failed A is skipped so B can proceed. Repeated adoption
+appends again and preserves the author cascade, specificity and importance.
+Loading a sheet that is never adopted changes no styles.
 
-The runtime owns all handles and rules on MTS. Neither a JS wrapper nor a DOM
-handle crosses Worker messages or the embedder boundary.
+Every load is a task of its view, using its existing cancellation token and
+`SourceCompletion`. Completion re-enters through `Page::enter`, applies ready
+adoptions and uses the normal commit/publication epilogue. Releasing a view
+cancels unfinished loads and discards late results.
 
-## Native contract and validation
+The JS WeakMap and finalizer retain only handle identity. A queued adoption
+retains its resource even if its JS handle is collected before loading finishes.
+Once mounted, styles belong to the document and survive handle collection.
 
-At native revision `66b002855a25a5a8812fe878af69e20a346d0408`, see
-`core/runtime/lepus/bindings/renderer_functions.cc:250,916–1030`,
-`base/include/value/base_value.h:116` and
-`core/renderer/dom/element_manager.h:438–440`:
-loading creates a fresh `SharedCSSFragmentWrapper` without mounting it;
-adoption appends and dirties styles, permits repetition and retains the rules.
-The `RETURN_UNDEFINED` macro actually returns a default null-tagged value,
-which explains React's explicit `styleSheet !== null` check. Native compiler
-compatibility gates precede fragment decoding and do not apply to core's
-already-normalized style vocabulary. Standard CSS cascade semantics follow
-the repository's W3C policy.
+## Source ownership and validation
 
-Source tests cover supported descriptor grammars, malformed data, native input
-and explicit web conversion, with distinct named sections in separate views.
-Runtime tests check inert loads, missing sheets/bundles, fresh handles, repeated
-adoption, source order, specificity, importance, handle collection and component
-style append. JS tests check opaque handle identity and argument validation.
+`PageSource` registers named compiler CSS with `Resources::register_style_sheet`
+using the same URLs as the JS wrapper. Native and web bundles share the
+supported descriptor decoder. It lowers StyleRule, KeyframesRule and
+FontFaceRule, compiler variables, fallbacks and trailing importance without
+reconstructing a whole stylesheet. Malformed or unsupported descriptors are
+not registered. Ordinary page styles keep their existing startup resource path;
+native/web wire formats and the rkyv 0.7 model are unchanged.
+
+Tests cover card aliases and explicit/escaped URLs, text/preparsed equivalence,
+inert loads, out-of-order completion with ordered repeated adoption, CSS
+precedence, collection before and after completion, load failure and view
+cancellation. Native/web source integration verifies the final painted result
+using only URLs and the embedder's resource loader.

@@ -286,14 +286,17 @@ useful signal for currently-compatible versions of those libraries.
   pipeline and HTTP client are that crate's own surface, reached only by an
   embedder that builds one. The protocol carries no response-size limit
   either; each fetcher owns the memory bound for the response it
-  materializes. `PageSource` supplies decoded default-page CSS through
-  `ViewSources::page_bundle`; named sheets lower to document-branded rules on
-  `__LoadStyleSheet`, without changing the cascade. `__AdoptStyleSheet` appends
-  those rules in call order, including repeated adoption. JS wrappers have
-  realm-local native handles, and adopted rules outlive their collection.
-  Component-style append uses the same author cascade. At this layer only
-  `__Card__` resolves; external bundle loading remains separate. See
-  `docs/named-styles-runtime.md` for source ownership and the native contract.
+  materializes. `PageSource` registers named CSS under ordinary entry-relative
+  resource URLs. The MTS `__Card__` import exposes the entry response URL;
+  JS replaces the `"__Card__"` alias and maps the compiler's `CSS` section to
+  `<entry-url>/index.css`. `__LoadStyleSheet` returns a fresh opaque handle and
+  requests that URL through the existing `SourceRequest::StyleSheet` protocol.
+  The embedder returns CSS text or a `PreparsedStyleSheet`; JS sees neither.
+  `__AdoptStyleSheet` applies in call order as resources arrive, including
+  repeated adoption. A pending adoption retains its sheet after JS collection;
+  adopted rules belong to the document. Failed loads report without blocking
+  later adoptions, and view release cancels completions. See
+  `docs/named-styles-runtime.md` for URL mapping and load timing.
   Per-component css-id scoping is
   **not** implemented — every fragment mounts globally, which is what
   web-core itself emits for a `enableRemoveCSSScope = true` bundle. The

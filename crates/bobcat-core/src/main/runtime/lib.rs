@@ -69,9 +69,11 @@ const INLINE_DELIVERIES: usize = 8;
 const ELEMENT_PAPI_SOURCE: &str = crate::esm::runtime_source!("element-papi");
 const RUNTIME_MODULE_SOURCE: &str = crate::esm::runtime_source!("main-thread-runtime");
 
-mod bundle_styles;
+mod style_sheets;
+pub(crate) use style_sheets::Sheet as PendingStyleSheet;
 
 const ENTRY_PREAMBLE: &str = r#"import {
+  __Card__,
   lynx,
   console,
   SystemInfo,
@@ -532,6 +534,7 @@ pub(crate) struct MainThreadRuntime {
     slot: Rc<RefCell<DocumentSlot>>,
     events: Rc<EventState>,
     timers: Rc<TimerState>,
+    styles: Rc<style_sheets::Styles>,
     /// Names one dispatch, so the realm can keep one event object alive across
     /// the whole walk instead of minting one per node. Not shared with the
     /// host functions: only [`Self::dispatch_event`] reads or advances it, and
@@ -587,12 +590,11 @@ impl MainThreadRuntime {
             &events,
             &timers,
         )?;
-        bundle_styles::install_styles(
-            &mut engine,
-            js_runtime,
-            &slot,
-            outbox.source_requester(outbox.token().clone()),
-        )?;
+        let styles = style_sheets::install_styles(&mut engine, js_runtime, &slot)?;
+        let entry_url = base_url.to_owned();
+        install(&mut engine, js_runtime, "entryUrl", 0, move |_| {
+            Ok(HostValue::String(entry_url.clone()))
+        })?;
         install_page_data(&mut engine, js_runtime, page_data)?;
         let readiness = Rc::new(RefCell::new(Ok(false)));
         install_readiness(&mut engine, js_runtime, &readiness)?;
@@ -607,10 +609,25 @@ impl MainThreadRuntime {
                 slot,
                 events,
                 timers,
+                styles,
                 next_event_id: 0,
             },
             incoming,
         ))
+    }
+
+    pub(crate) fn take_stylesheet_request(&self) -> Option<(String, Rc<PendingStyleSheet>)> {
+        self.styles.take_request()
+    }
+
+    pub(crate) fn complete_stylesheet(
+        &self,
+        sheet: &PendingStyleSheet,
+        source: Result<crate::resource::LoadedSource, crate::LynxViewError>,
+    ) -> Result<(), String> {
+        let result = sheet.complete(source);
+        self.styles.apply(&mut self.slot.borrow_mut());
+        result
     }
 
     /// How many of this realm's workers are still running, which is how many

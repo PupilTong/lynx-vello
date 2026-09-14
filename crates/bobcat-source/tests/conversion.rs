@@ -677,69 +677,73 @@ async fn named_lepus_chunks_load_on_demand_in_the_selected_entry_scope() {
 }
 
 #[tokio::test]
-async fn named_css_survives_native_web_conversion_and_stays_per_view() {
+async fn named_css_is_loaded_by_url_after_native_web_conversion() {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use bobcat_core::{EngineEvent, LynxGroup, NoWakeup, StyleThreads};
+    use bobcat_core::{DrawTarget, EngineEvent, LynxGroup, NoWakeup, Painter, StyleThreads};
     use bobcat_resources::{Resources, ResourcesConfig};
 
     let group = LynxGroup::new(Arc::new(NoWakeup), StyleThreads::Sequential)
         .await
         .unwrap();
-    let mut views = Vec::new();
-    for (name, absent) in [("A", "B"), ("B", "A")] {
+    for name in ["CSS", "A &/中"] {
         let main = format!(
             r"
+            const page = __CreatePage();
+            const box = __CreateView(0);
+            __SetClasses(box, 'box');
+            __SetInlineStyles(box, 'width:20px;height:20px');
+            __AppendElement(page, box);
             const first = __LoadStyleSheet('{name}', '__Card__');
-            const second = __LoadStyleSheet('{name}', '__Card__');
-            if (first === null || first === second) throw Error('named sheet or fresh handle missing');
-            if (__LoadStyleSheet('{absent}', '__Card__') !== null || __LoadStyleSheet('{name}', 'missing') !== null)
-                throw Error('another views named sheet leaked');
-            if (__AdoptStyleSheet(first) !== null || __AdoptStyleSheet(first) !== null)
-                throw Error('adopt result');
+            const second = __LoadStyleSheet('{name}', __Card__);
+            if (first === second) throw Error('stylesheet handles were reused');
+            __AdoptStyleSheet(first);
+            __AdoptStyleSheet(first);
         "
         );
         let native = native_bundle(vec![custom_section(vec![
             CustomSection::source("entry__main-thread", &main),
             CustomSection::css(name, &css_fragment()),
         ])]);
-        let mut expected = None;
         for web in [false, true] {
             let page = default_page(&native, web);
-            let sources = page.view_sources();
-            let bundle = sources.page_bundle.as_ref().unwrap();
-            assert_eq!(bundle.named_style_sheets.len(), 1);
-            let sheet = bundle.named_style_sheets[name].clone();
-            if let Some(expected) = expected.as_ref() {
-                assert_eq!(&sheet, expected);
-            } else {
-                expected = Some(sheet);
-            }
+            let mut sources = page.view_sources();
+            // Isolate explicit named-sheet loading from ordinary boot styles.
+            sources.style_sheets.clear();
             let resources = Resources::new(ResourcesConfig::default(), || {});
             page.register_with(&resources);
-            views.push(
-                group
-                    .create_lynx_view(100.0, 100.0, 1.0, resources.builder(), sources)
-                    .unwrap(),
-            );
-        }
-    }
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut ready = vec![false; views.len()];
-    while ready.iter().any(|ready| !ready) {
-        for (view, ready) in views.iter_mut().zip(&mut ready) {
-            for event in view.pump() {
-                match event {
-                    EngineEvent::ScriptFinished => *ready = true,
-                    other => panic!("unexpected event: {other:?}"),
+            let mut view = group
+                .create_lynx_view(32.0, 24.0, 1.0, resources.builder(), sources)
+                .unwrap();
+            let mut painter = Painter::new(DrawTarget::Offscreen, 32.0, 24.0, 1.0)
+                .await
+                .unwrap();
+            painter.attach(&view).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut booted = false;
+            loop {
+                for event in view.pump() {
+                    match event {
+                        EngineEvent::ScriptFinished => booted = true,
+                        EngineEvent::StartupFailed(error) => panic!("{error}"),
+                        EngineEvent::ScriptReported { message, .. } => panic!("{message}"),
+                        _ => {}
+                    }
                 }
+                if booted {
+                    let screenshot = painter.capture().unwrap();
+                    let offset = (5 * screenshot.size.width as usize + 5) * 4;
+                    if screenshot.pixels[offset..offset + 4] == [0x12, 0x34, 0x56, 255] {
+                        break;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "named CSS never reached the painted view: {name}, web={web}"
+                );
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
-        assert!(
-            Instant::now() < deadline,
-            "named stylesheet boot did not finish"
-        );
-        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 }
